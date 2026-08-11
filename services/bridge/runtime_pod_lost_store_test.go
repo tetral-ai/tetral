@@ -250,7 +250,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot { return snapshot },
 		Clock:    store.Clock,
 	}
-	plan, err := store.PrepareRuntimeCommand(context.Background(), RuntimeJob{
+	job := RuntimeJob{
 		JobID:           "qjob_pod_loss_later",
 		LeaseToken:      "lease_pod_loss_later",
 		Kind:            queue.KindRuntimeInput,
@@ -264,7 +264,9 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		InputKind:       "messages",
 		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_pod_loss","session_thread_id":"thr_bridge_pod_loss","runtime_input_id":"rin_pod_loss_later","event_ids":["evt_pod_loss_later"],"sequence_from":3,"sequence_to":3,"input_kind":"messages"}`,
-	})
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand after pod loss: %v", err)
 	}

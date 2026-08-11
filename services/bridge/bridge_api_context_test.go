@@ -1057,6 +1057,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsCompletionMailAcrossColdPasses
 		seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_window_"+strconv.Itoa(index), int64(index),
 			"agent.thread_message_sent",
 			bridgeInterAgentSentEventJSON(t, "delivery_bridge_completion_window_"+strconv.Itoa(index), childID, mainID, "", "sevt_bridge_completion_window_"+strconv.Itoa(index), messageJSON))
+		seedAgentMailCustody(t, admin, sessionID, mainID, "delivery_bridge_completion_window_"+strconv.Itoa(index), time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-window-key-32b")
@@ -1124,6 +1125,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsCompletionMailAcrossColdPasses
 	seedBridgeAPIEvent(t, admin, "default", sessionID, targetChildID, "evt_bridge_completion_window_7", 7,
 		"agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, "delivery_bridge_completion_window_7", targetChildID, mainID, "", "sevt_bridge_completion_window_7", secondTargetMessageJSON))
+	seedAgentMailCustody(t, admin, sessionID, mainID, "delivery_bridge_completion_window_7", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	filtered, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:          scope,
 		RuntimeInputId: "rin_bridge_completion_window_after_append",

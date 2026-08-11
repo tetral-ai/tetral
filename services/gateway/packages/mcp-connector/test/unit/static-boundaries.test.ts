@@ -55,7 +55,6 @@ describe("mcp-connector static boundaries", () => {
     expect(command).not.toContain("unavailableClient");
     expect(client).toContain("StreamableHTTPClientTransport");
     expect(client).toContain("onToolsListChanged");
-    expect(client).toContain("onRefreshAttempt");
   });
 
   test("logger uses the shared TypeScript observability wrapper", () => {

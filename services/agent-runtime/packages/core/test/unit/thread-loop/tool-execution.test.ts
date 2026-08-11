@@ -21,7 +21,7 @@ import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { SessionToolCoordinator } from "../../../src/tools/tool-scheduler.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage, buildThreadLoopDurableRuntimeNotificationMessage as durableRuntimeNotificationMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, approvalReviewerOutputSchemaJson, approvalReviewerPolicy, catalogForTest, createdAt, deferred, emptyColdCoverage, flushMicrotasks, installRecoveredToolTurn, memoryCatalogForTest, queuedLLMService, runtimeThreadLoopLayer, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, approvalReviewerOutputSchemaJson, approvalReviewerPolicy, catalogForTest, createdAt, deferred, emptyColdCoverage, flushMicrotasks, installRecoveredToolTurn, memoryCatalogForTest, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, writerFrom } from "./thread-loop-test-support.js";
 import type { TestContextLoader, TestDurableSequence } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -382,7 +382,21 @@ test("approval reviewer waits for its created input receipt before starting the 
         targetPodUid: "pod_reviewer_receipt",
         runtimeBindingToken: "binding-token-reviewer-receipt",
     });
-    session.state.enqueueAcceptedInput(approvalReviewAcceptedInput("rin_reviewer_receipt"));
+    const reviewerInput = {
+        ...approvalReviewAcceptedInput("rin_reviewer_receipt"),
+        workspaceId: session.identity.workspaceId,
+        sessionId: session.identity.sessionId,
+        sessionThreadId: session.identity.sessionThreadId,
+        bindingId: session.identity.bindingId,
+        bindingGeneration: session.identity.bindingGeneration,
+        targetPodUid: session.identity.targetPodUid,
+    };
+    expect(session.state.enqueueAcceptedInput(reviewerInput)).toBe("applied");
+    expect(session.state.threadTurnReduction().action).toEqual({
+        action: "commit_accepted_input",
+        runtimeInputId: reviewerInput.runtimeInputId,
+    });
+    session.state.markPersistentContextLoaded();
     const releaseCommit = deferred<void>();
     const loader = new QueuedContextLoader([], [], [
         async (input: RuntimeAcceptedInputState) => {
@@ -391,13 +405,32 @@ test("approval reviewer waits for its created input receipt before starting the 
         },
     ]);
     const requests: LLMRequest[] = [];
+    const appended: SessionEvent[] = [];
+    const commitOutcomes: string[] = [];
+    let earlyResult: ThreadLoop.ThreadLoopRunResult | undefined;
     const run = Effect.runPromise(Effect.gen(function* () {
         return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
         onStream: (request) => requests.push(request),
-    }))));
+        installLoaderState: false,
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+        recordAcceptedInputCommit: (event) => commitOutcomes.push(`${event.attempt}:${event.outcome}`),
+        runtime: { ...threadLoopRuntime(), sleep: sleepUntilAborted },
+    })))).then((result) => {
+        earlyResult = result;
+        return result;
+    });
 
-    await waitForCondition(() => loader.commitCalls.length === 1, "reviewer CommitInputs call");
+    await waitForCondition(() => loader.commitCalls.length === 1 || earlyResult !== undefined, "reviewer CommitInputs call");
+    expect({ earlyResult, appended, commitOutcomes, accepted: session.state.acceptedInputSnapshot() }).toEqual({
+        earlyResult: undefined,
+        appended: [expect.objectContaining({ type: "session.status_running" })],
+        commitOutcomes: ["1:started"],
+        accepted: [reviewerInput],
+    });
     expect(requests).toHaveLength(0);
     releaseCommit.resolve(undefined);
     await run;
@@ -2819,7 +2852,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
     const commitCalls: string[] = [];
     const order: string[] = [];
     let nextMessageSequence = 1;
-    const commitReceipt = (input: RuntimeAcceptedInputState): AcceptedInputCommitResult => {
+    const commitReceipt = (input: RuntimeAcceptedInputState): ReturnType<typeof acceptedInputReceipt> => {
         const result = acceptedInputReceipt(input, "committed", nextMessageSequence);
         nextMessageSequence += result.receipt.messages.length;
         return result;
@@ -3008,12 +3041,11 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         await Effect.runPromise(manager.acceptInput(preFenceInput));
         expect(commitCalls).toEqual(["rin_initial_mixed"]);
         releaseUncommittedRepair.resolve();
-        try {
-            await waitForCondition(() => requestEndObserved && preCommitObserved, "request-end and pre-fence input commit");
-        }
-        catch {
-            throw new Error(`request-end/pre-fence gate failed: requestEnd=${requestEndObserved}, preCommit=${preCommitObserved}, order=${order.join(",")}, store=${storeOrder.join(",")}, events=${JSON.stringify(appended)}`);
-        }
+        await waitForCondition(
+            () => requestEndObserved && order.includes("event:session.status_idle:requires_action"),
+            "request-end and requires-action settlement",
+        );
+        expect(preCommitObserved).toBe(false);
         expect(providerCalls).toBe(1);
         expect(toolRunnerCalls).toBe(1);
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
@@ -3038,19 +3070,25 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         await new Promise<void>((resolve) => setImmediate(resolve));
         await flushMicrotasks();
         const postFenceInput = { ...acceptedInput("rin_post_fence_mixed"), sequenceFrom: 10, sequenceTo: 10 };
-        await Effect.runPromise(manager.acceptInput(postFenceInput));
+        const postAccept = await Effect.runPromise(manager.acceptInput(postFenceInput));
+        expect(postAccept).toMatchObject({ ok: true, started: true });
         await flushMicrotasks();
-        expect(order).not.toContain("commit:interrupt");
         expect(order).not.toContain("commit:rin_post_fence_mixed");
         expect(order.filter((entry) => entry === "event:agent.tool_result:sevt_mixed_tool_2")).toHaveLength(0);
-        releasePreCommit.resolve();
         releaseNextProviderTool.resolve();
         const interruptResult = await interrupt;
-        expect({ interruptResult, order }).toMatchObject({ interruptResult: { ok: true, interrupted: true } });
-        await Effect.runPromise(manager.waitThread(postFenceInput, 1000));
+        expect({ interruptResult, order }).toMatchObject({
+            interruptResult: { ok: true, interrupted: false, idleInterrupt: true },
+        });
+        const postRun = await Effect.runPromise(manager.waitThread(postFenceInput, 1000));
+        expect(postRun).toMatchObject({ ok: true });
+        await waitForCondition(
+            () => commitCalls.includes("rin_post_fence_mixed"),
+            "post-fence accepted input follow-up",
+        );
         expect(providerCalls).toBe(2);
         expect(toolRunnerCalls).toBe(1);
-        expect(commitCalls).toEqual(["rin_initial_mixed", "rin_pre_fence_mixed", "rin_post_fence_mixed"]);
+        expect(commitCalls).toEqual(["rin_initial_mixed", "rin_post_fence_mixed"]);
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
         expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_1")).toHaveLength(1);
         expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_2")).toEqual([]);
@@ -3058,15 +3096,15 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(JSON.stringify(appended)).not.toContain("tool-uncommitted");
         expect(JSON.stringify(appended)).not.toContain("must-not-commit");
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
-        expect(order.indexOf("commit:pre:end")).toBeLessThan(order.indexOf("commit:interrupt"));
-        expect(order.indexOf("commit:interrupt")).toBeLessThan(order.indexOf("event:session.status_idle:end_turn"));
-        expect(order.indexOf("event:session.status_idle:end_turn")).toBeLessThan(order.indexOf("commit:rin_post_fence_mixed"));
+        expect(order).not.toContain("commit:pre:start");
+        expect(order).not.toContain("commit:pre:end");
+        expect(order.indexOf("commit:interrupt")).toBeLessThan(order.indexOf("commit:rin_post_fence_mixed"));
+        expect(order.indexOf("commit:rin_post_fence_mixed")).toBeLessThan(order.indexOf("event:session.status_idle:end_turn"));
         const closeoutIdleIndex = order.indexOf("event:session.status_idle:end_turn");
         expect(order.slice(0, closeoutIdleIndex).filter((entry) => entry.startsWith("commit:"))).toEqual([
             "commit:initial",
-            "commit:pre:start",
-            "commit:pre:end",
             "commit:interrupt",
+            "commit:rin_post_fence_mixed",
         ]);
     }
     finally {
@@ -3084,7 +3122,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
     const order: string[] = [];
     const commitCalls: string[] = [];
     let nextMessageSequence = 1;
-    const commitReceipt = (input: RuntimeAcceptedInputState): AcceptedInputCommitResult => {
+    const commitReceipt = (input: RuntimeAcceptedInputState): ReturnType<typeof acceptedInputReceipt> => {
         const result = acceptedInputReceipt(input, "committed", nextMessageSequence);
         nextMessageSequence += result.receipt.messages.length;
         return result;
@@ -4267,7 +4305,6 @@ test("one approval decision settles its named member while sibling approvals rem
 });
 test("LoadContext pendingToolUses hydrates cold approval waits and settles the original tool use", async () => {
     const session = new ThreadRuntime("sesn_1");
-    session.state.enqueueAcceptedInput(acceptedInput("rin_cold_restore"));
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const pendingMessage = DurableRuntimeMessageSchema.parse({
         id: "assistant-cold-restore",
@@ -4356,18 +4393,15 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
                 modelToolCallId: "tool-1",
                 toolUseEventId: "sevt_tool_1",
                 toolName: "Write",
-            }]);
+        }]);
         expect(yield* threadLoop.installLoadedPendingToolUses(session, pendingToolUses, loadedMessages)).toEqual({ ok: true });
         return yield* threadLoop.run(session, testRunCustody());
     }).pipe(Effect.provide(layer)));
     expect(first).toMatchObject({ type: "completed" });
-    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual(["rin_cold_restore"]);
+    expect(loader.commitCalls).toEqual([]);
     expect(requests).toHaveLength(0);
     expect(runToolCalls).toEqual([]);
-    expect(appended.at(-1)).toEqual({
-        type: "session.status_idle",
-        stop_reason: { type: "requires_action", event_ids: ["sevt_tool_1"] },
-    });
+    expect(appended).toEqual([]);
     expect(session.state.contextManager.messages().find((message) => message.id === pendingMessage.id)?.parts[0]).toMatchObject({
         type: "tool",
         toolUseEventId: "sevt_tool_1",
@@ -4398,8 +4432,6 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
     expect(requests).toHaveLength(1);
     expect(runToolCalls).toEqual(["mrq_cold_restore:tool-1:sevt_tool_1"]);
     expect(appended.map((event) => event.type)).toEqual([
-        "session.status_running",
-        "session.status_idle",
         "session.status_running",
         "agent.mcp_tool_result",
         "span.model_request_start",

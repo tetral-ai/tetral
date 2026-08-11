@@ -42,6 +42,8 @@ export { MCP_CLAIM_RPC_TIMEOUT_MS, MCP_COMMIT_RPC_TIMEOUT_MS } from "./phase-bud
 /** Bounds one Bridge manifest-change notification so retry scheduling cannot stall. */
 export const MCP_MANIFEST_CHANGE_RPC_TIMEOUT_MS = 5_000;
 
+const MCP_MANIFEST_TOO_LARGE_DETAILS = "mcp manifest tools exceed the accepted byte limit";
+
 const MCP_COMMIT_RETRY_BACKOFF_MS = [100, 300, 1_000] as const;
 
 /** Maximum send and receive size for Bridge commits that carry one bounded inline attachment. */
@@ -136,6 +138,14 @@ export class BridgeAPIManifestChangeNotifier {
       });
     } catch (error) {
       const serviceError = error as Partial<ServiceError>;
+      if (
+        serviceError.code === status.RESOURCE_EXHAUSTED
+        && serviceError.details === MCP_MANIFEST_TOO_LARGE_DETAILS
+      ) {
+        // Bridge uses ResourceExhausted only after durably settling an over-cap
+        // manifest as unready with Queue custody. The terminal status is its ACK.
+        return { ok: true, duplicate: false };
+      }
       return {
         ok: false,
         retryable: serviceError.code === undefined || serviceError.code === status.UNAVAILABLE || serviceError.code === status.DEADLINE_EXCEEDED,

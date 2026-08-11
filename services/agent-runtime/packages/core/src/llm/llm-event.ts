@@ -29,6 +29,7 @@ const SafeOperationNameSchema = z.enum(["commitInternalToolRepair"]);
 const SafeReasonCodeSchema = z.enum([
   "aborted",
   "bounded",
+  "gateway_transport_completion_deadline",
   "runtime_contract_validation",
   "runtime_shutdown",
   "timeout",
@@ -57,7 +58,7 @@ const RuntimeErrorCodeSchema = z.enum([
 
 const RedactedText = "[redacted]";
 const SensitiveTextPatterns = [
-  /\bUNIT\d+_[A-Z0-9_]*TOKEN[A-Z0-9_]*\b/g,
+  /\b[A-Z0-9_]*(?:TOKEN|CREDENTIAL|SECRET)[A-Z0-9_]*CANARY\b/g,
   /\b(?:sk|dummy)[-_][A-Za-z0-9._-]+\b/g,
   /\b(?:postgres|postgresql|mysql|redis):\/\/[^\s"'<>]+/gi,
   /\bselect\s+.+?\s+from\s+\S+/gi,

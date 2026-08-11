@@ -17,7 +17,7 @@ import { McpSDKClient } from "./client.js";
 import { loadMcpConnectorConfigFromProcessEnv } from "./config.js";
 import { SQLGitHubMcpCredentialResolver } from "./credential.js";
 import { createMcpConnectorHttpServer } from "./http-server.js";
-import { createJsonLogger, logWorkloadStarted, startupFailureLogRecord } from "./logger.js";
+import { createJsonLogger, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord } from "./logger.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import { createMcpConnectorGrpcServer } from "./server.js";
 import { McpConnectorServiceShell } from "./service.js";
@@ -79,11 +79,11 @@ export async function runMcpConnectorCommand(options: {
     throw error;
   }
   const client = options.client ?? new McpSDKClient({
-    credentialResolver: new SQLGitHubMcpCredentialResolver(sql, config.config.vaultKeyHex),
+    credentialResolver: new SQLGitHubMcpCredentialResolver(
+      sql, config.config.vaultKeyHex, undefined, undefined, undefined, undefined,
+      (event) => recordMcpOAuthRefreshCompleted(logger, (outcome) => metrics.recordRefreshAttempt(outcome), event),
+    ),
     logger,
-    onRefreshAttempt: (outcome) => {
-      metrics.recordRefreshAttempt(outcome);
-    },
     onToolsListChanged: async (input) => {
       await service.handleToolsListChangedNotification(input);
     },

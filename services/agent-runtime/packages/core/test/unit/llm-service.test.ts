@@ -54,8 +54,12 @@ function request(): ProviderRequest {
 
 function gatewayClient(events: readonly ProviderStreamEvent[]): GatewayClient {
   return {
-    streamProviderRequest() {
-      return Stream.fromIterable(events);
+    async streamProviderRequest() {
+      return {
+        events: Stream.fromIterable(events),
+        completion: Promise.resolve({ outcome: "eof" as const }),
+        cancel: () => undefined,
+      };
     },
   };
 }
@@ -125,8 +129,8 @@ describe("LLMService Gateway boundary", () => {
         fatal: false,
       };
       const client: GatewayClient = {
-        streamProviderRequest() {
-          return Stream.fail(failure);
+        async streamProviderRequest() {
+          throw failure;
         },
       };
 
@@ -145,14 +149,14 @@ describe("LLMService Gateway boundary", () => {
 
   test("preserves deterministic Gateway request rejection as a protocol failure", async () => {
     const client: GatewayClient = {
-      streamProviderRequest() {
-        return Stream.fail({
+      async streamProviderRequest() {
+        throw {
           type: "gateway-client",
           code: "gateway_protocol_error",
           message: "Gateway rejected the provider request.",
           retryable: false,
           fatal: true,
-        });
+        };
       },
     };
 
@@ -782,6 +786,20 @@ describe("LLMService Gateway boundary", () => {
         },
       ]);
     }
+
+    const semanticObservations: unknown[] = [];
+    const malformedTerminal = malformedEvents.at(-2)!;
+    const observedService = createLLMService(gatewayClient([malformedTerminal]), {
+      terminalObserved: (_request, terminalKind) => semanticObservations.push({ terminalKind }),
+      streamClosed: (_request, completion, terminalCandidateExisted) => semanticObservations.push({ completion, terminalCandidateExisted }),
+    });
+    expect(await collect(observedService.stream(request()))).toEqual([
+      expect.objectContaining({ type: "provider-error", error: expect.objectContaining({ code: "gateway_protocol_error" }) }),
+    ]);
+    expect(semanticObservations).toEqual([{
+      completion: { outcome: "eof" },
+      terminalCandidateExisted: false,
+    }]);
   });
 
   test("starts tool execution only from a valid complete tool-call event", async () => {
@@ -849,5 +867,56 @@ describe("LLMService Gateway boundary", () => {
         }),
       },
     ]);
+  });
+
+  test("discards a buffered terminal when transport completion fails", async () => {
+    const failure: GatewayClientError = {
+      type: "gateway-client",
+      code: "gateway_unavailable",
+      message: "Gateway provider stream is unavailable.",
+      retryable: true,
+      fatal: false,
+    };
+    const client: GatewayClient = {
+      async streamProviderRequest() {
+        return {
+          events: Stream.fromIterable([successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_STOP)]),
+          completion: Promise.resolve({ outcome: "transport_failure" as const, error: failure }),
+          cancel: () => undefined,
+        };
+      },
+    };
+
+    const error = await Effect.runPromise(Stream.runCollect(createLLMService(client).stream(request())).pipe(Effect.flip));
+    expect(error.error).toMatchObject({ code: "gateway_stream_error", retryable: true, fatal: false });
+  });
+
+  test("maps the call-start completion deadline through the existing retryable stream failure", async () => {
+    const observations: unknown[] = [];
+    const client: GatewayClient = {
+      async streamProviderRequest() {
+        return {
+          events: Stream.empty,
+          completion: Promise.resolve({ outcome: "completion_deadline" as const }),
+          cancel: () => undefined,
+        };
+      },
+    };
+    const error = await Effect.runPromise(Stream.runCollect(createLLMService(client, {
+      nowEpochMs: () => 10,
+      streamClosed: (_request, completion, terminalCandidateExisted) => observations.push({ completion, terminalCandidateExisted }),
+    }).stream(request())).pipe(Effect.flip));
+
+    expect(error.error).toMatchObject({
+      type: "runtime",
+      code: "gateway_stream_error",
+      reason: "gateway_transport_completion_deadline",
+      retryable: true,
+      fatal: false,
+    });
+    expect(observations).toEqual([{
+      completion: { outcome: "completion_deadline" },
+      terminalCandidateExisted: false,
+    }]);
   });
 });

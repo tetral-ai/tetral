@@ -25,12 +25,40 @@ type fenceCandidate struct {
 // an admitted child interrupt/close on itself or any ancestor. Callers must
 // already hold the Session mutation lock so admission cannot race this read.
 func ThreadOrAncestorClosingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, threadID string) (bool, error) {
+	return threadOrAncestorClosingTx(ctx, tx, workspaceID, sessionID, threadID, false)
+}
+
+// ThreadOrAncestorClosingOrClosedTx extends the admission fence for producers
+// whose durable result must wait in parked custody after a child has closed.
+// Reactivation continues to use ThreadOrAncestorClosingTx so it can reopen the
+// exact closed subtree.
+func ThreadOrAncestorClosingOrClosedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, threadID string) (bool, error) {
+	return threadOrAncestorClosingTx(ctx, tx, workspaceID, sessionID, threadID, true)
+}
+
+func threadOrAncestorClosingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, threadID string, includeClosed bool) (bool, error) {
 	var targetStatus string
 	if err := tx.QueryRow(ctx, `SELECT status FROM session_threads WHERE workspace_id=$1 AND session_id=$2 AND id=$3 FOR SHARE`, workspaceID, sessionID, threadID).Scan(&targetStatus); err != nil {
 		return false, err
 	}
 	if targetStatus == "failed" || targetStatus == "terminated" {
 		return false, nil
+	}
+	if includeClosed {
+		var closed bool
+		if err := tx.QueryRow(ctx, `WITH RECURSIVE ancestors(id,parent_thread_id,status) AS (
+			SELECT id,parent_thread_id,status FROM session_threads WHERE workspace_id=$1 AND session_id=$2 AND id=$3
+			UNION ALL
+			SELECT parent.id,parent.parent_thread_id,parent.status
+			  FROM session_threads parent JOIN ancestors child ON child.parent_thread_id=parent.id
+			 WHERE parent.workspace_id=$1 AND parent.session_id=$2
+		)
+		SELECT EXISTS (SELECT 1 FROM ancestors WHERE status='closed_for_runtime')`, workspaceID, sessionID, threadID).Scan(&closed); err != nil {
+			return false, err
+		}
+		if closed {
+			return true, nil
+		}
 	}
 	rows, err := tx.Query(ctx, `WITH RECURSIVE ancestors(id,parent_thread_id,status) AS (
 		SELECT id,parent_thread_id,status FROM session_threads WHERE workspace_id=$1 AND session_id=$2 AND id=$3

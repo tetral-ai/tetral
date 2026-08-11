@@ -1,7 +1,37 @@
 import { describe, expect, test } from "bun:test";
-import { createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, recordRuntimeReceiptEvidence, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
+import { acceptedInputCommitLogRecord, createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, recordRuntimeReceiptEvidence, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("Runtime Pod JSON logger", () => {
+  test("accepted-input commit record contains only stable identity and bounded outcome", () => {
+    const record = acceptedInputCommitLogRecord({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_1",
+      requestId: "req_1",
+      runtimeInputId: "rin_1",
+      inputKind: "task_notification",
+      attempt: 2,
+      durationMs: 17,
+      outcome: "retry",
+    });
+    expect(record).toEqual({
+      event: "runtime_accepted_input_commit",
+      "event.kind": "runtime_accepted_input_commit",
+      operation: "commit_accepted_input",
+      component: "agent-runtime",
+      message: "accepted input commit observed",
+      "workspace.id": "wksp_1",
+      "session.id": "sesn_1",
+      "thread.id": "thr_1",
+      "request.id": "req_1",
+      "runtime_input.id": "rin_1",
+      "runtime_input.kind": "task_notification",
+      "retry.attempt": 2,
+      "duration.ms": 17,
+      outcome: "retry",
+    });
+  });
+
   test("provider reschedule record pins accepted attempt and selected delay", () => {
     expect(providerRescheduleSelectedLogRecord({
       workspaceId: "wksp_1",

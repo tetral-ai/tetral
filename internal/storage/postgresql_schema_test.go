@@ -387,12 +387,6 @@ func TestSessionRuntimeInboxStatusShapeIncludesParkedDelivery(t *testing.T) {
 			t.Fatalf("session_runtime_inbox_status_shape missing status %q: %s", required, definition)
 		}
 	}
-	predicate := readIndexPredicate(t, db, schema, "idx_session_runtime_inbox_repair")
-	for _, required := range []string{"queued", "delivering", "accepted", "parked", "dead_lettered"} {
-		if !strings.Contains(predicate, required) {
-			t.Fatalf("runtime inbox repair predicate missing status %q: %s", required, predicate)
-		}
-	}
 }
 
 func TestSessionRuntimeInboxBindingShapeRequiresCompleteDeliveryIdentity(t *testing.T) {

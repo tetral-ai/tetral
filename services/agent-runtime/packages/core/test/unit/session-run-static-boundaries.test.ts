@@ -222,7 +222,6 @@ describe("session run static boundaries", () => {
       "src/thread-loop/thread-turn-checkpoint.ts",
     ]);
     expect(normalizedManager).toContain("interfaceThreadRunSlot{");
-    expect(normalizedManager).toContain("pendingWakeAfterStop:boolean;");
     expect(normalizedManager).toContain("interfaceThreadEntry{");
     expect(normalizedManager).toContain("runSlot:ThreadRunSlot|undefined;");
     expect(normalizedSessionEntry).toBe("workspaceId:string;readonlysessionId:string;bindingId:string;bindingGeneration:number;readonlythreads:Map<string,ThreadEntry>;readonlytoolCoordinator:SessionToolCoordinator;readonlyruntimeShutdown:RuntimeShutdownObservation;readonlycontrolGate:Semaphore.Semaphore;readonlyconfiguration:SessionConfiguration;sharedStateStatus:\"initializing\"|\"ready\"|\"failed\";readonlysharedStateInitializerThreadId:string;readonlysharedStateReady:Promise<boolean>;readonlycompleteSharedStateReady:(ready:boolean)=>void;");

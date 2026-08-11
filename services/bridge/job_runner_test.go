@@ -143,51 +143,24 @@ func TestJobRunnerLeaseLossCancelsDeliveryWithoutTransition(t *testing.T) {
 	}
 }
 
-func TestJobRunnerRepairsRuntimeInboxAndCompletionMailBeforeLeasingJobs(t *testing.T) {
-	queueClient := &recordingQueueClient{}
-	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
-	}
-
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if deliverer.repairCalls != 1 || deliverer.repairWorkspaceID != "ws_bridge" || deliverer.repairLimit != defaultRuntimeInboxRepairBatch {
-		t.Fatalf("repair calls = %d workspace=%q limit=%d; want one workspace repair before lease", deliverer.repairCalls, deliverer.repairWorkspaceID, deliverer.repairLimit)
-	}
-	if deliverer.mailRepairCalls != 1 || deliverer.mailRepairWorkspaceID != "ws_bridge" || deliverer.mailRepairLimit != defaultRuntimeInboxRepairBatch {
-		t.Fatalf("mail repair calls = %d workspace=%q limit=%d; want one workspace repair before lease", deliverer.mailRepairCalls, deliverer.mailRepairWorkspaceID, deliverer.mailRepairLimit)
-	}
-	if len(queueClient.leaseKinds) == 0 {
-		t.Fatal("queue was not leased after runtime inbox and completion-mail repair")
-	}
-}
-
-func TestJobRunnerRunsPodLossBeforeOtherRepairsAndJoinsEveryPhaseError(t *testing.T) {
+func TestJobRunnerRunsPodLossBeforeQueueAndJoinsEveryPhaseError(t *testing.T) {
 	podLossErr := errors.New("pod loss unavailable")
-	inboxErr := errors.New("inbox unavailable")
-	mailErr := errors.New("mail unavailable")
 	queueErr := errors.New("queue unavailable")
 	steps := []string{}
 	queueClient := &recordingQueueClient{leaseErr: queueErr, phaseSteps: &steps}
 	deliverer := &recordingDeliverer{
 		podLossRepairErr: podLossErr,
-		repairErr:        inboxErr,
-		mailRepairErr:    mailErr,
 		phaseSteps:       &steps,
 	}
 	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
 
 	err := runner.RunOnce(context.Background())
-	for _, sentinel := range []error{podLossErr, inboxErr, mailErr, queueErr} {
+	for _, sentinel := range []error{podLossErr, queueErr} {
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("RunOnce error %v does not retain %v", err, sentinel)
 		}
 	}
-	if want := []string{"pod-loss", "inbox", "mail", "lease"}; !reflect.DeepEqual(steps, want) {
+	if want := []string{"pod-loss", "lease"}; !reflect.DeepEqual(steps, want) {
 		t.Fatalf("workspace phases = %v; want %v", steps, want)
 	}
 }
@@ -274,12 +247,6 @@ func TestJobRunnerDiscoversAndLeasesEveryWorkspace(t *testing.T) {
 	if !reflect.DeepEqual(queueClient.leaseWorkspaceIDs, []string{"ws_alpha", "ws_beta"}) {
 		t.Fatalf("lease workspaces = %v; want every discovered workspace", queueClient.leaseWorkspaceIDs)
 	}
-	if !reflect.DeepEqual(deliverer.repairWorkspaceIDs, []string{"ws_alpha", "ws_beta"}) {
-		t.Fatalf("repair workspaces = %v; want every discovered workspace", deliverer.repairWorkspaceIDs)
-	}
-	if !reflect.DeepEqual(deliverer.mailRepairWorkspaceIDs, []string{"ws_alpha", "ws_beta"}) {
-		t.Fatalf("mail repair workspaces = %v; want every discovered workspace", deliverer.mailRepairWorkspaceIDs)
-	}
 }
 
 func TestJobRunnerSweepContinuesPastAFailingWorkspace(t *testing.T) {
@@ -300,9 +267,6 @@ func TestJobRunnerSweepContinuesPastAFailingWorkspace(t *testing.T) {
 	}
 	if !reflect.DeepEqual(queueClient.leaseWorkspaceIDs, []string{"ws_alpha", "ws_beta", "ws_gamma"}) {
 		t.Fatalf("lease workspaces = %v; want the sweep to reach every workspace despite the failure", queueClient.leaseWorkspaceIDs)
-	}
-	if !reflect.DeepEqual(deliverer.repairWorkspaceIDs, []string{"ws_alpha", "ws_beta", "ws_gamma"}) {
-		t.Fatalf("repair workspaces = %v; want workspaces after the failure still repaired", deliverer.repairWorkspaceIDs)
 	}
 }
 
@@ -1335,13 +1299,13 @@ func TestRunJobRunnerLoopBacksOffAcrossConsecutiveEmptyPolls(t *testing.T) {
 	}
 }
 
-func TestRunJobRunnerLoopResetsBackoffWhenRepairWasActiveBeforePollFailure(t *testing.T) {
+func TestRunJobRunnerLoopResetsBackoffWhenPodLossRepairWasActiveBeforePollFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runner := &JobRunner{
 		Queue:      pollFailingQueueClient{err: errors.New("queue unavailable")},
 		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  &recordingDeliverer{repairCount: 1},
+		Deliverer:  &recordingDeliverer{podLossRepairCount: 1},
 		Config: JobRunnerConfig{
 			PollInterval: time.Millisecond,
 		},
@@ -1485,36 +1449,24 @@ func (c *recordingQueueClient) Cancel(_ context.Context, request *queuev1.Cancel
 }
 
 type recordingDeliverer struct {
-	result                 RuntimeDeliveryResult
-	err                    error
-	jobs                   []RuntimeJob
-	repairErr              error
-	podLossRepairErr       error
-	podLossRepairCount     int
-	podLossRepairCalls     int
-	podLossRepair          func(context.Context, string) (int, error)
-	repairCount            int
-	repairCalls            int
-	repairWorkspaceID      string
-	repairWorkspaceIDs     []string
-	repairLimit            int
-	mailRepairErr          error
-	mailRepairCount        int
-	mailRepairCalls        int
-	mailRepairWorkspaceID  string
-	mailRepairWorkspaceIDs []string
-	mailRepairLimit        int
-	finalizeResult         RuntimeDeliveryResult
-	finalizeErr            error
-	finalizations          []recordedRuntimeFinalization
-	steps                  *[]string
-	phaseSteps             *[]string
-	replayResult           RuntimeDeliveryResult
-	replayFound            bool
-	replayErr              error
-	replayJobs             []RuntimeJob
-	sealedAttempt          string
-	sealErr                error
+	result             RuntimeDeliveryResult
+	err                error
+	jobs               []RuntimeJob
+	podLossRepairErr   error
+	podLossRepairCount int
+	podLossRepairCalls int
+	podLossRepair      func(context.Context, string) (int, error)
+	finalizeResult     RuntimeDeliveryResult
+	finalizeErr        error
+	finalizations      []recordedRuntimeFinalization
+	steps              *[]string
+	phaseSteps         *[]string
+	replayResult       RuntimeDeliveryResult
+	replayFound        bool
+	replayErr          error
+	replayJobs         []RuntimeJob
+	sealedAttempt      string
+	sealErr            error
 }
 
 type recordedRuntimeFinalization struct {
@@ -1562,28 +1514,6 @@ func (d *recordingDeliverer) RepairLostRuntimeBindings(ctx context.Context, work
 		return d.podLossRepair(ctx, workspaceID)
 	}
 	return d.podLossRepairCount, d.podLossRepairErr
-}
-
-func (d *recordingDeliverer) RepairRuntimeInbox(_ context.Context, workspaceID string, limit int) (int, error) {
-	d.repairCalls++
-	d.repairWorkspaceID = workspaceID
-	d.repairWorkspaceIDs = append(d.repairWorkspaceIDs, workspaceID)
-	d.repairLimit = limit
-	if d.phaseSteps != nil {
-		*d.phaseSteps = append(*d.phaseSteps, "inbox")
-	}
-	return d.repairCount, d.repairErr
-}
-
-func (d *recordingDeliverer) RepairCompletionMail(_ context.Context, workspaceID string, limit int) (int, error) {
-	d.mailRepairCalls++
-	d.mailRepairWorkspaceID = workspaceID
-	d.mailRepairWorkspaceIDs = append(d.mailRepairWorkspaceIDs, workspaceID)
-	d.mailRepairLimit = limit
-	if d.phaseSteps != nil {
-		*d.phaseSteps = append(*d.phaseSteps, "mail")
-	}
-	return d.mailRepairCount, d.mailRepairErr
 }
 
 func (d *recordingDeliverer) DeliverRuntimeJob(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {

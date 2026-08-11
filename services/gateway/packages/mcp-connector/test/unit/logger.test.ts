@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { semanticErrorOutcome } from "@tetral/ts-observability";
-import { createJsonLogger, logWorkloadStarted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
+import { createJsonLogger, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("MCP Connector logger", () => {
   test("emits shared resource fields through the TS observability wrapper", () => {
@@ -121,5 +121,34 @@ describe("MCP Connector logger", () => {
       info: () => { throw new Error("sink unavailable"); },
       error: () => undefined,
     })).not.toThrow();
+  });
+
+  test("OAuth refresh completion records successful owner outcomes with matching attempt metrics", () => {
+    const records: Array<Record<string, unknown>> = [];
+    const metrics: string[] = [];
+    const logger = { info: (record: Record<string, unknown>) => records.push(record) };
+    recordMcpOAuthRefreshCompleted(logger, (outcome) => metrics.push(outcome), {
+      mcpServerName: "github", credentialId: "cred_rotated", outcome: "refreshed",
+      httpStatusClass: "2xx", durableWrite: "committed", durationMs: 12, refreshAttemptMetric: "success",
+    });
+    recordMcpOAuthRefreshCompleted(logger, (outcome) => metrics.push(outcome), {
+      mcpServerName: "github", credentialId: "cred_reused", outcome: "concurrent_winner_reused",
+      durableWrite: "not_needed", durationMs: 3,
+    });
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ event: "mcp_oauth_refresh_completed", outcome: "refreshed",
+      "mcp.server.name": "github", "credential.id": "cred_rotated", "http.status_class": "2xx",
+      "durable_write.disposition": "committed" });
+    expect(records[1]).toMatchObject({ outcome: "concurrent_winner_reused" });
+    expect(metrics).toEqual(["success"]);
+  });
+
+  test("OAuth refresh observation is fail-open for metric and logger failures", () => {
+    expect(() => recordMcpOAuthRefreshCompleted(
+      { info: () => { throw new Error("logger unavailable"); } },
+      () => { throw new Error("metrics unavailable"); },
+      { mcpServerName: "github", credentialId: "cred_fail_open", outcome: "refreshed",
+        durableWrite: "committed", durationMs: 1, refreshAttemptMetric: "success" },
+    )).not.toThrow();
   });
 });

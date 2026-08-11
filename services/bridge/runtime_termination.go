@@ -51,7 +51,8 @@ func parseRuntimeTerminationFailure(raw string) (runtimeTerminationFailure, stri
 
 func isWhitelistedRuntimeTerminationFailure(failure runtimeTerminationFailure) bool {
 	if failure.Type == "runtime" {
-		return failure.Code == "runtime_invalid_sequence" && failure.Reason == "runtime_contract_validation"
+		return (failure.Code == "runtime_invalid_sequence" && failure.Reason == "runtime_contract_validation") ||
+			(failure.Code == "runtime_persistence_exhausted" && failure.Reason == "runtime_input_commit_exhausted")
 	}
 	if failure.Type != "provider" {
 		return false
@@ -447,6 +448,71 @@ func closeRuntimeTerminatedSessionSiblingsTx(
 		}
 	}
 	return nil
+}
+
+// cancelRuntimeTerminationInputsTx is the durable release boundary for Inbox
+// custody owned by a terminalized Thread. Main-thread termination covers the
+// whole Session tree; child termination remains thread-local. Reactivated task
+// jobs are cancelled together with queued/parked Inbox rows, invalidating any
+// runner lease before the Runtime receipt can release hot state.
+type runtimeTerminationCustodyTransitions struct {
+	accepted int
+	parked   int
+}
+
+func cancelRuntimeTerminationInputsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	sessionWide bool,
+	now time.Time,
+) (runtimeTerminationCustodyTransitions, error) {
+	threadID := scope.GetSessionThreadId()
+	if sessionWide {
+		threadID = ""
+	}
+	var transitions runtimeTerminationCustodyTransitions
+	err := tx.QueryRow(ctx,
+		`WITH target_inputs AS MATERIALIZED (
+		    SELECT inbox.runtime_input_id, inbox.status
+		      FROM session_runtime_inbox inbox
+		     WHERE inbox.workspace_id = $1
+		       AND inbox.session_id = $2
+		       AND ($3 = '' OR inbox.session_thread_id = $3)
+		       AND inbox.input_kind <> 'approval_review'
+		       AND (
+		           inbox.status IN ('delivering', 'accepted')
+		           OR (inbox.input_kind = 'task_notification' AND inbox.status IN ('queued', 'parked'))
+		       )
+		     FOR UPDATE
+		), cancelled_jobs AS (
+		    UPDATE queue_jobs job
+		       SET status = 'cancelled', cancelled_at = $4,
+		           lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
+		           updated_at = $4
+		     WHERE job.workspace_id = $1
+		       AND job.status IN ('pending', 'leased')
+		       AND EXISTS (
+		           SELECT 1 FROM target_inputs input
+		            WHERE job.dedupe_key = 'runtime_input:' || $1 || ':' || $2 || ':' || input.runtime_input_id
+		       )
+		), updated_inputs AS (
+		  UPDATE session_runtime_inbox inbox
+		     SET status = 'cancelled', updated_at = $4
+		    FROM target_inputs input
+		   WHERE inbox.workspace_id = $1
+		     AND inbox.runtime_input_id = input.runtime_input_id
+		  RETURNING input.status
+		)
+		SELECT count(*) FILTER (WHERE status IN ('delivering', 'accepted')),
+		       count(*) FILTER (WHERE status = 'parked')
+		  FROM updated_inputs`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		threadID,
+		now,
+	).Scan(&transitions.accepted, &transitions.parked)
+	return transitions, err
 }
 
 func appendRuntimeTerminationErrorTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, failureJSON string, now time.Time) (*bridgev1.DurableEventStamp, error) {

@@ -98,39 +98,23 @@ describe("McpConnectorServiceShell", () => {
     expect(JSON.stringify(logger.records)).not.toContain("Bearer");
   });
 
-  test("notifies Bridge once when tools/list_changed changes the manifest etag", async () => {
+  test("initial discovery and pre-dispatch notify failures leave later real notifications eligible", async () => {
     const client = new RecordingMcpClient();
     const notifier = new RecordingManifestChangeNotifier();
-    const logger = new MemoryLogger();
-    const service = createService(client, notifier, logger);
-    const initial = await service.listMcpTools(validListRequest(), new Metadata());
-
-    client.tools = [
-      ...client.tools,
-      { name: "create_pull_request", description: "Create a pull request.", inputSchema: { type: "object" } },
-    ];
-    const changed = await service.handleToolsListChangedNotification(validListRequest());
-    const unchanged = await service.handleToolsListChangedNotification(validListRequest());
-
-    expect(changed.status).toBe("notified");
-    expect(changed.manifestEtag).not.toBe(initial.manifestEtag);
-    expect(unchanged).toEqual({ status: "unchanged", manifestEtag: changed.manifestEtag });
-    expect(notifier.notifications).toEqual([{
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      mcpServerName: "github",
-      manifestEtag: changed.manifestEtag,
-    }]);
-    expect(logger.records).toContainEqual(expect.objectContaining({
-      event: "mcp_manifest_changed_notified",
-      "event.kind": "mcp_manifest_changed_notified",
-      operation: "mcp_manifest_changed",
-      component: "mcp-connector",
-      "workspace.id": "wksp_1",
-      "session.id": "sesn_1",
-      "mcp.server.name": "github",
-      "mcp.manifest_etag": changed.manifestEtag,
-    }));
+    const service = createService(client, notifier);
+    client.listToolsError = new Error("upstream discovery unavailable");
+    await expect(service.listMcpTools(validListRequest(), new Metadata())).rejects.toThrow("upstream discovery unavailable");
+    expect(notifier.notifications).toEqual([]);
+    await expect(service.handleToolsListChangedNotification(validListRequest())).rejects.toThrow("upstream discovery unavailable");
+    expect(notifier.notifications).toEqual([]);
+    client.listToolsError = undefined;
+    notifier.result = { ok: false, retryable: false, code: "token_unavailable", message: "Bridge auth unavailable." };
+    await expect(service.handleToolsListChangedNotification(validListRequest())).rejects.toThrow("Bridge auth unavailable.");
+    expect(notifier.notifications).toHaveLength(1);
+    notifier.result = { ok: true, duplicate: true };
+    await expect(service.handleToolsListChangedNotification(validListRequest())).resolves.toMatchObject({ status: "notified" });
+    expect(notifier.notifications).toHaveLength(2);
+    expect(notifier.notifications[1]?.manifestEtag).toBe(notifier.notifications[0]?.manifestEtag);
   });
 
   test("manifest notify retries exactly four times, logs exhaustion only, and a later event retriggers", async () => {
@@ -948,10 +932,12 @@ class RecordingMcpClient implements McpClient {
   callToolDelay: Promise<void> | undefined;
   callToolResult: Awaited<ReturnType<McpClient["callTool"]>> | undefined;
   callToolError: unknown;
+  listToolsError: unknown;
   tools: McpClientTool[] = [{ name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" } }];
 
   async listTools() {
     this.calls.push("listTools");
+    if (this.listToolsError !== undefined) throw this.listToolsError;
     return this.tools;
   }
 

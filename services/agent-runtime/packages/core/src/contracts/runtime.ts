@@ -92,7 +92,9 @@ const SafeOperationNameSchema = z.enum(["commitInternalToolRepair"]);
 const SafeReasonCodeSchema = z.enum([
   "aborted",
   "bounded",
+  "gateway_transport_completion_deadline",
   "runtime_contract_validation",
+  "runtime_input_commit_exhausted",
   "runtime_shutdown",
   "timeout",
   "write_acknowledgement_mismatch",
@@ -102,7 +104,7 @@ const Utf8Encoder = new TextEncoder();
 
 const RedactedText = "[redacted]";
 const SensitiveTextPatterns = [
-  /\bUNIT\d+_[A-Z0-9_]*TOKEN[A-Z0-9_]*\b/g,
+  /\b[A-Z0-9_]*(?:TOKEN|CREDENTIAL|SECRET)[A-Z0-9_]*CANARY\b/g,
   /\b(?:sk|dummy)[-_][A-Za-z0-9._-]+\b/g,
   /\b(?:postgres|postgresql|mysql|redis):\/\/[^\s"'<>]+/gi,
   /\bselect\s+.+?\s+from\s+\S+/gi,
@@ -669,6 +671,7 @@ const RuntimeErrorCodeSchema = z.enum([
   "gateway_stream_error",
   "gateway_unavailable",
   "runtime_invalid_sequence",
+  "runtime_persistence_exhausted",
 ]);
 
 export const RuntimeMessageStoreErrorSchema = z.strictObject({
@@ -802,7 +805,11 @@ export function isRuntimeTerminationFailure(failure: RuntimeFailure): boolean {
     return false;
   }
   if (failure.type === "runtime") {
-    return failure.code === "runtime_invalid_sequence" && failure.reason === "runtime_contract_validation";
+    return (
+      failure.code === "runtime_invalid_sequence" && failure.reason === "runtime_contract_validation"
+    ) || (
+      failure.code === "runtime_persistence_exhausted" && failure.reason === "runtime_input_commit_exhausted"
+    );
   }
   return failure.type === "provider" && !NonTerminalProviderFailureCodes.has(failure.code);
 }
@@ -1409,7 +1416,9 @@ export function normalizeRuntimeFailure(input: RuntimeFailureInput): RuntimeFail
   return RuntimeFailureSchema.parse({
     type: input.type,
     code,
-    message: "Runtime operation failed.",
+    message: code === "runtime_persistence_exhausted"
+      ? "Runtime could not durably commit accepted input."
+      : "Runtime operation failed.",
     retryable: input.retryable ?? false,
     fatal: input.fatal ?? true,
     ...(input.retryStatus !== undefined ? { retryStatus: input.retryStatus } : {}),

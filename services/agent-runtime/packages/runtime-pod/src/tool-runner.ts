@@ -1930,6 +1930,10 @@ function resultJsonToExecutionResult(
     return toolFailure(request, "Tool route returned malformed result JSON.", false);
   }
   const visible = filterVisibleToolResult(request, parsed);
+  const activationFailure = sandboxActivationExhaustionResult(request, visible, sandboxResultDigest);
+  if (activationFailure !== undefined) {
+    return activationFailure;
+  }
   const status = isRecord(visible) ? stringField(visible, "status") : undefined;
   const retryableValue = isRecord(visible) && Object.hasOwn(visible, "retryable")
     ? visible.retryable
@@ -1978,6 +1982,28 @@ function resultJsonToExecutionResult(
       resultErrorMessage(request, visible, "Tool route failed."),
       typeof retryableValue === "boolean" ? retryableValue : status === "runtime_error" || status === "failed",
     ),
+    ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
+  };
+}
+
+// Activation exhaustion is a private lifecycle settlement. Every Sandbox Tool
+// family converges here before Runtime failure and public Tool Result creation,
+// so route envelopes, partial output, and provider diagnosis cannot alter the
+// single model-visible failure text.
+function sandboxActivationExhaustionResult(
+  request: RuntimeToolExecutionRequest,
+  parsed: RuntimeJsonValue,
+  sandboxResultDigest?: string,
+): RuntimeToolExecutionResult | undefined {
+  if (request.entry.route.kind !== "sandbox" || !isRecord(parsed)) {
+    return undefined;
+  }
+  const error = recordField(parsed, "error");
+  if (!isRecord(error) || stringField(error, "kind") !== "sandbox_activation_attempts_exhausted") {
+    return undefined;
+  }
+  return {
+    ...toolFailure(request, "sandbox activation could not be completed", false),
     ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
   };
 }

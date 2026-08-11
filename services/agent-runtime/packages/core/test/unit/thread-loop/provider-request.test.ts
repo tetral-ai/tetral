@@ -3,7 +3,7 @@ import { Effect, Stream } from "effect";
 import { ProviderRequestKind, RuntimeMessageRole, SystemCacheHint, SystemSegmentKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type { SessionEvent, SessionEventWriter, SessionEventWriterRequestEndEnvelope } from "../../../src/contracts/runtime.js";
-import { RuntimeMessageSchema } from "../../../src/contracts/runtime.js";
+import { RuntimeMessageSchema, normalizeContextLoaderError } from "../../../src/contracts/runtime.js";
 import type { LLMEvent } from "../../../src/llm/llm-event.js";
 import { runtimeFailureFromProviderError } from "../../../src/llm/llm-event.js";
 import type { Interface as LLMServiceInterface, LLMRequest } from "../../../src/llm/llm-service.js";
@@ -23,7 +23,7 @@ import type {
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
-import type { RuntimeConfigPatchState } from "../../../src/thread-loop/thread-state.js";
+import type { RuntimeAcceptedInputState, RuntimeConfigPatchState } from "../../../src/thread-loop/thread-state.js";
 import { runtimeModelForThread, runtimeToolPolicyFromPatchPayloads } from "../../../../runtime-pod/src/command.js";
 import { createToolCatalog, lookupToolEntry } from "../../../src/tools/tool-catalog.js";
 import type { ToolCatalog } from "../../../src/tools/tool-catalog.js";
@@ -900,11 +900,11 @@ test("deterministic Gateway rejection closes on the first attempt without resche
     });
     expect(requestEnds[0]?.reschedule).toBeUndefined();
 });
-test("pre-event Gateway unavailability uses the existing reschedule budget", async () => {
-    const session = new ThreadRuntime("sesn_gateway_pre_event_unavailable");
+test("Gateway transport completion deadline uses one existing provider reschedule attempt", async () => {
+    const session = new ThreadRuntime("sesn_gateway_completion_deadline");
     const loader = new RecordingContextLoader([], {
         type: "messages",
-        messages: [userMessage("user-gateway-unavailable", 0, "send this request")],
+        messages: [userMessage("user-gateway-completion-deadline", 0, "send this request")],
     });
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -938,10 +938,11 @@ test("pre-event Gateway unavailability uses the existing reschedule budget", asy
                     type: "llm-service" as const,
                     error: {
                         type: "runtime" as const,
-                        code: "gateway_unavailable" as const,
-                        message: "Gateway provider stream is unavailable.",
+                        code: "gateway_stream_error" as const,
+                        message: "Gateway provider stream did not complete within its bounded allowance.",
                         retryable: true,
                         fatal: false,
+                        reason: "gateway_transport_completion_deadline" as const,
                     },
                 });
             }
@@ -970,7 +971,75 @@ test("pre-event Gateway unavailability uses the existing reschedule budget", asy
         attempt: 1,
         delayMs: 1_000,
         delaySource: "runtime_fallback",
-        failureCode: "gateway_unavailable",
+        failureCode: "gateway_stream_error",
+    })]);
+});
+test("Gateway provider timeout seals an error and uses one existing provider reschedule attempt", async () => {
+    const session = new ThreadRuntime("sesn_gateway_provider_timeout");
+    const loader = new RecordingContextLoader([], {
+        type: "messages",
+        messages: [userMessage("user-gateway-provider-timeout", 0, "send this request")],
+    });
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const reschedules: ThreadLoop.RuntimeProviderRescheduleObservation[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        writeRequestEnd: async (envelope) => {
+            requestEnds.push(envelope);
+            return await baseWriter.writeRequestEnd(envelope);
+        },
+    };
+    const success = llmService([
+        { type: "text-start", id: "text_after_provider_timeout" },
+        { type: "text-delta", id: "text_after_provider_timeout", text_delta: "done" },
+        { type: "text-end", id: "text_after_provider_timeout" },
+        { type: "finish", finishReason: "stop" },
+    ]);
+    let attempt = 0;
+    const service: LLMServiceInterface = {
+        stream(request, options) {
+            attempt += 1;
+            if (attempt === 1) {
+                return Stream.fromIterable<LLMEvent>([{
+                    type: "provider-error",
+                    error: runtimeFailureFromProviderError(normalizeProviderError({
+                        code: "provider_timeout",
+                        message: "Provider request timed out.",
+                        retryable: true,
+                        fatal: false,
+                    })),
+                }]);
+            }
+            return success.stream(request, options);
+        },
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer,
+        llmService: service,
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+        recordProviderReschedule: (event) => reschedules.push(event),
+    }))));
+
+    expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
+    expect(attempt).toBe(2);
+    expect(requestEnds).toHaveLength(2);
+    expect(requestEnds[0]).toMatchObject({
+        isError: true,
+        errorKind: "provider_error",
+        reschedule: { attempt: 1, backoffMs: 1_000 },
+    });
+    expect(requestEnds[1]).toMatchObject({ isError: false });
+    expect(reschedules).toEqual([expect.objectContaining({
+        attempt: 1,
+        failureCode: "provider_timeout",
     })]);
 });
 test("provider reschedule fallback remains 1s 2s 4s before the fourth failure exhausts", async () => {
@@ -1478,7 +1547,6 @@ test("task notification commits after the running receipt and reaches the provid
     const session = new ThreadRuntime("sesn_task_notification_turn");
     const order: string[] = [];
     const requests: LLMRequest[] = [];
-    const notification = runtimeNotificationMessage("msg_task_notification_turn", "task result for next turn");
     session.state.recordBackgroundTool({
         taskId: "task_notification_turn",
         sourceToolUseEventId: "sevt_task_notification_tool",
@@ -1495,10 +1563,6 @@ test("task notification commits after the running receipt and reaches the provid
         sourceToolUseEventId: "sevt_task_notification_tool",
         status: "completed",
         payloadJson: "{\"status\":\"completed\",\"text\":\"task result for next turn\"}",
-        commit: async () => {
-            order.push("task-commit");
-            return { ok: true, committedMessage: notification };
-        },
     })).toBe("applied");
     const writer = writerFrom((envelope) => {
         if (envelope.event.type === "session.status_running") {
@@ -1511,7 +1575,12 @@ test("task notification commits after the running receipt and reaches the provid
             processedAt: createdAt,
         };
     });
-    const loader = new RecordingContextLoader([], { type: "empty" });
+    const loader = new QueuedContextLoader([], [], [
+        (input: RuntimeAcceptedInputState) => {
+            order.push("task-commit");
+            return acceptedInputReceipt(input);
+        },
+    ]);
     const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
         return yield* threadLoop.run(session, testRunCustody());
@@ -1531,14 +1600,17 @@ test("task notification commits after the running receipt and reaches the provid
     expect(order.slice(0, 3)).toEqual(["running-receipt", "task-commit", "provider"]);
     expect(requests).toHaveLength(1);
     expect(JSON.stringify(requests[0]?.messages).match(/task result for next turn/g)).toHaveLength(1);
-    expect(session.state.contextManager.messages().filter((message) => message.id === notification.id)).toHaveLength(1);
+    expect(JSON.stringify(session.state.contextManager.messages()).match(/task result for next turn/g)).toHaveLength(1);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
     expect(session.state.backgroundTool("task_notification_turn")).toMatchObject({
         status: "terminal",
         terminalNotification: expect.objectContaining({ runtimeInputId: "rin_task_notification_turn" }),
     });
-    expect(session.state.threadTurnReduction().appliedEventIds).toContain(notification.owningEventId);
-    expect(session.state.threadTurnReduction().appliedEventIds).not.toContain(notification.id);
+    const committedNotification = session.state.contextManager.messages().find((message) =>
+        JSON.stringify(message).includes("task result for next turn"));
+    expect(committedNotification).toBeDefined();
+    expect(session.state.threadTurnReduction().appliedEventIds).toContain("sevt_rin_task_notification_turn");
+    expect(session.state.threadTurnReduction().appliedEventIds).not.toContain(committedNotification?.id);
 });
 
 test("prefix-only child Request Start stores durable message boundary zero", async () => {
@@ -1577,10 +1649,8 @@ test("prefix-only child Request Start stores durable message boundary zero", asy
     expect(result).toMatchObject({ type: "completed" });
     expect(requestStarts).toEqual([0]);
 });
-test("task notification replays an unknown commit outcome before provider work", async () => {
+test("task notification retries an unknown commit outcome before provider work", async () => {
     const session = new ThreadRuntime("sesn_task_notification_retryable_commit");
-    const committedMessage = runtimeNotificationMessage("msg_task_notification_retryable_commit", "task result recovered from the replayed receipt");
-    let commitCalls = 0;
     let providerCalls = 0;
     expect(session.state.enqueueAcceptedInput({
         requestId: "req_task_notification_retryable_commit",
@@ -1593,50 +1663,36 @@ test("task notification replays an unknown commit outcome before provider work",
         taskId: "task_notification_retryable_commit",
         sourceToolUseEventId: "sevt_task_notification_retryable_commit",
         status: "completed",
-        payloadJson: "{\"status\":\"completed\"}",
-        commit: async () => {
-            commitCalls += 1;
-            return commitCalls === 1
-                ? {
-                    ok: false as const,
-                    retryable: true,
-                    errorCode: "bridge_commit_unavailable",
-                    message: "task notification durable commit failed",
-                }
-                : { ok: true as const, committedMessage };
-        },
+        payloadJson: "{\"status\":\"completed\",\"text\":\"task result recovered from the replayed receipt\"}",
     })).toBe("applied");
     const custody = testRunCustody();
-    const layer = runtimeThreadLoopLayer(new RecordingContextLoader([], { type: "empty" }), {
+    const loader = new QueuedContextLoader([], [], [
+        (input: RuntimeAcceptedInputState) => {
+            throw normalizeContextLoaderError({
+                code: "unavailable",
+                sessionId: input.sessionId,
+                reason: "commit acknowledgement was lost",
+            });
+        },
+        (input: RuntimeAcceptedInputState) => acceptedInputReceipt(input),
+    ]);
+    const layer = runtimeThreadLoopLayer(loader, {
         onStream: () => {
             providerCalls += 1;
         },
     });
-    const first = await Effect.runPromise(Effect.gen(function* () {
+    const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
         return yield* threadLoop.run(session, custody);
     }).pipe(Effect.provide(layer)));
-    expect(first).toMatchObject({ type: "completed" });
-    expect(commitCalls).toBe(1);
-    expect(providerCalls).toBe(0);
-    expect(session.state.peekAcceptedInput()).toMatchObject({
-        kind: "task_notification",
-        runtimeInputId: "rin_task_notification_retryable_commit",
-    });
-    expect(session.state.contextManager.messages()).toEqual([]);
-    const second = await Effect.runPromise(Effect.gen(function* () {
-        const threadLoop = yield* ThreadLoop.Service;
-        return yield* threadLoop.run(session, custody);
-    }).pipe(Effect.provide(layer)));
-    expect(second).toMatchObject({ type: "completed" });
-    expect(commitCalls).toBe(2);
+    expect(result).toMatchObject({ type: "completed" });
+    expect(loader.commitCalls).toHaveLength(2);
     expect(providerCalls).toBe(1);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
-    expect(session.state.contextManager.messages()).toContainEqual(committedMessage);
+    expect(JSON.stringify(session.state.contextManager.messages())).toContain("task result recovered from the replayed receipt");
 });
-test("task notification arriving during provider reschedule waits for the next durable turn", async () => {
+test("task notification arriving during provider reschedule joins the next safe request", async () => {
     const session = new ThreadRuntime("sesn_task_notification_reschedule");
-    const taskMessage = runtimeNotificationMessage("msg_task_notification_reschedule", "task result after the retried request");
     let commitCalls = 0;
     const requests: LLMRequest[] = [];
     const streams: readonly (readonly LLMEvent[])[] = [
@@ -1678,20 +1734,22 @@ test("task notification arriving during provider reschedule waits for the next d
                     taskId: "task_notification_reschedule",
                     sourceToolUseEventId: "sevt_task_notification_reschedule",
                     status: "completed",
-                    payloadJson: "{\"status\":\"completed\"}",
-                    commit: async () => {
-                        commitCalls += 1;
-                        return { ok: true, committedMessage: taskMessage };
-                    },
+                    payloadJson: "{\"status\":\"completed\",\"text\":\"task result after the retried request\"}",
                 })).toBe("applied");
             }
             return Stream.fromIterable(streams[streamIndex++] ?? []);
         },
     };
-    const layer = runtimeThreadLoopLayer(new RecordingContextLoader([], {
+    const loader = new QueuedContextLoader([], [{
         type: "messages",
         messages: [userMessage("user-task-reschedule", 0, "finish the current request")],
-    }), {
+    }], [
+        (input: RuntimeAcceptedInputState) => {
+            commitCalls += 1;
+            return acceptedInputReceipt(input);
+        },
+    ]);
+    const layer = runtimeThreadLoopLayer(loader, {
         llmService: llm,
         runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
     });
@@ -1701,21 +1759,11 @@ test("task notification arriving during provider reschedule waits for the next d
         return yield* threadLoop.run(session, custody);
     }).pipe(Effect.provide(layer)));
     expect(currentTurn).toMatchObject({ type: "completed" });
-    expect(commitCalls).toBe(0);
-    expect(requests).toHaveLength(2);
-    expect(JSON.stringify(requests[1]?.messages)).not.toContain("task result after the retried request");
-    expect(session.state.peekAcceptedInput()).toMatchObject({
-        kind: "task_notification",
-        runtimeInputId: "rin_task_notification_reschedule",
-    });
-    const taskTurn = await Effect.runPromise(Effect.gen(function* () {
-        const threadLoop = yield* ThreadLoop.Service;
-        return yield* threadLoop.run(session, custody);
-    }).pipe(Effect.provide(layer)));
-    expect(taskTurn).toMatchObject({ type: "completed" });
     expect(commitCalls).toBe(1);
     expect(requests).toHaveLength(3);
+    expect(JSON.stringify(requests[1]?.messages)).not.toContain("task result after the retried request");
     expect(JSON.stringify(requests[2]?.messages).match(/task result after the retried request/g)).toHaveLength(1);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
 });
 test("stale task notification custody discards the resident thread before provider work", async () => {
     const session = new ThreadRuntime("sesn_stale_task_notification");
@@ -1732,12 +1780,11 @@ test("stale task notification custody discards the resident thread before provid
         sourceToolUseEventId: "sevt_stale_task_notification",
         status: "completed",
         payloadJson: "{\"status\":\"completed\"}",
-        commit: async () => ({ ok: true, stale: true }),
     })).toBe("applied");
     const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
         return yield* threadLoop.run(session, testRunCustody());
-    }).pipe(Effect.provide(runtimeThreadLoopLayer(new RecordingContextLoader([], { type: "empty" }), {
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], [], [{ type: "stale_custody" }]), {
         onStream: () => {
             providerCalls += 1;
         },

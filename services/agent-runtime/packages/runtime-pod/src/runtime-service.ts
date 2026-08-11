@@ -32,7 +32,6 @@ import type {
 import type { ServiceAccountIdentity } from "./auth.js";
 import type { RuntimePodLogger } from "./logger.js";
 import type {
-  DurableRuntimeMessage,
   RuntimeDeclarationReceipt,
   RuntimeMessage,
   RuntimeMessageCreate,
@@ -41,7 +40,6 @@ import type {
   RuntimeControlInputCommitResult,
   RuntimeControlInputDeclaration,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
-import { taskNotificationCreate } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { GrpcStatusError } from "./errors.js";
 import { runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
 
@@ -70,18 +68,18 @@ export interface RuntimeSessionRunHost {
         readonly sessionId: string;
         readonly created: boolean;
         readonly started: boolean;
-        readonly pendingWake: boolean;
         readonly duplicate?: true | undefined;
       }
     | {
         readonly ok: false;
         readonly sessionId: string;
-        readonly reason: "local_session_capacity_exceeded" | "control_conflict";
+        readonly reason: "local_session_capacity_exceeded" | "control_conflict" | "context_load_failed";
+        readonly retryable?: boolean | undefined;
       }
   >;
   readonly handleAgentMail: (command: RuntimeAgentMailCommand) => Promise<
     | { readonly ok: true; readonly sessionId: string; readonly applied: boolean }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "thread_not_receivable" | "context_load_failed" }
+    | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "thread_not_receivable" | "context_load_failed"; readonly retryable?: boolean | undefined }
   >;
   readonly handleInterruptControl: (
     sessionId: string,
@@ -118,12 +116,6 @@ export interface RuntimeSessionRunHost {
       readonly status: "completed" | "failed" | "cancelled" | "expired";
       readonly payloadJson: string;
     },
-    commit: () => Promise<
-      | { readonly ok: true; readonly stale: true }
-      | { readonly ok: true; readonly deferred: true }
-      | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
-      | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
-    >,
   ) => Promise<
     | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly applied: boolean }
     | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "control_busy" | "control_conflict" | "context_load_failed" }
@@ -186,31 +178,6 @@ export interface RuntimeAgentMailCommand extends RuntimeCommandScope {
 }
 
 /**
- * Bridge-backed durable settlement port for background task notifications.
- *
- * The owning agent run invokes this port after its running transition. A successful non-stale
- * result supplies the durable Runtime message that may then enter hot state.
- */
-export interface RuntimeTaskNotificationCommitter {
-  readonly commitTaskNotification: (input: {
-    readonly scope: RuntimeCommandScope;
-    readonly command: {
-      readonly runtimeInputId: string;
-      readonly taskId: string;
-      readonly sourceToolUseEventId: string;
-      readonly status: "completed" | "failed" | "cancelled" | "expired";
-      readonly payloadJson: string;
-      readonly messageCreate: RuntimeMessageCreate;
-    };
-  }) => Promise<
-    | { readonly ok: true; readonly stale: true }
-    | { readonly ok: true; readonly deferred: true }
-    | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
-    | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string; readonly message: string }
-  >;
-}
-
-/**
  * Bridge-backed durable input port for interrupts and tool confirmations.
  */
 export interface RuntimeControlInputCommitter {
@@ -261,7 +228,6 @@ export interface RuntimeControlServiceOptions {
   readonly authenticator: RuntimeAuthenticator;
   readonly runHost: RuntimeSessionRunHost;
   readonly controlInputCommitter?: RuntimeControlInputCommitter;
-  readonly taskNotificationCommitter?: RuntimeTaskNotificationCommitter;
   readonly cleanupController: RuntimeCleanupController;
   readonly logger: RuntimePodLogger;
   readonly ready: () => boolean;
@@ -567,6 +533,9 @@ export class RuntimeControlService {
         if (result.reason === "control_conflict") {
           return this.rejected(request, false, "runtime_input_identity_conflict");
         }
+        if (result.reason === "context_load_failed") {
+          return this.rejected(request, result.retryable ?? false, "runtime_context_load_failed");
+        }
         throw new GrpcStatusError(status.RESOURCE_EXHAUSTED, "local runtime capacity exceeded");
       }
       if (result.duplicate === true) {
@@ -585,7 +554,7 @@ export class RuntimeControlService {
         }
         return this.rejected(
           request,
-          result.reason !== "thread_not_receivable",
+          result.reason === "context_load_failed" ? result.retryable ?? false : false,
           result.reason === "thread_not_receivable" ? "runtime_control_not_accepted" : "runtime_context_load_failed",
         );
       }
@@ -686,21 +655,10 @@ export class RuntimeControlService {
     }
     if (effect === "task-notification") {
       const command = taskNotificationFromPayload(request.runtimeInputId, request.payloadJson);
-      if (this.options.taskNotificationCommitter === undefined) {
-        throw new GrpcStatusError(status.INTERNAL, "task notification durable committer is unavailable");
-      }
       const result = await this.options.runHost.handleTaskNotification(request.sessionId, {
         ...commandScope(request),
         ...command,
-      }, async () => await this.options.taskNotificationCommitter!.commitTaskNotification({
-        scope: taskNotificationCommitScope(request),
-        command: {
-          ...command,
-          messageCreate: taskNotificationCreate({
-            payloadJson: command.payloadJson,
-          }),
-        },
-      }));
+      });
       const accepted = ensureRuntimeControlAccepted(result);
       if (!accepted.ok) {
         return this.rejected(request, accepted.retryable, accepted.errorCode);
@@ -884,12 +842,6 @@ function validateRuntimeInputCommandOrThrow(request: RuntimeInputCommandRequest)
   if (!result.ok) {
     throw new GrpcStatusError(status.INVALID_ARGUMENT, result.message);
   }
-}
-
-function taskNotificationCommitScope(request: RuntimeInputCommandRequest): Parameters<
-  RuntimeTaskNotificationCommitter["commitTaskNotification"]
->[0]["scope"] {
-  return commandScope(request);
 }
 
 function commandScope(request: RuntimeInputCommandRequest): RuntimeCommandScope {

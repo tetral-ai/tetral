@@ -1667,10 +1667,9 @@ END $$`
 	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
-	createPostgreSQLSessionEventsCompletionMailIndex        = `CREATE INDEX IF NOT EXISTS idx_session_events_completion_mail_reconciliation ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
+	createPostgreSQLSessionEventsAgentMailDeliveryIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_agent_mail_delivery ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
-	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('queued', 'delivering', 'accepted', 'parked', 'dead_lettered')`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`
 	createPostgreSQLRuntimeStatusCleanupDueIndex            = `CREATE INDEX IF NOT EXISTS idx_session_runtime_status_cleanup_due ON session_runtime_status(workspace_id, cleanup_after, cleanup_job_id) WHERE status = 'idle' AND binding_id IS NOT NULL`
 	createPostgreSQLBridgeOperationsRuntimeWriteIndex       = `CREATE INDEX IF NOT EXISTS idx_session_bridge_operations_runtime_write ON session_bridge_operations(workspace_id, session_id, runtime_write_id) WHERE runtime_write_id IS NOT NULL`
@@ -1940,10 +1939,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_messages_model_request_unique", createPostgreSQLSessionMessagesModelRequestIndex},
 		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
 		{"index_session_file_attachment_consumptions_pending", createPostgreSQLSessionFileAttachmentPendingIndex},
-		{"index_session_events_completion_mail_reconciliation", createPostgreSQLSessionEventsCompletionMailIndex},
+		{"index_session_events_agent_mail_delivery", createPostgreSQLSessionEventsAgentMailDeliveryIndex},
 		{"index_session_pending_tool_uses_status", createPostgreSQLPendingToolUsesStatusIndex},
 		{"index_session_background_tasks_status", createPostgreSQLBackgroundTasksStatusIndex},
-		{"index_session_runtime_inbox_repair", createPostgreSQLRuntimeInboxRepairIndex},
 		{"index_session_mcp_manifests_generation", createPostgreSQLSessionMCPManifestsGenerationIndex},
 		{"index_session_runtime_status_cleanup_due", createPostgreSQLRuntimeStatusCleanupDueIndex},
 		{"index_session_bridge_operations_runtime_write", createPostgreSQLBridgeOperationsRuntimeWriteIndex},

@@ -15,7 +15,7 @@ import { SessionRunHostCleanupController } from "./cleanup-controller.js";
 import type { RuntimePodBootstrap } from "./lifecycle.js";
 import type { RuntimeGrpcServer } from "./grpc-server.js";
 import type { RuntimeHttpServer } from "./http-server.js";
-import type { RuntimeAuthenticator, RuntimeControlInputCommitter, RuntimeSessionRunHost, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
+import type { RuntimeAuthenticator, RuntimeControlInputCommitter, RuntimeSessionRunHost } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import type { RuntimePodConfig } from "./config.js";
 import type { RuntimePodLogger } from "./logger.js";
@@ -32,7 +32,6 @@ export interface RuntimePodAppOptions {
   readonly tokenReviewClient: RuntimeTokenReviewClient;
   readonly commandRunHost: RuntimeSessionRunHost;
   readonly controlInputCommitter?: RuntimeControlInputCommitter;
-  readonly taskNotificationCommitter?: RuntimeTaskNotificationCommitter;
   readonly cleanupRunHost: RuntimeCoreCleanupHost;
   readonly shutdownActiveRuns?: () => Promise<void>;
   readonly drainTimeoutMs?: number;
@@ -70,7 +69,6 @@ export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodAp
     authenticator,
     runHost: options.commandRunHost,
     ...(options.controlInputCommitter !== undefined ? { controlInputCommitter: options.controlInputCommitter } : {}),
-    ...(options.taskNotificationCommitter !== undefined ? { taskNotificationCommitter: options.taskNotificationCommitter } : {}),
     cleanupController: new SessionRunHostCleanupController(options.cleanupRunHost),
     logger: options.logger,
     ready: () => lifecycle.ready().ready,

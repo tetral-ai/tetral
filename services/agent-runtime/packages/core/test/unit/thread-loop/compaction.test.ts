@@ -11,7 +11,9 @@ import { compactionBoundaryMessageSequence } from "../../../src/thread-loop/comp
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
+import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-state.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopDurableRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
+import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
 import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, acceptedInput, activeCompactionRun, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, compactionHistory, compactionTransportHistory, createdAt, deferred, queuedLLMService, recordCompactionHint, runtimeThreadLoopLayer, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, withRuntimeTerminationReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -377,8 +379,7 @@ test("direct Effect interruption closes an ACKed compaction request before inter
 });
 test("task notification survives interrupted compaction and commits on the next run", async () => {
     const active = await activeCompactionRun(new ThreadRuntime("sesn_task_interrupted_compaction"));
-    const taskMessage = runtimeNotificationMessage("msg_task_interrupted_compaction", "task completed during interrupted compaction");
-    let commitCalls = 0;
+    const commitsBeforeNotification = active.loader.commitCalls.length;
     expect(active.session.state.enqueueAcceptedInput({
         requestId: "req_task_interrupted_compaction",
         ...active.session.identity,
@@ -391,10 +392,6 @@ test("task notification survives interrupted compaction and commits on the next 
         sourceToolUseEventId: "sevt_task_interrupted_compaction",
         status: "completed",
         payloadJson: "{\"status\":\"completed\",\"text\":\"task completed during interrupted compaction\"}",
-        commit: async () => {
-            commitCalls += 1;
-            return { ok: true, committedMessage: taskMessage };
-        },
     })).toBe("applied");
     const interruptCommand = acceptedInput("rin_task_compaction_interrupt");
     active.session.state.beginUserInterrupt(interruptCommand, testControlCommit(interruptCommand));
@@ -413,7 +410,7 @@ test("task notification survives interrupted compaction and commits on the next 
             processedAt: createdAt,
         });
         await interrupt;
-        expect(commitCalls).toBe(0);
+        expect(active.loader.commitCalls).toHaveLength(commitsBeforeNotification);
         expect(active.session.state.peekAcceptedInput()).toMatchObject({
             kind: "task_notification",
             runtimeInputId: "rin_task_interrupted_compaction",
@@ -421,10 +418,11 @@ test("task notification survives interrupted compaction and commits on the next 
         expect(JSON.stringify(active.session.state.contextManager.messages())).not.toContain("<conversation-checkpoint>");
         expect(active.session.state.userInterruptRequested()).toBe(false);
         const requests: LLMRequest[] = [];
+        const replayLoader = new QueuedContextLoader([], []);
         const result = await Effect.runPromise(Effect.gen(function* () {
             const threadLoop = yield* ThreadLoop.Service;
             return yield* threadLoop.run(active.session, testRunCustody());
-        }).pipe(Effect.provide(runtimeThreadLoopLayer(new RecordingContextLoader([], { type: "empty" }), {
+        }).pipe(Effect.provide(runtimeThreadLoopLayer(replayLoader, {
             onStream: (request) => {
                 requests.push(request);
             },
@@ -436,7 +434,7 @@ test("task notification survives interrupted compaction and commits on the next 
             })),
         }))));
         expect(result).toMatchObject({ type: "completed" });
-        expect(commitCalls).toBe(1);
+        expect(replayLoader.commitCalls).toHaveLength(1);
         expect(requests).toHaveLength(1);
         expect(JSON.stringify(requests[0]?.messages).match(/task completed during interrupted compaction/g)).toHaveLength(1);
         expect(active.session.state.peekAcceptedInput()).toBeUndefined();
@@ -685,11 +683,18 @@ test("task notification arriving during reactive compaction joins the preserved 
         taskId: "task_during_compaction",
         sourceToolUseEventId: "sevt_task_during_compaction",
     });
-    const loader = new RecordingContextLoader([userMessage("user-old", 0, compactionHistory("old context before task completion"))], { type: "messages", messages: [userMessage("user-new", 1, "start the compacted turn")] });
+    const loader = new QueuedContextLoader(
+        [userMessage("user-old", 0, compactionHistory("old context before task completion"))],
+        [{ type: "messages", messages: [userMessage("user-new", 1, "start the compacted turn")] }],
+        [(input: RuntimeAcceptedInputState) => {
+            commitCalls += 1;
+            order.push("task-commit");
+            return acceptedInputReceipt(input);
+        }],
+    );
     const requests: LLMRequest[] = [];
     const order: string[] = [];
     let commitCalls = 0;
-    const taskMessage = runtimeNotificationMessage("msg_task_during_compaction", "task completed while compaction was open");
     const batches: readonly (readonly LLMEvent[])[] = [
         [{
                 type: "provider-error",
@@ -749,11 +754,6 @@ test("task notification arriving during reactive compaction joins the preserved 
                     sourceToolUseEventId: "sevt_task_during_compaction",
                     status: "completed",
                     payloadJson: "{\"status\":\"completed\",\"text\":\"task completed while compaction was open\"}",
-                    commit: async () => {
-                        commitCalls += 1;
-                        order.push("task-commit");
-                        return { ok: true, committedMessage: taskMessage };
-                    },
                 })).toBe("applied");
             }
             else {
@@ -783,11 +783,14 @@ test("task notification arriving during reactive compaction joins the preserved 
     expect(await run()).toMatchObject({ type: "completed" });
     expect(commitCalls).toBe(1);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
-    expect(JSON.stringify(requests[2]?.messages).match(/task completed while compaction was open/g)).toHaveLength(1);
-    expect(JSON.stringify(requests[2]?.messages)).toContain("<conversation-checkpoint>");
+    const resumedRequest = requests.find((request) =>
+        JSON.stringify(request.messages).includes("task completed while compaction was open"));
+    expect(resumedRequest).toBeDefined();
+    expect(JSON.stringify(resumedRequest?.messages).match(/task completed while compaction was open/g)).toHaveLength(1);
+    expect(JSON.stringify(resumedRequest?.messages)).toContain("<conversation-checkpoint>");
     expect(order.indexOf("running-2")).toBeLessThan(order.indexOf("task-commit"));
     expect(order.indexOf("task-commit")).toBeLessThan(order.indexOf("provider-3"));
-    expect(session.state.contextManager.messages().filter((message) => message.id === taskMessage.id)).toHaveLength(1);
+    expect(JSON.stringify(session.state.contextManager.messages()).match(/task completed while compaction was open/g)).toHaveLength(1);
 });
 test("runtime layer finishes idle before normal provider request when compaction retries are exhausted", async () => {
     const session = new ThreadRuntime("sesn_1");

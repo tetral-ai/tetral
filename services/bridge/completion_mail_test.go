@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -42,6 +40,8 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 		"the loop authored this body\nverbatim",
 	)
 	request.CompletionMailCreate = bridgeCompletionMailCreateForTest(request.GetScope(), request.GetDurableTurnId(), wantEnvelope)
+	request.CompletionMailCreate.MessageInfoJson = `{"role":"user","origin":"runtime","status":"completed","finishReason":"stop","responseId":"completion_response","usage":{"inputTokens":1,"outputTokens":2,"reasoningTokens":3,"cacheReadTokens":4,"cacheWriteTokens":5}}`
+	request.CompletionMailCreate.Parts[0].PartJson = fmt.Sprintf(`{"type":"text","text":%q,"truncated":true,"status":"failed","startedAt":"2026-01-01T00:00:40Z","completedAt":"2026-01-01T00:00:41Z"}`, wantEnvelope)
 
 	response, err := finishIdleWithStagedCaptureForTest(t, admin, store, request)
 	if err != nil {
@@ -59,173 +59,79 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 	if mailCount != 1 || jobCount != 1 || envelope != wantEnvelope {
 		t.Fatalf("completion rows = mail %d job %d envelope %q; want 1/1/%q", mailCount, jobCount, envelope, wantEnvelope)
 	}
-}
-
-func TestPostgreSQLBridgeAPIStoreChildFinishIdleRearmsPendingCompletionMail(t *testing.T) {
-	tests := []struct {
-		name       string
-		stopReason string
-		interrupt  bool
-	}{
-		{name: "end_turn", stopReason: `{"type":"end_turn"}`},
-		{name: "requires_action", stopReason: `{"type":"requires_action","event_ids":["evt_pending"]}`},
-		{name: "retries_exhausted", stopReason: `{"type":"retries_exhausted"}`},
-		{name: "processed_interrupt", stopReason: `{"type":"end_turn"}`, interrupt: true},
+	var inboxCount, queuedInboxCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*), count(*) FILTER (WHERE status='queued') FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail'`, completionTestSessionID(suffix)).Scan(&inboxCount, &queuedInboxCount); err != nil {
+		t.Fatalf("read completion mail Inbox custody: %v", err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			suffix := "inbound_rearm_" + test.name
-			sessionID := completionTestSessionID(suffix)
-			childID := completionTestChildID(suffix)
-			grandchildID := childID + "_sender"
-			deliveryID := "delivery_" + suffix
-			seedBridgeAPIChildFinishIdleFailureFixture(t, admin, suffix)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, childID, grandchildID)
-			seedCompletionMailSentAt(t, admin, sessionID, childID, grandchildID, deliveryID, 1, "2026-01-01T00:00:01Z")
-			if test.interrupt {
-				eventID := "evt_interrupt_" + suffix
-				seedBridgeAPIEvent(t, admin, "default", sessionID, childID, eventID, 3, "user.interrupt", `{"type":"user.interrupt"}`)
-				if _, err := admin.ExecContext(context.Background(),
-					`UPDATE session_events
-					    SET processed_at = '2026-01-01T00:00:02Z'
-					  WHERE workspace_id = 'default'
-					    AND session_id = $1
-					    AND event_id = $2`,
-					sessionID,
-					eventID,
-				); err != nil {
-					t.Fatalf("mark interrupt processed: %v", err)
-				}
-			}
-
-			store := completionMailTestStore(t, runtime)
-			request := bridgeAPIChildFinishIdleFailureRequest(suffix)
-			request.StopReasonJson = test.stopReason
-			request.CompletionMailCreate = nil
-			if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, request); err != nil {
-				t.Fatalf("FinishIdle %s: %v", test.name, err)
-			}
-			assertActiveCompletionWake(t, admin, sessionID, deliveryID, true)
-			if test.interrupt {
-				var outboundCount int
-				if err := admin.QueryRowContext(context.Background(),
-					`SELECT count(*)
-					   FROM session_events
-					  WHERE workspace_id = 'default'
-					    AND session_id = $1
-					    AND type = 'agent.thread_message_sent'
-					    AND payload_json::jsonb ->> 'source_thread_id' = $2`,
-					sessionID,
-					childID,
-				).Scan(&outboundCount); err != nil {
-					t.Fatalf("count interrupted child outbound completion: %v", err)
-				}
-				if outboundCount != 0 {
-					t.Fatalf("interrupted child outbound completion count = %d; want 0", outboundCount)
-				}
-			}
-		})
+	if inboxCount != 1 || queuedInboxCount != 1 {
+		t.Fatalf("completion mail Inbox rows = %d queued = %d; want exactly one queued row", inboxCount, queuedInboxCount)
 	}
-}
-
-func TestPostgreSQLBridgeAPIStoreMainFinishIdleDrainsCompletionMailAcrossBoundedPages(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_main_finish_idle_mail_pages"
-		mainID    = "thr_main_finish_idle_mail_pages"
-		bindingID = "bind_main_finish_idle_mail_pages"
-		podUID    = "pod_main_finish_idle_mail_pages"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_runtime_status (
-			workspace_id, session_id, status, running_since, active_seconds_total,
-			binding_id, binding_generation, created_at, updated_at
-		) VALUES (
-			'default', $1, 'running', '2026-01-01T00:00:00Z', 0,
-			$2, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
-		)`,
-		sessionID,
-		bindingID,
-	); err != nil {
-		t.Fatalf("seed running runtime status: %v", err)
+	var semantics struct {
+		Message struct {
+			Origin       string         `json:"origin"`
+			Status       string         `json:"status"`
+			FinishReason string         `json:"finishReason"`
+			ResponseID   string         `json:"responseId"`
+			Usage        map[string]any `json:"usage"`
+			Parts        []struct {
+				Truncated   bool   `json:"truncated"`
+				Status      string `json:"status"`
+				StartedAt   string `json:"startedAt"`
+				CompletedAt string `json:"completedAt"`
+			} `json:"parts"`
+		} `json:"message"`
 	}
-	deliveries := make([]string, MailFetchMaxEnvelopes+1)
-	for index := range deliveries {
-		childID := fmt.Sprintf("thr_main_finish_idle_mail_child_%d", index)
-		deliveries[index] = fmt.Sprintf("delivery_main_finish_idle_mail_%d", index)
-		seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-		seedCompletionMailSentAt(
-			t,
-			admin,
-			sessionID,
-			mainID,
-			childID,
-			deliveries[index],
-			int64(index+1),
-			fmt.Sprintf("2026-01-01T00:00:0%dZ", index+1),
-		)
-	}
-
-	store := completionMailTestStore(t, runtime)
-	first := &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-		DurableTurnId:  "evt_main_finish_idle_mail_page_1_running",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}
-	seedBridgeAPIOpenDurableTurn(t, admin, first.GetScope(), first.GetDurableTurnId())
-	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, first); err != nil {
-		t.Fatalf("FinishIdle first page: %v", err)
-	}
-	for index, deliveryID := range deliveries {
-		assertActiveCompletionWake(t, admin, sessionID, deliveryID, index < MailFetchMaxEnvelopes)
-	}
-
-	var nextSequence int64
+	var raw string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_events
-		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
-		sessionID,
-		mainID,
-	).Scan(&nextSequence); err != nil {
-		t.Fatalf("read next main-thread sequence: %v", err)
+		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'`,
+		completionTestSessionID(suffix),
+	).Scan(&raw); err != nil {
+		t.Fatalf("read completion declaration: %v", err)
 	}
-	for index := 0; index < MailFetchMaxEnvelopes; index++ {
-		seedBridgeAPIEvent(
-			t,
-			admin,
-			"default",
-			sessionID,
-			mainID,
-			fmt.Sprintf("evt_main_finish_idle_mail_received_%d", index),
-			nextSequence+int64(index),
-			"agent.thread_message_received",
-			`{"delivery_id":"`+deliveries[index]+`"}`,
-		)
+	if err := json.Unmarshal([]byte(raw), &semantics); err != nil {
+		t.Fatalf("decode completion declaration: %v", err)
 	}
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_runtime_status
-		    SET status='running',
-		        running_since='2026-01-01T00:01:00Z',
-		        idle_since=NULL,
-		        cleanup_after=NULL,
-		        updated_at='2026-01-01T00:01:00Z'
-		  WHERE workspace_id='default' AND session_id=$1`,
-		sessionID,
-	); err != nil {
-		t.Fatalf("restart main-thread runtime status: %v", err)
+	part := semantics.Message.Parts[0]
+	if semantics.Message.Origin != "runtime" || semantics.Message.Status != "completed" ||
+		semantics.Message.FinishReason != "stop" || semantics.Message.ResponseID != "completion_response" ||
+		semantics.Message.Usage["reasoningTokens"] != float64(3) || !part.Truncated || part.Status != "failed" ||
+		part.StartedAt != "2026-01-01T00:00:40Z" || part.CompletedAt != "2026-01-01T00:00:41Z" {
+		t.Fatalf("completion declaration semantics changed: %#v", semantics.Message)
 	}
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 45, 0, time.UTC) }
-	second := proto.Clone(first).(*bridgev1.FinishIdleRequest)
-	second.DurableTurnId = "evt_main_finish_idle_mail_page_2_running"
-	seedBridgeAPIOpenDurableTurn(t, admin, second.GetScope(), second.GetDurableTurnId())
-	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, second); err != nil {
-		t.Fatalf("FinishIdle tail page: %v", err)
+}
+
+func TestPostgreSQLCompletionMailBirthRollsBackSourceInboxAndQueueTogether(t *testing.T) {
+	const suffix = "birth_rollback"
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, suffix)
+	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_completion_mail_queue_birth() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected completion mail queue failure'; END; $$ LANGUAGE plpgsql;
+		CREATE TRIGGER fail_completion_mail_queue_birth BEFORE INSERT ON queue_jobs
+		FOR EACH ROW WHEN (NEW.kind = 'runtime_input') EXECUTE FUNCTION fail_completion_mail_queue_birth()`); err != nil {
+		t.Fatalf("install completion mail queue failure: %v", err)
 	}
-	assertActiveCompletionWake(t, admin, sessionID, deliveries[MailFetchMaxEnvelopes], true)
+	store := completionMailTestStore(t, runtime)
+	request := bridgeAPIChildFinishIdleFailureRequest(suffix)
+	request.CompletionMailCreate = bridgeCompletionMailCreateForTest(
+		request.GetScope(), request.GetDurableTurnId(),
+		completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "rollback"),
+	)
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, request); err == nil {
+		t.Fatal("FinishIdle succeeded despite injected completion mail Queue failure")
+	}
+	var sent, inbox, jobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail'),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb ->> 'session_id'=$1 AND kind='runtime_input')`,
+		completionTestSessionID(suffix),
+	).Scan(&sent, &inbox, &jobs); err != nil {
+		t.Fatalf("read rolled-back completion custody: %v", err)
+	}
+	if sent != 0 || inbox != 0 || jobs != 0 {
+		t.Fatalf("rolled-back completion custody = sent %d Inbox %d Queue %d; want 0/0/0", sent, inbox, jobs)
+	}
 }
 
 func TestPostgreSQLCompletionMailRequiresActionThenSameChildCompletesNextTurn(t *testing.T) {

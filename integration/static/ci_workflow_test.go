@@ -154,9 +154,12 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 		t.Fatal("engine-ci gateway-ts job must own the Gateway suite")
 	}
 	for _, fragment := range []string{
+		"name: Start Gateway PostgreSQL test service",
+		"TETRAL_TEST_DATABASE_URL=postgres://tetral:tetral@127.0.0.1:$port/tetral?sslmode=disable",
 		"name: Gateway Service typecheck\n        run: bun run typecheck",
 		"name: Gateway Service tests with coverage\n        run: bun run test",
 		"name: Gateway Service build\n        run: bun run build",
+		"name: Stop Gateway PostgreSQL test service",
 	} {
 		if !strings.Contains(gatewayJob, fragment) {
 			t.Fatalf("engine-ci gateway-ts job must own Gateway protocol shell gate:\n%s", fragment)

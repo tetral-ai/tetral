@@ -214,7 +214,20 @@ func runtimePodLossCensusPageTx(
 		     ON session.workspace_id = binding.workspace_id
 		    AND session.id = binding.session_id
 		  WHERE binding.workspace_id = $1
-		    AND (runtime.status = 'running' OR session.status = 'rescheduling')
+		    AND (
+		      runtime.status = 'running'
+		      OR session.status = 'rescheduling'
+		      OR EXISTS (
+		        SELECT 1
+		          FROM session_runtime_inbox inbox
+		         WHERE inbox.workspace_id = binding.workspace_id
+		           AND inbox.session_id = binding.session_id
+		           AND inbox.status = 'accepted'
+		           AND inbox.binding_id = binding.binding_id
+		           AND inbox.binding_generation = binding.binding_generation
+		           AND inbox.target_pod_uid = binding.agent_runtime_pod_uid
+		      )
+		    )
 		    AND ($2 = '' OR (binding.session_id, binding.binding_generation, binding.binding_id) > ($2, $3, $4))
 		  ORDER BY binding.session_id, binding.binding_generation, binding.binding_id
 		  LIMIT $5`,

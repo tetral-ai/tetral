@@ -33,6 +33,8 @@ import type { RuntimeThreadIdentity, ThreadRuntime } from "./thread-runtime.js";
 import { normalizeRuntimeFailure, normalizeSessionEventWriterError } from "../contracts/runtime.js";
 import type { LLMRequest } from "../llm/llm-service.js";
 import type { RuntimeAttachmentRejection } from "../llm/llm-event.js";
+import { RuntimeFailureSchema as LLMRuntimeFailureSchema } from "../llm/llm-event.js";
+import type { RuntimeFailure as LLMRuntimeFailure } from "../llm/llm-event.js";
 import type { RuntimeMetricOutcome, RuntimeProviderStreamKind } from "../runtime/metrics.js";
 import { NoopRuntimeMetricsSink } from "../runtime/metrics.js";
 import type { ToolCatalog } from "../tools/tool-catalog.js";
@@ -488,8 +490,8 @@ export function requestEndKindFromRequest(
   }
 }
 
-export function providerStreamExhaustedFailure(request: LLMRequest): RuntimeFailure {
-  return normalizeRuntimeFailure({
+export function providerStreamExhaustedFailure(request: LLMRequest): LLMRuntimeFailure {
+  return LLMRuntimeFailureSchema.parse(normalizeRuntimeFailure({
     type: "runtime",
     code: "gateway_stream_error",
     retryable: false,
@@ -497,7 +499,7 @@ export function providerStreamExhaustedFailure(request: LLMRequest): RuntimeFail
     retryStatus: { type: "terminal" },
     providerId: request.model?.providerId,
     modelId: request.model?.modelId,
-  });
+  }));
 }
 
 // The platform base prompt is a stable environment-facts slot. Its former

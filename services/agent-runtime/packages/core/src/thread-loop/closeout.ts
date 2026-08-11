@@ -159,7 +159,7 @@ export async function closeFailedThreadRun(
     };
   }
   if (declaration.applicationDisposition === "stale_custody") {
-    session.state.clear();
+    session.state.clearAfterCustodyHandoff();
     return { type: "interrupted", discardHotState: true };
   }
   try {
@@ -328,6 +328,83 @@ export async function closeFailedRunDurably(
     sessionId: session.sessionId,
   });
   try {
+    // An unresolved accepted input makes atomic Runtime termination the only
+    // legal same-Pod release boundary. FinishIdle cannot disposition Inbox or
+    // Queue custody, so failed-run recovery reuses the open durable turn and
+    // the existing termination transaction until its receipt lands.
+    if (session.state.acceptedInputCount() > 0) {
+      const durableTurnId = closeout.durableTurnId;
+      if (durableTurnId === undefined) {
+        return {
+          type: "unrepairable",
+          error: normalizeSessionEventWriterError({ code: "unrepairable", sessionId: session.sessionId }),
+        };
+      }
+      const pendingTools = unfinishedToolUseEventIds(session.state.contextManager.messages())
+        .map((toolUseEventId) => ({ toolUseEventId }));
+      const toolSettlements = runtimeTerminationToolSettlements({ pendingTools, failure });
+      const completionMailCreate = runtimeTerminationCompletionCreate(session, failure);
+      const termination = await commitRuntimeTerminationWithRetry(options, {
+        requestId: durableTurnId,
+        workspaceId: session.identity.workspaceId,
+        sessionId: session.identity.sessionId,
+        sessionThreadId: session.identity.sessionThreadId,
+        bindingId: session.identity.bindingId,
+        bindingGeneration: session.identity.bindingGeneration,
+        targetPodUid: session.identity.targetPodUid,
+        writeId: durableTurnId,
+        failure,
+        toolSettlements: [...toolSettlements],
+        ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
+      });
+      if (!termination.ok) {
+        return failedRunCloseoutFailure(termination.error);
+      }
+      const declaration = termination.declaration;
+      if (declaration === undefined) {
+        return failedRunCloseoutFailure(normalizeSessionEventWriterError({
+          code: "schema_mismatch",
+          sessionId: session.sessionId,
+          writeId: durableTurnId,
+        }));
+      }
+      if (declaration.applicationDisposition === "stale_custody") {
+        return {
+          type: "superseded",
+          error: normalizeSessionEventWriterError({
+            code: "superseded",
+            sessionId: session.sessionId,
+            writeId: durableTurnId,
+          }),
+        };
+      }
+      try {
+        const terminalReceipt = validateRuntimeTerminationReceipt({
+          sessionThreadId: session.identity.sessionThreadId,
+          operationId: durableTurnId,
+          toolSettlements,
+          ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
+        }, declaration.receipt);
+        session.state.applyThreadTurnFact({
+          fact: "terminal_closeout_committed",
+          eventId: terminalReceipt.closeoutEventId,
+          failureEventId: terminalReceipt.failureEventId,
+          disposition: "terminated",
+        });
+      } catch (error) {
+        return failedRunCloseoutFailure(normalizeSessionEventWriterError({
+          code: "schema_mismatch",
+          rawError: error,
+          sessionId: session.sessionId,
+          writeId: durableTurnId,
+        }));
+      }
+      for (const pending of pendingTools) {
+        session.state.removePendingApprovalToolJob(pending.toolUseEventId);
+      }
+      custody.closeDurableTurn(durableTurnId);
+      return { type: "landed" };
+    }
     const errorAppend = await observeFailedRunCloseoutStep(
       closeout.errorStep,
       closeout.errorWriteId,

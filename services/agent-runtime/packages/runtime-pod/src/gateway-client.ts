@@ -14,7 +14,8 @@
  * Gateway.
  */
 import { credentials, status } from "@grpc/grpc-js";
-import type { ChannelOptions, ClientReadableStream, Metadata, ServiceError } from "@grpc/grpc-js";
+import type { CallOptions, ChannelOptions, ClientReadableStream, Metadata, ServiceError } from "@grpc/grpc-js";
+import { Readable } from "node:stream";
 import {
   ProviderRequest as ProviderRequestMessage,
   ProviderGatewayServiceClient,
@@ -24,7 +25,14 @@ import type {
   ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Stream } from "effect";
-import type { GatewayClient, GatewayClientError } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
+import type {
+  GatewayClient,
+  GatewayClientError,
+  LLMServiceStreamObserver,
+  RuntimeGatewayStreamCancelKind,
+  RuntimeGatewayStreamCompletion,
+  RuntimeGatewayStreamHandle,
+} from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "./bounds.js";
@@ -45,6 +53,85 @@ export interface RuntimePodGatewayClientOptions {
   readonly channelOptions?: ChannelOptions;
   /** Receives bounded identity-only transport diagnostics. */
   readonly logger?: RuntimePodLogger;
+  /** Supplies the call-start clock for deterministic transport-deadline tests. */
+  readonly nowEpochMs?: () => number;
+  /** Overrides the completion timer only for deterministic hosts and tests. */
+  readonly scheduleTimeout?: (callback: () => void, durationMs: number) => ReturnType<typeof setTimeout>;
+  readonly cancelTimeout?: (timer: ReturnType<typeof setTimeout>) => void;
+}
+
+/** Runtime-owned grace for Gateway transport completion after the request budget. */
+export const RuntimeGatewayTransportCompletionAllowanceMs = 10_000;
+export const RuntimeGatewayTransportDeadlineGuardMs = 1;
+
+/** Builds the semantic stream observer consumed by Runtime Core's LLM service. */
+export function runtimeProviderStreamObserver(
+  logger: RuntimePodLogger | undefined,
+  nowEpochMs: () => number = Date.now,
+): LLMServiceStreamObserver {
+  return {
+    nowEpochMs,
+    terminalObserved(request, terminalKind) {
+      try {
+        logger?.info({
+          event: "runtime_provider_terminal_observed",
+          "event.kind": "runtime_provider_terminal_observed",
+          operation: "StreamProviderRequest",
+          component: "agent-runtime",
+          message: "Gateway provider terminal observed",
+          "workspace.id": request.workspaceId,
+          "session.id": request.sessionId,
+          "thread.id": request.sessionThreadId,
+          "request.id": request.requestId,
+          "model_request.id": request.modelRequestId,
+          "provider.id": request.model?.providerId,
+          "model.id": request.model?.modelId,
+          "terminal.kind": terminalKind,
+        });
+      } catch {
+        // Observability cannot replace provider-stream settlement.
+      }
+    },
+    streamClosed(request, completion, terminalCandidateExisted, durationMs) {
+      try {
+        const transportError = completion.outcome === "transport_failure" ? completion.error : undefined;
+        const statusCode = transportError?.statusCode;
+        logger?.info({
+          event: "runtime_provider_stream_closed",
+          "event.kind": "runtime_provider_stream_closed",
+          operation: "StreamProviderRequest",
+          component: "agent-runtime",
+          message: "Gateway provider stream closed",
+          "workspace.id": request.workspaceId,
+          "session.id": request.sessionId,
+          "thread.id": request.sessionThreadId,
+          "request.id": request.requestId,
+          "model_request.id": request.modelRequestId,
+          "provider.id": request.model?.providerId,
+          "model.id": request.model?.modelId,
+          "transport.outcome": completion.outcome,
+          ...(completion.outcome === "cancelled" ? { "cancel.kind": completion.cancelKind } : {}),
+          "terminal.candidate_observed": terminalCandidateExisted,
+          "duration.ms": durationMs,
+          ...(statusCode === undefined ? {} : {
+            "rpc.grpc.status_code": statusCode,
+            "rpc.grpc.status_name": grpcStatusName(statusCode),
+          }),
+          ...(transportError === undefined ? {} : {
+            retryable: transportError.retryable,
+            terminal: transportError.fatal,
+            ...semanticErrorFields({
+              errorClass: "gateway_client",
+              errorCode: transportError.code,
+              messageSafe: "Gateway provider stream failed",
+            }),
+          }),
+        });
+      } catch {
+        // Observability cannot replace provider-stream settlement.
+      }
+    },
+  };
 }
 
 const GatewayRoundRobinChannelOptions: ChannelOptions = {
@@ -75,13 +162,13 @@ export class RuntimePodGatewayClient implements GatewayClient {
   /**
    * Opens one authenticated Gateway stream for a complete provider request.
    * Requests beyond the outbound message fuse fail locally and deterministically;
-   * otherwise the returned Effect stream yields Gateway-normalized events and
-   * translates aborts or gRPC failures into `GatewayClientError` values.
+   * otherwise the returned handle carries ordered events, an idempotent cancel
+   * operation, and one completion result that settles after transport cleanup.
    */
-  streamProviderRequest(
+  async streamProviderRequest(
     request: ProviderRequest,
     options: { readonly abortSignal?: AbortSignal } = {},
-  ): Stream.Stream<ProviderStreamEvent, GatewayClientError> {
+  ): Promise<RuntimeGatewayStreamHandle> {
     if (ProviderRequestMessage.encode(request).finish().byteLength > MaxGatewayRequestGrpcMessageBytes) {
       const error: GatewayClientError = {
         type: "gateway-client",
@@ -91,92 +178,198 @@ export class RuntimePodGatewayClient implements GatewayClient {
         fatal: true,
         statusCode: status.RESOURCE_EXHAUSTED,
       };
-      logProviderStreamFailure(this.options.logger, request, error, false);
-      return Stream.fail(error);
+    logProviderStreamFailed(this.options.logger, request, error, "request_fuse");
+      throw error;
     }
-    return Stream.fromAsyncIterable(
-      streamProviderRequest(
-        this.client,
-        this.metadataFactory,
-        this.options.tokenPath,
-        request,
-        options.abortSignal,
-        this.options.logger,
-      ),
-      (error): GatewayClientError => gatewayClientError(error),
+    let metadata: Metadata;
+    try {
+      metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
+    } catch (error) {
+    const normalized = gatewayClientError(error);
+    logProviderStreamFailed(this.options.logger, request, normalized, "metadata");
+    throw normalized;
+    }
+    const callStartedAt = (this.options.nowEpochMs ?? Date.now)();
+    const deadlineEpochMs = callStartedAt + Math.max(0, request.limits?.timeoutMs ?? 0) + RuntimeGatewayTransportCompletionAllowanceMs;
+    let call: ClientReadableStream<ProviderStreamEvent>;
+    try {
+      call = this.client.streamProviderRequest(request, metadata, {
+        // The Runtime timer owns the exact completion boundary. Keeping the
+        // transport deadline strictly later prevents scheduler order from
+        // relabeling that boundary as an infrastructure failure.
+        deadline: new Date(deadlineEpochMs + RuntimeGatewayTransportDeadlineGuardMs),
+      } satisfies CallOptions);
+    } catch (error) {
+      const normalized = gatewayClientError(error);
+      logProviderStreamFailed(this.options.logger, request, normalized, "stream_call");
+      throw normalized;
+    }
+    logProviderStreamOpened(this.options.logger, request);
+    return runtimeGatewayStreamHandle(
+      call,
+      request,
+      deadlineEpochMs,
+      options.abortSignal,
+      this.options.nowEpochMs ?? Date.now,
+      this.options.scheduleTimeout ?? setTimeout,
+      this.options.cancelTimeout ?? clearTimeout,
     );
   }
 }
 
-async function* streamProviderRequest(
-  client: ProviderGatewayServiceClient,
-  metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>,
-  tokenPath: string,
-  request: ProviderRequest,
-  abortSignal: AbortSignal | undefined,
-  logger?: RuntimePodLogger,
-): AsyncGenerator<ProviderStreamEvent> {
-  let receivedEvent = false;
-  try {
-    const metadata = await metadataFactory({ tokenPath });
-    const call = client.streamProviderRequest(request, metadata);
-    const cancel = (): void => {
-      call.cancel();
-    };
-    if (abortSignal !== undefined) {
-      if (abortSignal.aborted) {
-        cancel();
-        throw gatewayClientError({ code: status.CANCELLED });
-      }
-      abortSignal.addEventListener("abort", cancel, { once: true });
-    }
-    try {
-      for await (const event of readableEvents(call)) {
-        receivedEvent = true;
-        yield event;
-      }
-    } finally {
-      abortSignal?.removeEventListener("abort", cancel);
-    }
-  } catch (error) {
-    const classified = gatewayClientError(error);
-    if (classified.code !== "gateway_cancelled") {
-      logProviderStreamFailure(logger, request, classified, receivedEvent);
-    }
-    throw error;
-  }
-}
-
-function logProviderStreamFailure(
+function logProviderStreamFailed(
   logger: RuntimePodLogger | undefined,
   request: ProviderRequest,
   error: GatewayClientError,
-  receivedEvent: boolean,
+  stage: "request_fuse" | "metadata" | "stream_call",
 ): void {
   try {
-    const statusCode = error.statusCode ?? status.UNKNOWN;
     logger?.error({
-      event: "provider_stream_failed",
-      "event.kind": "provider_stream_failed",
+      event: "runtime_provider_stream_failed",
+      "event.kind": "runtime_provider_stream_failed",
       operation: "StreamProviderRequest",
       component: "agent-runtime",
-      message: "provider stream failed",
+      message: "Gateway provider stream failed before opening",
       "workspace.id": request.workspaceId,
       "session.id": request.sessionId,
       "thread.id": request.sessionThreadId,
       "request.id": request.requestId,
       "model_request.id": request.modelRequestId,
-      "rpc.grpc.status_code": statusCode,
-      "rpc.grpc.status_name": grpcStatusName(statusCode),
-      "stream.phase": receivedEvent ? "post_first_event" : "pre_first_event",
-      "stream.received_event": receivedEvent,
+      "provider.id": request.model?.providerId,
+      "model.id": request.model?.modelId,
+      "transport.stage": stage,
+      ...(error.statusCode === undefined ? {} : {
+        "rpc.grpc.status_code": error.statusCode,
+        "rpc.grpc.status_name": grpcStatusName(error.statusCode),
+      }),
       retryable: error.retryable,
       terminal: error.fatal,
       ...semanticErrorFields({
         errorClass: "gateway_client",
         errorCode: error.code,
-        messageSafe: "provider stream failed",
+        messageSafe: "Gateway provider stream failed before opening",
       }),
+    });
+  } catch {
+    // Observability cannot replace provider-stream settlement.
+  }
+}
+
+function runtimeGatewayStreamHandle(
+  call: ClientReadableStream<ProviderStreamEvent>,
+  request: ProviderRequest,
+  deadlineEpochMs: number,
+  abortSignal: AbortSignal | undefined,
+  nowEpochMs: () => number,
+  scheduleTimeout: (callback: () => void, durationMs: number) => ReturnType<typeof setTimeout>,
+  cancelTimeout: (timer: ReturnType<typeof setTimeout>) => void,
+): RuntimeGatewayStreamHandle {
+  const webStream = Readable.toWeb(call as unknown as Readable) as unknown as ReadableStream<ProviderStreamEvent>;
+  const reader = webStream.getReader();
+  let winner: RuntimeGatewayStreamCompletion | undefined;
+  let cancelRequested = false;
+  let callCancelled = false;
+  let resolveCompletion!: (completion: RuntimeGatewayStreamCompletion) => void;
+  const completion = new Promise<RuntimeGatewayStreamCompletion>((resolve) => {
+    resolveCompletion = resolve;
+  });
+  const cancelCall = (): void => {
+    if (!callCancelled) {
+      callCancelled = true;
+      call.cancel();
+    }
+  };
+  const onAbort = (): void => requestExit({ outcome: "cancelled", cancelKind: "caller" });
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const cleanup = async (outcome: RuntimeGatewayStreamCompletion): Promise<void> => {
+    if (deadlineTimer !== undefined) {
+      cancelTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    }
+    abortSignal?.removeEventListener("abort", onAbort);
+    if (outcome.outcome !== "eof") {
+      cancelCall();
+      try {
+        await reader.cancel();
+      } catch {
+        // The first typed exit remains authoritative.
+      }
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // A released or errored reader still has no remaining Runtime custody.
+    }
+    resolveCompletion(outcome);
+  };
+  function requestExit(outcome: RuntimeGatewayStreamCompletion): void {
+    if (winner !== undefined) {
+      return;
+    }
+    winner = outcome;
+    void cleanup(outcome);
+  }
+
+  const delayMs = Math.max(0, deadlineEpochMs - nowEpochMs());
+  deadlineTimer = scheduleTimeout(() => requestExit({ outcome: "completion_deadline" }), delayMs);
+  if (abortSignal?.aborted === true) {
+    requestExit({ outcome: "cancelled", cancelKind: "caller" });
+  } else {
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+  }
+
+  const events = Stream.fromAsyncIterable((async function* (): AsyncGenerator<ProviderStreamEvent> {
+    try {
+      while (winner === undefined) {
+        const result = await reader.read();
+        if (result.done) {
+          requestExit({ outcome: "eof" });
+          break;
+        }
+        yield result.value;
+      }
+    } catch (error) {
+      if (winner === undefined) {
+        requestExit({ outcome: "transport_failure", error: gatewayClientError(error) });
+      }
+    } finally {
+      if (winner === undefined) {
+        requestExit({ outcome: "cancelled", cancelKind: cancelRequested ? "consumer_validation" : "consumer_early_exit" });
+      }
+    }
+  })(), (error): never => {
+    throw error;
+  });
+
+  return {
+    events,
+    completion,
+    cancel(reason) {
+      cancelRequested = reason === "consumer_validation";
+      requestExit({ outcome: "cancelled", cancelKind: reason });
+    },
+  };
+}
+
+function logProviderStreamOpened(
+  logger: RuntimePodLogger | undefined,
+  request: ProviderRequest,
+): void {
+  try {
+    logger?.info({
+      event: "runtime_provider_stream_opened",
+      "event.kind": "runtime_provider_stream_opened",
+      operation: "StreamProviderRequest",
+      component: "agent-runtime",
+      message: "Gateway provider stream opened",
+      "workspace.id": request.workspaceId,
+      "session.id": request.sessionId,
+      "thread.id": request.sessionThreadId,
+      "request.id": request.requestId,
+      "model_request.id": request.modelRequestId,
+      "provider.id": request.model?.providerId,
+      "model.id": request.model?.modelId,
     });
   } catch {
     // Observability cannot replace provider-stream settlement.
@@ -203,10 +396,6 @@ function grpcStatusName(code: number): string {
     case status.UNAUTHENTICATED: return "UNAUTHENTICATED";
     default: return "UNRECOGNIZED";
   }
-}
-
-function readableEvents(call: ClientReadableStream<ProviderStreamEvent>): AsyncIterable<ProviderStreamEvent> {
-  return call as unknown as AsyncIterable<ProviderStreamEvent>;
 }
 
 // GATEWAY STATUS CLASSIFICATION (closed enumeration). Maps each gRPC status a

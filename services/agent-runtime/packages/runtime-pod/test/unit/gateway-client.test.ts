@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { Metadata, status } from "@grpc/grpc-js";
+import { Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
+import { Readable } from "node:stream";
 import {
   ProviderRequestKind,
+  ProviderGatewayServiceService,
   ProviderStreamEventType,
   RuntimeMessageRole,
   SystemCacheHint,
@@ -9,15 +11,17 @@ import {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
   ProviderGatewayServiceClient,
+  ProviderGatewayServiceServer,
   ProviderRequest,
   ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
+import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
-import { RuntimePodGatewayClient } from "../../src/gateway-client.js";
+import { RuntimeGatewayTransportCompletionAllowanceMs, RuntimeGatewayTransportDeadlineGuardMs, RuntimePodGatewayClient, runtimeProviderStreamObserver } from "../../src/gateway-client.js";
 
 describe("Runtime Pod Gateway client", () => {
-  test("logs one bounded identity record for a failure before the first event", async () => {
+  test("logs one bounded open record after the generated call handle exists", async () => {
     const records: unknown[] = [];
     const request = providerRequest();
     const error = await collectGatewayError(new RuntimePodGatewayClient({
@@ -30,22 +34,17 @@ describe("Runtime Pod Gateway client", () => {
 
     expect(error).toMatchObject({ code: "gateway_protocol_error", fatal: true });
     expect(records).toEqual([expect.objectContaining({
-      event: "provider_stream_failed",
-      "stream.phase": "pre_first_event",
-      "stream.received_event": false,
-      "rpc.grpc.status_code": status.INVALID_ARGUMENT,
-      "rpc.grpc.status_name": "INVALID_ARGUMENT",
+      event: "runtime_provider_stream_opened",
       "workspace.id": request.workspaceId,
       "session.id": request.sessionId,
       "thread.id": request.sessionThreadId,
       "request.id": request.requestId,
       "model_request.id": request.modelRequestId,
-      "error.code": "gateway_protocol_error",
     })]);
     expect(JSON.stringify(records)).not.toContain("secret raw rejection");
   });
 
-  test("logs the same bounded event with post-first-event phase after stream progress", async () => {
+  test("does not duplicate transport-failure logging after stream progress", async () => {
     const records: unknown[] = [];
     const request = providerRequest();
     const error = await collectGatewayError(new RuntimePodGatewayClient({
@@ -58,16 +57,9 @@ describe("Runtime Pod Gateway client", () => {
 
     expect(error).toMatchObject({ code: "gateway_unavailable", retryable: true, fatal: false });
     expect(records).toEqual([expect.objectContaining({
-      event: "provider_stream_failed",
-      "stream.phase": "post_first_event",
-      "stream.received_event": true,
-      "rpc.grpc.status_code": status.UNAVAILABLE,
-      "rpc.grpc.status_name": "UNAVAILABLE",
+      event: "runtime_provider_stream_opened",
       "request.id": request.requestId,
       "model_request.id": request.modelRequestId,
-      retryable: true,
-      terminal: false,
-      "error.code": "gateway_unavailable",
     })]);
     expect(JSON.stringify(records)).not.toContain("secret post-stream rejection");
   });
@@ -114,19 +106,13 @@ describe("Runtime Pod Gateway client", () => {
       logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
     });
 
-    const error = await Effect.runPromise(
-      Stream.runCollect(client.streamProviderRequest(providerRequest(), {
-        abortSignal: abortController.signal,
-      })).pipe(Effect.flip),
-    );
-
-    expect(error).toMatchObject({
-      type: "gateway-client",
-      code: "gateway_cancelled",
-      retryable: false,
-      fatal: false,
+    const handle = await client.streamProviderRequest(providerRequest(), {
+      abortSignal: abortController.signal,
     });
-    expect(records).toEqual([]);
+    await Effect.runPromise(Stream.runCollect(handle.events));
+
+    expect(await handle.completion).toEqual({ outcome: "cancelled", cancelKind: "caller" });
+    expect(records).toEqual([expect.objectContaining({ event: "runtime_provider_stream_opened" })]);
   });
 
   test("rejects an oversized ProviderRequest before metadata or transport work", async () => {
@@ -161,15 +147,49 @@ describe("Runtime Pod Gateway client", () => {
     expect(metadataCalls).toBe(0);
     expect(transportCalls).toBe(0);
     expect(records).toEqual([expect.objectContaining({
-      event: "provider_stream_failed",
-      "stream.phase": "pre_first_event",
-      "stream.received_event": false,
-      "rpc.grpc.status_code": status.RESOURCE_EXHAUSTED,
-      "rpc.grpc.status_name": "RESOURCE_EXHAUSTED",
+      event: "runtime_provider_stream_failed",
+      "transport.stage": "request_fuse",
       "request.id": request.requestId,
       "model_request.id": request.modelRequestId,
       "error.code": "gateway_protocol_error",
     })]);
+  });
+
+  test("records safe identity telemetry for every failure before a stream handle exists", async () => {
+    for (const scenario of [
+      {
+        stage: "metadata",
+        client: recordingGatewayClient(() => undefined),
+        metadataFactory: async (): Promise<Metadata> => { throw new Error("raw metadata credential"); },
+      },
+      {
+        stage: "stream_call",
+        client: { streamProviderRequest: () => { throw Object.assign(new Error("raw synchronous transport"), { code: status.UNAVAILABLE }); } } as unknown as ProviderGatewayServiceClient,
+        metadataFactory: async () => new Metadata(),
+      },
+    ] as const) {
+      const records: unknown[] = [];
+      const request = providerRequest();
+      await collectGatewayError(new RuntimePodGatewayClient({
+        address: "gateway.test:9090",
+        tokenPath: "/var/run/token",
+        client: scenario.client,
+        metadataFactory: scenario.metadataFactory,
+        logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+      }), request);
+
+      expect(records).toEqual([expect.objectContaining({
+        event: "runtime_provider_stream_failed",
+        "transport.stage": scenario.stage,
+        "workspace.id": request.workspaceId,
+        "session.id": request.sessionId,
+        "thread.id": request.sessionThreadId,
+        "request.id": request.requestId,
+        "model_request.id": request.modelRequestId,
+      })]);
+      expect(JSON.stringify(records)).not.toContain("raw metadata credential");
+      expect(JSON.stringify(records)).not.toContain("raw synchronous transport");
+    }
   });
 
   test("classifies local-send and Gateway-receive size failures precisely", async () => {
@@ -223,26 +243,378 @@ describe("Runtime Pod Gateway client", () => {
       statusCode: status.RESOURCE_EXHAUSTED,
     });
   });
+
+  test("anchors one call deadline to request timeout plus the transport allowance", async () => {
+    let observedDeadline = 0;
+    const request = providerRequest();
+    request.limits = { maxOutputTokens: 128, timeoutMs: 42_000 };
+    const client = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      nowEpochMs: () => 1_000,
+      client: {
+        streamProviderRequest(_request, _metadata, options) {
+          observedDeadline = (options?.deadline as Date).getTime();
+          return readableCall([]);
+        },
+      } as ProviderGatewayServiceClient,
+      metadataFactory: async () => new Metadata(),
+    });
+
+    const handle = await client.streamProviderRequest(request);
+    await Effect.runPromise(Stream.runCollect(handle.events));
+    expect(await handle.completion).toEqual({ outcome: "eof" });
+    expect(observedDeadline).toBe(1_000 + 42_000 + RuntimeGatewayTransportCompletionAllowanceMs + RuntimeGatewayTransportDeadlineGuardMs);
+  });
+
+  test("deducts Gateway call setup from the single call-start completion budget", async () => {
+    let now = 1_000;
+    let observedDeadline = 0;
+    let scheduledDelay = -1;
+    const waiting = new Readable({ objectMode: true, read() {} }) as Readable & { cancel: () => void };
+    waiting.cancel = () => waiting.destroy();
+    const request = providerRequest();
+    request.limits = { maxOutputTokens: 128, timeoutMs: 42_000 };
+    const client = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      nowEpochMs: () => now,
+      scheduleTimeout(_callback, durationMs) {
+        scheduledDelay = durationMs;
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      },
+      cancelTimeout: () => undefined,
+      client: {
+        streamProviderRequest(_request, _metadata, options) {
+          observedDeadline = (options?.deadline as Date).getTime();
+          now += 4_000;
+          return waiting;
+        },
+      } as ProviderGatewayServiceClient,
+      metadataFactory: async () => new Metadata(),
+    });
+
+    const handle = await client.streamProviderRequest(request);
+
+    expect(observedDeadline).toBe(1_000 + 42_000 + RuntimeGatewayTransportCompletionAllowanceMs + RuntimeGatewayTransportDeadlineGuardMs);
+    expect(scheduledDelay).toBe(38_000 + RuntimeGatewayTransportCompletionAllowanceMs);
+    handle.cancel("consumer_early_exit");
+    expect(await handle.completion).toEqual({ outcome: "cancelled", cancelKind: "consumer_early_exit" });
+  });
+
+  test("actively cancels the reader and call when the completion deadline wins", async () => {
+    let fireDeadline: (() => void) | undefined;
+    let scheduledDelay = -1;
+    let cancelCalls = 0;
+    const waiting = new Readable({ objectMode: true, read() {} }) as Readable & { cancel: () => void };
+    waiting.cancel = () => {
+      cancelCalls += 1;
+      waiting.destroy();
+    };
+    const request = providerRequest();
+    request.limits = { maxOutputTokens: 128, timeoutMs: 42_000 };
+    const client = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      nowEpochMs: () => 1_000,
+      scheduleTimeout(callback, durationMs) {
+        fireDeadline = callback;
+        scheduledDelay = durationMs;
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      },
+      cancelTimeout: () => undefined,
+      client: { streamProviderRequest: () => waiting } as unknown as ProviderGatewayServiceClient,
+      metadataFactory: async () => new Metadata(),
+    });
+
+    const handle = await client.streamProviderRequest(request);
+    expect(scheduledDelay).toBe(42_000 + RuntimeGatewayTransportCompletionAllowanceMs);
+    fireDeadline?.();
+    expect(await handle.completion).toEqual({ outcome: "completion_deadline" });
+    expect(cancelCalls).toBe(1);
+  });
+
+  test("consumer validation cancellation is typed and cancels the call once", async () => {
+    let cancelCalls = 0;
+    const waiting = new Readable({ objectMode: true, read() {} }) as Readable & { cancel: () => void };
+    waiting.cancel = () => {
+      cancelCalls += 1;
+      waiting.destroy();
+    };
+    const client = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: { streamProviderRequest: () => waiting } as unknown as ProviderGatewayServiceClient,
+      metadataFactory: async () => new Metadata(),
+    });
+
+    const handle = await client.streamProviderRequest(providerRequest());
+    handle.cancel("consumer_validation");
+    handle.cancel("consumer_early_exit");
+    expect(await handle.completion).toEqual({ outcome: "cancelled", cancelKind: "consumer_validation" });
+    expect(cancelCalls).toBe(1);
+  });
+
+  test("delivers a backpressured grpc-js burst through FINISH and normal EOF", async () => {
+    const request = providerRequest();
+    let crossedHighWaterMark = false;
+    const implementation: ProviderGatewayServiceServer = {
+      streamProviderRequest(call) {
+        for (let index = 0; index < 17; index += 1) {
+          const accepted = call.write({
+            requestId: request.requestId,
+            modelRequestId: request.modelRequestId,
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+            text: { id: "text_1", text: String(index), metadataJson: "" },
+          });
+          if (!accepted) crossedHighWaterMark = true;
+        }
+        call.write({
+          requestId: request.requestId,
+          modelRequestId: request.modelRequestId,
+          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+          finish: {
+            reason: 1,
+            usage: { inputTotalTokens: 1, inputUncachedTokens: 1, outputTotalTokens: 1, totalTokens: 2, providerUsageJson: "{}" },
+            metadataJson: "{}",
+            contextWindowTokens: 128_000,
+            outputTokenLimit: 8_192,
+          },
+        });
+        call.end();
+      },
+      runWeb(_call, callback) {
+        callback(new Error("not implemented"));
+      },
+    };
+    const server = new Server();
+    server.addService(ProviderGatewayServiceService, implementation);
+    const port = await new Promise<number>((resolve, reject) => {
+      server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) => {
+        if (error !== null) reject(error);
+        else resolve(boundPort);
+      });
+    });
+    const client = new RuntimePodGatewayClient({
+      address: `127.0.0.1:${port}`,
+      tokenPath: "/unused",
+      metadataFactory: async () => new Metadata(),
+    });
+
+    try {
+      const handle = await client.streamProviderRequest(request);
+      const events: ProviderStreamEvent[] = [];
+      for await (const providerEvent of Stream.toAsyncIterable(handle.events)) {
+        events.push(providerEvent);
+        if (events.length === 1) await Bun.sleep(20);
+      }
+      expect(crossedHighWaterMark).toBe(true);
+      expect(events).toHaveLength(18);
+      expect(events.at(-1)?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH);
+      expect(await handle.completion).toEqual({ outcome: "eof" });
+    } finally {
+      await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
+    }
+  });
+
+  test("cancels generated grpc-js calls on LLM validation failure and downstream early exit", async () => {
+    for (const scenario of ["validation", "early_exit"] as const) {
+      const request = providerRequest();
+      let cancelledCalls = 0;
+      const implementation: ProviderGatewayServiceServer = {
+        streamProviderRequest(call) {
+          call.on("cancelled", () => { cancelledCalls += 1; });
+          call.write({
+            requestId: scenario === "validation" ? "wrong_request" : request.requestId,
+            modelRequestId: request.modelRequestId,
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+            text: { id: "text_1", text: "", metadataJson: "" },
+          });
+        },
+        runWeb(_call, callback) {
+          callback(new Error("not implemented"));
+        },
+      };
+      const server = new Server();
+      server.addService(ProviderGatewayServiceService, implementation);
+      const port = await new Promise<number>((resolve, reject) => {
+        server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) => {
+          if (error !== null) reject(error);
+          else resolve(boundPort);
+        });
+      });
+      const client = new RuntimePodGatewayClient({
+        address: `127.0.0.1:${port}`,
+        tokenPath: "/unused",
+        metadataFactory: async () => new Metadata(),
+      });
+      try {
+        const stream = createLLMService(client).stream(request);
+        if (scenario === "validation") {
+      const events = Array.from(await Effect.runPromise(Stream.runCollect(stream)));
+      expect(events).toEqual([expect.objectContaining({
+        type: "provider-error",
+        error: expect.objectContaining({ code: "gateway_protocol_error" }),
+      })]);
+        } else {
+          const events = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(stream, 1))));
+          expect(events).toHaveLength(1);
+        }
+        for (let attempt = 0; attempt < 50 && cancelledCalls === 0; attempt += 1) {
+          await Bun.sleep(2);
+        }
+        expect(cancelledCalls).toBe(1);
+      } finally {
+        server.forceShutdown();
+      }
+    }
+  });
+
+  test("records one safe semantic close after terminal and EOF and remains fail-open", async () => {
+    const records: unknown[] = [];
+    const request = providerRequest();
+    request.runtimeBindingToken = "CANARY_TOKEN_VALUE";
+    request.messages[0]!.parts = [{ id: "part_1", text: { text: "raw provider payload marker" } }];
+    const finish: ProviderStreamEvent = {
+      requestId: request.requestId,
+      modelRequestId: request.modelRequestId,
+      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      finish: {
+        reason: 1,
+        usage: { inputTotalTokens: 1, inputUncachedTokens: 1, outputTotalTokens: 1, totalTokens: 2, providerUsageJson: "{}" },
+        metadataJson: "{}",
+        contextWindowTokens: 128_000,
+        outputTokenLimit: 8_192,
+      },
+    };
+    const logger = { info: (record: unknown) => records.push(record), error: (record: unknown) => records.push(record) };
+    const client = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/unused",
+      client: { streamProviderRequest: () => readableCall([finish]) } as unknown as ProviderGatewayServiceClient,
+      metadataFactory: async () => new Metadata(),
+      logger,
+    });
+
+    const events = Array.from(await Effect.runPromise(Stream.runCollect(
+      createLLMService(client, runtimeProviderStreamObserver(logger, () => 10)).stream(request),
+    )));
+    expect(events.at(-1)?.type).toBe("finish");
+    expect(records.map((record) => (record as { event?: string }).event)).toEqual([
+      "runtime_provider_stream_opened",
+      "runtime_provider_terminal_observed",
+      "runtime_provider_stream_closed",
+    ]);
+    expect(records[2]).toMatchObject({
+      "transport.outcome": "eof",
+      "terminal.candidate_observed": true,
+    });
+    expect(JSON.stringify(records)).not.toContain("CANARY_TOKEN_VALUE");
+    expect(JSON.stringify(records)).not.toContain("raw provider payload marker");
+
+    const throwingLogger = { info: () => { throw new Error("logger failed"); }, error: () => { throw new Error("logger failed"); } };
+    const throwingClient = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/unused",
+      client: { streamProviderRequest: () => readableCall([finish]) } as unknown as ProviderGatewayServiceClient,
+      metadataFactory: async () => new Metadata(),
+      logger: throwingLogger,
+    });
+    const failOpenEvents = await Effect.runPromise(Stream.runCollect(
+      createLLMService(throwingClient, runtimeProviderStreamObserver(throwingLogger)).stream(request),
+    ));
+    expect(Array.from(failOpenEvents).at(-1)?.type).toBe("finish");
+  });
+
+  test("records a validated terminal candidate once when transport cleanup fails", async () => {
+    const finish: ProviderStreamEvent = {
+      requestId: "req_gateway_client",
+      modelRequestId: "mreq_gateway_client",
+      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      finish: {
+        reason: 1,
+        usage: { inputTotalTokens: 1, inputUncachedTokens: 1, outputTotalTokens: 1, totalTokens: 2, providerUsageJson: "{}" },
+        metadataJson: "{}",
+        contextWindowTokens: 128_000,
+        outputTokenLimit: 8_192,
+      },
+    };
+    const request = providerRequest();
+    request.runtimeBindingToken = "CANARY_TOKEN_VALUE";
+    request.messages[0]!.parts = [{ id: "part_1", text: { text: "raw provider payload marker" } }];
+
+    const transportRecords: unknown[] = [];
+    const transportLogger = { info: (record: unknown) => transportRecords.push(record), error: (record: unknown) => transportRecords.push(record) };
+    const transportClient = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/unused",
+      client: {
+        streamProviderRequest() {
+          return readableCall((async function* () {
+            yield finish;
+            throw Object.assign(new Error("raw-secret-body"), { code: status.UNAVAILABLE, details: "raw-secret-body" });
+          })());
+        },
+      } as unknown as ProviderGatewayServiceClient,
+      metadataFactory: async () => new Metadata(),
+      logger: transportLogger,
+    });
+    const transportError = await Effect.runPromise(Stream.runCollect(
+      createLLMService(transportClient, runtimeProviderStreamObserver(transportLogger)).stream(request),
+    ).pipe(Effect.flip));
+    expect(transportError.error).toMatchObject({ code: "gateway_stream_error", retryable: true, fatal: false });
+    expect(transportRecords.map((record) => (record as { event?: string }).event)).toEqual([
+      "runtime_provider_stream_opened",
+      "runtime_provider_terminal_observed",
+      "runtime_provider_stream_closed",
+    ]);
+    expect(transportRecords[2]).toMatchObject({
+      "transport.outcome": "transport_failure",
+      "terminal.candidate_observed": true,
+    });
+    expect(JSON.stringify(transportRecords)).not.toContain("CANARY_TOKEN_VALUE");
+    expect(JSON.stringify(transportRecords)).not.toContain("raw provider payload marker");
+    expect(JSON.stringify(transportRecords)).not.toContain("raw-secret-body");
+  });
 });
 
 async function collectGatewayError(client: RuntimePodGatewayClient, request: ProviderRequest) {
-  return await Effect.runPromise(
-    Stream.runCollect(client.streamProviderRequest(request)).pipe(Effect.flip),
-  );
+  try {
+    const handle = await client.streamProviderRequest(request);
+    await Effect.runPromise(Stream.runCollect(handle.events));
+    const completion = await handle.completion;
+    if (completion.outcome === "transport_failure") {
+      return completion.error;
+    }
+    if (completion.outcome === "cancelled") {
+      return {
+        type: "gateway-client" as const,
+        code: "gateway_cancelled" as const,
+        message: "Gateway provider stream was cancelled.",
+        retryable: false,
+        fatal: false,
+      };
+    }
+    throw new Error(`expected transport failure, got ${completion.outcome}`);
+  } catch (error) {
+    return error;
+  }
 }
 
 function failingGatewayClient(code: number, details = "gateway request failed"): ProviderGatewayServiceClient {
-  return recordingGatewayClient(() => {
-    throw Object.assign(new Error(details), { code, details });
-  });
+  return {
+    streamProviderRequest() {
+      return readableCall((async function* (): AsyncGenerator<ProviderStreamEvent> {
+        throw Object.assign(new Error(details), { code, details });
+      })());
+    },
+  } as unknown as ProviderGatewayServiceClient;
 }
 
 function eventThenFailingGatewayClient(code: number, details: string): ProviderGatewayServiceClient {
   return {
     streamProviderRequest(request: ProviderRequest) {
-      return {
-        cancel() {},
-        async *[Symbol.asyncIterator](): AsyncIterator<ProviderStreamEvent> {
+      return readableCall((async function* () {
           yield {
             requestId: request.requestId,
             modelRequestId: request.modelRequestId,
@@ -250,8 +622,7 @@ function eventThenFailingGatewayClient(code: number, details: string): ProviderG
             text: { id: "text_1", text: "", metadataJson: "" },
           };
           throw Object.assign(new Error(details), { code, details });
-        },
-      };
+      })());
     },
   } as unknown as ProviderGatewayServiceClient;
 }
@@ -259,14 +630,16 @@ function eventThenFailingGatewayClient(code: number, details: string): ProviderG
 function recordingGatewayClient(onIterate: () => void): ProviderGatewayServiceClient {
   return {
     streamProviderRequest() {
-      return {
-        cancel() {},
-        async *[Symbol.asyncIterator](): AsyncIterator<ProviderStreamEvent> {
-          onIterate();
-        },
-      };
+      onIterate();
+      return readableCall([]);
     },
   } as unknown as ProviderGatewayServiceClient;
+}
+
+function readableCall(events: Iterable<ProviderStreamEvent> | AsyncIterable<ProviderStreamEvent>): ReturnType<ProviderGatewayServiceClient["streamProviderRequest"]> {
+  const readable = Readable.from(events, { objectMode: true }) as Readable & { cancel: () => void };
+  readable.cancel = () => readable.destroy(Object.assign(new Error("cancelled"), { code: status.CANCELLED }));
+  return readable as unknown as ReturnType<ProviderGatewayServiceClient["streamProviderRequest"]>;
 }
 
 function providerRequest(): ProviderRequest {

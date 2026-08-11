@@ -29,7 +29,6 @@ import {
   MCP_CONNECT_TIMEOUT_MS,
   MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS,
 } from "./phase-budgets.js";
-import type { McpConnectorRefreshAttemptOutcome } from "./metrics.js";
 import type { McpClient, McpClientTool, McpConnectorLogger, McpLogRecord } from "./service.js";
 import type { CallToolResult, CompatibilityCallToolResult, ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
 
@@ -80,7 +79,6 @@ export interface McpSDKClientOptions {
   readonly logger?: Pick<McpConnectorLogger, "error"> | undefined;
   readonly createClient?: ((identity: McpIdentity) => SDKClientLike) | undefined;
   readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined }) => unknown) | undefined;
-  readonly onRefreshAttempt?: ((outcome: McpConnectorRefreshAttemptOutcome) => void) | undefined;
   readonly idleTimeoutMs?: number | undefined;
   readonly callTimeoutMs?: number | undefined;
   readonly credentialTimeoutMs?: number | undefined;
@@ -224,9 +222,6 @@ export class McpSDKClient implements McpClient {
       "MCP credential resolution timed out.",
     );
     if (!credential.ok) {
-      if (credential.error === "refresh_failed") {
-        this.options.onRefreshAttempt?.("failed");
-      }
       if (credential.error === "credential_required") {
         throw new McpConnectorError("mcp_credential_required", `MCP server ${identity.mcpServerName} requires a configured credential.`, "terminal");
       }
@@ -237,7 +232,6 @@ export class McpSDKClient implements McpClient {
     }
     if (credential.refreshTriggered === true) {
       markRefresh();
-      this.options.onRefreshAttempt?.("success");
     }
     const baseKey = connectionBaseKey(identity);
     const key = connectionCacheKey(baseKey, credential);
@@ -422,17 +416,14 @@ export class McpSDKClient implements McpClient {
         "MCP credential refresh timed out.",
       );
     } catch (error) {
-      this.options.onRefreshAttempt?.("failed");
       if (isTimeoutError(error)) {
         throw error;
       }
       throw new McpConnectorError("mcp_authentication_failed", "MCP credential refresh failed.", "terminal");
     }
     if (!refreshed.ok || refreshed.mode !== "bearer") {
-      this.options.onRefreshAttempt?.("failed");
       throw new McpConnectorError("mcp_authentication_failed", "MCP credential refresh failed.", "terminal");
     }
-    this.options.onRefreshAttempt?.("success");
     return refreshed;
   }
 
@@ -446,6 +437,11 @@ export class McpSDKClient implements McpClient {
     }, {
       listChanged: {
         tools: {
+          // Tetral owns the one re-list per protocol notification. Disabling
+          // SDK refresh and debounce preserves notification cardinality while
+          // Bridge remains the sole durable manifest lifecycle owner.
+          autoRefresh: false,
+          debounceMs: 0,
           onChanged: (error) => {
             if (error !== undefined && error !== null) {
               this.options.logger?.error(mcpToolsListChangedFailureLogRecord(identity, "refresh_failed"));

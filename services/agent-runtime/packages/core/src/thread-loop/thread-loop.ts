@@ -118,6 +118,7 @@ import type {
 } from "./tool-execution.js";
 import type { RequestExecutionSnapshot } from "../session/session-configuration.js";
 import type {
+  RuntimeAcceptedInputState,
   RuntimePendingApprovalToolJobState,
   RuntimePendingSandboxExecutionJobState,
   RuntimePreloadedPendingToolUseState,
@@ -128,7 +129,8 @@ import type { ThreadContextPrefix } from "../session/context-manager.js";
 import * as ContextLoader from "../context/context-loader.js";
 import type { AcceptedInputCommitResult, ContextLoader as ContextLoaderInterface } from "../context/context-loader.js";
 import type { Interface as LLMServiceInterface, LLMServiceError, LLMRequest } from "../llm/llm-service.js";
-import type { LLMEvent, RuntimeAttachmentRejection, RuntimeModelLimits, RuntimeUsage } from "../llm/llm-event.js";
+import { RuntimeFailureSchema as LLMRuntimeFailureSchema } from "../llm/llm-event.js";
+import type { LLMEvent, RuntimeAttachmentRejection, RuntimeFailure as LLMRuntimeFailure, RuntimeModelLimits, RuntimeUsage } from "../llm/llm-event.js";
 import {
   applyRequestEndSeal,
   assembleLLMRequest,
@@ -236,6 +238,7 @@ export function interpretThreadTurnAction(action: ThreadTurnAction): Interpreted
     case "continue_after_compaction":
     case "complete_reviewer":
     case "apply_request_retry_or_reschedule":
+    case "commit_accepted_input":
     case "close_interrupted":
     case "close_failed":
       return { action, runDisposition: "active" };
@@ -344,7 +347,6 @@ export const contextLoaderLayer = ContextLoader.layer;
 
 const ToolRouteCancelJoinTimeoutMs = 250;
 const ProviderRequestScopeCloseTimeoutMs = ToolRouteCancelJoinTimeoutMs + 50;
-const TaskNotificationCommitReplayBackoffMs = 300;
 const RecoveredSandboxBindingRefreshBackoffMs = 100;
 
 class HotDurableOperationFenced extends Error {}
@@ -441,6 +443,8 @@ export interface ThreadLoopRuntimeOptions {
   readonly recordProviderToolDeclarationRejection?: (
     (event: RuntimeProviderToolDeclarationRejectionObservation) => void
   ) | undefined;
+  /** Payload-free observation of the reducer-owned accepted-input commit boundary. */
+  readonly recordAcceptedInputCommit?: ((event: RuntimeAcceptedInputCommitObservation) => void) | undefined;
   readonly refreshRuntimeBindingToken?: (
     identity: ThreadRuntime["identity"],
     options?: { readonly force?: boolean | undefined },
@@ -470,6 +474,19 @@ export interface RuntimeProviderToolDeclarationRejectionObservation {
   readonly declarationKind: "function" | "freeform" | "unknown";
   readonly family: "claude" | "gpt" | "unspecified";
   readonly validationMember: "declaration_kind" | "tool_family" | "function_schema" | "freeform_grammar";
+}
+
+/** Stable identities and bounded outcome for one accepted-input commit attempt. */
+export interface RuntimeAcceptedInputCommitObservation {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly requestId: string;
+  readonly runtimeInputId: string;
+  readonly inputKind: RuntimeAcceptedInputState["kind"];
+  readonly attempt: number;
+  readonly durationMs: number;
+  readonly outcome: "started" | "committed" | "deferred" | "retry" | "exhausted";
 }
 
 /** Provides request-time policy and provider context for one resident thread. */
@@ -595,7 +612,9 @@ function threadLoopLayer(options: ThreadLoopRuntimeOptions): Layer.Layer<Service
     const contextLoader = yield* ContextLoader.ContextLoaderService;
 
     return Service.of({
-      run: (session, custody) => runThreadLoopEffect(contextLoader, session, options, custody),
+      run: (session, custody) => runThreadLoopEffect(contextLoader, session, options, custody).pipe(
+        Effect.ensuring(Effect.sync(() => session.state.finishThreadRunProjection())),
+      ),
       closeFailedRun: (session, defect, custody) => {
         const request = session.state.threadTurnReduction().checkpoint.request;
         const action: Extract<ThreadTurnAction, { readonly action: "close_failed" }> = request === undefined
@@ -695,7 +714,6 @@ function runThreadLoopEffect(
   custody: ThreadLoopRunCustody,
 ): Effect.Effect<ThreadLoopRunResult, unknown> {
   let pendingProviderRequestReschedule = false;
-  let deferAcceptedInputUntilNextRun = false;
   const run: Effect.Effect<ThreadLoopRunResult, unknown> = Effect.gen(function* () {
     let pendingInput: PendingInputResult = { type: "empty" };
     const turnRetryCounters = {
@@ -739,11 +757,21 @@ function runThreadLoopEffect(
         }
         return { type: "interrupted" };
       }
-      // Freeze one finite input cut before committing. Inputs accepted while this cut is being
-      // stamped remain queued for the next provider request.
-      const acceptedInputCut = pendingProviderRequestReschedule
+      // The reducer selects one exact accepted-input identity at a safe Turn
+      // boundary. Inputs admitted while provider or Tool work is open remain in
+      // ThreadProcessor and cannot be projected into the in-flight request.
+      const selectedAction = interpretThreadTurnAction(session.state.threadTurnReduction().action).action;
+      const selectedAcceptedInput = selectedAction.action === "commit_accepted_input"
+        ? session.state.acceptedInputSnapshot().find(
+            (input) => input.runtimeInputId === selectedAction.runtimeInputId,
+          )
+        : undefined;
+      if (selectedAction.action === "commit_accepted_input" && selectedAcceptedInput === undefined) {
+        throw new Error("reducer selected an accepted input that is not owned by ThreadProcessor");
+      }
+      const acceptedInputCut = pendingProviderRequestReschedule || selectedAcceptedInput === undefined
         ? []
-        : session.state.acceptedInputSnapshot();
+        : [selectedAcceptedInput];
       const committedContextMessages: RuntimeMessage[] = [];
       const committedRequestInputMessages: RuntimeMessage[] = [];
       for (const acceptedInput of acceptedInputCut) {
@@ -761,48 +789,56 @@ function runThreadLoopEffect(
         runStatusRunningAppended = true;
         session.state.beginAcceptedInputCommit(acceptedInput.runtimeInputId);
         if (acceptedInput.kind === "task_notification") {
-          const committed = yield* Effect.promise(acceptedInput.commit).pipe(
+          const declaration = yield* effectFromAbortablePromise((signal) =>
+            commitAcceptedInput(contextLoader, acceptedInput, options, signal)
+          ).pipe(
             Effect.ensuring(Effect.sync(() => session.state.finishAcceptedInputCommit(acceptedInput.runtimeInputId))),
             Effect.uninterruptible,
           );
-          if (!committed.ok) {
-            if (committed.retryable) {
-              // The Bridge may have committed the frozen declaration even when its response was
-              // lost. Keep the accepted fact and durable turn resident so the next run replays
-              // the same declaration and applies its committed-or-duplicate receipt.
-              yield* Effect.promise(() => options.runtime.sleep(
-                TaskNotificationCommitReplayBackoffMs,
-                new AbortController().signal,
-              ));
-              return completedHotStateRunResult(session);
+          if (!declaration.ok) {
+            if (declaration.exhausted) {
+              return {
+                type: "failed",
+                error: normalizeRuntimeFailure({
+                  type: "runtime",
+                  code: "runtime_persistence_exhausted",
+                  reason: "runtime_input_commit_exhausted",
+                  retryable: false,
+                  fatal: true,
+                  retryStatus: { type: "terminal" },
+                  sessionId: session.sessionId,
+                }),
+              };
             }
-            return yield* nonAbandonablePromise(() => handleContextLoaderFailure(
-              options,
-              session,
-              normalizeContextLoaderError({
-                code: committed.retryable ? "unavailable" : "unknown",
-                sessionId: session.sessionId,
-                reason: `task notification commit rejected: ${String(committed.errorCode)}`,
-              }),
-            ));
+            return yield* nonAbandonablePromise(() => handleContextLoaderFailure(options, session, declaration.error));
           }
-		  if ("deferred" in committed) {
-			session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
-			acceptedContextCommitted = true;
-			continue;
-		  }
-          if ("stale" in committed) {
-            session.state.clear();
+          if (declaration.result.type === "task_notification_deferred") {
+            session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
+            continue;
+          }
+          if (
+            declaration.result.type === "stale_custody" ||
+            declaration.result.applicationDisposition !== "current_custody"
+          ) {
+            session.state.clearAfterCustodyHandoff();
             return { type: "interrupted", discardHotState: true };
           }
           const {
             kind: _kind,
-            commit: _commit,
             ...command
           } = acceptedInput;
+          const durableMessages = applyAcceptedInputReceipt(
+            acceptedInput,
+            declaration.messageCreates,
+            declaration.result.receipt,
+          );
+          const committedMessage = durableMessages[0];
+          if (durableMessages.length !== 1 || committedMessage === undefined) {
+            throw new Error("task notification receipt did not stamp one durable message");
+          }
           const notification = session.state.commitTaskNotification({
             ...command,
-            committedMessage: committed.committedMessage,
+            committedMessage,
           });
           if (notification === "conflict") {
             return yield* nonAbandonablePromise(() => handleContextLoaderFailure(
@@ -817,8 +853,8 @@ function runThreadLoopEffect(
           }
           session.state.applyThreadTurnFact({
             fact: "inputs_committed",
-            eventId: committed.committedMessage.owningEventId,
-            messageIds: [committed.committedMessage.id],
+            eventId: committedMessage.owningEventId,
+            messageIds: [committedMessage.id],
           });
           session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
           session.state.setProviderRequestOutputSchemaJson(undefined);
@@ -832,9 +868,26 @@ function runThreadLoopEffect(
               commitAcceptedInput(contextLoader, acceptedInput, options, signal)
             );
             if (!declaration.ok) {
+              if (declaration.exhausted) {
+                return {
+                  type: "exhausted" as const,
+                  error: normalizeRuntimeFailure({
+                    type: "runtime",
+                    code: "runtime_persistence_exhausted",
+                    reason: "runtime_input_commit_exhausted",
+                    retryable: false,
+                    fatal: true,
+                    retryStatus: { type: "terminal" },
+                    sessionId: session.sessionId,
+                  }),
+                };
+              }
               return { type: "failed" as const, error: declaration.error };
             }
-            if (declaration.result.applicationDisposition !== "current_custody") {
+            if (
+              declaration.result.type !== "receipt" ||
+              declaration.result.applicationDisposition !== "current_custody"
+            ) {
               return { type: "stale_custody" as const };
             }
             const durableMessages = applyAcceptedInputReceipt(
@@ -869,8 +922,11 @@ function runThreadLoopEffect(
           if (committed.type === "failed") {
             return yield* nonAbandonablePromise(() => handleContextLoaderFailure(options, session, committed.error));
           }
+          if (committed.type === "exhausted") {
+            return { type: "failed", error: committed.error };
+          }
           if (committed.type === "stale_custody") {
-            session.state.clear();
+            session.state.clearAfterCustodyHandoff();
             return { type: "interrupted", discardHotState: true };
           }
           committedContextMessages.push(...committed.durableMessages);
@@ -882,6 +938,12 @@ function runThreadLoopEffect(
       }
       for (const message of committedContextMessages) {
         session.state.contextManager.appendMessage(message);
+      }
+      if (acceptedInputCut.length > 0 && session.state.acceptedInputSnapshot().length > 0) {
+        // One reducer action owns one commit. Re-enter reduction before opening
+        // provider work so the next admitted identity is selected explicitly.
+        pendingInput = { type: "empty" };
+        continue;
       }
       pendingInput = committedRequestInputMessages.length === 0
         ? { type: "empty" }
@@ -1096,7 +1158,6 @@ function runThreadLoopEffect(
           }
           return { type: "interrupted" };
         }
-        deferAcceptedInputUntilNextRun = true;
         pendingInput = { type: "empty" };
         continue;
       }
@@ -1154,10 +1215,10 @@ function runThreadLoopEffect(
       const turnDecision = session.state.threadTurnReduction();
       const turnAction = interpretThreadTurnAction(turnDecision.action).action;
       if (
-        turnAction.action === "finish_idle" &&
-        turnAction.stopReason.type === "end_turn" &&
-        !deferAcceptedInputUntilNextRun &&
-        session.state.acceptedInputSnapshot().length > 0
+        turnAction.action === "commit_accepted_input" &&
+        session.state.acceptedInputSnapshot().some(
+          (input) => input.runtimeInputId === turnAction.runtimeInputId,
+        )
       ) {
         pendingInput = { type: "empty" };
         continue;
@@ -1303,7 +1364,7 @@ async function commitAcceptedInput(
       readonly result: AcceptedInputCommitResult;
       readonly messageCreates: ReturnType<typeof acceptedInputCreates>;
     }
-  | { readonly ok: false; readonly error: unknown }
+  | { readonly ok: false; readonly error: unknown; readonly exhausted: boolean }
 > {
   const messageCreates = acceptedInputCreates(input);
   if (contextLoader.commitAcceptedInput === undefined) {
@@ -1314,31 +1375,116 @@ async function commitAcceptedInput(
         sessionId: input.sessionId,
         reason: "accepted input commit boundary is unavailable",
       }),
+      exhausted: false,
     };
   }
-  for (let attempt = 1; ; attempt += 1) {
+  let lastError: unknown = normalizeContextLoaderError({
+    code: "unavailable",
+    sessionId: input.sessionId,
+    reason: "accepted input commit failed",
+  });
+  for (let attempt = 1; attempt <= SessionEventWriterRetryPolicy.attempts; attempt += 1) {
+    const attemptStartedAt = options.runtime.monotonicMs();
+    recordAcceptedInputCommit(options, input, attempt, attemptStartedAt, "started");
     try {
-      return {
-        ok: true,
-        result: await observeContextLoad(
+      const timeoutController = new AbortController();
+      let settled:
+        | { readonly type: "result"; readonly result: AcceptedInputCommitResult }
+        | { readonly type: "error"; readonly error: unknown }
+        | undefined;
+      const rawAttempt = contextLoader.commitAcceptedInput(input, { messageCreates }).then(
+        (result) => {
+          runtimeMetrics(options).observeContextLoadLatency(
+            "commit_accepted_input",
+            options.runtime.monotonicMs() - attemptStartedAt,
+            "success",
+          );
+          return settled = { type: "result" as const, result };
+        },
+        (error) => {
+          runtimeMetrics(options).observeContextLoadLatency(
+            "commit_accepted_input",
+            options.runtime.monotonicMs() - attemptStartedAt,
+            "error",
+          );
+          return settled = { type: "error" as const, error };
+        },
+      );
+      // A test clock and some embedders may resolve sleep immediately. Give an
+      // already-settled transport receipt one microtask to win before arming
+      // the local timeout; an actually pending write remains bounded below.
+      await Promise.resolve();
+      const attemptResult = settled ?? await Promise.race([
+        rawAttempt,
+        options.runtime.sleep(
+          SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+          timeoutController.signal,
+        ).then((elapsed) => ({ type: elapsed ? "timeout" as const : "cancelled" as const })),
+      ]);
+      timeoutController.abort();
+      if (attemptResult.type === "result") {
+        recordAcceptedInputCommit(
           options,
-          "commit_accepted_input",
-          () => contextLoader.commitAcceptedInput!(input, { messageCreates }),
-        ),
-        messageCreates,
-      };
+          input,
+          attempt,
+          attemptStartedAt,
+          attemptResult.result.type === "task_notification_deferred" ? "deferred" : "committed",
+        );
+        return { ok: true, result: attemptResult.result, messageCreates };
+      }
+      if (attemptResult.type === "error") {
+        throw attemptResult.error;
+      }
+      lastError = normalizeContextLoaderError({
+        code: attemptResult.type === "timeout" ? "timeout" : "unavailable",
+        sessionId: input.sessionId,
+        reason: attemptResult.type === "timeout"
+          ? "accepted input commit attempt timed out"
+          : "accepted input commit was cancelled",
+      });
     } catch (error) {
+      lastError = error;
       const parsed = ContextLoaderErrorSchema.safeParse(error);
       if (!parsed.success || !parsed.data.retryable) {
-        return { ok: false, error };
-      }
-      const backoffMs = SessionEventWriterRetryPolicy.backoffMs[
-        Math.min(attempt - 1, SessionEventWriterRetryPolicy.backoffMs.length - 1)
-      ] ?? 0;
-      if (backoffMs > 0 && !await options.runtime.sleep(backoffMs, signal)) {
-        return { ok: false, error };
+        recordAcceptedInputCommit(options, input, attempt, attemptStartedAt, "exhausted");
+        return { ok: false, error, exhausted: false };
       }
     }
+    if (attempt === SessionEventWriterRetryPolicy.attempts) {
+      recordAcceptedInputCommit(options, input, attempt, attemptStartedAt, "exhausted");
+      break;
+    }
+    recordAcceptedInputCommit(options, input, attempt, attemptStartedAt, "retry");
+    const backoffMs = SessionEventWriterRetryPolicy.backoffMs[attempt - 1] ?? 0;
+    if (backoffMs > 0 && !await options.runtime.sleep(backoffMs, signal)) {
+      recordAcceptedInputCommit(options, input, attempt, attemptStartedAt, "exhausted");
+      return { ok: false, error: lastError, exhausted: false };
+    }
+  }
+  return { ok: false, error: lastError, exhausted: true };
+}
+
+function recordAcceptedInputCommit(
+  options: ThreadLoopRuntimeOptions,
+  input: RuntimeAcceptedInputState,
+  attempt: number,
+  startedAt: number,
+  outcome: RuntimeAcceptedInputCommitObservation["outcome"],
+): void {
+  try {
+    options.recordAcceptedInputCommit?.({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sessionThreadId: input.sessionThreadId,
+      requestId: input.requestId,
+      runtimeInputId: input.runtimeInputId,
+      inputKind: input.kind,
+      attempt,
+      durationMs: Math.max(0, options.runtime.monotonicMs() - startedAt),
+      outcome,
+    });
+  } catch {
+    // Durable receipt handling is authoritative; observability is fail-open.
   }
 }
 
@@ -1622,7 +1768,11 @@ function runOwnedCompactionSummaryAttemptEffect(
           } as const;
         }
         if (startAppend.declaration?.applicationDisposition !== "current_custody") {
-          session.state.clear();
+          if (startAppend.declaration?.applicationDisposition === "stale_custody") {
+            session.state.clearAfterCustodyHandoff();
+          } else {
+            session.state.clear();
+          }
           return startAppend.declaration?.applicationDisposition === "stale_custody"
             ? { type: "interrupted", discardHotState: true } as const
             : {
@@ -1703,10 +1853,10 @@ function runOwnedCompactionSummaryAttemptEffect(
           );
         }
         const providerStream = Effect.sync(() => session.state.consumeThreadTurnEdge()).pipe(
-          Effect.andThen(options.llmService.stream(request, { abortSignal: providerAbortController.signal }).pipe(
+          Effect.andThen(Effect.suspend(() => options.llmService.stream(request, { abortSignal: providerAbortController.signal }).pipe(
             Stream.runForEach((event) => Effect.sync(() => consumeCompactionStreamEvent(session, currentModel, streamState, event))),
             Effect.as({ type: "completed" as const }),
-          )),
+          ))),
         );
         const providerLifecycle = yield* runCompactionStreamLifecycle(
           restore,
@@ -1846,7 +1996,11 @@ function runOwnedCompactionSummaryAttemptEffect(
         }
         const declaration = end.declaration;
         if (declaration === undefined || declaration.applicationDisposition !== "current_custody") {
-          session.state.clear();
+          if (declaration?.applicationDisposition === "stale_custody") {
+            session.state.clearAfterCustodyHandoff();
+          } else {
+            session.state.clear();
+          }
           return {
             type: "failed",
             result: {
@@ -2194,7 +2348,11 @@ function coordinateProviderTurnEffect(
       return providerTurnFailed(runtimeFailureFromEventWriter(spanStartAppend.error), "event_write_failed");
     }
     if (spanStartAppend.declaration?.applicationDisposition !== "current_custody") {
-      session.state.clear();
+      if (spanStartAppend.declaration?.applicationDisposition === "stale_custody") {
+        session.state.clearAfterCustodyHandoff();
+      } else {
+        session.state.clear();
+      }
       return spanStartAppend.declaration?.applicationDisposition === "stale_custody"
         ? providerTurnInterruptedWithDiscard()
         : providerTurnFailed(
@@ -2310,7 +2468,7 @@ function coordinateProviderTurnEffect(
             );
           }
           const providerStream = Effect.sync(() => session.state.consumeThreadTurnEdge()).pipe(
-            Effect.andThen(options.llmService.stream(request, { abortSignal: providerAbortController.signal }).pipe(
+            Effect.andThen(Effect.suspend(() => options.llmService.stream(request, { abortSignal: providerAbortController.signal }).pipe(
               Stream.runForEach((event) => {
                 const processing = processProviderEventEffect(
                   session,
@@ -2329,7 +2487,7 @@ function coordinateProviderTurnEffect(
                   : ownHotDurableEffect(durableOperations, processing)).pipe(Effect.uninterruptible);
               }),
               Effect.as({ type: "completed" as const }),
-            )),
+            ))),
         );
         const streamStartedAt = options.runtime.monotonicMs();
         const providerLifecycle = yield* runProviderStreamLifecycle(
@@ -5105,16 +5263,16 @@ function terminalFailureFromProcessorResult(result: ProviderStreamAccumulatorRes
   return sessionError;
 }
 
-function runtimeFailureFromLlmService(error: unknown): RuntimeFailure {
+function runtimeFailureFromLlmService(error: unknown): LLMRuntimeFailure {
   if (typeof error === "object" && error !== null && "type" in error && error.type === "llm-service" && "error" in error) {
     return (error as LLMServiceError).error;
   }
-  return normalizeRuntimeFailure({
+  return LLMRuntimeFailureSchema.parse(normalizeRuntimeFailure({
     type: "provider",
     code: "provider_unknown",
     retryable: false,
     fatal: true,
-  });
+  }));
 }
 
 function runtimeShutdownFailure(sessionId: string, source: RuntimeProcessorSource): RuntimeFailure {

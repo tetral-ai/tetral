@@ -51,6 +51,7 @@ import type { ThreadContextPrefix } from "../session/context-manager.js";
 import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "./thread-turn-checkpoint.js";
 import {
   consumeThreadTurnEdge,
+  deriveThreadTurnDecision,
   initializeThreadTurnReduction,
   reconcileThreadTurnSeal,
   reduceThreadTurn,
@@ -299,18 +300,9 @@ export interface RuntimeTaskNotificationCommandState extends RuntimeThreadContro
   readonly payloadJson: string;
 }
 
-/** Durable task-notification declaration invoked only by the owning thread run. */
-export type RuntimeTaskNotificationCommit = () => Promise<
-  | { readonly ok: true; readonly stale: true }
-  | { readonly ok: true; readonly deferred: true }
-  | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
-  | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
->;
-
 /** Terminal task fact waiting for the next serialized semantic turn. */
 export interface RuntimeTaskNotificationAcceptedInputState extends RuntimeTaskNotificationCommandState {
   readonly kind: "task_notification";
-  readonly commit: RuntimeTaskNotificationCommit;
 }
 
 /** Terminal background-task fact and its receipt-stamped message installed together in hot state. */
@@ -332,10 +324,14 @@ export interface RuntimeConfigPatchState extends RuntimeThreadControlState, Runt
 export class ThreadProcessor {
   #reduction: ThreadTurnReduction;
   #toolRoutes: ThreadToolRouteView;
+  #acceptedInputs: RuntimeAcceptedInputState[] = [];
+  #seenAgentMailByDeliveryId = Object.create(null) as Record<string, RuntimeInterAgentAcceptedInputState | undefined>;
+  #committingAcceptedInputId: string | undefined;
+  #acceptedInputBlockedUntilRunExit = false;
 
   constructor(checkpoint: ThreadTurnCheckpoint, toolRoutes: ThreadToolRouteView) {
     this.#toolRoutes = toolRoutes;
-    this.#reduction = initializeThreadTurnReduction(checkpoint, toolRoutes);
+    this.#reduction = initializeThreadTurnReduction(checkpoint, toolRoutes, []);
   }
 
   get checkpoint(): ThreadTurnCheckpoint { return this.#reduction.checkpoint; }
@@ -343,7 +339,7 @@ export class ThreadProcessor {
   reduction(): ThreadTurnReduction { return this.#reduction; }
 
   apply(fact: ThreadTurnFact): ThreadTurnReduction {
-    this.#reduction = reduceThreadTurn(this.#reduction, fact, this.#toolRoutes);
+    this.#reduction = reduceThreadTurn(this.#reduction, fact, this.#toolRoutes, this.acceptedInputIds());
     const currentToolUseEventIds = new Set(
       this.#reduction.checkpoint.request?.toolMembers.flatMap((member) =>
         member.memberKind === "public_tool_use" ? [member.toolUseEventId] : []
@@ -356,12 +352,12 @@ export class ThreadProcessor {
   }
 
   reconcileSeal(): ThreadTurnReduction {
-    this.#reduction = reconcileThreadTurnSeal(this.#reduction, this.#toolRoutes);
+    this.#reduction = reconcileThreadTurnSeal(this.#reduction, this.#toolRoutes, this.acceptedInputIds());
     return this.#reduction;
   }
 
   consumeEdge(): ThreadTurnReduction {
-    this.#reduction = consumeThreadTurnEdge(this.#reduction, this.#toolRoutes);
+    this.#reduction = consumeThreadTurnEdge(this.#reduction, this.#toolRoutes, this.acceptedInputIds());
     return this.#reduction;
   }
 
@@ -377,6 +373,119 @@ export class ThreadProcessor {
   clearRoute(toolUseEventId: string): void {
     this.#toolRoutes = { routes: this.#toolRoutes.routes.filter((route) => route.toolUseEventId !== toolUseEventId) };
   }
+
+  /**
+   * Installs one accepted command into the same projection the reducer consumes.
+   * Admission is the Runtime-command success boundary; durable receipt application
+   * is the only operation that removes the fact or advances request readiness.
+   */
+  admitAcceptedInput(
+    state: RuntimeAcceptedInputState,
+    durableMessages: readonly RuntimeMessage[],
+  ): "applied" | "duplicate" | "conflict" {
+    const existing = this.#acceptedInputs.find((input) => input.runtimeInputId === state.runtimeInputId);
+    if (existing !== undefined) {
+      return sameAcceptedInput(existing, state) ? "duplicate" : "conflict";
+    }
+    if (state.kind === "inter_agent_message") {
+      const seen = this.#seenAgentMailByDeliveryId[state.deliveryId];
+      if (seen !== undefined) {
+        return sameAcceptedInput(seen, state) ? "duplicate" : "conflict";
+      }
+    }
+    if (
+      state.eventIds.length > 0 &&
+      state.eventIds.every((eventId) => durableMessages.some((message) =>
+        "owningEventId" in message && message.owningEventId === eventId
+      ))
+    ) {
+      return "duplicate";
+    }
+    this.#acceptedInputs.push(state);
+    if (state.kind === "inter_agent_message") {
+      this.#seenAgentMailByDeliveryId[state.deliveryId] = state;
+    }
+    this.refreshDecision();
+    return "applied";
+  }
+
+  peekAcceptedInput(): RuntimeAcceptedInputState | undefined {
+    return this.#acceptedInputs[0];
+  }
+
+  acceptedInputSnapshot(): readonly RuntimeAcceptedInputState[] {
+    return [...this.#acceptedInputs];
+  }
+
+  acknowledgeAcceptedInput(runtimeInputId: string): void {
+    if (this.#acceptedInputs[0]?.runtimeInputId === runtimeInputId) {
+      this.#acceptedInputs.shift();
+    } else {
+      this.#acceptedInputs = this.#acceptedInputs.filter((input) => input.runtimeInputId !== runtimeInputId);
+    }
+    this.refreshDecision();
+  }
+
+  discardApprovalReview(reviewId: string): void {
+    this.#acceptedInputs = this.#acceptedInputs.filter(
+      (input) => input.kind !== "approval_review" || input.reviewId !== reviewId,
+    );
+    this.refreshDecision();
+  }
+
+  beginAcceptedInputCommit(runtimeInputId: string): void {
+    this.#committingAcceptedInputId = runtimeInputId;
+  }
+
+  finishAcceptedInputCommit(runtimeInputId: string): void {
+    if (this.#committingAcceptedInputId === runtimeInputId) {
+      this.#committingAcceptedInputId = undefined;
+    }
+  }
+
+  blockAcceptedInputUntilRunExit(): void {
+    this.#acceptedInputBlockedUntilRunExit = true;
+    this.refreshDecision();
+  }
+
+  finishRunBoundary(): void {
+    if (this.#acceptedInputBlockedUntilRunExit) {
+      this.#acceptedInputBlockedUntilRunExit = false;
+      this.refreshDecision();
+    }
+  }
+
+  discardAcceptedInputsBeforeFence(interruptFenceSequence: number, preserveTaskNotifications: boolean): void {
+    this.#acceptedInputs = this.#acceptedInputs.filter((input) =>
+      input.kind === "inter_agent_message" ||
+      (preserveTaskNotifications && input.kind === "task_notification") ||
+      input.runtimeInputId === this.#committingAcceptedInputId ||
+      input.sequenceTo >= interruptFenceSequence
+    );
+    this.refreshDecision();
+  }
+
+  acceptedInputCount(): number { return this.#acceptedInputs.length; }
+
+  clearAcceptedInputs(): void {
+    this.#acceptedInputs = [];
+    this.#seenAgentMailByDeliveryId = Object.create(null) as Record<string, RuntimeInterAgentAcceptedInputState | undefined>;
+    this.#committingAcceptedInputId = undefined;
+    this.refreshDecision();
+  }
+
+  private acceptedInputIds(): readonly string[] {
+    return this.#acceptedInputBlockedUntilRunExit
+      ? []
+      : this.#acceptedInputs.map((input) => input.runtimeInputId);
+  }
+
+  private refreshDecision(): void {
+    this.#reduction = {
+      ...this.#reduction,
+      ...deriveThreadTurnDecision(this.#reduction.checkpoint, this.#toolRoutes, this.acceptedInputIds()),
+    };
+  }
 }
 
 /** Recoverable thread-local working state for input, tools, config, media, and cancellation. */
@@ -384,9 +493,6 @@ export class ThreadState {
   readonly contextManager: ContextManager;
   #persistentContextLoaded = false;
   #currentModel: SessionCurrentModel | undefined;
-  #acceptedInputs: RuntimeAcceptedInputState[] = [];
-  #seenAgentMailDeliveryIds = new Set<string>();
-  #committingAcceptedInputId: string | undefined;
   #toolConfirmations: Record<string, RuntimeToolConfirmationState | undefined> = Object.create(null) as Record<
     string,
     RuntimeToolConfirmationState | undefined
@@ -492,84 +598,48 @@ export class ThreadState {
   }
 
   enqueueAcceptedInput(state: RuntimeAcceptedInputState): "applied" | "duplicate" | "conflict" {
-    if (state.kind === "inter_agent_message" && this.#seenAgentMailDeliveryIds.has(state.deliveryId)) {
-      return "duplicate";
-    }
-    if (
-      state.eventIds.length > 0 &&
-      state.eventIds.every((eventId) =>
-        this.contextManager.messages().some((message) =>
-          "owningEventId" in message && message.owningEventId === eventId
-        )
-      )
-    ) {
-      return "duplicate";
-    }
-    const existing = this.#acceptedInputs.find((input) => input.runtimeInputId === state.runtimeInputId);
-    if (existing === undefined) {
-      this.#acceptedInputs.push(state);
-      if (state.kind === "inter_agent_message") {
-        this.#seenAgentMailDeliveryIds.add(state.deliveryId);
-      }
-      return "applied";
-    }
-    if (sameAcceptedInput(existing, state)) {
-      return "duplicate";
-    }
-    return "conflict";
+    this.threadTurnReduction();
+    return this.#threadProcessor!.admitAcceptedInput(state, this.contextManager.messages());
   }
 
   peekAcceptedInput(): RuntimeAcceptedInputState | undefined {
-    return this.#acceptedInputs[0];
+    this.threadTurnReduction();
+    return this.#threadProcessor!.peekAcceptedInput();
   }
 
   acceptedInputSnapshot(): readonly RuntimeAcceptedInputState[] {
-    return [...this.#acceptedInputs];
+    this.threadTurnReduction();
+    return this.#threadProcessor!.acceptedInputSnapshot();
   }
 
   acknowledgeAcceptedInput(runtimeInputId: string): void {
-    if (this.#acceptedInputs[0]?.runtimeInputId === runtimeInputId) {
-      this.#acceptedInputs.shift();
-      return;
-    }
-    this.#acceptedInputs = this.#acceptedInputs.filter((input) => input.runtimeInputId !== runtimeInputId);
+    this.threadTurnReduction();
+    this.#threadProcessor!.acknowledgeAcceptedInput(runtimeInputId);
   }
 
   discardQueuedApprovalReview(reviewId: string): void {
-    this.#acceptedInputs = this.#acceptedInputs.filter(
-      (input) => input.kind !== "approval_review" || input.reviewId !== reviewId,
-    );
+    this.threadTurnReduction();
+    this.#threadProcessor!.discardApprovalReview(reviewId);
   }
 
   beginAcceptedInputCommit(runtimeInputId: string): void {
-    this.#committingAcceptedInputId = runtimeInputId;
+    this.threadTurnReduction();
+    this.#threadProcessor!.beginAcceptedInputCommit(runtimeInputId);
   }
 
   finishAcceptedInputCommit(runtimeInputId: string): void {
-    if (this.#committingAcceptedInputId === runtimeInputId) {
-      this.#committingAcceptedInputId = undefined;
-    }
+    this.threadTurnReduction();
+    this.#threadProcessor!.finishAcceptedInputCommit(runtimeInputId);
   }
 
   discardQueuedAcceptedInputsBeforeFence(interruptFenceSequence: number, preserveTaskNotifications: boolean): void {
-    this.#acceptedInputs = this.#acceptedInputs.filter((input) =>
-      input.kind === "inter_agent_message" ||
-	  (preserveTaskNotifications && input.kind === "task_notification") ||
-      input.runtimeInputId === this.#committingAcceptedInputId ||
-      input.sequenceTo >= interruptFenceSequence
-    );
+    this.threadTurnReduction();
+    this.#threadProcessor!.discardAcceptedInputsBeforeFence(interruptFenceSequence, preserveTaskNotifications);
   }
 
   acceptedInputCount(): number {
-    return this.#acceptedInputs.length;
-  }
-
-  hasQueuedInterAgentMessage(): boolean {
-    return this.#acceptedInputs.some((input) => input.kind === "inter_agent_message");
-  }
-
-  hasQueuedTaskNotification(): boolean {
-    return this.#acceptedInputs.some((input) => input.kind === "task_notification");
+    this.threadTurnReduction();
+    return this.#threadProcessor!.acceptedInputCount();
   }
 
   resolveToolConfirmation(state: RuntimeToolConfirmationState): "applied" | "duplicate" | "conflict" {
@@ -819,7 +889,12 @@ export class ThreadState {
       closeoutEligible: false,
       receiptApplied: false,
     };
+    this.#threadProcessor?.blockAcceptedInputUntilRunExit();
     return "applied";
+  }
+
+  finishThreadRunProjection(): void {
+    this.#threadProcessor?.finishRunBoundary();
   }
 
   userInterruptRequested(): boolean {
@@ -918,12 +993,20 @@ export class ThreadState {
   }
 
   clear(): void {
+    // Generic failure cleanup cannot erase an accepted Runtime input. The
+    // Session owner must first land an exact stale/close/termination receipt;
+    // only that durable custody handoff may use clearAfterCustodyHandoff.
+    if (this.acceptedInputCount() > 0) {
+      return;
+    }
+    this.clearAfterCustodyHandoff();
+  }
+
+  clearAfterCustodyHandoff(): void {
     this.contextManager.clear();
     this.#persistentContextLoaded = false;
     this.#currentModel = undefined;
-    this.#acceptedInputs = [];
-    this.#seenAgentMailDeliveryIds.clear();
-    this.#committingAcceptedInputId = undefined;
+    this.#threadProcessor?.clearAcceptedInputs();
     this.#toolConfirmations = Object.create(null) as Record<string, RuntimeToolConfirmationState | undefined>;
     this.#pendingApprovalToolJobs = Object.create(null) as Record<string, RuntimePendingApprovalToolJobState | undefined>;
     this.#pendingSandboxExecutionJobs = Object.create(null) as Record<string, RuntimePendingSandboxExecutionJobState | undefined>;
@@ -963,6 +1046,15 @@ function providerRequestAttachmentIdentity(attachment: ProviderRequestAttachment
 }
 
 function sameAcceptedInput(left: RuntimeAcceptedInputState, right: RuntimeAcceptedInputState): boolean {
-  // Request ids and process-local commit callbacks do not change a durable input's identity.
+  // Transport-attempt request ids do not change a durable input's identity.
+  if (left.kind === "inter_agent_message" && right.kind === "inter_agent_message") {
+    // Cold preload carries durable Thread lineage needed to construct the
+    // resident aggregate; a later delivery retry does not carry that local
+    // installation projection. Every mail custody and payload field must still
+    // match before the delivery is considered duplicate.
+    const { requestId: _leftRequestId, thread: _leftThread, ...leftIdentity } = left;
+    const { requestId: _rightRequestId, thread: _rightThread, ...rightIdentity } = right;
+    return JSON.stringify(leftIdentity) === JSON.stringify(rightIdentity);
+  }
   return JSON.stringify({ ...left, requestId: "" }) === JSON.stringify({ ...right, requestId: "" });
 }

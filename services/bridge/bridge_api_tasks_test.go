@@ -16,7 +16,9 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -656,4 +658,72 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 			t.Fatalf("inbox pod mismatch err = %v; want FailedPrecondition", err)
 		}
 	})
+}
+
+func TestPostgreSQLCommitTaskNotificationDeferredReceiptParksInboxAndTerminatesQueueCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_task_deferred_receipt"
+		parentID  = "thr_task_deferred_parent"
+		childID   = "thr_task_deferred_child"
+		bindingID = "bind_task_deferred"
+		podUID    = "pod_task_deferred"
+		taskID    = "task_deferred_receipt"
+		inputID   = "task_notification:task_deferred_receipt"
+	)
+	now := time.Date(2026, 8, 11, 8, 0, 0, 0, time.UTC)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_task_deferred_source")
+	resultJSON := `{"task_id":"task_deferred_receipt","source_tool_use_event_id":"evt_task_deferred_source","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
+	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", resultJSON)
+
+	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_task_deferred_close")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	if _, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), RootChildThreadId: childID,
+		SourceToolUseEventId: closeSource.GetSourceToolUseEventId(), Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+		IncludeDescendants: true,
+	}); err != nil {
+		t.Fatalf("admit child close: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,created_at,updated_at
+	) VALUES ('default',$1,$2,$3,'task_notification','[]','queued',$4,$4)`, sessionID, childID, inputID, now); err != nil {
+		t.Fatalf("seed queued notification after close admission: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, childID, taskID, now)
+	if err != nil {
+		t.Fatalf("build notification Queue custody: %v", err)
+	}
+	queuedJob, err := queueStore.Enqueue(context.Background(), enqueue)
+	if err != nil {
+		t.Fatalf("enqueue notification Queue custody: %v", err)
+	}
+
+	response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+		t,
+		bridgeAPIScope(sessionID, childID, bindingID, 1, podUID),
+		inputID,
+		taskID,
+		resultJSON,
+	))
+	if err != nil {
+		t.Fatalf("commit deferred task notification: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
+		response.GetAck().GetErrorCode() != "task_notification_deferred" {
+		t.Fatalf("deferred notification ACK = %#v; want task_notification_deferred", response.GetAck())
+	}
+	var inboxStatus, queueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status,job.status
+		FROM session_runtime_inbox inbox JOIN queue_jobs job ON job.workspace_id=inbox.workspace_id AND job.id=$2
+		WHERE inbox.workspace_id='default' AND inbox.runtime_input_id=$1`, inputID, queuedJob.ID).Scan(&inboxStatus, &queueStatus); err != nil {
+		t.Fatalf("read deferred custody: %v", err)
+	}
+	if inboxStatus != "parked" || queueStatus != queue.StatusCancelled {
+		t.Fatalf("deferred custody = Inbox %q / Queue %q; want parked / cancelled", inboxStatus, queueStatus)
+	}
 }

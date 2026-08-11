@@ -506,22 +506,40 @@ func settleBackgroundTaskResultTx(ctx context.Context, tx *dbconnect.Tx, work Sa
 		return nil
 	}
 	runtimeInputID := "task_notification:" + work.TaskID
+	closing, err := childcontrol.ThreadOrAncestorClosingOrClosedTx(ctx, tx, work.WorkspaceID, work.SessionID, work.SessionThreadID)
+	if err != nil {
+		return err
+	}
+	inboxStatus := "queued"
+	bindingID := ""
+	bindingGeneration := int64(0)
+	targetPodUID := ""
+	if closing {
+		inboxStatus = "parked"
+		// A close-time notification is born directly into dormant custody. Its
+		// binding identity records the Runtime owner whose lifecycle transaction
+		// fenced the child; resume later clears that identity while creating the
+		// one replacement Queue job.
+		if err := tx.QueryRow(ctx, `SELECT binding_id, binding_generation, agent_runtime_pod_uid
+			FROM session_runtime_bindings
+			WHERE workspace_id=$1 AND session_id=$2
+			FOR SHARE`, work.WorkspaceID, work.SessionID).Scan(&bindingID, &bindingGeneration, &targetPodUID); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_inbox (
 		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
 		event_ids_json, status,
 		binding_id, binding_generation, target_pod_uid, created_at, updated_at
-	) VALUES ($1,$2,$3,$4,'task_notification','[]','queued',NULL,NULL,NULL,$5,$5)
+	) VALUES ($1,$2,$3,$4,'task_notification','[]',$5,NULLIF($6,''),NULLIF($7,0),NULLIF($8,''),$9,$9)
 	ON CONFLICT (workspace_id, runtime_input_id) DO NOTHING`,
-		work.WorkspaceID, work.SessionID, work.SessionThreadID, runtimeInputID, now); err != nil {
+		work.WorkspaceID, work.SessionID, work.SessionThreadID, runtimeInputID, inboxStatus,
+		bindingID, bindingGeneration, targetPodUID, now); err != nil {
 		return err
 	}
 	request, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(
 		workspace.ID(work.WorkspaceID), work.SessionID, work.SessionThreadID, work.TaskID, now,
 	)
-	if err != nil {
-		return err
-	}
-	closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, work.WorkspaceID, work.SessionID, work.SessionThreadID)
 	if err != nil {
 		return err
 	}

@@ -16,7 +16,7 @@ class HarnessAuthenticator implements RuntimeAuthenticator {
 
 class HarnessRunHost implements RuntimeSessionRunHost {
   async handleAcceptInput(command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]) {
-    return { ok: true as const, sessionId: command.sessionId, created: true, started: true, pendingWake: false };
+    return { ok: true as const, sessionId: command.sessionId, created: true, started: true };
   }
 
   async handleAgentMail(command: Parameters<RuntimeSessionRunHost["handleAgentMail"]>[0]) {

@@ -42,9 +42,8 @@ type Transaction interface {
 	}
 }
 
-// SkillReferenceResolver validates custom Skill references inside the
-// Agent write transaction. Unit 3 moves the production implementation
-// behind skill.Service; Unit 2 establishes the Agent-side boundary.
+// SkillReferenceResolver keeps custom Skill validation inside the Agent write
+// transaction while the Skill service owns reference lookup semantics.
 type SkillReferenceResolver interface {
 	ValidateAgentSkillReferences(ctx context.Context, tx Transaction, workspaceID string, refs []SkillReference) error
 }

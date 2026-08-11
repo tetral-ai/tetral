@@ -23,7 +23,6 @@ export interface Interface {
   readonly handleTaskNotification: (
     sessionId: string,
     command: Parameters<SessionManager.Interface["commitTaskNotification"]>[1],
-    commit: Parameters<SessionManager.Interface["commitTaskNotification"]>[2],
   ) => Effect.Effect<SessionManager.RuntimeTaskNotificationResult>;
   readonly handleRuntimeConfigPatch: (sessionId: string, command: Parameters<SessionManager.Interface["applyRuntimeConfigPatch"]>[1]) => Effect.Effect<SessionManager.RuntimeControlResult>;
   readonly handleCleanupSession: (sessionId: string, command: SessionManager.RuntimeCleanupSessionCommand) => Effect.Effect<SessionManager.CleanupSessionResult>;
@@ -59,7 +58,7 @@ export const layer = Layer.effect(
       handleInterruptControl: (sessionId, command, commitInput) =>
         manager.interruptControl(sessionId, command, commitInput),
       handleToolConfirmation: (sessionId, command, commit) => manager.resolveToolConfirmation(sessionId, command, commit),
-      handleTaskNotification: (sessionId, command, commit) => manager.commitTaskNotification(sessionId, command, commit),
+      handleTaskNotification: (sessionId, command) => manager.commitTaskNotification(sessionId, command),
       handleRuntimeConfigPatch: (sessionId, command) => manager.applyRuntimeConfigPatch(sessionId, command),
       // External cleanup ingress; never loads pending input or context.
       handleCleanupSession: (sessionId, command) => manager.cleanupSession(sessionId, command),

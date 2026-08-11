@@ -109,7 +109,7 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
         Effect.sync(() => {
           calls.push({ method: "acceptInput", args });
           const sessionId = args[0].sessionId;
-          return { ok: true as const, sessionId, created: false, started: true, pendingWake: false };
+          return { ok: true as const, sessionId, created: false, started: true };
         }),
       interruptControl: (...args: readonly [string, SessionManager.RuntimeInterruptControlCommand, ...unknown[]]) =>
         Effect.sync(() => {
@@ -126,7 +126,6 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
       commitTaskNotification: (...args: readonly [
         string,
         Parameters<SessionManager.Interface["commitTaskNotification"]>[1],
-        Parameters<SessionManager.Interface["commitTaskNotification"]>[2],
         ...unknown[],
       ]) =>
         Effect.sync(() => {
@@ -390,8 +389,6 @@ async function waitForCondition(predicate: () => boolean, label: string): Promis
 describe("SessionRunHost", () => {
   test("handlers route to the exact SessionManager command boundary", async () => {
     const calls: ManagerCall[] = [];
-    const committedMessage = runtimeNotificationMessage("sesn_5");
-
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const host = yield* SessionRunHost.Service;
@@ -429,7 +426,7 @@ describe("SessionRunHost", () => {
           sourceToolUseEventId: "sevt_tool_1",
           status: "completed",
           payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
-        }, async () => ({ ok: true, committedMessage }));
+        });
         const config = yield* host.handleRuntimeConfigPatch("sesn_6", {
           ...threadControl("sesn_6"),
           runtimeInputId: "rin_config",
@@ -442,42 +439,35 @@ describe("SessionRunHost", () => {
     );
 
     expect(result).toEqual({
-      accepted: { ok: true, sessionId: "sesn_2", created: false, started: true, pendingWake: false },
+      accepted: { ok: true, sessionId: "sesn_2", created: false, started: true },
       interrupt: { ok: true, sessionId: "sesn_3", created: false, interrupted: true, idleInterrupt: false },
       confirmation: { ok: true, sessionId: "sesn_4", created: false, applied: true },
       task: { ok: true, sessionId: "sesn_5", created: false, applied: true },
       config: { ok: true, sessionId: "sesn_6", created: false, applied: true },
       cleanup: { ok: true, sessionId: "sesn_7", cleaned: true },
     });
-    expect(calls).toEqual([
-      { method: "acceptInput", args: [expect.objectContaining({ sessionId: "sesn_2", runtimeInputId: "rin_sesn_2" })] },
-      { method: "interruptControl", args: ["sesn_3", { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 }, expect.any(Function)] },
-      {
-        method: "resolveToolConfirmation",
-        args: [
-          "sesn_4",
-          { ...threadControl("sesn_4"), runtimeInputId: "rin_confirm", sourceEventId: "sevt_confirm_1", toolUseEventId: "sevt_tool_1", decision: "allow" },
-          expect.any(Function),
-        ],
-      },
-      {
-        method: "commitTaskNotification",
-        args: [
-          "sesn_5",
-          {
-            ...threadControl("sesn_5"),
-            runtimeInputId: "rin_task",
-            taskId: "task_1",
-            sourceToolUseEventId: "sevt_tool_1",
-            status: "completed",
-            payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
-          },
-          expect.any(Function),
-        ],
-      },
-      { method: "applyRuntimeConfigPatch", args: ["sesn_6", { ...threadControl("sesn_6"), runtimeInputId: "rin_config", generation: 3, payloadJson: "{\"config_generation\":3}" }] },
-      { method: "cleanupSession", args: ["sesn_7", threadControl("sesn_7")] },
+    expect(calls.map((call) => call.method)).toEqual([
+      "acceptInput",
+      "interruptControl",
+      "resolveToolConfirmation",
+      "commitTaskNotification",
+      "applyRuntimeConfigPatch",
+      "cleanupSession",
     ]);
+    expect(calls[0]?.args[0]).toMatchObject({ sessionId: "sesn_2", runtimeInputId: "rin_sesn_2" });
+    expect(calls[1]?.args.slice(0, 2)).toEqual(["sesn_3", { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 }]);
+    expect(typeof calls[1]?.args[2]).toBe("function");
+    expect(calls[2]?.args.slice(0, 2)).toEqual(["sesn_4", {
+      ...threadControl("sesn_4"),
+      runtimeInputId: "rin_confirm",
+      sourceEventId: "sevt_confirm_1",
+      toolUseEventId: "sevt_tool_1",
+      decision: "allow",
+    }]);
+    expect(typeof calls[2]?.args[2]).toBe("function");
+    expect(calls[3]?.args).toEqual(["sesn_5", expect.objectContaining({ runtimeInputId: "rin_task", taskId: "task_1" })]);
+    expect(calls[4]?.args).toEqual(["sesn_6", expect.objectContaining({ runtimeInputId: "rin_config", generation: 3 })]);
+    expect(calls[5]?.args).toEqual(["sesn_7", threadControl("sesn_7")]);
   });
 
   test("payload-like extra input is ignored before it can reach SessionManager", async () => {
@@ -547,7 +537,6 @@ describe("SessionRunHost", () => {
         sessionId: "sesn_1",
         created: false,
         started: true,
-        pendingWake: false,
       });
       await waitForCondition(() => llmService.requests.length === 1, "provider request");
       llmService.release();

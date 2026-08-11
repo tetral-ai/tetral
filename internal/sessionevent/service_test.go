@@ -755,6 +755,7 @@ func TestAppendClientEventsWritesIdempotencyAndRuntimeInputQueueJobsAtomically(t
 	}
 	assertRuntimeInputQueueJob(t, findRuntimeInputQueueJob(t, jobs, RuntimeInputKindMessages), RuntimeInputKindMessages, 0, []string{result.Data[0].ID}, 1, 1)
 	assertRuntimeInputQueueJob(t, findRuntimeInputQueueJob(t, jobs, RuntimeInputKindInterruptControl), RuntimeInputKindInterruptControl, 100, []string{result.Data[1].ID}, 2, 2)
+	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
 }
 
 func TestAppendClientEventsSessionInterruptFansOutToPublicThreads(t *testing.T) {
@@ -1353,6 +1354,7 @@ func TestAppendClientEventsRollsBackWhenQueueJobWriteFails(t *testing.T) {
 	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 0 {
 		t.Fatalf("queue jobs = %d; want rollback", got)
 	}
+	assertSessionEventInboxRowCount(t, admin, sessionID, 0)
 }
 
 func TestAppendClientEventsRequiresRuntimeStatusFence(t *testing.T) {
@@ -1579,6 +1581,48 @@ func readSessionEventQueueJobs(t *testing.T, db *sql.DB, sessionID string) []ses
 		t.Fatalf("queue jobs: %v", err)
 	}
 	return got
+}
+
+func assertSessionEventInboxMatchesQueue(t *testing.T, db *sql.DB, sessionID string, jobs []sessionEventQueueJobRow) {
+	t.Helper()
+	for _, job := range jobs {
+		var payload runtimeInputQueuePayload
+		if err := json.Unmarshal([]byte(job.payloadJSON), &payload); err != nil {
+			t.Fatalf("decode runtime input queue payload: %v", err)
+		}
+		var threadID, inputKind, eventIDsJSON, status string
+		var sequenceFrom, sequenceTo sql.NullInt64
+		if err := db.QueryRowContext(context.Background(), `SELECT session_thread_id,input_kind,event_ids_json,sequence_from,sequence_to,status
+			FROM session_runtime_inbox WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3`,
+			string(workspace.DefaultID), sessionID, payload.RuntimeInputID,
+		).Scan(&threadID, &inputKind, &eventIDsJSON, &sequenceFrom, &sequenceTo, &status); err != nil {
+			t.Fatalf("read runtime inbox birth for %s: %v", payload.RuntimeInputID, err)
+		}
+		var eventIDs []string
+		if err := json.Unmarshal([]byte(eventIDsJSON), &eventIDs); err != nil {
+			t.Fatalf("decode runtime inbox event ids: %v", err)
+		}
+		if threadID != payload.SessionThreadID || inputKind != payload.InputKind || status != "queued" ||
+			!equalSessionEventStringSlices(eventIDs, payload.EventIDs) ||
+			!sequenceFrom.Valid || sequenceFrom.Int64 != payload.SequenceFrom ||
+			!sequenceTo.Valid || sequenceTo.Int64 != payload.SequenceTo {
+			t.Fatalf("runtime inbox birth = thread %q kind %q events %v sequence %v..%v status %q; want queue payload %#v and queued",
+				threadID, inputKind, eventIDs, sequenceFrom, sequenceTo, status, payload)
+		}
+	}
+	assertSessionEventInboxRowCount(t, db, sessionID, len(jobs))
+}
+
+func assertSessionEventInboxRowCount(t *testing.T, db *sql.DB, sessionID string, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_inbox
+		WHERE workspace_id=$1 AND session_id=$2`, string(workspace.DefaultID), sessionID).Scan(&got); err != nil {
+		t.Fatalf("count runtime inbox rows: %v", err)
+	}
+	if got != want {
+		t.Fatalf("runtime inbox rows = %d; want %d", got, want)
+	}
 }
 
 func assertRuntimeInputQueueJob(t *testing.T, job sessionEventQueueJobRow, inputKind string, priority int, eventIDs []string, sequenceFrom int64, sequenceTo int64) {

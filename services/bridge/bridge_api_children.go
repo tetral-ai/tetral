@@ -269,19 +269,6 @@ func (s *PostgreSQLBridgeAPIStore) ResolveInterAgentDelivery(ctx context.Context
 		if err != nil {
 			return err
 		}
-		if !admitted.Terminal {
-			if _, err := enqueueAgentMailWakeTx(
-				ctx,
-				tx,
-				targetScope.GetWorkspaceId(),
-				targetScope.GetSessionId(),
-				targetScope.GetSessionThreadId(),
-				envelope.DeliveryID,
-				now,
-			); err != nil {
-				return err
-			}
-		}
 		response = &bridgev1.ResolveInterAgentDeliveryResponse{
 			Ack:                  committedAck("", ""),
 			DeliveryId:           envelope.DeliveryID,
@@ -316,8 +303,9 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 		return nil, err
 	}
 	var (
-		ack      *bridgev1.BridgeWriteAck
-		receipts []*bridgev1.DeclarationReceipt
+		ack                *bridgev1.BridgeWriteAck
+		receipts           []*bridgev1.DeclarationReceipt
+		custodyTransitions childCloseCustodyTransitions
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge."+bridgeOpMarkChildThreadClosed, func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
@@ -364,6 +352,10 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 				return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
 			}
 			lockedThreads[targetID] = mutation
+		}
+		custodyTransitions, err = settleChildCloseRuntimeInputsTx(ctx, tx, request.GetScope(), targetIDs, now)
+		if err != nil {
+			return err
 		}
 		for _, threadID := range targetIDs {
 			childScope := scopeForThread(request.GetScope(), threadID)
@@ -423,11 +415,94 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 	}); err != nil {
 		return nil, err
 	}
+	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "accepted_to_parked", custodyTransitions.parked)
+	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "accepted_to_cancelled", custodyTransitions.cancelled)
 	declaration, err := s.childLifecycleDeclarationResponse(ctx, request.GetScope(), receipts, ack)
 	if err != nil {
 		return nil, err
 	}
 	return &bridgev1.MarkChildThreadClosedResponse{Ack: ack, Declaration: declaration}, nil
+}
+
+// settleChildCloseRuntimeInputsTx transfers every accepted Inbox-backed input
+// in the frozen subtree before hot release: task notifications become durable
+// parked custody, while other input kinds are cancelled. Any active Queue job
+// for the exact input is terminalized in the same transaction and loses its
+// lease token.
+type childCloseCustodyTransitions struct {
+	parked    int
+	cancelled int
+}
+
+func settleChildCloseRuntimeInputsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	targetIDs []string,
+	now time.Time,
+) (childCloseCustodyTransitions, error) {
+	var transitions childCloseCustodyTransitions
+	for _, targetID := range targetIDs {
+		rows, err := tx.Query(ctx, `SELECT runtime_input_id,input_kind
+			FROM session_runtime_inbox
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			 AND status IN ('delivering','accepted') AND input_kind <> 'approval_review'
+			ORDER BY created_at,runtime_input_id FOR UPDATE`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), targetID)
+		if err != nil {
+			return childCloseCustodyTransitions{}, err
+		}
+		type closeInput struct{ runtimeInputID, inputKind string }
+		var inputs []closeInput
+		for rows.Next() {
+			var input closeInput
+			if err := rows.Scan(&input.runtimeInputID, &input.inputKind); err != nil {
+				_ = rows.Close()
+				return childCloseCustodyTransitions{}, err
+			}
+			inputs = append(inputs, input)
+		}
+		if err := rows.Close(); err != nil {
+			return childCloseCustodyTransitions{}, err
+		}
+		binding := runtimeBindingForDelivery{
+			BindingID: scope.GetBinding().GetBindingId(), BindingGeneration: scope.GetBinding().GetBindingGeneration(),
+			PodUID: scope.GetBinding().GetTargetPodUid(),
+		}
+		for _, input := range inputs {
+			if _, err := tx.Exec(ctx, `UPDATE queue_jobs
+				SET status='cancelled',cancelled_at=$4,lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,updated_at=$4
+				WHERE workspace_id=$1 AND status IN ('pending','leased')
+				 AND dedupe_key='runtime_input:' || $1 || ':' || $2 || ':' || $3`,
+				scope.GetWorkspaceId(), scope.GetSessionId(), input.runtimeInputID, now); err != nil {
+				return childCloseCustodyTransitions{}, err
+			}
+			if input.inputKind == "task_notification" {
+				parked, err := parkTaskNotificationInboxTx(
+					ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetID, input.runtimeInputID, binding, now,
+				)
+				if err != nil {
+					return childCloseCustodyTransitions{}, err
+				}
+				if !parked {
+					return childCloseCustodyTransitions{}, status.Error(codes.Aborted, "task notification Inbox authority changed during child close")
+				}
+				transitions.parked++
+				continue
+			}
+			result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='cancelled',updated_at=$4
+				WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status IN ('delivering','accepted')`,
+				scope.GetWorkspaceId(), scope.GetSessionId(), input.runtimeInputID, now)
+			if err != nil {
+				return childCloseCustodyTransitions{}, err
+			}
+			if !rowsAffected(result) {
+				return childCloseCustodyTransitions{}, status.Error(codes.Aborted, "runtime Inbox authority changed during child close")
+			}
+			transitions.cancelled++
+		}
+	}
+	return transitions, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, request *bridgev1.MarkChildThreadActiveRequest) (*bridgev1.MarkChildThreadActiveResponse, error) {
@@ -568,16 +643,17 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 // transition share the lifecycle transaction, so no stale close-time lease can
 // race the resumed delivery.
 func resumeTaskNotificationsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
-	rows, err := tx.Query(ctx, `UPDATE session_runtime_inbox inbox SET
-		status='queued', binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL, updated_at=$4
-		FROM session_background_tasks task
-		WHERE inbox.workspace_id=$1 AND inbox.session_id=$2 AND inbox.session_thread_id=$3
-		 AND inbox.input_kind='task_notification' AND inbox.status IN ('queued','parked')
-		 AND task.workspace_id=inbox.workspace_id AND task.session_id=inbox.session_id
+	rows, err := tx.Query(ctx, `SELECT inbox.runtime_input_id, task.task_id
+		FROM session_runtime_inbox inbox
+		JOIN session_background_tasks task
+		  ON task.workspace_id=inbox.workspace_id AND task.session_id=inbox.session_id
 		 AND task.session_thread_id=inbox.session_thread_id
 		 AND inbox.runtime_input_id='task_notification:' || task.task_id
+		WHERE inbox.workspace_id=$1 AND inbox.session_id=$2 AND inbox.session_thread_id=$3
+		 AND inbox.input_kind='task_notification' AND inbox.status='parked'
 		 AND task.terminal_event_id IS NULL
-		RETURNING inbox.runtime_input_id,task.task_id`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now)
+		ORDER BY inbox.created_at, inbox.runtime_input_id
+		FOR UPDATE OF inbox`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId())
 	if err != nil {
 		return err
 	}
@@ -595,16 +671,22 @@ func resumeTaskNotificationsTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		return err
 	}
 	ws := workspace.ID(scope.GetWorkspaceId())
-	requests := make([]queue.EnqueueRequest, 0, len(notifications))
 	for _, notification := range notifications {
+		if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+			SET status='queued', binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL, updated_at=$3
+			WHERE workspace_id=$1 AND runtime_input_id=$2 AND status='parked'`,
+			scope.GetWorkspaceId(), notification.runtimeInputID, now); err != nil {
+			return err
+		}
 		request, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(ws, scope.GetSessionId(), scope.GetSessionThreadId(), notification.taskID, now)
 		if err != nil {
 			return err
 		}
-		requests = append(requests, request)
+		if _, err := queue.EnqueueTx(ctx, tx, request); err != nil {
+			return err
+		}
 	}
-	_, err = queue.EnqueueBatchTx(ctx, tx, requests)
-	return err
+	return nil
 }
 
 type childLifecycleCommand struct {
@@ -751,16 +833,35 @@ func validateChildLifecycleSourceTx(
 }
 
 func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID, reviewID string) error {
-	var settled bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+	var outcomeCount int
+	err := tx.QueryRow(ctx, `SELECT COUNT(*)
+		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 		 AND type IN ('approval_review.decision','approval_review.failure')
-		 AND payload_json::jsonb->>'review_id'=$4)`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, reviewID).Scan(&settled)
+		 AND payload_json::jsonb->>'review_id'=$4`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, reviewID).Scan(&outcomeCount)
 	if err != nil {
 		return err
 	}
-	if !settled {
-		return status.Error(codes.FailedPrecondition, "approval reviewer close requires a durable outcome")
+	if outcomeCount > 1 {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close found competing durable outcomes")
+	}
+	outcomeSettled := outcomeCount == 1
+	var cancelledRequestSettled bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		  FROM session_events end_event
+		 WHERE end_event.workspace_id=$1
+		   AND end_event.session_id=$2
+		   AND end_event.session_thread_id=$3
+		   AND end_event.type='span.model_request_end'
+		   AND end_event.payload_json::jsonb->>'request_kind'='approval_reviewer'
+		   AND end_event.payload_json::jsonb->>'error_kind'='runtime_interrupted'
+		   AND end_event.payload_json::jsonb->>'finish_reason'='cancelled')`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID).Scan(&cancelledRequestSettled)
+	if err != nil {
+		return err
+	}
+	if !outcomeSettled && !cancelledRequestSettled {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close requires a durable outcome or cancelled request")
 	}
 	var unfinished bool
 	err = tx.QueryRow(ctx, `SELECT

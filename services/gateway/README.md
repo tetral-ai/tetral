@@ -478,13 +478,19 @@ monotonic `manifest_generation`, and enforces the 256 KiB per-server manifest
 bound at acceptance. Supersession keys on generation monotonicity, never on etag
 inequality — a flapping A→B→A etag must not clobber newer state — and the etag is
 identity-only, so the family-filtered delivered subset need not re-hash. At
-runtime a `tools/list_changed` notification triggers a re-list; on an etag change
-the connector calls Bridge's `McpManifestChanged` and retries to a durable ACK —
-4 total attempts (`MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS`, 1 s / 4 s / 16 s). Notify
+runtime every `tools/list_changed` notification triggers a re-list, and each
+successful re-list is reported to Bridge even when its etag matches an earlier
+notification. The initial upstream list precedes notification retry and is
+non-mutating on failure. The connector retries a within-cap notification with 4
+total attempts (`MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS`, 1 s / 4 s / 16 s). Notify
 exhaustion is a structured connector log only, never a readiness flip; the next
-notification re-triggers. The durable row carries a `(readiness, diagnostic)` pair
-orthogonal to content: an over-cap or discovery-failed server is written `unready`
-and contributes no tools while its last-accepted content is preserved; restore is
+notification re-triggers. Bridge alone decides whether the durable manifest is
+current, requires a readiness restore, or advances generation. Bridge treats a
+durably committed over-cap transition
+as terminal and returns it without connector retry. The durable row carries a
+`(readiness, diagnostic)` pair orthogonal to content: an over-cap manifest is
+written `unready` and contributes no tools while its last-accepted content is
+preserved; discovery failure leaves the row and Queue unchanged. Restore is
 readiness-aware, so a re-notify matching the stored etag while `unready` is a
 restore (not a duplicate no-op).
 
@@ -597,7 +603,9 @@ it preserves the stated invariants and passes the named suites.
 - **Invariants.** Match is by normalized `mcp_server_url`; the bounded
   `GitHubMcpCredentialError` set each fails closed and leaks no internal step; a
   rotating refresh token is never burned twice concurrently; per-operation refresh
-  ceiling of one per phase; plaintext never logged or persisted.
+  ceiling of one per phase; `refreshTriggered` means a successful rotation
+  contributed to the returned call, while issuer attempts are counted at the
+  locked refresh owner; plaintext never logged or persisted.
 - **Conformance.** `credential.test.ts`, `credential-postgresql.test.ts`, and the
   `test/testdata/mcp-credential-vectors.json` vector set (each vector exercised by
   the credential suite).

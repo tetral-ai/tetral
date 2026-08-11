@@ -23,19 +23,19 @@ import type { RuntimeThreadRoleState } from "@tetral/agent-runtime-core/src/thre
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { buildOutboundBearerMetadata, KubernetesTokenReviewClient, validateKubernetesTokenReviewReviewerMaterial } from "./auth.js";
 import type { RuntimeTokenReviewClient, ServiceAccountTokenConfig } from "./auth.js";
-import { BridgeAPIApprovalReviewerThreadCreator, BridgeAPIContextLoader, BridgeAPIControlInputCommitter, BridgeAPIEventWriter, BridgeAPIInternalToolRepairCommitter, BridgeAPITaskNotificationCommitter } from "./bridge-client.js";
+import { BridgeAPIApprovalReviewerThreadCreator, BridgeAPIContextLoader, BridgeAPIControlInputCommitter, BridgeAPIEventWriter, BridgeAPIInternalToolRepairCommitter } from "./bridge-client.js";
 import { buildRuntimeCoreHosts } from "./core-hosts.js";
 import type { RuntimeCoreHosts } from "./core-hosts.js";
 import { createRuntimeApprovalReviewer, loadApprovalReviewerAssets } from "./approval-reviewer.js";
-import { RuntimePodGatewayClient } from "./gateway-client.js";
+import { RuntimePodGatewayClient, runtimeProviderStreamObserver } from "./gateway-client.js";
 import { gatewayGrpcChannelOptions } from "./bounds.js";
 import { loadRuntimePodConfigFromProcessEnv, parseModelRef } from "./config.js";
 import type { RuntimePodConfig, RuntimePodModelRef } from "./config.js";
 import { createRuntimePodApp } from "./app.js";
 import type { RuntimePodApp } from "./app.js";
-import { createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
+import { acceptedInputCommitLogRecord, createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, runtimeCloseoutLogRecord, runtimeMCPManifestUpdateLogRecord, startupFailureLogRecord } from "./logger.js";
 import type { RuntimePodLogger } from "./logger.js";
-import type { RuntimeControlInputCommitter, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
+import type { RuntimeControlInputCommitter } from "./runtime-service.js";
 import { RuntimePodToolRunner } from "./tool-runner.js";
 import { RuntimePodMetricsRegistry } from "./metrics.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -74,10 +74,6 @@ export interface RuntimePodDependencyBuilderOptions {
     readonly config: RuntimePodConfig;
     readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   }) => RuntimeControlInputCommitter;
-  readonly taskNotificationCommitterFactory?: (input: {
-    readonly config: RuntimePodConfig;
-    readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
-  }) => RuntimeTaskNotificationCommitter;
 }
 
 function providerStreamTimeoutOptions(config: Pick<RuntimePodConfig, "providerStreamTimeoutMs">): {
@@ -206,6 +202,17 @@ export async function buildRuntimePodCommandDependencies(input: {
         // A metrics or logging sink cannot participate in closeout custody.
       }
     },
+    recordMCPManifestUpdate: (event) => {
+      try {
+        input.logger.info(runtimeMCPManifestUpdateLogRecord(event));
+      } catch {
+        // Configuration application and Tool Catalog rebuilding cannot depend on logging.
+      }
+    },
+    resolveMCPManifestEligibility: (effectivePatches, mcpServerName) =>
+      runtimeMCPManifestEligibilityFromPatchPayloads(
+        effectivePatches.map((patch) => patch.payloadJson), mcpServerName,
+      ),
     threadLoop: {
       internalToolRepairStore: new BridgeInternalToolRepairStore(internalToolRepairCommitter),
       sessionEventWriter: new BridgeAPIEventWriter({
@@ -232,13 +239,16 @@ export async function buildRuntimePodCommandDependencies(input: {
             }, { once: true });
         }),
       },
-      llmService: createLLMService(gatewayClient),
+      llmService: createLLMService(gatewayClient, runtimeProviderStreamObserver(input.logger)),
       storeOperationTimeoutMs: 5_000,
       recordProviderReschedule: (event) => {
         input.logger.info(providerRescheduleSelectedLogRecord(event));
       },
       recordProviderToolDeclarationRejection: (event) => {
         input.logger.error(providerToolDeclarationRejectedLogRecord(event));
+      },
+      recordAcceptedInputCommit: (event) => {
+        input.logger.info(acceptedInputCommitLogRecord(event));
       },
       providerCallRuntime: {
         ...DefaultProviderCallRuntimeConfig,
@@ -281,15 +291,6 @@ export async function buildRuntimePodCommandDependencies(input: {
       reviewerTokenPath: input.config.tokenReviewReviewerTokenPath,
       apiServerCaCertPath: input.config.kubernetesApiCaCertPath,
     });
-  const taskNotificationCommitter =
-    input.builderOptions?.taskNotificationCommitterFactory?.({ config: input.config, metadataFactory: outboundMetadataFactory }) ??
-    new BridgeAPITaskNotificationCommitter({
-      address: input.config.bridgeApiGrpcAddress,
-      tokenPath: input.config.outboundInternalGrpcTokenPath,
-      metadataFactory: outboundMetadataFactory,
-      logger: input.logger,
-      metrics,
-    });
   const controlInputCommitter =
     input.builderOptions?.controlInputCommitterFactory?.({ config: input.config, metadataFactory: outboundMetadataFactory }) ??
     new BridgeAPIControlInputCommitter({
@@ -303,7 +304,6 @@ export async function buildRuntimePodCommandDependencies(input: {
     tokenReviewClient,
     commandRunHost: coreHosts.commandRunHost,
     controlInputCommitter,
-    taskNotificationCommitter,
     cleanupRunHost: coreHosts.cleanupRunHost,
     shutdownActiveRuns: coreHosts.shutdownActiveRuns,
     metrics,
@@ -367,6 +367,26 @@ export function runtimeToolPolicyFromPatchPayloads(
   payloadJsons: readonly string[],
 ): ReturnType<typeof runtimeToolPolicyFromPatchPayloadsWithFamily> {
   return runtimeToolPolicyFromPatchPayloadsWithFamily(payloadJsons, undefined, true);
+}
+
+/** Computes manifest eligibility from the effective Session configuration, not the candidate patch. */
+export function runtimeMCPManifestEligibilityFromPatchPayloads(payloadJsons: readonly string[], mcpServerName: string): boolean {
+  let activeToolsets: ReadonlyMap<string, MCPManifestToolsetConfig> | undefined;
+  let manifestReady = false;
+  for (const payloadJson of payloadJsons) {
+    const parsed = parseRuntimePolicyPayload(payloadJson);
+    if (parsed === undefined) continue;
+    const nextToolsets = parseMcpToolsets(
+      recordArrayField(parsed.tool_policy, "mcpToolsets") ?? recordArrayField(parsed.tool_policy, "mcp_toolsets") ??
+      recordArrayField(parsed.toolPolicy, "mcpToolsets") ?? recordArrayField(parsed.toolPolicy, "mcp_toolsets"),
+    );
+    if (nextToolsets !== undefined) activeToolsets = nextToolsets;
+    const manifest = recordField(parsed, "mcp_manifest") ?? recordField(parsed, "mcpManifest");
+    if (!isRecord(manifest)) continue;
+    const serverName = recordStringField(manifest, "mcp_server_name") ?? recordStringField(manifest, "mcpServerName");
+    if (serverName === mcpServerName) manifestReady = (recordStringField(manifest, "readiness") ?? "ready") === "ready";
+  }
+  return manifestReady && activeToolsets?.has(mcpServerName) === true;
 }
 
 function runtimeToolPolicyFromPatchPayloadsWithFamily(

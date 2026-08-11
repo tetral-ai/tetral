@@ -2,13 +2,16 @@ package agentruntimebridge
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -39,23 +42,32 @@ type runtimePodLostAffectedThreads struct {
 }
 
 func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
+	repaired, _, err := repairLostRuntimeBindingDetailedTx(ctx, tx, workspaceID, sessionID, binding, now)
+	return repaired, err
+}
+
+func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, int, error) {
+	handedOff, err := handOffLostRuntimeAcceptedInputsTx(ctx, tx, workspaceID, sessionID, binding, now)
+	if err != nil {
+		return 0, 0, err
+	}
 	affected, err := runtimePodLostAffectedThreadsTx(ctx, tx, workspaceID, sessionID, binding)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	starts, err := runtimePodLostOpenRequestStartsTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	repaired := 0
+	repaired := handedOff
 	for _, start := range starts {
 		inserted, err := insertRuntimePodLostRequestEndTx(ctx, tx, workspaceID, sessionID, binding, start, now)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if inserted {
 			repaired++
@@ -64,7 +76,7 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 	for _, toolUse := range toolUses {
 		inserted, err := insertRuntimePodLostToolResultTx(ctx, tx, workspaceID, sessionID, binding, toolUse, now)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if inserted {
 			repaired++
@@ -76,22 +88,259 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 	// observe the same pending operation/job rather than creating another wake.
 	releaseJobs, err := sandboxrelease.ReadyRequestsTx(ctx, tx, workspaceID, sessionID, now, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs, binding, now)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	repaired += deliveryRepaired
 	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, affected, binding, now)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	repaired += liveScopesSettled
-	return repaired, nil
+	return repaired, handedOff, nil
+}
+
+type runtimePodLostAcceptedInput struct {
+	SessionThreadID string
+	RuntimeInputID  string
+	InputKind       string
+	EventIDsJSON    string
+	SequenceFrom    sql.NullInt64
+	SequenceTo      sql.NullInt64
+	RejectionReason sql.NullString
+	QueueJobID      sql.NullString
+	QueueStatus     sql.NullString
+}
+
+// handOffLostRuntimeAcceptedInputsTx is the sole transition from proven-lost
+// Runtime custody back to Queue custody. It preserves an active original job
+// and its attempt lineage; only an already-acknowledged delivery receives a new
+// job, in durable Inbox creation order.
+func handOffLostRuntimeAcceptedInputsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) (int, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT inbox.session_thread_id,
+		        inbox.runtime_input_id,
+		        inbox.input_kind,
+		        inbox.event_ids_json,
+		        inbox.sequence_from,
+		        inbox.sequence_to,
+		        inbox.rejection_reason_code,
+		        active.id,
+		        active.status
+		   FROM session_runtime_inbox inbox
+		   LEFT JOIN LATERAL (
+		       SELECT job.id, job.status
+		         FROM queue_jobs job
+		        WHERE job.workspace_id = inbox.workspace_id
+		          AND job.kind = 'runtime_input'
+		          AND job.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		          AND job.status IN ('pending', 'leased')
+		        ORDER BY job.created_at, job.id
+		        LIMIT 1
+		        FOR UPDATE OF job
+		   ) active ON true
+		  WHERE inbox.workspace_id = $1
+		    AND inbox.session_id = $2
+		    AND inbox.status IN ('delivering', 'accepted')
+		    AND inbox.input_kind <> 'approval_review'
+		    AND inbox.binding_id = $3
+		    AND inbox.binding_generation = $4
+		    AND inbox.target_pod_uid = $5
+		  ORDER BY inbox.created_at, inbox.runtime_input_id
+		  FOR UPDATE OF inbox`,
+		workspaceID,
+		sessionID,
+		binding.BindingID,
+		binding.BindingGeneration,
+		binding.PodUID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	inputs := make([]runtimePodLostAcceptedInput, 0)
+	for rows.Next() {
+		var input runtimePodLostAcceptedInput
+		if err := rows.Scan(
+			&input.SessionThreadID,
+			&input.RuntimeInputID,
+			&input.InputKind,
+			&input.EventIDsJSON,
+			&input.SequenceFrom,
+			&input.SequenceTo,
+			&input.RejectionReason,
+			&input.QueueJobID,
+			&input.QueueStatus,
+		); err != nil {
+			return 0, err
+		}
+		inputs = append(inputs, input)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	handedOff := 0
+	for _, input := range inputs {
+		if input.InputKind == "" {
+			return 0, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "runtime inbox input kind is missing", retryable: false}
+		}
+		var inboxStatus string
+		if err := tx.QueryRow(ctx,
+			`SELECT status
+			   FROM session_runtime_inbox
+			  WHERE workspace_id = $1 AND runtime_input_id = $2
+			  FOR UPDATE`,
+			workspaceID,
+			input.RuntimeInputID,
+		).Scan(&inboxStatus); err != nil {
+			return 0, err
+		}
+		if inboxStatus == "delivering" {
+			if !input.QueueJobID.Valid {
+				return 0, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "delivering runtime input has no active queue custody", retryable: false}
+			}
+			continue
+		}
+		if inboxStatus != "accepted" {
+			continue
+		}
+		if input.QueueJobID.Valid {
+			if input.QueueStatus.String == queue.StatusLeased {
+				if _, err := tx.Exec(ctx,
+					`UPDATE queue_jobs
+					    SET status = 'pending', available_at = $3,
+					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
+					        updated_at = $3
+					  WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,
+					workspaceID,
+					input.QueueJobID.String,
+					now,
+				); err != nil {
+					return 0, err
+				}
+			}
+		} else {
+			request, err := lostRuntimeInputEnqueueRequest(workspaceID, sessionID, input, now)
+			if err != nil {
+				return 0, err
+			}
+			if _, err := queue.EnqueueTx(ctx, tx, request); err != nil {
+				return 0, err
+			}
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE session_runtime_inbox
+			    SET status = 'queued', binding_id = NULL, binding_generation = NULL,
+			        target_pod_uid = NULL, updated_at = $3
+			  WHERE workspace_id = $1 AND runtime_input_id = $2
+			    AND status = 'accepted'
+			    AND binding_id = $4 AND binding_generation = $5 AND target_pod_uid = $6`,
+			workspaceID,
+			input.RuntimeInputID,
+			now,
+			binding.BindingID,
+			binding.BindingGeneration,
+			binding.PodUID,
+		); err != nil {
+			return 0, err
+		}
+		handedOff++
+	}
+	return handedOff, nil
+}
+
+func lostRuntimeInputEnqueueRequest(
+	workspaceID string,
+	sessionID string,
+	input runtimePodLostAcceptedInput,
+	now time.Time,
+) (queue.EnqueueRequest, error) {
+	ws := workspace.ID(workspaceID)
+	if input.InputKind == "task_notification" {
+		taskID := strings.TrimPrefix(input.RuntimeInputID, "task_notification:")
+		if taskID == "" || taskID == input.RuntimeInputID {
+			return queue.EnqueueRequest{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "task notification runtime input identity is invalid", retryable: false}
+		}
+		return queue.NewTaskNotificationRuntimeInputEnqueueRequest(ws, sessionID, input.SessionThreadID, taskID, now)
+	}
+	if input.InputKind == "agent_mail" {
+		deliveryID := strings.TrimPrefix(input.RuntimeInputID, "agent_mail:")
+		if deliveryID == "" || deliveryID == input.RuntimeInputID {
+			return queue.EnqueueRequest{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "agent mail runtime input identity is invalid", retryable: false}
+		}
+		request, _, err := agentMailWakeEnqueueRequest(workspaceID, sessionID, input.SessionThreadID, deliveryID, now)
+		return request, err
+	}
+	payloadJSON, err := runtimeInputQueuePayloadJSON(workspaceID, sessionID, input)
+	if err != nil {
+		return queue.EnqueueRequest{}, err
+	}
+	return queue.EnqueueRequest{
+		WorkspaceID:    ws,
+		Kind:           queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(ws, sessionID, input.RuntimeInputID),
+		PayloadVersion: 1,
+		PayloadJSON:    payloadJSON,
+		Priority:       runtimeInputPriority(input.InputKind),
+		Now:            now,
+	}, nil
+}
+
+type runtimeInputQueuePayload struct {
+	WorkspaceID     string   `json:"workspace_id"`
+	SessionID       string   `json:"session_id"`
+	SessionThreadID string   `json:"session_thread_id"`
+	RuntimeInputID  string   `json:"runtime_input_id"`
+	EventIDs        []string `json:"event_ids"`
+	SequenceFrom    int64    `json:"sequence_from"`
+	SequenceTo      int64    `json:"sequence_to"`
+	InputKind       string   `json:"input_kind"`
+}
+
+func runtimeInputQueuePayloadJSON(
+	workspaceID string,
+	sessionID string,
+	input runtimePodLostAcceptedInput,
+) ([]byte, error) {
+	if !input.SequenceFrom.Valid || !input.SequenceTo.Valid || input.SequenceFrom.Int64 <= 0 || input.SequenceTo.Int64 < input.SequenceFrom.Int64 {
+		return nil, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "runtime input has an invalid sequence range", retryable: false}
+	}
+	var eventIDs []string
+	if err := json.Unmarshal([]byte(input.EventIDsJSON), &eventIDs); err != nil || len(eventIDs) == 0 {
+		return nil, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "runtime input has invalid event identities", retryable: false}
+	}
+	return json.Marshal(runtimeInputQueuePayload{
+		WorkspaceID:     workspaceID,
+		SessionID:       sessionID,
+		SessionThreadID: input.SessionThreadID,
+		RuntimeInputID:  input.RuntimeInputID,
+		EventIDs:        eventIDs,
+		SequenceFrom:    input.SequenceFrom.Int64,
+		SequenceTo:      input.SequenceTo.Int64,
+		InputKind:       input.InputKind,
+	})
+}
+
+func runtimeInputPriority(inputKind string) int {
+	if inputKind == "interrupt_control" {
+		return 100
+	}
+	return 0
 }
 
 func runtimePodLostAffectedThreadsTx(
@@ -494,6 +743,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 	requireActive bool,
 ) (runtimePodLossMutationResult, error) {
 	result := runtimePodLossMutationResult{status: runtimePodLossMutationRepaired}
+	handedOff := 0
 	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
 			if code, ok := closeoutSentinelCode(err); requireActive && ok && code == closeoutScopeSupersededCode {
@@ -526,12 +776,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 				return nil
 			}
 		}
-		if _, err := repairLostRuntimeBindingTx(ctx, tx, workspaceID, sessionID, binding, now); err != nil {
+		_, count, err := repairLostRuntimeBindingDetailedTx(ctx, tx, workspaceID, sessionID, binding, now)
+		if err != nil {
 			return err
 		}
-		if _, err := rearmPendingCompletionMailForSessionTx(ctx, tx, workspaceID, sessionID, now); err != nil {
-			return err
-		}
+		handedOff = count
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM session_runtime_bindings
 			  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
@@ -557,6 +806,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 	if err != nil {
 		return runtimePodLossMutationResult{}, err
 	}
+	logRuntimeInputCustodyTransition(s.Logger, &bridgev1.RuntimeScope{
+		WorkspaceId: workspaceID,
+		SessionId:   sessionID,
+	}, "accepted_to_queued", handedOff)
 	return result, nil
 }
 
@@ -569,7 +822,20 @@ func runtimePodLossSessionActiveTx(
 ) (bool, error) {
 	var active bool
 	err := tx.QueryRow(ctx,
-		`SELECT (runtime.status = 'running' OR session.status = 'rescheduling')
+		`SELECT (
+		    runtime.status = 'running'
+		    OR session.status = 'rescheduling'
+		    OR EXISTS (
+		      SELECT 1
+		        FROM session_runtime_inbox inbox
+		       WHERE inbox.workspace_id = runtime.workspace_id
+		         AND inbox.session_id = runtime.session_id
+		         AND inbox.status = 'accepted'
+		         AND inbox.binding_id = $3
+		         AND inbox.binding_generation = $4
+		         AND inbox.target_pod_uid = $5
+		    )
+		  )
 		   FROM session_runtime_status runtime
 		   JOIN sessions session
 		     ON session.workspace_id = runtime.workspace_id
@@ -579,7 +845,7 @@ func runtimePodLossSessionActiveTx(
 		    AND runtime.binding_id = $3
 		    AND runtime.binding_generation = $4
 		  FOR UPDATE OF runtime`,
-		workspaceID, sessionID, binding.BindingID, binding.BindingGeneration,
+		workspaceID, sessionID, binding.BindingID, binding.BindingGeneration, binding.PodUID,
 	).Scan(&active)
 	if dbconnect.IsNoRows(err) {
 		return false, nil
@@ -897,18 +1163,6 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 				return 0, err
 			}
 		}
-		if _, err := enqueueCompletionMailWakeTx(
-			ctx,
-			tx,
-			workspaceID,
-			sessionID,
-			envelope.TargetThreadID,
-			envelope.DeliveryID,
-			now,
-		); err != nil {
-			return 0, err
-		}
-
 		var taskName string
 		if err := tx.QueryRow(ctx,
 			`SELECT COALESCE(task_name, '')

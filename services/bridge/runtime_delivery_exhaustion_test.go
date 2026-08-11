@@ -121,48 +121,6 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreExhaustionFenceSurvivesRepair(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_inbox", "thr_exhaust_inbox")
-	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_inbox", "thr_exhaust_inbox", "evt_exhaust_inbox", 1, "user.message", `{"type":"user.message"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_inbox", "thr_exhaust_inbox", "rin_exhaust_inbox", "messages", `["evt_exhaust_inbox"]`, "accepted", "bind_exhaust_inbox", "pod_exhaust_inbox", 1, 1)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC) }
-	job := exhaustionRuntimeJob("sesn_exhaust_inbox", "thr_exhaust_inbox", "rin_exhaust_inbox", "messages", []string{"evt_exhaust_inbox"})
-
-	finalized, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult())
-	if err != nil {
-		t.Fatalf("FinalizeRuntimeDelivery: %v", err)
-	}
-	assertExhaustedRuntimeDeliveryResult(t, finalized)
-	assertRuntimeExhaustionRows(t, admin, job, "dead_lettered", 1)
-
-	for iteration := 0; iteration < 3; iteration++ {
-		replayed, found, err := store.ReplayRuntimeDeliveryFinalization(context.Background(), job)
-		if err != nil || !found {
-			t.Fatalf("ReplayRuntimeDeliveryFinalization iteration %d = %#v/%v/%v; want stored disposition", iteration, replayed, found, err)
-		}
-		assertExhaustedRuntimeDeliveryResult(t, replayed)
-		finalized, err = store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult())
-		if err != nil {
-			t.Fatalf("FinalizeRuntimeDelivery replay %d: %v", iteration, err)
-		}
-		assertExhaustedRuntimeDeliveryResult(t, finalized)
-		repaired, err := store.RepairRuntimeInbox(context.Background(), "default", 10)
-		if err != nil || repaired != 0 {
-			t.Fatalf("RepairRuntimeInbox iteration %d = %d/%v; want zero", iteration, repaired, err)
-		}
-	}
-	assertRuntimeExhaustionRows(t, admin, job, "dead_lettered", 1)
-	var repairJobs int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='runtime_input'`).Scan(&repairJobs); err != nil {
-		t.Fatalf("count repair queue jobs: %v", err)
-	}
-	if repairJobs != 0 {
-		t.Fatalf("repair queue jobs = %d; want zero", repairJobs)
-	}
-}
-
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesEventAnchoredPreInboxOnce(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_preinbox", "thr_exhaust_preinbox")
@@ -187,9 +145,6 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesEventAnchoredPreInboxO
 		t.Fatalf("FinalizeRuntimeDelivery replay: %v", err)
 	}
 	assertRuntimeExhaustionRows(t, admin, job, "", 1)
-	if repaired, err := store.RepairRuntimeInbox(context.Background(), "default", 10); err != nil || repaired != 0 {
-		t.Fatalf("RepairRuntimeInbox = %d/%v; want zero", repaired, err)
-	}
 }
 
 func TestPostgreSQLRuntimeDeliveryStoreConcurrentEventAnchoredPreInboxFinalizationLinearizes(t *testing.T) {
@@ -658,9 +613,6 @@ func assertCrossDatabaseExhaustionConverged(t *testing.T, bridgeAdmin *sql.DB, q
 	for iteration := 0; iteration < 3; iteration++ {
 		if _, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult()); err != nil {
 			t.Fatalf("replay finalization %d: %v", iteration, err)
-		}
-		if repaired, err := store.RepairRuntimeInbox(context.Background(), "default", 10); err != nil || repaired != 0 {
-			t.Fatalf("repair after convergence %d = %d/%v; want zero", iteration, repaired, err)
 		}
 	}
 	assertRuntimeExhaustionRows(t, bridgeAdmin, job, wantInbox, 1)

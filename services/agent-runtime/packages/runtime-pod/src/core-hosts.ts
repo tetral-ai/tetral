@@ -21,7 +21,7 @@ import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@te
 import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
-import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
+import type { RuntimeCloseoutEvent, RuntimeMCPManifestUpdateEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import { runtimeAgentMailText, runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
@@ -69,6 +69,8 @@ export interface RuntimeCoreHostsOptions {
   readonly threadLoop: ThreadLoop.ThreadLoopRuntimeOptions;
   readonly metrics?: RuntimeMetricsSink | undefined;
   readonly recordCloseoutEvent?: ((event: RuntimeCloseoutEvent) => void) | undefined;
+  readonly recordMCPManifestUpdate?: ((event: RuntimeMCPManifestUpdateEvent) => void) | undefined;
+  readonly resolveMCPManifestEligibility?: SessionManager.LayerOptions["resolveMCPManifestEligibility"];
 }
 
 /**
@@ -161,6 +163,8 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
     closeoutMonotonicMs: options.threadLoop.runtime.monotonicMs,
     closeoutSleep: options.threadLoop.runtime.sleep,
     ...(options.recordCloseoutEvent !== undefined ? { recordCloseoutEvent: options.recordCloseoutEvent } : {}),
+    ...(options.recordMCPManifestUpdate !== undefined ? { recordMCPManifestUpdate: options.recordMCPManifestUpdate } : {}),
+    ...(options.resolveMCPManifestEligibility !== undefined ? { resolveMCPManifestEligibility: options.resolveMCPManifestEligibility } : {}),
   }).pipe(Layer.provide(threadLoopLayer));
   const hostLayer = SessionRunHost.layer.pipe(Layer.provide(managerLayer));
   const { host, scope } = await Effect.runPromise(
@@ -178,10 +182,18 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         if (result.ok) {
           return result;
         }
-        if (result.reason === "context_load_failed") {
-          throw new Error("cold thread preload failed");
-        }
-        return { ok: false, sessionId: result.sessionId, reason: "local_session_capacity_exceeded" };
+        return {
+          ok: false,
+          sessionId: result.sessionId,
+          reason: result.reason === "context_load_failed"
+            ? "context_load_failed"
+            : result.reason === "local_session_capacity_exceeded"
+              ? "local_session_capacity_exceeded"
+              : "control_conflict",
+          ...(result.reason === "context_load_failed" && result.retryable !== undefined
+            ? { retryable: result.retryable }
+            : {}),
+        };
       },
       handleAgentMail: async (command) => {
         try {
@@ -193,15 +205,18 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               reason: result.reason === "local_session_capacity_exceeded"
                 ? "local_session_capacity_exceeded"
                 : "thread_not_receivable",
+              ...(result.reason === "context_load_failed" && result.retryable !== undefined
+                ? { reason: "context_load_failed" as const, retryable: result.retryable }
+                : {}),
             } as const;
           }
           return {
             ok: true,
             sessionId: command.sessionId,
-            applied: result.started || result.pendingWake,
+            applied: result.duplicate !== true || result.started,
           };
         } catch {
-          return { ok: false, sessionId: command.sessionId, reason: "context_load_failed" };
+          return { ok: false, sessionId: command.sessionId, reason: "context_load_failed", retryable: false };
         }
       },
       handleInterruptControl: async (sessionId, command, commitInput) => await Effect.runPromise(host.handleInterruptControl(
@@ -211,8 +226,8 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       )),
       handleToolConfirmation: async (sessionId, command, commit) =>
         await Effect.runPromise(host.handleToolConfirmation(sessionId, command, commit)),
-      handleTaskNotification: async (sessionId, command, commit) =>
-        await Effect.runPromise(host.handleTaskNotification(sessionId, command, commit)),
+      handleTaskNotification: async (sessionId, command) =>
+        await Effect.runPromise(host.handleTaskNotification(sessionId, command)),
       handleRuntimeConfigPatch: async (sessionId, command) => {
         return await Effect.runPromise(host.handleRuntimeConfigPatch(sessionId, command));
       },

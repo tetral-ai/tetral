@@ -138,7 +138,19 @@ func readRequestEndInterruptReceiptTx(
 	return receipt, nil
 }
 
-func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request *bridgev1.WriteRequestEndRequest) (*bridgev1.WriteRequestEndResponse, error) {
+func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request *bridgev1.WriteRequestEndRequest) (response *bridgev1.WriteRequestEndResponse, resultErr error) {
+	evidence := runtimeDeclarationRejectionEvidence{
+		Active:      request.GetTrailingPartAppend() != nil || request.GetCompactionCheckpointCreate() != nil,
+		Kind:        "identity",
+		Operation:   bridgeOpWriteRequestEnd,
+		OperationID: request.GetRuntimeWriteId(),
+	}
+	if appendValue := request.GetTrailingPartAppend(); appendValue != nil && len(appendValue.GetParts()) > 0 && appendValue.GetParts()[0] != nil {
+		evidence.MessageOrPart = appendValue.GetParts()[0].GetPartKind()
+	} else if create := request.GetCompactionCheckpointCreate(); create != nil {
+		evidence.MessageOrPart = create.GetMessageKind().String()
+	}
+	defer func() { logRuntimeDeclarationRejected(s.Logger, request.GetScope(), evidence, resultErr) }()
 	if request.GetRuntimeWriteId() == "" || request.GetModelRequestId() == "" || request.GetModelRequestStartEventId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid request end write")
 	}
@@ -165,6 +177,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	}
 	usageJSON := defaultString(request.GetUsageJson(), "{}")
 	if !json.Valid([]byte(usageJSON)) {
+		evidence.Kind = "schema"
 		return nil, status.Error(codes.InvalidArgument, "usage must be JSON")
 	}
 	providerUsageJSON, err := parseProviderUsageJSON(usageJSON)
@@ -193,6 +206,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		return nil, err
 	}
 	key := request.GetModelRequestId()
+	evidence.Kind = "canonicality"
 	declarationDigest, err := writeRequestEndDeclarationDigest(
 		request,
 		requestKind,
@@ -220,9 +234,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		); err != nil {
 			return err
 		}
+		evidence.Kind = "authorization"
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		evidence.Kind = "transaction"
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -274,6 +290,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if err != nil {
 			return err
 		}
+		evidence.ThreadRole = threadScope.role
 		visibility, sessionVisible := threadScope.publicProjection("span.model_request_end")
 		activeTransientAttachmentRefs, err := validateTransientAttachmentsForConsumptionTx(
 			ctx,
@@ -380,6 +397,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			ctx,
 			tx,
 			request,
+			usage,
+			providerUsageJSON,
 			threadScope,
 			eventID,
 			sequence,
@@ -911,16 +930,6 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			receipt.Events = append(receipt.Events, mailEvent)
 			receipt.Messages = append(receipt.Messages, mailMessage)
 		}
-		if _, err := rearmPendingCompletionMailForThreadTx(
-			ctx,
-			tx,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			request.GetScope().GetSessionThreadId(),
-			now,
-		); err != nil {
-			return err
-		}
 		receiptJSON, err := marshalDeclarationReceipt(receipt)
 		if err != nil {
 			return err
@@ -1022,8 +1031,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	}
 	now := s.now()
 	var (
-		ack     *bridgev1.BridgeWriteAck
-		receipt *bridgev1.DeclarationReceipt
+		ack                *bridgev1.BridgeWriteAck
+		receipt            *bridgev1.DeclarationReceipt
+		custodyTransitions runtimeTerminationCustodyTransitions
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_runtime_termination", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
@@ -1102,6 +1112,16 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 				return err
 			}
 		}
+		custodyTransitions, err = cancelRuntimeTerminationInputsTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			threadScope.role == "main",
+			now,
+		)
+		if err != nil {
+			return err
+		}
 		// Runtime termination removes every current-thread and, for the main
 		// thread, sibling Sandbox blocker before release readiness is evaluated
 		// once for the Session. Queue custody is assigned in this transaction.
@@ -1150,6 +1170,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "accepted_to_cancelled", custodyTransitions.accepted)
+	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "parked_to_cancelled", custodyTransitions.parked)
 	logRuntimeDeclaration(
 		s.Logger,
 		request.GetScope(),

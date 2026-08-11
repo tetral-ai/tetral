@@ -44,7 +44,7 @@ invariants stated with them.
 | `ContextManager` | `context-manager.ts` | hot `RuntimeMessage` state for one thread | appends only after durable ACK |
 | `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
-| `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | recoverable hot state on the parent thread; durable truth is the trunk ledger |
+| `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; each outcome is ACKed on the Reviewer Thread that executed it, while a new hot lifetime re-reviews on a fresh trunk |
 
 Invariants a replacement must preserve:
 
@@ -58,22 +58,22 @@ Invariants a replacement must preserve:
 
 ### `run_slot` — single-owner run guard
 
-At most one owner run per thread. Many callers may join that owner; wake
-signals coalesce while it is active.
+At most one owner run per thread. Many callers may join that owner. Inputs
+accepted while it is active are installed in the thread's `ThreadProcessor`;
+the reducer, not a side-channel wake flag, decides whether work remains.
 
 | Field | Meaning |
 | --- | --- |
 | `run_id` / `owner_fiber` / `scope` / `done_deferred` | the active run, its scope, and the deferred that joined waiters await |
-| `pending_wake` | coalescing flag (not a counter): any number of inputs arriving while active yield exactly one follow-up run |
-| `pending_wake_after_stop` | input accepted after an interrupt fence; owner cleanup must not drop it |
 | `stopping` | interrupt installed; the owner is unwinding |
+| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, deferral, or terminal disposition receipt |
 
 | Event | Idle thread | Active, `stopping = false` | Active, `stopping = true` |
 | --- | --- | --- | --- |
-| `resume` | mark the resident Thread idle and receivable; later input performs the wake | reject as busy | reject as busy |
-| `wake` | create `run_slot(wake)` | set `pending_wake` | set `pending_wake_after_stop` |
-| `interrupt` | mark accepted, start no provider request | `stopping = true`, clear `pending_wake`, interrupt owner, close scopes | already stopping |
-| owner exits clean | — | if `pending_wake`: one follow-up run; else clear slot and complete `done_deferred` | if `pending_wake_after_stop`: clear `stopping`, start one follow-up after cleanup finalizers |
+| `resume` | mark the resident Thread idle and receivable; later input starts work | reject as busy | reject as busy |
+| accepted input | install the fact and start one run only when its reducer action is active | install the fact; the current run observes it at an action boundary | install the fact behind the interrupt fence |
+| `interrupt` | mark accepted, start no provider request | `stopping = true`, interrupt owner, close scopes | already stopping |
+| owner exits clean | — | clear the old slot, reduce the latest projection, and start at most one successor for an active action | clear the old slot after finalizers, then apply the same reducer rule |
 
 A successful `FinishIdle(end_turn)` ends the run even when input is queued; the
 follow-up run for queued work is the next run. Intra-turn retries — reschedule,
@@ -193,6 +193,12 @@ Invariants a replacement must preserve:
 - Stream events echo the request identity and arrive well-formed: fragments in
   order, one terminal event, each tool call at most once per id; any violation
   closes the turn as a protocol error and discards uncommitted drafts.
+- A validated terminal is held until the Gateway gRPC stream reaches normal
+  EOF. Runtime adapts grpc-js through a Web reader and owns one typed completion
+  latch; EOF without a terminal, transport failure after a terminal, consumer
+  cancellation, or expiry of the request timeout plus the fixed 10-second
+  transport-completion allowance cannot be mistaken for success. Every
+  non-EOF exit cancels the reader and generated call before the latch settles.
 - The stable `tool-call` is the execution boundary; `tool-input` fragments start
   nothing.
 - The next request cannot start until the stream is terminal, the request end is
@@ -250,6 +256,11 @@ result. A cold Runtime rejoins that accepted execution after refreshing its
 binding token; a transient refresh failure does not invent a Tool Result or
 consume durable custody. The terminal result digest stays internal and is
 returned to Bridge with the loop-authored tool-result declaration.
+Sandbox activation exhaustion is normalized at this shared rejoin boundary for
+command, file, media, and command-I/O routes: the private lifecycle settlement
+becomes one non-retryable Runtime error whose public Tool Result contains only
+`sandbox activation could not be completed`, with no route status, partial
+result, attempt metadata, or provider diagnosis.
 
 `RunWeb` reaches the web-connector through `TETRAL_WEB_CONNECTOR_GRPC_ADDR`,
 which boot config requires and gives no default: a Runtime Pod whose Deployment
@@ -323,7 +334,8 @@ Invariants a replacement must preserve:
   after `CreateChildThread` ACK reuses the same child and prefix.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → stamped input
-  receipt. Inbox repair recreates only the queue wake and reuses that identity.
+  receipt. Pod-loss reconciliation hands an accepted input back to the existing
+  queue job or creates one replacement only after exact Runtime custody is lost.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
 - Completion return rides the same durable wake/receipt rail: the child

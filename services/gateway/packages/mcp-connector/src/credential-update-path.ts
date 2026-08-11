@@ -36,6 +36,7 @@ export interface GitHubMcpCredentialRefreshWriter {
    */
   refreshOAuthCredential(input: {
     readonly workspaceId: string;
+    readonly mcpServerName: string;
     readonly row: GitHubCredentialUpdateRow;
     readonly vaultId: string;
     readonly credentialId: string;
@@ -43,6 +44,22 @@ export interface GitHubMcpCredentialRefreshWriter {
     readonly force: boolean;
     readonly signal?: AbortSignal | undefined;
   }): Promise<GitHubMcpCredentialResolution>;
+}
+
+export type McpOAuthRefreshFailureKind =
+  | "credential_state" | "configuration" | "storage" | "decrypt" | "transport"
+  | "timeout" | "http_status" | "response_shape" | "encrypt" | "write_back";
+
+/** One safe owner-exit observation for a locked OAuth refresh decision. */
+export interface McpOAuthRefreshCompletedEvent {
+  readonly mcpServerName: string;
+  readonly credentialId: string;
+  readonly outcome: "refreshed" | "concurrent_winner_reused" | "failed";
+  readonly failureKind?: McpOAuthRefreshFailureKind | undefined;
+  readonly httpStatusClass?: string | undefined;
+  readonly durableWrite: "committed" | "not_needed" | "not_attempted" | "failed";
+  readonly durationMs: number;
+  readonly refreshAttemptMetric?: "success" | "failed" | undefined;
 }
 
 /**
@@ -93,6 +110,15 @@ interface OAuthRefreshResult {
   readonly expiresAt: string;
 }
 
+type OAuthRefreshAttempt =
+  | { readonly ok: true; readonly value: OAuthRefreshResult; readonly httpStatusClass: string }
+  | { readonly ok: false; readonly failureKind: "configuration" | "transport" | "timeout" | "http_status" | "response_shape"; readonly issuerAttempted: boolean; readonly httpStatusClass?: string | undefined };
+
+interface RefreshOwnerResult {
+  readonly resolution: GitHubMcpCredentialResolution;
+  readonly event: Omit<McpOAuthRefreshCompletedEvent, "mcpServerName" | "credentialId" | "durationMs">;
+}
+
 // Adapter for the Vault-domain locked credential update path. The credential
 // lock spans the provider refresh call and the durable write.
 /**
@@ -107,6 +133,7 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
     private readonly now: () => Date = () => new Date(),
     private readonly fetchFn: FetchLike = fetch,
     private readonly refreshHTTPTimeoutMs: number = MCP_REFRESH_HTTP_TIMEOUT_MS,
+    private readonly onRefreshCompleted?: ((event: McpOAuthRefreshCompletedEvent) => void) | undefined,
   ) {}
 
   /**
@@ -117,6 +144,7 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
    */
   async refreshOAuthCredential(input: {
     readonly workspaceId: string;
+    readonly mcpServerName: string;
     readonly row: GitHubCredentialUpdateRow;
     readonly vaultId: string;
     readonly credentialId: string;
@@ -124,13 +152,15 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
     readonly force: boolean;
     readonly signal?: AbortSignal | undefined;
   }): Promise<GitHubMcpCredentialResolution> {
+    const started = Date.now();
     if (this.sql.begin === undefined) {
-      return fail("refresh_failed");
+      return this.finishRefresh(input, started, failedOwner("storage"));
     }
+    let failurePhase: "storage" | "encrypt" | "write_back" = "storage";
     try {
       // Capture the caller's snapshot before waiting so expiry-only refresh wins remain observable.
       const previousExpiresAt = await this.decryptCredentialExpiry(input.row.encrypted_auth);
-      return await this.sql.begin(async (tx) => {
+      const ownerResult = await this.sql.begin(async (tx): Promise<RefreshOwnerResult> => {
         await tx`SELECT set_config('tetral.workspace_id', ${input.workspaceId}, true)`;
         const locked = await tx<readonly GitHubCredentialLockedRow[]>`
           SELECT id, vault_id, auth_public_json, encrypted_auth
@@ -148,22 +178,25 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
           || lockedRow.vault_id !== input.vaultId
           || lockedRow.id !== input.credentialId
         ) {
-          return fail("credential_required");
+          return failedOwner("credential_state", "credential_required");
         }
         if (lockedRow.encrypted_auth === undefined || lockedRow.encrypted_auth === null) {
-          return fail("undecryptable");
+          return failedOwner("credential_state", "undecryptable");
         }
         const current = await this.decryptCredential(lockedRow);
-        if (current === undefined || current.type !== "mcp_oauth" || !nonEmpty(current.access_token)) {
-          return fail("undecryptable");
+        if (current === undefined) {
+          return failedOwner("decrypt", "undecryptable");
+        }
+        if (current.type !== "mcp_oauth" || !nonEmpty(current.access_token)) {
+          return failedOwner("credential_state", "undecryptable");
         }
         const publicMcpServerURL = mcpServerURLFromPublicAuth(lockedRow.auth_public_json);
         if (publicMcpServerURL === undefined || !catalogURLMatches(current.mcp_server_url ?? "", publicMcpServerURL)) {
-          return fail("undecryptable");
+          return failedOwner("credential_state", "undecryptable");
         }
         const currentResolution = useToken(current.access_token, lockedRow);
         if (expiryMovedForward(previousExpiresAt, current.expires_at)) {
-          return currentResolution;
+          return concurrentWinnerOwner(currentResolution);
         }
         if (
           input.previousTokenHash !== undefined &&
@@ -171,22 +204,24 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
           currentResolution.mode === "bearer" &&
           currentResolution.tokenHash !== input.previousTokenHash
         ) {
-          return currentResolution;
+          return concurrentWinnerOwner(currentResolution);
         }
         const currentAction = oauthRefreshAction(current, this.now(), false);
         if (!input.force && currentAction === "use") {
-          return currentResolution;
+          return concurrentWinnerOwner(currentResolution);
         }
         if (current.refresh === undefined) {
-          return fail(input.force ? "refresh_failed" : currentAction === "expired" ? "expired" : "refresh_failed");
+          return failedOwner("configuration", input.force ? "refresh_failed" : currentAction === "expired" ? "expired" : "refresh_failed");
         }
         const refreshed = await this.refreshGitHubOAuth(current.refresh, input.signal);
-        if (refreshed === undefined) {
-          return fail("refresh_failed");
+        if (!refreshed.ok) {
+          return failedOwner(refreshed.failureKind, "refresh_failed", refreshed.issuerAttempted, refreshed.httpStatusClass);
         }
-        const nextAuth = materializeRefreshedAuth(current, refreshed);
+        const nextAuth = materializeRefreshedAuth(current, refreshed.value);
         const publicAuth = publicAuthFromSecret(nextAuth);
+        failurePhase = "encrypt";
         const encrypted = await encryptAES256GCM(new TextEncoder().encode(JSON.stringify(nextAuth)), this.masterKeyHex);
+        failurePhase = "write_back";
         await tx`
           UPDATE credentials
              SET auth_public_json = ${JSON.stringify(publicAuth)},
@@ -198,11 +233,26 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
              AND vault_id = ${input.row.vault_id}
              AND id = ${input.row.id}
         `;
-        return { ...useToken(nextAuth.access_token ?? "", lockedRow), refreshTriggered: true };
+        return {
+          resolution: { ...useToken(nextAuth.access_token ?? "", lockedRow), refreshTriggered: true },
+          event: { outcome: "refreshed", httpStatusClass: refreshed.httpStatusClass,
+            durableWrite: "committed", refreshAttemptMetric: "success" },
+        };
       });
+      return this.finishRefresh(input, started, ownerResult);
     } catch {
-      return fail("refresh_failed");
+      return this.finishRefresh(input, started, failedOwner(failurePhase));
     }
+  }
+
+  private finishRefresh(input: { readonly mcpServerName: string; readonly credentialId: string }, started: number, ownerResult: RefreshOwnerResult): GitHubMcpCredentialResolution {
+    try {
+      this.onRefreshCompleted?.({ mcpServerName: input.mcpServerName, credentialId: input.credentialId,
+        durationMs: Math.max(0, Date.now() - started), ...ownerResult.event });
+    } catch {
+      // Durable rotation and fail-closed resolution do not depend on telemetry.
+    }
+    return ownerResult.resolution;
   }
 
   private async decryptCredentialExpiry(encryptedAuth: unknown): Promise<string | undefined> {
@@ -224,20 +274,15 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
     }
     try {
       const plaintext = await decryptAES256GCM(databaseBytes(row.encrypted_auth), this.masterKeyHex);
-      const auth = JSON.parse(new TextDecoder().decode(plaintext)) as CredentialAuth;
-      const publicMcpServerURL = mcpServerURLFromPublicAuth(row.auth_public_json);
-      if (publicMcpServerURL === undefined || !catalogURLMatches(auth.mcp_server_url ?? "", publicMcpServerURL)) {
-        return undefined;
-      }
-      return auth;
+      return JSON.parse(new TextDecoder().decode(plaintext)) as CredentialAuth;
     } catch {
       return undefined;
     }
   }
 
-  private async refreshGitHubOAuth(refresh: OAuthRefresh, parentSignal?: AbortSignal): Promise<OAuthRefreshResult | undefined> {
+  private async refreshGitHubOAuth(refresh: OAuthRefresh, parentSignal?: AbortSignal): Promise<OAuthRefreshAttempt> {
     if (!nonEmpty(refresh.refresh_token) || !nonEmpty(refresh.client_id) || !nonEmpty(refresh.token_endpoint)) {
-      return undefined;
+      return { ok: false, failureKind: "configuration", issuerAttempted: false };
     }
     const form = new URLSearchParams();
     form.set("grant_type", "refresh_token");
@@ -249,20 +294,20 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
       form.set("resource", refresh.resource);
     }
     const endpointAuth = refresh.token_endpoint_auth ?? { type: "none" };
-    const headers = new Headers({ "Content-Type": "application/x-www-form-urlencoded" });
+    const headers = new Headers({ Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" });
     if (endpointAuth.type === "client_secret_basic") {
       if (!nonEmpty(endpointAuth.client_secret)) {
-        return undefined;
+        return { ok: false, failureKind: "configuration", issuerAttempted: false };
       }
       headers.set("Authorization", `Basic ${btoa(`${refresh.client_id}:${endpointAuth.client_secret}`)}`);
     } else {
       if (endpointAuth.type !== undefined && endpointAuth.type !== "none" && endpointAuth.type !== "client_secret_post") {
-        return undefined;
+        return { ok: false, failureKind: "configuration", issuerAttempted: false };
       }
       form.set("client_id", refresh.client_id);
       if (endpointAuth.type === "client_secret_post") {
         if (!nonEmpty(endpointAuth.client_secret)) {
-          return undefined;
+          return { ok: false, failureKind: "configuration", issuerAttempted: false };
         }
         form.set("client_secret", endpointAuth.client_secret);
       }
@@ -279,18 +324,29 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
       (timer as { unref: () => void }).unref();
     }
     try {
-      const response = await this.fetchFn(refresh.token_endpoint, {
-        method: "POST",
-        headers,
-        body: form,
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        return undefined;
+      let response: Response;
+      try {
+        response = await this.fetchFn(refresh.token_endpoint, { method: "POST", headers, body: form, signal: controller.signal });
+      } catch {
+        return { ok: false, failureKind: controller.signal.aborted ? "timeout" : "transport", issuerAttempted: true };
       }
-      const payload = await response.json() as { readonly access_token?: unknown; readonly refresh_token?: unknown; readonly expires_in?: unknown; readonly expires_at?: unknown };
+      const httpStatusClass = `${Math.floor(response.status / 100)}xx`;
+      if (!response.ok) {
+        return { ok: false, failureKind: "http_status", issuerAttempted: true, httpStatusClass };
+      }
+      let payload: { readonly access_token?: unknown; readonly refresh_token?: unknown; readonly expires_in?: unknown; readonly expires_at?: unknown };
+      try {
+        payload = await response.json() as typeof payload;
+      } catch {
+        return {
+          ok: false,
+          failureKind: controller.signal.aborted ? "timeout" : "response_shape",
+          issuerAttempted: true,
+          httpStatusClass,
+        };
+      }
       if (typeof payload.access_token !== "string" || payload.access_token.length === 0 || typeof payload.refresh_token !== "string" || payload.refresh_token.length === 0) {
-        return undefined;
+        return { ok: false, failureKind: "response_shape", issuerAttempted: true, httpStatusClass };
       }
       const expiresAt = typeof payload.expires_at === "string" && payload.expires_at.length > 0
         ? payload.expires_at
@@ -298,18 +354,34 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
           ? new Date(this.now().getTime() + payload.expires_in * 1000).toISOString()
           : "";
       if (expiresAt === "") {
-        return undefined;
+        return { ok: false, failureKind: "response_shape", issuerAttempted: true, httpStatusClass };
       }
       return {
-        accessToken: payload.access_token,
-        refreshToken: payload.refresh_token,
-        expiresAt,
+        ok: true, httpStatusClass,
+        value: { accessToken: payload.access_token, refreshToken: payload.refresh_token, expiresAt },
       };
     } finally {
       clearTimeout(timer);
       parentSignal?.removeEventListener("abort", abortFromParent);
     }
   }
+}
+
+function failedOwner(
+  failureKind: McpOAuthRefreshFailureKind,
+  error: "credential_required" | "undecryptable" | "expired" | "refresh_failed" = "refresh_failed",
+  issuerAttempted = ["transport", "timeout", "http_status", "response_shape", "encrypt", "write_back"].includes(failureKind),
+  httpStatusClass?: string,
+): RefreshOwnerResult {
+  return { resolution: fail(error), event: {
+    outcome: "failed", failureKind, ...(httpStatusClass !== undefined ? { httpStatusClass } : {}),
+    durableWrite: failureKind === "write_back" ? "failed" : "not_attempted",
+    ...(issuerAttempted ? { refreshAttemptMetric: "failed" } : {}),
+  } };
+}
+
+function concurrentWinnerOwner(resolution: GitHubMcpCredentialResolution): RefreshOwnerResult {
+  return { resolution, event: { outcome: "concurrent_winner_reused", durableWrite: "not_needed" } };
 }
 
 function expiryMovedForward(previousExpiresAt: string | undefined, currentExpiresAt: string | undefined): boolean {
@@ -387,7 +459,7 @@ function fail(error: "credential_required" | "ambiguous" | "undecryptable" | "ex
   return { ok: false, error };
 }
 
-function useToken(token: string, row: Pick<GitHubCredentialLockedRow, "id" | "vault_id">): GitHubMcpCredentialResolution {
+function useToken(token: string, row: Pick<GitHubCredentialLockedRow, "id" | "vault_id">): Extract<GitHubMcpCredentialResolution, { readonly ok: true }> {
   return {
     ok: true,
     mode: "bearer",

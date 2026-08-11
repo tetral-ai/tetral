@@ -369,7 +369,7 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, request
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), targetID, runtimeInputID, string(eventIDs), sequence, now); err != nil {
 		return nil, err
 	}
-	payloadBytes, err := json.Marshal(runtimeInputRepairPayload{
+	payloadBytes, err := json.Marshal(runtimeInputQueuePayload{
 		WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(), SessionThreadID: targetID,
 		RuntimeInputID: runtimeInputID, EventIDs: []string{eventID}, SequenceFrom: sequence, SequenceTo: sequence, InputKind: "interrupt_control",
 	})
@@ -498,6 +498,10 @@ func childInterruptOutcomeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	}
 }
 
+// deferTargetTaskNotificationsTx closes the pending-Queue side of notification
+// custody before applying the shared parked transition. A concurrently leased
+// job cannot pass the Session lock until it observes the close fence and ACKs
+// its own token through deferLeasedTaskNotificationTx.
 func deferTargetTaskNotificationsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, targetIDs []string, now time.Time) error {
 	if len(targetIDs) == 0 {
 		return nil
@@ -536,16 +540,39 @@ func deferTargetTaskNotificationsTx(ctx context.Context, tx *dbconnect.Tx, scope
 				return status.Error(codes.Aborted, "task notification Queue authority changed during close admission")
 			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET
-			status=CASE WHEN status IN ('delivering','accepted','parked') THEN 'parked' ELSE 'queued' END,
-			binding_id=CASE WHEN status IN ('delivering','accepted','parked') THEN binding_id ELSE NULL END,
-			binding_generation=CASE WHEN status IN ('delivering','accepted','parked') THEN binding_generation ELSE NULL END,
-			target_pod_uid=CASE WHEN status IN ('delivering','accepted','parked') THEN target_pod_uid ELSE NULL END,
-			updated_at=$4
+		inboxRows, err := tx.Query(ctx, `SELECT runtime_input_id FROM session_runtime_inbox
 			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			 AND input_kind='task_notification' AND status IN ('queued','delivering','accepted','parked')`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), targetID, now); err != nil {
+			 AND input_kind='task_notification' AND status IN ('queued','delivering','accepted','parked')
+			ORDER BY created_at,runtime_input_id FOR UPDATE`, scope.GetWorkspaceId(), scope.GetSessionId(), targetID)
+		if err != nil {
 			return err
+		}
+		var runtimeInputIDs []string
+		for inboxRows.Next() {
+			var runtimeInputID string
+			if err := inboxRows.Scan(&runtimeInputID); err != nil {
+				_ = inboxRows.Close()
+				return err
+			}
+			runtimeInputIDs = append(runtimeInputIDs, runtimeInputID)
+		}
+		if err := inboxRows.Close(); err != nil {
+			return err
+		}
+		binding := runtimeBindingForDelivery{
+			BindingID: scope.GetBinding().GetBindingId(), BindingGeneration: scope.GetBinding().GetBindingGeneration(),
+			PodUID: scope.GetBinding().GetTargetPodUid(),
+		}
+		for _, runtimeInputID := range runtimeInputIDs {
+			parked, err := parkTaskNotificationInboxTx(
+				ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetID, runtimeInputID, binding, now,
+			)
+			if err != nil {
+				return err
+			}
+			if !parked {
+				return status.Error(codes.Aborted, "task notification Inbox authority changed during close admission")
+			}
 		}
 	}
 	return nil

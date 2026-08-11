@@ -45,7 +45,7 @@ import type {
 
 const signal = new AbortController().signal;
 const createdAt = "2026-05-22T00:00:00.000Z";
-const canary = "UNIT1_DUMMY_TOKEN_CANARY";
+const canary = "DUMMY_TOKEN_CANARY";
 const rawSql = "select * from secrets";
 const connectionString = "postgres://user:pass@db.internal/app";
 const rawHeaders = "authorization: bearer raw-header-secret";

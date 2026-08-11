@@ -1,10 +1,15 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
 import { MCP_REFRESH_HTTP_TIMEOUT_MS } from "../../src/phase-budgets.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
-import type { GitHubMcpCredentialRefreshWriter } from "../../src/credential-update-path.js";
+import { SQLVaultGitHubMcpCredentialUpdatePath } from "../../src/credential-update-path.js";
+import type { GitHubMcpCredentialRefreshWriter, McpOAuthRefreshFailureKind } from "../../src/credential-update-path.js";
+import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
+import { recordMcpOAuthRefreshCompleted } from "../../src/logger.js";
+
+type OwnerFetch = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => ReturnType<typeof fetch>;
 
 describe("SQLGitHubMcpCredentialResolver", () => {
   test("sets the workspace RLS GUC inside the credential read transaction", async () => {
@@ -233,6 +238,134 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     })).resolves.toEqual({ ok: false, error: "credential_required" });
   });
 
+  test("expired OAuth selections fail before the refresh writer", async () => {
+    const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    for (const scenario of [
+      { name: "invalid expiry with refresh material", expiresAt: "not-a-date", refresh: true, force: false },
+      { name: "past expiry without refresh material", expiresAt: "2025-12-31T23:59:00.000Z", refresh: false, force: false },
+      { name: "forced refresh without refresh material", expiresAt: "2026-01-01T01:00:00.000Z", refresh: false, force: true },
+    ] as const) {
+      const encrypted = await encryptAES256GCM(new TextEncoder().encode(JSON.stringify({
+        type: "mcp_oauth",
+        mcp_server_url: "https://api.githubcopilot.com/mcp/",
+        access_token: "unavailable-access",
+        expires_at: scenario.expiresAt,
+        ...(scenario.refresh ? { refresh: {
+          refresh_token: "unused-refresh",
+          client_id: "github-client",
+          token_endpoint: "https://tokens.example/oauth",
+          token_endpoint_auth: { type: "none" },
+        } } : {}),
+      })), keyHex);
+      const state = statefulSQL([{
+        id: "cred_oauth",
+        vault_id: "vlt_1",
+        mcp_server_url: "https://api.githubcopilot.com/mcp/",
+        auth_public_json: publicAuthJSON("https://api.githubcopilot.com/mcp/"),
+        encrypted_auth: encrypted,
+      }]);
+      let writerCalls = 0;
+      let fetchCalls = 0;
+      const writer: GitHubMcpCredentialRefreshWriter = {
+        refreshOAuthCredential: async () => {
+          writerCalls += 1;
+          return { ok: false, error: "refresh_failed" };
+        },
+      };
+      const resolver = new SQLGitHubMcpCredentialResolver(
+        state.sql,
+        keyHex,
+        () => new Date("2026-01-01T00:00:00.000Z"),
+        async () => { fetchCalls += 1; throw new Error("token endpoint must not be called"); },
+        writer,
+      );
+      const identity = { workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github" };
+      const resolved = scenario.force
+        ? await resolver.refresh({ ...identity, vaultId: "vlt_1", credentialId: "cred_oauth", previousTokenHash: "previous", force: true })
+        : await resolver.resolve(identity);
+
+      expect(resolved, scenario.name).toEqual({ ok: false, error: "expired" });
+      expect(writerCalls, scenario.name).toBe(0);
+      expect(fetchCalls, scenario.name).toBe(0);
+      expect(state.selectForUpdateCount, scenario.name).toBe(0);
+      expect(state.updateCount, scenario.name).toBe(0);
+    }
+  });
+
+  test("OAuth update owner emits each failure kind from its production exit", async () => {
+    const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const validAuth = {
+      type: "mcp_oauth",
+      mcp_server_url: "https://api.githubcopilot.com/mcp/",
+      access_token: "old-access",
+      expires_at: "2025-12-31T23:59:00.000Z",
+      refresh: { refresh_token: "old-refresh", client_id: "github-client", token_endpoint: "https://tokens.example/oauth", token_endpoint_auth: { type: "none" } },
+    };
+    const encrypted = await encryptAES256GCM(new TextEncoder().encode(JSON.stringify(validAuth)), keyHex);
+    const row = { id: "cred_owner", vault_id: "vlt_owner", mcp_server_url: validAuth.mcp_server_url,
+      auth_public_json: publicAuthJSON(validAuth.mcp_server_url), encrypted_auth: encrypted };
+    const observed: McpOAuthRefreshFailureKind[] = [];
+    for (const failureKind of [
+      "credential_state", "configuration", "storage", "decrypt", "transport",
+      "timeout", "http_status", "response_shape", "encrypt", "write_back",
+    ] as const) {
+      const logRecords: Array<Record<string, unknown>> = [];
+      let sql: McpCredentialSQL;
+      let lockedRow = row;
+      let fetchFn: OwnerFetch = async () => Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+      let timeoutMs = 100;
+      let encryptSpy: ReturnType<typeof spyOn> | undefined;
+      if (failureKind === "storage") {
+        sql = (async () => []) as McpCredentialSQL;
+      } else {
+        if (failureKind === "credential_state") {
+          const state = statefulSQL([row], []);
+          sql = state.sql;
+        } else {
+          if (failureKind === "decrypt") lockedRow = { ...row, encrypted_auth: new Uint8Array([1]) };
+          if (failureKind === "configuration") {
+            lockedRow = { ...row, encrypted_auth: await encryptAES256GCM(new TextEncoder().encode(JSON.stringify({ ...validAuth, refresh: undefined })), keyHex) };
+          }
+          const state = statefulSQL([lockedRow], undefined, failureKind === "write_back");
+          sql = state.sql;
+        }
+      }
+      if (failureKind === "transport") fetchFn = async () => { throw new Error("issuer unavailable"); };
+      if (failureKind === "timeout") {
+        timeoutMs = 1;
+        fetchFn = async (_url, init) => await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true }));
+      }
+      if (failureKind === "http_status") fetchFn = async () => new Response("unavailable", { status: 503 });
+      if (failureKind === "response_shape") fetchFn = async () => Response.json({ refresh_token: "new-refresh", expires_in: 3600 });
+      if (failureKind === "encrypt") {
+        encryptSpy = spyOn(crypto.subtle, "encrypt").mockRejectedValueOnce(new Error("encryption unavailable"));
+      }
+      const events: McpOAuthRefreshCompletedEvent[] = [];
+      const owner = new SQLVaultGitHubMcpCredentialUpdatePath(
+        sql, keyHex, () => new Date("2026-01-01T00:00:00.000Z"), fetchFn, timeoutMs, (event) => {
+          events.push(event);
+          recordMcpOAuthRefreshCompleted({ info: (record) => logRecords.push(record) }, undefined, event);
+        },
+      );
+      await owner.refreshOAuthCredential({
+        workspaceId: "wksp_1", mcpServerName: "github", row, vaultId: row.vault_id,
+        credentialId: row.id, previousTokenHash: sha256("old-access"), force: true,
+      });
+      encryptSpy?.mockRestore();
+      expect(events, failureKind).toEqual([expect.objectContaining({ outcome: "failed", failureKind })]);
+      expect(logRecords, failureKind).toEqual([expect.objectContaining({
+        event: "mcp_oauth_refresh_completed",
+        outcome: "failed",
+        "failure.kind": failureKind,
+      })]);
+      observed.push(events[0]!.failureKind!);
+    }
+    expect(observed).toEqual([
+      "credential_state", "configuration", "storage", "decrypt", "transport",
+      "timeout", "http_status", "response_shape", "encrypt", "write_back",
+    ]);
+  });
+
   test("refreshes expired OAuth credentials under the row lock and writes back rotated material", async () => {
     const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const now = new Date("2026-01-01T00:00:00.000Z");
@@ -256,14 +389,19 @@ describe("SQLGitHubMcpCredentialResolver", () => {
         },
       })), keyHex),
     }]);
-    const refreshRequests: Array<{ readonly url: string; readonly body: string }> = [];
+    const refreshRequests: Array<{ readonly url: string; readonly accept: string | null; readonly body: string }> = [];
     const resolver = new SQLGitHubMcpCredentialResolver(
       state.sql,
       keyHex,
       () => now,
       async (url, init) => {
-        refreshRequests.push({ url: String(url), body: String(init?.body) });
-        return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+        const accept = new Headers(init?.headers).get("accept");
+        refreshRequests.push({ url: String(url), accept, body: String(init?.body) });
+        return accept === "application/json"
+          ? Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 })
+          : new Response("access_token=new-access&refresh_token=new-refresh&expires_in=3600", {
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+            });
       },
     );
 
@@ -276,6 +414,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     expect(resolved).toMatchObject({ ok: true, token: "new-access" });
     expect(refreshRequests).toEqual([{
       url: "https://tokens.example/oauth",
+      accept: "application/json",
       body: "grant_type=refresh_token&refresh_token=old-refresh&scope=repo&resource=https%3A%2F%2Fapi.githubcopilot.com%2Fmcp%2F&client_id=github-client&client_secret=client-secret",
     }]);
     const decrypted = JSON.parse(new TextDecoder().decode(await decryptAES256GCM(state.row().encrypted_auth, keyHex))) as {
@@ -404,6 +543,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
         },
       })), keyHex),
     }]);
+    const refreshEvents: McpOAuthRefreshCompletedEvent[] = [];
     const resolver = new SQLGitHubMcpCredentialResolver(
       state.sql,
       keyHex,
@@ -426,6 +566,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       }), { status: 200, headers: { "content-type": "application/json" } }),
       undefined,
       1,
+      (event) => refreshEvents.push(event),
     );
 
     await expect(resolver.resolve({
@@ -434,6 +575,10 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       mcpServerName: "github",
     })).resolves.toEqual({ ok: false, error: "refresh_failed" });
     expect(state.updateCount).toBe(0);
+    expect(refreshEvents).toEqual([expect.objectContaining({
+      outcome: "failed", failureKind: "timeout", httpStatusClass: "2xx",
+      durableWrite: "not_attempted", refreshAttemptMetric: "failed",
+    })]);
   });
 
   test("delegates OAuth write-back to the injected Vault update path", async () => {
@@ -739,7 +884,7 @@ function statefulSQL(initialRows: ReadonlyArray<{
   readonly mcp_server_url: string;
   readonly auth_public_json: string | Record<string, unknown>;
   readonly encrypted_auth: Uint8Array;
-}>) {
+}>, throwOnUpdate = false) {
   let rows = initialRows.map((row) => ({ ...row }));
   const state = {
     beginCount: 0,
@@ -763,6 +908,7 @@ function statefulSQL(initialRows: ReadonlyArray<{
       }
     }
     if (text.includes("UPDATE credentials")) {
+      if (throwOnUpdate) throw new Error("credential write unavailable");
       state.updateCount += 1;
       state.publicAuthJSON = String(values[0]);
       rows = rows.map((row) => row.id === values[7] ? {

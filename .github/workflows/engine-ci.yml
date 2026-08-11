@@ -166,6 +166,12 @@ jobs:
         working-directory: services/agent-runtime
         run: bun install --frozen-lockfile
 
+      - name: Install Gateway dependencies
+        # Bridge composition tests drive the production Gateway notifier and
+        # MCP SDK callback through a Bun harness.
+        working-directory: services/gateway
+        run: bun install --frozen-lockfile
+
       - name: Allow unprivileged user namespaces
         # The sandbox helper's capture tests run the real binary inside
         # `unshare -Ur -m` so it sees a mount namespace of its own. Ubuntu 24.04
@@ -417,7 +423,7 @@ jobs:
 
   gateway-ts:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: services/gateway
@@ -446,6 +452,45 @@ jobs:
       - name: Install Gateway Service dependencies
         run: bun install --frozen-lockfile
 
+      - name: Start Gateway PostgreSQL test service
+        working-directory: ${{ github.workspace }}
+        env:
+          POSTGRES_CONTAINER: tetral-gateway-postgres-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker rm -f "$POSTGRES_CONTAINER" >/dev/null 2>&1 || true
+          for attempt in 1 2 3 4 5; do
+            if docker pull ghcr.io/tetral-ai/mirror/postgres:18-alpine; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "could not pull PostgreSQL test image after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          docker run -d \
+            --name "$POSTGRES_CONTAINER" \
+            -p 127.0.0.1::5432 \
+            --tmpfs /var/lib/postgresql/18/docker:rw,size=1g \
+            -e POSTGRES_USER=tetral \
+            -e POSTGRES_PASSWORD=tetral \
+            -e POSTGRES_DB=tetral \
+            ghcr.io/tetral-ai/mirror/postgres:18-alpine \
+            -c fsync=off \
+            -c synchronous_commit=off \
+            -c full_page_writes=off \
+            -c jit=off
+          for attempt in $(seq 1 40); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready -U tetral -d tetral >/dev/null 2>&1; then
+              port="$(docker port "$POSTGRES_CONTAINER" 5432/tcp | sed -n 's/.*://p' | tail -n1)"
+              echo "TETRAL_TEST_DATABASE_URL=postgres://tetral:tetral@127.0.0.1:$port/tetral?sslmode=disable" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "$POSTGRES_CONTAINER" >&2 || true
+          exit 1
+
       - name: Gateway Service typecheck
         run: bun run typecheck
 
@@ -454,6 +499,13 @@ jobs:
 
       - name: Gateway Service build
         run: bun run build
+
+      - name: Stop Gateway PostgreSQL test service
+        if: always()
+        working-directory: ${{ github.workspace }}
+        env:
+          POSTGRES_CONTAINER: tetral-gateway-postgres-${{ github.run_id }}-${{ github.run_attempt }}
+        run: docker rm -f "$POSTGRES_CONTAINER" >/dev/null 2>&1 || true
 
   k8s-manifests:
     runs-on: ubuntu-latest
