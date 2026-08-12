@@ -853,7 +853,7 @@ function runThreadLoopEffect(
           }
           session.state.applyThreadTurnFact({
             fact: "inputs_committed",
-            eventId: committedMessage.owningEventId,
+            eventId: declaration.result.receipt.events[0]!.eventId,
             messageIds: [committedMessage.id],
           });
           session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
@@ -890,6 +890,9 @@ function runThreadLoopEffect(
             ) {
               return { type: "stale_custody" as const };
             }
+            const residentMessageIds = new Set(
+              session.state.contextManager.messages().map((message) => message.id),
+            );
             const durableMessages = applyAcceptedInputReceipt(
               acceptedInput,
               declaration.messageCreates,
@@ -914,7 +917,11 @@ function runThreadLoopEffect(
                 messageIds: durableMessages.map((message) => message.id),
               });
             }
-            return { type: "committed" as const, durableMessages, makesRequestReady };
+            return {
+              type: "committed" as const,
+              durableMessages: durableMessages.filter((message) => !residentMessageIds.has(message.id)),
+              makesRequestReady,
+            };
           }).pipe(
             Effect.ensuring(Effect.sync(() => session.state.finishAcceptedInputCommit(acceptedInput.runtimeInputId))),
             Effect.uninterruptible,
@@ -2054,6 +2061,11 @@ function runOwnedCompactionSummaryAttemptEffect(
           } as const;
         }
         const compactedMessages = session.state.contextManager.replaceMessagesThroughSequence(compactionBoundarySequence, [checkpoint]);
+        session.state.applyThreadTurnFact({
+          fact: "inputs_committed",
+          eventId: declaration.receipt.events[1]!.eventId,
+          messageIds: [checkpoint.id],
+        });
         if (prefixConsumption !== undefined) {
           session.state.contextManager.installThreadContextPrefix(undefined);
         }
@@ -2283,7 +2295,7 @@ function coordinateProviderTurnEffect(
         bindingId: session.identity.bindingId,
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
-        durableMessages: session.state.contextManager.messages().filter((message): message is DurableRuntimeMessage => "owningEventId" in message),
+        durableMessages: session.state.contextManager.messages().map((message) => DurableRuntimeMessageSchema.parse(message)),
         ...(options.maxNormalizedTextPreviewBytes !== undefined
           ? { maxNormalizedTextPreviewBytes: options.maxNormalizedTextPreviewBytes }
           : {}),
@@ -2980,8 +2992,8 @@ function resumeRecoveredToolJobsEffect(
       const currentAssistant = session.state.contextManager.message(pending.assistantMessage.id);
       if (
         currentAssistant === undefined ||
-        !("owningEventId" in currentAssistant) ||
-        currentAssistant.owningEventId !== pending.assistantMessage.owningEventId ||
+        currentAssistant.id !== pending.assistantMessage.id ||
+        currentAssistant.sequence !== pending.assistantMessage.sequence ||
         findPendingApprovalSettlementDescriptor(
           [currentAssistant],
           pending.job.modelToolCallId,
@@ -3505,6 +3517,17 @@ function coordinateRuntimeToolJobEffect(
     }
 
     if (gateDecision.type === "review_required") {
+      const parentBoundaryEventId = session.state.threadTurnReduction().checkpoint.request?.requestStartEventId;
+      if (parentBoundaryEventId === undefined) {
+        return yield* Effect.promise(() => handleProcessorFailure(session, options, normalizeRuntimeFailure({
+          type: "runtime",
+          code: "runtime_invalid_sequence",
+          retryable: false,
+          fatal: true,
+          reason: "runtime_contract_validation",
+          sessionId: session.sessionId,
+        })));
+      }
       const reviewerOutcome = yield* Effect.gen(function* () {
         if (options.reviewApproval === undefined || session.approvalReviewerManager === undefined) {
           return { type: "failed" as const, message: "approval reviewer is unavailable" };
@@ -3519,6 +3542,7 @@ function coordinateRuntimeToolJobEffect(
             targetPodUid: session.identity.targetPodUid,
             runtimeBindingToken: session.identity.runtimeBindingToken,
             modelRequestId,
+            parentBoundaryEventId,
             targetModelToolCallId: job.modelToolCallId,
             targetToolName: job.name,
             actionJson: job.input,

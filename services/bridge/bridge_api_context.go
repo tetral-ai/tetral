@@ -100,7 +100,7 @@ type bridgeLoadContextMessageDescriptor struct {
 	Kind            string
 	MessageID       string
 	MessageSequence int64
-	OwningEventID   string
+	SourceEventID   *string
 	ModelRequestID  *string
 	DataJSON        json.RawMessage
 }
@@ -289,19 +289,13 @@ func loadThreadContextJSONTx(
 		)
 			SELECT m.kind,
 			       m.message_id,
-			       m.sequence,
-			       m.data_json,
-			       COALESCE(m.last_event_id, m.source_event_id),
-		       COALESCE(m.model_request_id, e.model_request_id),
+		       m.sequence,
+		       m.data_json,
+		       m.source_event_id,
+		       m.model_request_id,
 		       m.created_at,
-		       m.updated_at,
-		       e.sequence
+		       m.updated_at
 		  FROM session_messages m
-		  LEFT JOIN session_events e
-		    ON e.workspace_id = m.workspace_id
-		   AND e.session_id = m.session_id
-		   AND e.session_thread_id = m.session_thread_id
-		   AND e.event_id = COALESCE(m.last_event_id, m.source_event_id)
 		  CROSS JOIN latest_compaction c
 		 WHERE m.workspace_id = $1
 		   AND m.session_id = $2
@@ -323,21 +317,19 @@ func loadThreadContextJSONTx(
 		var messageID string
 		var sequence int64
 		var raw string
-		var owningEventID sql.NullString
+		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
 		var createdAt time.Time
 		var updatedAt time.Time
-		var eventSequence sql.NullInt64
 		if err := rows.Scan(
 			&kind,
 			&messageID,
 			&sequence,
 			&raw,
-			&owningEventID,
+			&sourceEventID,
 			&modelRequestID,
 			&createdAt,
 			&updatedAt,
-			&eventSequence,
 		); err != nil {
 			return "", err
 		}
@@ -351,16 +343,11 @@ func loadThreadContextJSONTx(
 			}
 			raw = projected
 		}
-		if !owningEventID.Valid || !eventSequence.Valid {
-			return "", status.Error(codes.FailedPrecondition, "session message projection has no owning event stamp")
-		}
 		stamped, err := stampRuntimeMessageForLoad(
 			raw,
 			scope.GetSessionId(),
 			messageID,
 			sequence,
-			owningEventID.String,
-			eventSequence.Int64,
 			createdAt,
 			updatedAt,
 		)
@@ -372,11 +359,13 @@ func loadThreadContextJSONTx(
 			Kind:            kind,
 			MessageID:       messageID,
 			MessageSequence: sequence,
-			OwningEventID:   owningEventID.String,
 			DataJSON:        stamped,
 		}
 		if modelRequestID.Valid {
 			descriptor.ModelRequestID = &modelRequestID.String
+		}
+		if sourceEventID.Valid {
+			descriptor.SourceEventID = &sourceEventID.String
 		}
 		messageDescriptors = append(messageDescriptors, descriptor)
 	}
@@ -498,8 +487,6 @@ func stampRuntimeMessageForLoad(
 	sessionID string,
 	messageID string,
 	messageSequence int64,
-	owningEventID string,
-	eventSequence int64,
 	createdAt time.Time,
 	updatedAt time.Time,
 ) (json.RawMessage, error) {
@@ -540,8 +527,6 @@ func stampRuntimeMessageForLoad(
 	message["id"] = messageID
 	message["sessionId"] = sessionID
 	message["sequence"] = messageSequence
-	message["owningEventId"] = owningEventID
-	message["eventSequence"] = eventSequence
 	message["createdAt"] = createdAt.UTC().Format(time.RFC3339Nano)
 	message["updatedAt"] = updatedAt.UTC().Format(time.RFC3339Nano)
 	stamped, err := json.Marshal(message)

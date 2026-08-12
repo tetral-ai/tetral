@@ -1220,7 +1220,6 @@ function testControlDeclaration(
   }
   return {
     messageCreates: [RuntimeMessageCreateSchema.parse({
-      sourceEventId: command.eventIds[0],
       messageKind: "approval_input",
       role: "user",
       origin: "user",
@@ -1254,7 +1253,6 @@ function testControlReceipt(
       })),
       messages: input.messageCreates.map((create, index) => ({
         sessionThreadId: input.scope.sessionThreadId,
-        owningEventId: create.sourceEventId!,
         messageId: `msg_${index}_${input.scope.runtimeInputId}`,
         messageSequence: input.scope.sequenceTo + index + 1,
         createdAt: "2026-01-01T00:00:00.000Z",

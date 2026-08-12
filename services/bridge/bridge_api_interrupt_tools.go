@@ -104,7 +104,7 @@ func settleInterruptedThreadToolsTx(
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, resultEventID, visibility, sessionVisible, now); err != nil {
 			return nil, err
 		}
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, resultEventID, settlement, now); err != nil {
+		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, settlement, now); err != nil {
 			return nil, err
 		}
 		if _, err := tx.Exec(ctx,

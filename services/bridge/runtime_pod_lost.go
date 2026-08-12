@@ -1351,7 +1351,7 @@ func insertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return false, err
 	}
-	if err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, toolUse, eventID, terminal, now); err != nil {
+	if err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, toolUse, terminal, now); err != nil {
 		return false, err
 	}
 	consumptionReason := terminal.ConsumptionReason
@@ -1378,7 +1378,6 @@ func settleRuntimeTerminalToolPartTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	toolUse runtimeOrphanToolUse,
-	resultEventID string,
 	terminal runtimeTerminalToolResult,
 	now time.Time,
 ) error {
@@ -1451,19 +1450,17 @@ func settleRuntimeTerminalToolPartTx(
 	result, err := tx.Exec(ctx,
 		`UPDATE session_messages
 		    SET data_json = $5,
-		        last_event_id = $6,
-		        updated_at = $7
+		        updated_at = $6
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND message_id = $4
-		    AND model_request_id = $8`,
+		    AND model_request_id = $7`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		messageID,
 		string(encoded),
-		resultEventID,
 		now,
 		toolUse.ModelRequestID,
 	)

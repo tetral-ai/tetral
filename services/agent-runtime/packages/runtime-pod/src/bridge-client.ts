@@ -233,7 +233,6 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
           const create = input.messageCreates[index];
           return create !== undefined &&
             message.sessionThreadId === input.scope.sessionThreadId &&
-            message.owningEventId === (create.sourceEventId ?? "") &&
             message.parts.length === create.parts.length &&
             message.parts.every((part) => part.messageId === message.messageId);
         }) &&
@@ -1518,7 +1517,6 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           completionMessage !== undefined &&
           completionEvent !== undefined &&
           completionMessage.sessionThreadId === envelope.sessionThreadId &&
-          completionMessage.owningEventId === completionEvent.eventId &&
           completionMessage.parts.length === completionCreate.parts.length &&
           completionMessage.parts.every((part) => part.messageId === completionMessage.messageId)
         );
@@ -2005,13 +2003,11 @@ function resolveInterAgentDelivery(
 
 function runtimeMessageCreateForBridge(create: CoreRuntimeMessageCreate) {
   const {
-    sourceEventId,
     messageKind,
     parts,
     ...messageInfo
   } = create;
   return {
-    sourceEventId,
     messageKind: runtimeMessageCreateKindForBridge(messageKind),
     messageInfoJson: JSON.stringify(messageInfo),
     parts: parts.map(runtimePartCreateForBridge),
@@ -2175,7 +2171,6 @@ function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDe
     })),
     messages: receipt.messages.map((message) => ({
       sessionThreadId: message.sessionThreadId,
-      owningEventId: message.owningEventId,
       messageId: message.messageId,
       messageSequence: message.messageSequence,
       createdAt: message.createdAt,

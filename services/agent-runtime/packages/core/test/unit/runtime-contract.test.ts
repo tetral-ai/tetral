@@ -10,6 +10,7 @@ import {
   RuntimeInternalToolRepairCommitSchema,
   RuntimeMessageInfoSchema,
   RuntimeMessageSchema,
+  DurableRuntimeMessageSchema,
   RuntimeInternalToolRepairStore,
   RuntimeMessageStoreErrorSchema,
   RuntimeDeclarationOperationControlsSchema,
@@ -51,6 +52,23 @@ const connectionString = "postgres://user:pass@db.internal/app";
 const rawHeaders = "authorization: bearer raw-header-secret";
 const rawPrompt = "system prompt raw backend payload marker";
 const rawProviderPayload = "raw provider payload marker";
+
+test("durable message parsing requires a database-assigned sequence", () => {
+  const hot = RuntimeMessageSchema.parse({
+    id: "message-hot",
+    sessionId: "session-1",
+    role: "assistant",
+    origin: "agent",
+    sequence: 0,
+    status: "streaming",
+    createdAt,
+    parts: [],
+  });
+
+  expect(hot.sequence).toBe(0);
+  expect(() => DurableRuntimeMessageSchema.parse(hot)).toThrow();
+  expect(DurableRuntimeMessageSchema.parse({ ...hot, sequence: 1 }).sequence).toBe(1);
+});
 
 function writerIdentity(requestId: string) {
   return {
@@ -338,7 +356,6 @@ function internalToolRepairResult(repair: RuntimeInternalToolRepairCommit): Runt
         }],
         messages: [{
           sessionThreadId: repair.sessionThreadId,
-          owningEventId: "event-repair-1",
           messageId: "message-repair-1",
           messageSequence: 2,
           createdAt,

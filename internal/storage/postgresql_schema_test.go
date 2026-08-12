@@ -689,7 +689,7 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_messages": {
 			"workspace_id", "session_id", "session_thread_id", "message_id",
-			"sequence", "kind", "data_json", "source_event_id", "last_event_id",
+			"sequence", "kind", "data_json", "source_event_id",
 			"repair_key", "model_request_id", "created_at", "updated_at",
 		},
 		"session_pending_tool_uses": {

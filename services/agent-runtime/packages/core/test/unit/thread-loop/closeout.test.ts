@@ -1331,12 +1331,17 @@ test("SessionManager joins the original interrupt FinishIdle ACK before releasin
         return { manager: Context.get(context, SessionManager.Service), scope: layerScope };
     }));
     try {
-        const firstInput = { ...acceptedInput("rin_finish_idle_owner"), sequenceFrom: 1, sequenceTo: 1 };
+        const firstInput = {
+            ...acceptedInput("rin_finish_idle_owner"),
+            sequenceFrom: 1,
+            sequenceTo: 1,
+            payloadJson: JSON.stringify({ messages: [userMessage("user-finish-idle-owner", 1, "hold the first run")] }),
+        };
         await Effect.runPromise(manager.preloadThread({
             ...firstInput,
             runtimeBindingToken: "runtime-binding-token",
             coldCoverage: emptyColdCoverage,
-            messages: [userMessage("user-finish-idle-owner", 0, "hold the first run")],
+            messages: [userMessage("user-finish-idle-owner", 1, "hold the first run")],
             thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
         }));
         await Effect.runPromise(manager.acceptInput(firstInput));

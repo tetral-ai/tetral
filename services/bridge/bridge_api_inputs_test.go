@@ -98,13 +98,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		t.Fatalf("loaded messages = %d; want one committed input", len(loaded.Messages))
 	}
 	var loadedMessage struct {
-		ID            string `json:"id"`
-		Sequence      int64  `json:"sequence"`
-		OwningEventID string `json:"owningEventId"`
-		EventSequence int64  `json:"eventSequence"`
-		ProviderID    string `json:"providerId"`
-		ModelID       string `json:"modelId"`
-		Parts         []struct {
+		ID         string `json:"id"`
+		Sequence   int64  `json:"sequence"`
+		ProviderID string `json:"providerId"`
+		ModelID    string `json:"modelId"`
+		Parts      []struct {
 			ID        string `json:"id"`
 			MessageID string `json:"messageId"`
 			Sequence  int64  `json:"sequence"`
@@ -116,8 +114,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	messageStamp := response.GetDeclaration().GetReceipts()[0].GetMessages()[0]
 	if loadedMessage.ID != messageStamp.GetMessageId() ||
 		loadedMessage.Sequence != messageStamp.GetMessageSequence() ||
-		loadedMessage.OwningEventID != messageStamp.GetOwningEventId() ||
-		loadedMessage.EventSequence != 1 ||
 		loadedMessage.ProviderID != "" ||
 		loadedMessage.ModelID != "" ||
 		len(loadedMessage.Parts) != 1 ||
@@ -580,10 +576,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}); err != nil || !acknowledged {
 		t.Fatalf("ACK resolved inter-agent wake = %v/%v; want true/nil", acknowledged, err)
 	}
-	sourceEventID := beforeReceived.GetReceivedEventId()
 	create := bridgeMessageCreateForTest(
 		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
-		"user", "runtime", &sourceEventID,
+		"user", "runtime",
 		bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"hello child","truncated":false,"status":"completed"}`},
 	)
 	request := &bridgev1.CommitInputsRequest{
@@ -1326,7 +1321,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			InputKind:      "approval_review",
 			EventIds:       []string{eventID},
 			MessageCreates: []*bridgev1.RuntimeMessageCreate{{
-				SourceEventId:   bridgeAPIString(eventID),
 				MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT,
 				MessageInfoJson: string(messageInfoJSON),
 				Parts: []*bridgev1.RuntimePartCreate{{
@@ -1432,7 +1426,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		wrongTarget.Scope = bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
 		wrongTarget.RuntimeInputId = "rin_bridge_reviewer_wrong_target"
 		wrongTarget.EventIds = []string{"evt_bridge_reviewer_wrong_target"}
-		wrongTarget.MessageCreates[0].SourceEventId = bridgeAPIString("evt_bridge_reviewer_wrong_target")
 		if _, err := store.CommitInputs(context.Background(), wrongTarget); status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("reviewer input wrong-target err = %v; want FailedPrecondition", err)
 		}
@@ -1491,12 +1484,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			MessageCreates: []*bridgev1.RuntimeMessageCreate{
 				bridgeMessageCreateForTest(
 					bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION,
-					"assistant", "agent", bridgeAPIString(eventID1),
+					"assistant", "agent",
 					bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"Input was not accepted.","truncated":false,"status":"completed"}`},
 				),
 				bridgeMessageCreateForTest(
 					bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION,
-					"assistant", "agent", bridgeAPIString(eventID2),
+					"assistant", "agent",
 					bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"Input was not accepted.","truncated":false,"status":"completed"}`},
 				),
 			},
@@ -1539,7 +1532,7 @@ func assertSingleCommitInputReceipt(t *testing.T, response *bridgev1.CommitInput
 	receipts := response.GetDeclaration().GetReceipts()
 	if len(receipts) != 1 || receipts[0].GetSourceKind() != sourceKind || receipts[0].GetOperationId() != sourceID ||
 		len(receipts[0].GetEvents()) != 1 || receipts[0].GetEvents()[0].GetEventId() != eventID ||
-		len(receipts[0].GetMessages()) != 1 || receipts[0].GetMessages()[0].GetOwningEventId() != eventID {
+		len(receipts[0].GetMessages()) != 1 {
 		t.Fatalf("CommitInputs receipt = %+v; want one %s receipt for %s", response.GetDeclaration(), sourceKind, sourceID)
 	}
 }

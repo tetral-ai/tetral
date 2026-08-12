@@ -409,6 +409,17 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 			t.Fatalf("Tool Result count for %s = %d; want one", target.GetEventId(), results)
 		}
 	}
+	store.RuntimeBindingTokenHMACKey = []byte("stable-reasoning-composition-key-32")
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_stable_reasoning_composition",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext stable reasoning: %v", err)
+	}
+	composed := runColdCheckpointComposition(t, loaded.GetContextJson())
+	if composed.Checkpoint.Request == nil || composed.Checkpoint.Request.ModelRequestID != requestID || composed.Checkpoint.Request.ToolMemberCount != 2 || len(composed.ToolRouteView.Routes) != 0 || composed.ReducerAction != "prepare_next_request" {
+		t.Fatalf("stable reasoning composition = %+v; want two independently terminal Tool members", composed)
+	}
 }
 
 func TestPostgreSQLBridgeAPIStoreStableReasoningEnforcesCumulativeBoundsAtomically(t *testing.T) {

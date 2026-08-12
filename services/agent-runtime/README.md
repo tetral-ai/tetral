@@ -98,6 +98,12 @@ actions around the six states rather than extra top-level states.
 | `ready_to_finish` | ThreadRun owner fiber | `FinishIdle` ACK gates local idle |
 
 The Thread-turn state is an internal typed contract, never a public status enum.
+Cold reconstruction consumes the same durable facts that ACK application uses:
+Message sequence defines pending user-side input, Request and Tool Events define
+the active request, and internal repairs carry one direct repair identity. It
+never compares Message and Event sequence coordinate systems or reconstructs a
+Message mutation history. The reducer then selects the next action from the
+checkpoint and the separately validated Tool-route view.
 Every run exit settles its scope exactly once, by exactly one writer with
 disjoint triggers (`FinishIdle`, terminal commit, pod-loss repair, or the
 cooperative cancellation closeout for internal child scopes on a healthy pod) —

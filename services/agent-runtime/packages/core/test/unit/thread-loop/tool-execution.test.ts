@@ -71,8 +71,6 @@ test("cold apply_patch recovery accepts only the canonical execution object", as
             const message = DurableRuntimeMessageSchema.parse({
                 id: `msg_patch_${suffix}`,
                 sessionId: session.sessionId,
-                owningEventId: toolUseEventId,
-                eventSequence: 1,
                 sequence: 1,
                 role: "assistant",
                 origin: "agent",
@@ -2352,12 +2350,15 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
         return { manager: Context.get(context, SessionManager.Service), scope: layerScope };
     }));
     try {
-        const input = acceptedInput("rin_gated_tool_use");
+        const input = {
+            ...acceptedInput("rin_gated_tool_use"),
+            payloadJson: JSON.stringify({ messages: [userMessage("user-1", 1, "run the gated tool")] }),
+        };
         await Effect.runPromise(manager.preloadThread({
             ...input,
             runtimeBindingToken: "runtime-binding-token",
             coldCoverage: emptyColdCoverage,
-            messages: [userMessage("user-1", 0, "run the gated tool")],
+            messages: [userMessage("user-1", 1, "run the gated tool")],
             thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
         }));
         await Effect.runPromise(manager.acceptInput(input));
@@ -2483,12 +2484,15 @@ test("interrupt joins a raw CommitInternalToolRepair ACK before snapshot and per
         return { manager: Context.get(context, SessionManager.Service), scope: layerScope };
     }));
     try {
-        const input = acceptedInput("rin_gated_internal_repair");
+        const input = {
+            ...acceptedInput("rin_gated_internal_repair"),
+            payloadJson: JSON.stringify({ messages: [userMessage("user-1", 1, "trigger an internal repair")] }),
+        };
         await Effect.runPromise(manager.preloadThread({
             ...input,
             runtimeBindingToken: "runtime-binding-token",
             coldCoverage: emptyColdCoverage,
-            messages: [userMessage("user-1", 0, "trigger an internal repair")],
+            messages: [userMessage("user-1", 1, "trigger an internal repair")],
             thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
         }));
         await Effect.runPromise(manager.acceptInput(input));
@@ -3324,11 +3328,9 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
     const loadedMessage = DurableRuntimeMessageSchema.parse({
         id: "assistant-rehydrated-approved",
         sessionId: "sesn_1",
-        owningEventId: "sevt_approved_settled",
-        eventSequence: 2,
         role: "assistant",
         origin: "agent",
-        sequence: 1,
+        sequence: 2,
         status: "completed",
         createdAt,
         parts: [
@@ -3447,11 +3449,14 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
     let interrupt: Promise<unknown> | undefined;
     let interruptDeclaration: RuntimeControlInputDeclaration | undefined;
     try {
-        const input = acceptedInput("rin_rehydrated_approved");
+        const input = {
+            ...acceptedInput("rin_rehydrated_approved"),
+            payloadJson: JSON.stringify({ messages: [userMessage("user-rehydrated-input", 3, "continue after tools")] }),
+        };
         await Effect.runPromise(manager.preloadThread({
             ...input,
             runtimeBindingToken: "runtime-binding-token",
-            messages: [userMessage("user-rehydrated-approved", 0, "resume approved tools"), loadedMessage],
+            messages: [userMessage("user-rehydrated-approved", 1, "resume approved tools"), loadedMessage],
             pendingToolUses,
             turnCheckpoint: {
                 pendingInputMessageIds: [],
@@ -3684,12 +3689,15 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
         return { manager: Context.get(context, SessionManager.Service), scope: layerScope };
     }));
     try {
-        const input = acceptedInput("rin_interrupt_acceptance");
+        const input = {
+            ...acceptedInput("rin_interrupt_acceptance"),
+            payloadJson: JSON.stringify({ messages: [userMessage("user-1", 1, "hello")] }),
+        };
         await Effect.runPromise(manager.preloadThread({
             ...input,
             runtimeBindingToken: "runtime-binding-token",
             coldCoverage: emptyColdCoverage,
-            messages: [userMessage("user-1", 0, "hello")],
+            messages: [userMessage("user-1", 1, "hello")],
             thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
         }));
         await Effect.runPromise(manager.acceptInput(input));
@@ -4309,11 +4317,9 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
     const pendingMessage = DurableRuntimeMessageSchema.parse({
         id: "assistant-cold-restore",
         sessionId: "sesn_1",
-        owningEventId: "sevt_tool_1",
-        eventSequence: 2,
         role: "assistant",
         origin: "agent",
-        sequence: 1,
+        sequence: 2,
         status: "completed",
         createdAt,
         parts: [{
@@ -4338,7 +4344,7 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
                 createdAt,
             }],
     });
-    const loadedMessages = [userMessage("user-cold", 0, "hello"), pendingMessage];
+    const loadedMessages = [userMessage("user-cold", 1, "hello"), pendingMessage];
     const pendingToolUses = [{
             toolUseEventId: "sevt_tool_1",
             modelRequestId: "mrq_cold_restore",
@@ -4447,11 +4453,9 @@ test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use
     const durableToolMessage = DurableRuntimeMessageSchema.parse({
         id: "assistant-cold-sandbox",
         sessionId: "sesn_1",
-        owningEventId: "sevt_sandbox_tool_1",
-        eventSequence: 2,
         role: "assistant",
         origin: "agent",
-        sequence: 1,
+        sequence: 2,
         status: "completed",
         createdAt,
         parts: [{
@@ -4472,7 +4476,7 @@ test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use
                 createdAt,
             }],
     });
-    const loadedMessages = [userMessage("user-cold-sandbox", 0, "hello"), durableToolMessage];
+    const loadedMessages = [userMessage("user-cold-sandbox", 1, "hello"), durableToolMessage];
     const pendingSandboxExecutions = [{
             toolUseEventId: "sevt_sandbox_tool_1",
             modelRequestId: "mrq_cold_sandbox",
@@ -4567,8 +4571,6 @@ test("cold accepted Sandbox execution releases stale Runtime custody without aut
     const durableToolMessage = DurableRuntimeMessageSchema.parse({
         id: "assistant-cold-sandbox-stale",
         sessionId: "sesn_1",
-        owningEventId: "sevt_sandbox_tool_stale",
-        eventSequence: 2,
         role: "assistant",
         origin: "agent",
         sequence: 1,
@@ -4660,8 +4662,6 @@ test("cold unresolved approval does not strand an accepted Sandbox execution", a
     const pendingMessage = DurableRuntimeMessageSchema.parse({
         id: "assistant-cold-mixed",
         sessionId: "sesn_1",
-        owningEventId: "sevt_approval",
-        eventSequence: 2,
         role: "assistant",
         origin: "agent",
         sequence: 1,
@@ -4773,15 +4773,13 @@ test("LoadContext pendingToolUses applies recorded deny decisions without re-wai
     session.state.enqueueAcceptedInput(acceptedInput("rin_cold_deny_restore"));
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const loadedMessages = [
-        userMessage("user-cold-deny", 0, "hello"),
+        userMessage("user-cold-deny", 1, "hello"),
         DurableRuntimeMessageSchema.parse({
             id: "assistant-cold-deny",
             sessionId: "sesn_1",
-            owningEventId: "sevt_tool_1",
-            eventSequence: 2,
             role: "assistant",
             origin: "agent",
-            sequence: 1,
+            sequence: 2,
             status: "completed",
             createdAt,
             parts: [

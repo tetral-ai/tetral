@@ -1791,8 +1791,8 @@ func insertPendingToolTerminalMessageTx(ctx context.Context, tx *dbconnect.Tx, s
 	_, err = tx.Exec(ctx,
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7, $8, $8)
+			data_json, source_event_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $8, $8)
 		ON CONFLICT (workspace_id, session_id, session_thread_id, source_event_id)
 		WHERE source_event_id IS NOT NULL
 		DO NOTHING`,

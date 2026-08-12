@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -359,7 +359,7 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 		Scope: scope, RuntimeInputId: lateID, InputKind: "agent_mail", EventIds: []string{lateEventID}, SequenceFrom: 2, SequenceTo: 2,
 		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeMessageCreateForTest(
 			bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
-			"user", "runtime", &lateEventID,
+			"user", "runtime",
 			bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"third","truncated":false,"status":"completed"}`},
 		)},
 	}); err != nil {
@@ -376,15 +376,20 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	if len(payload.Messages) != 3 {
 		t.Fatalf("replacement Context messages = %s; want three mixed-kind inputs", loaded.GetContextJson())
 	}
-	var contextKinds []string
-	for _, lineage := range payload.TurnFacts.MessageLineage {
-		if len(lineage.Entries) != 1 {
-			t.Fatalf("replacement Context lineage = %#v; want one durable source", lineage)
+	var contextTexts []string
+	for _, raw := range payload.Messages {
+		var message struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
 		}
-		contextKinds = append(contextKinds, lineage.Entries[0].SourceKind)
+		if err := json.Unmarshal(raw, &message); err != nil || len(message.Parts) != 1 {
+			t.Fatalf("decode replacement Context message: %v; message=%s", err, raw)
+		}
+		contextTexts = append(contextTexts, message.Parts[0].Text)
 	}
-	if got, want := contextKinds, []string{"messages", "task_notification", "agent_mail"}; !slices.Equal(got, want) {
-		t.Fatalf("replacement Context kind order = %v; want %v; context=%s", got, want, loaded.GetContextJson())
+	if len(contextTexts) != 3 || contextTexts[0] != "first" || !strings.Contains(contextTexts[1], taskID) || contextTexts[2] != "third" {
+		t.Fatalf("replacement Context order = %v; want user/task/agent-mail creation order; context=%s", contextTexts, loaded.GetContextJson())
 	}
 }
 

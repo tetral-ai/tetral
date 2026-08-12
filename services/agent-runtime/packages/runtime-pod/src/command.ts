@@ -188,6 +188,7 @@ export async function buildRuntimePodCommandDependencies(input: {
     maxConcurrentTools: 8,
     now: () => new Date().toISOString(),
     contextLoader: bridgeContextLoader,
+    logger: input.logger,
     metrics,
     recordCloseoutEvent: (event) => {
       try {

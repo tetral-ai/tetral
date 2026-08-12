@@ -448,7 +448,7 @@ class DeclarationBridge {
       ack: ack("", BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED),
       contextJson: JSON.stringify({
         messages: [],
-        turnFacts: { events: [], messageLineage: [] },
+        turnFacts: { events: [], internalRepairs: [] },
         coldCoverage: {
           pendingToolIds: [],
           pendingSandboxExecutionIds: [],
@@ -657,7 +657,7 @@ class DeclarationBridge {
     eventId: string,
   ) {
     this.messageSequence += 1;
-    return messageStamp(request, create.parts, eventId, this.messageSequence);
+    return messageStamp(request, create.parts, this.messageSequence);
   }
 
   private appendMessage(
@@ -666,20 +666,18 @@ class DeclarationBridge {
     eventId: string,
   ) {
     this.messageSequence += 1;
-    return messageStamp(request, parts, eventId, this.messageSequence);
+    return messageStamp(request, parts, this.messageSequence);
   }
 }
 
 function messageStamp(
   request: { readonly scope: RuntimeScope | undefined },
   parts: RuntimePartCreate[],
-  owningEventId: string,
   messageSequence: number,
 ) {
   const messageId = `msg_${messageSequence}`;
   return {
     sessionThreadId: request.scope?.sessionThreadId ?? "",
-    owningEventId,
     messageId,
     messageSequence,
     createdAt: now,

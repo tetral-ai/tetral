@@ -215,7 +215,6 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 		SequenceFrom:   request.GetSequenceFrom(),
 		SequenceTo:     request.GetSequenceTo(),
 		MessageCreates: []*bridgev1.RuntimeMessageCreate{{
-			SourceEventId:   &request.EventIds[0],
 			MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT,
 			MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
 			Parts: []*bridgev1.RuntimePartCreate{{

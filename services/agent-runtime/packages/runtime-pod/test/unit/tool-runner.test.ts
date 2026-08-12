@@ -2317,7 +2317,7 @@ describe("RuntimePodToolRunner", () => {
             events: [
               { eventId: "sevt_resume_running", eventSequence: 1, type: "session.status_running" as const },
             ],
-            messageLineage: [],
+            internalRepairs: [],
           },
         },
       },
@@ -2331,7 +2331,7 @@ describe("RuntimePodToolRunner", () => {
             events: [
               { eventId: "sevt_resume_start", eventSequence: 1, type: "span.model_request_start" as const, modelRequestId: "mreq_resume_open", requestStart: { requestKind: "agent_provider_request" as const, contextThroughMessageSequence: 0 } },
             ],
-            messageLineage: [],
+            internalRepairs: [],
           },
         },
       },
@@ -2359,7 +2359,7 @@ describe("RuntimePodToolRunner", () => {
         context: {
           messages: [], thread: closedThread,
           pendingToolUses: [], pendingSandboxExecutions: [],
-          turnFacts: { events: [{ eventId: "sevt_resume_interrupt", eventSequence: 1, type: "agent.thread_interrupt_requested" as const }], messageLineage: [] },
+          turnFacts: { events: [{ eventId: "sevt_resume_interrupt", eventSequence: 1, type: "agent.thread_interrupt_requested" as const }], internalRepairs: [] },
         },
       },
       {
@@ -2395,7 +2395,7 @@ describe("RuntimePodToolRunner", () => {
               { eventId: "sevt_resume_failure", eventSequence: 1, type: "session.error" as const, failure: { errorType: "provider_unavailable", retryStatus: "terminal" as const } },
               { eventId: "sevt_resume_terminated", eventSequence: 2, type: "session.status_terminated" as const },
             ],
-            messageLineage: [],
+            internalRepairs: [],
           },
         },
       },
@@ -2696,7 +2696,7 @@ const emptyResumeColdCoverage = {
   undeliveredMailDeliveryIds: [],
 } as const;
 
-const emptyResumeTurnFacts: ThreadTurnLoadFacts = { events: [], messageLineage: [] };
+const emptyResumeTurnFacts: ThreadTurnLoadFacts = { events: [], internalRepairs: [] };
 
 /**
  * Mirrors the disjunct list of validateClosedThreadResumeCheckpoint
@@ -2729,22 +2729,8 @@ function resumeCheckpointTrippedDisjuncts(
 }
 
 function resumeTurnFactsFor(messages: readonly DurableRuntimeMessage[]): ThreadTurnLoadFacts {
-  return {
-    events: [],
-    messageLineage: messages.map((message) => ({
-      messageId: message.id,
-      messageSequence: message.sequence,
-      owningEventId: message.owningEventId,
-      entries: [{
-        lineageKind: "declaration_receipt",
-        operationKind: message.origin === "agent" ? "write_event" : "commit_inputs",
-        sourceKind: message.origin === "agent" ? "runtime_event" : message.origin === "runtime" ? "agent_mail" : "messages",
-        eventId: message.owningEventId,
-        eventSequence: message.eventSequence,
-        disposition: "created",
-      }],
-    })),
-  };
+  void messages;
+  return { events: [], internalRepairs: [] };
 }
 
 function resumeTurnFactsForPendingTool(input: {
@@ -2754,29 +2740,31 @@ function resumeTurnFactsForPendingTool(input: {
   readonly modelToolCallId: string;
   readonly toolName: string;
 }): ThreadTurnLoadFacts {
-  const toolMessage = input.messages.find((message) => message.owningEventId === input.toolUseEventId);
-  if (toolMessage === undefined || toolMessage.eventSequence < 2) {
+  const toolMessage = input.messages.find((message) => message.parts.some((part) =>
+    part.type === "tool" && part.toolUseEventId === input.toolUseEventId
+  ));
+  if (toolMessage === undefined) {
     throw new Error("pending Tool Use fixture requires an ordered assistant projection");
   }
   return {
     events: [
       {
         eventId: `start_${input.modelRequestId}`,
-        eventSequence: toolMessage.eventSequence - 1,
+        eventSequence: 1,
         type: "span.model_request_start",
         modelRequestId: input.modelRequestId,
         requestStart: { requestKind: "agent_provider_request", contextThroughMessageSequence: 1 },
       },
       {
         eventId: input.toolUseEventId,
-        eventSequence: toolMessage.eventSequence,
+        eventSequence: 2,
         type: "agent.tool_use",
         modelRequestId: input.modelRequestId,
-        toolUse: { modelToolCallId: input.modelToolCallId, toolName: input.toolName },
+        toolUse: {},
       },
       {
         eventId: `end_${input.modelRequestId}`,
-        eventSequence: toolMessage.eventSequence + 1,
+        eventSequence: 3,
         type: "span.model_request_end",
         modelRequestId: input.modelRequestId,
         requestEnd: {
@@ -2786,15 +2774,7 @@ function resumeTurnFactsForPendingTool(input: {
         },
       },
     ],
-    messageLineage: resumeTurnFactsFor(input.messages).messageLineage.map((lineage) =>
-      lineage.messageId === toolMessage.id
-        ? {
-            ...lineage,
-            modelRequestId: input.modelRequestId,
-            entries: lineage.entries.map((entry) => ({ ...entry, sourceKind: "agent.tool_use" as const })),
-          }
-        : lineage
-    ),
+    internalRepairs: [],
   };
 }
 

@@ -551,9 +551,8 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	}
 	receipt := response.GetDeclaration().GetReceipts()[0]
 	if len(receipt.GetEvents()) != 1 || len(receipt.GetMessages()) != 1 ||
-		receipt.GetEvents()[0].GetEventId() != terminalEventID.String ||
-		receipt.GetMessages()[0].GetOwningEventId() != terminalEventID.String {
-		t.Fatalf("task notification receipt = %#v; want one event and its loop-authored message", receipt)
+		receipt.GetEvents()[0].GetEventId() != terminalEventID.String {
+		t.Fatalf("task notification receipt = %#v; want one event and one positional message", receipt)
 	}
 	var notificationMessage struct {
 		Role   string `json:"role"`

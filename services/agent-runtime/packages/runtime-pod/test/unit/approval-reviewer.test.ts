@@ -436,7 +436,7 @@ describe("Runtime approval reviewer", () => {
     expect(JSON.parse(sidecarCreation.threadContextPrefixJson)).toMatchObject({
       review_id: sidecarCreation.reviewId,
       source_parent_thread_id: "thrd_parent",
-      parent_boundary_event_id: "evt_msg_first",
+      parent_boundary_event_id: "sevt_request_start_1",
       runtime_messages_snapshot: [assistantDecision("sesn_1", "allow", "safe")],
     });
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation.reviewerThreadId);
@@ -515,7 +515,7 @@ describe("Runtime approval reviewer", () => {
     expect(JSON.parse(sidecarCreation?.threadContextPrefixJson ?? "{}")).toMatchObject({
       review_id: sidecarCreation?.reviewId,
       source_parent_thread_id: "thrd_parent",
-      parent_boundary_event_id: "evt_msg_parent",
+      parent_boundary_event_id: "sevt_request_start_1",
       runtime_messages_snapshot: [],
     });
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation?.reviewerThreadId);
@@ -1838,6 +1838,7 @@ function validReviewRequest(overrides: Partial<RuntimeApprovalReviewRequest> = {
     targetPodUid: "pod_1",
     runtimeBindingToken: "rtbt_1",
     modelRequestId: "mreq_1",
+    parentBoundaryEventId: "sevt_request_start_1",
     targetModelToolCallId: "tool_call_1",
     targetToolName: "Write",
     actionJson: { path: "src/a.ts", content: "ok" },

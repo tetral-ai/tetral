@@ -804,10 +804,8 @@ async function loadCapacityContext(messages: readonly RuntimeMessage[]) {
   const contextJson = JSON.stringify({
     messages: messages.map((message, index) => ({
       ...message,
-      owningEventId: `evt_capacity_context_${index}`,
-      eventSequence: index + 1,
     })),
-    turnFacts: { events: [], messageLineage: [] },
+    turnFacts: { events: [], internalRepairs: [] },
     coldCoverage: {
       pendingToolIds: [],
       pendingSandboxExecutionIds: [],

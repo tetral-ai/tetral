@@ -264,7 +264,6 @@ const RequestKindSchema = z.enum([
   "compaction_summary",
   "approval_reviewer",
 ]);
-const TerminalOutcomeSchema = z.enum(["success", "error", "cancelled", "unknown"]);
 
 const RequestStartFactSchema = z.strictObject({
   requestKind: RequestKindSchema,
@@ -278,21 +277,22 @@ const RequestEndFactSchema = z.strictObject({
   rescheduled: z.boolean(),
 });
 
-const ToolUseFactSchema = z.strictObject({
-  modelToolCallId: IdentitySchema,
-  toolName: IdentitySchema,
-});
+const ToolUseFactSchema = z.strictObject({});
 
 const OrdinaryToolResultFactSchema = z.strictObject({
   toolUseEventId: IdentitySchema,
-  outcome: TerminalOutcomeSchema,
 });
 
 const InternalToolRepairFactSchema = z.strictObject({
-  modelToolCallId: IdentitySchema,
-  toolName: IdentitySchema,
-  repairKind: z.literal("invalid_tool"),
-  outcome: z.literal("error"),
+  repairKey: IdentitySchema,
+});
+
+const InternalRepairReferenceSchema = z.strictObject({
+  repairKey: IdentitySchema,
+  messageId: IdentitySchema,
+  repairEventId: IdentitySchema,
+  eventSequence: SequenceSchema,
+  modelRequestId: IdentitySchema,
 });
 
 const TurnEventTypeSchema = z.enum([
@@ -369,7 +369,7 @@ const ThreadTurnEventFactSchema = z.strictObject({
       if (event.toolResult === undefined || specialized !== 1) {
         context.addIssue({ code: "custom", message: "Tool Result fact is malformed" });
       }
-      if (event.type === "agent.mcp_tool_result" && event.toolResult !== undefined && "repairKind" in event.toolResult) {
+      if (event.type === "agent.mcp_tool_result" && event.toolResult !== undefined && "repairKey" in event.toolResult) {
         context.addIssue({ code: "custom", message: "MCP Tool Result cannot be an internal repair" });
       }
       break;
@@ -391,68 +391,9 @@ const ThreadTurnEventFactSchema = z.strictObject({
   }
 });
 
-const DeclarationLineageEntrySchema = z.strictObject({
-  lineageKind: z.literal("declaration_receipt"),
-  operationKind: IdentitySchema,
-  sourceKind: IdentitySchema,
-  eventId: IdentitySchema,
-  eventSequence: SequenceSchema,
-  disposition: z.enum(["created", "updated"]),
-});
-
-const PodLossRepairLineageEntrySchema = z.strictObject({
-  lineageKind: z.literal("bridge_pod_loss_repair"),
-  repairEventId: IdentitySchema,
-  eventSequence: SequenceSchema,
-  toolUseEventId: IdentitySchema,
-  outcome: TerminalOutcomeSchema,
-});
-
-const IdleCleanupRepairLineageEntrySchema = z.strictObject({
-  lineageKind: z.literal("bridge_idle_cleanup_repair"),
-  repairEventId: IdentitySchema,
-  eventSequence: SequenceSchema,
-  toolUseEventId: IdentitySchema,
-  outcome: z.literal("error"),
-});
-
-const MessageLineageEntrySchema = z.discriminatedUnion("lineageKind", [
-  DeclarationLineageEntrySchema,
-  PodLossRepairLineageEntrySchema,
-  IdleCleanupRepairLineageEntrySchema,
-]);
-
-const RuntimeMessageLineageSchema = z.strictObject({
-  messageId: IdentitySchema,
-  messageSequence: MessageSequenceSchema,
-  owningEventId: IdentitySchema,
-  modelRequestId: IdentitySchema.optional(),
-  entries: z.array(MessageLineageEntrySchema).min(1),
-}).superRefine((lineage, context) => {
-  let previous = 0;
-  for (const entry of lineage.entries) {
-    if (entry.eventSequence <= previous) {
-      context.addIssue({ code: "custom", message: "message lineage must follow database event order" });
-      break;
-    }
-    previous = entry.eventSequence;
-  }
-  const creationCount = lineage.entries.filter((entry) =>
-    entry.lineageKind === "declaration_receipt" && entry.disposition === "created"
-  ).length;
-  const repairOnlyIdleCleanup =
-    creationCount === 0 &&
-    lineage.entries.length === 1 &&
-    lineage.entries[0]?.lineageKind === "bridge_idle_cleanup_repair" &&
-    lineage.entries[0].repairEventId === lineage.owningEventId;
-  if (creationCount !== 1 && !repairOnlyIdleCleanup) {
-    context.addIssue({ code: "custom", message: "message lineage requires one creation receipt" });
-  }
-});
-
 export const ThreadTurnLoadFactsSchema = z.strictObject({
   events: z.array(ThreadTurnEventFactSchema),
-  messageLineage: z.array(RuntimeMessageLineageSchema),
+  internalRepairs: z.array(InternalRepairReferenceSchema),
 }).superRefine((facts, context) => {
   const eventIds = new Set<string>();
   let previousSequence = 0;
@@ -464,8 +405,12 @@ export const ThreadTurnLoadFactsSchema = z.strictObject({
     eventIds.add(event.eventId);
     previousSequence = event.eventSequence;
   }
-  if (new Set(facts.messageLineage.map((lineage) => lineage.messageId)).size !== facts.messageLineage.length) {
-    context.addIssue({ code: "custom", message: "loaded messages must have one lineage record" });
+  if (
+    new Set(facts.internalRepairs.map((repair) => repair.repairKey)).size !== facts.internalRepairs.length ||
+    new Set(facts.internalRepairs.map((repair) => repair.messageId)).size !== facts.internalRepairs.length ||
+    new Set(facts.internalRepairs.map((repair) => repair.repairEventId)).size !== facts.internalRepairs.length
+  ) {
+    context.addIssue({ code: "custom", message: "internal repair direct references must be unique" });
   }
 });
 
@@ -491,8 +436,10 @@ export function extractThreadTurnCheckpoint(input: {
   readonly messages: readonly DurableRuntimeMessage[];
   readonly facts: ThreadTurnLoadFacts;
 }): ThreadTurnCheckpoint {
+  // PostgreSQL order is authoritative within Events and Messages separately.
+  // Direct identities relate Requests and Tools; Message sequence alone marks
+  // user-side input after the latest provider boundary.
   const facts = ThreadTurnLoadFactsSchema.parse(input.facts);
-  const messageLineage = validateLoadedMessageLineage(input.messages, facts.messageLineage);
   const starts = new Map<string, ThreadTurnLoadFacts["events"][number]>();
   const ends = new Map<string, ThreadTurnLoadFacts["events"][number]>();
 
@@ -517,7 +464,7 @@ export function extractThreadTurnCheckpoint(input: {
   }
 
   validateRequestOrdering(facts.events, starts, ends);
-  validateRequestMembers(facts.events, starts, ends, input.messages, messageLineage);
+  validateRequestMembers(facts.events, starts, ends, input.messages, facts.internalRepairs);
   const latestRunning = facts.events.filter((event) =>
     event.type === "session.status_running" || event.type === "session.thread_status_running"
   ).at(-1);
@@ -538,7 +485,7 @@ export function extractThreadTurnCheckpoint(input: {
   const newestStart = runIsClosed ? undefined : candidateStart;
   const request = newestStart === undefined
     ? undefined
-    : extractNewestRequest(newestStart, ends.get(newestStart.modelRequestId!), facts.events);
+    : extractNewestRequest(newestStart, ends.get(newestStart.modelRequestId!), facts.events, input.messages, facts.internalRepairs);
   const idleCloseout = closeout.idleCloseout?.stopReason === "requires_action" && request?.toolMembers.every(
     (member) => member.memberKind !== "public_tool_use" || member.terminalResult !== undefined,
   )
@@ -552,14 +499,10 @@ export function extractThreadTurnCheckpoint(input: {
   if (boundary > highestLoadedMessageSequence) {
     throw new Error("Request Start message boundary exceeds the loaded durable message range");
   }
-  const messagesById = new Map(input.messages.map((message) => [message.id, message]));
-  const pendingInputMessageIds = [...messageLineage.values()]
-    .filter((lineage) => {
-      const message = messagesById.get(lineage.messageId)!;
-      return lineage.messageSequence > boundary && messageLineageMakesRequestReady(message, lineage);
-    })
-    .sort((left, right) => left.messageSequence - right.messageSequence)
-    .map((lineage) => lineage.messageId);
+  const pendingInputMessageIds = input.messages
+    .filter((message) => message.role === "user" && message.sequence > boundary)
+    .sort((left, right) => left.sequence - right.sequence)
+    .map((message) => message.id);
 
   return parseThreadTurnCheckpoint({
     ...(closeout.executionRunId !== undefined ? { executionRunId: closeout.executionRunId } : {}),
@@ -642,83 +585,6 @@ export function extractColdThreadToolRouteView(input: {
   });
 }
 
-function validateLoadedMessageLineage(
-  messages: readonly DurableRuntimeMessage[],
-  lineageRecords: ThreadTurnLoadFacts["messageLineage"],
-): Map<string, ThreadTurnLoadFacts["messageLineage"][number]> {
-  const messagesById = new Map(messages.map((message) => [message.id, message]));
-  const lineageById = new Map(lineageRecords.map((lineage) => [lineage.messageId, lineage]));
-  if (messagesById.size !== messages.length || lineageById.size !== messagesById.size) {
-    throw new Error("checkpoint message lineage does not match the loaded message set");
-  }
-  for (const [messageId, message] of messagesById) {
-    const lineage = lineageById.get(messageId);
-    if (
-      lineage === undefined ||
-      lineage.messageSequence !== message.sequence ||
-      lineage.owningEventId !== message.owningEventId
-    ) {
-      throw new Error("checkpoint message lineage does not match the loaded message set");
-    }
-    for (const entry of lineage.entries) {
-      if (entry.lineageKind === "declaration_receipt" && !declarationLineageRecognized(entry)) {
-        throw new Error("message declaration lineage is not recognized");
-      }
-      if (
-        entry.lineageKind === "declaration_receipt" &&
-        declarationLineageMakesRequestReady(entry) &&
-        (entry.disposition !== "created" || message.role !== "user" || entry.eventId !== lineage.owningEventId)
-      ) {
-        throw new Error("message declaration lineage does not match its message projection");
-      }
-    }
-    const finalEntry = lineage.entries.at(-1)!;
-    const finalEventId = finalEntry.lineageKind === "declaration_receipt"
-      ? finalEntry.eventId
-      : finalEntry.repairEventId;
-    if (finalEventId !== lineage.owningEventId) {
-      throw new Error("message lineage does not end at its owning event");
-    }
-  }
-  return lineageById;
-}
-
-function declarationLineageRecognized(
-  entry: Extract<ThreadTurnLoadFacts["messageLineage"][number]["entries"][number], { lineageKind: "declaration_receipt" }>,
-): boolean {
-  switch (entry.operationKind) {
-    case "commit_inputs":
-      return [
-        "messages",
-        "tool_confirmation",
-        "approval_review",
-        "agent_mail",
-        "rejection",
-        "interrupt_control",
-      ].includes(entry.sourceKind);
-    case "write_event":
-      return [
-        "agent.message",
-        "agent.tool_use",
-        "agent.mcp_tool_use",
-        "agent.tool_result",
-        "agent.mcp_tool_result",
-      ].includes(entry.sourceKind);
-    case "write_request_end":
-      return entry.sourceKind === "model_request";
-    case "commit_internal_tool_repair":
-      return entry.sourceKind === "internal_tool_repair";
-    case "commit_task_notification_result":
-      return entry.sourceKind === "task_notification";
-    case "finish_idle":
-      return entry.sourceKind === "turn_closeout";
-    case "commit_runtime_termination":
-      return entry.sourceKind === "runtime_termination";
-    default:
-      return false;
-  }
-}
-
 function validateRequestOrdering(
   events: ThreadTurnLoadFacts["events"],
   starts: ReadonlyMap<string, ThreadTurnLoadFacts["events"][number]>,
@@ -728,7 +594,7 @@ function validateRequestOrdering(
   const resultSequenceByToolUse = new Map<string, number>();
   for (const event of events) {
     if ((event.type === "agent.tool_result" || event.type === "agent.mcp_tool_result") &&
-        event.toolResult !== undefined && !("repairKind" in event.toolResult)) {
+        event.toolResult !== undefined && !("repairKey" in event.toolResult)) {
       resultSequenceByToolUse.set(event.toolResult.toolUseEventId, event.eventSequence);
     }
   }
@@ -755,34 +621,36 @@ function validateRequestMembers(
   starts: ReadonlyMap<string, ThreadTurnLoadFacts["events"][number]>,
   ends: ReadonlyMap<string, ThreadTurnLoadFacts["events"][number]>,
   messages: readonly DurableRuntimeMessage[],
-  messageLineage: ReadonlyMap<string, ThreadTurnLoadFacts["messageLineage"][number]>,
+  internalRepairs: ThreadTurnLoadFacts["internalRepairs"],
 ): void {
   const toolUses = new Map<string, ThreadTurnLoadFacts["events"][number]>();
   const terminalResults = new Set<string>();
+  const consumedRepairs = new Set<string>();
+  const messagesById = new Map(messages.map((message) => [message.id, message]));
+  if (messagesById.size !== messages.length) {
+    throw new Error("loaded messages must have unique durable identities");
+  }
   const toolMessageParts = new Map<string, {
+    readonly messageId: string;
     readonly toolCallId: string;
     readonly toolName: string;
-    readonly lineage: ThreadTurnLoadFacts["messageLineage"][number];
+    readonly status: string;
   }[]>();
-  const unboundToolMessageParts: {
-    readonly toolCallId: string;
-    readonly toolName: string;
-    readonly lineage: ThreadTurnLoadFacts["messageLineage"][number];
-  }[] = [];
   for (const message of messages) {
-    const lineage = messageLineage.get(message.id)!;
     for (const part of message.parts) {
-      if (part.type !== "tool") {
+      if (part.type !== "tool" || part.toolUseEventId === undefined) {
         continue;
       }
-      if (part.toolUseEventId !== undefined) {
-        const projected = { toolCallId: part.toolCallId, toolName: part.toolName, lineage };
-        toolMessageParts.set(part.toolUseEventId, [...(toolMessageParts.get(part.toolUseEventId) ?? []), projected]);
-      } else {
-        unboundToolMessageParts.push({ toolCallId: part.toolCallId, toolName: part.toolName, lineage });
-      }
+      const projected = {
+        messageId: message.id,
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        status: part.state.status,
+      };
+      toolMessageParts.set(part.toolUseEventId, [...(toolMessageParts.get(part.toolUseEventId) ?? []), projected]);
     }
   }
+  const repairsByKey = new Map(internalRepairs.map((repair) => [repair.repairKey, repair]));
 
   for (const event of events) {
     if (event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use") {
@@ -798,24 +666,9 @@ function validateRequestMembers(
       if (end !== undefined && event.eventSequence > end.eventSequence) {
         throw new Error("Tool Use cannot follow Request End");
       }
-      const projected = (toolMessageParts.get(event.eventId) ?? []).filter((part) =>
-        part.toolCallId === event.toolUse!.modelToolCallId &&
-        part.toolName === event.toolUse!.toolName
-      );
-      if (projected.length === 0) {
-        throw new Error("Tool Use does not match its assistant projection part");
-      }
-      const declared = projected.filter((part) =>
-        part.lineage.entries.some((entry) =>
-          entry.lineageKind === "declaration_receipt" &&
-          entry.operationKind === "write_event" &&
-          entry.sourceKind === event.type &&
-          entry.eventId === event.eventId &&
-          (entry.disposition === "created" || entry.disposition === "updated")
-        )
-      );
-      if (declared.length !== 1) {
-        throw new Error("Tool Use has no matching declaration lineage");
+      const projected = toolMessageParts.get(event.eventId) ?? [];
+      if (projected.length !== 1) {
+        throw new Error("Tool Use does not match exactly one assistant Tool part");
       }
       toolUses.set(event.eventId, event);
       continue;
@@ -824,33 +677,31 @@ function validateRequestMembers(
       continue;
     }
     const result = event.toolResult!;
-    if ("repairKind" in result) {
+    if ("repairKey" in result) {
+      const repair = repairsByKey.get(result.repairKey);
       const start = starts.get(event.modelRequestId!);
       const end = ends.get(event.modelRequestId!);
-      if (start === undefined) {
-        throw new Error("internal repair has no matching Request Start");
+      if (
+        repair === undefined ||
+        repair.repairEventId !== event.eventId ||
+        repair.eventSequence !== event.eventSequence ||
+        repair.modelRequestId !== event.modelRequestId
+      ) {
+        throw new Error("internal repair direct reference does not match its Event");
       }
-      if (event.eventSequence <= start.eventSequence) {
-        throw new Error("internal repair cannot precede Request Start");
+      if (start === undefined || event.eventSequence <= start.eventSequence) {
+        throw new Error("internal repair has no preceding Request Start");
       }
       if (end !== undefined && event.eventSequence > end.eventSequence) {
         throw new Error("internal repair cannot follow Request End");
       }
-      const matchingRepairs = unboundToolMessageParts.filter((part) =>
-        part.toolCallId === result.modelToolCallId &&
-        part.toolName === result.toolName &&
-        part.lineage.modelRequestId === event.modelRequestId &&
-        part.lineage.entries.some((entry) =>
-          entry.lineageKind === "declaration_receipt" &&
-          entry.operationKind === "commit_internal_tool_repair" &&
-          entry.sourceKind === "internal_tool_repair" &&
-          entry.eventId === event.eventId &&
-          entry.disposition === "created"
-        )
-      );
-      if (matchingRepairs.length !== 1) {
-        throw new Error("internal repair has no matching declaration lineage");
+      const message = messagesById.get(repair.messageId);
+      const parts = message?.parts.filter((part) => part.type === "tool" && part.toolUseEventId === undefined) ?? [];
+      const part = parts[0];
+      if (parts.length !== 1 || part?.type !== "tool" || part.state.status !== "error") {
+        throw new Error("internal repair has no matching terminal Message part");
       }
+      consumedRepairs.add(repair.repairKey);
       continue;
     }
     const toolUse = toolUses.get(result.toolUseEventId);
@@ -866,35 +717,14 @@ function validateRequestMembers(
     if (terminalResults.has(result.toolUseEventId)) {
       throw new Error("Tool Use has duplicate terminal results");
     }
-    const matchingResultProjections = (toolMessageParts.get(result.toolUseEventId) ?? []).filter((projection) =>
-      projection.lineage.entries.some((entry) => {
-      if (
-        entry.lineageKind === "declaration_receipt" &&
-        entry.eventId === event.eventId
-      ) {
-        if (entry.disposition === "updated") {
-          return (
-            entry.operationKind === "write_event" && entry.sourceKind === event.type
-          ) || (
-            entry.operationKind === "commit_inputs" &&
-            (entry.sourceKind === "tool_confirmation" || entry.sourceKind === "interrupt_control")
-          );
-        }
-        return entry.disposition === "created" &&
-          entry.operationKind === "commit_runtime_termination" &&
-          entry.sourceKind === "runtime_termination";
-      }
-      return (
-        (entry.lineageKind === "bridge_pod_loss_repair" || entry.lineageKind === "bridge_idle_cleanup_repair") &&
-        entry.repairEventId === event.eventId &&
-        entry.toolUseEventId === result.toolUseEventId
-      );
-      })
-    );
-    if (matchingResultProjections.length !== 1) {
-      throw new Error("Tool Result has no matching message mutation lineage");
+    const matching = toolMessageParts.get(result.toolUseEventId) ?? [];
+    if (matching.length !== 1 || !["completed", "error", "cancelled"].includes(matching[0]!.status)) {
+      throw new Error("Tool Result has no matching terminal Message part");
     }
     terminalResults.add(result.toolUseEventId);
+  }
+  if (consumedRepairs.size !== internalRepairs.length) {
+    throw new Error("internal repair direct reference has no matching Event");
   }
 }
 
@@ -902,19 +732,43 @@ function extractNewestRequest(
   start: ThreadTurnLoadFacts["events"][number],
   end: ThreadTurnLoadFacts["events"][number] | undefined,
   events: ThreadTurnLoadFacts["events"],
+  messages: readonly DurableRuntimeMessage[],
+  internalRepairs: ThreadTurnLoadFacts["internalRepairs"],
 ): NonNullable<ThreadTurnCheckpoint["request"]> {
   const modelRequestId = start.modelRequestId!;
   const terminalByToolUse = new Map<string, { readonly resultEventId: string; readonly outcome: "success" | "error" | "cancelled" | "unknown" }>();
   const members: NonNullable<ThreadTurnCheckpoint["request"]>["toolMembers"][number][] = [];
   const modelToolCallIds = new Set<string>();
+  const messagesById = new Map(messages.map((message) => [message.id, message]));
+  const toolPartsByEventId = new Map<string, Extract<DurableRuntimeMessage["parts"][number], { readonly type: "tool" }>>();
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== "tool" || part.toolUseEventId === undefined) {
+        continue;
+      }
+      if (toolPartsByEventId.has(part.toolUseEventId)) {
+        throw new Error("Tool Use matches multiple assistant Tool parts");
+      }
+      toolPartsByEventId.set(part.toolUseEventId, part);
+    }
+  }
+  const repairsByKey = new Map(internalRepairs.map((repair) => [repair.repairKey, repair]));
   for (const event of events) {
     if (event.modelRequestId !== modelRequestId) {
       continue;
     }
-    if ((event.type === "agent.tool_result" || event.type === "agent.mcp_tool_result") && event.toolResult !== undefined && !("repairKind" in event.toolResult)) {
+    if (
+      (event.type === "agent.tool_result" || event.type === "agent.mcp_tool_result") &&
+      event.toolResult !== undefined &&
+      !("repairKey" in event.toolResult)
+    ) {
+      const part = toolPartsByEventId.get(event.toolResult.toolUseEventId);
+      if (part === undefined) {
+        throw new Error("Tool Result Message part is absent");
+      }
       terminalByToolUse.set(event.toolResult.toolUseEventId, {
         resultEventId: event.eventId,
-        outcome: event.toolResult.outcome,
+        outcome: terminalOutcomeFromToolPart(part.state.status),
       });
     }
   }
@@ -923,31 +777,41 @@ function extractNewestRequest(
       continue;
     }
     if (event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use") {
-      if (modelToolCallIds.has(event.toolUse!.modelToolCallId)) {
+      const part = toolPartsByEventId.get(event.eventId);
+      if (part === undefined) {
+        throw new Error("Tool Use Message part is absent");
+      }
+      if (modelToolCallIds.has(part.toolCallId)) {
         throw new Error("modelToolCallId is duplicated within the request");
       }
-      modelToolCallIds.add(event.toolUse!.modelToolCallId);
+      modelToolCallIds.add(part.toolCallId);
       const terminalResult = terminalByToolUse.get(event.eventId);
       members.push({
         memberKind: "public_tool_use",
-        modelToolCallId: event.toolUse!.modelToolCallId,
+        modelToolCallId: part.toolCallId,
         toolUseEventId: event.eventId,
-        toolName: event.toolUse!.toolName,
+        toolName: part.toolName,
         ...(terminalResult !== undefined ? { terminalResult } : {}),
       });
     } else if (
       event.type === "agent.tool_result" &&
       event.toolResult !== undefined &&
-      "repairKind" in event.toolResult
+      "repairKey" in event.toolResult
     ) {
-      if (modelToolCallIds.has(event.toolResult.modelToolCallId)) {
+      const repair = repairsByKey.get(event.toolResult.repairKey)!;
+      const message = messagesById.get(repair.messageId)!;
+      const part = message.parts.find((candidate) => candidate.type === "tool" && candidate.toolUseEventId === undefined);
+      if (part === undefined || part.type !== "tool") {
+        throw new Error("internal repair Message part is absent");
+      }
+      if (modelToolCallIds.has(part.toolCallId)) {
         throw new Error("modelToolCallId is duplicated within the request");
       }
-      modelToolCallIds.add(event.toolResult.modelToolCallId);
+      modelToolCallIds.add(part.toolCallId);
       members.push({
         memberKind: "internal_tool_repair",
-        modelToolCallId: event.toolResult.modelToolCallId,
-        toolName: event.toolResult.toolName,
+        modelToolCallId: part.toolCallId,
+        toolName: part.toolName,
         repairEventId: event.eventId,
         outcome: "error",
       });
@@ -972,29 +836,17 @@ function extractNewestRequest(
   };
 }
 
-function messageLineageMakesRequestReady(
-  message: DurableRuntimeMessage,
-  lineage: ThreadTurnLoadFacts["messageLineage"][number],
-): boolean {
-  if (message.role !== "user") {
-    return false;
+function terminalOutcomeFromToolPart(status: "pending" | "running" | "completed" | "error" | "cancelled"): "success" | "error" | "cancelled" {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "error":
+    case "cancelled":
+      return status;
+    case "pending":
+    case "running":
+      throw new Error("Tool Result has no terminal Message projection");
   }
-  return lineage.entries.some((entry) => {
-    return entry.lineageKind === "declaration_receipt" &&
-      entry.disposition === "created" &&
-      declarationLineageMakesRequestReady(entry);
-  });
-}
-
-function declarationLineageMakesRequestReady(
-  entry: Extract<ThreadTurnLoadFacts["messageLineage"][number]["entries"][number], { lineageKind: "declaration_receipt" }>,
-): boolean {
-  return (
-    entry.operationKind === "commit_inputs" &&
-    (entry.sourceKind === "messages" || entry.sourceKind === "approval_review" || entry.sourceKind === "agent_mail")
-  ) || (
-    entry.operationKind === "commit_task_notification_result" && entry.sourceKind === "task_notification"
-  );
 }
 
 function extractRunCloseout(events: ThreadTurnLoadFacts["events"]): Pick<

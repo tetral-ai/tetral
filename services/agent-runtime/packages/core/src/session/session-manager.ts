@@ -1446,6 +1446,11 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 ...threadResult.threadEntry.runtimeThread.state.contextManager.messages(),
                 message,
               ]);
+              threadResult.threadEntry.runtimeThread.state.applyThreadTurnFact({
+                fact: "inputs_committed",
+                eventId: committed.receipt.events[0]!.eventId,
+                messageIds: [message.id],
+              });
               threadResult.threadEntry.bridgeScope = command;
               const confirmation = threadResult.threadEntry.controlQueue.resolveToolConfirmation(command);
               if (confirmation === "conflict") {

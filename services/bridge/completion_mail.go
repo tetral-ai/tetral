@@ -495,7 +495,7 @@ func appendDeclaredCompletionMailForSourceTx(
 		return nil, nil, status.Error(codes.InvalidArgument, "completion mail requires a live sub-agent thread")
 	}
 	if create.GetMessageKind() != bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL ||
-		create.SourceEventId != nil || len(create.GetParts()) != 1 {
+		len(create.GetParts()) != 1 {
 		return nil, nil, status.Error(codes.InvalidArgument, "completion mail create identity is invalid")
 	}
 	if _, err := validateRuntimeMessageCreate(create); err != nil {
@@ -575,7 +575,6 @@ func appendDeclaredCompletionMailForSourceTx(
 			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
 		}, &bridgev1.DurableMessageStamp{
 			SessionThreadId: scope.GetSessionThreadId(),
-			OwningEventId:   eventID,
 			MessageId:       messageID,
 			MessageSequence: 0,
 			CreatedAt:       timestamp,

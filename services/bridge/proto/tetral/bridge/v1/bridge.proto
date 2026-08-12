@@ -121,7 +121,6 @@ enum ChildInterruptOutcome {
 }
 
 message RuntimeMessageCreate {
-  optional string source_event_id = 1;
   RuntimeMessageCreateKind message_kind = 2;
   string message_info_json = 3;
   repeated RuntimePartCreate parts = 4;
@@ -175,7 +174,6 @@ message DurablePartStamp {
 
 message DurableMessageStamp {
   string session_thread_id = 1;
-  string owning_event_id = 2;
   string message_id = 3;
   int64 message_sequence = 4;
   string created_at = 5;

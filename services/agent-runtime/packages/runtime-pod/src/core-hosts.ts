@@ -25,6 +25,8 @@ import type { RuntimeCloseoutEvent, RuntimeMCPManifestUpdateEvent } from "@tetra
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import { runtimeAgentMailText, runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
+import { recordCheckpointReconstructionFailure } from "./logger.js";
+import type { RuntimePodLogger } from "./logger.js";
 
 /**
  * Groups the promise-based Runtime Core host surfaces and the two operations that end their shared
@@ -71,6 +73,7 @@ export interface RuntimeCoreHostsOptions {
   readonly recordCloseoutEvent?: ((event: RuntimeCloseoutEvent) => void) | undefined;
   readonly recordMCPManifestUpdate?: ((event: RuntimeMCPManifestUpdateEvent) => void) | undefined;
   readonly resolveMCPManifestEligibility?: SessionManager.LayerOptions["resolveMCPManifestEligibility"];
+  readonly logger?: RuntimePodLogger | undefined;
 }
 
 /**
@@ -118,23 +121,30 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               );
               pendingAgentMail.push(acceptedResolvedAgentMail(command, resolved, context.thread));
             }
-            const turnCheckpoint = extractThreadTurnCheckpoint({ messages: context.messages, facts: context.turnFacts });
-            if (context.durableTurnId !== turnCheckpoint.executionRunId) {
-              throw new Error("durable turn identity conflicts with the reconstructed Thread turn");
+            let turnCheckpoint: ThreadTurnCheckpoint;
+            let turnToolRouteView: ThreadToolRouteView;
+            try {
+              turnCheckpoint = extractThreadTurnCheckpoint({ messages: context.messages, facts: context.turnFacts });
+              if (context.durableTurnId !== turnCheckpoint.executionRunId) {
+                throw new Error("durable turn identity conflicts with the reconstructed Thread turn");
+              }
+              turnToolRouteView = extractColdThreadToolRouteView({
+                checkpoint: turnCheckpoint,
+                pendingToolUses: context.pendingToolUses ?? [],
+                pendingSandboxExecutions: context.pendingSandboxExecutions ?? [],
+              });
+              if (context.thread?.status === "closed_for_runtime") {
+                validateClosedThreadResumeCheckpoint(
+                  turnCheckpoint,
+                  turnToolRouteView,
+                  context.pendingToolUses ?? [],
+                  context.pendingSandboxExecutions ?? [],
+                );
+              }
+            } catch (error) {
+              recordCheckpointReconstructionFailure(options.logger, command);
+              throw error;
             }
-            const turnToolRouteView = extractColdThreadToolRouteView({
-              checkpoint: turnCheckpoint,
-              pendingToolUses: context.pendingToolUses ?? [],
-              pendingSandboxExecutions: context.pendingSandboxExecutions ?? [],
-            });
-			if (context.thread?.status === "closed_for_runtime") {
-			  validateClosedThreadResumeCheckpoint(
-				turnCheckpoint,
-				turnToolRouteView,
-				context.pendingToolUses ?? [],
-				context.pendingSandboxExecutions ?? [],
-			  );
-			}
             return {
               ...command,
               ...(context.thread !== undefined ? { thread: context.thread } : {}),

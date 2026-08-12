@@ -802,7 +802,7 @@ func validateTaskNotificationCreate(
 	create := request.GetMessageCreate()
 	if create == nil ||
 		create.GetMessageKind() != bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION ||
-		create.SourceEventId != nil || len(create.GetParts()) != 1 {
+		len(create.GetParts()) != 1 {
 		return status.Error(codes.InvalidArgument, "task notification create identity is invalid")
 	}
 	if _, err := validateRuntimeMessageCreate(create); err != nil {
@@ -898,6 +898,7 @@ func commitTaskNotificationDeclarationTx(
 		scope,
 		"task_notification",
 		eventID,
+		nil,
 		request.GetMessageCreate(),
 		now,
 	)

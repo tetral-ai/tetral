@@ -301,7 +301,6 @@ func TestRuntimeDeclarationWritersLogCanonicalRejectionsOnceAndFailOpen(t *testi
 					Scope: scope, RuntimeInputId: "input_1", InputKind: "messages",
 					EventIds: []string{"event_1"}, SequenceFrom: 1, SequenceTo: 1,
 					MessageCreates: []*bridgev1.RuntimeMessageCreate{{
-						SourceEventId:   bridgeAPIString("event_1"),
 						MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT,
 						MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
 						Parts:           []*bridgev1.RuntimePartCreate{invalidPart},

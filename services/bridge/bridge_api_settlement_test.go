@@ -597,7 +597,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 		UsageJson:                `{"input_tokens":3,"output_tokens":2}`,
 		CompactionCheckpointCreate: bridgeMessageCreateForTest(
 			bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT,
-			"user", "runtime", nil,
+			"user", "runtime",
 			bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"` + checkpointText + `","truncated":false,"status":"completed"}`},
 		),
 		CompactedThroughMessageSequence: &compactedThrough,
@@ -613,10 +613,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 	}
 	receipt := receipts[0]
 	checkpoint := receipt.GetMessages()[0]
-	if receipt.GetCompactedThroughMessageSequence() != 0 ||
-		checkpoint.GetMessageSequence() != 1 ||
-		checkpoint.GetOwningEventId() != receipt.GetEvents()[1].GetEventId() {
-		t.Fatalf("compaction receipt = %+v; want boundary 0 and DB-stamped checkpoint sequence 1 owned by the compaction event", receipt)
+	if receipt.GetCompactedThroughMessageSequence() != 0 || checkpoint.GetMessageSequence() != 1 {
+		t.Fatalf("compaction receipt = %+v; want boundary 0 and DB-stamped checkpoint sequence 1", receipt)
 	}
 	replay, err := store.WriteRequestEnd(context.Background(), request)
 	if err != nil ||
@@ -1766,13 +1764,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_terminate'
 		    AND session_thread_id = 'thr_bridge_terminate'
-		    AND last_event_id IN (
-		        SELECT event_id
-		          FROM session_events
-		         WHERE workspace_id = 'default'
-		           AND session_id = 'sesn_bridge_terminate'
-		           AND type = 'agent.tool_result'
-		    )`,
+		    AND data_json::jsonb @> '{"parts":[{"type":"tool"}]}'::jsonb`,
 	).Scan(&toolResultMessage); err != nil {
 		t.Fatalf("read loop-authored terminal tool result: %v", err)
 	}

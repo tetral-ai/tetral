@@ -192,7 +192,6 @@ function canonicalMessageCreate(create: RuntimeMessageCreate | undefined): unkno
     message_info: JSON.parse(canonicalRunToolJSON(create.messageInfoJson)) as unknown,
     message_kind: runtimeMessageCreateKindName(create.messageKind),
     parts: create.parts.map(canonicalPart),
-    source_event_id: create.sourceEventId ?? null,
   };
 }
 

@@ -19,7 +19,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { RuntimeModelRef } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type { RuntimeApprovalReviewer, RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
-import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeJsonValue, RuntimeMessage, SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { ReviewerExecutionToken } from "@tetral/agent-runtime-core/src/session/session-manager.js";
@@ -152,8 +152,8 @@ export function createRuntimeApprovalReviewer(
 
     const lease = manager.beginReview(reviewId);
     const trunkSnapshot = manager.trunkSnapshot();
-    const currentParentBoundaryEventId = parentTranscriptBoundaryEventId(request);
-    if (currentParentBoundaryEventId === undefined) {
+    const currentParentBoundaryEventId = request.parentBoundaryEventId;
+    if (currentParentBoundaryEventId.length === 0) {
       lease.release();
       return failWithLog("runtime_failure", "approval reviewer parent transcript has no durable boundary");
     }
@@ -465,16 +465,6 @@ function approvalReviewCreatedAt(request: RuntimeApprovalReviewRequest, now: () 
   return request.currentProviderRequestMessages[0]?.createdAt
     ?? request.parentTranscript.messages.at(-1)?.createdAt
     ?? now();
-}
-
-function parentTranscriptBoundaryEventId(request: RuntimeApprovalReviewRequest): string | undefined {
-  for (let index = request.parentTranscript.messages.length - 1; index >= 0; index -= 1) {
-    const parsed = DurableRuntimeMessageSchema.safeParse(request.parentTranscript.messages[index]);
-    if (parsed.success) {
-      return parsed.data.owningEventId;
-    }
-  }
-  return undefined;
 }
 
 function reviewThreadControl(request: RuntimeApprovalReviewRequest, reviewerThreadId: string, reviewId: string): RuntimeThreadControlState {

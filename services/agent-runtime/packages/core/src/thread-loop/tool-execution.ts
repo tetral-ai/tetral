@@ -156,6 +156,7 @@ export interface RuntimeApprovalReviewRequest {
   readonly targetPodUid: string;
   readonly runtimeBindingToken: string;
   readonly modelRequestId: string;
+  readonly parentBoundaryEventId: string;
   readonly targetModelToolCallId: string;
   readonly targetToolName: string;
   readonly actionJson: RuntimeJsonValue;

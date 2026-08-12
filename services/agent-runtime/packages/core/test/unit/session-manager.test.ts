@@ -53,8 +53,6 @@ function pendingApprovalAssistantMessage(sessionId: string, toolUseEventId: stri
   return DurableRuntimeMessageSchema.parse({
     id: toolPart.messageId,
     sessionId,
-    owningEventId: toolUseEventId,
-    eventSequence: 1,
     sequence: 1,
     role: "assistant",
     origin: "agent",
@@ -1095,39 +1093,6 @@ describe("SessionManager", () => {
       threadLoop.runs[0]?.release();
       await new Promise((resolve) => setTimeout(resolve, 5));
       expect(threadLoop.runs).toHaveLength(1);
-    });
-  });
-
-  test("cold recovery starts the reconstructed request after the input ACK response was lost", async () => {
-    const threadLoop = makeControlledThreadLoop();
-    const input = acceptedInput("sesn_cold_input_replay", "rin_cold_input_replay");
-    const durableMessage = {
-      ...coldUserMessage(input.sessionId),
-      owningEventId: input.eventIds[0]!,
-      eventSequence: input.sequenceFrom,
-    };
-    await withSessionManager(sessionManagerLayer(threadLoop, {
-      loadThreadContext: async () => ({
-        ...threadControl(input.sessionId, input.runtimeInputId, input.sessionThreadId),
-        runtimeBindingToken: "runtime-binding-token",
-        messages: [durableMessage],
-        turnCheckpoint: { pendingInputMessageIds: [durableMessage.id] },
-        durableTurnId: "sevt_cold_input_running",
-        coldCoverage: coldCoverage(),
-      }),
-    }), async (manager) => {
-      expect(await Effect.runPromise(manager.acceptInput(input))).toEqual({
-        ok: true,
-        sessionId: input.sessionId,
-        created: true,
-        started: true,
-        duplicate: true,
-      });
-      await waitForRuns(threadLoop, 1);
-      expect(threadLoop.runs[0]?.session.state.threadTurnReduction().action).toEqual({
-        action: "prepare_next_request",
-      });
-      threadLoop.runs[0]?.release();
     });
   });
 
@@ -2389,6 +2354,9 @@ describe("SessionManager", () => {
       expect(session?.state.contextManager.messages().at(-1)?.parts).toEqual([
         expect.objectContaining({ type: "text", text: "Approval allowed" }),
       ]);
+      const confirmationMessage = session?.state.contextManager.messages().at(-1);
+      expect(confirmationMessage).toBeDefined();
+      expect(session?.state.threadTurnReduction().checkpoint.pendingInputMessageIds).toEqual([confirmationMessage!.id]);
       expect(threadLoop.runs).toHaveLength(1);
       const messagesAfterConfirmation = session?.state.contextManager.messages().length;
       expect(

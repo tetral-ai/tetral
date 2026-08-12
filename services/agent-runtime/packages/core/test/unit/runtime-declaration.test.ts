@@ -67,7 +67,7 @@ describe("incremental Runtime declarations", () => {
       operationId: "input",
       events: [{ sessionThreadId: "thread", eventId: "event", eventSequence: 4, disposition: "existing" }],
       messages: [{
-        sessionThreadId: "thread", owningEventId: "event", messageId: "message", messageSequence: 1,
+        sessionThreadId: "thread", messageId: "message", messageSequence: 1,
         createdAt: timestamp, updatedAt: timestamp, disposition: "created",
         parts: [{ partId: "part", messageId: "message", partSequence: 0, createdAt: timestamp, updatedAt: timestamp, disposition: "created" }],
       }],
@@ -84,7 +84,7 @@ describe("incremental Runtime declarations", () => {
     }, baseReceipt({
       events: [{ sessionThreadId: "thread", eventId: "event", eventSequence: 1, disposition: "created" }],
       messages: [{
-        sessionThreadId: "thread", owningEventId: "event", messageId: "message", messageSequence: 1,
+        sessionThreadId: "thread", messageId: "message", messageSequence: 1,
         createdAt: timestamp, updatedAt: timestamp, disposition: "created",
         parts: [{ partId: "part", messageId: "message", partSequence: 1, createdAt: timestamp, updatedAt: timestamp, disposition: "created" }],
       }],
@@ -96,7 +96,7 @@ describe("incremental Runtime declarations", () => {
     const receipt = baseReceipt({
       sourceKind: "agent.tool_result",
       events: [{ sessionThreadId: "thread", eventId: "result_event", eventSequence: 2, disposition: "created" }],
-      messages: [{ sessionThreadId: "thread", owningEventId: "result_event", messageId: "message", messageSequence: 1, createdAt: timestamp, updatedAt: timestamp, disposition: "updated", parts: [] }],
+      messages: [{ sessionThreadId: "thread", messageId: "message", messageSequence: 1, createdAt: timestamp, updatedAt: timestamp, disposition: "updated", parts: [] }],
     });
     expect(() => applyToolSettlementReceipt({
       sessionThreadId: "thread", operationKind: "write_event", sourceKind: "agent.tool_result",

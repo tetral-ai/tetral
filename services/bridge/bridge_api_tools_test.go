@@ -1016,6 +1016,13 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 		!strings.Contains(string(payload.Messages[0]), `"toolCallId":"call_repair"`) {
 		t.Fatalf("LoadContext repair messages = %s; want invalid call followed by durable repair row", contextResponse.GetContextJson())
 	}
+	if len(payload.TurnFacts.InternalRepairs) != 1 || payload.TurnFacts.InternalRepairs[0].RepairKey != repairKey || payload.TurnFacts.InternalRepairs[0].MessageID != messageID {
+		t.Fatalf("LoadContext repair facts = %+v; want direct Message/Event join", payload.TurnFacts.InternalRepairs)
+	}
+	composed := runColdCheckpointComposition(t, contextResponse.GetContextJson())
+	if composed.Checkpoint.Request == nil || composed.Checkpoint.Request.ModelRequestID != "mreq_repair" || composed.Checkpoint.Request.ToolMemberCount != 1 || composed.ReducerAction != "await_request_end" || !reflect.DeepEqual(composed.DerivedRepairKeys, []string{repairKey}) {
+		t.Fatalf("internal repair composition = %+v; want one terminal repair in the open request", composed)
+	}
 
 	conflict := proto.Clone(request).(*bridgev1.CommitInternalToolRepairRequest)
 	conflict.MessageCreate.Parts[0].PartJson = strings.ReplaceAll(
@@ -1076,6 +1083,144 @@ func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision
 			}
 			if err := writePublic("rwrite_tool_collision_public_second"); status.Code(err) != codes.AlreadyExists {
 				t.Fatalf("colliding public Tool Use err = %v; want AlreadyExists", err)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequest(t *testing.T) {
+	for _, order := range []string{"ordinary_then_repair", "repair_then_ordinary"} {
+		t.Run(order, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID := "sesn_bridge_mixed_members_" + order
+			threadID := "thr_bridge_mixed_members_" + order
+			bindingID := "bind_bridge_mixed_members_" + order
+			podUID := "pod_bridge_mixed_members_" + order
+			modelRequestID := "mreq_bridge_mixed_members_" + order
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
+			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_mixed_start_"+order, modelRequestID, "agent_provider_request", 0)
+
+			writeOrdinary := func() error {
+				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+					Scope: scope, RuntimeWriteId: "rwrite_mixed_text_" + order, ModelRequestId: modelRequestID,
+					EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"continuing"}]}`,
+					Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+						t, scope, "rwrite_mixed_text_"+order, "agent.message", "streaming",
+						bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"continuing","truncated":false,"status":"completed"}`},
+					)},
+				})
+				return err
+			}
+			writeRepair := func() (*bridgev1.CommitInternalToolRepairResponse, error) {
+				return store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
+					Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: "call_missing_" + order, ToolName: "missing_tool",
+					MessageCreate: bridgeInternalToolRepairCreateForTest("call_missing_"+order, "missing_tool", "invalid tool"),
+				})
+			}
+			var repairResponse *bridgev1.CommitInternalToolRepairResponse
+			var contextBeforeRepair *bridgev1.LoadContextResponse
+
+			if order == "ordinary_then_repair" {
+				if err := writeOrdinary(); err != nil {
+					t.Fatalf("ordinary member: %v", err)
+				}
+				var err error
+				contextBeforeRepair, err = store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+					Scope: scope, RuntimeInputId: "rin_mixed_before_repair_" + order,
+				})
+				if err != nil {
+					t.Fatalf("LoadContext before repair: %v", err)
+				}
+				repairResponse, err = writeRepair()
+				if err != nil {
+					t.Fatalf("repair member: %v", err)
+				}
+			} else {
+				var err error
+				repairResponse, err = writeRepair()
+				if err != nil {
+					t.Fatalf("repair member: %v", err)
+				}
+				if err := writeOrdinary(); err != nil {
+					t.Fatalf("ordinary member: %v", err)
+				}
+			}
+
+			var ordinaryRows, repairRows int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FILTER (WHERE model_request_id = $4),
+				        count(*) FILTER (WHERE repair_key IS NOT NULL)
+				   FROM session_messages
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
+				"default", sessionID, threadID, modelRequestID,
+			).Scan(&ordinaryRows, &repairRows); err != nil {
+				t.Fatalf("count mixed request members: %v", err)
+			}
+			if ordinaryRows != 1 || repairRows != 1 {
+				t.Fatalf("ordinary/repair rows = %d/%d; want 1/1", ordinaryRows, repairRows)
+			}
+
+			loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+				Scope: scope, RuntimeInputId: "rin_mixed_reload_" + order,
+			})
+			if err != nil {
+				t.Fatalf("LoadContext: %v", err)
+			}
+			composed := runColdCheckpointComposition(t, loaded.GetContextJson())
+			if order == "ordinary_then_repair" {
+				receipts := repairResponse.GetDeclaration().GetReceipts()
+				if len(receipts) != 1 || contextBeforeRepair == nil {
+					t.Fatalf("repair declaration = %+v; want one receipt and a pre-repair context", repairResponse.GetDeclaration())
+				}
+				repairKey := internalToolRepairKey(modelRequestID, "call_missing_"+order, "missing_tool")
+				composed = runColdCheckpointCompositionInput(t, map[string]any{
+					"contextJson": loaded.GetContextJson(),
+					"hotScenario": map[string]any{
+						"kind": "internal_repair", "baseContextJson": contextBeforeRepair.GetContextJson(),
+						"receipt": runtimeReceiptFixture(t, receipts[0]),
+						"create": map[string]any{
+							"messageKind": "internal_tool_repair", "role": "assistant", "origin": "agent", "status": "completed",
+							"parts": []any{map[string]any{
+								"type": "tool", "toolCallId": "call_missing_" + order, "toolName": "missing_tool",
+								"state": map[string]any{
+									"status": "error",
+									"error":  map[string]any{"type": "provider_tool_protocol_error", "message": "invalid tool", "retryable": false},
+								},
+							},
+							},
+						},
+						"sessionId": sessionID, "sessionThreadId": threadID, "modelRequestId": modelRequestID,
+						"repairKey": repairKey, "repairEventId": receipts[0].GetEvents()[0].GetEventId(),
+						"modelToolCallId": "call_missing_" + order, "toolName": "missing_tool",
+					},
+				})
+				if composed.HotSemantic == nil || !reflect.DeepEqual(composed.HotSemantic, composed.Semantic) {
+					t.Fatalf("repair hot/cold semantics differ: hot=%+v cold=%+v", composed.HotSemantic, composed.Semantic)
+				}
+			}
+			if composed.Checkpoint.Request == nil || composed.Checkpoint.Request.ModelRequestID != modelRequestID ||
+				composed.Checkpoint.Request.ToolMemberCount != 1 || composed.ReducerAction != "await_request_end" {
+				t.Fatalf("mixed member composition = %+v", composed)
+			}
+			if order == "ordinary_then_repair" {
+				var malformed map[string]any
+				if err := json.Unmarshal([]byte(loaded.GetContextJson()), &malformed); err != nil {
+					t.Fatalf("decode context for fail-closed composition: %v", err)
+				}
+				turnFacts, ok := malformed["turnFacts"].(map[string]any)
+				if !ok {
+					t.Fatalf("context turn facts = %#v; want object", malformed["turnFacts"])
+				}
+				turnFacts["internalRepairs"] = []any{}
+				malformedJSON, err := json.Marshal(malformed)
+				if err != nil {
+					t.Fatalf("encode malformed context: %v", err)
+				}
+				runColdCheckpointCompositionFailure(t, string(malformedJSON), "internal repair direct reference does not match its Event")
 			}
 		})
 	}

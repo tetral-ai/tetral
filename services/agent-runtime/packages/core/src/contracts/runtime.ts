@@ -428,7 +428,6 @@ export type RuntimeMessageCreateKind = z.infer<typeof RuntimeMessageCreateKindSc
 
 /** Creates one brand-new message; Bridge assigns all durable identity by position. */
 export const RuntimeMessageCreateSchema = z.strictObject({
-  sourceEventId: RuntimeIdentifierSchema.optional(),
   messageKind: RuntimeMessageCreateKindSchema,
   role: z.enum(["user", "assistant"]),
   origin: z.enum(["user", "agent", "runtime"]),
@@ -470,7 +469,6 @@ export interface RuntimeDurablePartStamp {
 
 export interface RuntimeDurableMessageStamp {
   readonly sessionThreadId: string;
-  readonly owningEventId: string;
   readonly messageId: string;
   readonly messageSequence: number;
   readonly createdAt: string;
@@ -565,8 +563,6 @@ export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
  */
 export const DurableRuntimeMessageSchema = RuntimeMessageInfoSchema
   .extend({
-    owningEventId: RuntimeIdentifierSchema,
-    eventSequence: PositiveIntegerSchema,
     parts: z.array(RuntimePartSchema),
   })
   .refine(
@@ -576,6 +572,10 @@ export const DurableRuntimeMessageSchema = RuntimeMessageInfoSchema
   .refine(
     (message) => message.parts.every((runtimePart) => runtimePart.sessionId === message.sessionId),
     "runtime part sessionId must match the owning message session id",
+  )
+  .refine(
+    (message) => message.sequence > 0,
+    "durable runtime message requires a database-assigned sequence",
   );
 export type DurableRuntimeMessage = z.infer<typeof DurableRuntimeMessageSchema>;
 
@@ -594,9 +594,7 @@ export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
   repairKey: SanitizedIdentifierSchema,
   messageCreate: RuntimeMessageCreateSchema,
 })
-  .refine((repair) =>
-    repair.messageCreate.sourceEventId === undefined &&
-    repair.messageCreate.messageKind === "internal_tool_repair",
+  .refine((repair) => repair.messageCreate.messageKind === "internal_tool_repair",
   "repair message create must match the repair operation")
   .refine((repair) =>
     repair.messageCreate.role === "assistant" &&

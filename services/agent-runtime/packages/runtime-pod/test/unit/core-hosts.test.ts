@@ -38,25 +38,11 @@ const emptyColdCoverage = {
   undeliveredMailDeliveryIds: [],
 } as const;
 
-const emptyTurnFacts: ThreadTurnLoadFacts = { events: [], messageLineage: [] };
+const emptyTurnFacts: ThreadTurnLoadFacts = { events: [], internalRepairs: [] };
 
 function turnFactsFor(messages: readonly DurableRuntimeMessage[]): ThreadTurnLoadFacts {
-  return {
-    events: [],
-    messageLineage: messages.map((message) => ({
-      messageId: message.id,
-      messageSequence: message.sequence,
-      owningEventId: message.owningEventId,
-      entries: [{
-        lineageKind: "declaration_receipt",
-        operationKind: message.origin === "agent" ? "write_event" : "commit_inputs",
-        sourceKind: message.origin === "agent" ? "runtime_event" : message.origin === "runtime" ? "agent_mail" : "messages",
-        eventId: message.owningEventId,
-        eventSequence: message.eventSequence,
-        disposition: "created",
-      }],
-    })),
-  };
+  void messages;
+  return { events: [], internalRepairs: [] };
 }
 
 function turnFactsForPendingTool(input: {
@@ -67,16 +53,17 @@ function turnFactsForPendingTool(input: {
   readonly toolName: string;
   readonly family: "agent.tool_use" | "agent.mcp_tool_use";
 }): ThreadTurnLoadFacts {
-  const toolMessage = input.messages.find((message) => message.owningEventId === input.toolUseEventId);
-  if (toolMessage === undefined || toolMessage.eventSequence < 2) {
+  const toolMessage = input.messages.find((message) => message.parts.some((part) =>
+    part.type === "tool" && part.toolUseEventId === input.toolUseEventId
+  ));
+  if (toolMessage === undefined) {
     throw new Error("pending Tool Use fixture requires an ordered assistant projection");
   }
-  const startSequence = toolMessage.eventSequence - 1;
   return {
     events: [
       {
         eventId: `start_${input.modelRequestId}`,
-        eventSequence: startSequence,
+        eventSequence: 1,
         type: "span.model_request_start",
         modelRequestId: input.modelRequestId,
         requestStart: {
@@ -86,17 +73,14 @@ function turnFactsForPendingTool(input: {
       },
       {
         eventId: input.toolUseEventId,
-        eventSequence: toolMessage.eventSequence,
+        eventSequence: 2,
         type: input.family,
         modelRequestId: input.modelRequestId,
-        toolUse: {
-          modelToolCallId: input.modelToolCallId,
-          toolName: input.toolName,
-        },
+        toolUse: {},
       },
       {
         eventId: `end_${input.modelRequestId}`,
-        eventSequence: toolMessage.eventSequence + 1,
+        eventSequence: 3,
         type: "span.model_request_end",
         modelRequestId: input.modelRequestId,
         requestEnd: {
@@ -106,18 +90,7 @@ function turnFactsForPendingTool(input: {
         },
       },
     ],
-    messageLineage: turnFactsFor(input.messages).messageLineage.map((lineage) =>
-      lineage.messageId === toolMessage.id
-        ? {
-            ...lineage,
-            modelRequestId: input.modelRequestId,
-            entries: lineage.entries.map((entry) => ({
-              ...entry,
-              sourceKind: input.family,
-            })),
-          }
-        : lineage
-    ),
+    internalRepairs: [],
   };
 }
 
@@ -738,7 +711,6 @@ describe("Runtime core host production assembly", () => {
           pendingInput,
           { kind: "mcp", mcpServerName: "github" },
         ),
-        eventSequence: 3,
       },
     ];
     const replacementScope = {
@@ -909,7 +881,6 @@ describe("Runtime core host production assembly", () => {
       userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 1, "hello"),
       {
         ...assistantRunningToolMessage("sesn_interrupt_confirm", "assistant-interrupt-confirm", 2, "tool-1", "Write", "sevt_tool_1", pendingInput),
-        eventSequence: 3,
       },
     ];
 
@@ -1072,9 +1043,11 @@ describe("Runtime core host production assembly", () => {
 
   test("cold installation rejects conflicting durable run identities", async () => {
     let appendCalls = 0;
+    const records: unknown[] = [];
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
       now: () => "2026-06-16T00:00:00.000Z",
+      logger: { info: () => undefined, error: (record) => records.push(record) },
       ...testCoreDependencies({
         contextLoader: {
           loadThreadContext: async () => ({
@@ -1086,7 +1059,7 @@ describe("Runtime core host production assembly", () => {
                 eventSequence: 1,
                 type: "session.status_running",
               }],
-              messageLineage: [],
+              internalRepairs: [],
             },
             runtimeBindingToken: "runtime-binding-token-conflicting-run",
             coldCoverage: emptyColdCoverage,
@@ -1115,6 +1088,17 @@ describe("Runtime core host production assembly", () => {
         reason: "context_load_failed",
       });
       expect(appendCalls).toBe(0);
+      expect(records).toEqual([{
+        event: "runtime_checkpoint_reconstruction_failed",
+        "event.kind": "runtime_checkpoint_reconstruction_failed",
+        component: "agent-runtime",
+        message: "durable Thread facts could not be reconstructed",
+        "workspace.id": "wksp_1",
+        "session.id": "sesn_conflicting_run",
+        "thread.id": "thrd_1",
+        "reconstruction.phase": "cold_checkpoint",
+        "failure.kind": "invalid_durable_facts",
+      }]);
       expect(await hosts.subAgentRunHost.inspectThread(commandScope("sesn_conflicting_run"))).toMatchObject({
         ok: true,
         observed: false,
@@ -1181,7 +1165,7 @@ describe("Runtime core host production assembly", () => {
                   },
                 },
               ],
-              messageLineage: [],
+              internalRepairs: [],
             },
             runtimeBindingToken: "runtime-binding-token-open-cold",
             coldCoverage: emptyColdCoverage,
@@ -1295,7 +1279,7 @@ function commandScope(sessionId: string) {
     eventIds: [],
     sequenceFrom: 0,
     sequenceTo: 0,
-		origin: "user" as const,
+    origin: "user" as const,
   };
 }
 
@@ -1330,6 +1314,7 @@ function composedReviewRequest(): RuntimeApprovalReviewRequest {
     targetPodUid: "pod_reviewer_composed",
     runtimeBindingToken: "runtime-binding-token-reviewer-composed",
     modelRequestId: "mreq_reviewer_parent",
+    parentBoundaryEventId: "sevt_reviewer_parent_start",
     targetModelToolCallId: "tool_call_reviewer_composed",
     targetToolName: "Write",
     actionJson: { path: "src/a.ts", content: "ok" },
@@ -1463,7 +1448,6 @@ function successfulEventAppend(envelope: SessionEventEnvelope): SessionEventWrit
         }],
 		messages: envelope.assistantPartAppend === undefined ? [] : [{
           sessionThreadId: envelope.sessionThreadId,
-          owningEventId: eventId,
 			messageId: `msg_${envelope.writeId}`,
 			messageSequence: 1,
           createdAt: committedAt,

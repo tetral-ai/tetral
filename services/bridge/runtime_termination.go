@@ -245,7 +245,7 @@ func commitRuntimeTerminationDeclarationsTx(
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 			return nil, err
 		}
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, toolUse.ModelRequestID, eventID, settlement, now); err != nil {
+		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, toolUse.ModelRequestID, settlement, now); err != nil {
 			return nil, err
 		}
 		if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUse.EventID, eventID, "runtime_terminated", now); err != nil {

@@ -353,7 +353,6 @@ class ThreadLoopRuntimeStore extends RuntimeInternalToolRepairStore {
                         }],
                     messages: [{
                             sessionThreadId: repair.sessionThreadId,
-                            owningEventId: eventId,
                             messageId,
                             messageSequence,
                             createdAt,
@@ -459,8 +458,6 @@ interface TestDurableSequence {
 interface TestAssistantProjection {
     readonly messageId: string;
     readonly messageSequence: number;
-    readonly owningEventId: string;
-    readonly owningEventSequence: number;
     nextPartSequence: number;
     unfinishedTools: Array<{ readonly toolUseEventId: string; readonly partSequence: number }>;
 }
@@ -474,7 +471,6 @@ class TestRuntimeDeclarationReceipts {
     }
 
     seedMessage(sessionThreadId: string, message: DurableRuntimeMessage): void {
-        this.sequence.eventSequence = Math.max(this.sequence.eventSequence, message.eventSequence);
         this.sequence.messageSequence = Math.max(this.sequence.messageSequence, message.sequence);
         if (message.role !== "assistant") return;
         const prior = this.assistants.get(sessionThreadId);
@@ -482,8 +478,6 @@ class TestRuntimeDeclarationReceipts {
         this.assistants.set(sessionThreadId, {
             messageId: message.id,
             messageSequence: message.sequence,
-            owningEventId: message.owningEventId,
-            owningEventSequence: message.eventSequence,
             nextPartSequence: Math.max(-1, ...message.parts.map((part) => part.sequence)) + 1,
             unfinishedTools: message.parts
                 .filter((part): part is Extract<RuntimePart, { readonly type: "tool" }> =>
@@ -668,8 +662,6 @@ class TestRuntimeDeclarationReceipts {
             assistant = {
                 messageId: `msg_assistant_${this.sequence.messageSequence}`,
                 messageSequence: this.sequence.messageSequence,
-                owningEventId: event.eventId,
-                owningEventSequence: event.eventSequence,
                 nextPartSequence: 0,
                 unfinishedTools: [],
             };
@@ -687,7 +679,6 @@ class TestRuntimeDeclarationReceipts {
         assistant.nextPartSequence += parts.length;
         return {
             sessionThreadId,
-            owningEventId: assistant.owningEventId,
             messageId: assistant.messageId,
             messageSequence: assistant.messageSequence,
             createdAt,
@@ -708,7 +699,6 @@ class TestRuntimeDeclarationReceipts {
         const messageId = `msg_created_${messageSequence}`;
         return {
             sessionThreadId,
-            owningEventId: event.eventId,
             messageId,
             messageSequence,
             createdAt,
