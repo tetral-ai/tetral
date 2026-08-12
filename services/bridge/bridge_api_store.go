@@ -660,6 +660,14 @@ func rejectedAck(errorCode string) *bridgev1.BridgeWriteAck {
 	}
 }
 
+func rejectedTaskNotificationAck(runtimeInputID string, errorCode string) *bridgev1.BridgeWriteAck {
+	return &bridgev1.BridgeWriteAck{
+		Status:         bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED,
+		RuntimeInputId: runtimeInputID,
+		ErrorCode:      errorCode,
+	}
+}
+
 // defaultTime parses a wire timestamp, falling back when the caller omitted it.
 // Wire timestamps are RFC 3339; durable columns are native timestamps, so an
 // unparsable value is rejected here rather than stored.

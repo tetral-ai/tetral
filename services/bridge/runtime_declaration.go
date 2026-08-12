@@ -42,7 +42,37 @@ func marshalRuntimeDeclarationObject(value map[string]any) ([]byte, error) {
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'}), nil
+	return runtimeJSONStringifyBytes(bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})), nil
+}
+
+// JavaScript JSON.stringify leaves the Unicode line and paragraph separators
+// intact. encoding/json escapes them even when HTML escaping is disabled, so
+// declaration digests restore only encoder-authored separator escapes. Escaped
+// backslash text such as "\\u2028" remains byte-for-byte unchanged.
+func runtimeJSONStringifyBytes(encoded []byte) []byte {
+	result := make([]byte, 0, len(encoded))
+	for offset := 0; offset < len(encoded); {
+		separator := offset+6 <= len(encoded) && encoded[offset] == '\\' &&
+			(string(encoded[offset:offset+6]) == `\u2028` || string(encoded[offset:offset+6]) == `\u2029`)
+		if separator {
+			precedingSlashes := 0
+			for index := offset - 1; index >= 0 && encoded[index] == '\\'; index-- {
+				precedingSlashes++
+			}
+			if precedingSlashes%2 == 0 {
+				if encoded[offset+5] == '8' {
+					result = append(result, "\u2028"...)
+				} else {
+					result = append(result, "\u2029"...)
+				}
+				offset += 6
+				continue
+			}
+		}
+		result = append(result, encoded[offset])
+		offset++
+	}
+	return result
 }
 
 func marshalRuntimeDeclarationObjectWithRawField(value map[string]any, fieldName string, rawJSON string) ([]byte, error) {
@@ -332,20 +362,27 @@ func internalToolRepairDeclarationDigest(
 
 func taskNotificationDeclarationDigest(
 	request *bridgev1.CommitTaskNotificationResultRequest,
-	resultJSON string,
 ) (string, error) {
-	resultJSON = stripInternalProviderFields(resultJSON)
-	create, err := canonicalRuntimeMessageCreate(request.GetMessageCreate())
-	if err != nil {
-		return "", err
+	create := request.GetMessageCreate()
+	parts := make([]map[string]any, 0, len(create.GetParts()))
+	for _, part := range create.GetParts() {
+		parts = append(parts, map[string]any{
+			"part_json": part.GetPartJson(),
+			"part_kind": part.GetPartKind(),
+		})
 	}
-	raw, err := marshalRuntimeDeclarationObjectWithRawField(map[string]any{
-		"message_create":    create,
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+		"message_create": map[string]any{
+			"message_info_json": create.GetMessageInfoJson(),
+			"message_kind":      create.GetMessageKind(),
+			"parts":             parts,
+		},
 		"operation_kind":    bridgeOpCommitTaskNotificationResult,
+		"result_json":       request.GetResultJson(),
 		"runtime_input_id":  request.GetRuntimeInputId(),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
 		"task_id":           request.GetTaskId(),
-	}, "result", resultJSON)
+	})
 	if err != nil {
 		return "", err
 	}

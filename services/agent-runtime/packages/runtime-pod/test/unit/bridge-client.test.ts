@@ -128,6 +128,58 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
   });
 
+  test("contains deterministic task-notification declaration errors to the exact input", async () => {
+    for (const testCase of [
+      { code: status.INVALID_ARGUMENT, errorCode: "task_notification_result_invalid" },
+      { code: status.ALREADY_EXISTS, errorCode: "task_notification_payload_mismatch" },
+    ] as const) {
+      const bridge = new DeclarationBridge();
+      bridge.taskNotificationErrors.push(testCase.code);
+      const loader = new BridgeAPIContextLoader(options(bridge));
+      const input = taskNotificationInput(`rin_task_deterministic_${testCase.code}`);
+
+      const result = await loader.commitAcceptedInput(input, {
+        messageCreates: acceptedInputCreates(input),
+      });
+
+      expect(result).toEqual({
+        type: "task_notification_rejected",
+        errorCode: testCase.errorCode,
+      });
+      expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+    }
+  });
+
+  test("returns an input-scoped terminal disposition for a durable notification rejection", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationRejections.push("task_notification_payload_mismatch");
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_rejected");
+
+    const result = await loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) });
+
+    expect(result).toEqual({
+      type: "task_notification_rejected",
+      errorCode: "task_notification_payload_mismatch",
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
+
+  test("keeps a malformed task-notification receipt on the retryable uncertainty path", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.corruptTaskNotificationDigest = true;
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_receipt_uncertain");
+
+    await expect(loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "unavailable",
+      retryable: true,
+      fatal: false,
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
+
   test("lowers the shared reviewer declaration through the production CommitInputs adapter", async () => {
     const fixture = await Bun.file(new URL("../../../../testdata/reviewer-input-declaration.json", import.meta.url)).json() as {
       message: unknown;
@@ -425,6 +477,8 @@ class DeclarationBridge {
   readonly commitTaskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
   readonly repairRequests: CommitInternalToolRepairRequest[] = [];
   readonly taskNotificationErrors: number[] = [];
+  readonly taskNotificationRejections: string[] = [];
+  corruptTaskNotificationDigest = false;
   repairOperationId = "repair";
   private eventSequence = 0;
   private messageSequence = 0;
@@ -493,6 +547,17 @@ class DeclarationBridge {
       callback(Object.assign(new Error("task notification commit rejected"), { code: errorCode }), {});
       return grpcCall();
     }
+    const rejectionCode = this.taskNotificationRejections.shift();
+    if (rejectionCode !== undefined) {
+      callback(null, {
+        ack: {
+          status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
+          runtimeInputId: request.runtimeInputId,
+          errorCode: rejectionCode,
+        },
+      });
+      return grpcCall();
+    }
     const event = this.event(request, `sevt_${request.runtimeInputId}`);
     const operationId = taskNotificationOperationId(request.runtimeInputId, request.taskId);
     callback(null, response(request, request.runtimeInputId, [receipt({
@@ -500,7 +565,7 @@ class DeclarationBridge {
       operationKind: "commit_task_notification_result",
       sourceKind: "task_notification",
       operationId,
-      digest: taskNotificationDeclarationDigest(request),
+      digest: this.corruptTaskNotificationDigest ? "corrupt-task-notification-digest" : taskNotificationDeclarationDigest(request),
       events: [event],
       messages: request.messageCreate === undefined ? [] : [this.message(request, request.messageCreate, event.eventId)],
     })]));

@@ -542,6 +542,34 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.logger.records).toHaveLength(commands.length);
   });
 
+  test("preserves the delivered task notification bytes for durable settlement", async () => {
+    const fixture = runtimeFixture();
+    const payloadJson = '{"stderr":{"truncated":false,"text":""},"stdout":{"truncated":false,"text":"done"},"status":"completed","source_tool_use_event_id":"sevt_tool_1","task_id":"task_1"}';
+
+    const response = await fixture.service.acceptTaskNotification(
+      validCommand({
+        commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
+        runtimeInputId: "rin_task",
+        payloadJson,
+      }),
+      authMetadata(),
+    );
+
+    expect(response).toEqual(acceptedResponse({ runtimeInputId: "rin_task" }));
+    expect(fixture.runHost.taskNotifications).toEqual([
+      {
+        sessionId: "sesn_1",
+        command: {
+          ...commandScope({ runtimeInputId: "rin_task" }),
+          taskId: "task_1",
+          sourceToolUseEventId: "sevt_tool_1",
+          status: "completed",
+          payloadJson,
+        },
+      },
+    ]);
+  });
+
   test("active interrupt closeout owns the durable processed marker and retries when its ACK fails", async () => {
     const events: string[] = [];
     const fixture = runtimeFixture({
@@ -978,7 +1006,7 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.taskNotifications).toEqual([]);
   });
 
-  test("defers the canonicalized task notification declaration to the owning loop", async () => {
+  test("rejects task notification fields outside the delivered canonical shape", async () => {
     const fixture = runtimeFixture();
     const payloadJson = JSON.stringify({
       task_id: "task_1",
@@ -1006,25 +1034,15 @@ describe("RuntimeControlService command envelope", () => {
       provider_metadata_json: "{\"raw\":\"secret\"}",
     });
 
-    await fixture.service.acceptTaskNotification(
+    await expectGrpcCode(fixture.service.acceptTaskNotification(
       validCommand({
         commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
         runtimeInputId: "rin_task",
         payloadJson,
       }),
       authMetadata(),
-    );
-    const expected = {
-      task_id: "task_1",
-      source_tool_use_event_id: "sevt_tool_1",
-      status: "completed",
-      exit_code: 0,
-      stdout: { text: "done", truncated: false, original_bytes: 4 },
-      stderr: { text: "", truncated: false, original_lines: null },
-    };
-    const applied = fixture.runHost.taskNotifications[0]?.command.payloadJson;
-    expect(JSON.parse(applied ?? "{}")).toEqual(expected);
-    expect(JSON.stringify(fixture.runHost.taskNotifications)).not.toContain("provider_");
+    ), status.INVALID_ARGUMENT);
+    expect(fixture.runHost.taskNotifications).toEqual([]);
   });
 
   test("maps local capacity and cleanup busy outcomes to retryable transport failures", async () => {

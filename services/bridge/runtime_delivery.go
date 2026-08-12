@@ -555,6 +555,15 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 			return err
 		}
 		if !rowsAffected(result) {
+			if job.InputKind == "task_notification" {
+				replayed, found, replayErr := replayTaskNotificationDeliveryFinalizationTx(ctx, tx, job)
+				if replayErr != nil {
+					return replayErr
+				}
+				if found && replayed.Status == RuntimeDeliveryDuplicate {
+					return nil
+				}
+			}
 			return runtimeDeliveryPrepareError{kind: "runtime_inbox_accept_missing", message: "runtime inbox row is missing for accepted input", retryable: true}
 		}
 		return nil
@@ -994,6 +1003,23 @@ func replayTaskNotificationDeliveryFinalizationTx(ctx context.Context, tx *dbcon
 	if err == nil {
 		switch inboxStatus {
 		case "dead_lettered":
+			var errorCode string
+			err := tx.QueryRow(ctx, `SELECT error_code
+				FROM session_bridge_operations
+				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+				  AND operation=$4 AND source_kind=$4 AND idempotency_key=$5
+				  AND ack_status=$6 AND runtime_input_id=$7
+				FOR UPDATE`,
+				job.WorkspaceID, job.SessionID, job.SessionThreadID,
+				bridgeOpCommitTaskNotificationResult, taskID+":"+job.RuntimeInputID,
+				bridgeAckRejected, job.RuntimeInputID,
+			).Scan(&errorCode)
+			if err == nil && taskNotificationRejectionCode(errorCode) {
+				return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+			}
+			if err != nil && !dbconnect.IsNoRows(err) {
+				return RuntimeDeliveryResult{}, false, err
+			}
 			return runtimeDeliveryExhaustedResult(), true, nil
 		case "committed", "cancelled":
 			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil

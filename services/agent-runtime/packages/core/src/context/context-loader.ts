@@ -84,6 +84,13 @@ export type AcceptedInputCommitResult =
       readonly receipt: RuntimeDeclarationReceipt;
     }
   | { readonly type: "task_notification_deferred" }
+  | {
+      readonly type: "task_notification_rejected";
+      readonly errorCode:
+        | "task_notification_result_invalid"
+        | "task_notification_message_invalid"
+        | "task_notification_payload_mismatch";
+    }
   | { readonly type: "stale_custody" };
 
 /** Durable pending tool-use state reconstructed during a cold thread load. */

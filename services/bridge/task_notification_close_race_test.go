@@ -43,7 +43,7 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_task_close_lease_source")
+	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_task_close_lease_source")
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", `{"task_id":"task_close_lease","source_tool_use_event_id":"evt_task_close_lease_source","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,created_at,updated_at
@@ -74,6 +74,7 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_task_close_lease_close")
 	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	apiStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	admitRequest := &bridgev1.AdmitChildInterruptRequest{
 		Scope: parentScope, RootChildThreadId: childID,
 		SourceToolUseEventId: closeSource.GetSourceToolUseEventId(), Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
@@ -175,6 +176,7 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	}
 	controlQueueSettled := false
 	if !admissionFirst {
+		takeoverNow := now.Add(7 * 24 * time.Hour)
 		if response, err := apiStore.AwaitChildInterrupt(context.Background(), awaitRequest); status.Code(err) != codes.DeadlineExceeded || response != nil {
 			t.Fatalf("await before leased notification quiescence = %#v/%v; want DeadlineExceeded", response, err)
 		}
@@ -189,21 +191,21 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 		}
 		takeover, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 			WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-task-close-takeover",
-			MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(24 * time.Hour),
+			MaxJobs: 1, LeaseDuration: time.Minute, Now: takeoverNow,
 		})
 		if err != nil || len(takeover) != 1 {
 			t.Fatalf("take over close-race Queue work = %#v, %v; want one", takeover, err)
 		}
 		if takeover[0].ID != queued.ID {
 			if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
-				WorkspaceID: workspace.DefaultID, JobID: takeover[0].ID, LeaseToken: takeover[0].LeaseToken, Now: now.Add(24*time.Hour + time.Second),
+				WorkspaceID: workspace.DefaultID, JobID: takeover[0].ID, LeaseToken: takeover[0].LeaseToken, Now: takeoverNow.Add(time.Second),
 			}); err != nil || !acked {
 				t.Fatalf("ACK overtaking committed child-close control = %t, %v; want true", acked, err)
 			}
 			controlQueueSettled = true
 			takeover, err = queueStore.Lease(context.Background(), queue.LeaseRequest{
 				WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-task-close-takeover",
-				MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(24*time.Hour + 2*time.Second),
+				MaxJobs: 1, LeaseDuration: time.Minute, Now: takeoverNow.Add(2 * time.Second),
 			})
 			if err != nil || len(takeover) != 1 || takeover[0].ID != queued.ID {
 				t.Fatalf("take over expired task notification after control = %#v, %v; want %s", takeover, err, queued.ID)
@@ -225,13 +227,13 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	if !controlQueueSettled {
 		controlLease, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 			WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-child-close-control",
-			MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(24*time.Hour + 3*time.Second),
+			MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(7*24*time.Hour + 3*time.Second),
 		})
 		if err != nil || len(controlLease) != 1 || controlLease[0].ID == queued.ID {
 			t.Fatalf("lease committed child-close control = %#v, %v; want control job", controlLease, err)
 		}
 		if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
-			WorkspaceID: workspace.DefaultID, JobID: controlLease[0].ID, LeaseToken: controlLease[0].LeaseToken, Now: now.Add(24*time.Hour + 4*time.Second),
+			WorkspaceID: workspace.DefaultID, JobID: controlLease[0].ID, LeaseToken: controlLease[0].LeaseToken, Now: now.Add(7*24*time.Hour + 4*time.Second),
 		}); err != nil || !acked {
 			t.Fatalf("ACK committed child-close control = %t, %v; want true", acked, err)
 		}

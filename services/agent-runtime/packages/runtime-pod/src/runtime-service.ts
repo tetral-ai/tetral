@@ -1101,40 +1101,26 @@ function taskNotificationFromPayload(
   if (
     taskId === undefined ||
     sourceToolUseEventId === undefined ||
-    (statusValue !== "completed" && statusValue !== "failed" && statusValue !== "cancelled" && statusValue !== "expired")
+    (statusValue !== "completed" && statusValue !== "failed" && statusValue !== "cancelled" && statusValue !== "expired") ||
+    !hasExactFields(payload, ["task_id", "source_tool_use_event_id", "status", "stdout", "stderr"], ["exit_code"])
   ) {
     throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid task notification payload");
   }
-  const canonicalPayload = canonicalTaskNotificationPayload(payload, taskId, sourceToolUseEventId, statusValue);
+  if (hasOwn(payload, "exit_code")) {
+    nullableSafeInteger(payload.exit_code, "task notification exit_code");
+  }
+  validateTaskNotificationStream(payload, "stdout");
+  validateTaskNotificationStream(payload, "stderr");
   return {
     runtimeInputId,
     taskId,
     sourceToolUseEventId,
     status: statusValue,
-    payloadJson: JSON.stringify(canonicalPayload),
+    payloadJson,
   };
 }
 
-function canonicalTaskNotificationPayload(
-  payload: Record<string, unknown>,
-  taskId: string,
-  sourceToolUseEventId: string,
-  statusValue: "completed" | "failed" | "cancelled" | "expired",
-): Record<string, unknown> {
-  const canonical: Record<string, unknown> = {
-    task_id: taskId,
-    source_tool_use_event_id: sourceToolUseEventId,
-    status: statusValue,
-  };
-  if (hasOwn(payload, "exit_code")) {
-    canonical.exit_code = nullableSafeInteger(payload.exit_code, "task notification exit_code");
-  }
-  canonical.stdout = canonicalTaskNotificationStream(payload, "stdout");
-  canonical.stderr = canonicalTaskNotificationStream(payload, "stderr");
-  return canonical;
-}
-
-function canonicalTaskNotificationStream(payload: Record<string, unknown>, field: "stdout" | "stderr"): Record<string, unknown> {
+function validateTaskNotificationStream(payload: Record<string, unknown>, field: "stdout" | "stderr"): void {
   if (!hasOwn(payload, field)) {
     throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid task notification ${field}`);
   }
@@ -1144,16 +1130,21 @@ function canonicalTaskNotificationStream(payload: Record<string, unknown>, field
   }
   const text = value.text;
   const truncated = value.truncated;
-  if (typeof text !== "string" || typeof truncated !== "boolean") {
+  if (
+    typeof text !== "string" ||
+    typeof truncated !== "boolean" ||
+    !hasExactFields(value, ["text", "truncated"], ["original_bytes", "original_lines"])
+  ) {
     throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid task notification ${field}`);
   }
-  const canonical: Record<string, unknown> = { text, truncated };
   for (const optional of ["original_bytes", "original_lines"] as const) {
     if (hasOwn(value, optional)) {
-      canonical[optional] = nullableSafeInteger(value[optional], `task notification ${field}.${optional}`);
+      const count = nullableSafeInteger(value[optional], `task notification ${field}.${optional}`);
+      if (count !== null && count < 0) {
+        throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid task notification ${field}.${optional}`);
+      }
     }
   }
-  return canonical;
 }
 
 function nullableSafeInteger(value: unknown, field: string): number | null {
@@ -1257,6 +1248,17 @@ function parseObjectPayload(payloadJson: string, kind: string): Record<string, u
 
 function hasOwn(payload: Record<string, unknown>, field: string): boolean {
   return Object.prototype.hasOwnProperty.call(payload, field);
+}
+
+function hasExactFields(
+  payload: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const fields = new Set(Object.keys(payload));
+  return required.every((field) => fields.delete(field)) &&
+    optional.every((field) => !fields.has(field) || fields.delete(field)) &&
+    fields.size === 0;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

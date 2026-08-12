@@ -261,9 +261,9 @@ func bridgeTaskNotificationCreateForTest(t *testing.T, runtimeInputID, taskID, r
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, sourceToolUseEventID, err := taskNotificationResultIdentity(resultJSON)
-	if err != nil {
-		t.Fatal(err)
+	_, sourceToolUseEventID, ok := taskNotificationDeclaredIdentity(resultJSON)
+	if !ok {
+		t.Fatal("task notification result identity is invalid")
 	}
 	payload, err := canonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
 	if err != nil {
@@ -1523,6 +1523,20 @@ func seedBridgeAPITaskNotificationInbox(t *testing.T, db *sql.DB, workspaceID st
 func seedBridgeAPIBackgroundTask(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, bindingID string, taskID string, sourceToolUseEventID string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, created_at, updated_at
+		) SELECT $1, $2, $3, $4,
+			COALESCE((SELECT MAX(sequence) + 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2), 1),
+			'span.tool_use', '{}',
+			'internal', false, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		WHERE NOT EXISTS (
+			SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND event_id=$4
+		)`,
+		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
+		t.Fatalf("seed background task source Tool Use: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_background_tasks (
 			workspace_id, session_id, session_thread_id, task_id, source_tool_use_event_id,
 			binding_id, sandbox_id, provider_session_id, provider_command_id,
@@ -1530,6 +1544,29 @@ func seedBridgeAPIBackgroundTask(t *testing.T, db *sql.DB, workspaceID string, s
 		) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, 'provider_session_notify', 'provider_command_notify', '{}', 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID, sessionID, threadID, taskID, sourceToolUseEventID, bindingID, "sandbox_"+sessionID); err != nil {
 		t.Fatalf("seed background task: %v", err)
+	}
+}
+
+func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, bindingID string, taskID string, sourceToolUseEventID string) {
+	t.Helper()
+	seedBridgeAPIBackgroundTask(t, db, workspaceID, sessionID, threadID, bindingID, taskID, sourceToolUseEventID)
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_events
+		SET type='agent.tool_use', model_request_id='mreq_' || $4,
+		    payload_json='{"type":"agent.tool_use","name":"exec_command","input":{},"evaluated_permission":"allow"}'
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4`,
+		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
+		t.Fatalf("mark background task source Tool Use: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, model_request_id, created_at, updated_at
+	) SELECT $1, $2, $3, 'evt_result_' || $4,
+		COALESCE((SELECT MAX(sequence) + 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2), 1),
+		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_event_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
+		'internal', false, 'mreq_' || $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	WHERE NOT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND event_id='evt_result_' || $4)`,
+		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
+		t.Fatalf("seed background task source Tool Result: %v", err)
 	}
 }
 

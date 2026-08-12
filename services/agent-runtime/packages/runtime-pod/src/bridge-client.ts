@@ -410,11 +410,26 @@ export class BridgeAPITaskNotificationCommitter {
     try {
       response = await commitTaskNotificationResult(this.client, request, metadata);
     } catch (error) {
+      const code = grpcStatusCode(error);
+      if (code === status.INVALID_ARGUMENT) {
+        return {
+          ok: true as const,
+          rejected: true as const,
+          errorCode: "task_notification_result_invalid" as const,
+        };
+      }
+      if (code === status.ALREADY_EXISTS) {
+        return {
+          ok: true as const,
+          rejected: true as const,
+          errorCode: "task_notification_payload_mismatch" as const,
+        };
+      }
       return {
         ok: false as const,
         // A queued Inbox without Queue custody is a durable invariant violation;
         // live-lease contention and all other transport failures remain retryable.
-        retryable: grpcStatusCode(error) !== status.FAILED_PRECONDITION,
+        retryable: code !== status.FAILED_PRECONDITION,
         errorCode: "bridge_commit_unavailable",
         message: "task notification durable commit failed",
       };
@@ -482,7 +497,7 @@ export class BridgeAPITaskNotificationCommitter {
         });
         return {
           ok: false as const,
-          retryable: false,
+          retryable: true,
           errorCode: "bridge_task_notification_projection_invalid",
           message: "task notification durable commit returned malformed receipt",
         };
@@ -532,7 +547,7 @@ export class BridgeAPITaskNotificationCommitter {
         });
         return {
           ok: false as const,
-          retryable: false,
+          retryable: true,
           errorCode: "bridge_task_notification_projection_invalid",
           message: "task notification durable commit returned malformed receipt",
         };
@@ -544,6 +559,16 @@ export class BridgeAPITaskNotificationCommitter {
     if (ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack?.errorCode === "task_notification_deferred") {
       return { ok: true as const, deferred: true as const };
     }
+    const rejectionErrorCode = response.ack?.errorCode;
+    if (
+      ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED &&
+      response.declaration === undefined &&
+      response.ack?.runtimeInputId === input.command.runtimeInputId &&
+      rejectionErrorCode !== undefined &&
+      taskNotificationRejectionCode(rejectionErrorCode)
+    ) {
+      return { ok: true as const, rejected: true as const, errorCode: rejectionErrorCode };
+    }
     return {
       ok: false as const,
       retryable: false,
@@ -551,6 +576,15 @@ export class BridgeAPITaskNotificationCommitter {
       message: "task notification durable commit rejected",
     };
   }
+}
+
+function taskNotificationRejectionCode(errorCode: string): errorCode is
+  | "task_notification_result_invalid"
+  | "task_notification_message_invalid"
+  | "task_notification_payload_mismatch" {
+  return errorCode === "task_notification_result_invalid" ||
+    errorCode === "task_notification_message_invalid" ||
+    errorCode === "task_notification_payload_mismatch";
 }
 
 /** Configures Bridge-backed creation and closure of temporary approval-reviewer threads. */
@@ -871,6 +905,16 @@ export class BridgeAPIContextLoader implements ContextLoader {
       }
       if ("deferred" in result) {
         return { type: "task_notification_deferred" };
+      }
+      if ("rejected" in result) {
+        if (result.errorCode !== undefined && taskNotificationRejectionCode(result.errorCode)) {
+          return { type: "task_notification_rejected", errorCode: result.errorCode };
+        }
+        throw normalizeContextLoaderError({
+          code: "schema_mismatch",
+          sessionId: input.sessionId,
+          reason: "task notification rejection is invalid",
+        });
       }
       if ("stale" in result) {
         return { type: "stale_custody" };

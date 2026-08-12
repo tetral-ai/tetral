@@ -286,7 +286,7 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_early", 1, "user.message", `{"content":[{"type":"text","text":"first"}]}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_late", 2, "agent.thread_message_received", `{"delivery_id":"a_pod_loss_late"}`)
-	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "evt_pod_loss_task_source")
+	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "evt_pod_loss_task_source")
 	taskResult := `{"task_id":"task_m_pod_loss_middle","source_tool_use_event_id":"evt_pod_loss_task_source","status":"completed","stdout":{"text":"second","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":0}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", taskResult)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, earlyID, "messages", `["evt_pod_loss_early"]`, "accepted", bindingID, podUID, 1, 1)
@@ -351,7 +351,11 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	}); err != nil {
 		t.Fatalf("commit first replacement input: %v", err)
 	}
-	if _, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(t, scope, middleID, taskID, taskResult)); err != nil {
+	canonicalTaskResult, err := canonicalTaskNotificationPayloadJSON(taskID, "evt_pod_loss_task_source", "completed", taskResult)
+	if err != nil {
+		t.Fatalf("build middle task notification: %v", err)
+	}
+	if response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(t, scope, middleID, taskID, canonicalTaskResult)); err != nil || response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("commit middle replacement input: %v", err)
 	}
 	lateEventID := "evt_pod_loss_late"

@@ -505,7 +505,7 @@ func settleBackgroundTaskResultTx(ctx context.Context, tx *dbconnect.Tx, work Sa
 	if !transitionRowsAffected(updated) {
 		return nil
 	}
-	runtimeInputID := "task_notification:" + work.TaskID
+	runtimeInputID := queue.FormatTaskNotificationRuntimeInputID(work.TaskID)
 	closing, err := childcontrol.ThreadOrAncestorClosingOrClosedTx(ctx, tx, work.WorkspaceID, work.SessionID, work.SessionThreadID)
 	if err != nil {
 		return err

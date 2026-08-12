@@ -486,7 +486,12 @@ export interface RuntimeAcceptedInputCommitObservation {
   readonly inputKind: RuntimeAcceptedInputState["kind"];
   readonly attempt: number;
   readonly durationMs: number;
-  readonly outcome: "started" | "committed" | "deferred" | "retry" | "exhausted";
+  readonly outcome: "started" | "committed" | "deferred" | "rejected" | "retry" | "exhausted";
+  readonly failureClass?:
+    | "task_notification_result_invalid"
+    | "task_notification_message_invalid"
+    | "task_notification_payload_mismatch"
+    | undefined;
 }
 
 /** Provides request-time policy and provider context for one resident thread. */
@@ -813,6 +818,10 @@ function runThreadLoopEffect(
             return yield* nonAbandonablePromise(() => handleContextLoaderFailure(options, session, declaration.error));
           }
           if (declaration.result.type === "task_notification_deferred") {
+            session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
+            continue;
+          }
+          if (declaration.result.type === "task_notification_rejected") {
             session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
             continue;
           }
@@ -1435,7 +1444,12 @@ async function commitAcceptedInput(
           input,
           attempt,
           attemptStartedAt,
-          attemptResult.result.type === "task_notification_deferred" ? "deferred" : "committed",
+          attemptResult.result.type === "task_notification_deferred"
+            ? "deferred"
+            : attemptResult.result.type === "task_notification_rejected"
+              ? "rejected"
+              : "committed",
+          attemptResult.result.type === "task_notification_rejected" ? attemptResult.result.errorCode : undefined,
         );
         return { ok: true, result: attemptResult.result, messageCreates };
       }
@@ -1477,6 +1491,7 @@ function recordAcceptedInputCommit(
   attempt: number,
   startedAt: number,
   outcome: RuntimeAcceptedInputCommitObservation["outcome"],
+  failureClass?: RuntimeAcceptedInputCommitObservation["failureClass"],
 ): void {
   try {
     options.recordAcceptedInputCommit?.({
@@ -1489,6 +1504,7 @@ function recordAcceptedInputCommit(
       attempt,
       durationMs: Math.max(0, options.runtime.monotonicMs() - startedAt),
       outcome,
+      ...(failureClass === undefined ? {} : { failureClass }),
     });
   } catch {
     // Durable receipt handling is authoritative; observability is fail-open.

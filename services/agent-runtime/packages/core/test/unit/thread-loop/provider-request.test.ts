@@ -21,6 +21,7 @@ import type {
   SkillGuidanceIndexEntry,
 } from "../../../src/thread-loop/provider-request.js";
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
+import type { RuntimeAcceptedInputCommitObservation } from "../../../src/thread-loop/thread-loop.js";
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeAcceptedInputState, RuntimeConfigPatchState } from "../../../src/thread-loop/thread-state.js";
@@ -1690,6 +1691,62 @@ test("task notification retries an unknown commit outcome before provider work",
     expect(providerCalls).toBe(1);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
     expect(JSON.stringify(session.state.contextManager.messages())).toContain("task result recovered from the replayed receipt");
+});
+test("terminal task notification rejection drops only that input and continues the thread", async () => {
+    const session = new ThreadRuntime("sesn_task_notification_rejected");
+    const observations: RuntimeAcceptedInputCommitObservation[] = [];
+    const appended: SessionEvent[] = [];
+    let providerCalls = 0;
+    expect(session.state.enqueueAcceptedInput({
+        requestId: "req_task_notification_rejected",
+        ...session.identity,
+        runtimeInputId: "rin_task_notification_rejected",
+        eventIds: [],
+        sequenceFrom: 0,
+        sequenceTo: 0,
+        kind: "task_notification",
+        taskId: "task_notification_rejected",
+        sourceToolUseEventId: "sevt_task_notification_rejected",
+        status: "completed",
+        payloadJson: '{"status":"completed"}',
+    })).toBe("applied");
+    const followUp = userMessage("msg_after_task_rejection", 1, "continue after rejected notification");
+    expect(session.state.enqueueAcceptedInput({
+        requestId: "req_after_task_rejection",
+        ...session.identity,
+        runtimeInputId: "rin_after_task_rejection",
+        eventIds: ["sevt_after_task_rejection"],
+        sequenceFrom: 1,
+        sequenceTo: 1,
+        kind: "messages",
+        payloadJson: JSON.stringify({ messages: [followUp] }),
+    })).toBe("applied");
+    const loader = new QueuedContextLoader([], [], [
+        () => ({ type: "task_notification_rejected" as const, errorCode: "task_notification_payload_mismatch" as const }),
+        (input: RuntimeAcceptedInputState) => acceptedInputReceipt(input),
+    ]);
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        recordAcceptedInputCommit: (event) => observations.push(event),
+        onStream: () => { providerCalls += 1; },
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+    }))));
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(loader.commitCalls).toHaveLength(2);
+    expect(providerCalls).toBe(1);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
+    expect(JSON.stringify(session.state.contextManager.messages())).toContain("continue after rejected notification");
+    expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
+    expect(observations).toContainEqual(expect.objectContaining({
+        runtimeInputId: "rin_task_notification_rejected",
+        outcome: "rejected",
+        failureClass: "task_notification_payload_mismatch",
+    }));
 });
 test("task notification arriving during provider reschedule joins the next safe request", async () => {
     const session = new ThreadRuntime("sesn_task_notification_reschedule");

@@ -248,6 +248,7 @@ export function acceptedInputCommitLogRecord(
     "retry.attempt": event.attempt,
     "duration.ms": event.durationMs,
     outcome: event.outcome,
+    ...(event.failureClass === undefined ? {} : { "failure.class": event.failureClass }),
   };
 }
 

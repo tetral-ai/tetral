@@ -13,6 +13,7 @@ describe("Runtime Pod JSON logger", () => {
       attempt: 2,
       durationMs: 17,
       outcome: "retry",
+      failureClass: "task_notification_payload_mismatch",
     });
     expect(record).toEqual({
       event: "runtime_accepted_input_commit",
@@ -29,6 +30,7 @@ describe("Runtime Pod JSON logger", () => {
       "retry.attempt": 2,
       "duration.ms": 17,
       outcome: "retry",
+      "failure.class": "task_notification_payload_mismatch",
     });
   });
 
