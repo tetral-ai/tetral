@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -76,6 +77,10 @@ type RuntimeDeliveryFinalizationReplayer interface {
 	ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error)
 }
 
+type malformedRuntimeInputCustodyReplacer interface {
+	ReplaceMalformedRuntimeInputCustody(context.Context, RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error)
+}
+
 type RuntimePodLossRepairer interface {
 	RepairLostRuntimeBindings(context.Context, string) (int, error)
 }
@@ -85,6 +90,7 @@ type JobRunner struct {
 	Workspaces WorkspaceLister
 	Deliverer  RuntimeJobDeliverer
 	Config     JobRunnerConfig
+	Logger     *slog.Logger
 }
 
 type RuntimeJob struct {
@@ -125,6 +131,12 @@ type RuntimeDeliveryResult struct {
 	ErrorKind         string
 	ErrorMessage      string
 	QueueLeaseSettled bool
+	// The command plan carries the binding that actually owned this attempt.
+	// These process-local fields fence Bridge finalization after a Pod-loss
+	// handoff; they are not Queue payload, receipt, or durable state.
+	AttemptedBindingID         string
+	AttemptedBindingGeneration int64
+	AttemptedTargetPodUID      string
 }
 
 func (r *JobRunner) RunOnce(ctx context.Context) error {
@@ -260,12 +272,16 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
 				return heartbeatErr
 			}
+			if invalidRuntimeJobPayload(err) {
+				return r.deadLetterInvalidRuntimeJob(ctx, job)
+			}
 			return err
 		}
 		if found {
 			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
 				return heartbeatErr
 			}
+			r.logRuntimeJobAttempt(job, "none", "durable_replay")
 			return r.applyRuntimeDeliveryResult(ctx, job, replayed)
 		}
 	}
@@ -277,25 +293,39 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		return deliverErr
 	}
 	if deliverErr != nil {
+		preparationKind := runtimeJobPreparationErrorKind(deliverErr)
+		attemptedBindingID := result.AttemptedBindingID
+		attemptedBindingGeneration := result.AttemptedBindingGeneration
+		attemptedTargetPodUID := result.AttemptedTargetPodUID
 		result = RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    true,
-			ErrorKind:    "runtime_transport_error",
-			ErrorMessage: "runtime command delivery failed",
+			Status:                     RuntimeDeliveryRejected,
+			Retryable:                  true,
+			ErrorKind:                  "runtime_transport_error",
+			ErrorMessage:               "runtime command delivery failed",
+			AttemptedBindingID:         attemptedBindingID,
+			AttemptedBindingGeneration: attemptedBindingGeneration,
+			AttemptedTargetPodUID:      attemptedTargetPodUID,
 		}
 		if job.Kind == queue.KindRuntimeConfigUpdate && !isMCPManifestRuntimeJob(job) {
+			r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 			return r.deferRuntimeConfig(ctx, job)
 		}
 		if runtimeJobFinalAttempt(job) {
 			finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 			if err != nil {
+				if invalidRuntimeJobPayload(err) {
+					return r.deadLetterInvalidRuntimeJob(ctx, job)
+				}
 				return err
 			}
 			if shouldDeferRuntimeConfigResult(job, finalized) {
+				r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 				return r.deferRuntimeConfig(ctx, job)
 			}
+			r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(finalized))
 			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
 		}
+		r.logRuntimeJobAttempt(job, preparationKind, "retry_scheduled")
 		return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 			WorkspaceId:  job.WorkspaceID,
 			JobId:        job.JobID,
@@ -305,19 +335,96 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}))
 	}
 	if shouldDeferRuntimeConfigResult(job, result) {
+		r.logRuntimeJobAttempt(job, "none", "deferred")
 		return r.deferRuntimeConfig(ctx, job)
+	}
+	preparationKind := "none"
+	if result.ErrorKind != "" {
+		preparationKind = result.ErrorKind
 	}
 	if runtimeDeliveryRequiresFinalization(job, result) {
 		finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 		if err != nil {
+			if invalidRuntimeJobPayload(err) {
+				return r.deadLetterInvalidRuntimeJob(ctx, job)
+			}
 			return err
 		}
 		result = finalized
 	}
 	if shouldDeferRuntimeConfigResult(job, result) {
+		r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 		return r.deferRuntimeConfig(ctx, job)
 	}
+	r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(result))
 	return r.applyRuntimeDeliveryResult(ctx, job, result)
+}
+
+func runtimeJobPreparationErrorKind(err error) string {
+	var preparation runtimeDeliveryPrepareError
+	if errors.As(err, &preparation) && preparation.kind != "" {
+		return preparation.kind
+	}
+	return "runtime_transport_error"
+}
+
+func runtimeJobFinalizationDisposition(result RuntimeDeliveryResult) string {
+	if result.ErrorKind != "" {
+		return string(result.Status) + ":" + result.ErrorKind
+	}
+	if result.Status == "" {
+		return "none"
+	}
+	return string(result.Status)
+}
+
+// Runtime delivery telemetry is emitted only after the owning branch has
+// selected its Queue disposition. It carries bounded identities and kinds;
+// durable Inbox and Queue facts remain the lifecycle authority.
+func (r *JobRunner) logRuntimeJobAttempt(job RuntimeJob, preparationKind string, disposition string) {
+	if r == nil || r.Logger == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	r.Logger.Info("bridge.runtime_delivery.attempt",
+		slog.String("operation", "runtime_delivery.attempt"),
+		slog.String("event.kind", "runtime_delivery_attempt"),
+		slog.String("component", ServiceNameJobRunner),
+		slog.String("workspace.id", job.WorkspaceID),
+		slog.String("session.id", job.SessionID),
+		slog.String("thread.id", job.SessionThreadID),
+		slog.String("queue.job.id", job.JobID),
+		slog.String("runtime.input.id", job.RuntimeInputID),
+		slog.String("runtime.input.kind", job.InputKind),
+		slog.Int("queue.attempt", int(job.AttemptCount)),
+		slog.Int("queue.max_attempts", int(job.MaxAttempts)),
+		slog.String("preparation.error_kind", preparationKind),
+		slog.String("finalization.disposition", disposition),
+	)
+}
+
+func invalidRuntimeJobPayload(err error) bool {
+	var preparation runtimeDeliveryPrepareError
+	return errors.As(err, &preparation) && preparation.kind == "invalid_runtime_job_payload" && !preparation.retryable
+}
+
+func (r *JobRunner) deadLetterInvalidRuntimeJob(ctx context.Context, job RuntimeJob) error {
+	replacer, ok := r.Deliverer.(malformedRuntimeInputCustodyReplacer)
+	if !ok {
+		return errors.New("malformed runtime-input custody replacer is required")
+	}
+	outcome, err := replacer.ReplaceMalformedRuntimeInputCustody(ctx, job)
+	if err != nil {
+		return err
+	}
+	disposition := "invalid_payload_stale_lease"
+	if outcome.Replaced {
+		disposition = "invalid_payload_replaced"
+	} else if outcome.DeadLettered {
+		disposition = "invalid_payload_dead_lettered"
+	}
+	r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", disposition)
+	return nil
 }
 
 func shouldDeferRuntimeConfigResult(job RuntimeJob, result RuntimeDeliveryResult) bool {

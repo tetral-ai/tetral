@@ -1475,6 +1475,161 @@ func (s *PostgreSQLQueueStore) DeadLetter(ctx context.Context, request DeadLette
 	return s.fencedTerminalUpdate(ctx, request.WorkspaceID, request.JobID, request.LeaseToken, StatusDeadLettered, "dead_lettered_at", request.ErrorKind, request.ErrorMessage, request.Now.UTC())
 }
 
+// ReplaceMalformedRuntimeInputCustody atomically retires a lease-fenced
+// malformed runtime-input job and, when a canonical queued Inbox fact exists,
+// creates its sole replacement. The malformed payload contributes no business
+// fields; Inbox is locked before the Queue row and EnqueueTx takes the partition
+// counter lock last.
+func (s *PostgreSQLQueueStore) ReplaceMalformedRuntimeInputCustody(
+	ctx context.Context,
+	request ReplaceMalformedRuntimeInputCustodyRequest,
+) (ReplaceMalformedRuntimeInputCustodyResult, error) {
+	if request.WorkspaceID == "" || request.SessionID == "" || request.RuntimeInputID == "" || request.JobID == "" || request.LeaseToken == "" {
+		return ReplaceMalformedRuntimeInputCustodyResult{}, &ValidationError{Message: "complete malformed runtime-input custody identity is required"}
+	}
+	if s == nil || s.client == nil {
+		return ReplaceMalformedRuntimeInputCustodyResult{}, &ValidationError{Message: "queue store is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	request.Now = request.Now.UTC()
+	var outcome ReplaceMalformedRuntimeInputCustodyResult
+	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.replace_malformed_runtime_input_custody", func(tx *dbconnect.Tx) error {
+		var (
+			threadID, inputKind, eventIDsJSON, inboxStatus string
+			sequenceFrom, sequenceTo                       sql.NullInt64
+		)
+		inboxErr := tx.QueryRow(ctx,
+			`SELECT session_thread_id, input_kind, event_ids_json, sequence_from, sequence_to, status
+			   FROM session_runtime_inbox
+			  WHERE workspace_id = $1 AND session_id = $2 AND runtime_input_id = $3
+			  FOR UPDATE`,
+			string(request.WorkspaceID), request.SessionID, request.RuntimeInputID,
+		).Scan(&threadID, &inputKind, &eventIDsJSON, &sequenceFrom, &sequenceTo, &inboxStatus)
+		if inboxErr != nil && !dbconnect.IsNoRows(inboxErr) {
+			return inboxErr
+		}
+
+		var kind, queueStatus, leaseToken string
+		var leaseCurrent bool
+		if err := tx.QueryRow(ctx,
+			`SELECT kind, status, COALESCE(lease_token, ''), COALESCE(leased_until > clock_timestamp(), false)
+			   FROM queue_jobs
+			  WHERE workspace_id = $1 AND id = $2
+			  FOR UPDATE`,
+			string(request.WorkspaceID), request.JobID,
+		).Scan(&kind, &queueStatus, &leaseToken, &leaseCurrent); dbconnect.IsNoRows(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if kind != KindRuntimeInput || queueStatus != StatusLeased || leaseToken != request.LeaseToken || !leaseCurrent {
+			return nil
+		}
+
+		result, err := tx.Exec(ctx,
+			`UPDATE queue_jobs
+			    SET status = 'dead_lettered', dead_lettered_at = $4,
+			        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
+			        last_error_kind = 'invalid_runtime_job_payload',
+			        last_error_message = 'runtime queue payload conflicts with durable custody',
+			        updated_at = $4
+			  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3
+			    AND status = 'leased' AND leased_until > clock_timestamp()`,
+			string(request.WorkspaceID), request.JobID, request.LeaseToken, request.Now,
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(result) {
+			return nil
+		}
+		outcome.DeadLettered = true
+		if dbconnect.IsNoRows(inboxErr) || inboxStatus != "queued" {
+			return nil
+		}
+
+		enqueue, err := canonicalRuntimeInputReplacement(
+			request.WorkspaceID, request.SessionID, request.RuntimeInputID,
+			threadID, inputKind, eventIDsJSON, sequenceFrom, sequenceTo, request.Now,
+		)
+		if err != nil {
+			return err
+		}
+		job, err := EnqueueTx(ctx, tx, enqueue)
+		if err != nil {
+			return err
+		}
+		outcome.Replaced = job != nil
+		return nil
+	})
+	return outcome, err
+}
+
+func canonicalRuntimeInputReplacement(
+	workspaceID workspace.ID,
+	sessionID string,
+	runtimeInputID string,
+	threadID string,
+	inputKind string,
+	eventIDsJSON string,
+	sequenceFrom sql.NullInt64,
+	sequenceTo sql.NullInt64,
+	now time.Time,
+) (EnqueueRequest, error) {
+	if threadID == "" || !isRuntimeInputKind(inputKind) {
+		return EnqueueRequest{}, &IntegrityError{Message: "queued runtime Inbox identity is invalid"}
+	}
+	var eventIDs []string
+	if err := json.Unmarshal([]byte(eventIDsJSON), &eventIDs); err != nil || eventIDs == nil {
+		return EnqueueRequest{}, &IntegrityError{Message: "queued runtime Inbox event identity is invalid"}
+	}
+	sequenceStart, sequenceEnd := int64(0), int64(0)
+	maxAttempts := 0
+	switch inputKind {
+	case "agent_mail":
+		if !strings.HasPrefix(runtimeInputID, "agent_mail:") || runtimeInputID == "agent_mail:" {
+			return EnqueueRequest{}, &IntegrityError{Message: "queued agent-mail Inbox identity is invalid"}
+		}
+		eventIDs = []string{}
+		maxAttempts = DefaultMaxAttempts
+	case "task_notification":
+		if !strings.HasPrefix(runtimeInputID, "task_notification:") || runtimeInputID == "task_notification:" {
+			return EnqueueRequest{}, &IntegrityError{Message: "queued task-notification Inbox identity is invalid"}
+		}
+		eventIDs = []string{}
+		maxAttempts = DefaultMaxAttempts
+	default:
+		if len(eventIDs) == 0 || !sequenceFrom.Valid || !sequenceTo.Valid || sequenceFrom.Int64 <= 0 || sequenceTo.Int64 < sequenceFrom.Int64 {
+			return EnqueueRequest{}, &IntegrityError{Message: "queued runtime Inbox event range is invalid"}
+		}
+		sequenceStart, sequenceEnd = sequenceFrom.Int64, sequenceTo.Int64
+	}
+	payload, err := json.Marshal(struct {
+		WorkspaceID     string   `json:"workspace_id"`
+		SessionID       string   `json:"session_id"`
+		SessionThreadID string   `json:"session_thread_id"`
+		RuntimeInputID  string   `json:"runtime_input_id"`
+		EventIDs        []string `json:"event_ids"`
+		SequenceFrom    int64    `json:"sequence_from"`
+		SequenceTo      int64    `json:"sequence_to"`
+		InputKind       string   `json:"input_kind"`
+	}{string(workspaceID), sessionID, threadID, runtimeInputID, eventIDs, sequenceStart, sequenceEnd, inputKind})
+	if err != nil {
+		return EnqueueRequest{}, err
+	}
+	priority := 0
+	if inputKind == "interrupt_control" {
+		priority = 100
+	}
+	return EnqueueRequest{
+		ID: NewJobID(), WorkspaceID: workspaceID, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(workspaceID, sessionID), DedupeKey: FormatRuntimeInputDedupeKey(workspaceID, sessionID, runtimeInputID),
+		PayloadVersion: 1, PayloadJSON: payload, Priority: priority, MaxAttempts: maxAttempts, Now: now,
+	}, nil
+}
+
 func (s *PostgreSQLQueueStore) Cancel(ctx context.Context, request CancelRequest) (int, error) {
 	if err := validateCancelRequest(request); err != nil {
 		return 0, err

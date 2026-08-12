@@ -532,7 +532,8 @@ func runtimeInputSegments(events []*Event) []runtimeInputSegment {
 		last := len(segments) - 1
 		if last < 0 ||
 			segments[last].inputKind != inputKind ||
-			segments[last].events[0].ThreadID != event.ThreadID {
+			segments[last].events[0].ThreadID != event.ThreadID ||
+			segments[last].events[len(segments[last].events)-1].Sequence+1 != event.Sequence {
 			segments = append(segments, runtimeInputSegment{inputKind: inputKind})
 			last = len(segments) - 1
 		}

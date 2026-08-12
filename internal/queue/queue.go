@@ -335,6 +335,23 @@ type DeadLetterRequest struct {
 	Now          time.Time
 }
 
+// ReplaceMalformedRuntimeInputCustodyRequest identifies one leased malformed
+// runtime-input job and the canonical Inbox identity that may replace it.
+type ReplaceMalformedRuntimeInputCustodyRequest struct {
+	WorkspaceID    workspace.ID
+	SessionID      string
+	RuntimeInputID string
+	JobID          string
+	LeaseToken     string
+	Now            time.Time
+}
+
+// ReplaceMalformedRuntimeInputCustodyResult reports the atomic Queue outcome.
+type ReplaceMalformedRuntimeInputCustodyResult struct {
+	DeadLettered bool
+	Replaced     bool
+}
+
 type CancelRequest struct {
 	WorkspaceID            workspace.ID
 	SessionID              string

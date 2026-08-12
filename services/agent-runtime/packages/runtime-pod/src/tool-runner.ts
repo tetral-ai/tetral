@@ -88,7 +88,6 @@ import type {
   RuntimeToolExecutionRequest,
   RuntimeToolExecutionResult,
 } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
-import type { PublicMcpErrorEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { selectRecentUserLedTurns } from "@tetral/agent-runtime-core/src/runtime/conversation-turns.js";
 import type { RuntimeAcceptedInputState, RuntimeThreadControlState, RuntimeThreadStatusState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
@@ -511,7 +510,6 @@ export class RuntimePodToolRunner {
         response.status === RunWebStatus.RUN_WEB_STATUS_RUNTIME_ERROR,
         undefined,
         undefined,
-        undefined,
         serverToolUse,
       );
     } catch (error) {
@@ -548,34 +546,37 @@ export class RuntimePodToolRunner {
       if (response.errorKind === McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST) {
         return { type: "stale_custody" };
       }
+      const materializationHandle = response.materializationHandle;
+      if (materializationHandle === undefined || materializationHandle.length === 0) {
+        return { type: "stale_custody" };
+      }
       if (response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED) {
         const attachments = response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment));
+        const completed = completedText(response.resultText);
+        if (completed.type !== "completed") {
+          return completed;
+        }
         return {
-          ...completedText(response.resultText),
+          ...completed,
           ...(attachments.length > 0 ? { attachments } : {}),
-          ...(response.materializationHandle !== undefined && response.materializationHandle.length > 0
-            ? { mcpMaterializationHandle: response.materializationHandle }
-            : {}),
+          mcpMaterializationHandle: materializationHandle,
         };
       }
       const attachments = response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR
         ? response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment))
         : [];
-      const fallback = response.errorKind === undefined
-        ? "MCP tool execution failed."
-        : `MCP tool execution failed: ${String(RunMcpToolStatus[response.status] ?? response.status)}`;
-      const message = response.resultText || fallback;
+      const toolScoped = response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR;
+      const message = toolScoped && response.resultText.length > 0
+        ? response.resultText
+        : modelVisibleMcpRuntimeFailure(response.errorKind);
       return toolFailure(
         request,
         message,
-        response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-        runtimeRetryStatusFromMcp(response.retryStatus),
-        publicMcpErrorEventFromResponse(response, mcpServerName, message),
+        false,
+        undefined,
         attachments,
         undefined,
-        response.materializationHandle !== undefined && response.materializationHandle.length > 0
-          ? response.materializationHandle
-          : undefined,
+        materializationHandle,
       );
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
@@ -584,7 +585,7 @@ export class RuntimePodToolRunner {
       if (error instanceof ToolResultContractError) {
         return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
-      return toolFailure(request, "MCP connector route is unavailable.", true);
+      return toolFailure(request, "The MCP tool outcome could not be confirmed. Check the external service before retrying.", false);
     }
   }
 
@@ -1335,6 +1336,24 @@ export class RuntimePodToolRunner {
 
   private async metadata(): Promise<Metadata> {
     return await this.metadataFactory({ tokenPath: this.options.tokenPath });
+  }
+}
+
+function modelVisibleMcpRuntimeFailure(errorKind: McpErrorKind | undefined): string {
+  switch (errorKind) {
+    case McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT:
+      return "The MCP tool execution is still in progress. Check the external service before retrying.";
+    case McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED:
+      return "The MCP tool may have completed, but its result could not be confirmed. Check the external service before retrying.";
+    case McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT:
+      return "The MCP tool request conflicts with an existing execution. Check the external service before retrying.";
+    case McpErrorKind.MCP_ERROR_KIND_INTERNAL:
+    case McpErrorKind.MCP_ERROR_KIND_UNSPECIFIED:
+    case McpErrorKind.UNRECOGNIZED:
+    case undefined:
+      return "The MCP tool outcome could not be confirmed. Check the external service before retrying.";
+    default:
+      return "MCP tool execution is unavailable.";
   }
 }
 
@@ -2285,7 +2304,6 @@ function toolFailure(
   message: string,
   retryable: boolean,
   retryStatus?: ReturnType<typeof runtimeRetryStatusFromMcp>,
-  publicErrorEvent?: PublicMcpErrorEvent | undefined,
   attachments?: readonly ProviderRequestAttachment[],
   serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
   mcpMaterializationHandle?: string,
@@ -2293,7 +2311,6 @@ function toolFailure(
   return {
     type: "error",
     error: runtimeFailure(request, message, retryable, retryStatus),
-    ...(publicErrorEvent !== undefined ? { publicErrorEvent } : {}),
     ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     ...(serverToolUse !== undefined ? { serverToolUse } : {}),
     ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
@@ -2337,63 +2354,6 @@ function runtimeRetryStatusFromMcp(retryStatus: McpRetryStatus | undefined) {
       return undefined;
     case McpRetryStatus.UNRECOGNIZED:
       return undefined;
-  }
-}
-
-function publicMcpErrorEventFromResponse(
-  response: RunMcpToolResponse,
-  mcpServerName: string,
-  message: string,
-): PublicMcpErrorEvent | undefined {
-  const retryStatus = publicMcpRetryStatusFromMcp(response.retryStatus);
-  switch (response.errorKind) {
-    case McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED:
-    case McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED:
-      return {
-        type: "mcp_authentication_failed_error",
-        mcpServerName,
-        message,
-        retryStatus,
-      };
-    case McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT:
-      return {
-        type: "unknown_error",
-        message,
-        retryStatus: { type: "terminal" },
-      };
-    case McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED:
-      return {
-        type: "mcp_connection_failed_error",
-        mcpServerName,
-        message,
-        retryStatus,
-      };
-    case McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR:
-    case McpErrorKind.MCP_ERROR_KIND_INVALID_INPUT:
-    case McpErrorKind.MCP_ERROR_KIND_TIMEOUT:
-    case McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT:
-    case McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED:
-    case McpErrorKind.MCP_ERROR_KIND_INTERNAL:
-    case McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST:
-    case McpErrorKind.MCP_ERROR_KIND_UNSPECIFIED:
-    case undefined:
-    case McpErrorKind.UNRECOGNIZED:
-      return undefined;
-  }
-}
-
-function publicMcpRetryStatusFromMcp(retryStatus: McpRetryStatus | undefined): PublicMcpErrorEvent["retryStatus"] {
-  switch (retryStatus) {
-    case McpRetryStatus.MCP_RETRY_STATUS_RETRYING:
-      return { type: "retrying" };
-    case McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED:
-      return { type: "exhausted" };
-    case McpRetryStatus.MCP_RETRY_STATUS_TERMINAL:
-      return { type: "terminal" };
-    case McpRetryStatus.MCP_RETRY_STATUS_UNSPECIFIED:
-    case undefined:
-    case McpRetryStatus.UNRECOGNIZED:
-      return { type: "terminal" };
   }
 }
 

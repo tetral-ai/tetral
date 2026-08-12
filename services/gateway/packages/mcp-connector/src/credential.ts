@@ -236,6 +236,7 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
 
   private async resolveMatchedCredential(input: {
     readonly workspaceId: string;
+    readonly sessionId: string;
     readonly mcpServerName: string;
   }, row: GitHubCredentialMatchedRow | undefined, options: {
     readonly force: boolean;
@@ -272,6 +273,7 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     if (action === "refresh") {
       const refreshed = await this.refreshWriter.refreshOAuthCredential({
         workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
         mcpServerName: input.mcpServerName,
         row,
         vaultId: row.vault_id,

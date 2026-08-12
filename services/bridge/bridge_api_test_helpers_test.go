@@ -1460,6 +1460,18 @@ func seedAgentMailCustody(t *testing.T, db *sql.DB, sessionID string, targetThre
 	}
 }
 
+func acceptAgentMailCustody(t *testing.T, db *sql.DB, runtimeInputID string, eventID string, sequence int64, bindingID string, podUID string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+		SET status='accepted', event_ids_json=$3, sequence_from=$4, sequence_to=$4,
+		    binding_id=$5, binding_generation=1, target_pod_uid=$6, updated_at=now()
+		WHERE workspace_id=$1 AND runtime_input_id=$2`,
+		"default", runtimeInputID, fmt.Sprintf("[%q]", eventID), sequence, bindingID, podUID,
+	); err != nil {
+		t.Fatalf("accept agent-mail Inbox custody: %v", err)
+	}
+}
+
 func seedBridgeAPIRuntimeInbox(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, inputKind string, eventsJSON string, status string, bindingID string, podUID string, sequenceFrom int64, sequenceTo int64) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),

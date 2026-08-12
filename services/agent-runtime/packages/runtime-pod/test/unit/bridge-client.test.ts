@@ -31,6 +31,7 @@ import {
   runtimeInternalToolRepairCreate,
   taskNotificationOperationId,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
+import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import type {
   RuntimeInternalToolRepairCommit,
   SessionEventEnvelope,
@@ -322,6 +323,43 @@ describe("Bridge runtime declaration adapters", () => {
     ]);
   });
 
+  test("does not retry a definitive MCP settlement rejection", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventRejections.push("mcp_materialization_invalid");
+    const transport = new BridgeAPIEventWriter(options(bridge));
+    const writer = createSessionEventWriter({
+      append: async (envelope) => await transport.append(envelope),
+      sleep: async (durationMs) => durationMs < 3_000
+        ? true
+        : await new Promise<boolean>(() => undefined),
+    });
+    const envelope = mcpSettlementEnvelope("rwrite_mcp_rejected");
+
+    await expect(writer.append(envelope)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "ack_mismatch", retryable: false },
+    });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+  });
+
+  test("replays an ambiguous MCP settlement with immutable identity", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventPostCommitErrors.push(status.UNKNOWN);
+    const transport = new BridgeAPIEventWriter(options(bridge));
+    const envelope = mcpSettlementEnvelope("rwrite_mcp_replay");
+
+    await expect(transport.append(envelope)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "unavailable", retryable: true },
+    });
+    await expect(transport.append(envelope)).resolves.toMatchObject({ ok: true, writeId: envelope.writeId });
+    expect(bridge.writeEventRequests).toHaveLength(2);
+    expect(bridge.writeEventRequests.map((request) => writeEventDeclarationDigest(request))).toEqual([
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+    ]);
+  });
+
   test("matches RequestEnd and joined interrupt receipts by operation identity", async () => {
     const bridge = new DeclarationBridge();
     const writer = new BridgeAPIEventWriter(options(bridge));
@@ -522,6 +560,27 @@ function eventScope(writeId: string) {
     bindingGeneration: 3,
     targetPodUid: "pod_1",
     writeId,
+  };
+}
+
+function mcpSettlementEnvelope(writeId: string): SessionEventEnvelope {
+  return {
+    ...eventScope(writeId),
+    modelRequestId: "mrq_mcp",
+    event: {
+      type: "agent.mcp_tool_result",
+      mcp_tool_use_id: "sevt_mcp_use",
+      content: [{ type: "text", text: "done" }],
+    },
+    mcpMaterializationHandle: "sevt_mcp_materialized",
+    toolSettlement: {
+      toolUseEventId: "sevt_mcp_use",
+      outcome: {
+        type: "completed",
+        output: { text: "done", truncated: false },
+        mcpMaterializationHandle: "sevt_mcp_materialized",
+      },
+    },
   };
 }
 

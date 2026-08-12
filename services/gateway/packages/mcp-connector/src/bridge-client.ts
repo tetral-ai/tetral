@@ -16,6 +16,11 @@ import {
   BridgeWriteStatus,
   ReceiptApplicationDisposition,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import {
+  McpErrorKind,
+  McpRetryStatus,
+  RunMcpToolStatus,
+} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
 import type {
   ClaimMcpToolResultRequest,
@@ -45,6 +50,18 @@ export const MCP_MANIFEST_CHANGE_RPC_TIMEOUT_MS = 5_000;
 const MCP_MANIFEST_TOO_LARGE_DETAILS = "mcp manifest tools exceed the accepted byte limit";
 
 const MCP_COMMIT_RETRY_BACKOFF_MS = [100, 300, 1_000] as const;
+
+const MCP_COMMIT_MATERIALIZATION_FAILURE: PendingStoredRunMcpToolResponse = {
+  response: {
+    status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+    resultText: "MCP tool result could not be committed.",
+    attachments: [],
+    errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+    retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+  },
+  contentItems: 0,
+  refreshTriggered: false,
+};
 
 /** Maximum send and receive size for Bridge commits that carry one bounded inline attachment. */
 export const BridgeMcpCommitGrpcMessageBytes = 10 * 1024 * 1024 + 256 * 1024;
@@ -264,6 +281,8 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         suggestedFilename: attachment.suggestedFilename,
       })),
     });
+    let activeRequest = request;
+    let materializingFailure = false;
     let response: CommitMcpToolResultResponse;
     let outcomeUnknown = false;
     for (let attempt = 0; ; attempt++) {
@@ -280,11 +299,26 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         continue;
       }
       try {
-        response = await commitMcpToolResult(this.client, request, metadata, {
+        response = await commitMcpToolResult(this.client, activeRequest, metadata, {
           deadline: new Date(this.now() + this.commitTimeoutMs),
         });
         break;
-      } catch {
+      } catch (error) {
+        const disposition = mcpCommitFailureDisposition(error);
+        if (disposition === "result_payload_rejected" && !materializingFailure) {
+          activeRequest = freezeCommitRequest({
+            ...request,
+            resultJson: serializePendingRunMcpToolResponse(MCP_COMMIT_MATERIALIZATION_FAILURE),
+            inlineMedia: [],
+          });
+          materializingFailure = true;
+          outcomeUnknown = false;
+          continue;
+        }
+        if (disposition === "stale_custody" || disposition === "result_payload_rejected") {
+          await this.#local.fail(key, context);
+          throw new McpIdempotencyStaleCustodyError();
+        }
         outcomeUnknown = true;
         const delayIndex = Math.min(attempt, MCP_COMMIT_RETRY_BACKOFF_MS.length - 1);
         await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000);
@@ -295,9 +329,9 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       response.ack?.status !== BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED
     ) {
       await this.#local.fail(key, context);
-      throw new Error("mcp tool idempotency commit rejected");
+      throw new McpIdempotencyStaleCustodyError();
     }
-    const disposition = mcpCommitDisposition(response, request, context);
+    const disposition = mcpCommitDisposition(response, activeRequest, context);
     if (disposition === undefined) {
       await this.#local.fail(key, context);
       throw new Error("mcp tool commit returned malformed declaration receipt");
@@ -321,6 +355,27 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
 
   private async metadata(): Promise<Metadata> {
     return await this.metadataFactory({ tokenPath: this.options.tokenPath });
+  }
+}
+
+type McpCommitFailureDisposition = "result_payload_rejected" | "stale_custody" | "outcome_unknown";
+
+// Commit status is classified at the Bridge boundary: only request-shape
+// rejection permits a canonical replacement while the same claim is tested by
+// that replacement commit. Identity and custody statuses relinquish local
+// ownership; every unclassified transport outcome replays immutable bytes.
+function mcpCommitFailureDisposition(error: unknown): McpCommitFailureDisposition {
+  switch ((error as Partial<ServiceError>).code) {
+    case status.INVALID_ARGUMENT:
+      return "result_payload_rejected";
+    case status.ALREADY_EXISTS:
+    case status.FAILED_PRECONDITION:
+    case status.NOT_FOUND:
+    case status.PERMISSION_DENIED:
+    case status.UNAUTHENTICATED:
+      return "stale_custody";
+    default:
+      return "outcome_unknown";
   }
 }
 

@@ -865,6 +865,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionMail
 	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_completion_baseline", completionMailEnvelope("main", "task_"+childID, "done"))
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_baseline_sent", 1, "agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_bridge_completion_baseline_spawn", messageJSON))
+	seedAgentMailCustody(t, admin, sessionID, mainID, delivery, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-baseline-key-32b")
 
@@ -895,6 +896,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionMail
 		rawBeforePayload.PendingAgentMail[0]["sourceToolUseEventId"] == nil {
 		t.Fatalf("pending completion descriptor = %#v; want identity fields only", rawBeforePayload.PendingAgentMail)
 	}
+	acceptAgentMailCustody(t, admin, "agent_mail:"+delivery, stableRuntimeID("agent_mail_received_event", "default", sessionID, mainID, delivery), 1, bindingID, podUID)
 
 	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
 		t,
@@ -924,6 +926,63 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionMail
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreAgentMailSourceHistoryRequiresInboxCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_bridge_mail_custody_gate"
+		mainID    = "thr_bridge_mail_custody_gate_main"
+		childID   = "thr_bridge_mail_custody_gate_child"
+		bindingID = "bind_bridge_mail_custody_gate"
+		podUID    = "pod_bridge_mail_custody_gate"
+		delivery  = "delivery_bridge_mail_custody_gate"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_mail_custody_gate", completionMailEnvelope("main", "task_child", "history only"))
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_mail_custody_gate", 1, "agent.thread_message_sent",
+		bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_bridge_mail_custody_gate", messageJSON))
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-mail-custody-gate-key-32")
+	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope, RuntimeInputId: "rin_bridge_mail_custody_gate"})
+	if err != nil {
+		t.Fatalf("LoadContext without agent-mail Inbox custody: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode context without agent-mail Inbox custody: %v", err)
+	}
+	if len(payload.PendingAgentMail) != 0 {
+		t.Fatalf("source-only pending agent mail = %#v; want none", payload.PendingAgentMail)
+	}
+	for _, deliveryID := range []string{"", delivery} {
+		_, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
+			Scope: scope, ChildThreadId: childID, DeliveryId: deliveryID,
+		})
+		if status.Code(err) != codes.NotFound {
+			t.Fatalf("ResolveInterAgentDelivery without custody for %q = %v; want NotFound", deliveryID, err)
+		}
+	}
+	var inboxRows, receivedEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_received')`, sessionID).Scan(&inboxRows, &receivedEvents); err != nil {
+		t.Fatalf("read source-only agent-mail mutations: %v", err)
+	}
+	if inboxRows != 0 || receivedEvents != 0 {
+		t.Fatalf("source-only agent-mail mutations = Inbox %d received %d; want 0/0", inboxRows, receivedEvents)
+	}
+
+	seedAgentMailCustody(t, admin, sessionID, mainID, delivery, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	resolved, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
+		Scope: scope, ChildThreadId: childID, DeliveryId: delivery,
+	})
+	if err != nil || resolved.GetDeliveryId() != delivery || resolved.GetReceivedEventId() == "" {
+		t.Fatalf("ResolveInterAgentDelivery with exact custody = %#v/%v", resolved, err)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionDescriptors(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -948,6 +1007,8 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionDesc
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_currency_sent", 2,
 		"agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_bridge_completion_currency_spawn", messageJSON))
+	seedAgentMailCustody(t, admin, sessionID, mainID, delivery, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	acceptAgentMailCustody(t, admin, "agent_mail:"+delivery, stableRuntimeID("agent_mail_received_event", "default", sessionID, mainID, delivery), 1, bindingID, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-currency-key")
 	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
@@ -1022,6 +1083,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionDesc
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_currency_owed", 4,
 		"agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, owedDelivery, childID, mainID, "", "sevt_bridge_completion_currency_owed", owedMessageJSON))
+	seedAgentMailCustody(t, admin, sessionID, mainID, owedDelivery, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_currency_after_owed", 5,
 		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`)
 	owed, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{

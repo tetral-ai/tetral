@@ -5,6 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -22,6 +26,181 @@ import (
 )
 
 // This file owns the Bridge mcp protocol-family boundary.
+
+func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinues(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID    = "sesn_mcp_tool_failure_composition"
+		threadID     = "thr_mcp_tool_failure_composition"
+		bindingID    = "bind_mcp_tool_failure_composition"
+		podUID       = "pod_mcp_tool_failure_composition"
+		modelRequest = "mreq_mcp_tool_failure_composition"
+		modelCall    = "call_mcp_tool_failure_composition"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("mcp-tool-failure-composition-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	requestStart := seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_tool_failure_start", modelRequest, "agent_provider_request", 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_use", ModelRequestId: modelRequest,
+		EventType:      "agent.mcp_tool_use",
+		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
+		SessionVisible: true,
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			t, scope, "rwrite_mcp_tool_failure_use", "agent.mcp_tool_use", "streaming",
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"` + modelCall + `","toolName":"github_search","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"query":"tetral"},"preview":"{\"query\":\"tetral\"}","truncated":false}}}`},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("write MCP Tool Use: %v", err)
+	}
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_end", ModelRequestId: modelRequest,
+		ModelRequestStartEventId: requestStart.GetEventId(), RequestKind: "agent_provider_request",
+		FinishReason: "tool-calls", UsageJson: `{}`,
+	}); err != nil {
+		t.Fatalf("write request end: %v", err)
+	}
+	const inputJSON = `{"query":"tetral"}`
+	claim := &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUse.GetEventId(), NormalizedInputHash: sha256Hex(inputJSON),
+		McpServerName: "github", ToolName: "github_search", InputJson: inputJSON,
+	}
+	if _, err := store.ClaimMcpToolResult(context.Background(), claim); err != nil {
+		t.Fatalf("claim MCP materialization: %v", err)
+	}
+	store.Logger = slog.New(panicSlogHandler{})
+	materialized, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: claim.GetToolUseEventId(), NormalizedInputHash: claim.GetNormalizedInputHash(),
+		McpServerName: claim.GetMcpServerName(), ToolName: claim.GetToolName(), InputJson: claim.GetInputJson(),
+		ResultJson: `{"response":{"status":3,"result_text":"credential and provider response must not escape","attachments":[],"error_kind":2,"retry_status":2},"content_items":0,"refresh_triggered":true}`,
+	})
+	if err != nil || materialized.GetMaterializationHandle() == "" {
+		t.Fatalf("commit MCP materialization with failing telemetry = %#v/%v", materialized, err)
+	}
+	fixtureInput := map[string]any{
+		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"modelRequestId": modelRequest, "modelToolCallId": modelCall, "toolUseEventId": toolUse.GetEventId(),
+		"materializationHandle": materialized.GetMaterializationHandle(),
+	}
+	rawInput, err := json.Marshal(fixtureInput)
+	if err != nil {
+		t.Fatalf("encode MCP failure composition input: %v", err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "mcp-tool-failure.json")
+	if err := os.WriteFile(inputPath, rawInput, 0o600); err != nil {
+		t.Fatalf("write MCP failure composition input: %v", err)
+	}
+	command := exec.CommandContext(context.Background(), "bun", "packages/runtime-pod/test/fixtures/mcp-tool-failure-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned path.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run MCP failure composition: %v: %s", err, output)
+	}
+	var composed struct {
+		ConnectorCalls int `json:"connectorCalls"`
+		Result         struct {
+			Type                     string `json:"type"`
+			MCPMaterializationHandle string `json:"mcpMaterializationHandle"`
+			Error                    struct {
+				Message   string `json:"message"`
+				Retryable bool   `json:"retryable"`
+			} `json:"error"`
+		} `json:"result"`
+		Settlement struct {
+			Type  string          `json:"type"`
+			Error json.RawMessage `json:"error"`
+		} `json:"settlement"`
+		Event struct {
+			Type       string `json:"type"`
+			MCPToolUse string `json:"mcp_tool_use_id"`
+			IsError    bool   `json:"is_error"`
+			Content    []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(output, &composed); err != nil {
+		t.Fatalf("decode MCP failure composition: %v: %s", err, output)
+	}
+	if composed.ConnectorCalls != 1 || composed.Result.Type != "error" || composed.Result.Error.Retryable ||
+		composed.Result.MCPMaterializationHandle != materialized.GetMaterializationHandle() ||
+		composed.Result.Error.Message != "MCP tool execution is unavailable." || composed.Settlement.Type != "error" ||
+		composed.Event.Type != "agent.mcp_tool_result" || composed.Event.MCPToolUse != toolUse.GetEventId() ||
+		!composed.Event.IsError || len(composed.Event.Content) != 1 || composed.Event.Content[0].Text != "MCP tool execution is unavailable." {
+		t.Fatalf("MCP failure composition = %+v; want one generic non-retryable Tool Result", composed)
+	}
+	payload, err := json.Marshal(composed.Event)
+	if err != nil {
+		t.Fatalf("encode MCP Tool Result event: %v", err)
+	}
+	committed, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_result", ModelRequestId: modelRequest,
+		EventType: "agent.mcp_tool_result", PayloadJson: string(payload), SessionVisible: true,
+		McpMaterializationHandle: &composed.Result.MCPMaterializationHandle,
+		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
+			ToolUseEventId: toolUse.GetEventId(),
+			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: string(composed.Settlement.Error)}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("commit MCP Tool Result: %v", err)
+	}
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_result_second", ModelRequestId: modelRequest,
+		EventType: "agent.mcp_tool_result", PayloadJson: string(payload), SessionVisible: true,
+		McpMaterializationHandle: &composed.Result.MCPMaterializationHandle,
+		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolUse.GetEventId(), "MCP tool execution is unavailable.")},
+	}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("second MCP Tool Result settlement = %v; want AlreadyExists", err)
+	}
+	var toolResults, sessionErrors int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.mcp_tool_result' AND payload_json::jsonb ->> 'mcp_tool_use_id'=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`, sessionID, toolUse.GetEventId()).Scan(&toolResults, &sessionErrors); err != nil {
+		t.Fatalf("count MCP failure durable results: %v", err)
+	}
+	if toolResults != 1 || sessionErrors != 0 || committed.GetEventId() == "" {
+		t.Fatalf("durable MCP failure = Tool Results %d Session errors %d event %q; want 1/0/nonempty", toolResults, sessionErrors, committed.GetEventId())
+	}
+	var durableMessage string
+	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		sessionID, threadID, modelRequest).Scan(&durableMessage); err != nil {
+		t.Fatalf("read MCP Tool projection: %v", err)
+	}
+	var mcpProjection struct {
+		Parts []struct {
+			State struct {
+				Error struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				} `json:"error"`
+			} `json:"state"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(durableMessage), &mcpProjection); err != nil || len(mcpProjection.Parts) != 1 ||
+		mcpProjection.Parts[0].State.Error.Type == "" || mcpProjection.Parts[0].State.Error.Message != "MCP tool execution is unavailable." {
+		t.Fatalf("MCP Tool error was not normalized: %s", durableMessage)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope, RuntimeInputId: "rin_mcp_tool_failure_cold"})
+	if err != nil {
+		t.Fatalf("LoadContext after MCP Tool failure: %v", err)
+	}
+	checkpoint := runColdCheckpointComposition(t, loaded.GetContextJson())
+	if checkpoint.Checkpoint.Request == nil || checkpoint.Checkpoint.Request.ModelRequestID != modelRequest ||
+		checkpoint.Checkpoint.Request.ToolMemberCount != 1 || checkpoint.ReducerAction != "prepare_next_request" {
+		t.Fatalf("MCP failure checkpoint = %+v; want one terminal member and next request", checkpoint)
+	}
+	for _, forbidden := range []string{"credential and provider response must not escape", "access_token", "refresh_token"} {
+		if strings.Contains(string(output), forbidden) || strings.Contains(loaded.GetContextJson(), forbidden) {
+			t.Fatalf("MCP failure surface exposed %q", forbidden)
+		}
+	}
+}
 
 func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGeneration(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)

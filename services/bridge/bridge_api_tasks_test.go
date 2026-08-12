@@ -843,14 +843,18 @@ func TestPostgreSQLBridgeAPIStoreTerminalTaskNotificationRejectionIsInputScoped(
 func TestPostgreSQLRuntimeDeliveryReplayKeepsGenuineTaskNotificationExhaustionTerminal(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_task_exhaustion", "thr_task_exhaustion")
-	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_task_exhaustion", "thr_task_exhaustion",
-		"task_notification:task_exhaustion", "task_notification", `[]`, "dead_lettered", "bind_task_exhaustion", "pod_task_exhaustion", 0, 0)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-
-	replayed, found, err := store.ReplayRuntimeDeliveryFinalization(context.Background(), RuntimeJob{
+	job := RuntimeJob{
 		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: "sesn_task_exhaustion",
 		SessionThreadID: "thr_task_exhaustion", RuntimeInputID: "task_notification:task_exhaustion", InputKind: "task_notification",
-	})
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET status='dead_lettered'
+		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, job.SessionID, job.RuntimeInputID); err != nil {
+		t.Fatalf("terminalize task notification Inbox: %v", err)
+	}
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+
+	replayed, found, err := store.ReplayRuntimeDeliveryFinalization(context.Background(), job)
 	if err != nil || !found || replayed.Status != RuntimeDeliveryRejected || replayed.Retryable || replayed.ErrorKind != "runtime_delivery_exhausted" {
 		t.Fatalf("genuine task notification exhaustion replay = %#v/%t/%v", replayed, found, err)
 	}

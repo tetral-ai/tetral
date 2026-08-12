@@ -1,11 +1,14 @@
 package agentruntimebridge
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -64,6 +67,28 @@ type expiringMCPManifestLister struct {
 	contexts []context.Context
 }
 
+type racingInitialMCPManifestLister struct {
+	initialStarted chan struct{}
+	releaseInitial chan struct{}
+	blockInitial   bool
+	once           sync.Once
+}
+
+func (l *racingInitialMCPManifestLister) ListMCPTools(ctx context.Context, request MCPManifestListRequest) (MCPManifestListResult, error) {
+	if request.ManifestETag != "" {
+		return mcpManifestResult(request.ManifestETag, "github_ready"), nil
+	}
+	if l.blockInitial {
+		l.once.Do(func() { close(l.initialStarted) })
+		select {
+		case <-l.releaseInitial:
+		case <-ctx.Done():
+			return MCPManifestListResult{}, ctx.Err()
+		}
+	}
+	return MCPManifestListResult{}, mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticDiscoveryUnavailable}
+}
+
 func (l *expiringMCPManifestLister) ListMCPTools(ctx context.Context, request MCPManifestListRequest) (MCPManifestListResult, error) {
 	if len(l.contexts) > 0 {
 		select {
@@ -84,7 +109,7 @@ func (l *expiringMCPManifestLister) ListMCPTools(ctx context.Context, request MC
 	}, nil
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCrashAfterCaptureRedrivesDurableGeneration(t *testing.T) {
+func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAndRedrivesGeneration(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_initial_mcp", "thr_bridge_initial_mcp")
 	seedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_initial_mcp", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
@@ -100,7 +125,9 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCrashAfterCaptureRedriv
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	store.MCPManifestLister = lister
-	sender := &recordingRuntimeCommandSender{}
+	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
+		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
+	}}
 	job := RuntimeJob{
 		JobID:           "qjob_bridge_initial_mcp",
 		LeaseToken:      "lease_bridge_initial_mcp",
@@ -116,14 +143,15 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCrashAfterCaptureRedriv
 		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"type":"messages"}`,
 	}
+	seedBridgeAPIEvent(t, admin, "default", job.SessionID, job.SessionThreadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 	seedRuntimeInboxBirthForJob(t, admin, job)
 
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil {
 		t.Fatalf("DeliverRuntimeJob initial MCP manifest: %v", err)
 	}
-	if result.Status != RuntimeDeliveryRejected || !result.Retryable || result.ErrorKind != "mcp_manifest_discovery_pending" {
-		t.Fatalf("initial MCP manifest delivery result = %#v; want retryable mcp_manifest_discovery_pending", result)
+	if result.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("initial MCP manifest delivery result = %#v; want accepted", result)
 	}
 	if len(lister.requests) != 1 ||
 		lister.requests[0].WorkspaceID != "default" ||
@@ -132,8 +160,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCrashAfterCaptureRedriv
 		lister.requests[0].ManifestETag != "" {
 		t.Fatalf("MCP manifest lister requests = %#v; want initial github list", lister.requests)
 	}
-	if len(sender.requests) != 0 {
-		t.Fatalf("runtime commands sent = %d; want 0 while manifest update is queued first", len(sender.requests))
+	if len(sender.requests) != 1 || sender.requests[0].GetRuntimeInputId() != job.RuntimeInputID {
+		t.Fatalf("runtime commands = %#v; want the original input in the capture attempt", sender.requests)
 	}
 	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_initial_mcp", "github", 1)
 	var operationRuntimeInputID string
@@ -152,8 +180,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCrashAfterCaptureRedriv
 		t.Fatalf("bridge operation runtime_input_id = %q; want manifest runtime config update id", operationRuntimeInputID)
 	}
 
-	// Reconstruct the delivery from the committed queue payload, as a fresh worker
-	// would after the accepting process crashed before sending anything to Runtime.
+	// The independent hot-projection carrier remains durable even though the
+	// original input no longer waits for that Queue job.
 	var queuedJobID string
 	var queuedPayload string
 	if err := admin.QueryRowContext(context.Background(),
@@ -215,6 +243,323 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCrashAfterCaptureRedriv
 	}
 	if len(lister.requests) != 1 {
 		t.Fatalf("connector list calls after durable redrive = %d; want original capture call only", len(lister.requests))
+	}
+}
+
+func TestPostgreSQLRuntimeDeliveryPreparationBoundsStateDrivenReentry(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_runtime_prepare_reentry_bound"
+		threadID  = "thr_runtime_prepare_reentry_bound"
+	)
+	seedMCPFamilySession(t, admin, sessionID, threadID, "claude")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_runtime_prepare_reentry_bound", 1, "pod_runtime_prepare_reentry_bound")
+	job := RuntimeJob{
+		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_runtime_prepare_reentry_bound", EventIDs: []string{"evt_runtime_prepare_reentry_bound"},
+		SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"continue"}]}`)
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	lister := &recordingMCPManifestLister{results: []MCPManifestListResult{mcpManifestResult("etag_reentry_bound", "github_search")}}
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store.MCPManifestLister = lister
+
+	_, err := store.prepareRuntimeCommand(context.Background(), job, maxRuntimePreparationReentries)
+	var prepareErr runtimeDeliveryPrepareError
+	if !errors.As(err, &prepareErr) || prepareErr.kind != "runtime_reconcile_invariant" || prepareErr.retryable {
+		t.Fatalf("bounded preparation error = %#v; want terminal runtime_reconcile_invariant", err)
+	}
+	if len(lister.requests) != 0 {
+		t.Fatalf("manifest calls after reentry bound = %d; want zero", len(lister.requests))
+	}
+}
+
+func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureAdvancesSingleAttemptInput(t *testing.T) {
+	connector := startInitialManifestFailureConnector(t)
+	tests := []struct {
+		name       string
+		suffix     string
+		lister     func(*testing.T) MCPManifestLister
+		diagnostic string
+	}{
+		{name: "credential unavailable", suffix: "credential", lister: func(*testing.T) MCPManifestLister {
+			return NewGatewayMCPManifestLister(connector.address, &countingRuntimeCommandTokenSource{})
+		}, diagnostic: mcpManifestDiagnosticCredentialUnavailable},
+		{name: "server unavailable", suffix: "server", lister: func(*testing.T) MCPManifestLister {
+			return NewGatewayMCPManifestLister(connector.address, &countingRuntimeCommandTokenSource{})
+		}, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
+		{name: "discovery timeout", suffix: "timeout", lister: func(*testing.T) MCPManifestLister {
+			return NewGatewayMCPManifestLister(connector.address, &countingRuntimeCommandTokenSource{})
+		}, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
+		{name: "manifest invalid trailer", suffix: "invalid", lister: func(*testing.T) MCPManifestLister {
+			return NewGatewayMCPManifestLister(connector.address, &countingRuntimeCommandTokenSource{})
+		}, diagnostic: mcpManifestDiagnosticInvalid},
+		{name: "untyped unavailable transport", suffix: "transport_unavailable", lister: func(t *testing.T) MCPManifestLister { return newUntypedFailureMCPManifestLister(t, codes.Unavailable) }, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
+		{name: "untyped deadline transport", suffix: "transport_deadline", lister: func(t *testing.T) MCPManifestLister {
+			return newUntypedFailureMCPManifestLister(t, codes.DeadlineExceeded)
+		}, diagnostic: mcpManifestDiagnosticDiscoveryUnavailable},
+		{name: "manifest invalid locally", suffix: "local_invalid", lister: func(*testing.T) MCPManifestLister {
+			return &recordingMCPManifestLister{results: []MCPManifestListResult{{ManifestETag: "etag_invalid", Tools: []MCPManifestTool{{Name: "github_search", InputSchemaJSON: `not-json`}}}}}
+		}, diagnostic: mcpManifestDiagnosticInvalid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID := "sesn_initial_mcp_failure_" + test.suffix
+			threadID := "thr_initial_mcp_failure_" + test.suffix
+			seedMCPFamilySession(t, admin, sessionID, threadID, "claude")
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_initial_mcp_failure", 1, "pod_initial_mcp_failure")
+			job := RuntimeJob{
+				Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+				RuntimeInputID: "rin_initial_mcp_failure", EventIDs: []string{"evt_initial_mcp_failure"},
+				SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+			}
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"continue"}]}`)
+			seedRuntimeInboxBirthForJob(t, admin, job)
+			now := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
+			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			enqueueExhaustionJob(t, queueStore, job, now.Add(-time.Second))
+
+			deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+			deliveryStore.Clock = func() time.Time { return now }
+			deliveryStore.MCPManifestLister = test.lister(t)
+			sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
+				Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
+			}}
+			runner := &JobRunner{
+				Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{"default"},
+				Deliverer: manifestCompositionDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
+				Config:    JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+			}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("run single-attempt input: %v", err)
+			}
+			if len(sender.requests) != 1 || sender.requests[0].GetRuntimeInputId() != job.RuntimeInputID {
+				t.Fatalf("Runtime requests = %#v; want original input once", sender.requests)
+			}
+			var readiness, diagnostic, inboxStatus, inputQueueStatus string
+			if err := admin.QueryRowContext(context.Background(), `SELECT readiness, diagnostic FROM session_mcp_manifests
+				WHERE workspace_id='default' AND session_id=$1 AND mcp_server_name='github'`, sessionID).Scan(&readiness, &diagnostic); err != nil {
+				t.Fatalf("read durable unready manifest: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+				WHERE workspace_id='default' AND runtime_input_id=$1`, job.RuntimeInputID).Scan(&inboxStatus); err != nil {
+				t.Fatalf("read original Inbox custody: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
+				WHERE workspace_id='default' AND kind='runtime_input' AND payload_json::jsonb ->> 'runtime_input_id'=$1`, job.RuntimeInputID).Scan(&inputQueueStatus); err != nil {
+				t.Fatalf("read original Queue custody: %v", err)
+			}
+			if readiness != "unready" || diagnostic != test.diagnostic || inboxStatus != "accepted" || inputQueueStatus != queue.StatusAcknowledged {
+				t.Fatalf("manifest/Inbox/Queue = %s/%s %s/%s; want unready/%s accepted/succeeded", readiness, diagnostic, inboxStatus, inputQueueStatus, test.diagnostic)
+			}
+			assertRuntimeMCPManifestQueueJob(t, admin, "default", sessionID, "github", 1)
+			var manifestJobs, sessionErrors int
+			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+				WHERE workspace_id='default' AND kind='runtime_config_update'
+				AND payload_json::jsonb ->> 'session_id'=$1 AND payload_json::jsonb ->> 'mcp_server_name'='github'`, sessionID).Scan(&manifestJobs); err != nil {
+				t.Fatalf("count manifest Queue custody: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+				WHERE workspace_id='default' AND session_id=$1 AND type='session.error'`, sessionID).Scan(&sessionErrors); err != nil {
+				t.Fatalf("count Session errors: %v", err)
+			}
+			if manifestJobs != 1 || sessionErrors != 0 {
+				t.Fatalf("manifest jobs/session errors = %d/%d; want 1/0", manifestJobs, sessionErrors)
+			}
+		})
+	}
+	stats := connector.finish(t)
+	if stats.ListCalls != 4 || !stats.LogsRedacted {
+		t.Fatalf("production Connector failure composition = %+v; want four typed calls with redacted logs", stats)
+	}
+}
+
+func TestPostgreSQLRuntimeDeliveryStoreRejectsUnclassifiedMCPFailureWithoutDurableTransition(t *testing.T) {
+	tests := []struct {
+		name   string
+		code   codes.Code
+		values []string
+	}{
+		{name: "invalid request", code: codes.InvalidArgument},
+		{name: "unauthenticated", code: codes.Unauthenticated},
+		{name: "permission denied", code: codes.PermissionDenied},
+		{name: "internal", code: codes.Internal},
+		{name: "failed precondition without token", code: codes.FailedPrecondition},
+		{name: "duplicate token", code: codes.Unavailable, values: []string{"server_unavailable", "server_unavailable"}},
+		{name: "wrong status pair", code: codes.FailedPrecondition, values: []string{"server_unavailable"}},
+		{name: "unknown token", code: codes.Unavailable, values: []string{"unknown"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			const (
+				sessionID = "sesn_initial_mcp_fail_closed"
+				threadID  = "thr_initial_mcp_fail_closed"
+			)
+			seedMCPFamilySession(t, admin, sessionID, threadID, "claude")
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_initial_mcp_fail_closed", 1, "pod_initial_mcp_fail_closed")
+			job := RuntimeJob{
+				JobID: "qjob_initial_mcp_fail_closed", LeaseToken: "lease_initial_mcp_fail_closed", Kind: queue.KindRuntimeInput,
+				WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+				RuntimeInputID: "rin_initial_mcp_fail_closed", EventIDs: []string{"evt_initial_mcp_fail_closed"},
+				SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+			}
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"retain custody"}]}`)
+			seedRuntimeInboxBirthForJob(t, admin, job)
+			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+			store.MCPManifestLister = newExactFailureMCPManifestLister(t, test.code, test.values)
+			sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+			result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+			if err != nil || result.Status == RuntimeDeliveryAccepted || len(sender.requests) != 0 {
+				t.Fatalf("unclassified discovery delivery = %+v/%v requests:%d; want retained input without Runtime", result, err, len(sender.requests))
+			}
+			var inboxStatus string
+			var manifests, manifestJobs, sessionErrors int
+			if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+				WHERE workspace_id='default' AND runtime_input_id=$1`, job.RuntimeInputID).Scan(&inboxStatus); err != nil {
+				t.Fatalf("read retained Inbox: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(), `SELECT
+				(SELECT count(*) FROM session_mcp_manifests WHERE workspace_id='default' AND session_id=$1),
+				(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='runtime_config_update'
+				 AND payload_json::jsonb->>'session_id'=$1),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`, sessionID).Scan(&manifests, &manifestJobs, &sessionErrors); err != nil {
+				t.Fatalf("count fail-closed discovery facts: %v", err)
+			}
+			if inboxStatus != "queued" || manifests != 0 || manifestJobs != 0 || sessionErrors != 0 {
+				t.Fatalf("fail-closed discovery facts = Inbox:%s manifests:%d jobs:%d errors:%d; want queued/0/0/0",
+					inboxStatus, manifests, manifestJobs, sessionErrors)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureRacesManifestNotification(t *testing.T) {
+	setup := func(t *testing.T, lister MCPManifestLister) (*sql.DB, *PostgreSQLRuntimeDeliveryStore, RuntimeJob, *recordingRuntimeCommandSender) {
+		t.Helper()
+		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+		const (
+			sessionID = "sesn_initial_mcp_race"
+			threadID  = "thr_initial_mcp_race"
+		)
+		seedMCPFamilySession(t, admin, sessionID, threadID, "claude")
+		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_initial_mcp_race", 1, "pod_initial_mcp_race")
+		job := RuntimeJob{
+			JobID: "qjob_initial_mcp_race", LeaseToken: "lease_initial_mcp_race", Kind: queue.KindRuntimeInput,
+			WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+			RuntimeInputID: "rin_initial_mcp_race", EventIDs: []string{"evt_initial_mcp_race"},
+			SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+		}
+		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"race"}]}`)
+		seedRuntimeInboxBirthForJob(t, admin, job)
+		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+		store.MCPManifestLister = lister
+		sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+		return admin, store, job, sender
+	}
+	readState := func(t *testing.T, admin *sql.DB, wantGeneration int64, wantReadiness string, wantJobs int) {
+		t.Helper()
+		var generation int64
+		var readiness string
+		if err := admin.QueryRowContext(context.Background(), `SELECT manifest_generation, readiness FROM session_mcp_manifests
+			WHERE workspace_id='default' AND session_id='sesn_initial_mcp_race' AND mcp_server_name='github'`).Scan(&generation, &readiness); err != nil {
+			t.Fatalf("read raced manifest: %v", err)
+		}
+		var jobs int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+			WHERE workspace_id='default' AND kind='runtime_config_update'
+			AND payload_json::jsonb ->> 'session_id'='sesn_initial_mcp_race'
+			AND payload_json::jsonb ->> 'mcp_server_name'='github'`).Scan(&jobs); err != nil {
+			t.Fatalf("count raced manifest Queue jobs: %v", err)
+		}
+		if generation != wantGeneration || readiness != wantReadiness || jobs != wantJobs {
+			t.Fatalf("raced manifest = generation %d readiness %s jobs %d; want %d/%s/%d", generation, readiness, jobs, wantGeneration, wantReadiness, wantJobs)
+		}
+	}
+
+	t.Run("notification wins expected absence", func(t *testing.T) {
+		lister := &racingInitialMCPManifestLister{initialStarted: make(chan struct{}), releaseInitial: make(chan struct{}), blockInitial: true}
+		admin, store, job, sender := setup(t, lister)
+		resultCh := make(chan RuntimeDeliveryResult, 1)
+		errorCh := make(chan error, 1)
+		go func() {
+			result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+			resultCh <- result
+			errorCh <- err
+		}()
+		select {
+		case <-lister.initialStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("initial discovery did not reach the staged list")
+		}
+		bridge := NewPostgreSQLBridgeAPIStore(store.Client)
+		bridge.MCPManifestLister = lister
+		mustAcceptMCPManifestChange(t, bridge, job.SessionID, "etag_notification")
+		close(lister.releaseInitial)
+		if err := <-errorCh; err != nil {
+			t.Fatalf("deliver after notification winner: %v", err)
+		}
+		if result := <-resultCh; result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 1 {
+			t.Fatalf("delivery after notification winner = %#v requests %d; want accepted/1", result, len(sender.requests))
+		}
+		readState(t, admin, 1, "ready", 1)
+	})
+
+	t.Run("initial failure wins before notification", func(t *testing.T) {
+		lister := &racingInitialMCPManifestLister{}
+		admin, store, job, sender := setup(t, lister)
+		result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+		if err != nil || result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 1 {
+			t.Fatalf("delivery after initial failure = %#v/%v requests %d; want accepted/nil/1", result, err, len(sender.requests))
+		}
+		readState(t, admin, 1, "unready", 1)
+		bridge := NewPostgreSQLBridgeAPIStore(store.Client)
+		bridge.MCPManifestLister = lister
+		mustAcceptMCPManifestChange(t, bridge, job.SessionID, "etag_notification")
+		readState(t, admin, 2, "ready", 2)
+	})
+}
+
+func TestPostgreSQLRuntimeDeliveryStoreInitialMCPTransitionRollbackRetainsInputCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_initial_mcp_rollback"
+		threadID  = "thr_initial_mcp_rollback"
+	)
+	seedMCPFamilySession(t, admin, sessionID, threadID, "claude")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_initial_mcp_rollback", 1, "pod_initial_mcp_rollback")
+	job := RuntimeJob{
+		JobID: "qjob_initial_mcp_rollback", LeaseToken: "lease_initial_mcp_rollback", Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_initial_mcp_rollback", EventIDs: []string{"evt_initial_mcp_rollback"},
+		SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"retain"}]}`)
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	if _, err := admin.ExecContext(context.Background(), `DROP TABLE queue_jobs`); err != nil {
+		t.Fatalf("remove manifest Queue persistence: %v", err)
+	}
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store.MCPManifestLister = &recordingMCPManifestLister{err: mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticDiscoveryUnavailable}}
+	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+	if err != nil || result.Status != RuntimeDeliveryRejected || !result.Retryable || len(sender.requests) != 0 {
+		t.Fatalf("delivery after manifest transaction rollback = %#v/%v requests %d; want retryable rejection/nil/0", result, err, len(sender.requests))
+	}
+	var manifests int
+	var inboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_mcp_manifests
+		WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&manifests); err != nil {
+		t.Fatalf("count rolled-back manifests: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, job.RuntimeInputID).Scan(&inboxStatus); err != nil {
+		t.Fatalf("read retained Inbox custody: %v", err)
+	}
+	if manifests != 0 || inboxStatus != "queued" {
+		t.Fatalf("rolled-back manifests/Inbox = %d/%s; want 0/queued", manifests, inboxStatus)
 	}
 }
 
@@ -651,12 +996,9 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
 
-	_, firstErr := store.PrepareRuntimeCommand(context.Background(), job)
-	var pendingErr runtimeDeliveryPrepareError
-	if !errors.As(firstErr, &pendingErr) ||
-		pendingErr.kind != "mcp_manifest_discovery_pending" ||
-		!pendingErr.retryable {
-		t.Fatalf("first PrepareRuntimeCommand error = %#v; want retryable mcp_manifest_discovery_pending", firstErr)
+	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
+	if err != nil {
+		t.Fatalf("PrepareRuntimeCommand: %v", err)
 	}
 	requests := connector.recordedRequests()
 	if len(requests) != 1 ||
@@ -675,13 +1017,355 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 	if readiness != "ready" {
 		t.Fatalf("captured MCP manifest readiness = %q; want ready", readiness)
 	}
-	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-	if err != nil {
-		t.Fatalf("second PrepareRuntimeCommand: %v", err)
-	}
 	if plan.Request == nil || plan.Request.GetRuntimeInputId() != job.RuntimeInputID {
-		t.Fatalf("second PrepareRuntimeCommand plan = %#v; want runtime input delivery", plan)
+		t.Fatalf("PrepareRuntimeCommand plan = %#v; want same-attempt runtime input delivery", plan)
 	}
+}
+
+func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_oauth_initial_manifest"
+		threadID  = "thr_oauth_initial_manifest"
+		eventID   = "evt_oauth_initial_manifest"
+		inputID   = "rin_oauth_initial_manifest"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_oauth_manifest", 1, "pod_oauth_manifest")
+	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("seed installed MCP toolset: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"search"}]}`)
+	connector := startOAuthInitialManifestConnector(t, admin, sessionID)
+
+	job := RuntimeJob{
+		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
+		InputKind: "messages", CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	now := time.Now().UTC()
+	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), queue.RetryPolicy{
+		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
+	})
+	enqueueExhaustionJob(t, queueStore, job, now)
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.MCPManifestLister = NewGatewayMCPManifestLister(connector.address, &countingRuntimeCommandTokenSource{})
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_oauth_manifest", PodIP: "10.0.0.10",
+		}})
+	}}
+	var runtimeConfigPayload string
+	client := dbconnect.NewClientForTesting(runtime)
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.oauth_manifest_runtime_config", func(tx *dbconnect.Tx) error {
+		var err error
+		runtimeConfigPayload, _, err = runtimeCommandPayloadForJobTx(context.Background(), tx, RuntimeJob{
+			Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID, ConfigGeneration: "1",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("build OAuth Runtime config: %v", err)
+	}
+	sender := &oauthReadyRuntimeSender{admin: admin, client: client, inputPath: t.TempDir() + "/oauth-ready-provider.json", runtimeConfigPayload: runtimeConfigPayload}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:    JobRunnerConfig{LeaseOwner: "oauth-manifest-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	active, err := runner.RunOnceWithActivity(context.Background())
+	if err != nil || !active {
+		t.Fatalf("deliver OAuth-backed initial manifest = active:%t err:%v", active, err)
+	}
+	if !sender.result.ToolPresent || sender.result.NextProviderRequests != 1 {
+		t.Fatalf("Runtime ready Tool Catalog composition = %+v", sender.result)
+	}
+
+	var readiness, inboxStatus, inputQueueStatus string
+	var diagnostic sql.NullString
+	var generation, manifestJobs, sessionErrors int
+	if err := admin.QueryRowContext(context.Background(), `SELECT readiness, diagnostic, manifest_generation
+		FROM session_mcp_manifests WHERE workspace_id='default' AND session_id=$1 AND mcp_server_name='github'`, sessionID).Scan(&readiness, &diagnostic, &generation); err != nil {
+		t.Fatalf("read OAuth-backed manifest: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, inputID).Scan(&inboxStatus); err != nil {
+		t.Fatalf("read accepted OAuth input: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID)).Scan(&inputQueueStatus); err != nil {
+		t.Fatalf("read OAuth input Queue status: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='runtime_config_update'
+		 AND payload_json::jsonb->>'session_id'=$1 AND payload_json::jsonb->>'mcp_server_name'='github'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`, sessionID).Scan(&manifestJobs, &sessionErrors); err != nil {
+		t.Fatalf("count OAuth manifest custody: %v", err)
+	}
+	if readiness != "ready" || diagnostic.Valid || generation != 1 || inboxStatus != "accepted" ||
+		inputQueueStatus != queue.StatusAcknowledged || manifestJobs != 1 || sessionErrors != 0 {
+		t.Fatalf("OAuth durable progression = ready:%s diagnostic:%q generation:%d Inbox:%s Queue:%s jobs:%d errors:%d sender:%s",
+			readiness, diagnostic.String, generation, inboxStatus, inputQueueStatus, manifestJobs, sessionErrors, sender.lastError)
+	}
+	stats := connector.finish(t)
+	if stats.TokenEndpointAttempts != 1 || stats.ToolsListCalls != 1 || !stats.UsedRotatedToken ||
+		!stats.DurableRotation || !stats.LogsRedacted || len(stats.RefreshOutcomes) != 1 ||
+		stats.RefreshOutcomes[0].Outcome != "refreshed" || stats.RefreshOutcomes[0].DurableWrite != "committed" ||
+		stats.RefreshOutcomes[0].HTTPStatusClass != "2xx" {
+		t.Fatalf("OAuth Connector composition stats = %+v", stats)
+	}
+}
+
+type oauthReadyRuntimeSender struct {
+	admin                *sql.DB
+	client               *dbconnect.Client
+	inputPath            string
+	runtimeConfigPayload string
+	result               struct {
+		ToolPresent          bool `json:"toolPresent"`
+		NextProviderRequests int  `json:"nextProviderRequests"`
+	}
+	lastError string
+}
+
+func (s *oauthReadyRuntimeSender) SendRuntimeCommand(ctx context.Context, _ RuntimePodTarget, request *agentruntimev1.RuntimeInputCommandRequest) (*agentruntimev1.RuntimeInputCommandResponse, error) {
+	var manifestJobID, manifestJobEnvelope string
+	if err := s.admin.QueryRowContext(ctx, `SELECT id, payload_json FROM queue_jobs
+		WHERE workspace_id=$1 AND kind='runtime_config_update'
+		AND payload_json::jsonb->>'session_id'=$2 AND payload_json::jsonb->>'mcp_server_name'='github'
+		ORDER BY created_at LIMIT 1`, request.GetWorkspaceId(), request.GetSessionId()).Scan(&manifestJobID, &manifestJobEnvelope); err != nil {
+		s.lastError = fmt.Sprintf("read ready manifest carrier: %v", err)
+		return nil, errors.New(s.lastError)
+	}
+	manifestJob, err := DecodeRuntimeJob(&queuev1.QueueJob{
+		Id: manifestJobID, WorkspaceId: request.GetWorkspaceId(), Kind: queue.KindRuntimeConfigUpdate,
+		LeaseToken: "lease_oauth_manifest_projection", PayloadJson: manifestJobEnvelope,
+	})
+	if err != nil {
+		s.lastError = fmt.Sprintf("decode ready manifest carrier: %v", err)
+		return nil, errors.New(s.lastError)
+	}
+	var manifestPayload string
+	if err := s.client.WithWorkspaceTx(ctx, request.GetWorkspaceId(), "test.oauth_ready_manifest_payload", func(tx *dbconnect.Tx) error {
+		var err error
+		manifestPayload, _, err = runtimeCommandPayloadForJobTx(ctx, tx, manifestJob)
+		return err
+	}); err != nil {
+		s.lastError = fmt.Sprintf("build ready manifest payload: %v", err)
+		return nil, errors.New(s.lastError)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"workspaceId": request.GetWorkspaceId(), "sessionId": request.GetSessionId(),
+		"sessionThreadId": request.GetSessionThreadId(), "readyManifestPayloadJson": manifestPayload,
+		"runtimeConfigPayloadJson": s.runtimeConfigPayload, "toolName": "github_search",
+	})
+	if err != nil {
+		s.lastError = fmt.Sprintf("encode ready provider input: %v", err)
+		return nil, errors.New(s.lastError)
+	}
+	if err := os.WriteFile(s.inputPath, raw, 0o600); err != nil {
+		s.lastError = fmt.Sprintf("write ready provider input: %v", err)
+		return nil, errors.New(s.lastError)
+	}
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/mcp-ready-provider-composition.ts", s.inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		s.lastError = fmt.Sprintf("run ready MCP provider composition: %v: %s", err, output)
+		return nil, errors.New(s.lastError)
+	}
+	if err := json.Unmarshal(output, &s.result); err != nil {
+		s.lastError = fmt.Sprintf("decode ready MCP provider composition: %v", err)
+		return nil, errors.New(s.lastError)
+	}
+	return &agentruntimev1.RuntimeInputCommandResponse{
+		Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
+		SessionId: request.GetSessionId(), RuntimeInputId: request.GetRuntimeInputId(),
+		BindingId: request.GetBindingId(), BindingGeneration: request.GetBindingGeneration(),
+	}, nil
+}
+
+type oauthInitialManifestConnector struct {
+	address  string
+	command  *exec.Cmd
+	scanner  *bufio.Scanner
+	stdin    io.WriteCloser
+	stderr   bytes.Buffer
+	finished bool
+}
+
+type oauthInitialManifestStats struct {
+	TokenEndpointAttempts int  `json:"tokenEndpointAttempts"`
+	ToolsListCalls        int  `json:"toolsListCalls"`
+	UsedRotatedToken      bool `json:"usedRotatedToken"`
+	DurableRotation       bool `json:"durableRotation"`
+	LogsRedacted          bool `json:"logsRedacted"`
+	RefreshOutcomes       []struct {
+		Outcome         string `json:"outcome"`
+		DurableWrite    string `json:"durableWrite"`
+		HTTPStatusClass string `json:"httpStatusClass"`
+	} `json:"refreshOutcomes"`
+}
+
+func startOAuthInitialManifestConnector(t *testing.T, admin *sql.DB, sessionID string) *oauthInitialManifestConnector {
+	t.Helper()
+	var schema string
+	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatalf("read isolated schema: %v", err)
+	}
+	input, err := json.Marshal(map[string]string{"schema": schema, "workspaceId": "default", "sessionId": sessionID})
+	if err != nil {
+		t.Fatalf("encode OAuth Connector fixture input: %v", err)
+	}
+	inputPath := t.TempDir() + "/oauth-connector.json"
+	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
+		t.Fatalf("write OAuth Connector fixture input: %v", err)
+	}
+	fixture := &oauthInitialManifestConnector{}
+	fixture.command = exec.Command("bun", "packages/mcp-connector/test/fixtures/oauth-initial-manifest-server.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	fixture.command.Dir = "../gateway"
+	stdout, err := fixture.command.StdoutPipe()
+	if err != nil {
+		t.Fatalf("open OAuth Connector stdout: %v", err)
+	}
+	fixture.stdin, err = fixture.command.StdinPipe()
+	if err != nil {
+		t.Fatalf("open OAuth Connector stdin: %v", err)
+	}
+	fixture.command.Stderr = &fixture.stderr
+	fixture.scanner = bufio.NewScanner(stdout)
+	if err := fixture.command.Start(); err != nil {
+		t.Fatalf("start OAuth Connector fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if fixture.finished || fixture.command.Process == nil {
+			return
+		}
+		_ = fixture.command.Process.Kill()
+		_ = fixture.command.Wait()
+	})
+	if !fixture.scanner.Scan() {
+		t.Fatalf("OAuth Connector fixture did not start: %v: %s", fixture.scanner.Err(), fixture.stderr.String())
+	}
+	var started struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(fixture.scanner.Bytes(), &started); err != nil || started.Address == "" {
+		t.Fatalf("decode OAuth Connector address: %v: %q", err, fixture.scanner.Text())
+	}
+	fixture.address = started.Address
+	return fixture
+}
+
+func (f *oauthInitialManifestConnector) finish(t *testing.T) oauthInitialManifestStats {
+	t.Helper()
+	if _, err := f.stdin.Write([]byte("finish\n")); err != nil {
+		t.Fatalf("finish OAuth Connector fixture: %v", err)
+	}
+	if !f.scanner.Scan() {
+		t.Fatalf("OAuth Connector fixture omitted stats: %v: %s", f.scanner.Err(), f.stderr.String())
+	}
+	var stats oauthInitialManifestStats
+	if err := json.Unmarshal(f.scanner.Bytes(), &stats); err != nil {
+		t.Fatalf("decode OAuth Connector stats: %v: %q", err, f.scanner.Text())
+	}
+	if err := f.command.Wait(); err != nil {
+		t.Fatalf("OAuth Connector fixture exit: %v: %s", err, f.stderr.String())
+	}
+	f.finished = true
+	return stats
+}
+
+func newUntypedFailureMCPManifestLister(t *testing.T, code codes.Code) MCPManifestLister {
+	return newExactFailureMCPManifestLister(t, code, nil)
+}
+
+func newExactFailureMCPManifestLister(t *testing.T, code codes.Code, values []string) MCPManifestLister {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for untyped MCP failure: %v", err)
+	}
+	server := grpc.NewServer()
+	providergatewayv1.RegisterMcpConnectorServiceServer(server, failingMCPManifestTransportServer{code: code, values: values})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+	return NewGatewayMCPManifestLister(listener.Addr().String(), &countingRuntimeCommandTokenSource{})
+}
+
+type initialManifestFailureConnector struct {
+	address  string
+	command  *exec.Cmd
+	scanner  *bufio.Scanner
+	stdin    io.WriteCloser
+	stderr   bytes.Buffer
+	finished bool
+}
+
+type initialManifestFailureStats struct {
+	ListCalls    int  `json:"listCalls"`
+	LogsRedacted bool `json:"logsRedacted"`
+}
+
+func startInitialManifestFailureConnector(t *testing.T) *initialManifestFailureConnector {
+	t.Helper()
+	fixture := &initialManifestFailureConnector{}
+	fixture.command = exec.Command("bun", "packages/mcp-connector/test/fixtures/initial-manifest-failure-server.ts") //nolint:gosec // Fixed repository fixture.
+	fixture.command.Dir = "../gateway"
+	stdout, err := fixture.command.StdoutPipe()
+	if err != nil {
+		t.Fatalf("open failure Connector stdout: %v", err)
+	}
+	fixture.stdin, err = fixture.command.StdinPipe()
+	if err != nil {
+		t.Fatalf("open failure Connector stdin: %v", err)
+	}
+	fixture.command.Stderr = &fixture.stderr
+	fixture.scanner = bufio.NewScanner(stdout)
+	if err := fixture.command.Start(); err != nil {
+		t.Fatalf("start failure Connector fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if fixture.finished || fixture.command.Process == nil {
+			return
+		}
+		_ = fixture.command.Process.Kill()
+		_ = fixture.command.Wait()
+	})
+	if !fixture.scanner.Scan() {
+		t.Fatalf("failure Connector fixture did not start: %v: %s", fixture.scanner.Err(), fixture.stderr.String())
+	}
+	var started struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(fixture.scanner.Bytes(), &started); err != nil || started.Address == "" {
+		t.Fatalf("decode failure Connector address: %v: %q", err, fixture.scanner.Text())
+	}
+	fixture.address = started.Address
+	return fixture
+}
+
+func (f *initialManifestFailureConnector) finish(t *testing.T) initialManifestFailureStats {
+	t.Helper()
+	if _, err := f.stdin.Write([]byte("finish\n")); err != nil {
+		t.Fatalf("finish failure Connector fixture: %v", err)
+	}
+	if !f.scanner.Scan() {
+		t.Fatalf("failure Connector fixture omitted stats: %v: %s", f.scanner.Err(), f.stderr.String())
+	}
+	var stats initialManifestFailureStats
+	if err := json.Unmarshal(f.scanner.Bytes(), &stats); err != nil {
+		t.Fatalf("decode failure Connector stats: %v: %q", err, f.scanner.Text())
+	}
+	if err := f.command.Wait(); err != nil {
+		t.Fatalf("failure Connector fixture exit: %v: %s", err, f.stderr.String())
+	}
+	f.finished = true
+	return stats
 }
 
 func TestInitialMCPManifestListUsesFreshRPCOnlyDeadline(t *testing.T) {
@@ -694,7 +1378,7 @@ func TestInitialMCPManifestListUsesFreshRPCOnlyDeadline(t *testing.T) {
 	lister := &expiringMCPManifestLister{}
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.MCPManifestLister = lister
-	err := store.enqueueInitialMCPManifestUpdatesWithListTimeout(
+	err := store.captureInitialMCPManifestsWithListTimeout(
 		context.Background(),
 		RuntimeJob{WorkspaceID: "default", SessionID: sessionID},
 		[]MCPManifestToolsetConfig{
@@ -705,7 +1389,7 @@ func TestInitialMCPManifestListUsesFreshRPCOnlyDeadline(t *testing.T) {
 		10*time.Millisecond,
 	)
 	if err != nil {
-		t.Fatalf("enqueueInitialMCPManifestUpdatesWithListTimeout: %v", err)
+		t.Fatalf("captureInitialMCPManifestsWithListTimeout: %v", err)
 	}
 	if len(lister.contexts) != 2 || lister.contexts[0] == lister.contexts[1] {
 		t.Fatalf("MCP list contexts = %#v; want one fresh context per toolset", lister.contexts)

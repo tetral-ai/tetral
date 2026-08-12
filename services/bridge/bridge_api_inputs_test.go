@@ -619,43 +619,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	if len(loaded.Messages) != 1 || testJSONPathString(t, string(loaded.Messages[0]), "origin") != "runtime" {
 		t.Fatalf("loaded inter-agent messages = %s; want one runtime-origin message", loadResponse.GetContextJson())
 	}
-	afterReceived, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope:         parentScope,
-		ChildThreadId: "thr_bridge_inter_agent_child",
-		DeliveryId:    "delivery_bridge_inter_agent_0",
-	})
-	if err != nil {
-		t.Fatalf("ResolveInterAgentDelivery after receive: %v", err)
-	}
-	if afterReceived.GetDeliveryId() != beforeReceived.GetDeliveryId() ||
-		afterReceived.GetReceivedEventId() != beforeReceived.GetReceivedEventId() ||
-		afterReceived.GetReceivedSequence() != beforeReceived.GetReceivedSequence() ||
-		afterReceived.GetMessageJson() != beforeReceived.GetMessageJson() {
-		t.Fatalf("delivery replay = %+v; want stable admitted envelope %+v", afterReceived, beforeReceived)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_threads
-		    SET status = 'closed_for_runtime'
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_inter_agent'
-		    AND id = 'thr_bridge_inter_agent_child'`,
-	); err != nil {
-		t.Fatalf("close committed delivery recipient: %v", err)
-	}
-	closedReplay, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope:         parentScope,
-		ChildThreadId: "thr_bridge_inter_agent_child",
-		DeliveryId:    "delivery_bridge_inter_agent_0",
-	})
-	if err != nil {
-		t.Fatalf("ResolveInterAgentDelivery after recipient close: %v", err)
-	}
-	if closedReplay.GetDeliveryId() != beforeReceived.GetDeliveryId() ||
-		closedReplay.GetReceivedEventId() != beforeReceived.GetReceivedEventId() ||
-		closedReplay.GetReceivedSequence() != beforeReceived.GetReceivedSequence() ||
-		closedReplay.GetMessageJson() != beforeReceived.GetMessageJson() {
-		t.Fatalf("closed-recipient delivery replay = %+v; want stable admitted envelope %+v", closedReplay, beforeReceived)
-	}
 	var receivedEventID string
 	var receivedVisibility string
 	var receivedSessionVisible bool
@@ -1575,5 +1538,59 @@ func TestAdmitAgentMailDeliveryRejectsApprovalReviewerTarget(t *testing.T) {
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("admit completion mail on reviewer err = %v; want FailedPrecondition", err)
+	}
+}
+
+func TestPostgreSQLResolveInterAgentDeliveryReplaysAcceptedColdCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID  = "sesn_agent_mail_accepted_cold"
+		mainID     = "thr_agent_mail_accepted_cold_main"
+		childID    = "thr_agent_mail_accepted_cold_child"
+		bindingID  = "bind_agent_mail_accepted_cold"
+		podUID     = "pod_agent_mail_accepted_cold"
+		deliveryID = "delivery_agent_mail_accepted_cold"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_agent_mail_accepted_cold", completionMailEnvelope("main", "task_"+childID, "done"))
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_agent_mail_accepted_cold_sent", 1, "agent.thread_message_sent",
+		bridgeInterAgentSentEventJSON(t, deliveryID, childID, mainID, "", "evt_agent_mail_accepted_cold_spawn", messageJSON))
+	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+	commitRequest := bridgeAgentMailCommitRequestForTest(t, admin, scope, "agent_mail:"+deliveryID, deliveryID, childID, "evt_agent_mail_accepted_cold_spawn", messageJSON)
+	receivedID := commitRequest.GetEventIds()[0]
+	enqueue, _, err := agentMailWakeEnqueueRequest("default", sessionID, mainID, deliveryID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("build accepted cold Queue custody: %v", err)
+	}
+	if _, err := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)).Enqueue(context.Background(), enqueue); err != nil {
+		t.Fatalf("enqueue accepted cold Queue custody: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	response, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
+		Scope: scope, ChildThreadId: childID, DeliveryId: deliveryID,
+	})
+	if err != nil {
+		t.Fatalf("ResolveInterAgentDelivery accepted cold custody: %v", err)
+	}
+	if response.GetReceivedEventId() != receivedID || response.GetReceivedSequence() != 1 ||
+		!strings.Contains(response.GetMessageJson(), "done") {
+		t.Fatalf("accepted cold mail response = %#v; want existing durable projection", response)
+	}
+	var inboxStatus, queueStatus string
+	var receivedEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id='agent_mail:' || $2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		 AND type='agent.thread_message_received' AND payload_json::jsonb ->> 'delivery_id'=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default'
+		 AND dedupe_key='runtime_input:default:' || $1 || ':agent_mail:' || $2)`,
+		sessionID, deliveryID).Scan(&inboxStatus, &receivedEvents, &queueStatus); err != nil {
+		t.Fatalf("read accepted cold mail replay: %v", err)
+	}
+	if inboxStatus != "accepted" || receivedEvents != 1 || queueStatus != queue.StatusPending {
+		t.Fatalf("accepted cold mail replay = Inbox %q / received events %d / Queue %q; want accepted / one / pending", inboxStatus, receivedEvents, queueStatus)
 	}
 }

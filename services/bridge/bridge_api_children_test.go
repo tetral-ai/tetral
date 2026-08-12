@@ -519,10 +519,11 @@ func TestPostgreSQLBridgeAPIStoreChildControlDeliveryExhaustionPreventsClose(t *
 		t.Fatalf("decode child control Queue job: %v", err)
 	}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	if _, err := deliveryStore.PrepareRuntimeCommand(context.Background(), runtimeJob); err != nil {
+	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), runtimeJob)
+	if err != nil {
 		t.Fatalf("prepare leased child control delivery: %v", err)
 	}
-	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), runtimeJob, retryableExhaustionResult()); err != nil {
+	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), runtimeJob, runtimeDeliveryResultWithAttemptedBinding(retryableExhaustionResult(), plan.Request)); err != nil {
 		t.Fatalf("finalize child control delivery exhaustion: %v", err)
 	}
 	deadLettered, err := queueStore.DeadLetter(context.Background(), queue.DeadLetterRequest{
@@ -662,8 +663,13 @@ func TestPostgreSQLBridgeAPIStoreChildControlFenceRejectsDirectedWorkUntilClose(
 	if _, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{Scope: parentScope, ChildThreadId: childID, Source: resumeSource}); err != nil {
 		t.Fatalf("resume child after terminal control: %v", err)
 	}
+	const resumedDeliveryID = "delivery_child_control_work_fence_resumed"
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, "evt_child_control_work_fence_resumed_sent",
+		nextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.thread_message_sent",
+		bridgeInterAgentSentEventJSON(t, resumedDeliveryID, mainID, childID, "worker", "evt_child_control_work_fence_send_tool", directMessageJSON))
+	seedAgentMailCustody(t, admin, sessionID, childID, resumedDeliveryID, time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC))
 	resolved, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope: parentScope, ChildThreadId: childID, DeliveryId: "delivery_child_control_work_fence_direct",
+		Scope: parentScope, ChildThreadId: childID, DeliveryId: resumedDeliveryID,
 	})
 	if err != nil || resolved.GetReceivedEventId() == "" {
 		t.Fatalf("direct agent mail after control release = %+v, %v; want admitted delivery", resolved, err)
@@ -1748,10 +1754,16 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	}
 	prepareCompletedChildCloseForTest(t, admin, store, closeRequest)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, childID, "rin_close_tree_message", "messages", `["evt_close_tree_message"]`, "accepted", bindingID, podUID, 1, 1)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childID,
+		RuntimeInputID: "rin_close_tree_queued", InputKind: "messages",
+		EventIDs: []string{"evt_close_tree_queued"}, SequenceFrom: 2, SequenceTo: 2,
+	})
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, grandchildID, "task_notification:close_tree", "task_notification", `[]`, "accepted", bindingID, podUID, 0, 0)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	for _, input := range []runtimePodLostAcceptedInput{
 		{SessionThreadID: childID, RuntimeInputID: "rin_close_tree_message", InputKind: "messages", EventIDsJSON: `["evt_close_tree_message"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true}},
+		{SessionThreadID: childID, RuntimeInputID: "rin_close_tree_queued", InputKind: "messages", EventIDsJSON: `["evt_close_tree_queued"]`, SequenceFrom: sql.NullInt64{Int64: 2, Valid: true}, SequenceTo: sql.NullInt64{Int64: 2, Valid: true}},
 		{SessionThreadID: grandchildID, RuntimeInputID: "task_notification:close_tree", InputKind: "task_notification", EventIDsJSON: `[]`},
 	} {
 		request, err := lostRuntimeInputEnqueueRequest("default", sessionID, input, store.Clock())
@@ -1771,6 +1783,7 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	}
 	for runtimeInputID, wantStatus := range map[string]string{
 		"rin_close_tree_message":       "cancelled",
+		"rin_close_tree_queued":        "cancelled",
 		"task_notification:close_tree": "parked",
 	} {
 		var inboxStatus, queueStatus string

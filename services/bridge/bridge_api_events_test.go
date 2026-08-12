@@ -738,11 +738,38 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(
 	}
 	resultRequest := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_tool_result_membership_first", ModelRequestId: "mreq_tool_result_membership",
-		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}],"is_error":false}`,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
+		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"failed"}],"is_error":true}`,
+		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
+			ToolUseEventId: toolUse.GetEventId(),
+			Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
+				ErrorJson: `{"code":"sandbox_failure","detail":{"exit":7}}`,
+			}},
+		}},
 	}
 	if _, err := store.WriteEvent(context.Background(), resultRequest); err != nil {
 		t.Fatalf("WriteEvent first Tool Result: %v", err)
+	}
+	var durableMessage string
+	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+		WHERE workspace_id='default' AND session_id='sesn_tool_result_membership'
+		AND session_thread_id='thr_tool_result_membership' AND model_request_id='mreq_tool_result_membership'`).Scan(&durableMessage); err != nil {
+		t.Fatalf("read generic Tool projection: %v", err)
+	}
+	var genericProjection struct {
+		Parts []struct {
+			State struct {
+				Error struct {
+					Code   string `json:"code"`
+					Detail struct {
+						Exit int `json:"exit"`
+					} `json:"detail"`
+				} `json:"error"`
+			} `json:"state"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(durableMessage), &genericProjection); err != nil || len(genericProjection.Parts) != 1 ||
+		genericProjection.Parts[0].State.Error.Code != "sandbox_failure" || genericProjection.Parts[0].State.Error.Detail.Exit != 7 {
+		t.Fatalf("generic Tool error was rewritten: %s", durableMessage)
 	}
 	duplicateResult := proto.Clone(resultRequest).(*bridgev1.WriteEventRequest)
 	duplicateResult.RuntimeWriteId = "rwrite_tool_result_membership_second"

@@ -110,6 +110,7 @@ type runtimePodLostAcceptedInput struct {
 	SessionThreadID string
 	RuntimeInputID  string
 	InputKind       string
+	InboxStatus     string
 	EventIDsJSON    string
 	SequenceFrom    sql.NullInt64
 	SequenceTo      sql.NullInt64
@@ -134,6 +135,7 @@ func handOffLostRuntimeAcceptedInputsTx(
 		`SELECT inbox.session_thread_id,
 		        inbox.runtime_input_id,
 		        inbox.input_kind,
+		        inbox.status,
 		        inbox.event_ids_json,
 		        inbox.sequence_from,
 		        inbox.sequence_to,
@@ -178,6 +180,7 @@ func handOffLostRuntimeAcceptedInputsTx(
 			&input.SessionThreadID,
 			&input.RuntimeInputID,
 			&input.InputKind,
+			&input.InboxStatus,
 			&input.EventIDsJSON,
 			&input.SequenceFrom,
 			&input.SequenceTo,
@@ -198,24 +201,13 @@ func handOffLostRuntimeAcceptedInputsTx(
 		if input.InputKind == "" {
 			return 0, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "runtime inbox input kind is missing", retryable: false}
 		}
-		var inboxStatus string
-		if err := tx.QueryRow(ctx,
-			`SELECT status
-			   FROM session_runtime_inbox
-			  WHERE workspace_id = $1 AND runtime_input_id = $2
-			  FOR UPDATE`,
-			workspaceID,
-			input.RuntimeInputID,
-		).Scan(&inboxStatus); err != nil {
-			return 0, err
-		}
-		if inboxStatus == "delivering" {
+		if input.InboxStatus == "delivering" {
 			if !input.QueueJobID.Valid {
 				return 0, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "delivering runtime input has no active queue custody", retryable: false}
 			}
 			continue
 		}
-		if inboxStatus != "accepted" {
+		if input.InboxStatus != "accepted" {
 			continue
 		}
 		if input.QueueJobID.Valid {
@@ -656,17 +648,51 @@ func runtimePodLostInterruptedThenLostTx(
 		      AND session_id = $2
 		      AND session_thread_id = $3
 		      AND sequence > $4
-		      AND (
-		           (type IN ('user.message', 'user.interrupt', 'user.tool_confirmation') AND processed_at IS NOT NULL)
-		        OR type = 'agent.thread_message_received'
-		      )
+		      AND type IN ('user.message', 'user.interrupt', 'user.tool_confirmation')
+		      AND processed_at IS NOT NULL
 		)`,
 		workspaceID,
 		sessionID,
 		threadID,
 		interruptSequence,
 	).Scan(&superseded)
-	return !superseded, err
+	if err != nil || superseded {
+		return !superseded, err
+	}
+	// A received projection is accepted input truth only while its exact Inbox
+	// custody remains nonterminal. Locking that row keeps Pod-loss repair from
+	// inferring progress from an orphaned source event.
+	var receivedEventID string
+	err = tx.QueryRow(ctx,
+		`SELECT received.event_id
+		   FROM session_events received
+		   JOIN session_runtime_inbox inbox
+		     ON inbox.workspace_id = received.workspace_id
+		    AND inbox.session_id = received.session_id
+		    AND inbox.session_thread_id = received.session_thread_id
+		    AND inbox.runtime_input_id = 'agent_mail:' || (received.payload_json::jsonb ->> 'delivery_id')
+		    AND inbox.input_kind = 'agent_mail'
+		    AND inbox.status IN ('queued', 'delivering', 'accepted')
+		    AND inbox.event_ids_json::jsonb = jsonb_build_array(received.event_id)
+		    AND inbox.sequence_from = received.sequence
+		    AND inbox.sequence_to = received.sequence
+		  WHERE received.workspace_id = $1
+		    AND received.session_id = $2
+		    AND received.session_thread_id = $3
+		    AND received.sequence > $4
+		    AND received.type = 'agent.thread_message_received'
+		  ORDER BY received.sequence
+		  LIMIT 1
+		  FOR UPDATE OF inbox`,
+		workspaceID,
+		sessionID,
+		threadID,
+		interruptSequence,
+	).Scan(&receivedEventID)
+	if dbconnect.IsNoRows(err) {
+		return true, nil
+	}
+	return false, err
 }
 
 func insertRuntimePodLostSettlementEventTx(
@@ -1145,6 +1171,21 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 			}
 			continue
 		}
+		currentInbox, err := runtimePodLostAgentMailInboxCurrentTx(ctx, tx, workspaceID, sessionID, envelope, binding)
+		if err != nil {
+			return 0, err
+		}
+		if !currentInbox {
+			inserted, insertErr := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
+				"Sub-agent delivery could not be recovered because its durable Inbox custody is invalid.", now)
+			if insertErr != nil {
+				return 0, insertErr
+			}
+			if inserted {
+				repaired++
+			}
+			continue
+		}
 
 		parentScope := runtimePodLostRepairScope(workspaceID, sessionID, delivery.ToolUse.SessionThreadID, binding, envelope.DeliveryID)
 		if err := requireAgentMailInputTargetTx(ctx, tx, scopeForThread(parentScope, envelope.TargetThreadID)); err != nil {
@@ -1181,6 +1222,112 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 		}
 	}
 	return repaired, nil
+}
+
+// Pod-loss delivery repair may declare success only from the same Inbox fact
+// that owns Runtime delivery. Source events and the stored mail envelope prove
+// content identity, but never substitute for nonterminal custody.
+func runtimePodLostAgentMailInboxCurrentTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	envelope storedAgentMailEnvelope,
+	binding runtimeBindingForDelivery,
+) (bool, error) {
+	var (
+		threadID                             string
+		inputKind, eventIDsJSON, inboxStatus string
+		sequenceFrom, sequenceTo             sql.NullInt64
+		bindingID, targetPodUID              sql.NullString
+		bindingGeneration                    sql.NullInt64
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT session_thread_id, input_kind, event_ids_json, sequence_from, sequence_to,
+		        status, binding_id, binding_generation, target_pod_uid
+		   FROM session_runtime_inbox
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND runtime_input_id = $3
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		completionRuntimeInputID(envelope.DeliveryID),
+	).Scan(
+		&threadID,
+		&inputKind,
+		&eventIDsJSON,
+		&sequenceFrom,
+		&sequenceTo,
+		&inboxStatus,
+		&bindingID,
+		&bindingGeneration,
+		&targetPodUID,
+	)
+	if dbconnect.IsNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if threadID != envelope.TargetThreadID || inputKind != "agent_mail" {
+		return false, nil
+	}
+	switch inboxStatus {
+	case "queued":
+		if bindingID.Valid || bindingGeneration.Valid || targetPodUID.Valid {
+			return false, nil
+		}
+	case "delivering", "accepted":
+		if !bindingID.Valid || bindingID.String != binding.BindingID ||
+			!bindingGeneration.Valid || bindingGeneration.Int64 != binding.BindingGeneration ||
+			!targetPodUID.Valid || targetPodUID.String != binding.PodUID {
+			return false, nil
+		}
+	default:
+		return false, nil
+	}
+
+	var eventIDs []string
+	if err := json.Unmarshal([]byte(eventIDsJSON), &eventIDs); err != nil || eventIDs == nil {
+		return false, nil
+	}
+	if len(eventIDs) == 0 {
+		return inboxStatus == "queued" && !sequenceFrom.Valid && !sequenceTo.Valid, nil
+	}
+	receivedEventID := stableRuntimeID("agent_mail_received_event", workspaceID, sessionID, envelope.TargetThreadID, envelope.DeliveryID)
+	if len(eventIDs) != 1 || eventIDs[0] != receivedEventID || !sequenceFrom.Valid || !sequenceTo.Valid || sequenceFrom.Int64 != sequenceTo.Int64 {
+		return false, nil
+	}
+	var sequence int64
+	var sourceThreadID, sourceToolUseEventID string
+	err = tx.QueryRow(ctx,
+		`SELECT sequence,
+		        payload_json::jsonb ->> 'source_thread_id',
+		        payload_json::jsonb ->> 'source_tool_use_event_id'
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND event_id = $4
+		    AND type = 'agent.thread_message_received'
+		    AND payload_json::jsonb ->> 'delivery_id' = $5
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		envelope.TargetThreadID,
+		receivedEventID,
+		envelope.DeliveryID,
+	).Scan(&sequence, &sourceThreadID, &sourceToolUseEventID)
+	if dbconnect.IsNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sequence == sequenceFrom.Int64 &&
+		sourceThreadID == envelope.SourceThreadID &&
+		sourceToolUseEventID == envelope.SourceToolUseEventID, nil
 }
 
 func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimePodLostSubAgentDelivery, error) {

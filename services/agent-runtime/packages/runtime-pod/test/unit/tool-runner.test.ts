@@ -1298,6 +1298,22 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
+  test("does not expose a claimed MCP outcome without durable materialization identity", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "must not reach the model",
+      attachments: [],
+      errorKind: undefined,
+      materializationHandle: undefined,
+    };
+
+    await expect(makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }))).resolves.toEqual({
+      type: "stale_custody",
+    });
+    expect(mcp.runMcpToolRequests).toHaveLength(1);
+  });
+
   test("accepts the true 50 KiB escape-dense MCP result without a line-cap shortcut", async () => {
     const mcp = new RecordingMcpConnectorClient();
     const resultText = "\u0001".repeat(50 * 1024);
@@ -1387,6 +1403,7 @@ describe("RuntimePodToolRunner", () => {
       resultText: "invalid repository",
       attachments: [],
       errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
+      materializationHandle: "evt_mcp_tool_error",
     };
     const runner = makeRunner({ mcp });
 
@@ -1409,6 +1426,7 @@ describe("RuntimePodToolRunner", () => {
       resultText: "tool returned an image error",
       attachments: [{ attachmentRef: "att_mcp_error", mime: "image/png", sizeBytes: 3, suggestedFilename: "error.png" }],
       errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
+      materializationHandle: "evt_mcp_tool_error_attachment",
     };
     const runner = makeRunner({ bridge, mcp });
 
@@ -1430,67 +1448,20 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
-  test("preserves terminal MCP authentication retry status for runtime error events", async () => {
-    for (const scenario of [
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-          resultText: "MCP authentication failed after refresh.",
-        },
-        publicErrorEvent: {
-          type: "mcp_authentication_failed_error",
-          mcpServerName: "github",
-          message: "MCP authentication failed after refresh.",
-          retryStatus: { type: "terminal" },
-        },
-      },
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-          resultText: "MCP server github requires a configured credential.",
-        },
-        publicErrorEvent: {
-          type: "mcp_authentication_failed_error",
-          mcpServerName: "github",
-          message: "MCP server github requires a configured credential.",
-          retryStatus: { type: "terminal" },
-        },
-      },
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-          resultText: "MCP tool idempotency conflict.",
-        },
-        publicErrorEvent: {
-          type: "unknown_error",
-          message: "MCP tool idempotency conflict.",
-          retryStatus: { type: "terminal" },
-        },
-      },
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED,
-          resultText: "MCP connection failed.",
-        },
-        publicErrorEvent: {
-          type: "mcp_connection_failed_error",
-          mcpServerName: "github",
-          message: "MCP connection failed.",
-          retryStatus: { type: "exhausted" },
-        },
-      },
+  test("settles MCP infrastructure failures as one generic non-retryable Tool error", async () => {
+    for (const response of [
+      { errorKind: McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED, retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL },
+      { errorKind: McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED, retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL },
+      { errorKind: McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED, retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED },
     ]) {
       const mcp = new RecordingMcpConnectorClient();
       mcp.runMcpToolResponse = {
         status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-        resultText: scenario.response.resultText,
+        resultText: "credential and provider response must not escape",
         attachments: [],
-        errorKind: scenario.response.errorKind,
-        retryStatus: scenario.response.retryStatus,
+        errorKind: response.errorKind,
+        retryStatus: response.retryStatus,
+        materializationHandle: "evt_mcp_infrastructure_failure",
       };
       const runner = makeRunner({ mcp });
 
@@ -1498,37 +1469,41 @@ describe("RuntimePodToolRunner", () => {
 
       expect(result).toMatchObject({
         type: "error",
-        error: {
-          retryable: true,
-          message: scenario.response.resultText,
-          retryStatus: scenario.publicErrorEvent.retryStatus,
-        },
-        publicErrorEvent: scenario.publicErrorEvent,
+        error: expect.objectContaining({
+          retryable: false,
+          message: "MCP tool execution is unavailable.",
+        }),
+        mcpMaterializationHandle: "evt_mcp_infrastructure_failure",
       });
     }
   });
 
-  test("settles internal MCP failures without retry status or a public error event", async () => {
-    const mcp = new RecordingMcpConnectorClient();
-    mcp.runMcpToolResponse = {
-      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-      resultText: "MCP connector failed.",
-      attachments: [],
-      errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
-      retryStatus: undefined,
-    };
-    const runner = makeRunner({ mcp });
-
-    const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
-
-    expect(result).toMatchObject({
-      type: "error",
-      error: {
-        retryable: true,
-        message: "MCP connector failed.",
+  test("does not project pre-materialization MCP uncertainty responses", async () => {
+    for (const testCase of [
+      {
+        errorKind: McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT,
       },
-    });
-    expect(result).not.toHaveProperty("publicErrorEvent");
+      {
+        errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+      },
+      {
+        errorKind: McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT,
+      },
+    ]) {
+      const mcp = new RecordingMcpConnectorClient();
+      mcp.runMcpToolResponse = {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+        resultText: "connector details must not escape",
+        attachments: [],
+        errorKind: testCase.errorKind,
+        retryStatus: undefined,
+      };
+      const runner = makeRunner({ mcp });
+
+      const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+
+      expect(result).toEqual({ type: "stale_custody" });
+    }
   });
 
   test("returns stale custody without projecting a model-visible MCP failure", async () => {
@@ -1555,6 +1530,7 @@ describe("RuntimePodToolRunner", () => {
       resultText: "image",
       attachments: [{ attachmentRef: "att_mcp_plot", mime: "image/png", sizeBytes: 3, suggestedFilename: "plot.png" }],
       errorKind: undefined,
+      materializationHandle: "evt_mcp_attachment",
     };
     const runner = makeRunner({ bridge, mcp });
 
@@ -3647,6 +3623,7 @@ class RecordingMcpConnectorClient {
     attachments: [],
     errorKind: undefined,
     retryStatus: undefined,
+    materializationHandle: "evt_mcp_materialized_default",
   };
 
   client(): Pick<McpConnectorServiceClient, "runMcpTool"> {

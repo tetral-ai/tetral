@@ -1203,6 +1203,8 @@ func settleRuntimeToolPartTx(
 		return runtimeToolProjectionPayload{}, status.Error(codes.AlreadyExists, "Tool Use already has a terminal settlement")
 	}
 	nextState := map[string]any{}
+	toolEvent, _ := selected["toolEvent"].(map[string]any)
+	isMCPTool := toolEvent["kind"] == "mcp"
 	if input, present := state["input"]; present {
 		nextState["input"] = input
 	}
@@ -1215,8 +1217,8 @@ func settleRuntimeToolPartTx(
 		nextState["status"] = "completed"
 		nextState["output"] = output
 	case *bridgev1.RuntimeToolSettlement_Error:
-		var normalizedError any
-		if err := json.Unmarshal([]byte(outcome.Error.GetErrorJson()), &normalizedError); err != nil || normalizedError == nil {
+		normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Error.GetErrorJson(), isMCPTool)
+		if err != nil {
 			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool error is invalid")
 		}
 		nextState["status"] = "error"
@@ -1224,8 +1226,8 @@ func settleRuntimeToolPartTx(
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
 		nextState["status"] = "cancelled"
 		if outcome.Cancelled.ErrorJson != nil {
-			var normalizedError any
-			if err := json.Unmarshal([]byte(outcome.Cancelled.GetErrorJson()), &normalizedError); err != nil || normalizedError == nil {
+			normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Cancelled.GetErrorJson(), isMCPTool)
+			if err != nil {
 				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool cancellation error is invalid")
 			}
 			nextState["error"] = normalizedError
@@ -1257,6 +1259,33 @@ func settleRuntimeToolPartTx(
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement lost its durable message")
 	}
 	return runtimeToolProjectionFromDurablePart(messageID, selected), nil
+}
+
+// Runtime failures carry lifecycle diagnostics that belong to the declaration
+// receipt, while durable Tool parts expose only the stable model-visible error.
+// Other Tool owners already declare their durable error object directly.
+func runtimeDeclaredToolErrorFromFailureJSON(raw string, normalizeMCP bool) (map[string]any, error) {
+	var declared map[string]any
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil || declared == nil {
+		return nil, fmt.Errorf("invalid Runtime failure")
+	}
+	if !normalizeMCP {
+		return declared, nil
+	}
+	code, hasCode := declared["code"].(string)
+	message, hasMessage := declared["message"].(string)
+	retryable, hasRetryable := declared["retryable"].(bool)
+	if !hasCode {
+		return declared, nil
+	}
+	if code == "" || !hasMessage || message == "" || !hasRetryable {
+		return nil, fmt.Errorf("invalid Runtime failure")
+	}
+	return map[string]any{
+		"type":      code,
+		"message":   message,
+		"retryable": retryable,
+	}, nil
 }
 
 func runtimeToolProjectionFromDurablePart(messageID string, part map[string]any) runtimeToolProjectionPayload {

@@ -12,8 +12,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+const mcpFailureKindMetadataKey = "tetral-mcp-failure-kind"
 
 // MaxMcpManifestBytes (256 KiB per server) bounds a server's accepted
 // tools_json. Bridge is the AUTHORITATIVE enforcement point: the check runs
@@ -37,6 +40,14 @@ type MCPManifestListRequest struct {
 type MCPManifestListResult struct {
 	ManifestETag string
 	Tools        []MCPManifestTool
+}
+
+type mcpManifestDiscoveryError struct {
+	diagnostic string
+}
+
+func (e mcpManifestDiscoveryError) Error() string {
+	return "mcp manifest discovery failed"
 }
 
 type MCPManifestTool struct {
@@ -68,13 +79,14 @@ func (l *GatewayMCPManifestLister) ListMCPTools(ctx context.Context, request MCP
 		return MCPManifestListResult{}, err
 	}
 	defer func() { _ = conn.Close() }()
+	var trailers metadata.MD
 	response, err := providergatewayv1.NewMcpConnectorServiceClient(conn).ListMcpTools(ctx, &providergatewayv1.ListMcpToolsRequest{
 		WorkspaceId:   request.WorkspaceID,
 		SessionId:     request.SessionID,
 		McpServerName: request.MCPServerName,
-	})
+	}, grpc.Trailer(&trailers))
 	if err != nil {
-		return MCPManifestListResult{}, err
+		return MCPManifestListResult{}, classifyMCPManifestListError(err, trailers)
 	}
 	tools := make([]MCPManifestTool, 0, len(response.GetTools()))
 	for _, tool := range response.GetTools() {
@@ -85,6 +97,32 @@ func (l *GatewayMCPManifestLister) ListMCPTools(ctx context.Context, request MCP
 		})
 	}
 	return MCPManifestListResult{ManifestETag: response.GetManifestEtag(), Tools: tools}, nil
+}
+
+func classifyMCPManifestListError(err error, trailers metadata.MD) error {
+	code := status.Code(err)
+	values := trailers.Get(mcpFailureKindMetadataKey)
+	if len(values) == 0 {
+		if code == codes.Unavailable || code == codes.DeadlineExceeded {
+			return mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticDiscoveryUnavailable}
+		}
+		return err
+	}
+	if len(values) != 1 {
+		return err
+	}
+	switch {
+	case code == codes.FailedPrecondition && values[0] == "credential_unavailable":
+		return mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticCredentialUnavailable}
+	case code == codes.Unavailable && values[0] == "server_unavailable":
+		return mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticDiscoveryUnavailable}
+	case code == codes.DeadlineExceeded && values[0] == "discovery_timeout":
+		return mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticDiscoveryUnavailable}
+	case code == codes.FailedPrecondition && values[0] == "manifest_invalid":
+		return mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticInvalid}
+	default:
+		return err
+	}
 }
 
 func mcpManifestInputSchema(inputSchemaJSON string) (map[string]any, error) {

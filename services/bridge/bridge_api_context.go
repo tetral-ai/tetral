@@ -646,6 +646,14 @@ func loadThreadPendingAgentMailTx(
 			     ON target.workspace_id = sent.workspace_id
 			    AND target.session_id = sent.session_id
 			    AND target.id = $3
+			   JOIN session_runtime_inbox inbox
+			     ON inbox.workspace_id = sent.workspace_id
+			    AND inbox.session_id = sent.session_id
+			    AND inbox.session_thread_id = $3
+			    AND inbox.runtime_input_id =
+			        'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
+			    AND inbox.input_kind = 'agent_mail'
+			    AND inbox.status IN ('queued', 'delivering', 'accepted')
 			  WHERE sent.workspace_id = $1
 			    AND sent.session_id = $2
 			    AND sent.type = 'agent.thread_message_sent'
@@ -664,37 +672,6 @@ func loadThreadPendingAgentMailTx(
 		           AND received.payload_json::jsonb ->> 'delivery_id' =
 		               sent.payload_json::jsonb ->> 'delivery_id'
 		           AND received.processed_at IS NOT NULL
-		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_runtime_inbox inbox
-		         WHERE inbox.workspace_id = sent.workspace_id
-		           AND inbox.session_id = sent.session_id
-		           AND inbox.session_thread_id = $3
-		           AND inbox.runtime_input_id =
-		               'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
-		           AND inbox.status = 'committed'
-		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_events exhausted
-		         WHERE exhausted.workspace_id = sent.workspace_id
-		           AND exhausted.session_id = sent.session_id
-		           AND exhausted.event_id =
-		               'evt_runtime_exhausted_' || substr(encode(sha256(
-		                   convert_to(sent.workspace_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(sent.session_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(
-		                       'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id'),
-		                       'UTF8'
-		                   ) ||
-		                   decode('00', 'hex') ||
-		                   convert_to('runtime_delivery_exhausted', 'UTF8')
-		               ), 'hex'), 1, 24)
-		           AND exhausted.type = 'session.error'
-		           AND exhausted.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
 		    )
 		  ORDER BY sent.sequence ASC, sent.event_id ASC
 		  LIMIT 4`,

@@ -1150,7 +1150,8 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 
   /** Writes one semantic event and its operation-specific durable projection. */
   async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
-    const reviewerFailure = envelope.event.type === "approval_review.failure";
+    const replayUnknownTransport = envelope.event.type === "approval_review.failure" ||
+      envelope.event.type === "agent.mcp_tool_result";
     try {
       const event = sessionEventForDurableWrite(envelope.event);
       const request = {
@@ -1186,7 +1187,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           envelope.sessionId,
           envelope.writeId,
           response.ack?.errorCode,
-          event.type === "approval_review.failure",
+          event.type === "approval_review.failure" || event.type === "agent.mcp_tool_result",
         );
       }
       const declaration = response.declaration;
@@ -1302,7 +1303,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         envelope.sessionId,
         envelope.writeId,
         error,
-        reviewerFailure,
+        replayUnknownTransport,
       );
     }
   }

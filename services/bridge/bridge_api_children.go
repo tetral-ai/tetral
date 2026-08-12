@@ -230,7 +230,7 @@ func (s *PostgreSQLBridgeAPIStore) ResolveInterAgentDelivery(ctx context.Context
 				request.GetChildThreadId(),
 			)
 		} else {
-			envelope, err = loadStoredAgentMailEnvelopeByDeliveryTx(
+			envelope, err = loadDeliverableAgentMailEnvelopeByDeliveryTx(
 				ctx,
 				tx,
 				request.GetScope().GetWorkspaceId(),
@@ -424,7 +424,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 	return &bridgev1.MarkChildThreadClosedResponse{Ack: ack, Declaration: declaration}, nil
 }
 
-// settleChildCloseRuntimeInputsTx transfers every accepted Inbox-backed input
+// settleChildCloseRuntimeInputsTx transfers every live Inbox-backed input
 // in the frozen subtree before hot release: task notifications become durable
 // parked custody, while other input kinds are cancelled. Any active Queue job
 // for the exact input is terminalized in the same transaction and loses its
@@ -446,7 +446,7 @@ func settleChildCloseRuntimeInputsTx(
 		rows, err := tx.Query(ctx, `SELECT runtime_input_id,input_kind
 			FROM session_runtime_inbox
 			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			 AND status IN ('delivering','accepted') AND input_kind <> 'approval_review'
+			 AND status IN ('queued','delivering','accepted') AND input_kind <> 'approval_review'
 			ORDER BY created_at,runtime_input_id FOR UPDATE`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), targetID)
 		if err != nil {
@@ -491,7 +491,7 @@ func settleChildCloseRuntimeInputsTx(
 				continue
 			}
 			result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='cancelled',updated_at=$4
-				WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status IN ('delivering','accepted')`,
+				WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status IN ('queued','delivering','accepted')`,
 				scope.GetWorkspaceId(), scope.GetSessionId(), input.runtimeInputID, now)
 			if err != nil {
 				return childCloseCustodyTransitions{}, err

@@ -829,6 +829,7 @@ func logMCPMaterializationConsumed(
 	if logger == nil || scope == nil {
 		return
 	}
+	defer func() { _ = recover() }()
 	logger.Info("bridge.mcp_materialization",
 		slog.String("operation", "mcp_materialization"),
 		slog.String("event.kind", "mcp_materialization_consumed"),

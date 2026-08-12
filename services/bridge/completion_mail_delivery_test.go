@@ -255,9 +255,10 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 				t.Fatalf("prepare completion-mail race fixture = %#v/%v; want live request", plan, err)
 			}
 			test.mutate(t, admin, sessionID, threadID)
+			exhaustion := runtimeDeliveryResultWithAttemptedBinding(retryableExhaustionResult(), plan.Request)
 
 			for attempt := 0; attempt < 2; attempt++ {
-				finalized, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult())
+				finalized, err := store.FinalizeRuntimeDelivery(context.Background(), job, exhaustion)
 				if err != nil || finalized.Status != RuntimeDeliveryAccepted {
 					t.Fatalf("finalize stale completion mail attempt %d = %#v/%v; want accepted no-op", attempt, finalized, err)
 				}

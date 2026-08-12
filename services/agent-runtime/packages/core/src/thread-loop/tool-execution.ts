@@ -27,7 +27,7 @@ import {
 } from "../contracts/runtime.js";
 import type { LLMEvent } from "../llm/llm-event.js";
 import { ProviderStreamAccumulator } from "../runtime/accumulator.js";
-import type { PublicMcpErrorEvent, PublicToolEvent, RuntimeProcessorSource, ProviderStreamAccumulatorResult } from "../runtime/accumulator.js";
+import type { PublicToolEvent, RuntimeProcessorSource, ProviderStreamAccumulatorResult } from "../runtime/accumulator.js";
 import type { AutoApprovalReviewerManager, ParentTranscriptView } from "../session/approval-reviewer-manager.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
 import type { ToolCatalog, ToolEntry } from "../tools/tool-catalog.js";
@@ -46,7 +46,7 @@ import type * as ContextLoader from "../context/context-loader.js";
 /** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
 export type RuntimeToolExecutionResult =
   | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly attachments?: readonly ProviderRequestAttachment[]; readonly backgroundTask?: RuntimeToolExecutionBackgroundTask | undefined; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly attachments?: readonly ProviderRequestAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly attachments?: readonly ProviderRequestAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
   | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string }
   | { readonly type: "stale_custody" };
 
@@ -119,7 +119,6 @@ export function runtimeToolSettlement(
       return {
         type: result.type,
         error: result.error,
-        ...(result.publicErrorEvent === undefined ? {} : { publicErrorEvent: result.publicErrorEvent }),
         ...(result.serverToolUse === undefined ? {} : { serverToolUse: result.serverToolUse }),
         ...(result.mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle: result.mcpMaterializationHandle }),
         ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),

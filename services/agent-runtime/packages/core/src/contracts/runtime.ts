@@ -38,20 +38,6 @@ export interface RuntimeProcessorSource {
   readonly modelId: string;
 }
 
-/** Public MCP failure projection that may accompany a terminal tool settlement. */
-export type PublicMcpErrorEvent =
-  | {
-      readonly type: "mcp_authentication_failed_error" | "mcp_connection_failed_error";
-      readonly mcpServerName: string;
-      readonly message: string;
-      readonly retryStatus: { readonly type: "retrying" | "exhausted" | "terminal" };
-    }
-  | {
-      readonly type: "unknown_error";
-      readonly message: string;
-      readonly retryStatus: { readonly type: "terminal" };
-    };
-
 export interface SessionEventWriterServerToolUse {
   readonly webSearchRequests: number;
   readonly webFetchRequests: number;
@@ -60,7 +46,7 @@ export interface SessionEventWriterServerToolUse {
 /** Final disposition returned by a Runtime tool route to its request turn. */
 export type RuntimeToolSettlement =
   | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
   | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string };
 
 const IdentifierSchema = z.string().min(1);
@@ -773,7 +759,6 @@ const RuntimeToolSettlementSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("error"),
     error: RuntimeFailureSchema,
-    publicErrorEvent: z.custom<PublicMcpErrorEvent>().optional(),
     serverToolUse: z.strictObject({ webSearchRequests: NonNegativeIntegerSchema, webFetchRequests: NonNegativeIntegerSchema }).optional(),
     mcpMaterializationHandle: RuntimeIdentifierSchema.optional(),
     sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),

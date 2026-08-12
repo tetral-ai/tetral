@@ -174,6 +174,14 @@ func loadOldestUncommittedCompletionEnvelopeTx(
 	err := tx.QueryRow(ctx,
 		`SELECT sent.payload_json::jsonb ->> 'delivery_id'
 		   FROM session_events sent
+		   JOIN session_runtime_inbox inbox
+		     ON inbox.workspace_id = sent.workspace_id
+		    AND inbox.session_id = sent.session_id
+		    AND inbox.session_thread_id = $4
+		    AND inbox.runtime_input_id =
+		        'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
+		    AND inbox.input_kind = 'agent_mail'
+		    AND inbox.status IN ('queued', 'delivering', 'accepted')
 		  WHERE sent.workspace_id = $1
 		    AND sent.session_id = $2
 		    AND sent.type = 'agent.thread_message_sent'
@@ -199,37 +207,6 @@ func loadOldestUncommittedCompletionEnvelopeTx(
 		               sent.payload_json::jsonb ->> 'delivery_id'
 		           AND received.processed_at IS NOT NULL
 		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_runtime_inbox inbox
-		         WHERE inbox.workspace_id = sent.workspace_id
-		           AND inbox.session_id = sent.session_id
-		           AND inbox.session_thread_id = $4
-		           AND inbox.runtime_input_id =
-		               'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
-		           AND inbox.status = 'committed'
-		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_events exhausted
-		         WHERE exhausted.workspace_id = sent.workspace_id
-		           AND exhausted.session_id = sent.session_id
-		           AND exhausted.event_id =
-		               'evt_runtime_exhausted_' || substr(encode(sha256(
-		                   convert_to(sent.workspace_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(sent.session_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(
-		                       'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id'),
-		                       'UTF8'
-		                   ) ||
-		                   decode('00', 'hex') ||
-		                   convert_to('runtime_delivery_exhausted', 'UTF8')
-		               ), 'hex'), 1, 24)
-		           AND exhausted.type = 'session.error'
-		           AND exhausted.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
-		    )
 		  ORDER BY sent.sequence ASC, sent.event_id ASC
 		  LIMIT 1
 		  FOR UPDATE`,
@@ -245,6 +222,35 @@ func loadOldestUncommittedCompletionEnvelopeTx(
 		return storedAgentMailEnvelope{}, err
 	}
 	return loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, workspaceID, sessionID, deliveryID)
+}
+
+func loadDeliverableAgentMailEnvelopeByDeliveryTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	deliveryID string,
+) (storedAgentMailEnvelope, error) {
+	var targetThreadID string
+	err := tx.QueryRow(ctx, `SELECT session_thread_id
+		FROM session_runtime_inbox
+		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id='agent_mail:' || $3
+		AND input_kind='agent_mail' AND status IN ('queued','delivering','accepted')
+		FOR UPDATE`, workspaceID, sessionID, deliveryID).Scan(&targetThreadID)
+	if dbconnect.IsNoRows(err) {
+		return storedAgentMailEnvelope{}, status.Error(codes.NotFound, "agent mail custody not found")
+	}
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	envelope, err := loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, workspaceID, sessionID, deliveryID)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if envelope.TargetThreadID != targetThreadID {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail custody conflicts with the stored envelope")
+	}
+	return envelope, nil
 }
 
 func admitAgentMailDeliveryTx(
@@ -265,19 +271,32 @@ func admitAgentMailDeliveryTx(
 	if envelope.TargetThreadID != targetScope.GetSessionThreadId() {
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target does not match the durable envelope")
 	}
-	exhausted, err := runtimeDeliveryExhaustionEventExistsTx(ctx, tx, RuntimeJob{
-		WorkspaceID:     targetScope.GetWorkspaceId(),
-		SessionID:       targetScope.GetSessionId(),
-		SessionThreadID: targetScope.GetSessionThreadId(),
-		RuntimeInputID:  completionRuntimeInputID(envelope.DeliveryID),
-		Kind:            queue.KindRuntimeInput,
-		InputKind:       "agent_mail",
-	})
+	var inboxStatus string
+	var inboxBindingID, inboxPodUID sql.NullString
+	var inboxBindingGeneration sql.NullInt64
+	var inboxEventIDsJSON string
+	var inboxSequenceFrom, inboxSequenceTo sql.NullInt64
+	err = tx.QueryRow(ctx, `SELECT status, binding_id, binding_generation, target_pod_uid,
+		event_ids_json, sequence_from, sequence_to
+		FROM session_runtime_inbox
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		AND runtime_input_id=$4 AND input_kind='agent_mail'
+		FOR UPDATE`, targetScope.GetWorkspaceId(), targetScope.GetSessionId(),
+		targetScope.GetSessionThreadId(), completionRuntimeInputID(envelope.DeliveryID),
+	).Scan(&inboxStatus, &inboxBindingID, &inboxBindingGeneration, &inboxPodUID,
+		&inboxEventIDsJSON, &inboxSequenceFrom, &inboxSequenceTo)
+	if dbconnect.IsNoRows(err) {
+		return admittedAgentMailDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_missing", message: "agent mail has no producer custody", retryable: false}
+	}
 	if err != nil {
 		return admittedAgentMailDelivery{}, err
 	}
-	if exhausted {
-		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery is exhausted")
+	switch inboxStatus {
+	case "queued", "delivering", "accepted":
+	case "dead_lettered", "cancelled":
+		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery is terminal")
+	default:
+		return admittedAgentMailDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "agent mail Inbox status is invalid", retryable: false}
 	}
 	sourceTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, targetScope, envelope.SourceThreadID)
 	if err != nil {
@@ -365,31 +384,23 @@ func admitAgentMailDeliveryTx(
 	if normalizeJSONForCompare(json.RawMessage(receivedPayloadJSON)) != normalizeJSONForCompare(json.RawMessage(eventPayloadJSON)) {
 		return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery replay conflicts with the admitted source")
 	}
-	var inboxStatus sql.NullString
-	err = tx.QueryRow(ctx,
-		`SELECT status
-		   FROM session_runtime_inbox
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND runtime_input_id = $4
-		  FOR UPDATE`,
-		targetScope.GetWorkspaceId(),
-		targetScope.GetSessionId(),
-		targetScope.GetSessionThreadId(),
-		completionRuntimeInputID(envelope.DeliveryID),
-	).Scan(&inboxStatus)
-	if err != nil && !dbconnect.IsNoRows(err) {
-		return admittedAgentMailDelivery{}, err
-	}
-	if dbconnect.IsNoRows(err) {
-		inboxStatus = sql.NullString{}
-	}
-	terminal := processedAt.Valid || inboxStatus.String == "committed"
+	terminal := processedAt.Valid
 	if !terminal && !threadReceivableTx(threadScope) {
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 	}
-	if !terminal {
+	if !terminal && inboxStatus == "accepted" {
+		var inboxEventIDs []string
+		if err := json.Unmarshal([]byte(inboxEventIDsJSON), &inboxEventIDs); err != nil ||
+			len(inboxEventIDs) != 1 || inboxEventIDs[0] != receivedEventID ||
+			!inboxSequenceFrom.Valid || !inboxSequenceTo.Valid ||
+			inboxSequenceFrom.Int64 != receivedSequence || inboxSequenceTo.Int64 != receivedSequence ||
+			!inboxBindingID.Valid || inboxBindingID.String != binding.BindingID ||
+			!inboxBindingGeneration.Valid || inboxBindingGeneration.Int64 != binding.BindingGeneration ||
+			!inboxPodUID.Valid || inboxPodUID.String != binding.PodUID {
+			return admittedAgentMailDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "accepted agent mail custody conflicts with the current Runtime", retryable: false}
+		}
+	}
+	if !terminal && inboxStatus != "accepted" {
 		job := RuntimeJob{
 			WorkspaceID:     targetScope.GetWorkspaceId(),
 			SessionID:       targetScope.GetSessionId(),

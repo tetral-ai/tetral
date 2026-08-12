@@ -171,7 +171,6 @@ import {
 import {
   internalToolRepairKey,
   ProviderStreamAccumulator,
-  runtimeMcpErrorSessionEvent,
   runtimeToolResultEvent,
 } from "../runtime/accumulator.js";
 import { toGatewayRuntimeMessages } from "../runtime/message-projection.js";
@@ -3412,14 +3411,7 @@ async function commitRecoveredToolSettlement(
     events: [event],
     durableEventIds: [result.eventId],
   };
-  if (settlement.type !== "error" || settlement.publicErrorEvent === undefined) {
-    return committed;
-  }
-  const publicError = runtimeMcpErrorSessionEvent(settlement.publicErrorEvent);
-  const publicErrorResult = await appendProcessorEvent(options, session, publicError);
-  return publicErrorResult.ok
-    ? { ...committed, events: [...committed.events, publicError] }
-    : { ok: false, events: committed.events, error: runtimeFailureFromEventWriter(publicErrorResult.error) };
+  return committed;
 }
 
 function joinToolFibersEffect(

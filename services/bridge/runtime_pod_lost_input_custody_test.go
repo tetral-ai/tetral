@@ -137,6 +137,7 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_queue_active", 1, "user.message", `{"type":"user.message"}`)
 			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_active"]`, test.inboxStatus, bindingID, podUID, 1, 1)
 
 			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
@@ -155,6 +156,7 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			if _, err := queueStore.Enqueue(context.Background(), request); err != nil {
 				t.Fatalf("enqueue original Queue job: %v", err)
 			}
+			var leasedRuntimeJob RuntimeJob
 			if test.leaseJob {
 				leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 					WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-active-custody",
@@ -162,6 +164,10 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 				})
 				if err != nil || len(leased) != 1 || leased[0].ID != jobID {
 					t.Fatalf("lease original Queue job = %#v, %v; want %s", leased, err, jobID)
+				}
+				leasedRuntimeJob, err = DecodeRuntimeJob(queueJobProto(leased[0]))
+				if err != nil {
+					t.Fatalf("decode original Queue job: %v", err)
 				}
 			}
 
@@ -182,6 +188,23 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			}
 			if test.inboxStatus == "accepted" && leaseTokenValid {
 				t.Fatal("reclaimed accepted input retained a stale Queue lease")
+			}
+			if test.name == "accepted leased" {
+				staleAttempt := retryableExhaustionResultForBinding(bindingID, 1, podUID)
+				deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+				if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), leasedRuntimeJob, staleAttempt); !invalidRuntimeJobPayload(err) {
+					t.Fatalf("stale finalization error = %v; want invalid_runtime_job_payload", err)
+				}
+				var exhaustionEvents int
+				if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+					WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`,
+					sessionID, runtimeDeliveryExhaustionEventID(leasedRuntimeJob),
+				).Scan(&exhaustionEvents); err != nil {
+					t.Fatalf("count stale exhaustion events: %v", err)
+				}
+				if exhaustionEvents != 0 {
+					t.Fatalf("stale finalization exhaustion events = %d; want zero", exhaustionEvents)
+				}
 			}
 			var jobCount int
 			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs

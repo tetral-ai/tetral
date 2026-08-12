@@ -128,15 +128,16 @@ describe("MCP Connector logger", () => {
     const metrics: string[] = [];
     const logger = { info: (record: Record<string, unknown>) => records.push(record) };
     recordMcpOAuthRefreshCompleted(logger, (outcome) => metrics.push(outcome), {
-      mcpServerName: "github", credentialId: "cred_rotated", outcome: "refreshed",
+      workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github", credentialId: "cred_rotated", outcome: "refreshed",
       httpStatusClass: "2xx", durableWrite: "committed", durationMs: 12, refreshAttemptMetric: "success",
     });
     recordMcpOAuthRefreshCompleted(logger, (outcome) => metrics.push(outcome), {
-      mcpServerName: "github", credentialId: "cred_reused", outcome: "concurrent_winner_reused",
+      workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github", credentialId: "cred_reused", outcome: "concurrent_winner_reused",
       durableWrite: "not_needed", durationMs: 3,
     });
     expect(records).toHaveLength(2);
     expect(records[0]).toMatchObject({ event: "mcp_oauth_refresh_completed", outcome: "refreshed",
+      "workspace.id": "wksp_1", "session.id": "sesn_1",
       "mcp.server.name": "github", "credential.id": "cred_rotated", "http.status_class": "2xx",
       "durable_write.disposition": "committed" });
     expect(records[1]).toMatchObject({ outcome: "concurrent_winner_reused" });
@@ -147,7 +148,7 @@ describe("MCP Connector logger", () => {
     expect(() => recordMcpOAuthRefreshCompleted(
       { info: () => { throw new Error("logger unavailable"); } },
       () => { throw new Error("metrics unavailable"); },
-      { mcpServerName: "github", credentialId: "cred_fail_open", outcome: "refreshed",
+      { workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github", credentialId: "cred_fail_open", outcome: "refreshed",
         durableWrite: "committed", durationMs: 1, refreshAttemptMetric: "success" },
     )).not.toThrow();
   });

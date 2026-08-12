@@ -462,7 +462,17 @@ func seedRuntimePodLostDeliveryFixture(
 		sequence++
 		if withReceived {
 			receivedPayload := bridgeInterAgentMessageJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.toolUseEventID, messageJSON)
-			seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.childThreadID, "evt_received_"+fixture.toolUseEventID, 1, "agent.thread_message_received", receivedPayload, "public", true)
+			receivedEventID := stableRuntimeID("agent_mail_received_event", "default", fixture.sessionID, fixture.childThreadID, fixture.deliveryID)
+			seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.childThreadID, receivedEventID, 1, "agent.thread_message_received", receivedPayload, "public", true)
+			if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+				SET status='accepted', event_ids_json=jsonb_build_array($3::text)::text,
+				    sequence_from=1, sequence_to=1, binding_id=$4, binding_generation=$5,
+				    target_pod_uid=$6, updated_at=$7
+				WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`,
+				fixture.sessionID, completionRuntimeInputID(fixture.deliveryID), receivedEventID,
+				fixture.binding.BindingID, fixture.binding.BindingGeneration, fixture.binding.PodUID, fixture.now); err != nil {
+				t.Fatalf("accept received agent-mail custody: %v", err)
+			}
 		}
 	}
 	if withTerminal {
@@ -475,6 +485,105 @@ func seedRuntimePodLostDeliveryFixture(
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_end_"+fixture.toolUseEventID, sequence, "span.model_request_end", payload, "internal", false)
 	}
 	return fixture
+}
+
+func TestPostgreSQLRuntimePodLossDeliveryRequiresExactInboxCustody(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(*testing.T, *sql.DB, runtimePodLostDeliveryFixture)
+		wantDelivered bool
+	}{
+		{name: "exact queued Inbox", wantDelivered: true},
+		{
+			name: "missing Inbox",
+			mutate: func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
+				t.Helper()
+				if _, err := db.ExecContext(context.Background(), `DELETE FROM session_runtime_inbox
+					WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, fixture.sessionID, completionRuntimeInputID(fixture.deliveryID)); err != nil {
+					t.Fatalf("delete agent-mail Inbox: %v", err)
+				}
+			},
+		},
+		{
+			name:   "dead-lettered Inbox",
+			mutate: runtimePodLostDeliveryInboxStatusMutation("dead_lettered"),
+		},
+		{
+			name:   "cancelled Inbox",
+			mutate: runtimePodLostDeliveryInboxStatusMutation("cancelled"),
+		},
+		{
+			name: "wrong delivery identity",
+			mutate: func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
+				t.Helper()
+				if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET runtime_input_id='agent_mail:delivery_other'
+					WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, fixture.sessionID, completionRuntimeInputID(fixture.deliveryID)); err != nil {
+					t.Fatalf("change agent-mail delivery identity: %v", err)
+				}
+			},
+		},
+		{
+			name: "wrong target thread",
+			mutate: func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
+				t.Helper()
+				if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET session_thread_id=$3
+					WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, fixture.sessionID, completionRuntimeInputID(fixture.deliveryID), fixture.parentThreadID); err != nil {
+					t.Fatalf("change agent-mail target thread: %v", err)
+				}
+			},
+		},
+		{
+			name: "wrong received event",
+			mutate: func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
+				t.Helper()
+				if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+					SET event_ids_json='["evt_wrong_received"]', sequence_from=1, sequence_to=1
+					WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, fixture.sessionID, completionRuntimeInputID(fixture.deliveryID)); err != nil {
+					t.Fatalf("change agent-mail received event: %v", err)
+				}
+			},
+		},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			fixture := seedRuntimePodLostDeliveryFixture(t, admin, 100+index, "spawn_agent", "idle", true, false, false, true, false)
+			if test.mutate != nil {
+				test.mutate(t, admin, fixture)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, err := runRuntimePodLostRepairTransaction(context.Background(), runtime, fixture.sessionID, fixture.binding, fixture.now); err != nil {
+					t.Fatalf("repair attempt %d: %v", attempt+1, err)
+				}
+			}
+			var delivered, failed int
+			if err := admin.QueryRowContext(context.Background(), `SELECT
+				count(*) FILTER (WHERE COALESCE((payload_json::jsonb ->> 'is_error')::boolean, false) = false),
+				count(*) FILTER (WHERE payload_json::jsonb ->> 'reason' = 'runtime_pod_lost_delivery_failed')
+				FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'
+				AND payload_json::jsonb ->> 'tool_use_event_id'=$2`, fixture.sessionID, fixture.toolUseEventID).Scan(&delivered, &failed); err != nil {
+				t.Fatalf("read delivery settlement: %v", err)
+			}
+			if test.wantDelivered {
+				if delivered != 1 || failed != 0 {
+					t.Fatalf("delivery settlement delivered=%d failed=%d; want 1/0", delivered, failed)
+				}
+			} else if delivered != 0 || failed != 1 {
+				t.Fatalf("delivery settlement delivered=%d failed=%d; want 0/1", delivered, failed)
+			}
+		})
+	}
+}
+
+func runtimePodLostDeliveryInboxStatusMutation(status string) func(*testing.T, *sql.DB, runtimePodLostDeliveryFixture) {
+	return func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
+		t.Helper()
+		if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET status=$3
+			WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, fixture.sessionID, completionRuntimeInputID(fixture.deliveryID), status); err != nil {
+			t.Fatalf("set agent-mail Inbox status: %v", err)
+		}
+	}
 }
 
 func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture, threadID string, eventID string, sequence int64, eventType string, payloadJSON string, visibility string, sessionVisible bool) {
