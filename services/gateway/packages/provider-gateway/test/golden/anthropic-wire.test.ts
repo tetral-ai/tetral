@@ -1171,6 +1171,78 @@ describe("Session provider golden wire path", () => {
     }
   });
 
+  test("sends approval-reviewer output as DeepSeek JSON-object mode", async () => {
+    const [policyPrompt, outputSchemaJson] = await Promise.all([
+      readFile(new URL("../../../../../agent-runtime/packages/runtime-pod/src/assets/approval-reviewer-policy.md", import.meta.url), "utf8"),
+      readFile(ApprovalReviewerOutputSchemaUrl, "utf8"),
+    ]);
+    const outputSchema = JSON.parse(outputSchemaJson) as Record<string, unknown>;
+    const prompt = JSON.stringify({
+      output_schema: outputSchema,
+      review_id: "arvw_wire",
+      target_tool_name: "Bash",
+      action_json: { cmd: "true" },
+    }, null, 2);
+    const mock = createMockAnthropicServer(deepSeekStructuredOutputFixture());
+    const registry = new ProviderClientRegistry({ fetch: mock.fetch });
+    try {
+      await collectEvents(registry.stream({
+        request: deepSeekGoldenRequest({
+          requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+          outputSchemaJson,
+          system: [
+            {
+              kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE,
+              text: "You review one proposed action.",
+              cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
+            },
+            {
+              kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_APPROVAL_REVIEWER_POLICY,
+              text: policyPrompt.trim(),
+              cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
+            },
+          ],
+          messages: [{
+            id: "msg_reviewer_prompt",
+            role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+            status: "completed",
+            origin: "runtime",
+            parts: [{ id: "part_reviewer_prompt", text: { text: prompt } }],
+          }],
+        }),
+        credential: sessionDeepSeekCredential(),
+      }));
+
+      expect(mock.requests).toHaveLength(1);
+      const captured = mock.requests[0]!;
+      expect(captured.body.model).toBe("deepseek-v4-pro");
+      expect(captured.body.response_format).toEqual({ type: "json_object" });
+      expect(JSON.stringify(captured.body)).not.toContain("json_schema");
+      const messages = JSON.stringify(captured.body.messages);
+      expect(messages).toContain("Return only JSON that matches the output_schema");
+      for (const field of ["outcome", "risk_level", "user_authorization", "rationale"]) {
+        expect(messages).toContain(field);
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test("keeps ordinary DeepSeek requests out of structured-output mode", async () => {
+    const mock = createMockAnthropicServer(await readFile(DeepSeekFixtureUrl, "utf8"));
+    const registry = new ProviderClientRegistry({ fetch: mock.fetch });
+    try {
+      await collectEvents(registry.stream({
+        request: deepSeekGoldenRequest(),
+        credential: sessionDeepSeekCredential(),
+      }));
+      expect(mock.requests).toHaveLength(1);
+      expect(mock.requests[0]!.body).not.toHaveProperty("response_format");
+    } finally {
+      await mock.close();
+    }
+  });
+
   test("turns a mid-stream DeepSeek transport disconnect into a retryable stream failure after partial events", async () => {
     const fixture = await readFile(DeepSeekDisconnectFixtureUrl, "utf8");
     expect(fixture).toContain("source=real-provider-prefix");
@@ -1423,6 +1495,19 @@ function anthropicStructuredOutputFixture(): string {
     "",
     "event: message_stop",
     'data: {"type":"message_stop"}',
+    "",
+  ].join("\n");
+}
+
+function deepSeekStructuredOutputFixture(): string {
+  return [
+    'data: {"id":"chatcmpl-review","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":null}',
+    "",
+    'data: {"id":"chatcmpl-review","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"{\\"risk_level\\":\\"low\\",\\"user_authorization\\":\\"high\\",\\"outcome\\":\\"allow\\",\\"rationale\\":\\"authorized\\"}"},"finish_reason":null}],"usage":null}',
+    "",
+    'data: {"id":"chatcmpl-review","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}',
+    "",
+    "data: [DONE]",
     "",
   ].join("\n");
 }

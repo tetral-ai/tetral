@@ -73,6 +73,6 @@ export const MoonshotKimiK3Rules: ProviderRules = {
   },
   maxOutputTokens: "clamp",
   schemaStrategy: "moonshot",
-  requestOutputSchema: undefined,
+  structuredOutputStrategy: "unsupported",
   providerSpecificErrorRules: [],
 };

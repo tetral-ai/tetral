@@ -33,7 +33,8 @@ export interface ProviderRules {
   readonly sampling: ProviderSamplingRules;
   readonly maxOutputTokens: "clamp" | "omit";
   readonly schemaStrategy: "passthrough" | "openai-codex" | "moonshot";
-  readonly requestOutputSchema: "approval-reviewer" | undefined;
+  /** Provider wire enforcement available for request-level structured output. */
+  readonly structuredOutputStrategy: "native_json_schema" | "json_object" | "unsupported";
   readonly providerSpecificErrorRules: readonly string[];
 }
 

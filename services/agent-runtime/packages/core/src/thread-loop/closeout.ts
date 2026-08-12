@@ -100,20 +100,32 @@ export async function closeFailedThreadRun(
   const failure = "type" in result.error
     ? result.error
     : runtimeFailureFromProviderError(result.error);
-  if (!isRuntimeTerminationFailure(failure)) {
+  const reviewerRequest = session.state.threadTurnReduction().checkpoint.request?.requestKind === "approval_reviewer";
+  if (reviewerRequest || !isRuntimeTerminationFailure(failure)) {
+    // An internal reviewer request must leave its reusable trunk durably idle;
+    // its separately acknowledged outcome owns whether the parent falls back
+    // to user approval. Even a fatal request-local failure therefore closes
+    // this request turn without terminalizing the reviewer Thread.
     const idle = await appendIdle(
       options,
       session,
       custody,
-      failure.retryStatus?.type === "exhausted" ? { type: "retries_exhausted" } : { type: "end_turn" },
+      failure.retryStatus?.type === "exhausted" && !reviewerRequest
+        ? { type: "retries_exhausted" }
+        : { type: "end_turn" },
       failure,
       false,
       result.failureEventId,
       true,
     );
-    return idle.ok
-      ? result
-      : { type: "failed", error: idle.error, releaseSession: { reason: "event_write_failed" } };
+    if (!idle.ok) {
+      return { type: "failed", error: idle.error, releaseSession: { reason: "event_write_failed" } };
+    }
+    if (reviewerRequest) {
+      const { releaseSession: _releaseSession, ...reviewerResult } = result;
+      return reviewerResult;
+    }
+    return result;
   }
 
   const pendingTools = unfinishedToolUseEventIds(session.state.contextManager.messages())

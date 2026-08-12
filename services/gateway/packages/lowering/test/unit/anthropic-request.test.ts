@@ -344,23 +344,43 @@ describe("anthropic request lowering", () => {
       outputSchemaJson: approvalReviewerOutputSchemaJson,
     }));
 
-    expect(AnthropicOpus48Rules.requestOutputSchema).toBe("approval-reviewer");
-    expect(lowered.outputSchema).toEqual({ kind: "ai-sdk-json-schema", schema });
-    expect(lowerAnthropicRequest(anthropicRequest()).outputSchema).toBeUndefined();
+    expect(AnthropicOpus48Rules.structuredOutputStrategy).toBe("native_json_schema");
+    expect(lowered.structuredOutput).toEqual({
+      strategy: "native_json_schema",
+      schema: { kind: "ai-sdk-json-schema", schema },
+    });
+    expect(lowerAnthropicRequest(anthropicRequest()).structuredOutput).toBeUndefined();
   });
 
   test("rejects missing, malformed, and cross-kind request output schemas during lowering", () => {
+    for (const request of [
+      anthropicRequest({
+        requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+        outputSchemaJson: undefined,
+      }),
+      anthropicRequest({
+        requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+        outputSchemaJson: "[]",
+      }),
+      anthropicRequest({ outputSchemaJson: approvalReviewerOutputSchemaJson }),
+    ]) {
+      try {
+        lowerAnthropicRequest(request);
+        throw new Error("expected structured-output lowering to reject the request");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProviderRequestLoweringError);
+        expect((error as ProviderRequestLoweringError).providerError).toMatchObject({
+          code: "provider_request_invalid",
+          retryable: false,
+          fatal: true,
+          statusCode: 400,
+        });
+      }
+    }
     expect(() => lowerAnthropicRequest(anthropicRequest({
       requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
-      outputSchemaJson: undefined,
-    }))).toThrow("approval reviewer output schema");
-    expect(() => lowerAnthropicRequest(anthropicRequest({
-      requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
-      outputSchemaJson: "[]",
-    }))).toThrow("approval reviewer output schema");
-    expect(() => lowerAnthropicRequest(anthropicRequest({
-      outputSchemaJson: approvalReviewerOutputSchemaJson,
-    }))).toThrow("request output schema is not allowed");
+      outputSchemaJson: "{",
+    }))).toThrow("invalid approval reviewer output schema JSON");
   });
 
   test("L4 rejects unknown tool state instead of inventing interrupted repair messages", () => {

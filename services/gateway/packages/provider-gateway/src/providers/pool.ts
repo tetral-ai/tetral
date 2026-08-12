@@ -77,9 +77,14 @@ export interface ProviderFailureClassification {
   readonly cooldownMs?: number | undefined;
 }
 
+export type ProviderFailureOrigin = "http_rejection" | "transport_failure";
+
 /** Carries a classified key-attempt failure from a provider client to orchestration. */
 export class ProviderKeyFailureError extends Error {
-  constructor(readonly classification: ProviderFailureClassification) {
+  constructor(
+    readonly classification: ProviderFailureClassification,
+    readonly origin: ProviderFailureOrigin = "http_rejection",
+  ) {
     super(classification.providerError.message ?? "Provider key attempt failed.");
     this.name = "ProviderKeyFailureError";
   }

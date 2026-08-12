@@ -70,7 +70,7 @@ session-key only.
 | --- | --- | --- |
 | `agent_provider_request` | Bound `session_provider_auth` credential by `(workspace_id, session_id)` when present; else platform pool for a `platformHosted` provider | A bound credential that is missing/revoked/archived/wrong-provider/undecryptable/refresh-failed fails closed with **no** fallback to platform access; a no-credential request on a non-hosted provider → `credential_required` |
 | `compaction_summary` | Resolved identically to `agent_provider_request` — the session's current model on the session's own credential path | Same as above; failure follows the compaction failure path |
-| `approval_reviewer` | Platform-owned reviewer credential from the pool; the one kind carrying a request-level output schema (structured output) | Reviewer failure never touches the user's session credential |
+| `approval_reviewer` | Platform-owned reviewer credential from the pool; its request schema is lowered by the selected route's `native_json_schema` or `json_object` capability | Unsupported routes fail before provider construction; Reviewer failure never touches the user's session credential |
 | `approval_reviewer_compaction` | Resolved identically to `approval_reviewer` (platform reviewer credential); lowered like a compaction otherwise | Never falls back to the session credential |
 
 Decrypted plaintext exists only in process memory and inside TLS to the

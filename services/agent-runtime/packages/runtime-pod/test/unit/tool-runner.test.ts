@@ -3492,8 +3492,18 @@ class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
     return this.preloadResults.shift() ?? { ok: true as const, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, applied: true };
   }
 
+  async evictReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["evictReviewerExecution"]>[0]) {
+    this.actions.push("evict-reviewer");
+    return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
+  }
+
   async interruptReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["interruptReviewerExecution"]>[0]) {
     this.actions.push("interrupt-reviewer");
+    return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
+  }
+
+  async releaseReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["releaseReviewerExecution"]>[0]) {
+    this.actions.push("release-reviewer");
     return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
   }
 

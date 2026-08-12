@@ -68,6 +68,6 @@ export const DeepSeekV4ProRules: ProviderRules = {
   },
   maxOutputTokens: "clamp",
   schemaStrategy: "passthrough",
-  requestOutputSchema: undefined,
+  structuredOutputStrategy: "json_object",
   providerSpecificErrorRules: [],
 };

@@ -15,7 +15,7 @@ import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-
 import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { buildThreadLoopUserMessage as userMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, beginTestUserInterrupt, catalogForTest, createdAt, deferred, emptyColdCoverage, expectNoProviderDiagnosticCanaries, failingEventWriter, flushMicrotasks, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, withFinishIdleReceiptForTest, withRuntimeTerminationReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, createdAt, deferred, emptyColdCoverage, expectNoProviderDiagnosticCanaries, failingEventWriter, flushMicrotasks, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, withFinishIdleReceiptForTest, withRuntimeTerminationReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -1907,6 +1907,67 @@ test("runtime layer routes a proven terminal provider failure through atomic ter
                 disposition: "terminated",
             },
         },
+        state: { state: "idle" },
+        action: { action: "await_input" },
+    });
+});
+test("a fatal reviewer request failure closes durably idle without terminating its thread", async () => {
+    const session = new ThreadRuntime({
+        workspaceId: "wksp_reviewer",
+        sessionId: "sesn_1",
+        sessionThreadId: "thrd_reviewer",
+        parentThreadId: "thrd_main",
+        threadRole: "approval_reviewer",
+        bindingId: "bind_reviewer",
+        bindingGeneration: 1,
+        targetPodUid: "pod_reviewer",
+        runtimeBindingToken: "binding-token-reviewer",
+    });
+    session.state.enqueueAcceptedInput(approvalReviewAcceptedInput("rin_reviewer_fatal"));
+    const appended: SessionEvent[] = [];
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
+    const baseWriter = writerFrom((envelope) => {
+        appended.push(envelope.event);
+        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+    });
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        writeRequestEnd: async (envelope) => {
+            requestEnds.push(envelope);
+            return await baseWriter.writeRequestEnd(envelope);
+        },
+        commitRuntimeTermination: async (envelope) => {
+            terminations.push(envelope);
+            return await baseWriter.commitRuntimeTermination!(envelope);
+        },
+    };
+    const failure = {
+        type: "provider",
+        code: "provider_invalid_request",
+        message: "Reviewer request is terminal.",
+        retryable: false,
+        fatal: true,
+        retryStatus: { type: "terminal" },
+        providerId: "anthropic",
+        modelId: "claude-opus-4-8",
+    } as const;
+
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+        writer,
+        events: [{ type: "provider-error", error: failure }],
+        runtimeModel: () => ({ providerId: "anthropic", modelId: "claude-opus-4-8" }),
+    }))));
+
+    expect(result).toMatchObject({ type: "failed", error: failure });
+    expect(result).not.toHaveProperty("releaseSession");
+    expect(requestEnds).toEqual([expect.objectContaining({ requestKind: "approval_reviewer", isError: true })]);
+    expect(terminations).toEqual([]);
+    expect(appended.map((event) => event.type)).toContain("session.status_idle");
+    expect(session.state.threadTurnReduction()).toMatchObject({
+        checkpoint: { idleCloseout: { stopReason: "end_turn" } },
         state: { state: "idle" },
         action: { action: "await_input" },
     });

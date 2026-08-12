@@ -72,6 +72,6 @@ export const ZaiGLM52Rules: ProviderRules = {
   },
   maxOutputTokens: "clamp",
   schemaStrategy: "passthrough",
-  requestOutputSchema: undefined,
+  structuredOutputStrategy: "unsupported",
   providerSpecificErrorRules: [],
 };

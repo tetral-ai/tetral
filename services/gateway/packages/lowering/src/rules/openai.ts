@@ -87,7 +87,7 @@ export const OpenAIGPT55Rules: ProviderRules = {
   },
   maxOutputTokens: "omit",
   schemaStrategy: "openai-codex",
-  requestOutputSchema: undefined,
+  structuredOutputStrategy: "unsupported",
   providerSpecificErrorRules: [
     "404_retryable",
     "usage_not_included_non_retryable",

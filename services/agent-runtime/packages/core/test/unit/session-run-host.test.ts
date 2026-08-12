@@ -90,7 +90,9 @@ interface ManagerCall {
     | "cleanupSession"
     | "preloadThread"
     | "ensureThreadInstalled"
+    | "evictReviewerExecution"
     | "interruptReviewerExecution"
+    | "releaseReviewerExecution"
     | "markThreadClosed"
     | "markThreadActive"
     | "waitThread"
@@ -157,9 +159,21 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
           const command = args[0];
           return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: false };
         }),
+      evictReviewerExecution: (...args: readonly [Parameters<SessionManager.Interface["evictReviewerExecution"]>[0], SessionManager.ReviewerExecutionToken, ...unknown[]]) =>
+        Effect.sync(() => {
+          calls.push({ method: "evictReviewerExecution", args });
+          const command = args[0];
+          return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
+        }),
       interruptReviewerExecution: (...args: readonly [Parameters<SessionManager.Interface["interruptReviewerExecution"]>[0], SessionManager.ReviewerExecutionToken, ...unknown[]]) =>
         Effect.sync(() => {
           calls.push({ method: "interruptReviewerExecution", args });
+          const command = args[0];
+          return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
+        }),
+      releaseReviewerExecution: (...args: readonly [Parameters<SessionManager.Interface["releaseReviewerExecution"]>[0], SessionManager.ReviewerExecutionToken, ...unknown[]]) =>
+        Effect.sync(() => {
+          calls.push({ method: "releaseReviewerExecution", args });
           const command = args[0];
           return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
         }),
@@ -502,15 +516,17 @@ describe("SessionRunHost", () => {
 
     expect(keys).toEqual([
       "handleAcceptInput",
-      "handleCleanupSession",
-      "handleEnsureThreadInstalled",
-      "handleInspectReviewerExecution",
+    "handleCleanupSession",
+    "handleEnsureThreadInstalled",
+    "handleEvictReviewerExecution",
+    "handleInspectReviewerExecution",
       "handleInspectThread",
       "handleInterruptControl",
       "handleInterruptReviewerExecution",
       "handleMarkThreadActive",
       "handleMarkThreadClosed",
       "handlePreloadThread",
+      "handleReleaseReviewerExecution",
       "handleRuntimeConfigPatch",
       "handleTaskNotification",
       "handleToolConfirmation",

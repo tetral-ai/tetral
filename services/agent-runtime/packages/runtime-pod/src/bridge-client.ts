@@ -1136,7 +1136,8 @@ export interface BridgeAPIEventWriterOptions extends BridgeDeclarationEvidenceOp
 /**
  * Persists Runtime Core semantic events, request ends, idle transitions, and runtime termination
  * through Bridge. Each write carries its thread scope and requires a committed or duplicate ACK;
- * rejected ACKs preserve closeout release sentinels, while unknown rejections remain retryable.
+ * rejected ACKs preserve closeout release sentinels; reviewer-outcome contract
+ * rejections are deterministic and stop the shared writer retry policy.
  */
 export class BridgeAPIEventWriter implements SessionEventWriter {
   private readonly client: AgentRuntimeBridgeServiceClient;
@@ -1149,6 +1150,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 
   /** Writes one semantic event and its operation-specific durable projection. */
   async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
+    const reviewerFailure = envelope.event.type === "approval_review.failure";
     try {
       const event = sessionEventForDurableWrite(envelope.event);
       const request = {
@@ -1180,7 +1182,12 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
       const declarationDigest = writeEventDeclarationDigest(request);
       const response = await writeEvent(this.client, request, metadata);
       if (!bridgeAckAccepted(response.ack?.status)) {
-        return eventWriterRejected(envelope.sessionId, envelope.writeId, response.ack?.errorCode);
+        return eventWriterRejected(
+          envelope.sessionId,
+          envelope.writeId,
+          response.ack?.errorCode,
+          event.type === "approval_review.failure",
+        );
       }
       const declaration = response.declaration;
       const bridgeReceipt = declaration?.receipts[0];
@@ -1291,7 +1298,12 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         },
       };
     } catch (error) {
-      return eventWriterTransportFailure(envelope.sessionId, envelope.writeId, error);
+      return eventWriterTransportFailure(
+        envelope.sessionId,
+        envelope.writeId,
+        error,
+        reviewerFailure,
+      );
     }
   }
 
@@ -3080,13 +3092,16 @@ function eventWriterRejected(
   sessionId: string,
   writeId: string,
   errorCode: string | undefined,
+  deterministic = false,
 ): SessionEventWriterAppendResult {
   const code =
     errorCode === "scope_superseded"
       ? "superseded"
       : errorCode === "closeout_unrepairable"
         ? "unrepairable"
-        : "unavailable";
+        : deterministic
+          ? "ack_mismatch"
+          : "unavailable";
   return {
     ok: false,
     error: normalizeSessionEventWriterError({ code, sessionId, writeId }),
@@ -3111,6 +3126,7 @@ function eventWriterTransportFailure(
   sessionId: string,
   writeId: string,
   error: unknown,
+  retryUnknown = false,
 ): SessionEventWriterAppendResult {
   const grpcCode =
     typeof error === "object" && error !== null && "code" in error && typeof error.code === "number"
@@ -3121,6 +3137,8 @@ function eventWriterTransportFailure(
       ? "timeout"
       : grpcCode === status.UNAVAILABLE || grpcCode === status.ABORTED || grpcCode === status.RESOURCE_EXHAUSTED
         ? "unavailable"
+        : retryUnknown && grpcCode === status.UNKNOWN
+          ? "unavailable"
         : "unknown";
   return {
     ok: false,

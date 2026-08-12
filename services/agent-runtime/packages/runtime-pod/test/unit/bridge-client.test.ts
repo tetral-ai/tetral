@@ -264,6 +264,64 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.writeEventRequests[1]?.toolSettlement?.toolUseEventId).toBe("sevt_tool_1");
   });
 
+  test("classifies a rejected reviewer failure ACK as deterministic", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventRejections.push("reviewer_outcome_rejected");
+    const writer = new BridgeAPIEventWriter(options(bridge));
+
+    const result = await writer.append({
+      ...eventScope("rwrite_review_failure"),
+      event: {
+        type: "approval_review.failure",
+        review_id: "arvw_rejected",
+        parent_thread_id: "thrd_parent",
+        target_model_tool_call_id: "tool_call_rejected",
+        target_tool_name: "Write",
+        failure_kind: "parse_failure",
+        message: "approval reviewer decision is invalid",
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ack_mismatch", retryable: false } });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+  });
+
+  test("recovers a reviewer failure receipt after the committed response is lost", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventPostCommitErrors.push(status.UNKNOWN);
+    const transport = new BridgeAPIEventWriter(options(bridge));
+    const envelope = {
+      ...eventScope("rwrite_review_failure_replay"),
+      event: {
+        type: "approval_review.failure" as const,
+        review_id: "arvw_replay",
+        parent_thread_id: "thrd_parent",
+        target_model_tool_call_id: "tool_call_replay",
+        target_tool_name: "Write",
+        failure_kind: "runtime_failure" as const,
+        message: "approval reviewer failed",
+      },
+    };
+
+    await expect(transport.append(envelope)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "unavailable", retryable: true },
+    });
+    await expect(transport.append(envelope)).resolves.toMatchObject({
+      ok: true,
+      writeId: envelope.writeId,
+    });
+    expect(bridge.writeEventRequests).toHaveLength(2);
+    expect(bridge.writeEventRequests.map((request) => request.runtimeWriteId)).toEqual([
+      envelope.writeId,
+      envelope.writeId,
+    ]);
+    expect(bridge.writeEventRequests.map((request) => writeEventDeclarationDigest(request))).toEqual([
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+    ]);
+  });
+
   test("matches RequestEnd and joined interrupt receipts by operation identity", async () => {
     const bridge = new DeclarationBridge();
     const writer = new BridgeAPIEventWriter(options(bridge));
@@ -471,6 +529,8 @@ class DeclarationBridge {
   readonly loadContextRequests: LoadContextRequest[] = [];
   readonly commitInputsRequests: CommitInputsRequest[] = [];
   readonly writeEventRequests: WriteEventRequest[] = [];
+  readonly writeEventRejections: string[] = [];
+  readonly writeEventPostCommitErrors: number[] = [];
   readonly writeRequestEndRequests: WriteRequestEndRequest[] = [];
   readonly finishIdleRequests: FinishIdleRequest[] = [];
   readonly terminationRequests: CommitRuntimeTerminationRequest[] = [];
@@ -482,6 +542,7 @@ class DeclarationBridge {
   repairOperationId = "repair";
   private eventSequence = 0;
   private messageSequence = 0;
+  private readonly committedWriteEvents = new Map<string, Record<string, unknown>>();
 
   client(): AgentRuntimeBridgeServiceClient {
     return {
@@ -574,6 +635,28 @@ class DeclarationBridge {
 
   private writeEvent(request: WriteEventRequest, _metadata: Metadata, callback: (error: Error | null, responseValue: unknown) => void): unknown {
     this.writeEventRequests.push(request);
+    const rejectionCode = this.writeEventRejections.shift();
+    if (rejectionCode !== undefined) {
+      callback(null, {
+        ack: {
+          status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
+          runtimeWriteId: request.runtimeWriteId,
+          errorCode: rejectionCode,
+        },
+      });
+      return grpcCall();
+    }
+    const existing = this.committedWriteEvents.get(request.runtimeWriteId);
+    if (existing !== undefined) {
+      callback(null, {
+        ...existing,
+        ack: {
+          ...(existing.ack as Record<string, unknown>),
+          status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE,
+        },
+      });
+      return grpcCall();
+    }
     const event = this.event(request, `sevt_${request.runtimeWriteId}`);
     const messages = request.assistantPartAppend === undefined
       ? []
@@ -590,11 +673,18 @@ class DeclarationBridge {
         requestStart: { requestKind: request.requestKind, contextThroughMessageSequence: request.contextThroughMessageSequence ?? 0 },
       } : {}),
     });
-    callback(null, {
+    const committed = {
       ...response(request, request.runtimeWriteId, [declarationReceipt]),
       eventId: event.eventId,
       sequence: event.eventSequence,
-    });
+    };
+    this.committedWriteEvents.set(request.runtimeWriteId, committed);
+    const postCommitError = this.writeEventPostCommitErrors.shift();
+    if (postCommitError !== undefined) {
+      callback(Object.assign(new Error("write event response was lost"), { code: postCommitError }), {});
+      return grpcCall();
+    }
+    callback(null, committed);
     return grpcCall();
   }
 

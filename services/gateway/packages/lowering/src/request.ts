@@ -46,7 +46,7 @@ import type { ProviderRules } from "./rules/rules.js";
 export interface LoweredProviderRequest {
   readonly messages: readonly LoweredProviderMessage[];
   readonly tools: Readonly<Record<string, LoweredToolDefinition>>;
-  readonly outputSchema?: LoweredJsonSchema;
+  readonly structuredOutput?: LoweredStructuredOutput;
   readonly options: LoweredProviderOptions;
 }
 
@@ -172,6 +172,11 @@ export interface LoweredJsonSchema {
   readonly schema: unknown;
 }
 
+/** Explicit provider-wire strategy retained through provider construction. */
+export type LoweredStructuredOutput =
+  | { readonly strategy: "native_json_schema"; readonly schema: LoweredJsonSchema }
+  | { readonly strategy: "json_object"; readonly schema: LoweredJsonSchema };
+
 /** Call-level provider options, headers, sampling values, and optional output limit. */
 export interface LoweredProviderOptions {
   readonly providerOptions: Readonly<Record<string, unknown>>;
@@ -235,10 +240,10 @@ export function lowerProviderRequest(request: ProviderRequest, rules: ProviderRu
   //      here is absent from the list the next step observes.
   //   2. applyCacheControl marks cache points over that already-normalized list,
   //      so a message dropped in step 1 can never receive a cache marker.
-  //   3. Output-schema and provider-option assembly (lowerRequestOutputSchema,
+  //   3. Output-schema and provider-option assembly (lowerRequestStructuredOutput,
   //      lowerProviderOptions) run last and do not touch message content.
   // UPDATE-WITH: lowerRequestAttachments, lowerSystemSegment, lowerRuntimeMessage,
-  // applyCacheControl, lowerRequestOutputSchema, lowerProviderOptions (this file).
+  // applyCacheControl, lowerRequestStructuredOutput, lowerProviderOptions (this file).
   const attachmentMessage = lowerRequestAttachments(request.attachments, options.resolvedAttachments ?? [], rules);
 
   const envelopes = [
@@ -247,12 +252,12 @@ export function lowerProviderRequest(request: ProviderRequest, rules: ProviderRu
     ...(attachmentMessage === undefined ? [] : [attachmentMessage]),
   ];
   const messages = applyCacheControl(envelopes, rules);
-  const outputSchema = lowerRequestOutputSchema(request, rules);
+  const structuredOutput = lowerRequestStructuredOutput(request, rules);
 
   return {
     messages,
     tools: lowerTools(request.tools, rules),
-    ...(outputSchema !== undefined ? { outputSchema } : {}),
+    ...(structuredOutput !== undefined ? { structuredOutput } : {}),
     options: lowerProviderOptions(request, rules, options),
   };
 }
@@ -639,25 +644,44 @@ function lowerTools(tools: readonly RuntimeToolDefinition[], rules: ProviderRule
   return loweredTools;
 }
 
-function lowerRequestOutputSchema(request: ProviderRequest, rules: ProviderRules): LoweredJsonSchema | undefined {
+function lowerRequestStructuredOutput(request: ProviderRequest, rules: ProviderRules): LoweredStructuredOutput | undefined {
   const approvalReviewerRequest = request.requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER;
   if (!approvalReviewerRequest) {
     if (request.outputSchemaJson !== undefined) {
-      throw new Error("gateway_protocol_error: request output schema is not allowed for this request kind");
+      throw invalidReviewerOutputSchema("Request output schema is not allowed for this request kind.");
     }
     return undefined;
   }
   if (request.outputSchemaJson === undefined) {
-    throw new Error("gateway_protocol_error: approval reviewer output schema is required");
+    throw invalidReviewerOutputSchema("Approval reviewer output schema is required.");
   }
-  if (rules.requestOutputSchema !== "approval-reviewer") {
-    throw new Error("gateway_protocol_error: approval reviewer output schema is not enabled for model");
+  if (rules.structuredOutputStrategy === "unsupported") {
+    throw new ProviderRequestLoweringError({
+      code: "provider_configuration_invalid",
+      message: "The selected provider model does not support the required structured output.",
+      retryable: false,
+      fatal: true,
+      statusCode: 500,
+    });
   }
   const schema = parseProviderJson(request.outputSchemaJson, "approval reviewer output schema");
   if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
-    throw new Error("gateway_protocol_error: approval reviewer output schema must be a JSON object");
+    throw invalidReviewerOutputSchema("Approval reviewer output schema must be a JSON object.");
   }
-  return wrapJsonSchema(lowerJsonSchema(schema, rules));
+  return {
+    strategy: rules.structuredOutputStrategy,
+    schema: wrapJsonSchema(lowerJsonSchema(schema, rules)),
+  };
+}
+
+function invalidReviewerOutputSchema(message: string): ProviderRequestLoweringError {
+  return new ProviderRequestLoweringError({
+    code: "provider_request_invalid",
+    message,
+    retryable: false,
+    fatal: true,
+    statusCode: 400,
+  });
 }
 
 function lowerProviderOptions(request: ProviderRequest, rules: ProviderRules, options: LowerProviderRequestOptions): LoweredProviderOptions {

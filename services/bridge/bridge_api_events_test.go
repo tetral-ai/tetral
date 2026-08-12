@@ -1592,15 +1592,25 @@ func TestPostgreSQLBridgeAPIStoreWriteEventForInternalReviewerStaysInternal(t *t
 			payloadJSON:    `{"type":"approval_review.failure","review_id":"arvw_bridge","parent_thread_id":"thr_bridge_reviewer_parent","target_model_tool_call_id":"tool_call_bridge","target_tool_name":"Write","failure_kind":"parse_failure","message":"approval reviewer decision is not JSON"}`,
 		},
 	} {
-		response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		request := &bridgev1.WriteEventRequest{
 			Scope:          bridgeAPIScope("sesn_bridge_reviewer_event", "thr_bridge_reviewer", "bind_bridge_reviewer_event", 1, "pod_uid_reviewer_event"),
 			RuntimeWriteId: test.runtimeWriteID,
 			EventType:      test.eventType,
 			PayloadJson:    test.payloadJSON,
 			SessionVisible: true,
-		})
+		}
+		response, err := store.WriteEvent(context.Background(), request)
 		if err != nil {
 			t.Fatalf("WriteEvent reviewer %s: %v", test.name, err)
+		}
+		replay, err := store.WriteEvent(context.Background(), request)
+		if err != nil {
+			t.Fatalf("WriteEvent reviewer %s replay: %v", test.name, err)
+		}
+		if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+			replay.GetEventId() != response.GetEventId() ||
+			replay.GetAck().GetRuntimeWriteId() != test.runtimeWriteID {
+			t.Fatalf("WriteEvent reviewer %s replay = %+v; want duplicate original event and operation", test.name, replay)
 		}
 
 		var eventVisibility string

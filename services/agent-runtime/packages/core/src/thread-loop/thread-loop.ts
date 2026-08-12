@@ -3577,9 +3577,19 @@ function coordinateRuntimeToolJobEffect(
             },
             currentModel: session.state.currentModel(),
           });
-      }).pipe(Effect.catchCause(() => Effect.succeed({ type: "failed" as const, message: "approval reviewer failed" })));
+      }).pipe(Effect.catchCause(() => Effect.succeed({
+        type: "settlement_failed" as const,
+        error: normalizeSessionEventWriterError({
+          code: "unknown",
+          sessionId: session.sessionId,
+          writeId: `rwrite_${modelRequestId}_${job.modelToolCallId}_reviewer_settlement`,
+        }),
+      })));
       if (reviewerOutcome.type === "stale_custody") {
         return providerTurnInterruptedWithDiscard();
+      }
+      if (reviewerOutcome.type === "settlement_failed") {
+        return providerTurnFailed(runtimeFailureFromEventWriter(reviewerOutcome.error), "event_write_failed");
       }
       gateDecision = evaluateToolGate({
         catalog: toolCatalog,

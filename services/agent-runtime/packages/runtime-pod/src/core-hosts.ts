@@ -17,6 +17,7 @@ import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host
 import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type { SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
@@ -47,7 +48,9 @@ export interface RuntimeCoreHosts {
 export interface RuntimeSubAgentRunHost {
   readonly enqueueThreadInput: (input: RuntimeAcceptedInputState) => Promise<SessionManager.AcceptInputResult>;
   readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "turnCheckpoint" | "turnToolRouteView" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
+  readonly evictReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
+  readonly releaseReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: Parameters<SessionRunHost.Interface["handleMarkThreadClosed"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly markThreadActive: (command: Parameters<SessionRunHost.Interface["handleMarkThreadActive"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly waitThread: (command: Parameters<SessionRunHost.Interface["handleWaitThread"]>[0], timeoutMs: number | undefined, abortSignal?: AbortSignal | undefined) => Promise<SessionManager.ThreadWaitResult>;
@@ -83,6 +86,10 @@ export interface RuntimeCoreHostsOptions {
  * callers close the returned hosts to release the layer scope.
  */
 export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): Promise<RuntimeCoreHosts> {
+  const reviewerFailureWriter = createSessionEventWriter({
+    append: (envelope) => options.threadLoop.sessionEventWriter.append(envelope),
+    sleep: async (durationMs) => await options.threadLoop.runtime.sleep(durationMs, new AbortController().signal),
+  });
   const threadLoopLayer = ThreadLoop.layer({
     ...options.threadLoop,
     ...(options.contextLoader.refreshRuntimeBindingToken !== undefined
@@ -247,7 +254,9 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       preloadThread: async (input) => {
         return await Effect.runPromise(host.handleEnsureThreadInstalled(input));
       },
+      evictReviewerExecution: async (command, token) => await Effect.runPromise(host.handleEvictReviewerExecution(command, token)),
       interruptReviewerExecution: async (command, token) => await Effect.runPromise(host.handleInterruptReviewerExecution(command, token)),
+      releaseReviewerExecution: async (command, token) => await Effect.runPromise(host.handleReleaseReviewerExecution(command, token)),
       markThreadClosed: async (command) => await Effect.runPromise(host.handleMarkThreadClosed(command)),
       markThreadActive: async (command) => await Effect.runPromise(host.handleMarkThreadActive(command)),
       waitThread: async (command, timeoutMs, abortSignal) => await Effect.runPromise(
@@ -289,7 +298,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         writeId: `rwrite_${event.review_id}_decision`,
         event,
       }),
-      commitApprovalReviewFailure: async (command, event) => await options.threadLoop.sessionEventWriter.append({
+      commitApprovalReviewFailure: async (command, event) => await reviewerFailureWriter.append({
         requestId: command.requestId,
         workspaceId: command.workspaceId,
         sessionId: command.sessionId,

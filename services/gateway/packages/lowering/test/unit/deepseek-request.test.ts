@@ -15,6 +15,21 @@ const deepSeekFixtureRoot = new URL("../fixtures/deepseek/", import.meta.url);
 const deepSeekFixtures = await loadDeepSeekFixtures();
 
 describe("deepseek request lowering", () => {
+  test("approval reviewer selects JSON-object wire enforcement", () => {
+    const schema = { type: "object", properties: { outcome: { type: "string" } } };
+    const lowered = lowerDeepSeekRequest(deepSeekRequest({
+      requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+      outputSchemaJson: JSON.stringify(schema),
+    }));
+
+    expect(DeepSeekV4ProRules.structuredOutputStrategy).toBe("json_object");
+    expect(lowered.structuredOutput).toEqual({
+      strategy: "json_object",
+      schema: { kind: "ai-sdk-json-schema", schema },
+    });
+    expect(lowerDeepSeekRequest(deepSeekRequest()).structuredOutput).toBeUndefined();
+  });
+
   test("DeepSeek lowering fixtures exist and load", () => {
     expect(deepSeekFixtures.length).toBeGreaterThan(0);
   });

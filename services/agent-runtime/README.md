@@ -44,7 +44,7 @@ invariants stated with them.
 | `ContextManager` | `context-manager.ts` | hot `RuntimeMessage` state for one thread | appends only after durable ACK |
 | `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
-| `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; each outcome is ACKed on the Reviewer Thread that executed it, while a new hot lifetime re-reviews on a fresh trunk |
+| `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; failure fallback requires an ACKed outcome, failed requests reach durable idle before trunk reuse, and uncertain outcomes evict only the addressed execution |
 
 Invariants a replacement must preserve:
 

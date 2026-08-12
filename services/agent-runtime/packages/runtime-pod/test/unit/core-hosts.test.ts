@@ -2,22 +2,24 @@ import { describe, expect, test } from "bun:test";
 import { status } from "@grpc/grpc-js";
 import { Effect, Stream } from "effect";
 import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { RuntimeInternalToolRepairStore, normalizeContextLoaderError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { RuntimeInternalToolRepairStore, normalizeContextLoaderError, normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   DurableRuntimeMessage,
   SessionEvent,
   SessionEventEnvelope,
   SessionEventWriter,
   SessionEventWriterAppendResult,
+  SessionEventWriterRequestEndEnvelope,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import type { RuntimeControlInputDeclaration } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeControlInputDeclaration, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import { createRuntimeApprovalReviewer } from "../../src/approval-reviewer.js";
 import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
+import type * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import { runtimeModelForThread, runtimeToolPolicyForThread } from "../../src/command.js";
@@ -190,6 +192,388 @@ describe("Runtime core host production assembly", () => {
       expect(providerRequests[0]?.requestKind).toBe(ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER);
       expect(appended.filter((event) => event.type === "span.model_request_start")).toHaveLength(1);
       expect(appended.filter((event) => event.type === "approval_review.decision")).toHaveLength(1);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("acknowledged sidecar outcome closes durably before its retained run slot is released", async () => {
+    const firstProviderRelease = deferred<void>();
+    const lifecycle: string[] = [];
+    const reviewerTokens = new Map<string, SessionManager.ReviewerExecutionToken>();
+    const reviewerControls = new Map<string, RuntimeThreadControlState>();
+    let providerCalls = 0;
+    let nextEventSequence = 2;
+    let nextMessageSequence = 2;
+    const baseWriter = writerFrom((envelope) => {
+      const result = successfulEventAppend(envelope);
+      if (!result.ok || result.declaration === undefined) {
+        throw new Error("sidecar composition requires a declaration receipt");
+      }
+      return {
+        ...result,
+        declaration: {
+          ...result.declaration,
+          receipt: {
+            ...result.declaration.receipt,
+            events: result.declaration.receipt.events.map((event) => ({ ...event, eventSequence: nextEventSequence++ })),
+            messages: result.declaration.receipt.messages.map((message) => ({ ...message, messageSequence: nextMessageSequence++ })),
+          },
+        },
+      };
+    });
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-08-12T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            turnFacts: emptyTurnFacts,
+            runtimeBindingToken: "runtime-binding-token-reviewer-composed",
+            coldCoverage: emptyColdCoverage,
+          }),
+          commitAcceptedInput: async (input) => acceptedInputReceipt(input),
+        },
+        threadLoop: {
+          sessionEventWriter: baseWriter,
+          providerCallRuntime: {
+            ...DefaultProviderCallRuntimeConfig,
+            approvalReviewerPolicy: "Review the proposed action and return the required decision JSON.",
+            timeoutMs: 1_000,
+          },
+          llmService: {
+            stream: () => {
+              providerCalls += 1;
+              const events = Stream.fromIterable([
+                { type: "text-start" as const, id: `review-${providerCalls}` },
+                { type: "text-delta" as const, id: `review-${providerCalls}`, text_delta: JSON.stringify({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "composed allow" }) },
+                { type: "text-end" as const, id: `review-${providerCalls}` },
+                { type: "finish" as const, finishReason: "stop" as const },
+              ]);
+              return providerCalls === 1
+                ? Stream.unwrap(Effect.promise(async () => {
+                    await firstProviderRelease.promise;
+                    return events;
+                  }))
+                : events;
+            },
+          },
+        },
+      }),
+    });
+    type ReviewerControl = Parameters<typeof hosts.subAgentRunHost.enqueueThreadInput>[0];
+    const reviewerHost = {
+      ...hosts.subAgentRunHost,
+      enqueueThreadInput: async (input: ReviewerControl) => {
+        const result = await hosts.subAgentRunHost.enqueueThreadInput(input);
+        if (input.kind === "approval_review" && result.ok && result.reviewerExecutionToken !== undefined) {
+          reviewerTokens.set(input.sessionThreadId, result.reviewerExecutionToken);
+          reviewerControls.set(input.sessionThreadId, input);
+        }
+        return result;
+      },
+      commitApprovalReviewDecision: async (...args: Parameters<typeof hosts.subAgentRunHost.commitApprovalReviewDecision>) => {
+        const result = await hosts.subAgentRunHost.commitApprovalReviewDecision(...args);
+        lifecycle.push("outcome-receipt");
+        return result;
+      },
+      markThreadClosed: async (...args: Parameters<typeof hosts.subAgentRunHost.markThreadClosed>) => {
+        lifecycle.push("hot-release");
+        return await hosts.subAgentRunHost.markThreadClosed(...args);
+      },
+    };
+    const threadCreator = {
+      createApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+      closeApprovalReviewerThread: async (creation: ApprovalReviewerThreadCreation) => {
+        const control = reviewerControls.get(creation.reviewerThreadId);
+        const token = reviewerTokens.get(creation.reviewerThreadId);
+        if (control === undefined || token === undefined) {
+          throw new Error("sidecar close has no retained execution identity");
+        }
+        expect(await hosts.subAgentRunHost.markThreadActive(control)).toMatchObject({
+          ok: false,
+          reason: "thread_busy",
+        });
+        const snapshot = await hosts.subAgentRunHost.inspectReviewerExecution(control, token);
+        expect(snapshot).toMatchObject({ ok: true, observed: true, status: "idle" });
+        lifecycle.push("durable-close-receipt");
+        return { ok: true as const };
+      },
+    };
+    try {
+      const manager = new AutoApprovalReviewerManager();
+      const reviewer = createRuntimeApprovalReviewer(() => reviewerHost, {
+        model: { providerId: "anthropic", modelId: "claude-opus-4-8" },
+        threadCreator,
+        now: () => "2026-08-12T00:00:00.000Z",
+        waitTimeoutMs: 2_000,
+      });
+      const request = { ...composedReviewRequest(), approvalReviewerManager: manager };
+      const trunk = Effect.runPromise(reviewer({ ...request, targetModelToolCallId: "tool_call_reviewer_trunk" }));
+      await waitUntil(() => providerCalls === 1, "reviewer trunk provider request");
+      const sidecar = await bounded("reviewer sidecar settlement", Effect.runPromise(reviewer({
+        ...request,
+        targetModelToolCallId: "tool_call_reviewer_sidecar",
+      })));
+      expect(sidecar).toMatchObject({ type: "decision", outcome: "allow" });
+      expect(lifecycle).toEqual(["outcome-receipt", "durable-close-receipt", "hot-release"]);
+      firstProviderRelease.resolve(undefined);
+      await bounded("reviewer trunk settlement", trunk);
+    } finally {
+      firstProviderRelease.resolve(undefined);
+      await hosts.close();
+    }
+  });
+
+  test("reviewer failure retries one durable identity before reusing its idle trunk", async () => {
+    const failureAttempts: SessionEventEnvelope[] = [];
+    const reviewerRequestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const reviewerIdleEvents: SessionEventEnvelope[] = [];
+    const acceptedReviewerThreadIds: string[] = [];
+    const lifecycleOrder: string[] = [];
+    let providerCalls = 0;
+    const baseWriter = writerFrom((envelope) => {
+      if (envelope.event.type === "approval_review.failure") {
+        failureAttempts.push(envelope);
+        lifecycleOrder.push("failure_outcome");
+        if (failureAttempts.length < 3) {
+          return {
+            ok: false,
+            error: normalizeSessionEventWriterError({
+              code: "unavailable",
+              sessionId: envelope.sessionId,
+              writeId: envelope.writeId,
+            }),
+          };
+        }
+      }
+      if (envelope.event.type === "session.status_idle") {
+        reviewerIdleEvents.push(envelope);
+        lifecycleOrder.push("idle");
+      }
+      return successfulEventAppend(envelope);
+    });
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        reviewerRequestEnds.push(envelope);
+        lifecycleOrder.push("request_end");
+        return await baseWriter.writeRequestEnd(envelope);
+      },
+    };
+    const manager = new AutoApprovalReviewerManager();
+    const enqueueResults: SessionManager.AcceptInputResult[] = [];
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-08-12T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            turnFacts: emptyTurnFacts,
+            runtimeBindingToken: "runtime-binding-token-reviewer-failure",
+            coldCoverage: emptyColdCoverage,
+          }),
+          commitAcceptedInput: async (input) => {
+            if (input.kind === "approval_review") {
+              acceptedReviewerThreadIds.push(input.sessionThreadId);
+            }
+            return acceptedInputReceipt(input);
+          },
+        },
+        threadLoop: {
+          sessionEventWriter: writer,
+          providerCallRuntime: {
+            ...DefaultProviderCallRuntimeConfig,
+            approvalReviewerPolicy: "Review the proposed action and return the required decision JSON.",
+            timeoutMs: 1_000,
+          },
+          llmService: {
+            stream: () => {
+              providerCalls += 1;
+              if (providerCalls === 1) {
+                return Stream.fromIterable([{
+                  type: "provider-error" as const,
+                  error: {
+                    type: "provider",
+                    code: "provider_stream_error",
+                    message: "Provider request failed.",
+                    retryable: false,
+                    fatal: true,
+                    providerId: "anthropic",
+                    modelId: "claude-opus-4-8",
+                    statusCode: 500,
+                  } as const,
+                }]);
+              }
+              const text = JSON.stringify({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "reused trunk" });
+              return Stream.fromIterable([
+                { type: "text-start" as const, id: `review-${providerCalls}` },
+                { type: "text-delta" as const, id: `review-${providerCalls}`, text_delta: text },
+                { type: "text-end" as const, id: `review-${providerCalls}` },
+                { type: "finish" as const, finishReason: "stop" as const },
+              ]);
+            },
+          },
+        },
+      }),
+    });
+    const threadCreator = {
+      createApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+      closeApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+    };
+    try {
+      const reviewerHost = {
+        ...hosts.subAgentRunHost,
+        enqueueThreadInput: async (...args: Parameters<typeof hosts.subAgentRunHost.enqueueThreadInput>) => {
+          const result = await hosts.subAgentRunHost.enqueueThreadInput(...args);
+          enqueueResults.push(result);
+          return result;
+        },
+      };
+      const reviewer = createRuntimeApprovalReviewer(() => reviewerHost, {
+        model: { providerId: "anthropic", modelId: "claude-opus-4-8" },
+        threadCreator,
+        now: () => "2026-08-12T00:00:00.000Z",
+        waitTimeoutMs: 2_000,
+      });
+      const request = { ...composedReviewRequest(), approvalReviewerManager: manager };
+      await expect(bounded("composed reviewer failure", Effect.runPromise(reviewer(request)))).resolves.toEqual({
+        type: "failed",
+        message: "approval reviewer returned no decision",
+      });
+      expect(reviewerRequestEnds).toHaveLength(1);
+      expect(reviewerRequestEnds[0]?.requestKind).toBe("approval_reviewer");
+      expect(reviewerRequestEnds[0]?.isError).toBe(true);
+      expect(reviewerIdleEvents).toHaveLength(1);
+      expect(failureAttempts).toHaveLength(3);
+      expect(lifecycleOrder).toEqual([
+        "request_end",
+        "idle",
+        "failure_outcome",
+        "failure_outcome",
+        "failure_outcome",
+      ]);
+      const failureWriteId = failureAttempts[0]?.writeId;
+      if (failureWriteId === undefined) {
+        throw new Error("reviewer failure did not reach its durable writer");
+      }
+      expect(new Set(failureAttempts.map((envelope) => envelope.writeId))).toEqual(new Set([failureWriteId]));
+      expect(failureAttempts.map((envelope) => JSON.stringify(envelope.event))).toEqual([
+        JSON.stringify(failureAttempts[0]?.event),
+        JSON.stringify(failureAttempts[0]?.event),
+        JSON.stringify(failureAttempts[0]?.event),
+      ]);
+      const reviewerThreadId = acceptedReviewerThreadIds[0];
+      if (reviewerThreadId === undefined) {
+        throw new Error("reviewer failure did not commit accepted input");
+      }
+      expect(await hosts.subAgentRunHost.inspectThread({
+        ...commandScope(request.sessionId),
+        requestId: request.modelRequestId,
+        workspaceId: request.workspaceId,
+        sessionThreadId: reviewerThreadId,
+        bindingId: request.bindingId,
+        bindingGeneration: request.bindingGeneration,
+        targetPodUid: request.targetPodUid,
+      })).toMatchObject({ ok: true, observed: true, status: "idle" });
+
+      const reused = await bounded("reused reviewer trunk", Effect.runPromise(reviewer({
+        ...request,
+        modelRequestId: "mreq_reviewer_parent_next",
+        parentBoundaryEventId: "sevt_reviewer_parent_next",
+        targetModelToolCallId: "tool_call_reviewer_composed_next",
+      })));
+      expect(enqueueResults).toEqual([
+        expect.objectContaining({ ok: true, started: true }),
+        expect.objectContaining({ ok: true, started: true }),
+      ]);
+      expect(acceptedReviewerThreadIds).toEqual([reviewerThreadId, reviewerThreadId]);
+      expect(providerCalls).toBe(2);
+      expect(reused).toMatchObject({ type: "decision", outcome: "allow", message: "reused trunk" });
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("a deterministic reviewer failure rejection stops at the composed durable writer", async () => {
+    const failureAttempts: SessionEventEnvelope[] = [];
+    const writer = writerFrom((envelope) => {
+      if (envelope.event.type === "approval_review.failure") {
+        failureAttempts.push(envelope);
+        return {
+          ok: false,
+          error: normalizeSessionEventWriterError({
+            code: "schema_mismatch",
+            sessionId: envelope.sessionId,
+            writeId: envelope.writeId,
+          }),
+        };
+      }
+      return successfulEventAppend(envelope);
+    });
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-08-12T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            turnFacts: emptyTurnFacts,
+            runtimeBindingToken: "runtime-binding-token-reviewer-rejection",
+            coldCoverage: emptyColdCoverage,
+          }),
+          commitAcceptedInput: async (input) => acceptedInputReceipt(input),
+        },
+        threadLoop: {
+          sessionEventWriter: writer,
+          providerCallRuntime: {
+            ...DefaultProviderCallRuntimeConfig,
+            approvalReviewerPolicy: "Review the proposed action and return the required decision JSON.",
+            timeoutMs: 1_000,
+          },
+          llmService: {
+            stream: () => Stream.fromIterable([{
+              type: "provider-error" as const,
+              error: {
+                type: "provider",
+                code: "provider_stream_error",
+                message: "Provider request failed.",
+                retryable: false,
+                fatal: true,
+                providerId: "anthropic",
+                modelId: "claude-opus-4-8",
+                statusCode: 500,
+              } as const,
+            }]),
+          },
+        },
+      }),
+    });
+    try {
+      const reviewer = createRuntimeApprovalReviewer(() => hosts.subAgentRunHost, {
+        model: { providerId: "anthropic", modelId: "claude-opus-4-8" },
+        threadCreator: {
+          createApprovalReviewerThread: async () => ({ ok: true as const }),
+          closeApprovalReviewerThread: async () => ({ ok: true as const }),
+        },
+        now: () => "2026-08-12T00:00:00.000Z",
+        waitTimeoutMs: 2_000,
+      });
+
+      await expect(bounded(
+        "deterministic reviewer failure rejection",
+        Effect.runPromise(reviewer(composedReviewRequest())),
+      )).resolves.toMatchObject({
+        type: "settlement_failed",
+        error: { code: "schema_mismatch", retryable: false },
+      });
+      expect(failureAttempts).toHaveLength(1);
+      expect(failureAttempts[0]?.event).toMatchObject({
+        type: "approval_review.failure",
+        failure_kind: "runtime_failure",
+      });
     } finally {
       await hosts.close();
     }
@@ -1340,6 +1724,14 @@ async function bounded<T>(label: string, operation: Promise<T>): Promise<T> {
     operation,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`timed out during ${label}`)), 2_000)),
   ]);
+}
+
+async function waitUntil(predicate: () => boolean, label: string): Promise<void> {
+  await bounded(label, (async () => {
+    while (!predicate()) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+  })());
 }
 
 function publicAgentMailJSON(message: ReturnType<typeof bridgeRuntimeMessage>): string {

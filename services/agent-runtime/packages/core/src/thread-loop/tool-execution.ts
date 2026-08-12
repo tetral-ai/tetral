@@ -16,6 +16,7 @@ import type {
   RuntimeJsonValue,
   RuntimeMessage,
   RuntimePart,
+  SessionEventWriterError,
   RuntimeToolSettlement,
 } from "../contracts/runtime.js";
 import {
@@ -178,10 +179,16 @@ export interface RuntimeApprovalReviewSiblingToolCall {
   readonly actionJson: RuntimeJsonValue;
 }
 
+/** Internal reviewer result; settlement failures return to ThreadLoop's existing persistence closeout. */
+export type RuntimeApprovalReviewResult = ApprovalReviewerOutcome | {
+  readonly type: "settlement_failed";
+  readonly error: SessionEventWriterError;
+};
+
 /** Runs an internal approval review without exposing reviewer failures through the Effect error channel. */
 export type RuntimeApprovalReviewer = (
   request: RuntimeApprovalReviewRequest,
-) => Effect.Effect<ApprovalReviewerOutcome, never>;
+) => Effect.Effect<RuntimeApprovalReviewResult, never>;
 
 export interface RuntimeToolRegistrationState {
   readonly executionPolicy: { readonly toolCatalog?: ToolCatalog };

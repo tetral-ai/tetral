@@ -14,7 +14,7 @@ import * as SessionManager from "../../../src/session/session-manager.js";
 import type { AcceptedInputCommitResult } from "../../../src/context/context-loader.js";
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
-import type { RuntimeToolExecutionResult } from "../../../src/thread-loop/tool-execution.js";
+import type { RuntimeApprovalReviewRequest, RuntimeToolExecutionResult } from "../../../src/thread-loop/tool-execution.js";
 import { AutoApprovalReviewerManager } from "../../../src/session/approval-reviewer-manager.js";
 import type { RuntimeAcceptedInputState, RuntimeControlInputDeclaration, RuntimeThreadControlState } from "../../../src/thread-loop/thread-state.js";
 import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
@@ -3996,14 +3996,111 @@ test("approve_for_me reviewer failure falls back to public ask approval", async 
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(runToolCalls).toBe(0);
-    expect(appended).toContainEqual(expect.objectContaining({
+    expect(appended.filter((event) => event.type === "agent.tool_use")).toEqual([expect.objectContaining({
         type: "agent.tool_use",
         evaluated_permission: "ask",
-    }));
+    })]);
     expect(appended.at(-1)).toEqual({
         type: "session.status_idle",
         stop_reason: { type: "requires_action", event_ids: ["sevt_tool_1"] },
     });
+});
+test("an unexpected reviewer defect fails parent progression without publishing or caching approval", async () => {
+    const reviewerManager = new AutoApprovalReviewerManager();
+    const rememberDecision = jest.spyOn(reviewerManager, "rememberDecision");
+    const session = new ThreadRuntime("sesn_1", reviewerManager);
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const appended: SessionEvent[] = [];
+    let runToolCalls = 0;
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+        approvalMode: "approve_for_me",
+        events: [
+            {
+                type: "tool-call",
+                id: "tool-1",
+                toolName: "Write",
+                input: { file_path: "src/a.ts", content: "ok" },
+                inputPreview: { preview: "{}", truncated: false },
+            },
+            { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+            systemInstructions: "approval reviewer defect safety test system",
+            toolCatalog: catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" }),
+        },
+        reviewApproval: () => Effect.die(new Error("unexpected reviewer defect")),
+        runTool: () => {
+            runToolCalls += 1;
+            return { type: "completed", output: { text: "must not run", truncated: false } };
+        },
+    }))));
+
+    expect(result).toMatchObject({
+        type: "failed",
+        error: { type: "session-event-writer", code: "unknown", retryable: false },
+        releaseSession: { reason: "event_write_failed" },
+    });
+    expect(runToolCalls).toBe(0);
+    expect(rememberDecision).toHaveBeenCalledTimes(0);
+    expect(appended.some((event) => event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use")).toBe(false);
+    rememberDecision.mockRestore();
+});
+test("reviewer settlement failure closes the parent without publishing or executing its tool", async () => {
+    const session = new ThreadRuntime("sesn_1", new AutoApprovalReviewerManager());
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const appended: SessionEvent[] = [];
+    let runToolCalls = 0;
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+        approvalMode: "approve_for_me",
+        events: [
+            {
+                type: "tool-call",
+                id: "tool-1",
+                toolName: "Write",
+                input: { file_path: "src/a.ts", content: "ok" },
+                inputPreview: { preview: "{}", truncated: false },
+            },
+            { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+            systemInstructions: "approval reviewer settlement test system",
+            toolCatalog: catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" }),
+        },
+        reviewApproval: () => Effect.succeed({
+            type: "settlement_failed" as const,
+            error: normalizeSessionEventWriterError({
+                code: "schema_mismatch",
+                sessionId: "sesn_1",
+                writeId: "rwrite_reviewer_failure",
+            }),
+        }),
+        runTool: () => {
+            runToolCalls += 1;
+            return { type: "completed", output: { text: "must not run", truncated: false } };
+        },
+    }))));
+
+    expect(result).toMatchObject({
+        type: "failed",
+        error: { type: "session-event-writer", code: "schema_mismatch", retryable: false },
+        releaseSession: { reason: "event_write_failed" },
+    });
+    expect(runToolCalls).toBe(0);
+    expect(appended.some((event) => event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use")).toBe(false);
 });
 test("approval reviewer stale custody stops the turn and discards HotState", async () => {
     const session = new ThreadRuntime("sesn_1", new AutoApprovalReviewerManager());
@@ -4044,6 +4141,7 @@ test("approve_for_me reviewer receives current request-turn draft state", async 
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const order: string[] = [];
     const appended: SessionEvent[] = [];
+    let reviewerRequest: RuntimeApprovalReviewRequest | undefined;
     const writer = writerFrom((envelope) => {
         order.push(`event:${envelope.event.type}`);
         appended.push(envelope.event);
@@ -4082,18 +4180,18 @@ test("approve_for_me reviewer receives current request-turn draft state", async 
         },
         reviewApproval: (request) => Effect.sync(() => {
             order.push(`review:${request.targetModelToolCallId}`);
-            expect(appended.some((event) => event.type === "agent.tool_use")).toBe(false);
-            const currentDraft = request.currentProviderRequestMessages.find((message) => message.role === "assistant" && message.status === "streaming");
-            expect(currentDraft?.parts).toEqual(expect.arrayContaining([
-                expect.objectContaining({ type: "text", text: "I will update the file before calling the tool.", status: "completed" }),
-                expect.objectContaining({ type: "reasoning", text: "Need to patch one file.", status: "completed" }),
-                expect.objectContaining({ type: "tool", toolCallId: "tool-1", toolName: "Write", state: expect.objectContaining({ status: "running" }) }),
-            ]));
+            reviewerRequest = request;
             return { type: "decision" as const, riskLevel: "low" as const, userAuthorization: "high" as const, outcome: "allow" as const };
         }),
         runTool: () => ({ type: "completed", output: { text: "done", truncated: false } }),
     }))));
     expect(result).toMatchObject({ type: "completed" });
+    expect(appended.some((event) => event.type === "agent.tool_use")).toBe(true);
+    const currentDraft = reviewerRequest?.currentProviderRequestMessages.find((message) => message.role === "assistant" && message.status === "streaming");
+    expect(currentDraft?.parts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "text", text: "I will update the file before calling the tool.", status: "completed" }),
+    ]));
+    expect(reviewerRequest?.siblingToolCalls).toContainEqual(expect.objectContaining({ modelToolCallId: "tool-1", toolName: "Write" }));
     expect(order.indexOf("review:tool-1")).toBeLessThan(order.indexOf("event:agent.tool_use"));
 });
 test("ask approval resumes the pending ToolJob instead of rerunning the old ToolFiber", async () => {
