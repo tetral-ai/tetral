@@ -171,7 +171,6 @@ import {
 import {
   internalToolRepairKey,
   ProviderStreamAccumulator,
-  runtimeMcpErrorSessionEvent,
   runtimeToolResultEvent,
 } from "../runtime/accumulator.js";
 import { toGatewayRuntimeMessages } from "../runtime/message-projection.js";
@@ -486,7 +485,12 @@ export interface RuntimeAcceptedInputCommitObservation {
   readonly inputKind: RuntimeAcceptedInputState["kind"];
   readonly attempt: number;
   readonly durationMs: number;
-  readonly outcome: "started" | "committed" | "deferred" | "retry" | "exhausted";
+  readonly outcome: "started" | "committed" | "deferred" | "rejected" | "retry" | "exhausted";
+  readonly failureClass?:
+    | "task_notification_result_invalid"
+    | "task_notification_message_invalid"
+    | "task_notification_payload_mismatch"
+    | undefined;
 }
 
 /** Provides request-time policy and provider context for one resident thread. */
@@ -816,6 +820,10 @@ function runThreadLoopEffect(
             session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
             continue;
           }
+          if (declaration.result.type === "task_notification_rejected") {
+            session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
+            continue;
+          }
           if (
             declaration.result.type === "stale_custody" ||
             declaration.result.applicationDisposition !== "current_custody"
@@ -853,7 +861,7 @@ function runThreadLoopEffect(
           }
           session.state.applyThreadTurnFact({
             fact: "inputs_committed",
-            eventId: committedMessage.owningEventId,
+            eventId: declaration.result.receipt.events[0]!.eventId,
             messageIds: [committedMessage.id],
           });
           session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
@@ -890,6 +898,9 @@ function runThreadLoopEffect(
             ) {
               return { type: "stale_custody" as const };
             }
+            const residentMessageIds = new Set(
+              session.state.contextManager.messages().map((message) => message.id),
+            );
             const durableMessages = applyAcceptedInputReceipt(
               acceptedInput,
               declaration.messageCreates,
@@ -914,7 +925,11 @@ function runThreadLoopEffect(
                 messageIds: durableMessages.map((message) => message.id),
               });
             }
-            return { type: "committed" as const, durableMessages, makesRequestReady };
+            return {
+              type: "committed" as const,
+              durableMessages: durableMessages.filter((message) => !residentMessageIds.has(message.id)),
+              makesRequestReady,
+            };
           }).pipe(
             Effect.ensuring(Effect.sync(() => session.state.finishAcceptedInputCommit(acceptedInput.runtimeInputId))),
             Effect.uninterruptible,
@@ -1428,7 +1443,12 @@ async function commitAcceptedInput(
           input,
           attempt,
           attemptStartedAt,
-          attemptResult.result.type === "task_notification_deferred" ? "deferred" : "committed",
+          attemptResult.result.type === "task_notification_deferred"
+            ? "deferred"
+            : attemptResult.result.type === "task_notification_rejected"
+              ? "rejected"
+              : "committed",
+          attemptResult.result.type === "task_notification_rejected" ? attemptResult.result.errorCode : undefined,
         );
         return { ok: true, result: attemptResult.result, messageCreates };
       }
@@ -1470,6 +1490,7 @@ function recordAcceptedInputCommit(
   attempt: number,
   startedAt: number,
   outcome: RuntimeAcceptedInputCommitObservation["outcome"],
+  failureClass?: RuntimeAcceptedInputCommitObservation["failureClass"],
 ): void {
   try {
     options.recordAcceptedInputCommit?.({
@@ -1482,6 +1503,7 @@ function recordAcceptedInputCommit(
       attempt,
       durationMs: Math.max(0, options.runtime.monotonicMs() - startedAt),
       outcome,
+      ...(failureClass === undefined ? {} : { failureClass }),
     });
   } catch {
     // Durable receipt handling is authoritative; observability is fail-open.
@@ -2054,6 +2076,11 @@ function runOwnedCompactionSummaryAttemptEffect(
           } as const;
         }
         const compactedMessages = session.state.contextManager.replaceMessagesThroughSequence(compactionBoundarySequence, [checkpoint]);
+        session.state.applyThreadTurnFact({
+          fact: "inputs_committed",
+          eventId: declaration.receipt.events[1]!.eventId,
+          messageIds: [checkpoint.id],
+        });
         if (prefixConsumption !== undefined) {
           session.state.contextManager.installThreadContextPrefix(undefined);
         }
@@ -2283,7 +2310,7 @@ function coordinateProviderTurnEffect(
         bindingId: session.identity.bindingId,
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
-        durableMessages: session.state.contextManager.messages().filter((message): message is DurableRuntimeMessage => "owningEventId" in message),
+        durableMessages: session.state.contextManager.messages().map((message) => DurableRuntimeMessageSchema.parse(message)),
         ...(options.maxNormalizedTextPreviewBytes !== undefined
           ? { maxNormalizedTextPreviewBytes: options.maxNormalizedTextPreviewBytes }
           : {}),
@@ -2980,8 +3007,8 @@ function resumeRecoveredToolJobsEffect(
       const currentAssistant = session.state.contextManager.message(pending.assistantMessage.id);
       if (
         currentAssistant === undefined ||
-        !("owningEventId" in currentAssistant) ||
-        currentAssistant.owningEventId !== pending.assistantMessage.owningEventId ||
+        currentAssistant.id !== pending.assistantMessage.id ||
+        currentAssistant.sequence !== pending.assistantMessage.sequence ||
         findPendingApprovalSettlementDescriptor(
           [currentAssistant],
           pending.job.modelToolCallId,
@@ -3384,14 +3411,7 @@ async function commitRecoveredToolSettlement(
     events: [event],
     durableEventIds: [result.eventId],
   };
-  if (settlement.type !== "error" || settlement.publicErrorEvent === undefined) {
-    return committed;
-  }
-  const publicError = runtimeMcpErrorSessionEvent(settlement.publicErrorEvent);
-  const publicErrorResult = await appendProcessorEvent(options, session, publicError);
-  return publicErrorResult.ok
-    ? { ...committed, events: [...committed.events, publicError] }
-    : { ok: false, events: committed.events, error: runtimeFailureFromEventWriter(publicErrorResult.error) };
+  return committed;
 }
 
 function joinToolFibersEffect(
@@ -3505,9 +3525,27 @@ function coordinateRuntimeToolJobEffect(
     }
 
     if (gateDecision.type === "review_required") {
+      const parentBoundaryEventId = session.state.threadTurnReduction().checkpoint.request?.requestStartEventId;
+      if (parentBoundaryEventId === undefined) {
+        return yield* Effect.promise(() => handleProcessorFailure(session, options, normalizeRuntimeFailure({
+          type: "runtime",
+          code: "runtime_invalid_sequence",
+          retryable: false,
+          fatal: true,
+          reason: "runtime_contract_validation",
+          sessionId: session.sessionId,
+        })));
+      }
       const reviewerOutcome = yield* Effect.gen(function* () {
         if (options.reviewApproval === undefined || session.approvalReviewerManager === undefined) {
-          return { type: "failed" as const, message: "approval reviewer is unavailable" };
+          return {
+            type: "settlement_failed" as const,
+            error: normalizeSessionEventWriterError({
+              code: "unknown",
+              sessionId: session.sessionId,
+              writeId: `rwrite_${modelRequestId}_${job.modelToolCallId}_reviewer_unavailable`,
+            }),
+          };
         }
         return yield* options.reviewApproval({
             workspaceId: session.identity.workspaceId,
@@ -3519,6 +3557,7 @@ function coordinateRuntimeToolJobEffect(
             targetPodUid: session.identity.targetPodUid,
             runtimeBindingToken: session.identity.runtimeBindingToken,
             modelRequestId,
+            parentBoundaryEventId,
             targetModelToolCallId: job.modelToolCallId,
             targetToolName: job.name,
             actionJson: job.input,
@@ -3537,9 +3576,19 @@ function coordinateRuntimeToolJobEffect(
             },
             currentModel: session.state.currentModel(),
           });
-      }).pipe(Effect.catchCause(() => Effect.succeed({ type: "failed" as const, message: "approval reviewer failed" })));
+      }).pipe(Effect.catchCause(() => Effect.succeed({
+        type: "settlement_failed" as const,
+        error: normalizeSessionEventWriterError({
+          code: "unknown",
+          sessionId: session.sessionId,
+          writeId: `rwrite_${modelRequestId}_${job.modelToolCallId}_reviewer_settlement`,
+        }),
+      })));
       if (reviewerOutcome.type === "stale_custody") {
         return providerTurnInterruptedWithDiscard();
+      }
+      if (reviewerOutcome.type === "settlement_failed") {
+        return providerTurnFailed(runtimeFailureFromEventWriter(reviewerOutcome.error), "event_write_failed");
       }
       gateDecision = evaluateToolGate({
         catalog: toolCatalog,

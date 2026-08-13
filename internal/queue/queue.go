@@ -335,6 +335,23 @@ type DeadLetterRequest struct {
 	Now          time.Time
 }
 
+// ReplaceMalformedRuntimeInputCustodyRequest identifies one leased malformed
+// runtime-input job and the canonical Inbox identity that may replace it.
+type ReplaceMalformedRuntimeInputCustodyRequest struct {
+	WorkspaceID    workspace.ID
+	SessionID      string
+	RuntimeInputID string
+	JobID          string
+	LeaseToken     string
+	Now            time.Time
+}
+
+// ReplaceMalformedRuntimeInputCustodyResult reports the atomic Queue outcome.
+type ReplaceMalformedRuntimeInputCustodyResult struct {
+	DeadLettered bool
+	Replaced     bool
+}
+
 type CancelRequest struct {
 	WorkspaceID            workspace.ID
 	SessionID              string
@@ -580,8 +597,15 @@ func FormatRuntimeInputDedupeKey(workspaceID workspace.ID, sessionID string, run
 	return "runtime_input:" + string(workspaceID) + ":" + sessionID + ":" + runtimeInputID
 }
 
+func FormatTaskNotificationRuntimeInputID(taskID string) string {
+	if taskID == "" {
+		return ""
+	}
+	return "task_notification:" + taskID
+}
+
 func NewTaskNotificationRuntimeInputEnqueueRequest(workspaceID workspace.ID, sessionID string, sessionThreadID string, taskID string, now time.Time) (EnqueueRequest, error) {
-	runtimeInputID := "task_notification:" + taskID
+	runtimeInputID := FormatTaskNotificationRuntimeInputID(taskID)
 	payload, err := json.Marshal(struct {
 		WorkspaceID     string   `json:"workspace_id"`
 		SessionID       string   `json:"session_id"`

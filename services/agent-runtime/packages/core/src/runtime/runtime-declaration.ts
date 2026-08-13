@@ -92,8 +92,7 @@ export function acceptedInputCreates(input: RuntimeAcceptedInputState): readonly
     if (input.eventIds.length === 0) {
       throw new Error("rejection input must name at least one source event");
     }
-    return input.eventIds.map((sourceEventId) => RuntimeMessageCreateSchema.parse({
-      sourceEventId,
+    return input.eventIds.map(() => RuntimeMessageCreateSchema.parse({
       messageKind: "rejection",
       role: "assistant",
       origin: "agent",
@@ -111,9 +110,8 @@ export function acceptedInputCreates(input: RuntimeAcceptedInputState): readonly
   if (messages.length !== input.eventIds.length) {
     throw new Error("accepted input message and source event counts differ");
   }
-  return messages.map((message, index) => RuntimeMessageCreateSchema.parse({
+  return messages.map((message) => RuntimeMessageCreateSchema.parse({
     ...messageCreateInfo(message),
-    sourceEventId: input.eventIds[index],
     messageKind,
     parts: message.parts.map(partCreateFromDurable),
   }));
@@ -246,9 +244,7 @@ export function applyInterruptToolProjections(
       return state === undefined || part.type !== "tool" ? part : { ...part, state };
       }),
     };
-    return "owningEventId" in message
-      ? DurableRuntimeMessageSchema.parse(projected)
-      : RuntimeMessageSchema.parse(projected);
+    return DurableRuntimeMessageSchema.parse(projected);
   });
 }
 
@@ -282,9 +278,7 @@ export function applyToolSettlementProjection(
     });
     if (!changed) return message;
     const next = { ...message, parts };
-    return "owningEventId" in message
-      ? DurableRuntimeMessageSchema.parse(next)
-      : RuntimeMessageSchema.parse(next);
+    return DurableRuntimeMessageSchema.parse(next);
   });
   if (matches !== 1) {
     throw new Error("Tool settlement must name exactly one unfinished hot Tool");
@@ -312,7 +306,6 @@ export function toolConfirmationCreate(input: {
       ? "Approval denied"
       : `Approval denied: ${input.denyMessage}`;
   return RuntimeMessageCreateSchema.parse({
-    sourceEventId: input.sourceEventId,
     messageKind: "approval_input",
     role: "user",
     origin: "user",
@@ -649,14 +642,11 @@ export function applyAssistantPartAppendReceipt(input: {
   if (existing !== undefined && (
     existing.id !== messageStamp.messageId ||
     existing.sequence !== messageStamp.messageSequence ||
-    existing.owningEventId !== messageStamp.owningEventId ||
     messageStamp.disposition !== "updated"
   )) {
     throw new Error("Assistant append changed its durable message identity");
   }
-  if (existing === undefined && (
-    messageStamp.disposition !== "created" || messageStamp.owningEventId !== eventStamp.eventId
-  )) {
+  if (existing === undefined && messageStamp.disposition !== "created") {
     throw new Error("first Assistant append did not create its message");
   }
   const expectedFirstPartSequence = existing === undefined
@@ -678,8 +668,6 @@ export function applyAssistantPartAppendReceipt(input: {
     status: existing?.status ?? "streaming",
     createdAt: messageStamp.createdAt,
     ...(messageStamp.updatedAt.length > 0 ? { updatedAt: messageStamp.updatedAt } : {}),
-    owningEventId: existing?.owningEventId ?? eventStamp.eventId,
-    eventSequence: existing?.eventSequence ?? eventStamp.eventSequence,
     ...(existing?.error === undefined ? {} : { error: existing.error }),
     ...(existing?.finishReason === undefined ? {} : { finishReason: existing.finishReason }),
     ...(existing?.usage === undefined ? {} : { usage: existing.usage }),
@@ -730,8 +718,6 @@ function applyMessageCreateStamps(input: {
       stamp.sessionThreadId !== input.sessionThreadId ||
       stamp.disposition !== "created" ||
       owningEvent === undefined || owningEvent.sessionThreadId !== input.sessionThreadId ||
-      stamp.owningEventId !== owningEvent.eventId ||
-      (create.sourceEventId !== undefined && create.sourceEventId !== owningEvent.eventId) ||
       (index > 0 && stamp.messageSequence !== previousMessageSequence + 1) ||
       stamp.parts.length !== create.parts.length
     ) {
@@ -758,8 +744,6 @@ function applyMessageCreateStamps(input: {
       ...(create.finishReason === undefined ? {} : { finishReason: create.finishReason }),
       ...(create.usage === undefined ? {} : { usage: create.usage }),
       ...(create.responseId === undefined ? {} : { responseId: create.responseId }),
-      owningEventId: stamp.owningEventId,
-      eventSequence: owningEvent.eventSequence,
       parts,
     });
   });
@@ -791,7 +775,7 @@ function durablePartFromStamp(
   } as RuntimePart;
 }
 
-function messageCreateInfo(message: RuntimeMessage): Omit<RuntimeMessageCreate, "messageKind" | "sourceEventId" | "parts"> {
+function messageCreateInfo(message: RuntimeMessage): Omit<RuntimeMessageCreate, "messageKind" | "parts"> {
   return {
     role: message.role,
     origin: message.origin,

@@ -39,14 +39,9 @@ export function acceptedInputReceipt(
         : "existing",
     })),
 		messages: creates.map((create, messageIndex) => {
-      const sourceEventId = input.kind === "task_notification" ? taskEventId : create.sourceEventId;
-      if (sourceEventId === undefined) {
-				throw new Error("accepted input test create is missing its source event");
-			}
 			const messageId = `msg_${input.runtimeInputId}_${messageIndex}`;
 			return {
 				sessionThreadId: input.sessionThreadId,
-        owningEventId: sourceEventId,
 				messageId,
         messageSequence: messageSequenceStart + messageIndex,
         createdAt: committedAt,

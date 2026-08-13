@@ -2,6 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 
 func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 	for _, role := range []string{"main", "child"} {
-		for _, state := range []string{"before_snapshot_ack", "snapshot_acked", "committed_input_above", "committed_inter_agent_above"} {
+		for _, state := range []string{"before_snapshot_ack", "snapshot_acked", "committed_input_above", "committed_inter_agent_above", "orphan_inter_agent_above"} {
 			t.Run(role+"/"+state, func(t *testing.T) {
 				runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 				suffix := role + "_" + state
@@ -61,8 +62,13 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 						t.Fatalf("mark above-fence input processed: %v", err)
 					}
 				}
-				if state == "committed_inter_agent_above" {
-					seedBridgeAPIEvent(t, admin, "default", sessionID, targetThreadID, "sevt_inter_agent_above_"+suffix, 3, "agent.thread_message_received", `{}`)
+				if state == "committed_inter_agent_above" || state == "orphan_inter_agent_above" {
+					deliveryID := "delivery_inter_agent_above_" + suffix
+					receivedEventID := "sevt_inter_agent_above_" + suffix
+					seedBridgeAPIEvent(t, admin, "default", sessionID, targetThreadID, receivedEventID, 3, "agent.thread_message_received", `{"delivery_id":"`+deliveryID+`"}`)
+					if state == "committed_inter_agent_above" {
+						seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, targetThreadID, "agent_mail:"+deliveryID, "agent_mail", `[`+fmt.Sprintf("%q", receivedEventID)+`]`, "committed", bindingID, binding.PodUID, 3, 3)
+					}
 				}
 				otherThreadID := "thrd_pod_loss_interrupt_other_" + suffix
 				if _, err := admin.ExecContext(context.Background(),
@@ -103,7 +109,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 					sessionID, targetThreadID, idleType).Scan(&errorCount, &endTurnCount, &exhaustedCount); err != nil {
 					t.Fatalf("read settlement facts: %v", err)
 				}
-				if state == "snapshot_acked" {
+				if state == "snapshot_acked" || state == "orphan_inter_agent_above" {
 					if errorCount != 0 || endTurnCount != 1 || exhaustedCount != 0 {
 						t.Fatalf("settlement error/end_turn/exhausted = %d/%d/%d; want 0/1/0", errorCount, endTurnCount, exhaustedCount)
 					}
@@ -126,7 +132,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 					t.Fatalf("count pod-loss completion jobs: %v", err)
 				}
 				if completionMailCount != 0 || completionJobCount != 0 {
-					t.Fatalf("pod-loss completion rows = mail %d job %d; want zero", completionMailCount, completionJobCount)
+					t.Fatalf("pod-loss completion rows = mail %d job %d; want 0/0", completionMailCount, completionJobCount)
 				}
 			})
 		}

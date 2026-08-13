@@ -65,6 +65,7 @@ export function mcpOAuthRefreshCompletedLogRecord(event: McpOAuthRefreshComplete
     event: "mcp_oauth_refresh_completed", "event.kind": "mcp_oauth_refresh_completed",
     operation: "mcp_oauth_refresh", component: "mcp-connector",
     message: "MCP OAuth refresh owner completed",
+    "workspace.id": event.workspaceId, "session.id": event.sessionId,
     "mcp.server.name": event.mcpServerName, "credential.id": event.credentialId,
     outcome: event.outcome,
     ...(event.failureKind !== undefined ? { "failure.kind": event.failureKind } : {}),

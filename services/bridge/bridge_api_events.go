@@ -56,8 +56,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		return nil, err
 	}
 	if request.GetEventType() == "agent.mcp_tool_result" {
-		if request.GetMcpMaterializationHandle() == "" {
-			return nil, status.Error(codes.InvalidArgument, "mcp tool result requires a materialization handle")
+		if request.GetMcpMaterializationHandle() == "" && request.GetToolSettlement().GetError() == nil {
+			return nil, status.Error(codes.InvalidArgument, "successful mcp tool result requires a materialization handle")
 		}
 	} else if request.GetMcpMaterializationHandle() != "" {
 		return nil, status.Error(codes.InvalidArgument, "materialization handle requires an mcp tool-result event")
@@ -580,11 +580,6 @@ func verifyModelToolCallIDUniqueTx(
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*)
 		   FROM session_messages AS message
-		   JOIN session_events AS event
-		     ON event.workspace_id = message.workspace_id
-		    AND event.session_id = message.session_id
-		    AND event.session_thread_id = message.session_thread_id
-		    AND event.event_id = message.source_event_id
 		  CROSS JOIN LATERAL jsonb_array_elements(
 		    CASE
 		      WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
@@ -592,10 +587,22 @@ func verifyModelToolCallIDUniqueTx(
 		      ELSE '[]'::jsonb
 		    END
 		  ) AS part
-		  WHERE event.workspace_id = $1
-		    AND event.session_id = $2
-		    AND event.session_thread_id = $3
-		    AND event.model_request_id = $4
+		  WHERE message.workspace_id = $1
+		    AND message.session_id = $2
+		    AND message.session_thread_id = $3
+		    AND (
+		      message.model_request_id = $4
+		      OR EXISTS (
+		        SELECT 1
+		          FROM session_events AS repair_event
+		         WHERE repair_event.workspace_id = message.workspace_id
+		           AND repair_event.session_id = message.session_id
+		           AND repair_event.session_thread_id = message.session_thread_id
+		           AND repair_event.runtime_write_id = message.repair_key
+		           AND repair_event.model_request_id = $4
+		           AND repair_event.type = 'agent.tool_result'
+		      )
+		    )
 		    AND part ->> 'toolCallId' = $5`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
@@ -609,6 +616,56 @@ func verifyModelToolCallIDUniqueTx(
 		return status.Error(codes.FailedPrecondition, "model tool call projection is missing")
 	}
 	if occurrences != 1 {
+		return status.Error(codes.AlreadyExists, "model tool call id already has a durable declaration")
+	}
+	return nil
+}
+
+func verifyModelToolCallIDAvailableTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	modelToolCallID string,
+) error {
+	if modelToolCallID == "" {
+		return status.Error(codes.FailedPrecondition, "model tool call id is missing")
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_messages AS message
+			 CROSS JOIN LATERAL jsonb_array_elements(
+			   CASE
+			     WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
+			     THEN message.data_json::jsonb -> 'parts'
+			     ELSE '[]'::jsonb
+			   END
+			 ) AS part
+			 WHERE message.workspace_id = $1
+			   AND message.session_id = $2
+			   AND message.session_thread_id = $3
+			   AND (
+			     message.model_request_id = $4
+			     OR EXISTS (
+			       SELECT 1
+			         FROM session_events AS repair_event
+			        WHERE repair_event.workspace_id = message.workspace_id
+			          AND repair_event.session_id = message.session_id
+			          AND repair_event.session_thread_id = message.session_thread_id
+			          AND repair_event.runtime_write_id = message.repair_key
+			          AND repair_event.model_request_id = $4
+			          AND repair_event.type = 'agent.tool_result'
+			     )
+			   )
+			   AND part ->> 'toolCallId' = $5
+		)`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID, modelToolCallID,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
 		return status.Error(codes.AlreadyExists, "model tool call id already has a durable declaration")
 	}
 	return nil
@@ -772,6 +829,7 @@ func logMCPMaterializationConsumed(
 	if logger == nil || scope == nil {
 		return
 	}
+	defer func() { _ = recover() }()
 	logger.Info("bridge.mcp_materialization",
 		slog.String("operation", "mcp_materialization"),
 		slog.String("event.kind", "mcp_materialization_consumed"),

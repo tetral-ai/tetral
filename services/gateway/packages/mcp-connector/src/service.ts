@@ -124,6 +124,9 @@ export interface McpManifestChangeNotifier {
  */
 export const MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS = [1_000, 4_000, 16_000] as const;
 
+/** Private trailing metadata used only by Bridge initial discovery. */
+export const MCP_FAILURE_KIND_METADATA_KEY = "tetral-mcp-failure-kind";
+
 /** Waits between retryable manifest notifications and honors caller cancellation. */
 export type McpManifestNotifySleep = (delayMs: number, signal?: AbortSignal) => Promise<void>;
 
@@ -135,6 +138,7 @@ type RunMcpToolLogRecordFields = {
   readonly "workspace.id": string;
   readonly "session.id": string;
   readonly "thread.id": string;
+  readonly "tool.use.event.id": string;
   readonly operation: "run_mcp_tool";
   readonly "event.kind": "mcpconnector.call";
   readonly component: "mcp-connector";
@@ -202,11 +206,21 @@ export class McpConnectorServiceShell {
     if (catalogEntryByName(request.mcpServerName) === undefined) {
       throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
     }
-    const listed = await this.options.client.listTools({
-      workspaceId: request.workspaceId,
-      sessionId: request.sessionId,
-      mcpServerName: request.mcpServerName,
-    });
+    let listed: readonly McpClientTool[];
+    try {
+      listed = await this.options.client.listTools({
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        mcpServerName: request.mcpServerName,
+      });
+    } catch (error) {
+      const failure = initialDiscoveryFailure(error);
+      logInitialDiscoveryFailure(this.options.logger, request, failure);
+      if (failure !== undefined) {
+        throw initialDiscoveryStatusError(failure);
+      }
+      throw error;
+    }
     // The connector does not own the session's pinned builtin family, so those
     // names pass through for Bridge to filter. Platform tool names are
     // family-independent and can be omitted here.
@@ -218,11 +232,13 @@ export class McpConnectorServiceShell {
     };
     const responseValidation = validateListMcpToolsResponse(response);
     if (!responseValidation.ok) {
-      throw new GrpcStatusError(status.INTERNAL, "mcp connector response contract violation");
+      const failure = { kind: "manifest_invalid", code: status.FAILED_PRECONDITION } as const;
+      logInitialDiscoveryFailure(this.options.logger, request, failure);
+      throw initialDiscoveryStatusError(failure);
     }
     this.#metrics.recordManifestRefresh();
     for (const omitted of omittedTools) {
-      this.options.logger.info({
+      safeConnectorLog(this.options.logger, "info", {
         event: "mcp_manifest_tool_omitted",
         severity: "warning",
         operation: "mcp_manifest_list",
@@ -237,7 +253,7 @@ export class McpConnectorServiceShell {
         "mcp.omission.reason": omitted.reason,
       });
     }
-    this.options.logger.info({
+    safeConnectorLog(this.options.logger, "info", {
       event: "mcp_manifest_listed",
       "event.kind": "mcp_manifest_listed",
       operation: "mcp_manifest_list",
@@ -291,7 +307,7 @@ export class McpConnectorServiceShell {
         manifestEtag: nextManifestEtag,
       });
       if (notified.ok) {
-        this.options.logger.info({
+        safeConnectorLog(this.options.logger, "info", {
           event: "mcp_manifest_changed_notified",
           "event.kind": "mcp_manifest_changed_notified",
           operation: "mcp_manifest_changed",
@@ -313,7 +329,7 @@ export class McpConnectorServiceShell {
         await (this.options.manifestNotifySleep ?? abortableManifestNotifySleep)(delayMs, signal);
       }
     }
-    this.options.logger.error({
+    safeConnectorLog(this.options.logger, "error", {
       event: "mcp_manifest_notify_exhausted",
       "event.kind": "mcp_manifest_notify_exhausted",
       operation: "mcp_manifest_changed",
@@ -549,7 +565,7 @@ export class McpConnectorServiceShell {
     started: number,
   ): RunMcpToolResponse {
     this.recordRunToolMetrics(request, response, started);
-    this.options.logger.info(runMcpToolLogRecord(request, response, execution, started));
+    safeConnectorLog(this.options.logger, "info", runMcpToolLogRecord(request, response, execution, started));
     return response;
   }
 
@@ -560,7 +576,7 @@ export class McpConnectorServiceShell {
       errorKind: errorCode,
       durationSeconds: Math.max(0, performance.now() - started) / 1000,
     });
-    this.options.logger.info(runMcpToolFailureLogRecord(request, errorCode, started));
+    safeConnectorLog(this.options.logger, "info", runMcpToolFailureLogRecord(request, errorCode, started));
   }
 }
 
@@ -581,6 +597,16 @@ function abortableManifestNotifySleep(delayMs: number, signal?: AbortSignal): Pr
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+// Connector telemetry observes a completed owner decision; sink failure may
+// never rewrite discovery, notification, or Tool settlement semantics.
+function safeConnectorLog(logger: McpConnectorLogger, level: "info" | "error", record: McpLogRecord): void {
+  try {
+    logger[level](record);
+  } catch {
+    // Business results and retries do not depend on observability.
+  }
 }
 
 function runMcpToolThrownErrorKind(error: unknown): string {
@@ -618,6 +644,7 @@ function runMcpToolLogRecord(
     "workspace.id": request.workspaceId,
     "session.id": request.sessionId,
     "thread.id": request.sessionThreadId,
+    "tool.use.event.id": request.toolUseEventId,
     operation: "run_mcp_tool",
     "event.kind": "mcpconnector.call",
     component: "mcp-connector",
@@ -649,6 +676,7 @@ function runMcpToolFailureLogRecord(
     "workspace.id": request.workspaceId,
     "session.id": request.sessionId,
     "thread.id": request.sessionThreadId,
+    "tool.use.event.id": request.toolUseEventId,
     operation: "run_mcp_tool",
     "event.kind": "mcpconnector.call",
     component: "mcp-connector",
@@ -669,9 +697,66 @@ export class GrpcStatusError extends Error {
   constructor(
     readonly code: status,
     message: string,
+    readonly metadata: Metadata = new Metadata(),
   ) {
     super(message);
     this.name = "GrpcStatusError";
+  }
+}
+
+type InitialDiscoveryFailure = {
+  readonly kind: "credential_unavailable" | "server_unavailable" | "discovery_timeout" | "manifest_invalid";
+  readonly code: status.FAILED_PRECONDITION | status.UNAVAILABLE | status.DEADLINE_EXCEEDED;
+};
+
+function initialDiscoveryFailure(error: unknown): InitialDiscoveryFailure | undefined {
+  if (!(error instanceof McpConnectorError)) {
+    return undefined;
+  }
+  switch (error.code) {
+    case "mcp_credential_required":
+    case "mcp_authentication_failed":
+      return { kind: "credential_unavailable", code: status.FAILED_PRECONDITION };
+    case "mcp_timeout":
+      return { kind: "discovery_timeout", code: status.DEADLINE_EXCEEDED };
+    case "mcp_connection_failed":
+      return error.retryStatus === "exhausted"
+        ? { kind: "server_unavailable", code: status.UNAVAILABLE }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function initialDiscoveryStatusError(failure: InitialDiscoveryFailure): GrpcStatusError {
+  const metadata = new Metadata();
+  metadata.set(MCP_FAILURE_KIND_METADATA_KEY, failure.kind);
+  return new GrpcStatusError(failure.code, "mcp manifest discovery failed", metadata);
+}
+
+function logInitialDiscoveryFailure(
+  logger: McpConnectorLogger,
+  request: ListMcpToolsRequest,
+  failure: InitialDiscoveryFailure | undefined,
+): void {
+  try {
+    logger.error({
+      event: "mcp_manifest_discovery_failed",
+      "event.kind": "mcp_manifest_discovery_failed",
+      operation: "mcp_manifest_list",
+      component: "mcp-connector",
+      "workspace.id": request.workspaceId,
+      "session.id": request.sessionId,
+      "mcp.server.name": request.mcpServerName,
+      "mcp.failure.kind": failure?.kind ?? "internal",
+      ...semanticErrorFields({
+        errorClass: "mcp_manifest_discovery_failure",
+        errorCode: failure?.kind ?? "internal",
+        messageSafe: "MCP manifest discovery failed.",
+      }),
+    });
+  } catch {
+    // Discovery classification must not depend on observability.
   }
 }
 

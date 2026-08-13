@@ -84,7 +84,7 @@ export const AnthropicOpus48Rules: ProviderRules = {
   },
   maxOutputTokens: "clamp",
   schemaStrategy: "passthrough",
-  requestOutputSchema: "approval-reviewer",
+  structuredOutputStrategy: "native_json_schema",
   providerSpecificErrorRules: [],
 };
 

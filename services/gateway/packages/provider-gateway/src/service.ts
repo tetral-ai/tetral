@@ -29,7 +29,7 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxIdBytes, validateProviderRequest, validateProviderStreamEvent } from "@tetral/gateway-protocol/src/bounds.js";
-import { classifyProviderStreamError, ProviderStreamTimeoutError, providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
+import { classifyProviderStreamError, ProviderRequestLoweringError, ProviderStreamTimeoutError, providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
 import { GrpcStatusError } from "./errors.js";
 import type { RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import type { GatewayLogger } from "./logger.js";
@@ -119,6 +119,8 @@ export class ProviderGatewayServiceShell {
     let requestOutcome: "ok" | "failed" = "failed";
     let errorClass = "runtime_error";
     let errorCode = "stream_incomplete";
+    let providerStatusCode: number | undefined;
+    let providerFailureClass = "provider_error";
     let validationMember: string | undefined;
     let callerServiceAccount: string | undefined;
     let requestIdentity: Partial<{
@@ -194,11 +196,19 @@ export class ProviderGatewayServiceShell {
               elapsedMs: performance.now() - providerStartedAt,
             });
           },
+          (origin) => {
+            providerFailureClass = origin === "http_rejection"
+              ? "provider_http_rejection"
+              : "provider_transport_failure";
+          },
         )) {
           if (event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR) {
             failed = true;
-            errorClass = "provider_error";
             errorCode = providerLogErrorCode(event.providerError?.error?.code);
+            providerStatusCode = boundedProviderStatusCode(event.providerError?.error?.statusCode);
+            errorClass = errorCode === "provider_configuration_invalid"
+              ? "provider_configuration"
+              : providerFailureClass;
           }
           yield event;
         }
@@ -252,6 +262,7 @@ export class ProviderGatewayServiceShell {
                 errorCode,
                 messageSafe: "provider request failed",
               }),
+              ...(providerStatusCode === undefined ? {} : { "provider.status_code": providerStatusCode }),
             });
         }
       } catch {
@@ -324,6 +335,7 @@ export class ProviderGatewayServiceShell {
     abortSignal: AbortSignal,
     providerDeadline: number,
     abortOnTimeout: (timeout: ProviderTimeoutObservation) => void,
+    recordFailureOrigin: (origin: "http_rejection" | "transport_failure") => void,
   ): AsyncGenerator<ProviderStreamEvent> {
     const catalogError = this.catalogGate(request);
     if (catalogError !== undefined) {
@@ -425,19 +437,31 @@ export class ProviderGatewayServiceShell {
         if (error instanceof GrpcStatusError) {
           throw error;
         }
+        if (error instanceof ProviderRequestLoweringError) {
+          yield providerErrorEvent(request, error.providerError);
+          return;
+        }
         const providerKeyFailure = error instanceof ProviderKeyFailureError
           ? error
           : resolvedCredential?.source === "platform" && !emitted
-            ? new ProviderKeyFailureError(classifyProviderFailure(resolvedCredential.providerId, providerAttemptFailureInput(error)))
+            ? (() => {
+                const input = providerAttemptFailureInput(error);
+                return new ProviderKeyFailureError(
+                  classifyProviderFailure(resolvedCredential.providerId, input),
+                  input.networkError === true || input.timeout === true ? "transport_failure" : "http_rejection",
+                );
+              })()
             : undefined;
         if (providerKeyFailure === undefined) {
           if (error instanceof ProviderIncompleteStreamError) {
             logProviderStreamIncomplete(this.options.logger, request, error);
           }
+          recordFailureOrigin("transport_failure");
           yield providerErrorEvent(request, classifyProviderStreamError(error));
           return;
         }
         if (resolvedCredential?.source !== "platform" || emitted) {
+          recordFailureOrigin(providerKeyFailure.origin);
           yield providerErrorEvent(request, providerKeyFailure.classification.providerError);
           return;
         }
@@ -447,6 +471,7 @@ export class ProviderGatewayServiceShell {
         platformAttempts += 1;
         lastPlatformProviderError = providerKeyFailure.classification.providerError;
         if (providerKeyFailure.classification.action === "fail-fast" || platformAttempts >= PlatformKeyPoolConstants.maxKeySwitchesPerTurn) {
+          recordFailureOrigin(providerKeyFailure.origin);
           yield providerErrorEvent(request, providerKeyFailure.classification.providerError);
           return;
         }
@@ -577,6 +602,8 @@ function safeRequestIdentity(request: ProviderRequest): Partial<{
   readonly "thread.id": string;
   readonly "request.id": string;
   readonly "model_request.id": string;
+  readonly "provider.id": string;
+  readonly "model.id": string;
 }> {
   const bounded = (value: string): string | undefined =>
     value.length > 0 && new TextEncoder().encode(value).byteLength <= MaxIdBytes ? value : undefined;
@@ -585,12 +612,16 @@ function safeRequestIdentity(request: ProviderRequest): Partial<{
   const threadId = bounded(request.sessionThreadId);
   const requestId = bounded(request.requestId);
   const modelRequestId = bounded(request.modelRequestId);
+  const providerId = bounded(request.model?.providerId ?? "");
+  const modelId = bounded(request.model?.modelId ?? "");
   return {
     ...(workspaceId !== undefined ? { "workspace.id": workspaceId } : {}),
     ...(sessionId !== undefined ? { "session.id": sessionId } : {}),
     ...(threadId !== undefined ? { "thread.id": threadId } : {}),
     ...(requestId !== undefined ? { "request.id": requestId } : {}),
     ...(modelRequestId !== undefined ? { "model_request.id": modelRequestId } : {}),
+    ...(providerId !== undefined ? { "provider.id": providerId } : {}),
+    ...(modelId !== undefined ? { "model.id": modelId } : {}),
   };
 }
 
@@ -598,6 +629,12 @@ function providerLogErrorCode(value: string | undefined): string {
   return value !== undefined && /^[a-z0-9_.-]{1,128}$/i.test(value)
     ? value
     : "provider_error";
+}
+
+function boundedProviderStatusCode(value: number | undefined): number | undefined {
+  return Number.isInteger(value) && value !== undefined && value >= 100 && value <= 599
+    ? value
+    : undefined;
 }
 
 function providerAttemptFailureInput(error: unknown): Parameters<typeof classifyProviderFailure>[1] {

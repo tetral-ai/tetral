@@ -53,8 +53,6 @@ function pendingApprovalAssistantMessage(sessionId: string, toolUseEventId: stri
   return DurableRuntimeMessageSchema.parse({
     id: toolPart.messageId,
     sessionId,
-    owningEventId: toolUseEventId,
-    eventSequence: 1,
     sequence: 1,
     role: "assistant",
     origin: "agent",
@@ -853,6 +851,10 @@ describe("SessionManager", () => {
       reentryArmed = true;
       threadLoop.releaseCleanup();
       await cancellation;
+      await Effect.runPromise(manager.releaseReviewerExecution(
+        threadControl(sessionId, "rin_target_a_reentry_control", reviewerThreadId),
+        targetA.reviewerExecutionToken,
+      ));
       await waitForCondition(() => reentryResult !== undefined, "reviewer reentrant admission");
       expect(await reentryResult).toMatchObject({ ok: true, started: true });
       await threadLoop.targetBStarted;
@@ -897,6 +899,10 @@ describe("SessionManager", () => {
 
       threadLoop.releaseCleanup();
       expect(await cancellation).toMatchObject({ ok: true, terminal: true, applied: true });
+      expect(await Effect.runPromise(manager.releaseReviewerExecution(
+        targetAControl,
+        targetA.reviewerExecutionToken,
+      ))).toMatchObject({ ok: true, terminal: true, applied: true });
 
       const targetBInput = approvalReviewInput(sessionId, "rin_target_b", reviewerThreadId, parentThreadId);
       const targetB = await Effect.runPromise(manager.acceptInput(targetBInput));
@@ -944,6 +950,57 @@ describe("SessionManager", () => {
         targetBControl,
         targetA.reviewerExecutionToken,
       ))).toMatchObject({ ok: false, reason: "reviewer_execution_mismatch" });
+    });
+  });
+
+  test("retains a durably idle failed reviewer until its exact token is evicted", async () => {
+    const sessionId = "sesn_reviewer_failed_idle";
+    const reviewerThreadId = "thrd_reviewer_failed_idle";
+    const siblingThreadId = "thrd_reviewer_sibling";
+    const parentThreadId = "thrd_reviewer_parent";
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
+      expect(await Effect.runPromise(manager.preloadThread({
+        ...threadControl(sessionId, "rin_preload_sibling", siblingThreadId),
+        runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: coldCoverage(),
+        messages: [],
+        thread: {
+          parentThreadId,
+          role: "approval_reviewer",
+          visibility: "internal",
+          agentType: "approval_reviewer",
+          status: "idle",
+        },
+      }))).toMatchObject({ ok: true, applied: true });
+
+      const accepted = await Effect.runPromise(manager.acceptInput(
+        approvalReviewInput(sessionId, "rin_failed_idle", reviewerThreadId, parentThreadId),
+      ));
+      if (!accepted.ok || accepted.reviewerExecutionToken === undefined) {
+        throw new Error("failed reviewer did not receive an execution token");
+      }
+      await waitForRuns(threadLoop, 1);
+      const requestFailure = fatalRunResult("terminated");
+      if (requestFailure.type !== "failed") {
+        throw new Error("expected a failed reviewer result");
+      }
+      threadLoop.runs[0]?.release({ type: "failed", error: requestFailure.error });
+      const control = threadControl(sessionId, "rin_failed_idle_control", reviewerThreadId);
+      expect(await Effect.runPromise(manager.waitReviewerExecution(
+        control,
+        accepted.reviewerExecutionToken,
+        undefined,
+      ))).toMatchObject({ ok: true, status: "idle", terminal: true, timedOut: false });
+
+      expect(await Effect.runPromise(manager.evictReviewerExecution(
+        control,
+        accepted.reviewerExecutionToken,
+      ))).toMatchObject({ ok: true, applied: true, terminal: true });
+      expect(await Effect.runPromise(manager.inspectThread(control))).toMatchObject({ ok: true, observed: false });
+      expect(await Effect.runPromise(manager.inspectThread(
+        threadControl(sessionId, "rin_sibling_inspect", siblingThreadId),
+      ))).toMatchObject({ ok: true, observed: true, status: "idle" });
     });
   });
 
@@ -1095,39 +1152,6 @@ describe("SessionManager", () => {
       threadLoop.runs[0]?.release();
       await new Promise((resolve) => setTimeout(resolve, 5));
       expect(threadLoop.runs).toHaveLength(1);
-    });
-  });
-
-  test("cold recovery starts the reconstructed request after the input ACK response was lost", async () => {
-    const threadLoop = makeControlledThreadLoop();
-    const input = acceptedInput("sesn_cold_input_replay", "rin_cold_input_replay");
-    const durableMessage = {
-      ...coldUserMessage(input.sessionId),
-      owningEventId: input.eventIds[0]!,
-      eventSequence: input.sequenceFrom,
-    };
-    await withSessionManager(sessionManagerLayer(threadLoop, {
-      loadThreadContext: async () => ({
-        ...threadControl(input.sessionId, input.runtimeInputId, input.sessionThreadId),
-        runtimeBindingToken: "runtime-binding-token",
-        messages: [durableMessage],
-        turnCheckpoint: { pendingInputMessageIds: [durableMessage.id] },
-        durableTurnId: "sevt_cold_input_running",
-        coldCoverage: coldCoverage(),
-      }),
-    }), async (manager) => {
-      expect(await Effect.runPromise(manager.acceptInput(input))).toEqual({
-        ok: true,
-        sessionId: input.sessionId,
-        created: true,
-        started: true,
-        duplicate: true,
-      });
-      await waitForRuns(threadLoop, 1);
-      expect(threadLoop.runs[0]?.session.state.threadTurnReduction().action).toEqual({
-        action: "prepare_next_request",
-      });
-      threadLoop.runs[0]?.release();
     });
   });
 
@@ -2389,6 +2413,9 @@ describe("SessionManager", () => {
       expect(session?.state.contextManager.messages().at(-1)?.parts).toEqual([
         expect.objectContaining({ type: "text", text: "Approval allowed" }),
       ]);
+      const confirmationMessage = session?.state.contextManager.messages().at(-1);
+      expect(confirmationMessage).toBeDefined();
+      expect(session?.state.threadTurnReduction().checkpoint.pendingInputMessageIds).toEqual([confirmationMessage!.id]);
       expect(threadLoop.runs).toHaveLength(1);
       const messagesAfterConfirmation = session?.state.contextManager.messages().length;
       expect(
@@ -4340,6 +4367,7 @@ describe("SessionManager", () => {
       "cleanupSession",
       "commitTaskNotification",
       "ensureThreadInstalled",
+      "evictReviewerExecution",
       "inspectReviewerExecution",
       "inspectThread",
       "interruptControl",
@@ -4347,6 +4375,7 @@ describe("SessionManager", () => {
       "markThreadActive",
       "markThreadClosed",
       "preloadThread",
+      "releaseReviewerExecution",
       "resolveToolConfirmation",
       "shutdownActiveRuns",
       "waitReviewerExecution",

@@ -379,10 +379,7 @@ export class ThreadProcessor {
    * Admission is the Runtime-command success boundary; durable receipt application
    * is the only operation that removes the fact or advances request readiness.
    */
-  admitAcceptedInput(
-    state: RuntimeAcceptedInputState,
-    durableMessages: readonly RuntimeMessage[],
-  ): "applied" | "duplicate" | "conflict" {
+  admitAcceptedInput(state: RuntimeAcceptedInputState): "applied" | "duplicate" | "conflict" {
     const existing = this.#acceptedInputs.find((input) => input.runtimeInputId === state.runtimeInputId);
     if (existing !== undefined) {
       return sameAcceptedInput(existing, state) ? "duplicate" : "conflict";
@@ -392,14 +389,6 @@ export class ThreadProcessor {
       if (seen !== undefined) {
         return sameAcceptedInput(seen, state) ? "duplicate" : "conflict";
       }
-    }
-    if (
-      state.eventIds.length > 0 &&
-      state.eventIds.every((eventId) => durableMessages.some((message) =>
-        "owningEventId" in message && message.owningEventId === eventId
-      ))
-    ) {
-      return "duplicate";
     }
     this.#acceptedInputs.push(state);
     if (state.kind === "inter_agent_message") {
@@ -599,7 +588,7 @@ export class ThreadState {
 
   enqueueAcceptedInput(state: RuntimeAcceptedInputState): "applied" | "duplicate" | "conflict" {
     this.threadTurnReduction();
-    return this.#threadProcessor!.admitAcceptedInput(state, this.contextManager.messages());
+    return this.#threadProcessor!.admitAcceptedInput(state);
   }
 
   peekAcceptedInput(): RuntimeAcceptedInputState | undefined {

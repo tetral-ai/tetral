@@ -409,6 +409,17 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 			t.Fatalf("Tool Result count for %s = %d; want one", target.GetEventId(), results)
 		}
 	}
+	store.RuntimeBindingTokenHMACKey = []byte("stable-reasoning-composition-key-32")
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_stable_reasoning_composition",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext stable reasoning: %v", err)
+	}
+	composed := runColdCheckpointComposition(t, loaded.GetContextJson())
+	if composed.Checkpoint.Request == nil || composed.Checkpoint.Request.ModelRequestID != requestID || composed.Checkpoint.Request.ToolMemberCount != 2 || len(composed.ToolRouteView.Routes) != 0 || composed.ReducerAction != "prepare_next_request" {
+		t.Fatalf("stable reasoning composition = %+v; want two independently terminal Tool members", composed)
+	}
 }
 
 func TestPostgreSQLBridgeAPIStoreStableReasoningEnforcesCumulativeBoundsAtomically(t *testing.T) {
@@ -727,11 +738,38 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(
 	}
 	resultRequest := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_tool_result_membership_first", ModelRequestId: "mreq_tool_result_membership",
-		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}],"is_error":false}`,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
+		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"failed"}],"is_error":true}`,
+		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
+			ToolUseEventId: toolUse.GetEventId(),
+			Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
+				ErrorJson: `{"code":"sandbox_failure","detail":{"exit":7}}`,
+			}},
+		}},
 	}
 	if _, err := store.WriteEvent(context.Background(), resultRequest); err != nil {
 		t.Fatalf("WriteEvent first Tool Result: %v", err)
+	}
+	var durableMessage string
+	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+		WHERE workspace_id='default' AND session_id='sesn_tool_result_membership'
+		AND session_thread_id='thr_tool_result_membership' AND model_request_id='mreq_tool_result_membership'`).Scan(&durableMessage); err != nil {
+		t.Fatalf("read generic Tool projection: %v", err)
+	}
+	var genericProjection struct {
+		Parts []struct {
+			State struct {
+				Error struct {
+					Code   string `json:"code"`
+					Detail struct {
+						Exit int `json:"exit"`
+					} `json:"detail"`
+				} `json:"error"`
+			} `json:"state"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(durableMessage), &genericProjection); err != nil || len(genericProjection.Parts) != 1 ||
+		genericProjection.Parts[0].State.Error.Code != "sandbox_failure" || genericProjection.Parts[0].State.Error.Detail.Exit != 7 {
+		t.Fatalf("generic Tool error was rewritten: %s", durableMessage)
 	}
 	duplicateResult := proto.Clone(resultRequest).(*bridgev1.WriteEventRequest)
 	duplicateResult.RuntimeWriteId = "rwrite_tool_result_membership_second"
@@ -1581,15 +1619,25 @@ func TestPostgreSQLBridgeAPIStoreWriteEventForInternalReviewerStaysInternal(t *t
 			payloadJSON:    `{"type":"approval_review.failure","review_id":"arvw_bridge","parent_thread_id":"thr_bridge_reviewer_parent","target_model_tool_call_id":"tool_call_bridge","target_tool_name":"Write","failure_kind":"parse_failure","message":"approval reviewer decision is not JSON"}`,
 		},
 	} {
-		response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		request := &bridgev1.WriteEventRequest{
 			Scope:          bridgeAPIScope("sesn_bridge_reviewer_event", "thr_bridge_reviewer", "bind_bridge_reviewer_event", 1, "pod_uid_reviewer_event"),
 			RuntimeWriteId: test.runtimeWriteID,
 			EventType:      test.eventType,
 			PayloadJson:    test.payloadJSON,
 			SessionVisible: true,
-		})
+		}
+		response, err := store.WriteEvent(context.Background(), request)
 		if err != nil {
 			t.Fatalf("WriteEvent reviewer %s: %v", test.name, err)
+		}
+		replay, err := store.WriteEvent(context.Background(), request)
+		if err != nil {
+			t.Fatalf("WriteEvent reviewer %s replay: %v", test.name, err)
+		}
+		if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+			replay.GetEventId() != response.GetEventId() ||
+			replay.GetAck().GetRuntimeWriteId() != test.runtimeWriteID {
+			t.Fatalf("WriteEvent reviewer %s replay = %+v; want duplicate original event and operation", test.name, replay)
 		}
 
 		var eventVisibility string

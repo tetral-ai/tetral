@@ -104,12 +104,12 @@ test("refreshes the binding token without advancing the request anchor past its 
     expect(session.state.lastRequestContextAnchorSequence()).toBe(session.state.contextManager.messages().find((message) => message.role === "user")?.sequence);
 });
 test("loads cold context and pending messages without deriving the configured model from either message list", async () => {
-    const history = [userMessage("user-1", 0, "first")];
+    const history = [userMessage("user-1", 1, "first")];
     const pending = {
         type: "messages",
         messages: [
-            userMessage("user-2", 1, "second"),
-            userMessage("user-3", 2, "third"),
+            userMessage("user-2", 2, "second"),
+            userMessage("user-3", 3, "third"),
         ],
     } as const satisfies PendingInputResult;
     const loader = new RecordingContextLoader(history, pending);
@@ -505,14 +505,18 @@ test("inputs admitted during a commit are reducer-selected before the finite req
 });
 test("lost CommitInputs acknowledgement cold-loads the database-stamped input exactly once", async () => {
     const session = new ThreadRuntime("sesn_cold_committed_input");
-    const committed = userMessage("msg_cold_committed_input", 1, "resume this durable input");
+    const replayedInput = acceptedInput("rin_cold_committed_input", session.sessionId);
+    const committed = userMessage("msg_rin_cold_committed_input_0", 1, "resume this durable input");
     session.state.contextManager.replaceMessages([committed]);
     session.state.markPersistentContextLoaded();
     session.state.installThreadTurn({
         pendingInputMessageIds: [committed.id],
     }, { routes: [] });
+    expect(session.state.enqueueAcceptedInput(replayedInput)).toBe("applied");
     const requests: LLMRequest[] = [];
-    const loader = new QueuedContextLoader([], []);
+    const loader = new QueuedContextLoader([], [], [
+        (input: RuntimeAcceptedInputState) => acceptedInputReceipt(input, "duplicate", 1),
+    ]);
     const result = await Effect.runPromise(Effect.gen(function* () {
         return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
@@ -520,7 +524,8 @@ test("lost CommitInputs acknowledgement cold-loads the database-stamped input ex
         onStream: (request) => requests.push(request),
     }))));
     expect(result).toMatchObject({ type: "completed" });
-    expect(loader.commitCalls).toEqual([]);
+    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([replayedInput.runtimeInputId]);
+    expect(session.state.threadTurnReduction().checkpoint.pendingInputMessageIds).toEqual([]);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(1);
     expect(requests[0]?.messages.map((message) => message.role)).toEqual([
@@ -1403,8 +1408,6 @@ describe("ThreadState", () => {
       role: "user",
       origin: "runtime",
       sequence: 4,
-      owningEventId: "sevt_task_notification_committed",
-      eventSequence: 4,
       status: "completed",
       createdAt: timestamp,
       updatedAt: timestamp,

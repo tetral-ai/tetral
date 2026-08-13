@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -87,8 +88,10 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 		"accepted", bindingID, podUID, 2, 2,
 	)
 	job := exhaustionRuntimeJob(sessionID, threadID, "rin_exhaustion_delivery", "messages", []string{"evt_exhaustion_delivery"})
+	job.SequenceFrom = 2
+	job.SequenceTo = 2
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult()); err != nil {
+	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResultForBinding(bindingID, 1, podUID)); err != nil {
 		t.Fatalf("finalize exhausted delivery: %v", err)
 	}
 
@@ -121,33 +124,7 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesEventAnchoredPreInboxOnce(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_preinbox", "thr_exhaust_preinbox")
-	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_preinbox", "thr_exhaust_preinbox", "evt_exhaust_preinbox", 1, "user.message", `{"type":"user.message"}`)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 1, 0, 0, time.UTC) }
-	job := exhaustionRuntimeJob("sesn_exhaust_preinbox", "thr_exhaust_preinbox", "rin_exhaust_preinbox", "messages", []string{"evt_exhaust_preinbox"})
-
-	finalized, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult())
-	if err != nil {
-		t.Fatalf("FinalizeRuntimeDelivery: %v", err)
-	}
-	assertExhaustedRuntimeDeliveryResult(t, finalized)
-	assertRuntimeExhaustionRows(t, admin, job, "", 1)
-
-	replayed, found, err := store.ReplayRuntimeDeliveryFinalization(context.Background(), job)
-	if err != nil || !found {
-		t.Fatalf("ReplayRuntimeDeliveryFinalization = %#v/%v/%v; want stored disposition", replayed, found, err)
-	}
-	assertExhaustedRuntimeDeliveryResult(t, replayed)
-	if _, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult()); err != nil {
-		t.Fatalf("FinalizeRuntimeDelivery replay: %v", err)
-	}
-	assertRuntimeExhaustionRows(t, admin, job, "", 1)
-}
-
-func TestPostgreSQLRuntimeDeliveryStoreConcurrentEventAnchoredPreInboxFinalizationLinearizes(t *testing.T) {
+func TestPostgreSQLRuntimeDeliveryStoreConcurrentQueuedInboxFinalizationLinearizes(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_exhaust_concurrent_event"
 	const threadID = "thr_exhaust_concurrent_event"
@@ -157,6 +134,7 @@ func TestPostgreSQLRuntimeDeliveryStoreConcurrentEventAnchoredPreInboxFinalizati
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 1, 30, 0, time.UTC) }
 	job := exhaustionRuntimeJob(sessionID, threadID, "rin_exhaust_concurrent_event", "messages", []string{eventID})
+	seedRuntimeInboxBirthForJob(t, admin, job)
 	locker, lockerPID := lockPostgreSQLFinalizationFence(t, admin,
 		`SELECT id FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2 FOR UPDATE`,
 		sessionID,
@@ -176,7 +154,7 @@ func TestPostgreSQLRuntimeDeliveryStoreConcurrentEventAnchoredPreInboxFinalizati
 		}
 		assertExhaustedRuntimeDeliveryResult(t, result.result)
 	}
-	assertRuntimeExhaustionRows(t, admin, job, "", 1)
+	assertRuntimeExhaustionRows(t, admin, job, "dead_lettered", 1)
 }
 
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *testing.T) {
@@ -187,7 +165,7 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *tes
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	job := exhaustionRuntimeJob("sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", []string{"evt_exhaust_delivering"})
 
-	result, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult())
+	result, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResultForBinding("bind_exhaust_delivering", 1, "pod_exhaust_delivering"))
 	if err != nil {
 		t.Fatalf("FinalizeRuntimeDelivery: %v", err)
 	}
@@ -259,41 +237,52 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		if err := queueAdmin.QueryRowContext(context.Background(), `SELECT status, attempt_count, max_attempts FROM queue_jobs WHERE workspace_id='default' AND id=$1`, job.JobID).Scan(&queueStatus, &attemptCount, &maxAttempts); err != nil {
 			t.Fatalf("read recoverable Queue lease: %v", err)
 		}
-		if inboxStatus != "accepted" || processedAt.Valid || errorsCount != 0 || queueStatus != queue.StatusLeased || attemptCount != 1 || maxAttempts != 1 {
-			t.Fatalf("pre-transaction Bridge/Queue state inbox=%q processed=%v errors=%d queue=%q attempts=%d/%d; want accepted/unprocessed/zero/leased/1/1", inboxStatus, processedAt.Valid, errorsCount, queueStatus, attemptCount, maxAttempts)
+		if inboxStatus != "queued" || processedAt.Valid || errorsCount != 0 || queueStatus != queue.StatusLeased || attemptCount != 1 || maxAttempts != 1 {
+			t.Fatalf("pre-transaction Bridge/Queue state inbox=%q processed=%v errors=%d queue=%q attempts=%d/%d; want queued/unprocessed/zero/leased/1/1", inboxStatus, processedAt.Valid, errorsCount, queueStatus, attemptCount, maxAttempts)
 		}
 	})
 
 	t.Run("Bridge commit before Queue dead-letter", func(t *testing.T) {
 		for _, arm := range []struct {
-			name          string
-			existingInbox bool
-			wantInbox     string
+			name      string
+			wantInbox string
 		}{
-			{name: "existing inbox", existingInbox: true, wantInbox: "dead_lettered"},
-			{name: "event-anchored pre-inbox", existingInbox: false},
+			{name: "queued inbox", wantInbox: "dead_lettered"},
 		} {
 			t.Run(arm.name, func(t *testing.T) {
 				bridgeRuntime, bridgeAdmin := storagetest.NewPostgreSQLDBWithAdmin(t)
 				queueRuntime, queueAdmin := storagetest.NewPostgreSQLDBWithAdmin(t)
 				suffix := strings.NewReplacer("-", "_", " ", "_").Replace(arm.name)
-				job := seedCrossDatabaseExhaustionFixture(t, bridgeAdmin, suffix, arm.existingInbox)
+				job := seedCrossDatabaseExhaustionFixture(t, bridgeAdmin, suffix, true)
 				bridgeStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(bridgeRuntime), 9090)
 				bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC) }
 				queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(queueRuntime))
 				leased := enqueueAndLeaseExhaustionJob(t, queueStore, job, time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC))
+				if _, err := queueAdmin.ExecContext(context.Background(), `UPDATE queue_jobs
+					SET max_attempts=2,
+					    leased_until=clock_timestamp() - interval '1 millisecond'
+				  WHERE workspace_id='default' AND id=$1`, leased.ID); err != nil {
+					t.Fatalf("extend Queue attempt bound for real reclaim: %v", err)
+				}
 				job.JobID = leased.ID
 				job.LeaseToken = leased.LeaseToken
-				job.AttemptCount = int32(leased.AttemptCount)
-				job.MaxAttempts = int32(leased.MaxAttempts)
+				job.AttemptCount = 2
+				job.MaxAttempts = 2
 
 				if _, err := bridgeStore.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult()); err != nil {
 					t.Fatalf("commit Bridge exhaustion fence: %v", err)
 				}
+				reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+					WorkspaceID: workspace.DefaultID,
+					Kind:        queue.KindRuntimeInput,
+					Limit:       1,
+				})
+				if err != nil || reclaimed != 1 {
+					t.Fatalf("reclaim expired Queue lease = %d/%v; want one", reclaimed, err)
+				}
 				deliverer := &postgresFinalizingDeliverer{store: bridgeStore, result: retryableExhaustionResult()}
 				queueServer := tetralqueue.NewServer(queueStore, nil)
-				queueClient := &fixedLeaseQueueClient{QueueClient: queueServer, job: queueJobProto(leased)}
-				runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
+				runner := &JobRunner{Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
 
 				if err := runner.RunOnce(context.Background()); err != nil {
 					t.Fatalf("RunOnce after Bridge crash boundary: %v", err)
@@ -325,6 +314,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 			t.Fatalf("Runtime deliveries before Queue response loss = %d; want one", deliverer.deliveries)
 		}
 		job.JobID = queueClient.deadLetteredJobID
+		job.MaxAttempts = 1
 		assertCrossDatabaseExhaustionConverged(t, bridgeAdmin, queueAdmin, bridgeStore, job, "dead_lettered")
 		if err := runner.RunOnce(context.Background()); err != nil {
 			t.Fatalf("RunOnce after terminal Queue row: %v", err)
@@ -333,6 +323,251 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 			t.Fatalf("Runtime deliveries after terminal Queue row = %d; want unchanged one", deliverer.deliveries)
 		}
 	})
+}
+
+func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMutation(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, *sql.DB, *queue.PostgreSQLQueueStore, time.Time) (string, string)
+		check func(*testing.T, *sql.DB)
+	}{
+		{
+			name: "missing generic Inbox",
+			setup: func(t *testing.T, admin *sql.DB, queueStore *queue.PostgreSQLQueueStore, now time.Time) (string, string) {
+				job := seedCrossDatabaseExhaustionFixture(t, admin, "missing_generic", false)
+				queued := enqueueExhaustionJob(t, queueStore, job, now)
+				return job.SessionID, queued.ID
+			},
+			check: func(t *testing.T, admin *sql.DB) {
+				assertRuntimeSourceFactsUnchanged(t, admin, "sesn_cross_missing_generic", []string{"evt_cross_missing_generic"}, "rin_cross_missing_generic", false)
+			},
+		},
+		{
+			name: "conflicting generic Inbox",
+			setup: func(t *testing.T, admin *sql.DB, queueStore *queue.PostgreSQLQueueStore, now time.Time) (string, string) {
+				const (
+					sessionID = "sesn_invalid_generic_conflict"
+					threadID  = "thr_invalid_generic_conflict"
+				)
+				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_inbox_generic_conflict", 1, "user.message", `{"type":"user.message"}`)
+				seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_queue_generic_conflict", 2, "user.message", `{"type":"user.message"}`)
+				inboxJob := exhaustionRuntimeJob(sessionID, threadID, "rin_invalid_generic_conflict", "messages", []string{"evt_inbox_generic_conflict"})
+				seedRuntimeInboxBirthForJob(t, admin, inboxJob)
+				queueJob := exhaustionRuntimeJob(sessionID, threadID, inboxJob.RuntimeInputID, "messages", []string{"evt_queue_generic_conflict"})
+				queueJob.SequenceFrom, queueJob.SequenceTo = 2, 2
+				payload := fmt.Sprintf(`{"workspace_id":"default","session_id":%q,"session_thread_id":%q,"runtime_input_id":%q,"event_ids":[%q],"sequence_from":2,"sequence_to":2,"input_kind":"messages"}`, sessionID, threadID, queueJob.RuntimeInputID, queueJob.EventIDs[0])
+				queued, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+					WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+					PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+					DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, queueJob.RuntimeInputID),
+					PayloadVersion: 1, PayloadJSON: []byte(payload), MaxAttempts: 1, Now: now,
+				})
+				if err != nil {
+					t.Fatalf("enqueue conflicting generic job: %v", err)
+				}
+				return sessionID, queued.ID
+			},
+			check: func(t *testing.T, admin *sql.DB) {
+				assertRuntimeSourceFactsUnchanged(t, admin, "sesn_invalid_generic_conflict", []string{"evt_inbox_generic_conflict", "evt_queue_generic_conflict"}, "rin_invalid_generic_conflict", true)
+				var queuedJobs int
+				var eventIDsJSON string
+				if err := admin.QueryRowContext(context.Background(), `SELECT count(*), COALESCE(max(payload_json::jsonb ->> 'event_ids'), '')
+					FROM queue_jobs WHERE workspace_id='default' AND status=$1
+					AND payload_json::jsonb ->> 'runtime_input_id'='rin_invalid_generic_conflict'`, queue.StatusPending).Scan(&queuedJobs, &eventIDsJSON); err != nil {
+					t.Fatalf("read recreated canonical Queue custody: %v", err)
+				}
+				if queuedJobs != 1 || eventIDsJSON != `["evt_inbox_generic_conflict"]` {
+					t.Fatalf("recreated Queue custody = %d/%s; want one canonical Inbox payload", queuedJobs, eventIDsJSON)
+				}
+			},
+		},
+		{
+			name: "missing agent mail Inbox",
+			setup: func(t *testing.T, admin *sql.DB, queueStore *queue.PostgreSQLQueueStore, now time.Time) (string, string) {
+				const (
+					sessionID = "sesn_invalid_missing_mail"
+					mainID    = "thr_invalid_missing_mail_main"
+					childID   = "thr_invalid_missing_mail_child"
+					delivery  = "delivery_invalid_missing_mail"
+				)
+				seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+				seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+				messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_invalid_missing_mail", completionMailEnvelope("main", "task_child", "done"))
+				seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_invalid_missing_mail", 1, "agent.thread_message_sent",
+					bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_invalid_missing_mail", messageJSON))
+				request, _, err := agentMailWakeEnqueueRequest("default", sessionID, mainID, delivery, now)
+				if err != nil {
+					t.Fatalf("build missing agent-mail Queue custody: %v", err)
+				}
+				queued, err := queueStore.Enqueue(context.Background(), request)
+				if err != nil {
+					t.Fatalf("enqueue missing agent-mail custody: %v", err)
+				}
+				return sessionID, queued.ID
+			},
+			check: func(t *testing.T, admin *sql.DB) {
+				assertRuntimeSourceFactsUnchanged(t, admin, "sesn_invalid_missing_mail", []string{"evt_invalid_missing_mail"}, "agent_mail:delivery_invalid_missing_mail", false)
+			},
+		},
+		{
+			name: "missing task notification Inbox",
+			setup: func(t *testing.T, admin *sql.DB, queueStore *queue.PostgreSQLQueueStore, now time.Time) (string, string) {
+				const (
+					sessionID = "sesn_invalid_missing_task"
+					threadID  = "thr_invalid_missing_task"
+					taskID    = "task_invalid_missing_task"
+					sourceID  = "sevt_invalid_missing_task"
+				)
+				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_invalid_missing_task", 1, "pod_invalid_missing_task")
+				seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, "bind_invalid_missing_task", taskID, sourceID)
+				settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
+				request, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
+				if err != nil {
+					t.Fatalf("build missing task-notification Queue custody: %v", err)
+				}
+				queued, err := queueStore.Enqueue(context.Background(), request)
+				if err != nil {
+					t.Fatalf("enqueue missing task-notification custody: %v", err)
+				}
+				return sessionID, queued.ID
+			},
+			check: func(t *testing.T, admin *sql.DB) {
+				assertRuntimeSourceFactsUnchanged(t, admin, "sesn_invalid_missing_task", []string{"sevt_invalid_missing_task"}, "task_notification:task_invalid_missing_task", false)
+				var terminalEvent sql.NullString
+				if err := admin.QueryRowContext(context.Background(), `SELECT terminal_event_id FROM session_background_tasks
+					WHERE workspace_id='default' AND session_id='sesn_invalid_missing_task' AND task_id='task_invalid_missing_task'`).Scan(&terminalEvent); err != nil {
+					t.Fatalf("read missing task-notification source: %v", err)
+				}
+				if terminalEvent.Valid {
+					t.Fatalf("missing task-notification source terminal event = %q; want unchanged empty", terminalEvent.String)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			now := time.Now().UTC().Add(-time.Second)
+			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			sessionID, jobID := test.setup(t, admin, queueStore, now)
+			deliverer := &postgresFinalizingDeliverer{
+				store:  NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090),
+				result: retryableExhaustionResult(),
+			}
+			runner := &JobRunner{
+				Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+				Config: JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+			}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("run invalid custody job: %v", err)
+			}
+			var queueStatus, errorKind string
+			if err := admin.QueryRowContext(context.Background(), `SELECT status, last_error_kind FROM queue_jobs
+				WHERE workspace_id='default' AND id=$1`, jobID).Scan(&queueStatus, &errorKind); err != nil {
+				t.Fatalf("read invalid custody Queue disposition: %v", err)
+			}
+			var sessionErrors int
+			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+				WHERE workspace_id='default' AND session_id=$1 AND type='session.error'`, sessionID).Scan(&sessionErrors); err != nil {
+				t.Fatalf("count invalid custody Session errors: %v", err)
+			}
+			if queueStatus != queue.StatusDeadLettered || errorKind != "invalid_runtime_job_payload" || sessionErrors != 0 || deliverer.deliveries != 0 {
+				t.Fatalf("invalid custody disposition = Queue %s/%s Session errors %d Runtime calls %d; want dead_lettered/invalid_runtime_job_payload/0/0", queueStatus, errorKind, sessionErrors, deliverer.deliveries)
+			}
+			test.check(t, admin)
+		})
+	}
+}
+
+func TestPostgreSQLCompletionMailProducerAndJobRunnerTerminalizeQueuedInbox(t *testing.T) {
+	const suffix = "queued_exhaustion"
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, suffix)
+	producer := completionMailTestStore(t, runtime)
+	request := bridgeAPIChildFinishIdleFailureRequest(suffix)
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, producer, request); err != nil {
+		t.Fatalf("produce completion mail custody: %v", err)
+	}
+	sessionID := completionTestSessionID(suffix)
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+		t.Fatalf("remove Runtime target before first delivery: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET max_attempts=1, available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND kind='runtime_input'
+		AND payload_json::jsonb ->> 'session_id'=$1
+		AND payload_json::jsonb ->> 'input_kind'='agent_mail'`, sessionID); err != nil {
+		t.Fatalf("configure final completion-mail attempt: %v", err)
+	}
+	var sentProcessedBefore sql.NullTime
+	if err := admin.QueryRowContext(context.Background(), `SELECT processed_at FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'`, sessionID).Scan(&sentProcessedBefore); err != nil {
+		t.Fatalf("read completion-mail source before exhaustion: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: manifestCompositionDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
+		Config:    JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run final completion-mail attempt: %v", err)
+	}
+	var inboxStatus, queueStatus, errorKind string
+	var sessionErrors, liveInbox int
+	var sentProcessed sql.NullTime
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail'),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND kind='runtime_input'
+		  AND payload_json::jsonb ->> 'session_id'=$1 AND payload_json::jsonb ->> 'input_kind'='agent_mail'),
+		(SELECT last_error_kind FROM queue_jobs WHERE workspace_id='default' AND kind='runtime_input'
+		  AND payload_json::jsonb ->> 'session_id'=$1 AND payload_json::jsonb ->> 'input_kind'='agent_mail'),
+		(SELECT processed_at FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1
+		  AND status IN ('queued','delivering','accepted','parked'))`, sessionID).Scan(
+		&inboxStatus, &queueStatus, &errorKind, &sentProcessed, &sessionErrors, &liveInbox,
+	); err != nil {
+		t.Fatalf("read completion-mail exhaustion settlement: %v", err)
+	}
+	if inboxStatus != "dead_lettered" || queueStatus != queue.StatusDeadLettered || errorKind != "runtime_delivery_exhausted" ||
+		sentProcessed.Valid != sentProcessedBefore.Valid || (sentProcessed.Valid && !sentProcessed.Time.Equal(sentProcessedBefore.Time)) ||
+		sessionErrors != 1 || liveInbox != 0 || len(sender.requests) != 0 {
+		t.Fatalf("completion-mail settlement = Inbox %s Queue %s/%s sent processed %v errors %d live %d Runtime calls %d",
+			inboxStatus, queueStatus, errorKind, sentProcessed.Valid, sessionErrors, liveInbox, len(sender.requests))
+	}
+}
+
+func assertRuntimeSourceFactsUnchanged(t *testing.T, db *sql.DB, sessionID string, eventIDs []string, runtimeInputID string, wantInbox bool) {
+	t.Helper()
+	for _, eventID := range eventIDs {
+		var processedAt sql.NullTime
+		if err := db.QueryRowContext(context.Background(), `SELECT processed_at FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, eventID).Scan(&processedAt); err != nil {
+			t.Fatalf("read unchanged source event %s: %v", eventID, err)
+		}
+		if processedAt.Valid {
+			t.Fatalf("source event %s processed at %v; want unchanged", eventID, processedAt.Time)
+		}
+	}
+	var inboxCount int
+	var inboxStatus string
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*), COALESCE(max(status), '') FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID).Scan(&inboxCount, &inboxStatus); err != nil {
+		t.Fatalf("read unchanged Inbox custody: %v", err)
+	}
+	wantCount := 0
+	if wantInbox {
+		wantCount = 1
+	}
+	if inboxCount != wantCount || (wantInbox && inboxStatus != "queued") {
+		t.Fatalf("unchanged Inbox = %d/%s; want %d/queued", inboxCount, inboxStatus, wantCount)
+	}
 }
 
 func exhaustionRuntimeJob(sessionID string, threadID string, runtimeInputID string, inputKind string, eventIDs []string) RuntimeJob {
@@ -355,6 +590,14 @@ func exhaustionRuntimeJob(sessionID string, threadID string, runtimeInputID stri
 
 func retryableExhaustionResult() RuntimeDeliveryResult {
 	return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_busy", ErrorMessage: "runtime busy"}
+}
+
+func retryableExhaustionResultForBinding(bindingID string, bindingGeneration int64, podUID string) RuntimeDeliveryResult {
+	result := retryableExhaustionResult()
+	result.AttemptedBindingID = bindingID
+	result.AttemptedBindingGeneration = bindingGeneration
+	result.AttemptedTargetPodUID = podUID
+	return result
 }
 
 func assertExhaustedRuntimeDeliveryResult(t *testing.T, result RuntimeDeliveryResult) {
@@ -511,18 +754,8 @@ func (d *postgresFinalizingDeliverer) ReplayRuntimeDeliveryFinalization(ctx cont
 	return d.store.ReplayRuntimeDeliveryFinalization(ctx, job)
 }
 
-type fixedLeaseQueueClient struct {
-	QueueClient
-	job    *queuev1.QueueJob
-	leased bool
-}
-
-func (c *fixedLeaseQueueClient) Lease(context.Context, *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
-	if c.leased {
-		return &queuev1.LeaseResponse{}, nil
-	}
-	c.leased = true
-	return &queuev1.LeaseResponse{Jobs: []*queuev1.QueueJob{c.job}}, nil
+func (d *postgresFinalizingDeliverer) ReplaceMalformedRuntimeInputCustody(ctx context.Context, job RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error) {
+	return d.store.ReplaceMalformedRuntimeInputCustody(ctx, job)
 }
 
 var errSyntheticQueueResponseLoss = errors.New("synthetic queue response loss")
@@ -550,7 +783,8 @@ func seedCrossDatabaseExhaustionFixture(t *testing.T, bridgeAdmin *sql.DB, suffi
 	seedBridgeAPISession(t, bridgeAdmin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, bridgeAdmin, "default", sessionID, threadID, eventID, 1, "user.message", `{"type":"user.message"}`)
 	if existingInbox {
-		seedBridgeAPIRuntimeInbox(t, bridgeAdmin, "default", sessionID, threadID, runtimeInputID, "messages", fmt.Sprintf(`[%q]`, eventID), "accepted", "bind_cross", "pod_cross", 1, 1)
+		job := exhaustionRuntimeJob(sessionID, threadID, runtimeInputID, "messages", []string{eventID})
+		seedRuntimeInboxBirthForJob(t, bridgeAdmin, job)
 	}
 	return exhaustionRuntimeJob(sessionID, threadID, runtimeInputID, "messages", []string{eventID})
 }
@@ -609,7 +843,7 @@ func queueJobProto(job *queue.Job) *queuev1.QueueJob {
 func assertCrossDatabaseExhaustionConverged(t *testing.T, bridgeAdmin *sql.DB, queueAdmin *sql.DB, store *PostgreSQLRuntimeDeliveryStore, job RuntimeJob, wantInbox string) {
 	t.Helper()
 	assertRuntimeExhaustionRows(t, bridgeAdmin, job, wantInbox, 1)
-	assertIndependentQueueExhausted(t, queueAdmin, job.JobID)
+	assertIndependentQueueExhausted(t, queueAdmin, job.JobID, int(job.MaxAttempts))
 	for iteration := 0; iteration < 3; iteration++ {
 		if _, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult()); err != nil {
 			t.Fatalf("replay finalization %d: %v", iteration, err)
@@ -618,7 +852,7 @@ func assertCrossDatabaseExhaustionConverged(t *testing.T, bridgeAdmin *sql.DB, q
 	assertRuntimeExhaustionRows(t, bridgeAdmin, job, wantInbox, 1)
 }
 
-func assertIndependentQueueExhausted(t *testing.T, queueAdmin *sql.DB, jobID string) {
+func assertIndependentQueueExhausted(t *testing.T, queueAdmin *sql.DB, jobID string, wantAttempts int) {
 	t.Helper()
 	var queueStatus string
 	var attemptCount int
@@ -626,7 +860,7 @@ func assertIndependentQueueExhausted(t *testing.T, queueAdmin *sql.DB, jobID str
 	if err := queueAdmin.QueryRowContext(context.Background(), `SELECT status, attempt_count, max_attempts FROM queue_jobs WHERE workspace_id='default' AND id=$1`, jobID).Scan(&queueStatus, &attemptCount, &maxAttempts); err != nil {
 		t.Fatalf("read independent Queue row: %v", err)
 	}
-	if queueStatus != queue.StatusDeadLettered || attemptCount != 1 || maxAttempts != 1 {
-		t.Fatalf("Queue status/attempts = %q/%d/%d; want dead_lettered/1/1", queueStatus, attemptCount, maxAttempts)
+	if queueStatus != queue.StatusDeadLettered || attemptCount != wantAttempts || maxAttempts != wantAttempts {
+		t.Fatalf("Queue status/attempts = %q/%d/%d; want dead_lettered/%d/%d", queueStatus, attemptCount, maxAttempts, wantAttempts, wantAttempts)
 	}
 }

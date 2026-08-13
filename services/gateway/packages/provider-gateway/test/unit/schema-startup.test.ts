@@ -10,7 +10,7 @@ describe("provider-gateway schema verification", () => {
     const sql = schemaSQL(queries, [
       [{ exists: true }],
       [
-        { version: 1, checksum: "b3524de83064493ac449227dfafa353044524393045e536044cb6694f7476bc5" },
+        { version: 1, checksum: "c367edfe42520fc13444fce5e23e896ac689f23e9e9c850e6555a55d1d58c9d3" },
       ],
     ]);
 
@@ -23,12 +23,12 @@ describe("provider-gateway schema verification", () => {
     { name: "missing", responses: [[{ exists: false }]], kind: "schema_missing" },
     { name: "behind", responses: [[{ exists: true }], []], kind: "schema_behind" },
     { name: "gap", responses: [[{ exists: true }], [{ version: 2, checksum: "a".repeat(64) }]], kind: "schema_history_gap" },
-    { name: "duplicate", responses: [[{ exists: true }], [{ version: 1, checksum: "b3524de83064493ac449227dfafa353044524393045e536044cb6694f7476bc5" }, { version: 1, checksum: "b3524de83064493ac449227dfafa353044524393045e536044cb6694f7476bc5" }]], kind: "schema_history_duplicate" },
+    { name: "duplicate", responses: [[{ exists: true }], [{ version: 1, checksum: "c367edfe42520fc13444fce5e23e896ac689f23e9e9c850e6555a55d1d58c9d3" }, { version: 1, checksum: "c367edfe42520fc13444fce5e23e896ac689f23e9e9c850e6555a55d1d58c9d3" }]], kind: "schema_history_duplicate" },
     { name: "drift", responses: [[{ exists: true }], [{ version: 1, checksum: "a".repeat(64) }]], kind: "schema_checksum_drift" },
     {
       name: "ahead",
       responses: [[{ exists: true }], [
-        { version: 1, checksum: "b3524de83064493ac449227dfafa353044524393045e536044cb6694f7476bc5" },
+        { version: 1, checksum: "c367edfe42520fc13444fce5e23e896ac689f23e9e9c850e6555a55d1d58c9d3" },
         { version: 2, checksum: "a".repeat(64) },
       ]],
       kind: "schema_ahead",

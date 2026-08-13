@@ -41,6 +41,8 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "mcp.manifest.received_generation"?: number;
   readonly "mcp.manifest.current_generation"?: number;
   readonly "mcp.tool_catalog.eligible"?: boolean;
+  readonly "reconstruction.phase"?: "cold_checkpoint";
+  readonly "failure.kind"?: "invalid_durable_facts";
 };
 
 /** Closed, non-sensitive Runtime Pod startup stages. */
@@ -59,6 +61,28 @@ export interface RuntimeReceiptEvidence {
   readonly bindingGeneration: number;
   readonly applicationDisposition?: "current_custody" | "stale_custody" | undefined;
   readonly outcome: RuntimeReceiptEvidenceOutcome;
+}
+
+/** Emits bounded identity-only evidence when durable facts cannot form a cold Thread checkpoint. */
+export function recordCheckpointReconstructionFailure(
+  logger: RuntimePodLogger | undefined,
+  identity: { readonly workspaceId: string; readonly sessionId: string; readonly sessionThreadId: string },
+): void {
+  try {
+    logger?.error({
+      event: "runtime_checkpoint_reconstruction_failed",
+      "event.kind": "runtime_checkpoint_reconstruction_failed",
+      component: "agent-runtime",
+      message: "durable Thread facts could not be reconstructed",
+      "workspace.id": identity.workspaceId,
+      "session.id": identity.sessionId,
+      "thread.id": identity.sessionThreadId,
+      "reconstruction.phase": "cold_checkpoint",
+      "failure.kind": "invalid_durable_facts",
+    });
+  } catch {
+    // Durable context handling is authoritative; diagnostics are fail-open.
+  }
 }
 
 /** Minimal metric extension consumed by the receipt evidence recorder. */
@@ -224,6 +248,7 @@ export function acceptedInputCommitLogRecord(
     "retry.attempt": event.attempt,
     "duration.ms": event.durationMs,
     outcome: event.outcome,
+    ...(event.failureClass === undefined ? {} : { "failure.class": event.failureClass }),
   };
 }
 

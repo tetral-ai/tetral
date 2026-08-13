@@ -1,7 +1,12 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -116,5 +121,93 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	}
 	if finalInboxStatus != "accepted" || finalQueueStatus != queue.StatusAcknowledged {
 		t.Fatalf("delivered custody = Inbox %q / Queue %q; want accepted / acknowledged", finalInboxStatus, finalQueueStatus)
+	}
+}
+
+func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_first_queued_exhaustion"
+		threadID  = "thr_first_queued_exhaustion"
+		bindingID = "bind_first_queued_exhaustion"
+		podUID    = "pod_first_queued_exhaustion"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	client := dbconnect.NewClientForTesting(runtime)
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	appended, err := eventService.AppendClientEvents(
+		context.Background(), workspace.DefaultID, sessionID, "idem_first_queued_exhaustion",
+		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+			Type:    sessionevent.EventTypeUserMessage,
+			Content: []sessionevent.ContentBlock{{Type: sessionevent.ContentBlockTypeText, Text: "exhaust before claim"}},
+		}}},
+	)
+	if err != nil || len(appended.Data) != 1 {
+		t.Fatalf("append producer input = %#v/%v; want one event", appended, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+		t.Fatalf("remove Runtime target before first claim: %v", err)
+	}
+	var runtimeInputID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND input_kind='messages'`, sessionID).Scan(&runtimeInputID); err != nil {
+		t.Fatalf("read producer Runtime input: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET max_attempts=1, available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND kind='runtime_input'
+		AND payload_json::jsonb ->> 'runtime_input_id'=$1`, runtimeInputID); err != nil {
+		t.Fatalf("configure final producer input attempt: %v", err)
+	}
+	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	var attemptLog bytes.Buffer
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: manifestCompositionDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
+		Config:    JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Logger:    slog.New(slog.NewJSONHandler(&attemptLog, nil)),
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run producer input final attempt: %v", err)
+	}
+	var inboxStatus, queueStatus, errorKind string
+	var sessionErrors, liveInbox int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb ->> 'runtime_input_id'=$1),
+		(SELECT last_error_kind FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb ->> 'runtime_input_id'=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND type='session.error'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$2
+		  AND status IN ('queued','delivering','accepted','parked'))`, runtimeInputID, sessionID).Scan(
+		&inboxStatus, &queueStatus, &errorKind, &sessionErrors, &liveInbox,
+	); err != nil {
+		t.Fatalf("read producer input exhaustion: %v", err)
+	}
+	if inboxStatus != "dead_lettered" || queueStatus != queue.StatusDeadLettered || errorKind != "runtime_delivery_exhausted" ||
+		sessionErrors != 1 || liveInbox != 0 || len(sender.requests) != 0 {
+		t.Fatalf("producer exhaustion = Inbox %s Queue %s/%s errors %d live %d Runtime calls %d",
+			inboxStatus, queueStatus, errorKind, sessionErrors, liveInbox, len(sender.requests))
+	}
+	var record map[string]any
+	if err := json.Unmarshal(attemptLog.Bytes(), &record); err != nil {
+		t.Fatalf("decode Runtime delivery attempt log: %v", err)
+	}
+	keys := make([]string, 0, len(record))
+	for key := range record {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	wantKeys := []string{
+		"component", "event.kind", "finalization.disposition", "level", "msg", "operation",
+		"preparation.error_kind", "queue.attempt", "queue.job.id", "queue.max_attempts",
+		"runtime.input.id", "runtime.input.kind", "session.id", "thread.id", "time", "workspace.id",
+	}
+	if !reflect.DeepEqual(keys, wantKeys) || record["preparation.error_kind"] != "runtime_binding_unavailable" ||
+		record["finalization.disposition"] != "rejected:runtime_delivery_exhausted" {
+		t.Fatalf("Runtime delivery attempt log = %#v; want bounded attempt and finalization evidence", record)
 	}
 }

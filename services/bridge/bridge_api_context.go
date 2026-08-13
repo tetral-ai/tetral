@@ -100,7 +100,7 @@ type bridgeLoadContextMessageDescriptor struct {
 	Kind            string
 	MessageID       string
 	MessageSequence int64
-	OwningEventID   string
+	SourceEventID   *string
 	ModelRequestID  *string
 	DataJSON        json.RawMessage
 }
@@ -289,19 +289,13 @@ func loadThreadContextJSONTx(
 		)
 			SELECT m.kind,
 			       m.message_id,
-			       m.sequence,
-			       m.data_json,
-			       COALESCE(m.last_event_id, m.source_event_id),
-		       COALESCE(m.model_request_id, e.model_request_id),
+		       m.sequence,
+		       m.data_json,
+		       m.source_event_id,
+		       m.model_request_id,
 		       m.created_at,
-		       m.updated_at,
-		       e.sequence
+		       m.updated_at
 		  FROM session_messages m
-		  LEFT JOIN session_events e
-		    ON e.workspace_id = m.workspace_id
-		   AND e.session_id = m.session_id
-		   AND e.session_thread_id = m.session_thread_id
-		   AND e.event_id = COALESCE(m.last_event_id, m.source_event_id)
 		  CROSS JOIN latest_compaction c
 		 WHERE m.workspace_id = $1
 		   AND m.session_id = $2
@@ -323,21 +317,19 @@ func loadThreadContextJSONTx(
 		var messageID string
 		var sequence int64
 		var raw string
-		var owningEventID sql.NullString
+		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
 		var createdAt time.Time
 		var updatedAt time.Time
-		var eventSequence sql.NullInt64
 		if err := rows.Scan(
 			&kind,
 			&messageID,
 			&sequence,
 			&raw,
-			&owningEventID,
+			&sourceEventID,
 			&modelRequestID,
 			&createdAt,
 			&updatedAt,
-			&eventSequence,
 		); err != nil {
 			return "", err
 		}
@@ -351,16 +343,11 @@ func loadThreadContextJSONTx(
 			}
 			raw = projected
 		}
-		if !owningEventID.Valid || !eventSequence.Valid {
-			return "", status.Error(codes.FailedPrecondition, "session message projection has no owning event stamp")
-		}
 		stamped, err := stampRuntimeMessageForLoad(
 			raw,
 			scope.GetSessionId(),
 			messageID,
 			sequence,
-			owningEventID.String,
-			eventSequence.Int64,
 			createdAt,
 			updatedAt,
 		)
@@ -372,11 +359,13 @@ func loadThreadContextJSONTx(
 			Kind:            kind,
 			MessageID:       messageID,
 			MessageSequence: sequence,
-			OwningEventID:   owningEventID.String,
 			DataJSON:        stamped,
 		}
 		if modelRequestID.Valid {
 			descriptor.ModelRequestID = &modelRequestID.String
+		}
+		if sourceEventID.Valid {
+			descriptor.SourceEventID = &sourceEventID.String
 		}
 		messageDescriptors = append(messageDescriptors, descriptor)
 	}
@@ -498,8 +487,6 @@ func stampRuntimeMessageForLoad(
 	sessionID string,
 	messageID string,
 	messageSequence int64,
-	owningEventID string,
-	eventSequence int64,
 	createdAt time.Time,
 	updatedAt time.Time,
 ) (json.RawMessage, error) {
@@ -540,8 +527,6 @@ func stampRuntimeMessageForLoad(
 	message["id"] = messageID
 	message["sessionId"] = sessionID
 	message["sequence"] = messageSequence
-	message["owningEventId"] = owningEventID
-	message["eventSequence"] = eventSequence
 	message["createdAt"] = createdAt.UTC().Format(time.RFC3339Nano)
 	message["updatedAt"] = updatedAt.UTC().Format(time.RFC3339Nano)
 	stamped, err := json.Marshal(message)
@@ -661,6 +646,14 @@ func loadThreadPendingAgentMailTx(
 			     ON target.workspace_id = sent.workspace_id
 			    AND target.session_id = sent.session_id
 			    AND target.id = $3
+			   JOIN session_runtime_inbox inbox
+			     ON inbox.workspace_id = sent.workspace_id
+			    AND inbox.session_id = sent.session_id
+			    AND inbox.session_thread_id = $3
+			    AND inbox.runtime_input_id =
+			        'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
+			    AND inbox.input_kind = 'agent_mail'
+			    AND inbox.status IN ('queued', 'delivering', 'accepted')
 			  WHERE sent.workspace_id = $1
 			    AND sent.session_id = $2
 			    AND sent.type = 'agent.thread_message_sent'
@@ -679,37 +672,6 @@ func loadThreadPendingAgentMailTx(
 		           AND received.payload_json::jsonb ->> 'delivery_id' =
 		               sent.payload_json::jsonb ->> 'delivery_id'
 		           AND received.processed_at IS NOT NULL
-		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_runtime_inbox inbox
-		         WHERE inbox.workspace_id = sent.workspace_id
-		           AND inbox.session_id = sent.session_id
-		           AND inbox.session_thread_id = $3
-		           AND inbox.runtime_input_id =
-		               'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
-		           AND inbox.status = 'committed'
-		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_events exhausted
-		         WHERE exhausted.workspace_id = sent.workspace_id
-		           AND exhausted.session_id = sent.session_id
-		           AND exhausted.event_id =
-		               'evt_runtime_exhausted_' || substr(encode(sha256(
-		                   convert_to(sent.workspace_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(sent.session_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(
-		                       'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id'),
-		                       'UTF8'
-		                   ) ||
-		                   decode('00', 'hex') ||
-		                   convert_to('runtime_delivery_exhausted', 'UTF8')
-		               ), 'hex'), 1, 24)
-		           AND exhausted.type = 'session.error'
-		           AND exhausted.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
 		    )
 		  ORDER BY sent.sequence ASC, sent.event_id ASC
 		  LIMIT 4`,

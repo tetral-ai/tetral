@@ -31,6 +31,7 @@ import {
   runtimeInternalToolRepairCreate,
   taskNotificationOperationId,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
+import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import type {
   RuntimeInternalToolRepairCommit,
   SessionEventEnvelope,
@@ -128,6 +129,68 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
   });
 
+  test("retains task-notification custody when raw validation has no durable disposition", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationErrors.push(status.INVALID_ARGUMENT);
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_invalid_without_receipt");
+
+    await expect(loader.commitAcceptedInput(input, {
+      messageCreates: acceptedInputCreates(input),
+    })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      retryable: false,
+      fatal: true,
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
+
+  test("contains a durable task-notification idempotency conflict to the exact input", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationErrors.push(status.ALREADY_EXISTS);
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_payload_mismatch");
+
+    await expect(loader.commitAcceptedInput(input, {
+      messageCreates: acceptedInputCreates(input),
+    })).resolves.toEqual({
+      type: "task_notification_rejected",
+      errorCode: "task_notification_payload_mismatch",
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
+
+  test("returns an input-scoped terminal disposition for a durable notification rejection", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationRejections.push("task_notification_payload_mismatch");
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_rejected");
+
+    const result = await loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) });
+
+    expect(result).toEqual({
+      type: "task_notification_rejected",
+      errorCode: "task_notification_payload_mismatch",
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
+
+  test("keeps a malformed task-notification receipt on the retryable uncertainty path", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.corruptTaskNotificationDigest = true;
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_receipt_uncertain");
+
+    await expect(loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "unavailable",
+      retryable: true,
+      fatal: false,
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
+
   test("lowers the shared reviewer declaration through the production CommitInputs adapter", async () => {
     const fixture = await Bun.file(new URL("../../../../testdata/reviewer-input-declaration.json", import.meta.url)).json() as {
       message: unknown;
@@ -210,6 +273,101 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.writeEventRequests[0]?.toolSettlement).toBeUndefined();
     expect(bridge.writeEventRequests[1]?.assistantPartAppend).toBeUndefined();
     expect(bridge.writeEventRequests[1]?.toolSettlement?.toolUseEventId).toBe("sevt_tool_1");
+  });
+
+  test("classifies a rejected reviewer failure ACK as deterministic", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventRejections.push("reviewer_outcome_rejected");
+    const writer = new BridgeAPIEventWriter(options(bridge));
+
+    const result = await writer.append({
+      ...eventScope("rwrite_review_failure"),
+      event: {
+        type: "approval_review.failure",
+        review_id: "arvw_rejected",
+        parent_thread_id: "thrd_parent",
+        target_model_tool_call_id: "tool_call_rejected",
+        target_tool_name: "Write",
+        failure_kind: "parse_failure",
+        message: "approval reviewer decision is invalid",
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "ack_mismatch", retryable: false } });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+  });
+
+  test("recovers a reviewer failure receipt after the committed response is lost", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventPostCommitErrors.push(status.UNKNOWN);
+    const transport = new BridgeAPIEventWriter(options(bridge));
+    const envelope = {
+      ...eventScope("rwrite_review_failure_replay"),
+      event: {
+        type: "approval_review.failure" as const,
+        review_id: "arvw_replay",
+        parent_thread_id: "thrd_parent",
+        target_model_tool_call_id: "tool_call_replay",
+        target_tool_name: "Write",
+        failure_kind: "runtime_failure" as const,
+        message: "approval reviewer failed",
+      },
+    };
+
+    await expect(transport.append(envelope)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "unavailable", retryable: true },
+    });
+    await expect(transport.append(envelope)).resolves.toMatchObject({
+      ok: true,
+      writeId: envelope.writeId,
+    });
+    expect(bridge.writeEventRequests).toHaveLength(2);
+    expect(bridge.writeEventRequests.map((request) => request.runtimeWriteId)).toEqual([
+      envelope.writeId,
+      envelope.writeId,
+    ]);
+    expect(bridge.writeEventRequests.map((request) => writeEventDeclarationDigest(request))).toEqual([
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+    ]);
+  });
+
+  test("does not retry a definitive MCP settlement rejection", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventRejections.push("mcp_materialization_invalid");
+    const transport = new BridgeAPIEventWriter(options(bridge));
+    const writer = createSessionEventWriter({
+      append: async (envelope) => await transport.append(envelope),
+      sleep: async (durationMs) => durationMs < 3_000
+        ? true
+        : await new Promise<boolean>(() => undefined),
+    });
+    const envelope = mcpSettlementEnvelope("rwrite_mcp_rejected");
+
+    await expect(writer.append(envelope)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "ack_mismatch", retryable: false },
+    });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+  });
+
+  test("replays an ambiguous MCP settlement with immutable identity", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.writeEventPostCommitErrors.push(status.UNKNOWN);
+    const transport = new BridgeAPIEventWriter(options(bridge));
+    const envelope = mcpSettlementEnvelope("rwrite_mcp_replay");
+
+    await expect(transport.append(envelope)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "unavailable", retryable: true },
+    });
+    await expect(transport.append(envelope)).resolves.toMatchObject({ ok: true, writeId: envelope.writeId });
+    expect(bridge.writeEventRequests).toHaveLength(2);
+    expect(bridge.writeEventRequests.map((request) => writeEventDeclarationDigest(request))).toEqual([
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
+    ]);
   });
 
   test("matches RequestEnd and joined interrupt receipts by operation identity", async () => {
@@ -415,19 +573,45 @@ function eventScope(writeId: string) {
   };
 }
 
+function mcpSettlementEnvelope(writeId: string): SessionEventEnvelope {
+  return {
+    ...eventScope(writeId),
+    modelRequestId: "mrq_mcp",
+    event: {
+      type: "agent.mcp_tool_result",
+      mcp_tool_use_id: "sevt_mcp_use",
+      content: [{ type: "text", text: "done" }],
+    },
+    mcpMaterializationHandle: "sevt_mcp_materialized",
+    toolSettlement: {
+      toolUseEventId: "sevt_mcp_use",
+      outcome: {
+        type: "completed",
+        output: { text: "done", truncated: false },
+        mcpMaterializationHandle: "sevt_mcp_materialized",
+      },
+    },
+  };
+}
+
 class DeclarationBridge {
   readonly loadContextRequests: LoadContextRequest[] = [];
   readonly commitInputsRequests: CommitInputsRequest[] = [];
   readonly writeEventRequests: WriteEventRequest[] = [];
+  readonly writeEventRejections: string[] = [];
+  readonly writeEventPostCommitErrors: number[] = [];
   readonly writeRequestEndRequests: WriteRequestEndRequest[] = [];
   readonly finishIdleRequests: FinishIdleRequest[] = [];
   readonly terminationRequests: CommitRuntimeTerminationRequest[] = [];
   readonly commitTaskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
   readonly repairRequests: CommitInternalToolRepairRequest[] = [];
   readonly taskNotificationErrors: number[] = [];
+  readonly taskNotificationRejections: string[] = [];
+  corruptTaskNotificationDigest = false;
   repairOperationId = "repair";
   private eventSequence = 0;
   private messageSequence = 0;
+  private readonly committedWriteEvents = new Map<string, Record<string, unknown>>();
 
   client(): AgentRuntimeBridgeServiceClient {
     return {
@@ -448,7 +632,7 @@ class DeclarationBridge {
       ack: ack("", BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED),
       contextJson: JSON.stringify({
         messages: [],
-        turnFacts: { events: [], messageLineage: [] },
+        turnFacts: { events: [], internalRepairs: [] },
         coldCoverage: {
           pendingToolIds: [],
           pendingSandboxExecutionIds: [],
@@ -493,6 +677,17 @@ class DeclarationBridge {
       callback(Object.assign(new Error("task notification commit rejected"), { code: errorCode }), {});
       return grpcCall();
     }
+    const rejectionCode = this.taskNotificationRejections.shift();
+    if (rejectionCode !== undefined) {
+      callback(null, {
+        ack: {
+          status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
+          runtimeInputId: request.runtimeInputId,
+          errorCode: rejectionCode,
+        },
+      });
+      return grpcCall();
+    }
     const event = this.event(request, `sevt_${request.runtimeInputId}`);
     const operationId = taskNotificationOperationId(request.runtimeInputId, request.taskId);
     callback(null, response(request, request.runtimeInputId, [receipt({
@@ -500,7 +695,7 @@ class DeclarationBridge {
       operationKind: "commit_task_notification_result",
       sourceKind: "task_notification",
       operationId,
-      digest: taskNotificationDeclarationDigest(request),
+      digest: this.corruptTaskNotificationDigest ? "corrupt-task-notification-digest" : taskNotificationDeclarationDigest(request),
       events: [event],
       messages: request.messageCreate === undefined ? [] : [this.message(request, request.messageCreate, event.eventId)],
     })]));
@@ -509,6 +704,28 @@ class DeclarationBridge {
 
   private writeEvent(request: WriteEventRequest, _metadata: Metadata, callback: (error: Error | null, responseValue: unknown) => void): unknown {
     this.writeEventRequests.push(request);
+    const rejectionCode = this.writeEventRejections.shift();
+    if (rejectionCode !== undefined) {
+      callback(null, {
+        ack: {
+          status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
+          runtimeWriteId: request.runtimeWriteId,
+          errorCode: rejectionCode,
+        },
+      });
+      return grpcCall();
+    }
+    const existing = this.committedWriteEvents.get(request.runtimeWriteId);
+    if (existing !== undefined) {
+      callback(null, {
+        ...existing,
+        ack: {
+          ...(existing.ack as Record<string, unknown>),
+          status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE,
+        },
+      });
+      return grpcCall();
+    }
     const event = this.event(request, `sevt_${request.runtimeWriteId}`);
     const messages = request.assistantPartAppend === undefined
       ? []
@@ -525,11 +742,18 @@ class DeclarationBridge {
         requestStart: { requestKind: request.requestKind, contextThroughMessageSequence: request.contextThroughMessageSequence ?? 0 },
       } : {}),
     });
-    callback(null, {
+    const committed = {
       ...response(request, request.runtimeWriteId, [declarationReceipt]),
       eventId: event.eventId,
       sequence: event.eventSequence,
-    });
+    };
+    this.committedWriteEvents.set(request.runtimeWriteId, committed);
+    const postCommitError = this.writeEventPostCommitErrors.shift();
+    if (postCommitError !== undefined) {
+      callback(Object.assign(new Error("write event response was lost"), { code: postCommitError }), {});
+      return grpcCall();
+    }
+    callback(null, committed);
     return grpcCall();
   }
 
@@ -657,7 +881,7 @@ class DeclarationBridge {
     eventId: string,
   ) {
     this.messageSequence += 1;
-    return messageStamp(request, create.parts, eventId, this.messageSequence);
+    return messageStamp(request, create.parts, this.messageSequence);
   }
 
   private appendMessage(
@@ -666,20 +890,18 @@ class DeclarationBridge {
     eventId: string,
   ) {
     this.messageSequence += 1;
-    return messageStamp(request, parts, eventId, this.messageSequence);
+    return messageStamp(request, parts, this.messageSequence);
   }
 }
 
 function messageStamp(
   request: { readonly scope: RuntimeScope | undefined },
   parts: RuntimePartCreate[],
-  owningEventId: string,
   messageSequence: number,
 ) {
   const messageId = `msg_${messageSequence}`;
   return {
     sessionThreadId: request.scope?.sessionThreadId ?? "",
-    owningEventId,
     messageId,
     messageSequence,
     createdAt: now,

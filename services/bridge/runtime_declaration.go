@@ -42,7 +42,37 @@ func marshalRuntimeDeclarationObject(value map[string]any) ([]byte, error) {
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'}), nil
+	return runtimeJSONStringifyBytes(bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})), nil
+}
+
+// JavaScript JSON.stringify leaves the Unicode line and paragraph separators
+// intact. encoding/json escapes them even when HTML escaping is disabled, so
+// declaration digests restore only encoder-authored separator escapes. Escaped
+// backslash text such as "\\u2028" remains byte-for-byte unchanged.
+func runtimeJSONStringifyBytes(encoded []byte) []byte {
+	result := make([]byte, 0, len(encoded))
+	for offset := 0; offset < len(encoded); {
+		separator := offset+6 <= len(encoded) && encoded[offset] == '\\' &&
+			(string(encoded[offset:offset+6]) == `\u2028` || string(encoded[offset:offset+6]) == `\u2029`)
+		if separator {
+			precedingSlashes := 0
+			for index := offset - 1; index >= 0 && encoded[index] == '\\'; index-- {
+				precedingSlashes++
+			}
+			if precedingSlashes%2 == 0 {
+				if encoded[offset+5] == '8' {
+					result = append(result, "\u2028"...)
+				} else {
+					result = append(result, "\u2029"...)
+				}
+				offset += 6
+				continue
+			}
+		}
+		result = append(result, encoded[offset])
+		offset++
+	}
+	return result
 }
 
 func marshalRuntimeDeclarationObjectWithRawField(value map[string]any, fieldName string, rawJSON string) ([]byte, error) {
@@ -332,20 +362,27 @@ func internalToolRepairDeclarationDigest(
 
 func taskNotificationDeclarationDigest(
 	request *bridgev1.CommitTaskNotificationResultRequest,
-	resultJSON string,
 ) (string, error) {
-	resultJSON = stripInternalProviderFields(resultJSON)
-	create, err := canonicalRuntimeMessageCreate(request.GetMessageCreate())
-	if err != nil {
-		return "", err
+	create := request.GetMessageCreate()
+	parts := make([]map[string]any, 0, len(create.GetParts()))
+	for _, part := range create.GetParts() {
+		parts = append(parts, map[string]any{
+			"part_json": part.GetPartJson(),
+			"part_kind": part.GetPartKind(),
+		})
 	}
-	raw, err := marshalRuntimeDeclarationObjectWithRawField(map[string]any{
-		"message_create":    create,
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+		"message_create": map[string]any{
+			"message_info_json": create.GetMessageInfoJson(),
+			"message_kind":      create.GetMessageKind(),
+			"parts":             parts,
+		},
 		"operation_kind":    bridgeOpCommitTaskNotificationResult,
+		"result_json":       request.GetResultJson(),
 		"runtime_input_id":  request.GetRuntimeInputId(),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
 		"task_id":           request.GetTaskId(),
-	}, "result", resultJSON)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -434,10 +471,9 @@ func canonicalRuntimeMessageCreate(create *bridgev1.RuntimeMessageCreate) (any, 
 		return nil, err
 	}
 	return map[string]any{
-		"message_info":    json.RawMessage(messageInfo),
-		"message_kind":    create.GetMessageKind().String(),
-		"parts":           parts,
-		"source_event_id": nullableDeclarationString(create.GetSourceEventId()),
+		"message_info": json.RawMessage(messageInfo),
+		"message_kind": create.GetMessageKind().String(),
+		"parts":        parts,
 	}, nil
 }
 
@@ -567,10 +603,7 @@ func commitInputCreatesTx(
 		if index >= len(eventIDs) {
 			return nil, status.Error(codes.InvalidArgument, "runtime message create has no source event")
 		}
-		if create == nil || create.SourceEventId == nil || create.GetSourceEventId() != eventIDs[index] {
-			return nil, status.Error(codes.InvalidArgument, "runtime input message lineage is invalid")
-		}
-		stamp, err := insertRuntimeMessageCreateTx(ctx, tx, scope, inputKind, eventIDs[index], create, now)
+		stamp, err := insertRuntimeMessageCreateTx(ctx, tx, scope, inputKind, eventIDs[index], nil, create, now)
 		if err != nil {
 			return nil, err
 		}
@@ -621,7 +654,7 @@ func commitWriteEventDeclarationTx(
 		messageStamps = []*bridgev1.DurableMessageStamp{stamp}
 	}
 	if settlement != nil {
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, modelRequestID, eventID, settlement, now); err != nil {
+		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, modelRequestID, settlement, now); err != nil {
 			return nil, err
 		}
 	}
@@ -688,7 +721,7 @@ func commitWriteRequestEndDeclarationTx(
 			}
 			receipt.Messages = []*bridgev1.DurableMessageStamp{messageStamp}
 		}
-		if err := sealRuntimeAssistantMessageTx(ctx, tx, request, usage, providerUsageJSON, requestEndEventID, now); err != nil {
+		if err := sealRuntimeAssistantMessageTx(ctx, tx, request, usage, providerUsageJSON, now); err != nil {
 			return nil, err
 		}
 		return receipt, nil
@@ -778,6 +811,7 @@ func commitWriteRequestEndDeclarationTx(
 		request.GetScope(),
 		"agent.thread_context_compacted",
 		compactionEventID,
+		nil,
 		request.GetCompactionCheckpointCreate(),
 		now,
 	)
@@ -821,7 +855,6 @@ func sealRuntimeAssistantMessageTx(
 	request *bridgev1.WriteRequestEndRequest,
 	usage bridgeUsage,
 	providerUsageJSON string,
-	requestEndEventID string,
 	now time.Time,
 ) error {
 	var messageID, dataJSON string
@@ -864,10 +897,10 @@ func sealRuntimeAssistantMessageTx(
 	if err != nil {
 		return err
 	}
-	result, err := tx.Exec(ctx, `UPDATE session_messages SET data_json=$5,last_event_id=$6,updated_at=$7
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND message_id=$4 AND model_request_id=$8`,
+	result, err := tx.Exec(ctx, `UPDATE session_messages SET data_json=$5,updated_at=$6
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND message_id=$4 AND model_request_id=$7`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(),
-		messageID, string(updatedJSON), requestEndEventID, now, request.GetModelRequestId())
+		messageID, string(updatedJSON), now, request.GetModelRequestId())
 	if err != nil {
 		return err
 	}
@@ -964,12 +997,11 @@ func appendRuntimeAssistantMembersTx(
 	var (
 		messageID       string
 		messageSequence int64
-		owningEventID   string
 		messageCreated  time.Time
 		existingJSON    string
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT message_id, sequence, source_event_id, created_at, data_json
+		`SELECT message_id, sequence, created_at, data_json
 		   FROM session_messages
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -977,7 +1009,7 @@ func appendRuntimeAssistantMembersTx(
 		    AND model_request_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&messageID, &messageSequence, &owningEventID, &messageCreated, &existingJSON)
+	).Scan(&messageID, &messageSequence, &messageCreated, &existingJSON)
 	insertMessage := false
 	disposition := bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_UPDATED
 	if dbconnect.IsNoRows(err) {
@@ -990,7 +1022,6 @@ func appendRuntimeAssistantMembersTx(
 			return nil, err
 		}
 		messageID = id.New("msg_")
-		owningEventID = eventID
 		messageCreated = now
 		existingJSON = `{"role":"assistant","origin":"agent","status":"streaming","parts":[]}`
 		insertMessage = true
@@ -1085,8 +1116,8 @@ func appendRuntimeAssistantMembersTx(
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_messages (
 				workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-				data_json, source_event_id, last_event_id, model_request_id, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7, $8, $9, $9)`,
+				data_json, source_event_id, model_request_id, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $8, $9, $9)`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
 			messageID, messageSequence, string(dataJSON), eventID, modelRequestID, now,
 		); err != nil {
@@ -1095,11 +1126,11 @@ func appendRuntimeAssistantMembersTx(
 	} else {
 		result, err := tx.Exec(ctx,
 			`UPDATE session_messages
-			    SET data_json = $5, last_event_id = $6, updated_at = $7
+			    SET data_json = $5, updated_at = $6
 			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-			    AND message_id = $4 AND model_request_id = $8`,
+			    AND message_id = $4 AND model_request_id = $7`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-			messageID, string(dataJSON), eventID, now, modelRequestID,
+			messageID, string(dataJSON), now, modelRequestID,
 		)
 		if err != nil {
 			return nil, err
@@ -1109,8 +1140,8 @@ func appendRuntimeAssistantMembersTx(
 		}
 	}
 	return &bridgev1.DurableMessageStamp{
-		SessionThreadId: scope.GetSessionThreadId(), OwningEventId: owningEventID,
-		MessageId: messageID, MessageSequence: messageSequence,
+		SessionThreadId: scope.GetSessionThreadId(),
+		MessageId:       messageID, MessageSequence: messageSequence,
 		CreatedAt: createdAt, UpdatedAt: timestamp, Disposition: disposition, Parts: partStamps,
 	}, nil
 }
@@ -1120,7 +1151,6 @@ func settleRuntimeToolPartTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	modelRequestID string,
-	resultEventID string,
 	settlement *bridgev1.RuntimeToolSettlement,
 	now time.Time,
 ) (runtimeToolProjectionPayload, error) {
@@ -1173,6 +1203,8 @@ func settleRuntimeToolPartTx(
 		return runtimeToolProjectionPayload{}, status.Error(codes.AlreadyExists, "Tool Use already has a terminal settlement")
 	}
 	nextState := map[string]any{}
+	toolEvent, _ := selected["toolEvent"].(map[string]any)
+	isMCPTool := toolEvent["kind"] == "mcp"
 	if input, present := state["input"]; present {
 		nextState["input"] = input
 	}
@@ -1185,8 +1217,8 @@ func settleRuntimeToolPartTx(
 		nextState["status"] = "completed"
 		nextState["output"] = output
 	case *bridgev1.RuntimeToolSettlement_Error:
-		var normalizedError any
-		if err := json.Unmarshal([]byte(outcome.Error.GetErrorJson()), &normalizedError); err != nil || normalizedError == nil {
+		normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Error.GetErrorJson(), isMCPTool)
+		if err != nil {
 			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool error is invalid")
 		}
 		nextState["status"] = "error"
@@ -1194,8 +1226,8 @@ func settleRuntimeToolPartTx(
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
 		nextState["status"] = "cancelled"
 		if outcome.Cancelled.ErrorJson != nil {
-			var normalizedError any
-			if err := json.Unmarshal([]byte(outcome.Cancelled.GetErrorJson()), &normalizedError); err != nil || normalizedError == nil {
+			normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Cancelled.GetErrorJson(), isMCPTool)
+			if err != nil {
 				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool cancellation error is invalid")
 			}
 			nextState["error"] = normalizedError
@@ -1214,11 +1246,11 @@ func settleRuntimeToolPartTx(
 	}
 	result, err := tx.Exec(ctx,
 		`UPDATE session_messages
-		    SET data_json = $5, last_event_id = $6, updated_at = $7
+		    SET data_json = $5, updated_at = $6
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND message_id = $4 AND model_request_id = $8`,
+		    AND message_id = $4 AND model_request_id = $7`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		messageID, string(updatedJSON), resultEventID, now, modelRequestID,
+		messageID, string(updatedJSON), now, modelRequestID,
 	)
 	if err != nil {
 		return runtimeToolProjectionPayload{}, err
@@ -1227,6 +1259,33 @@ func settleRuntimeToolPartTx(
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement lost its durable message")
 	}
 	return runtimeToolProjectionFromDurablePart(messageID, selected), nil
+}
+
+// Runtime failures carry lifecycle diagnostics that belong to the declaration
+// receipt, while durable Tool parts expose only the stable model-visible error.
+// Other Tool owners already declare their durable error object directly.
+func runtimeDeclaredToolErrorFromFailureJSON(raw string, normalizeMCP bool) (map[string]any, error) {
+	var declared map[string]any
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil || declared == nil {
+		return nil, fmt.Errorf("invalid Runtime failure")
+	}
+	if !normalizeMCP {
+		return declared, nil
+	}
+	code, hasCode := declared["code"].(string)
+	message, hasMessage := declared["message"].(string)
+	retryable, hasRetryable := declared["retryable"].(bool)
+	if !hasCode {
+		return declared, nil
+	}
+	if code == "" || !hasMessage || message == "" || !hasRetryable {
+		return nil, fmt.Errorf("invalid Runtime failure")
+	}
+	return map[string]any{
+		"type":      code,
+		"message":   message,
+		"retryable": retryable,
+	}, nil
 }
 
 func runtimeToolProjectionFromDurablePart(messageID string, part map[string]any) runtimeToolProjectionPayload {
@@ -1391,13 +1450,13 @@ func insertRuntimeMessageCreateTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	sourceKind string,
-	owningEventID string,
+	sourceEventID string,
+	modelRequestID *string,
 	create *bridgev1.RuntimeMessageCreate,
 	now time.Time,
 ) (*bridgev1.DurableMessageStamp, error) {
 	class, ok := runtimeMessageCreateKindForSource(sourceKind)
-	if !ok || create == nil || create.GetMessageKind() != class.Kind ||
-		(create.SourceEventId != nil && create.GetSourceEventId() != owningEventID) {
+	if !ok || create == nil || create.GetMessageKind() != class.Kind {
 		return nil, status.Error(codes.InvalidArgument, "runtime message create identity is invalid")
 	}
 	message, err := validateRuntimeMessageCreate(create)
@@ -1449,16 +1508,16 @@ func insertRuntimeMessageCreateTx(
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $9)`,
+			data_json, source_event_id, model_request_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		messageID, messageSequence, class.MessageKind, string(dataJSON), owningEventID, now,
+		messageID, messageSequence, class.MessageKind, string(dataJSON), sourceEventID, modelRequestID, now,
 	); err != nil {
 		return nil, err
 	}
 	return &bridgev1.DurableMessageStamp{
-		SessionThreadId: scope.GetSessionThreadId(), OwningEventId: owningEventID,
-		MessageId: messageID, MessageSequence: messageSequence,
+		SessionThreadId: scope.GetSessionThreadId(),
+		MessageId:       messageID, MessageSequence: messageSequence,
 		CreatedAt: timestamp, UpdatedAt: timestamp,
 		Disposition: bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
 		Parts:       partStamps,
@@ -1489,7 +1548,9 @@ func commitInternalToolRepairCreateTx(
 		part["toolName"] != toolName || state["status"] != "error" {
 		return nil, status.Error(codes.InvalidArgument, "internal Tool repair payload does not match request")
 	}
-	stamp, err := insertRuntimeMessageCreateTx(ctx, tx, scope, "internal_tool_repair", eventID, create, now)
+	stamp, err := insertRuntimeMessageCreateTx(
+		ctx, tx, scope, "internal_tool_repair", eventID, nil, create, now,
+	)
 	if err != nil {
 		return nil, err
 	}

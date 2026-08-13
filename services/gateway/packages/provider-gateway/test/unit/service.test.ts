@@ -181,6 +181,56 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
   });
 
+  test("logs local capability rejection as configuration failure", async () => {
+    const logs: unknown[] = [];
+    let providerFactoryCalls = 0;
+    let platformFailureRecords = 0;
+    const providerStreamer = new ProviderClientRegistry({
+      openAIProviderFactory: () => {
+        providerFactoryCalls += 1;
+        return { responses: (modelId) => ({ provider: "openai", modelId }) };
+      },
+    });
+    const request = validProviderRequest({
+      requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+      model: { providerId: "openai", modelId: "gpt-5.5", variant: "" },
+      outputSchemaJson: approvalReviewerOutputSchemaJson,
+    });
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      credentialResolver: platformOpenAICredentialResolver(() => {
+        platformFailureRecords += 1;
+      }),
+      providerStreamer,
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+        providerError: expect.objectContaining({
+          error: expect.objectContaining({ code: "provider_configuration_invalid", retryable: false, fatal: true }),
+        }),
+      }),
+    ]);
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "provider_request_streamed",
+        "request.outcome": "failed",
+        "error.class": "provider_configuration",
+        "error.code": "provider_configuration_invalid",
+        "provider.id": "openai",
+        "model.id": "gpt-5.5",
+        "request.id": request.requestId,
+      }),
+    ]);
+    expect(providerFactoryCalls).toBe(0);
+    expect(platformFailureRecords).toBe(0);
+    expect(JSON.stringify(logs)).not.toContain("additionalProperties");
+    expect(JSON.stringify(logs)).not.toContain("sk-platform-openai");
+  });
+
   test("stream and web logs emit shared safe fields", async () => {
     const logs: unknown[] = [];
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
@@ -612,13 +662,15 @@ describe("ProviderGatewayServiceShell", () => {
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
     });
     const attempts: string[] = [];
+    const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_1", "pfk_2", "pfk_3", "pfk_4"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* (input) {
           attempts.push(input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing");
-          throw new TypeError("network down before first byte");
+          throw new TypeError("network down before first byte secret-provider-body");
         },
       },
     });
@@ -638,6 +690,18 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "provider_request_streamed",
+        "error.class": "provider_transport_failure",
+        "error.code": "provider_stream_error",
+        "provider.id": "anthropic",
+        "model.id": "claude-opus-4-8",
+        "request.id": request.requestId,
+      }),
+    ]);
+    expect(JSON.stringify(logs)).not.toContain("secret-provider-body");
+    expect(JSON.stringify(logs)).not.toContain("sk-pfk_");
   });
 
   test("T-POOL-4 does not switch platform keys after a downstream event has been emitted", async () => {
@@ -647,8 +711,10 @@ describe("ProviderGatewayServiceShell", () => {
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
     });
     const attempts: string[] = [];
+    const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_1", "pfk_2"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* (input) {
@@ -821,8 +887,10 @@ describe("ProviderGatewayServiceShell", () => {
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
     });
     const attempts: string[] = [];
+    const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_1", "pfk_2"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* (input) {
@@ -851,6 +919,14 @@ describe("ProviderGatewayServiceShell", () => {
       fatal: true,
       statusCode: 422,
     });
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "provider_request_streamed",
+        "error.class": "provider_http_rejection",
+        "error.code": "provider_request_invalid",
+        "provider.status_code": 422,
+      }),
+    ]);
   });
 
   test("non-catalog models fail closed before credential resolution", async () => {
@@ -1317,6 +1393,29 @@ function sessionCredentialResolver(): ProviderCredentialResolver {
       },
     }),
     recordPlatformFailure: () => undefined,
+  } as unknown as ProviderCredentialResolver;
+}
+
+function platformOpenAICredentialResolver(onFailure: () => void): ProviderCredentialResolver {
+  return {
+    resolve: async () => ({
+      ok: true,
+      credential: {
+        source: "platform",
+        authType: "provider_api_key",
+        providerId: "openai",
+        supplyMode: "openai-api-key",
+        platformKey: {
+          keyId: "pfk_openai_local_capability",
+          providerId: "openai",
+          key: "sk-platform-openai",
+          weight: 1,
+          priority: 0,
+          cacheScope: "openai-local-capability",
+        },
+      },
+    }),
+    recordPlatformFailure: onFailure,
   } as unknown as ProviderCredentialResolver;
 }
 

@@ -348,13 +348,15 @@ describe("SQLGitHubMcpCredentialResolver", () => {
         },
       );
       await owner.refreshOAuthCredential({
-        workspaceId: "wksp_1", mcpServerName: "github", row, vaultId: row.vault_id,
+        workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github", row, vaultId: row.vault_id,
         credentialId: row.id, previousTokenHash: sha256("old-access"), force: true,
       });
       encryptSpy?.mockRestore();
       expect(events, failureKind).toEqual([expect.objectContaining({ outcome: "failed", failureKind })]);
       expect(logRecords, failureKind).toEqual([expect.objectContaining({
         event: "mcp_oauth_refresh_completed",
+        "workspace.id": "wksp_1",
+        "session.id": "sesn_1",
         outcome: "failed",
         "failure.kind": failureKind,
       })]);

@@ -298,7 +298,7 @@ describe("Runtime Pod static boundaries", () => {
     expect(reviewer).toContain("yield* manager.fork(");
     expect(reviewer).not.toContain("return async (request)");
     expect(reviewer).not.toMatch(/\bvoid\s*\(\s*async\s*\(/);
-    expect(toolExecution).toContain(") => Effect.Effect<ApprovalReviewerOutcome, never>;");
+    expect(toolExecution).toContain(") => Effect.Effect<RuntimeApprovalReviewResult, never>;");
     expect(threadLoop).not.toContain("yield* Effect.promise(async () =>");
   });
 });

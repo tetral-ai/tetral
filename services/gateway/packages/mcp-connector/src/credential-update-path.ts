@@ -36,6 +36,7 @@ export interface GitHubMcpCredentialRefreshWriter {
    */
   refreshOAuthCredential(input: {
     readonly workspaceId: string;
+    readonly sessionId: string;
     readonly mcpServerName: string;
     readonly row: GitHubCredentialUpdateRow;
     readonly vaultId: string;
@@ -52,6 +53,8 @@ export type McpOAuthRefreshFailureKind =
 
 /** One safe owner-exit observation for a locked OAuth refresh decision. */
 export interface McpOAuthRefreshCompletedEvent {
+  readonly workspaceId: string;
+  readonly sessionId: string;
   readonly mcpServerName: string;
   readonly credentialId: string;
   readonly outcome: "refreshed" | "concurrent_winner_reused" | "failed";
@@ -116,7 +119,7 @@ type OAuthRefreshAttempt =
 
 interface RefreshOwnerResult {
   readonly resolution: GitHubMcpCredentialResolution;
-  readonly event: Omit<McpOAuthRefreshCompletedEvent, "mcpServerName" | "credentialId" | "durationMs">;
+  readonly event: Omit<McpOAuthRefreshCompletedEvent, "workspaceId" | "sessionId" | "mcpServerName" | "credentialId" | "durationMs">;
 }
 
 // Adapter for the Vault-domain locked credential update path. The credential
@@ -144,6 +147,7 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
    */
   async refreshOAuthCredential(input: {
     readonly workspaceId: string;
+    readonly sessionId: string;
     readonly mcpServerName: string;
     readonly row: GitHubCredentialUpdateRow;
     readonly vaultId: string;
@@ -245,9 +249,10 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
     }
   }
 
-  private finishRefresh(input: { readonly mcpServerName: string; readonly credentialId: string }, started: number, ownerResult: RefreshOwnerResult): GitHubMcpCredentialResolution {
+  private finishRefresh(input: { readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName: string; readonly credentialId: string }, started: number, ownerResult: RefreshOwnerResult): GitHubMcpCredentialResolution {
     try {
-      this.onRefreshCompleted?.({ mcpServerName: input.mcpServerName, credentialId: input.credentialId,
+      this.onRefreshCompleted?.({ workspaceId: input.workspaceId, sessionId: input.sessionId,
+        mcpServerName: input.mcpServerName, credentialId: input.credentialId,
         durationMs: Math.max(0, Date.now() - started), ...ownerResult.event });
     } catch {
       // Durable rotation and fail-closed resolution do not depend on telemetry.

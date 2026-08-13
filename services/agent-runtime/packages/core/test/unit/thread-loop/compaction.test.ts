@@ -198,14 +198,15 @@ Previous anchored summary.
     expect(prompt).toContain('{"legacy":"recent"}');
     expect(prompt).not.toContain("<conversation-checkpoint>");
     const checkpoint = session.state.contextManager.messages().find((message) => message.origin === "runtime");
+    expect(checkpoint).toBeDefined();
     const checkpointText = checkpoint?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? "";
     expect(checkpointText).toContain("<summary>\n\nUpdated anchored summary.\n\n</summary>");
     expect(checkpointText).toContain("[User]: fresh continuation");
-    expect(pendingBeforeAgentRequest).toEqual([]);
+    expect(pendingBeforeAgentRequest).toEqual([checkpoint!.id]);
 });
 test("a first context overflow compacts and rebuilds while a repeated overflow terminalizes", async () => {
     const session = new ThreadRuntime("sesn_reactive_compaction");
-    const loader = new RecordingContextLoader([userMessage("user-old", 0, compactionHistory("old context for reactive compaction"))], { type: "messages", messages: [userMessage("user-new", 1, "continue")] });
+    const loader = new RecordingContextLoader([userMessage("user-old", 1, compactionHistory("old context for reactive compaction"))], { type: "messages", messages: [userMessage("user-new", 2, "continue")] });
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
@@ -277,7 +278,7 @@ test("a first context overflow compacts and rebuilds while a repeated overflow t
 });
 test("reactive compaction overflow stops before rebuilding the ordinary provider request", async () => {
     const session = new ThreadRuntime("sesn_reactive_compaction_failure");
-    const loader = new RecordingContextLoader([userMessage("user-old", 0, compactionHistory("old reactive context"))], { type: "messages", messages: [userMessage("user-new", 1, "continue")] });
+    const loader = new RecordingContextLoader([userMessage("user-old", 1, compactionHistory("old reactive context"))], { type: "messages", messages: [userMessage("user-new", 2, "continue")] });
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const overflow = {
@@ -684,12 +685,12 @@ test("task notification arriving during reactive compaction joins the preserved 
         sourceToolUseEventId: "sevt_task_during_compaction",
     });
     const loader = new QueuedContextLoader(
-        [userMessage("user-old", 0, compactionHistory("old context before task completion"))],
-        [{ type: "messages", messages: [userMessage("user-new", 1, "start the compacted turn")] }],
+        [userMessage("user-old", 1, compactionHistory("old context before task completion"))],
+        [{ type: "messages", messages: [userMessage("user-new", 2, "start the compacted turn")] }],
         [(input: RuntimeAcceptedInputState) => {
             commitCalls += 1;
             order.push("task-commit");
-            return acceptedInputReceipt(input);
+            return acceptedInputReceipt(input, "committed", 3);
         }],
     );
     const requests: LLMRequest[] = [];

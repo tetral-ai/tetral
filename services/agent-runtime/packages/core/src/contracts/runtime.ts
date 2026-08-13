@@ -38,20 +38,6 @@ export interface RuntimeProcessorSource {
   readonly modelId: string;
 }
 
-/** Public MCP failure projection that may accompany a terminal tool settlement. */
-export type PublicMcpErrorEvent =
-  | {
-      readonly type: "mcp_authentication_failed_error" | "mcp_connection_failed_error";
-      readonly mcpServerName: string;
-      readonly message: string;
-      readonly retryStatus: { readonly type: "retrying" | "exhausted" | "terminal" };
-    }
-  | {
-      readonly type: "unknown_error";
-      readonly message: string;
-      readonly retryStatus: { readonly type: "terminal" };
-    };
-
 export interface SessionEventWriterServerToolUse {
   readonly webSearchRequests: number;
   readonly webFetchRequests: number;
@@ -60,7 +46,7 @@ export interface SessionEventWriterServerToolUse {
 /** Final disposition returned by a Runtime tool route to its request turn. */
 export type RuntimeToolSettlement =
   | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
   | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string };
 
 const IdentifierSchema = z.string().min(1);
@@ -428,7 +414,6 @@ export type RuntimeMessageCreateKind = z.infer<typeof RuntimeMessageCreateKindSc
 
 /** Creates one brand-new message; Bridge assigns all durable identity by position. */
 export const RuntimeMessageCreateSchema = z.strictObject({
-  sourceEventId: RuntimeIdentifierSchema.optional(),
   messageKind: RuntimeMessageCreateKindSchema,
   role: z.enum(["user", "assistant"]),
   origin: z.enum(["user", "agent", "runtime"]),
@@ -470,7 +455,6 @@ export interface RuntimeDurablePartStamp {
 
 export interface RuntimeDurableMessageStamp {
   readonly sessionThreadId: string;
-  readonly owningEventId: string;
   readonly messageId: string;
   readonly messageSequence: number;
   readonly createdAt: string;
@@ -565,8 +549,6 @@ export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
  */
 export const DurableRuntimeMessageSchema = RuntimeMessageInfoSchema
   .extend({
-    owningEventId: RuntimeIdentifierSchema,
-    eventSequence: PositiveIntegerSchema,
     parts: z.array(RuntimePartSchema),
   })
   .refine(
@@ -576,6 +558,10 @@ export const DurableRuntimeMessageSchema = RuntimeMessageInfoSchema
   .refine(
     (message) => message.parts.every((runtimePart) => runtimePart.sessionId === message.sessionId),
     "runtime part sessionId must match the owning message session id",
+  )
+  .refine(
+    (message) => message.sequence > 0,
+    "durable runtime message requires a database-assigned sequence",
   );
 export type DurableRuntimeMessage = z.infer<typeof DurableRuntimeMessageSchema>;
 
@@ -594,9 +580,7 @@ export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
   repairKey: SanitizedIdentifierSchema,
   messageCreate: RuntimeMessageCreateSchema,
 })
-  .refine((repair) =>
-    repair.messageCreate.sourceEventId === undefined &&
-    repair.messageCreate.messageKind === "internal_tool_repair",
+  .refine((repair) => repair.messageCreate.messageKind === "internal_tool_repair",
   "repair message create must match the repair operation")
   .refine((repair) =>
     repair.messageCreate.role === "assistant" &&
@@ -775,7 +759,6 @@ const RuntimeToolSettlementSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("error"),
     error: RuntimeFailureSchema,
-    publicErrorEvent: z.custom<PublicMcpErrorEvent>().optional(),
     serverToolUse: z.strictObject({ webSearchRequests: NonNegativeIntegerSchema, webFetchRequests: NonNegativeIntegerSchema }).optional(),
     mcpMaterializationHandle: RuntimeIdentifierSchema.optional(),
     sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
@@ -1017,8 +1000,12 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   if (envelope.mcpMaterializationHandle !== undefined && envelope.event.type !== "agent.mcp_tool_result") {
     context.addIssue({ code: "custom", message: "MCP materialization requires an MCP tool-result event" });
   }
-  if (envelope.event.type === "agent.mcp_tool_result" && envelope.mcpMaterializationHandle === undefined) {
-    context.addIssue({ code: "custom", message: "MCP tool-result event requires materialization" });
+  if (
+    envelope.event.type === "agent.mcp_tool_result" &&
+    envelope.mcpMaterializationHandle === undefined &&
+    envelope.toolSettlement?.outcome.type !== "error"
+  ) {
+    context.addIssue({ code: "custom", message: "successful MCP tool-result event requires materialization" });
   }
   if (envelope.sandboxResultDigest !== undefined && envelope.event.type !== "agent.tool_result") {
     context.addIssue({ code: "custom", message: "sandbox result digest requires a tool-result event" });

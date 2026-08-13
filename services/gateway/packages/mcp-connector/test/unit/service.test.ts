@@ -7,7 +7,7 @@ import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
 import { McpConnectorError } from "../../src/errors.js";
 import { McpConnectorMetricsRegistry } from "../../src/metrics.js";
-import { MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
+import { MCP_FAILURE_KIND_METADATA_KEY, MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
 import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { BridgeWriteStatus, ReceiptApplicationDisposition } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { McpAuthenticator, McpClient, McpClientTool, McpConnectorLogger } from "../../src/service.js";
@@ -96,6 +96,70 @@ describe("McpConnectorServiceShell", () => {
     }));
     expect(JSON.stringify(logger.records)).not.toContain("Authorization");
     expect(JSON.stringify(logger.records)).not.toContain("Bearer");
+  });
+
+  test("keeps discovery, notification, and Tool settlement independent of logger failure", async () => {
+    const client = new RecordingMcpClient();
+    const notifier = new RecordingManifestChangeNotifier();
+    const throwingLogger: McpConnectorLogger = {
+      info: () => { throw new Error("telemetry sink unavailable"); },
+      error: () => { throw new Error("telemetry sink unavailable"); },
+    };
+    const service = createService(client, notifier, throwingLogger, undefined, undefined, async () => undefined);
+
+    const listed = await service.listMcpTools(validListRequest(), new Metadata());
+    expect(listed.tools.map((tool) => tool.name)).toEqual(["create_issue"]);
+
+    await expect(service.handleToolsListChangedNotification(validListRequest())).resolves.toMatchObject({ status: "notified" });
+    notifier.result = { ok: false, retryable: true, code: "bridge_unavailable", message: "private bridge detail" };
+    await expect(service.handleToolsListChangedNotification(validListRequest())).resolves.toMatchObject({ status: "exhausted" });
+
+    await expect(service.runMcpTool(validRunRequest(), authorizationMetadata())).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "ok",
+    });
+    await expect(service.runMcpTool(validRunRequest({
+      requestId: "req_rejected",
+      toolUseEventId: "sevt_tool_rejected",
+      runtimeBindingToken: "invalid-binding-token",
+    }), authorizationMetadata())).rejects.toMatchObject({ code: status.PERMISSION_DENIED });
+  });
+
+  test("classifies only bounded initial discovery failures with private metadata", async () => {
+    const cases = [
+      [new McpConnectorError("mcp_credential_required", "secret credential", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
+      [new McpConnectorError("mcp_authentication_failed", "secret token response", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
+      [new McpConnectorError("mcp_connection_failed", "upstream body", "exhausted"), status.UNAVAILABLE, "server_unavailable"],
+      [new McpConnectorError("mcp_timeout", "upstream timeout detail"), status.DEADLINE_EXCEEDED, "discovery_timeout"],
+    ] as const;
+    for (const [failure, code, kind] of cases) {
+      const client = new RecordingMcpClient();
+      const logger = new MemoryLogger();
+      client.listToolsError = failure;
+
+      const error = await createService(client, new RecordingManifestChangeNotifier(), logger)
+        .listMcpTools(validListRequest(), new Metadata())
+        .then(() => undefined, (caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(GrpcStatusError);
+      expect(error).toMatchObject({ code, message: "mcp manifest discovery failed" });
+      expect((error as GrpcStatusError).metadata.get(MCP_FAILURE_KIND_METADATA_KEY)).toEqual([kind]);
+      expect(logger.records).toEqual([expect.objectContaining({
+        event: "mcp_manifest_discovery_failed",
+        "workspace.id": "wksp_1",
+        "session.id": "sesn_1",
+        "mcp.server.name": "github",
+        "mcp.failure.kind": kind,
+        "error.code": kind,
+      })]);
+      expect(JSON.stringify(logger.records)).not.toContain(failure.message);
+    }
+
+    const retrying = new RecordingMcpClient();
+    retrying.listToolsError = new McpConnectorError("mcp_connection_failed", "still reconnecting", "retrying");
+    const error = await createService(retrying).listMcpTools(validListRequest(), new Metadata())
+      .then(() => undefined, (caught: unknown) => caught);
+    expect(error).toBe(retrying.listToolsError);
   });
 
   test("initial discovery and pre-dispatch notify failures leave later real notifications eligible", async () => {
@@ -471,6 +535,25 @@ describe("McpConnectorServiceShell", () => {
     }
   });
 
+  test("does not classify an invalid scoped discovery request as external degradation", async () => {
+    const client = new RecordingMcpClient();
+    const logger = new MemoryLogger();
+    const invalid = new McpConnectorError("mcp_invalid_input", "invalid upstream schema");
+    client.listToolsError = invalid;
+
+    const error = await createService(client, new RecordingManifestChangeNotifier(), logger)
+      .listMcpTools(validListRequest(), new Metadata())
+      .then(() => undefined, (caught: unknown) => caught);
+
+    expect(error).toBe(invalid);
+    expect(error).not.toBeInstanceOf(GrpcStatusError);
+    expect(logger.records).toEqual([expect.objectContaining({
+      event: "mcp_manifest_discovery_failed",
+      "mcp.failure.kind": "internal",
+      "error.code": "internal",
+    })]);
+  });
+
   test("does not execute the MCP tool when the durable Claim reaches its deadline", async () => {
     const client = new RecordingMcpClient();
     const bridge = new DeadlineClaimBridgeClient();
@@ -490,6 +573,30 @@ describe("McpConnectorServiceShell", () => {
 
     expect(bridge.claimOptions).toEqual([{ deadline: new Date(2_234) }]);
     expect(client.calls).toEqual([]);
+  });
+
+  test("returns the one durable terminal failure when Bridge rejects the provider result shape", async () => {
+    const client = new RecordingMcpClient();
+    const bridge = new RecordingMcpToolResultBridgeClient();
+    bridge.commitPayloadRejectionsRemaining = 1;
+    const service = createService(
+      client,
+      new RecordingManifestChangeNotifier(),
+      new MemoryLogger(),
+      undefined,
+      bridgeBackedStore(bridge),
+    );
+
+    await expect(service.runMcpTool(validRunRequest(), authorizationMetadata())).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP tool result could not be committed.",
+      errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+      retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+      materializationHandle: "sevt_tool_1",
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(bridge.commitCalls).toHaveLength(2);
+    expect(bridge.stored.size).toBe(1);
   });
 
   test("logs RunMcpTool without credential material", async () => {
@@ -533,6 +640,7 @@ describe("McpConnectorServiceShell", () => {
         "session.id",
         "status",
         "thread.id",
+        "tool.use.event.id",
         "tool_name",
         "workspace.id",
       ].sort());
@@ -541,6 +649,7 @@ describe("McpConnectorServiceShell", () => {
         "workspace.id": "wksp_1",
         "session.id": "sesn_1",
         "thread.id": "thrd_1",
+        "tool.use.event.id": "sevt_tool_1",
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         component: "mcp-connector",
@@ -607,6 +716,7 @@ describe("McpConnectorServiceShell", () => {
       "session.id",
       "status",
       "thread.id",
+      "tool.use.event.id",
       "tool_name",
       "workspace.id",
     ].sort());
@@ -819,8 +929,9 @@ describe("McpConnectorServiceShell", () => {
         "request.id",
         "session.id",
         "status",
-        "thread.id",
-        "tool_name",
+      "thread.id",
+      "tool.use.event.id",
+      "tool_name",
         "workspace.id",
       ].sort());
       expect(JSON.stringify(logger.records[0])).not.toContain("rtbt_v1");
@@ -1031,6 +1142,7 @@ class RecordingMcpToolResultBridgeClient {
   readonly claims = new Map<string, ClaimMcpToolResultRequest>();
   inFlight = false;
   commitTransportFailuresRemaining = 0;
+  commitPayloadRejectionsRemaining = 0;
 
   claimMcpToolResult(
     request: ClaimMcpToolResultRequest,
@@ -1077,6 +1189,15 @@ class RecordingMcpToolResultBridgeClient {
     callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
   ) {
     this.commitCalls.push(request);
+    if (this.commitPayloadRejectionsRemaining > 0) {
+      this.commitPayloadRejectionsRemaining -= 1;
+      callback(grpcServiceError(status.INVALID_ARGUMENT), {
+        ack: undefined,
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
+      return;
+    }
     if (this.commitTransportFailuresRemaining > 0) {
       this.commitTransportFailuresRemaining -= 1;
       callback(grpcServiceError(status.UNAVAILABLE), {

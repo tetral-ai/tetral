@@ -519,10 +519,11 @@ func TestPostgreSQLBridgeAPIStoreChildControlDeliveryExhaustionPreventsClose(t *
 		t.Fatalf("decode child control Queue job: %v", err)
 	}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	if _, err := deliveryStore.PrepareRuntimeCommand(context.Background(), runtimeJob); err != nil {
+	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), runtimeJob)
+	if err != nil {
 		t.Fatalf("prepare leased child control delivery: %v", err)
 	}
-	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), runtimeJob, retryableExhaustionResult()); err != nil {
+	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), runtimeJob, runtimeDeliveryResultWithAttemptedBinding(retryableExhaustionResult(), plan.Request)); err != nil {
 		t.Fatalf("finalize child control delivery exhaustion: %v", err)
 	}
 	deadLettered, err := queueStore.DeadLetter(context.Background(), queue.DeadLetterRequest{
@@ -662,8 +663,13 @@ func TestPostgreSQLBridgeAPIStoreChildControlFenceRejectsDirectedWorkUntilClose(
 	if _, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{Scope: parentScope, ChildThreadId: childID, Source: resumeSource}); err != nil {
 		t.Fatalf("resume child after terminal control: %v", err)
 	}
+	const resumedDeliveryID = "delivery_child_control_work_fence_resumed"
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, "evt_child_control_work_fence_resumed_sent",
+		nextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.thread_message_sent",
+		bridgeInterAgentSentEventJSON(t, resumedDeliveryID, mainID, childID, "worker", "evt_child_control_work_fence_send_tool", directMessageJSON))
+	seedAgentMailCustody(t, admin, sessionID, childID, resumedDeliveryID, time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC))
 	resolved, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope: parentScope, ChildThreadId: childID, DeliveryId: "delivery_child_control_work_fence_direct",
+		Scope: parentScope, ChildThreadId: childID, DeliveryId: resumedDeliveryID,
 	})
 	if err != nil || resolved.GetReceivedEventId() == "" {
 		t.Fatalf("direct agent mail after control release = %+v, %v; want admitted delivery", resolved, err)
@@ -1748,10 +1754,16 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	}
 	prepareCompletedChildCloseForTest(t, admin, store, closeRequest)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, childID, "rin_close_tree_message", "messages", `["evt_close_tree_message"]`, "accepted", bindingID, podUID, 1, 1)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childID,
+		RuntimeInputID: "rin_close_tree_queued", InputKind: "messages",
+		EventIDs: []string{"evt_close_tree_queued"}, SequenceFrom: 2, SequenceTo: 2,
+	})
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, grandchildID, "task_notification:close_tree", "task_notification", `[]`, "accepted", bindingID, podUID, 0, 0)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	for _, input := range []runtimePodLostAcceptedInput{
 		{SessionThreadID: childID, RuntimeInputID: "rin_close_tree_message", InputKind: "messages", EventIDsJSON: `["evt_close_tree_message"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true}},
+		{SessionThreadID: childID, RuntimeInputID: "rin_close_tree_queued", InputKind: "messages", EventIDsJSON: `["evt_close_tree_queued"]`, SequenceFrom: sql.NullInt64{Int64: 2, Valid: true}, SequenceTo: sql.NullInt64{Int64: 2, Valid: true}},
 		{SessionThreadID: grandchildID, RuntimeInputID: "task_notification:close_tree", InputKind: "task_notification", EventIDsJSON: `[]`},
 	} {
 		request, err := lostRuntimeInputEnqueueRequest("default", sessionID, input, store.Clock())
@@ -1771,6 +1783,7 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	}
 	for runtimeInputID, wantStatus := range map[string]string{
 		"rin_close_tree_message":       "cancelled",
+		"rin_close_tree_queued":        "cancelled",
 		"task_notification:close_tree": "parked",
 	} {
 		var inboxStatus, queueStatus string
@@ -2395,7 +2408,7 @@ func TestPostgreSQLTaskNotificationAndChildCloseSerializeAtSessionBoundary(t *te
 			seedBridgeAPISession(t, admin, "default", sessionID, parentID)
 			seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_notification_close")
-			seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_task_source")
+			seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_task_source")
 			resultJSON := `{"task_id":"task_notification_close","source_tool_use_event_id":"evt_task_source","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 			settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", resultJSON)
 			seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, childID, inputID, bindingID, "pod_notification_close")
@@ -2403,7 +2416,11 @@ func TestPostgreSQLTaskNotificationAndChildCloseSerializeAtSessionBoundary(t *te
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, "pod_notification_close")
 			childScope := scopeForThread(parentScope, childID)
-			commitRequest := bridgeTaskNotificationRequestForTest(t, childScope, inputID, taskID, resultJSON)
+			deliveredResultJSON, err := canonicalTaskNotificationPayloadJSON(taskID, "evt_task_source", "completed", resultJSON)
+			if err != nil {
+				t.Fatalf("build delivered task notification: %v", err)
+			}
+			commitRequest := bridgeTaskNotificationRequestForTest(t, childScope, inputID, taskID, deliveredResultJSON)
 			admitRequest := &bridgev1.AdmitChildInterruptRequest{
 				Scope: parentScope, RootChildThreadId: childID,
 				SourceToolUseEventId: closeSource.GetSourceToolUseEventId(),
@@ -2476,6 +2493,20 @@ func TestPostgreSQLTaskNotificationAndChildCloseSerializeAtSessionBoundary(t *te
 				if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 					t.Fatalf("notification-first ack = %#v; want committed", committed.GetAck())
 				}
+				var inboxStatus string
+				var notificationEvents, notificationMessages, rejectedOperations int
+				if err := admin.QueryRow(`SELECT
+					(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+					(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND type='runtime_notification'),
+					(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$2 AND kind='runtime_notification'),
+					(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$2
+					  AND operation='commit_task_notification_result' AND ack_status='rejected')`, inputID, sessionID,
+				).Scan(&inboxStatus, &notificationEvents, &notificationMessages, &rejectedOperations); err != nil {
+					t.Fatalf("read notification-first facts: %v", err)
+				}
+				if inboxStatus != "committed" || notificationEvents != 1 || notificationMessages != 1 || rejectedOperations != 0 {
+					t.Fatalf("notification-first facts = Inbox:%s Events:%d Messages:%d rejectedOps:%d", inboxStatus, notificationEvents, notificationMessages, rejectedOperations)
+				}
 				return
 			}
 			if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED || committed.GetAck().GetErrorCode() != "task_notification_deferred" {
@@ -2513,17 +2544,19 @@ func TestPostgreSQLTaskNotificationAndChildCloseSerializeAtSessionBoundary(t *te
 				t.Fatalf("resume child: %v", err)
 			}
 			var inboxStatus string
-			var queuedJobs int
-			if err := admin.QueryRow(`SELECT status FROM session_runtime_inbox
-				WHERE workspace_id='default' AND runtime_input_id=$1`, inputID).Scan(&inboxStatus); err != nil {
-				t.Fatalf("read resumed notification: %v", err)
+			var queuedJobs, notificationEvents, notificationMessages, rejectedOperations int
+			if err := admin.QueryRow(`SELECT
+				(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+				(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind=$2 AND payload_json::jsonb ->> 'runtime_input_id'=$1),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND type='runtime_notification'),
+				(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND kind='runtime_notification'),
+				(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$3
+				  AND operation='commit_task_notification_result' AND ack_status='rejected')`, inputID, queue.KindRuntimeInput, sessionID,
+			).Scan(&inboxStatus, &queuedJobs, &notificationEvents, &notificationMessages, &rejectedOperations); err != nil {
+				t.Fatalf("read resumed notification facts: %v", err)
 			}
-			if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs
-				WHERE workspace_id='default' AND kind=$1 AND payload_json::jsonb ->> 'runtime_input_id'=$2`, queue.KindRuntimeInput, inputID).Scan(&queuedJobs); err != nil {
-				t.Fatalf("count resumed notification jobs: %v", err)
-			}
-			if inboxStatus != "queued" || queuedJobs != 1 {
-				t.Fatalf("resumed notification = %q/%d jobs; want queued/1", inboxStatus, queuedJobs)
+			if inboxStatus != "queued" || queuedJobs != 1 || notificationEvents != 0 || notificationMessages != 0 || rejectedOperations != 0 {
+				t.Fatalf("resumed notification = Inbox:%s jobs:%d Events:%d Messages:%d rejectedOps:%d", inboxStatus, queuedJobs, notificationEvents, notificationMessages, rejectedOperations)
 			}
 		})
 	}

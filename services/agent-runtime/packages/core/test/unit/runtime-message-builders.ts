@@ -35,11 +35,11 @@ export function buildRuntimeControlCommitResult(
         eventSequence: scope.sequenceFrom + index,
         disposition: "existing" as const,
       })),
-		messages: declaration.messageCreates.map((create, index) =>
-		runtimeControlMessageStamp(scope, create, index, createdAt)
+      messages: declaration.messageCreates.map((create, index) =>
+        runtimeControlMessageStamp(scope, create, index, createdAt)
       ),
       pendingAttachmentDelta: [],
-		interruptToolProjections: [],
+      interruptToolProjections: [],
       prefixConsumptions: [],
       childLifecycle: [],
     },
@@ -55,13 +55,12 @@ function runtimeControlMessageStamp(
   const messageId = `msg_control_${scope.runtimeInputId}_${index}`;
   return {
     sessionThreadId: scope.sessionThreadId,
-		owningEventId: create.sourceEventId ?? scope.eventIds[index]!,
     messageId,
     messageSequence: scope.sequenceTo + index + 1,
     createdAt,
     updatedAt: "",
     disposition: "created" as const,
-		parts: create.parts.map((_part, partIndex) => ({
+    parts: create.parts.map((_part, partIndex) => ({
       partId: `part_control_${scope.runtimeInputId}_${index}_${partIndex}`,
       messageId,
       partSequence: partIndex,
@@ -131,8 +130,7 @@ export function buildThreadLoopDurableRuntimeNotificationMessage(id: string, tex
   const message = buildThreadLoopRuntimeNotificationMessage(id, text);
   return DurableRuntimeMessageSchema.parse({
     ...message,
-    owningEventId: `${id}-event`,
-    eventSequence: 1,
+    sequence: 1,
   });
 }
 
@@ -398,9 +396,7 @@ export function buildSessionManagerBridgeRuntimeMessage(sessionId = "sesn_1", te
     sessionId,
     role: "user",
     origin: "runtime",
-    sequence: 0,
-    owningEventId: `sevt_${sessionId}_task_notification`,
-    eventSequence: 1,
+    sequence: 1,
     status: "completed",
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -509,9 +505,7 @@ export function buildSessionRunHostRuntimeNotificationMessage(sessionId: string)
     sessionId,
     role: "user",
     origin: "runtime",
-    sequence: 0,
-    owningEventId: `sevt_${sessionId}_task_notification`,
-    eventSequence: 1,
+    sequence: 1,
     status: "completed",
     createdAt,
     updatedAt: createdAt,
@@ -538,11 +532,9 @@ export function buildApprovalReviewerUserMessage(sessionId: string, messageId = 
   return DurableRuntimeMessageSchema.parse({
     id: messageId,
     sessionId,
-    owningEventId: `evt_${messageId}`,
-    eventSequence: 1,
     role: "user",
     origin: "user",
-    sequence: 0,
+    sequence: 1,
     status: "completed",
     createdAt,
     parts: [{
@@ -672,8 +664,7 @@ export function buildBridgeClientRuntimeMessage(id: string, text: string): Runti
 export function buildBridgeClientDurableRuntimeMessage(id: string, text: string): RuntimeMessage {
   return DurableRuntimeMessageSchema.parse({
     ...buildBridgeClientRuntimeMessage(id, text),
-    owningEventId: `evt_${id}`,
-    eventSequence: 1,
+    sequence: 1,
   });
 }
 
@@ -712,8 +703,6 @@ export function buildCoreHostsUserMessage(sessionId: string, id: string, sequenc
   return DurableRuntimeMessageSchema.parse({
     id,
     sessionId,
-    owningEventId: `sevt_${id}`,
-    eventSequence: sequence,
     role: "user",
     origin: "user",
     sequence,
@@ -752,8 +741,6 @@ export function buildCoreHostsAssistantRunningToolMessage(
   return DurableRuntimeMessageSchema.parse({
     id,
     sessionId,
-    owningEventId: toolUseEventId,
-    eventSequence: sequence,
     role: "assistant",
     origin: "agent",
     sequence,
@@ -815,8 +802,6 @@ export function buildCoreHostsDurableBridgeRuntimeMessage(sessionId: string, tex
   return DurableRuntimeMessageSchema.parse({
     ...buildCoreHostsBridgeRuntimeMessage(sessionId, text),
     sequence: 1,
-    owningEventId: `sevt_${sessionId}_task_notification`,
-    eventSequence: 1,
   });
 }
 
@@ -856,8 +841,7 @@ export function buildRuntimeServiceDurableBridgeRuntimeMessage(
   const message = buildRuntimeServiceBridgeRuntimeMessage(options);
   return DurableRuntimeMessageSchema.parse({
     ...message,
-    owningEventId: `sevt_${message.sessionId}_task_notification`,
-    eventSequence: 1,
+    sequence: 1,
   });
 }
 

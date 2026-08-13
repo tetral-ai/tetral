@@ -68,12 +68,12 @@ func assertCommitInputsConflictDidNotAdvance(t *testing.T, admin *sql.DB, sessio
 	}
 }
 
-func bridgeUserInputCreateForTest(_ string, _ string, _ string, _ string, eventID string, textValue string) *bridgev1.RuntimeMessageCreate {
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT, "user", "user", &eventID, bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", textValue)})
+func bridgeUserInputCreateForTest(_ string, _ string, _ string, _ string, _ string, textValue string) *bridgev1.RuntimeMessageCreate {
+	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT, "user", "user", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", textValue)})
 }
 
-func bridgeApprovalInputCreateForTest(_ string, _ string, _ string, _ string, eventID string, textValue string) *bridgev1.RuntimeMessageCreate {
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT, "user", "user", &eventID, bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", textValue)})
+func bridgeApprovalInputCreateForTest(_ string, _ string, _ string, _ string, _ string, textValue string) *bridgev1.RuntimeMessageCreate {
+	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT, "user", "user", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", textValue)})
 }
 
 func bridgeAgentMailCommitRequestForTest(
@@ -173,7 +173,6 @@ func bridgeAgentMailCommitRequestForTest(
 		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
 		"user",
 		"runtime",
-		&eventID,
 		bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", message.Parts[0].Text)},
 	)
 	return &bridgev1.CommitInputsRequest{
@@ -232,16 +231,16 @@ func bridgeErrorToolSettlementForTest(toolUseEventID, message string) *bridgev1.
 	}
 }
 
-func bridgeMessageCreateForTest(kind bridgev1.RuntimeMessageCreateKind, role, origin string, sourceEventID *string, parts ...bridgeRuntimePartCreateForTest) *bridgev1.RuntimeMessageCreate {
+func bridgeMessageCreateForTest(kind bridgev1.RuntimeMessageCreateKind, role, origin string, parts ...bridgeRuntimePartCreateForTest) *bridgev1.RuntimeMessageCreate {
 	creates := make([]*bridgev1.RuntimePartCreate, 0, len(parts))
 	for _, part := range parts {
 		creates = append(creates, &bridgev1.RuntimePartCreate{PartKind: part.kind, PartJson: part.json})
 	}
-	return &bridgev1.RuntimeMessageCreate{SourceEventId: sourceEventID, MessageKind: kind, MessageInfoJson: fmt.Sprintf("{\"role\":%q,\"origin\":%q,\"status\":\"completed\"}", role, origin), Parts: creates}
+	return &bridgev1.RuntimeMessageCreate{MessageKind: kind, MessageInfoJson: fmt.Sprintf("{\"role\":%q,\"origin\":%q,\"status\":\"completed\"}", role, origin), Parts: creates}
 }
 
 func bridgeCompletionMailCreateForTest(_ *bridgev1.RuntimeScope, _ string, envelope string) *bridgev1.RuntimeMessageCreate {
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL, "user", "runtime", nil, bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", envelope)})
+	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL, "user", "runtime", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", envelope)})
 }
 
 func bridgeAssistantAppendForTest(t *testing.T, parts ...bridgeRuntimePartCreateForTest) *bridgev1.RuntimeAssistantPartAppend {
@@ -262,16 +261,16 @@ func bridgeTaskNotificationCreateForTest(t *testing.T, runtimeInputID, taskID, r
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, sourceToolUseEventID, err := taskNotificationResultIdentity(resultJSON)
-	if err != nil {
-		t.Fatal(err)
+	_, sourceToolUseEventID, ok := taskNotificationDeclaredIdentity(resultJSON)
+	if !ok {
+		t.Fatal("task notification result identity is invalid")
 	}
 	payload, err := canonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = runtimeInputID
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION, "user", "runtime", nil, bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", payload)})
+	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION, "user", "runtime", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", payload)})
 }
 
 func bridgeTaskNotificationRequestForTest(t *testing.T, scope *bridgev1.RuntimeScope, runtimeInputID, taskID, resultJSON string) *bridgev1.CommitTaskNotificationResultRequest {
@@ -574,10 +573,6 @@ func bridgeAPIInt64(value int64) *int64 {
 	return &value
 }
 
-func bridgeAPIString(value string) *string {
-	return &value
-}
-
 func seedBridgeAPIRequestStart(
 	t *testing.T,
 	store *PostgreSQLBridgeAPIStore,
@@ -603,73 +598,6 @@ func seedBridgeAPIRequestStart(
 	return response
 }
 
-func seedBridgeAPIMessageLineage(
-	t *testing.T,
-	db *sql.DB,
-	workspaceID string,
-	sessionID string,
-	threadID string,
-	operation string,
-	sourceKind string,
-	sourceID string,
-	eventID string,
-	messageID string,
-	messageSequence int64,
-) {
-	t.Helper()
-	var eventSequence int64
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT sequence FROM session_events
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
-		workspaceID, sessionID, threadID, eventID,
-	).Scan(&eventSequence); err != nil {
-		t.Fatalf("read lineage event sequence: %v", err)
-	}
-	receiptJSON, err := marshalDeclarationReceipt(&bridgev1.DeclarationReceipt{
-		SessionThreadId:   threadID,
-		OperationKind:     operation,
-		SourceKind:        sourceKind,
-		OperationId:       sourceID,
-		DeclarationDigest: "fixture_digest_" + sourceID,
-		Events: []*bridgev1.DurableEventStamp{{
-			SessionThreadId: threadID,
-			EventId:         eventID,
-			EventSequence:   eventSequence,
-			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-		}},
-		Messages: []*bridgev1.DurableMessageStamp{{
-			SessionThreadId: threadID,
-			OwningEventId:   eventID,
-			MessageId:       messageID,
-			MessageSequence: messageSequence,
-			Disposition:     bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
-		}},
-	})
-	if err != nil {
-		t.Fatalf("marshal message lineage receipt: %v", err)
-	}
-	var runtimeInputID any
-	var runtimeWriteID any
-	if operation == bridgeOpCommitInputs {
-		runtimeInputID = sourceID
-	}
-	if operation == bridgeOpWriteEvent {
-		runtimeWriteID = sourceID
-	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
-			request_hash, declaration_digest, receipt_json, ack_status, runtime_input_id, runtime_write_id,
-			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'committed', $10, $11,
-			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID, sessionID, threadID, operation, sourceKind, sourceID,
-		"fixture_hash_"+sourceID, "fixture_digest_"+sourceID, receiptJSON, runtimeInputID, runtimeWriteID,
-	); err != nil {
-		t.Fatalf("seed message lineage operation: %v", err)
-	}
-}
-
 func bridgeInternalToolRepairCreateForTest(
 	toolCallID string,
 	toolName string,
@@ -679,7 +607,6 @@ func bridgeInternalToolRepairCreateForTest(
 		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR,
 		"assistant",
 		"agent",
-		nil,
 		bridgeRuntimePartCreateForTest{
 			kind: "tool",
 			json: fmt.Sprintf(
@@ -1212,8 +1139,8 @@ func seedBridgeAPIDurableToolMessage(
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, model_request_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7, $8, $9, $9)`,
+			data_json, source_event_id, model_request_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $8, $9, $9)`,
 		workspaceID,
 		sessionID,
 		threadID,
@@ -1226,11 +1153,6 @@ func seedBridgeAPIDurableToolMessage(
 	); err != nil {
 		t.Fatalf("seed durable tool message: %v", err)
 	}
-	seedBridgeAPIMessageLineage(
-		t, db, workspaceID, sessionID, threadID,
-		bridgeOpWriteEvent, "agent.tool_use", "rwrite_fixture_"+toolUseEventID,
-		toolUseEventID, messageID, messageSequence,
-	)
 }
 
 func seedBridgeAPIAgentConfig(t *testing.T, db *sql.DB, workspaceID string, sessionID string, configJSON string) {
@@ -1538,6 +1460,18 @@ func seedAgentMailCustody(t *testing.T, db *sql.DB, sessionID string, targetThre
 	}
 }
 
+func acceptAgentMailCustody(t *testing.T, db *sql.DB, runtimeInputID string, eventID string, sequence int64, bindingID string, podUID string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+		SET status='accepted', event_ids_json=$3, sequence_from=$4, sequence_to=$4,
+		    binding_id=$5, binding_generation=1, target_pod_uid=$6, updated_at=now()
+		WHERE workspace_id=$1 AND runtime_input_id=$2`,
+		"default", runtimeInputID, fmt.Sprintf("[%q]", eventID), sequence, bindingID, podUID,
+	); err != nil {
+		t.Fatalf("accept agent-mail Inbox custody: %v", err)
+	}
+}
+
 func seedBridgeAPIRuntimeInbox(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, inputKind string, eventsJSON string, status string, bindingID string, podUID string, sequenceFrom int64, sequenceTo int64) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
@@ -1601,6 +1535,20 @@ func seedBridgeAPITaskNotificationInbox(t *testing.T, db *sql.DB, workspaceID st
 func seedBridgeAPIBackgroundTask(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, bindingID string, taskID string, sourceToolUseEventID string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, created_at, updated_at
+		) SELECT $1, $2, $3, $4,
+			COALESCE((SELECT MAX(sequence) + 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2), 1),
+			'span.tool_use', '{}',
+			'internal', false, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		WHERE NOT EXISTS (
+			SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND event_id=$4
+		)`,
+		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
+		t.Fatalf("seed background task source Tool Use: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_background_tasks (
 			workspace_id, session_id, session_thread_id, task_id, source_tool_use_event_id,
 			binding_id, sandbox_id, provider_session_id, provider_command_id,
@@ -1608,6 +1556,29 @@ func seedBridgeAPIBackgroundTask(t *testing.T, db *sql.DB, workspaceID string, s
 		) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, 'provider_session_notify', 'provider_command_notify', '{}', 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID, sessionID, threadID, taskID, sourceToolUseEventID, bindingID, "sandbox_"+sessionID); err != nil {
 		t.Fatalf("seed background task: %v", err)
+	}
+}
+
+func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, bindingID string, taskID string, sourceToolUseEventID string) {
+	t.Helper()
+	seedBridgeAPIBackgroundTask(t, db, workspaceID, sessionID, threadID, bindingID, taskID, sourceToolUseEventID)
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_events
+		SET type='agent.tool_use', model_request_id='mreq_' || $4,
+		    payload_json='{"type":"agent.tool_use","name":"exec_command","input":{},"evaluated_permission":"allow"}'
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4`,
+		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
+		t.Fatalf("mark background task source Tool Use: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, model_request_id, created_at, updated_at
+	) SELECT $1, $2, $3, 'evt_result_' || $4,
+		COALESCE((SELECT MAX(sequence) + 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2), 1),
+		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_event_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
+		'internal', false, 'mreq_' || $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	WHERE NOT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND event_id='evt_result_' || $4)`,
+		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
+		t.Fatalf("seed background task source Tool Result: %v", err)
 	}
 }
 

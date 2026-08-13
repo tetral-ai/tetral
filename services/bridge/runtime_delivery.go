@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +94,16 @@ type RuntimePodDirectDeliverer struct {
 	Sender RuntimeCommandSender
 }
 
+func (d RuntimePodDirectDeliverer) ReplaceMalformedRuntimeInputCustody(ctx context.Context, job RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error) {
+	replacer, ok := d.Store.(interface {
+		ReplaceMalformedRuntimeInputCustody(context.Context, RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error)
+	})
+	if !ok || replacer == nil {
+		return queue.ReplaceMalformedRuntimeInputCustodyResult{}, errors.New("runtime delivery store is unavailable")
+	}
+	return replacer.ReplaceMalformedRuntimeInputCustody(ctx, job)
+}
+
 func (d RuntimePodDirectDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
 	repairer, ok := d.Store.(RuntimePodLossRepairer)
 	if !ok || repairer == nil {
@@ -149,12 +160,12 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return finalizer.FinalizeRuntimeCleanup(ctx, job)
 	}
 	if d.Sender == nil {
-		return RuntimeDeliveryResult{
+		return runtimeDeliveryResultWithAttemptedBinding(RuntimeDeliveryResult{
 			Status:       RuntimeDeliveryRejected,
 			Retryable:    true,
 			ErrorKind:    "runtime_transport_unavailable",
 			ErrorMessage: "runtime command sender is unavailable",
-		}, nil
+		}, plan.Request), nil
 	}
 	if plan.Request == nil {
 		return RuntimeDeliveryResult{
@@ -167,6 +178,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	response, err := d.Sender.SendRuntimeCommand(ctx, plan.Target, plan.Request)
 	if err != nil {
 		result, deliveryErr := runtimeDeliveryResultFromSendError(err)
+		result = runtimeDeliveryResultWithAttemptedBinding(result, plan.Request)
 		if deliveryErr != nil {
 			return result, deliveryErr
 		}
@@ -180,6 +192,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return result, nil
 	}
 	result := RuntimeDeliveryResultFromResponseForRequest(response, plan.Request)
+	result = runtimeDeliveryResultWithAttemptedBinding(result, plan.Request)
 	converted, err := d.prepareRuntimeInputRejection(ctx, job, result)
 	if err != nil {
 		return runtimeDeliveryResultFromPrepareError(err), nil
@@ -190,7 +203,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	if job.Kind == queue.KindRuntimeInput && (result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
 		queueLeaseSettled, err := d.Store.MarkRuntimeInputAccepted(ctx, job, plan.Request)
 		if err != nil {
-			return runtimeDeliveryResultFromPrepareError(err), nil
+			return runtimeDeliveryResultWithAttemptedBinding(runtimeDeliveryResultFromPrepareError(err), plan.Request), nil
 		}
 		if queueLeaseSettled {
 			result.QueueLeaseSettled = true
@@ -209,6 +222,19 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return finalizer.FinalizeRuntimeCleanup(ctx, job)
 	}
 	return result, nil
+}
+
+func runtimeDeliveryResultWithAttemptedBinding(
+	result RuntimeDeliveryResult,
+	request *agentruntimev1.RuntimeInputCommandRequest,
+) RuntimeDeliveryResult {
+	if request == nil {
+		return result
+	}
+	result.AttemptedBindingID = request.GetBindingId()
+	result.AttemptedBindingGeneration = request.GetBindingGeneration()
+	result.AttemptedTargetPodUID = request.GetTargetPodUid()
+	return result
 }
 
 func (d RuntimePodDirectDeliverer) prepareRuntimeInputRejection(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (bool, error) {
@@ -295,7 +321,16 @@ func NewJobRunnerRuntimeDeliveryStore(
 	return store
 }
 
+const maxRuntimePreparationReentries = 2
+
 func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
+	return s.prepareRuntimeCommand(ctx, job, 0)
+}
+
+// Preparation can legitimately repair one lost binding and capture one initial
+// MCP manifest before retrying the same durable job. Bound those state-driven
+// re-entries explicitly so a broken repair or capture cannot recurse forever.
+func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Context, job RuntimeJob, reentries int) (RuntimeCommandPlan, error) {
 	if s == nil || s.Client == nil {
 		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
@@ -476,10 +511,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Conte
 		var initialMCP runtimeInitialMCPManifestRequiredError
 		var lostBinding runtimeBindingLostError
 		if errors.As(err, &lostBinding) {
+			if reentries >= maxRuntimePreparationReentries {
+				return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_invariant", message: "runtime preparation did not converge after durable repair", retryable: false}
+			}
 			if err := s.repairLostRuntimeBinding(ctx, job.WorkspaceID, job.SessionID, lostBinding.binding, now); err != nil {
 				return RuntimeCommandPlan{}, err
 			}
-			return s.PrepareRuntimeCommand(ctx, job)
+			return s.prepareRuntimeCommand(ctx, job, reentries+1)
 		} else if errors.As(err, &initialMCP) {
 			initialMCPManifestToolsets = initialMCP.toolsets
 		} else {
@@ -487,10 +525,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Conte
 		}
 	}
 	if len(initialMCPManifestToolsets) > 0 {
-		if err := s.enqueueInitialMCPManifestUpdates(ctx, job, initialMCPManifestToolsets, now); err != nil {
+		if reentries >= maxRuntimePreparationReentries {
+			return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_invariant", message: "runtime preparation did not converge after manifest capture", retryable: false}
+		}
+		if err := s.captureInitialMCPManifests(ctx, job, initialMCPManifestToolsets, now); err != nil {
 			return RuntimeCommandPlan{}, err
 		}
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "mcp_manifest_discovery_pending", message: "mcp manifest update queued before runtime input delivery", retryable: true}
+		return s.prepareRuntimeCommand(ctx, job, reentries+1)
 	}
 	return plan, nil
 }
@@ -555,6 +596,15 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 			return err
 		}
 		if !rowsAffected(result) {
+			if job.InputKind == "task_notification" {
+				replayed, found, replayErr := replayTaskNotificationDeliveryFinalizationTx(ctx, tx, job)
+				if replayErr != nil {
+					return replayErr
+				}
+				if found && replayed.Status == RuntimeDeliveryDuplicate {
+					return nil
+				}
+			}
 			return runtimeDeliveryPrepareError{kind: "runtime_inbox_accept_missing", message: "runtime inbox row is missing for accepted input", retryable: true}
 		}
 		return nil
@@ -670,6 +720,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 	}
 	finalized := RuntimeDeliveryResult{}
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_runtime_delivery", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
 		replayed, found, err := replayRuntimeDeliveryFinalizationTx(ctx, tx, job)
 		if err != nil {
 			return err
@@ -677,6 +730,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 		if found {
 			finalized = replayed
 			return nil
+		}
+		if err := validateRuntimeFinalizationBindingTx(ctx, tx, job, result); err != nil {
+			return err
 		}
 		if job.InputKind == "agent_mail" {
 			stale, err := agentMailRecipientTerminalTx(ctx, tx, job)
@@ -718,9 +774,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			finalized = replayed
 			return nil
 		}
-		if len(job.EventIDs) == 0 {
-			return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime delivery finalization requires event anchors", retryable: false}
-		}
 		if err := markRuntimeInputEventsProcessedByIDTx(ctx, tx, job.WorkspaceID, job.SessionID, job.EventIDs, now); err != nil {
 			return err
 		}
@@ -734,7 +787,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			  WHERE workspace_id = $1
 			    AND session_id = $2
 			    AND runtime_input_id = $3
-			    AND status IN ('delivering', 'accepted')`,
+			    AND status IN ('queued', 'delivering', 'accepted')`,
 			job.WorkspaceID,
 			job.SessionID,
 			job.RuntimeInputID,
@@ -801,7 +854,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeMCPManifestDelivery(ctx context
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
-	logMCPManifestTransitionCommitted(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, job.MCPServerName, acceptance)
+	logMCPManifestTransitionCommitted(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, job.MCPServerName, acceptance, false)
 	return runtimeDeliveryExhaustedResult(), nil
 }
 
@@ -822,6 +875,231 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 	return result, found, err
 }
 
+func (s *PostgreSQLRuntimeDeliveryStore) ReplaceMalformedRuntimeInputCustody(ctx context.Context, job RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error) {
+	if s == nil || s.Client == nil || job.WorkspaceID == "" || job.SessionID == "" || job.RuntimeInputID == "" {
+		return queue.ReplaceMalformedRuntimeInputCustodyResult{}, nil
+	}
+	now := time.Now().UTC()
+	if s.Clock != nil {
+		now = s.Clock().UTC()
+	}
+	return queue.NewPostgreSQLStore(s.Client).ReplaceMalformedRuntimeInputCustody(ctx, queue.ReplaceMalformedRuntimeInputCustodyRequest{
+		WorkspaceID:    workspace.ID(job.WorkspaceID),
+		SessionID:      job.SessionID,
+		RuntimeInputID: job.RuntimeInputID,
+		JobID:          job.JobID,
+		LeaseToken:     job.LeaseToken,
+		Now:            now,
+	})
+}
+
+type lockedRuntimeInboxFinalization struct {
+	threadID        string
+	inputKind       string
+	rejectionReason sql.NullString
+	eventIDs        []string
+	sequenceFrom    sql.NullInt64
+	sequenceTo      sql.NullInt64
+	status          string
+}
+
+func validateRuntimeFinalizationBindingTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	result RuntimeDeliveryResult,
+) error {
+	var status string
+	var bindingID, targetPodUID sql.NullString
+	var bindingGeneration sql.NullInt64
+	if err := tx.QueryRow(ctx, `SELECT status, binding_id, binding_generation, target_pod_uid
+		FROM session_runtime_inbox
+		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		FOR UPDATE`, job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(
+		&status, &bindingID, &bindingGeneration, &targetPodUID,
+	); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return invalidRuntimeFinalizationIdentity("runtime Inbox custody is missing")
+		}
+		return err
+	}
+	attemptedComplete := result.AttemptedBindingID != "" && result.AttemptedBindingGeneration > 0 && result.AttemptedTargetPodUID != ""
+	attemptedEmpty := result.AttemptedBindingID == "" && result.AttemptedBindingGeneration == 0 && result.AttemptedTargetPodUID == ""
+	switch status {
+	case "queued":
+		if !attemptedEmpty || bindingID.Valid || bindingGeneration.Valid || targetPodUID.Valid {
+			return invalidRuntimeFinalizationIdentity("queued runtime Inbox conflicts with attempted binding")
+		}
+	case "delivering", "accepted":
+		if !attemptedComplete || !bindingID.Valid || bindingID.String != result.AttemptedBindingID ||
+			!bindingGeneration.Valid || bindingGeneration.Int64 != result.AttemptedBindingGeneration ||
+			!targetPodUID.Valid || targetPodUID.String != result.AttemptedTargetPodUID {
+			return invalidRuntimeFinalizationIdentity("runtime Inbox binding conflicts with delivery attempt")
+		}
+	}
+	return nil
+}
+
+// Exhaustion is authorized only by the producer-owned Inbox row. This lock and
+// identity check runs before any source event, task, mail, or exhaustion fact
+// can be mutated; Queue payloads never reconstruct missing custody.
+func lockRuntimeInboxFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (lockedRuntimeInboxFinalization, error) {
+	var row lockedRuntimeInboxFinalization
+	var eventIDsJSON string
+	err := tx.QueryRow(ctx, `SELECT session_thread_id, input_kind, rejection_reason_code,
+		event_ids_json, sequence_from, sequence_to, status
+		FROM session_runtime_inbox
+		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		FOR UPDATE`, job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(
+		&row.threadID, &row.inputKind, &row.rejectionReason, &eventIDsJSON,
+		&row.sequenceFrom, &row.sequenceTo, &row.status,
+	)
+	if dbconnect.IsNoRows(err) {
+		return lockedRuntimeInboxFinalization{}, invalidRuntimeFinalizationIdentity("runtime Inbox custody is missing")
+	}
+	if err != nil {
+		return lockedRuntimeInboxFinalization{}, err
+	}
+	if err := json.Unmarshal([]byte(eventIDsJSON), &row.eventIDs); err != nil || row.eventIDs == nil {
+		return lockedRuntimeInboxFinalization{}, invalidRuntimeFinalizationIdentity("runtime Inbox event identity is invalid")
+	}
+	if row.threadID != job.SessionThreadID {
+		return lockedRuntimeInboxFinalization{}, invalidRuntimeFinalizationIdentity("runtime Inbox thread conflicts with Queue custody")
+	}
+
+	switch job.InputKind {
+	case "agent_mail":
+		if row.inputKind != "agent_mail" || len(job.EventIDs) != 0 || job.SequenceFrom != 0 || job.SequenceTo != 0 {
+			return lockedRuntimeInboxFinalization{}, invalidRuntimeFinalizationIdentity("agent mail Queue identity conflicts with Inbox custody")
+		}
+		if row.status == "dead_lettered" {
+			return row, nil
+		}
+		if err := validateAgentMailFinalizationIdentityTx(ctx, tx, job, row); err != nil {
+			return lockedRuntimeInboxFinalization{}, err
+		}
+	case "task_notification":
+		if row.inputKind != "task_notification" || len(job.EventIDs) != 0 || len(row.eventIDs) != 0 ||
+			job.SequenceFrom != 0 || job.SequenceTo != 0 || row.sequenceFrom.Valid || row.sequenceTo.Valid {
+			return lockedRuntimeInboxFinalization{}, invalidRuntimeFinalizationIdentity("task notification Queue identity conflicts with Inbox custody")
+		}
+		if row.status == "dead_lettered" {
+			return row, nil
+		}
+		if err := validateTaskNotificationFinalizationIdentityTx(ctx, tx, job); err != nil {
+			return lockedRuntimeInboxFinalization{}, err
+		}
+	default:
+		kindMatches := row.inputKind == job.InputKind
+		if job.InputKind == "messages" && row.inputKind == "rejection" {
+			kindMatches = row.rejectionReason.Valid && (row.rejectionReason.String == "runtime_command_payload_too_large" || row.rejectionReason.String == "runtime_command_rejected")
+		}
+		if !kindMatches || len(job.EventIDs) == 0 || !slices.Equal(row.eventIDs, job.EventIDs) ||
+			!row.sequenceFrom.Valid || !row.sequenceTo.Valid || row.sequenceFrom.Int64 != job.SequenceFrom || row.sequenceTo.Int64 != job.SequenceTo {
+			return lockedRuntimeInboxFinalization{}, invalidRuntimeFinalizationIdentity("runtime Queue identity conflicts with Inbox custody")
+		}
+		if err := validateRuntimeFinalizationEventsTx(ctx, tx, job); err != nil {
+			return lockedRuntimeInboxFinalization{}, err
+		}
+	}
+	return row, nil
+}
+
+func validateRuntimeFinalizationEventsTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) error {
+	if job.SequenceTo-job.SequenceFrom+1 != int64(len(job.EventIDs)) {
+		return invalidRuntimeFinalizationIdentity("runtime Queue event range is invalid")
+	}
+	for index, eventID := range job.EventIDs {
+		var threadID string
+		var sequence int64
+		err := tx.QueryRow(ctx, `SELECT session_thread_id, sequence FROM session_events
+			WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3 FOR UPDATE`,
+			job.WorkspaceID, job.SessionID, eventID,
+		).Scan(&threadID, &sequence)
+		if dbconnect.IsNoRows(err) || (err == nil && (threadID != job.SessionThreadID || sequence != job.SequenceFrom+int64(index))) {
+			return invalidRuntimeFinalizationIdentity("runtime Queue event identity conflicts with durable events")
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAgentMailFinalizationIdentityTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, inbox lockedRuntimeInboxFinalization) error {
+	deliveryID := strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")
+	if deliveryID == "" || deliveryID == job.RuntimeInputID {
+		return invalidRuntimeFinalizationIdentity("agent mail runtime input id is invalid")
+	}
+	envelope, err := loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID, deliveryID)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return invalidRuntimeFinalizationIdentity("agent mail envelope is missing")
+		}
+		return err
+	}
+	if envelope.TargetThreadID != job.SessionThreadID || envelope.SourceThreadID == "" || envelope.SourceToolUseEventID == "" {
+		return invalidRuntimeFinalizationIdentity("agent mail envelope conflicts with Queue custody")
+	}
+	if inbox.status == "queued" {
+		if len(inbox.eventIDs) == 0 && !inbox.sequenceFrom.Valid && !inbox.sequenceTo.Valid {
+			return nil
+		}
+	}
+	receivedEventID := stableRuntimeID("agent_mail_received_event", job.WorkspaceID, job.SessionID, job.SessionThreadID, deliveryID)
+	if len(inbox.eventIDs) != 1 || inbox.eventIDs[0] != receivedEventID || !inbox.sequenceFrom.Valid || !inbox.sequenceTo.Valid || inbox.sequenceFrom.Int64 != inbox.sequenceTo.Int64 {
+		return invalidRuntimeFinalizationIdentity("agent mail received identity conflicts with Inbox custody")
+	}
+	var sequence int64
+	var sourceThreadID, sourceToolUseEventID string
+	err = tx.QueryRow(ctx, `SELECT sequence, payload_json::jsonb ->> 'source_thread_id',
+		payload_json::jsonb ->> 'source_tool_use_event_id'
+		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		AND event_id=$4 AND type='agent.thread_message_received'
+		AND payload_json::jsonb ->> 'delivery_id'=$5 FOR UPDATE`,
+		job.WorkspaceID, job.SessionID, job.SessionThreadID, receivedEventID, deliveryID,
+	).Scan(&sequence, &sourceThreadID, &sourceToolUseEventID)
+	if dbconnect.IsNoRows(err) || (err == nil && (sequence != inbox.sequenceFrom.Int64 || sourceThreadID != envelope.SourceThreadID || sourceToolUseEventID != envelope.SourceToolUseEventID)) {
+		return invalidRuntimeFinalizationIdentity("agent mail received event conflicts with durable envelope")
+	}
+	return err
+}
+
+func validateTaskNotificationFinalizationIdentityTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) error {
+	taskID := taskNotificationTaskID(job.RuntimeInputID)
+	if taskID == "" {
+		return invalidRuntimeFinalizationIdentity("task notification runtime input id is invalid")
+	}
+	var threadID, sourceToolUseEventID, taskStatus string
+	var terminalResultJSON sql.NullString
+	var sourceExists bool
+	err := tx.QueryRow(ctx, `SELECT task.session_thread_id, task.source_tool_use_event_id, task.status,
+		task.terminal_result_json, EXISTS (
+			SELECT 1 FROM session_events source WHERE source.workspace_id=task.workspace_id
+			AND source.session_id=task.session_id AND source.session_thread_id=task.session_thread_id
+			AND source.event_id=task.source_tool_use_event_id
+		)
+		FROM session_background_tasks task
+		WHERE task.workspace_id=$1 AND task.session_id=$2 AND task.task_id=$3 FOR UPDATE`,
+		job.WorkspaceID, job.SessionID, taskID,
+	).Scan(&threadID, &sourceToolUseEventID, &taskStatus, &terminalResultJSON, &sourceExists)
+	if dbconnect.IsNoRows(err) {
+		return invalidRuntimeFinalizationIdentity("task notification source is missing")
+	}
+	if err != nil {
+		return err
+	}
+	if threadID != job.SessionThreadID || sourceToolUseEventID == "" || !sourceExists || !validBackgroundTaskTerminalStatus(taskStatus) ||
+		!terminalResultJSON.Valid || !json.Valid([]byte(terminalResultJSON.String)) {
+		return invalidRuntimeFinalizationIdentity("task notification source conflicts with Queue custody")
+	}
+	return nil
+}
+
+func invalidRuntimeFinalizationIdentity(message string) error {
+	return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: message, retryable: false}
+}
+
 func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
 	if job.InputKind == "task_notification" {
 		return replayTaskNotificationDeliveryFinalizationTx(ctx, tx, job)
@@ -829,103 +1107,37 @@ func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, 
 	if job.InputKind == "agent_mail" {
 		return replayAgentMailDeliveryFinalizationTx(ctx, tx, job)
 	}
-	var inboxStatus string
-	err := tx.QueryRow(ctx,
-		`SELECT status
-		   FROM session_runtime_inbox
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND runtime_input_id = $3
-		  FOR UPDATE`,
-		job.WorkspaceID,
-		job.SessionID,
-		job.RuntimeInputID,
-	).Scan(&inboxStatus)
-	if err == nil {
-		switch inboxStatus {
-		case "dead_lettered":
-			return runtimeDeliveryExhaustedResult(), true, nil
-		case "committed", "cancelled":
-			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
-		case "queued", "delivering", "accepted":
-			return RuntimeDeliveryResult{}, false, nil
-		default:
-			return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
-		}
-	}
-	if !dbconnect.IsNoRows(err) {
-		return RuntimeDeliveryResult{}, false, err
-	}
-	exists, err := runtimeDeliveryExhaustionEventExistsTx(ctx, tx, job)
+	inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
 	if err != nil {
 		return RuntimeDeliveryResult{}, false, err
 	}
-	if exists {
+	switch inbox.status {
+	case "dead_lettered":
 		return runtimeDeliveryExhaustedResult(), true, nil
-	}
-	if len(job.EventIDs) == 0 {
-		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "event-less runtime delivery finalization is unauthorized", retryable: false}
-	}
-	processed, err := allRuntimeInputEventsProcessedTx(ctx, tx, job)
-	if err != nil {
-		return RuntimeDeliveryResult{}, false, err
-	}
-	if processed {
+	case "committed", "cancelled":
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+	case "queued", "delivering", "accepted":
+		return RuntimeDeliveryResult{}, false, nil
+	default:
+		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 	}
-	return RuntimeDeliveryResult{}, false, nil
 }
 
 func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
-	if exists, err := runtimeDeliveryExhaustionEventExistsTx(ctx, tx, job); err != nil {
+	inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
+	if err != nil {
 		return RuntimeDeliveryResult{}, false, err
-	} else if exists {
+	}
+	switch inbox.status {
+	case "dead_lettered":
 		return runtimeDeliveryExhaustedResult(), true, nil
-	}
-	deliveryID := strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")
-	if deliveryID == "" || deliveryID == job.RuntimeInputID {
-		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail runtime input id is invalid", retryable: false}
-	}
-	var sent bool
-	var receivedProcessed bool
-	var inboxCommitted bool
-	if err := tx.QueryRow(ctx,
-		`SELECT
-			EXISTS (
-				SELECT 1 FROM session_events
-				 WHERE workspace_id=$1 AND session_id=$2
-				   AND type='agent.thread_message_sent'
-				   AND payload_json::jsonb ->> 'delivery_id'=$3
-			),
-			EXISTS (
-				SELECT 1 FROM session_events
-				 WHERE workspace_id=$1 AND session_id=$2
-				   AND session_thread_id=$4
-				   AND type='agent.thread_message_received'
-				   AND payload_json::jsonb ->> 'delivery_id'=$3
-				   AND processed_at IS NOT NULL
-			),
-			EXISTS (
-				SELECT 1 FROM session_runtime_inbox
-				 WHERE workspace_id=$1 AND session_id=$2
-				   AND session_thread_id=$4
-				   AND runtime_input_id='agent_mail:' || $3
-				   AND status='committed'
-			)`,
-		job.WorkspaceID,
-		job.SessionID,
-		deliveryID,
-		job.SessionThreadID,
-	).Scan(&sent, &receivedProcessed, &inboxCommitted); err != nil {
-		return RuntimeDeliveryResult{}, false, err
-	}
-	if !sent {
-		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail sent envelope is missing", retryable: false}
-	}
-	if receivedProcessed || inboxCommitted {
+	case "committed", "cancelled":
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+	case "queued", "delivering", "accepted":
+		return RuntimeDeliveryResult{}, false, nil
+	default:
+		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 	}
-	return RuntimeDeliveryResult{}, false, nil
 }
 
 func settleAgentMailDeliveryExhaustionTx(
@@ -965,7 +1177,7 @@ func settleAgentMailDeliveryExhaustionTx(
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND runtime_input_id = $3
-		    AND status IN ('delivering', 'accepted')`,
+		    AND status IN ('queued', 'delivering', 'accepted')`,
 		job.WorkspaceID,
 		job.SessionID,
 		job.RuntimeInputID,
@@ -979,30 +1191,38 @@ func replayTaskNotificationDeliveryFinalizationTx(ctx context.Context, tx *dbcon
 	if taskID == "" {
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "task notification runtime input id must identify a task", retryable: false}
 	}
-	var inboxStatus string
-	err := tx.QueryRow(ctx,
-		`SELECT status
-		   FROM session_runtime_inbox
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND runtime_input_id = $3
-		  FOR UPDATE`,
-		job.WorkspaceID,
-		job.SessionID,
-		job.RuntimeInputID,
-	).Scan(&inboxStatus)
-	if err == nil {
-		switch inboxStatus {
-		case "dead_lettered":
-			return runtimeDeliveryExhaustedResult(), true, nil
-		case "committed", "cancelled":
-			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
-		case "queued", "delivering", "accepted", "parked":
-		default:
-			return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
-		}
-	} else if !dbconnect.IsNoRows(err) {
+	inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
+	if err != nil {
 		return RuntimeDeliveryResult{}, false, err
+	}
+	switch inbox.status {
+	case "dead_lettered":
+		var errorCode string
+		err := tx.QueryRow(ctx, `SELECT error_code
+				FROM session_bridge_operations
+				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+				  AND operation=$4 AND source_kind=$4 AND idempotency_key=$5
+				  AND ack_status=$6 AND runtime_input_id=$7
+				FOR UPDATE`,
+			job.WorkspaceID, job.SessionID, job.SessionThreadID,
+			bridgeOpCommitTaskNotificationResult, taskID+":"+job.RuntimeInputID,
+			bridgeAckRejected, job.RuntimeInputID,
+		).Scan(&errorCode)
+		if err == nil && taskNotificationRejectionCode(errorCode) {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+		}
+		if err != nil && !dbconnect.IsNoRows(err) {
+			return RuntimeDeliveryResult{}, false, err
+		}
+		return runtimeDeliveryExhaustedResult(), true, nil
+	case "committed", "cancelled":
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+	case "parked":
+		// Deferral owns parked custody; a stale Queue lease cannot terminalize it.
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+	case "queued", "delivering", "accepted":
+	default:
+		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 	}
 	var taskThreadID string
 	var terminalResultJSON sql.NullString
@@ -1018,7 +1238,7 @@ func replayTaskNotificationDeliveryFinalizationTx(ctx context.Context, tx *dbcon
 		taskID,
 	).Scan(&taskThreadID, &terminalResultJSON)
 	if dbconnect.IsNoRows(err) {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "task notification source is missing", retryable: false}
 	}
 	if err != nil {
 		return RuntimeDeliveryResult{}, false, err
@@ -1077,7 +1297,7 @@ func finalizeTaskNotificationDeliveryTx(ctx context.Context, tx *dbconnect.Tx, j
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND runtime_input_id = $3
-		    AND status IN ('delivering', 'accepted')`,
+		    AND status IN ('queued', 'delivering', 'accepted')`,
 		job.WorkspaceID,
 		job.SessionID,
 		job.RuntimeInputID,
@@ -1133,25 +1353,6 @@ func insertRuntimeDeliveryExhaustionEventWithThreadScopeTx(ctx context.Context, 
 	return nil
 }
 
-func runtimeDeliveryExhaustionEventExistsTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
-	var exists bool
-	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM session_events
-			 WHERE workspace_id = $1
-			   AND session_id = $2
-			   AND event_id = $3
-			   AND type = 'session.error'
-			   AND payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
-		)`,
-		job.WorkspaceID,
-		job.SessionID,
-		runtimeDeliveryExhaustionEventID(job),
-	).Scan(&exists)
-	return exists, err
-}
-
 func runtimeDeliveryExhaustionEventID(job RuntimeJob) string {
 	digest := sha256Hex(strings.Join([]string{job.WorkspaceID, job.SessionID, job.RuntimeInputID, "runtime_delivery_exhausted"}, "\x00"))
 	return "evt_runtime_exhausted_" + digest[:24]
@@ -1195,11 +1396,11 @@ func requireInitialMCPManifestReadyTx(ctx context.Context, tx *dbconnect.Tx, wor
 	return runtimeInitialMCPManifestRequiredError{toolsets: toolsets}
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) enqueueInitialMCPManifestUpdates(ctx context.Context, job RuntimeJob, toolsets []MCPManifestToolsetConfig, now time.Time) error {
-	return s.enqueueInitialMCPManifestUpdatesWithListTimeout(ctx, job, toolsets, now, initialMCPManifestListTimeout)
+func (s *PostgreSQLRuntimeDeliveryStore) captureInitialMCPManifests(ctx context.Context, job RuntimeJob, toolsets []MCPManifestToolsetConfig, now time.Time) error {
+	return s.captureInitialMCPManifestsWithListTimeout(ctx, job, toolsets, now, initialMCPManifestListTimeout)
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) enqueueInitialMCPManifestUpdatesWithListTimeout(
+func (s *PostgreSQLRuntimeDeliveryStore) captureInitialMCPManifestsWithListTimeout(
 	ctx context.Context,
 	job RuntimeJob,
 	toolsets []MCPManifestToolsetConfig,
@@ -1218,30 +1419,122 @@ func (s *PostgreSQLRuntimeDeliveryStore) enqueueInitialMCPManifestUpdatesWithLis
 		})
 		cancelList()
 		if err != nil {
-			return runtimeDeliveryPrepareError{kind: "mcp_manifest_discovery_unavailable", message: "mcp manifest discovery failed", retryable: true}
-		}
-		if strings.TrimSpace(manifest.ManifestETag) == "" {
-			return runtimeDeliveryPrepareError{kind: "mcp_manifest_protocol_error", message: "mcp manifest etag is missing", retryable: false}
+			var discoveryFailure mcpManifestDiscoveryError
+			if !errors.As(err, &discoveryFailure) {
+				return err
+			}
+			acceptance, commitErr := s.captureInitialMCPManifestFailure(ctx, job, toolset, discoveryFailure.diagnostic, now)
+			if commitErr != nil {
+				return commitErr
+			}
+			logMCPManifestTransitionCommitted(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, toolset.MCPServerName, acceptance, true)
+			continue
 		}
 		var acceptance mcpManifestAcceptance
 		if err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.enqueue_initial_mcp_manifest", func(tx *dbconnect.Tx) error {
 			var err error
-			acceptance, err = captureMCPManifestAcceptanceTx(
-				ctx, tx, job.WorkspaceID, job.SessionID, toolset.MCPServerName, manifest.ManifestETag, manifest.Tools, now,
+			acceptance, err = captureInitialMCPManifestAcceptanceTx(
+				ctx, tx, job.WorkspaceID, job.SessionID, toolset, manifest, now,
 			)
 			return err
 		}); err != nil {
-			if status.Code(err) == codes.ResourceExhausted {
-				return runtimeDeliveryPrepareError{kind: "mcp_manifest_too_large", message: "mcp manifest tools exceed the accepted byte limit", retryable: false}
-			}
 			return err
 		}
-		logMCPManifestTransitionCommitted(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, toolset.MCPServerName, acceptance)
+		logMCPManifestTransitionCommitted(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, toolset.MCPServerName, acceptance, true)
 		if !acceptance.Duplicate {
 			logMCPManifestOmissions(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, toolset.MCPServerName, acceptance.BuiltinFamily, acceptance.Omissions)
 		}
 	}
 	return nil
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) captureInitialMCPManifestFailure(
+	ctx context.Context,
+	job RuntimeJob,
+	toolset MCPManifestToolsetConfig,
+	diagnostic string,
+	now time.Time,
+) (mcpManifestAcceptance, error) {
+	var acceptance mcpManifestAcceptance
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.capture_initial_mcp_manifest_failure", func(tx *dbconnect.Tx) error {
+		var err error
+		acceptance, err = captureInitialMCPManifestUnreadyTx(ctx, tx, job.WorkspaceID, job.SessionID, toolset, diagnostic, now)
+		return err
+	})
+	return acceptance, err
+}
+
+func captureInitialMCPManifestAcceptanceTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	toolset MCPManifestToolsetConfig,
+	manifest MCPManifestListResult,
+	now time.Time,
+) (mcpManifestAcceptance, error) {
+	if err := acquireMCPManifestAcceptanceLockTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName); err != nil {
+		return mcpManifestAcceptance{}, err
+	}
+	current, exists, err := loadMCPManifestRowForUpdateTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName)
+	if err != nil {
+		return mcpManifestAcceptance{}, err
+	}
+	if exists {
+		return mcpManifestAcceptance{PreviousGeneration: current.Generation, Generation: current.Generation, Duplicate: true}, nil
+	}
+	filtered, omissions := filterMCPManifestCollisions(toolset.BuiltinFamily, manifest.Tools)
+	toolsJSON, canonicalErr := canonicalMCPManifestToolsJSON(filtered)
+	if strings.TrimSpace(manifest.ManifestETag) == "" || canonicalErr != nil || len([]byte(toolsJSON)) > MaxMcpManifestBytes {
+		acceptance, err := captureInitialMCPManifestUnreadyLockedTx(ctx, tx, workspaceID, sessionID, toolset, mcpManifestDiagnosticInvalid, now)
+		acceptance.ManifestTooLarge = len([]byte(toolsJSON)) > MaxMcpManifestBytes
+		return acceptance, err
+	}
+	acceptance, err := commitMCPManifestReadyTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName, manifest.ManifestETag, toolsJSON, 1, toolset, now)
+	acceptance.Readiness = mcpManifestReadinessReady
+	acceptance.QueueCustody = "created"
+	acceptance.Transitioned = true
+	acceptance.BuiltinFamily = toolset.BuiltinFamily
+	acceptance.Omissions = omissions
+	return acceptance, err
+}
+
+func captureInitialMCPManifestUnreadyTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	toolset MCPManifestToolsetConfig,
+	diagnostic string,
+	now time.Time,
+) (mcpManifestAcceptance, error) {
+	if err := acquireMCPManifestAcceptanceLockTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName); err != nil {
+		return mcpManifestAcceptance{}, err
+	}
+	current, exists, err := loadMCPManifestRowForUpdateTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName)
+	if err != nil {
+		return mcpManifestAcceptance{}, err
+	}
+	if exists {
+		return mcpManifestAcceptance{PreviousGeneration: current.Generation, Generation: current.Generation, Duplicate: true}, nil
+	}
+	return captureInitialMCPManifestUnreadyLockedTx(ctx, tx, workspaceID, sessionID, toolset, diagnostic, now)
+}
+
+func captureInitialMCPManifestUnreadyLockedTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	toolset MCPManifestToolsetConfig,
+	diagnostic string,
+	now time.Time,
+) (mcpManifestAcceptance, error) {
+	generation, err := transitionMCPManifestUnreadyTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName, mcpManifestRow{}, false, diagnostic, toolset, now)
+	return mcpManifestAcceptance{
+		Generation: generation, Readiness: mcpManifestReadinessUnready, Diagnostic: diagnostic,
+		QueueCustody: "created", Transitioned: true, BuiltinFamily: toolset.BuiltinFamily,
+	}, err
 }
 
 type MCPManifestToolsetConfig struct {
@@ -1791,8 +2084,8 @@ func insertPendingToolTerminalMessageTx(ctx context.Context, tx *dbconnect.Tx, s
 	_, err = tx.Exec(ctx,
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7, $8, $8)
+			data_json, source_event_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $8, $8)
 		ON CONFLICT (workspace_id, session_id, session_thread_id, source_event_id)
 		WHERE source_event_id IS NOT NULL
 		DO NOTHING`,

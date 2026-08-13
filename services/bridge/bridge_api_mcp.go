@@ -65,7 +65,7 @@ func (s *PostgreSQLBridgeAPIStore) McpManifestChanged(ctx context.Context, reque
 	if err != nil {
 		return nil, err
 	}
-	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance)
+	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance, false)
 	if acceptance.ManifestTooLarge {
 		return nil, status.Error(codes.ResourceExhausted, "mcp manifest tools exceed the accepted byte limit")
 	}
@@ -820,7 +820,7 @@ func (s *PostgreSQLBridgeAPIStore) replayedMCPManifestChanged(ctx context.Contex
 	if err != nil {
 		return nil, false, err
 	}
-	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, restored)
+	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, restored, false)
 	return response, response != nil, nil
 }
 
@@ -1032,7 +1032,11 @@ const (
 	mcpManifestReadinessUnready            = "unready"
 	mcpManifestDiagnosticTooLarge          = "manifest_too_large"
 	mcpManifestDiagnosticDeliveryExhausted = "delivery_exhausted"
-	runtimeMCPManifestDeliveryMaxAttempts  = 5
+	//nolint:gosec // This is a public readiness diagnostic token, not credential material.
+	mcpManifestDiagnosticCredentialUnavailable = "credential_unavailable"
+	mcpManifestDiagnosticDiscoveryUnavailable  = "discovery_unavailable"
+	mcpManifestDiagnosticInvalid               = "manifest_invalid"
+	runtimeMCPManifestDeliveryMaxAttempts      = 5
 )
 
 type mcpManifestRow struct {
@@ -1260,6 +1264,7 @@ func logMCPManifestOmissions(logger *slog.Logger, component string, workspaceID 
 	if logger == nil {
 		return
 	}
+	defer func() { _ = recover() }()
 	for _, omission := range omissions {
 		logger.Warn("bridge.mcp_manifest.tool_omitted",
 			slog.String("operation", "mcp_manifest.filter"),
@@ -1278,7 +1283,7 @@ func logMCPManifestOmissions(logger *slog.Logger, component string, workspaceID 
 // The transaction result is the sole source of this event. Keeping the logger
 // at the post-commit boundary prevents telemetry from becoming manifest state
 // or Queue custody evidence.
-func logMCPManifestTransitionCommitted(logger *slog.Logger, component string, workspaceID string, sessionID string, mcpServerName string, acceptance mcpManifestAcceptance) {
+func logMCPManifestTransitionCommitted(logger *slog.Logger, component string, workspaceID string, sessionID string, mcpServerName string, acceptance mcpManifestAcceptance, inputContinued bool) {
 	if logger == nil || !acceptance.Transitioned {
 		return
 	}
@@ -1297,6 +1302,7 @@ func logMCPManifestTransitionCommitted(logger *slog.Logger, component string, wo
 		slog.String("mcp.manifest.readiness", acceptance.Readiness),
 		slog.String("mcp.manifest.diagnostic", acceptance.Diagnostic),
 		slog.String("queue.custody", acceptance.QueueCustody),
+		slog.Bool("runtime.input.continued", inputContinued),
 	)
 }
 
@@ -1304,6 +1310,7 @@ func logMCPMaterialization(logger *slog.Logger, eventKind string, request *bridg
 	if logger == nil || request == nil || request.GetScope() == nil {
 		return
 	}
+	defer func() { _ = recover() }()
 	logger.Info("bridge.mcp_materialization",
 		slog.String("operation", "mcp_materialization"),
 		slog.String("event.kind", eventKind),

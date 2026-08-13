@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Effect, Fiber, Scope } from "effect";
 import type { RuntimeMessage, SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import type { RuntimeApprovalReviewRequest, RuntimeApprovalReviewResult } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
 import { acceptedInputCreates } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import type { RuntimeAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
-import type { ApprovalReviewerOutcome } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { createRuntimeApprovalReviewer as createEffectRuntimeApprovalReviewer } from "../../src/approval-reviewer.js";
 import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
 import {
@@ -24,12 +23,30 @@ const platformReviewerModel = { providerId: "anthropic", modelId: "claude-opus-4
 
 function createRuntimeApprovalReviewer(
   ...args: Parameters<typeof createEffectRuntimeApprovalReviewer>
-): (request: RuntimeApprovalReviewRequest) => Promise<ApprovalReviewerOutcome> {
+): (request: RuntimeApprovalReviewRequest) => Promise<RuntimeApprovalReviewResult> {
   const reviewer = createEffectRuntimeApprovalReviewer(...args);
   return async (request) => await Effect.runPromise(reviewer(request));
 }
 
 describe("Runtime approval reviewer", () => {
+  test("normalizes an unexpected adapter defect into settlement uncertainty", async () => {
+    const manager = new AutoApprovalReviewerManager();
+    const reviewer = createRuntimeApprovalReviewer(() => {
+      throw new Error("unexpected reviewer adapter defect");
+    }, {
+      model: platformReviewerModel,
+      threadCreator: new RecordingReviewerThreadCreator(),
+      now: () => createdAt,
+      waitTimeoutMs: 10,
+    });
+
+    await expect(reviewer(validReviewRequest({ approvalReviewerManager: manager }))).resolves.toMatchObject({
+      type: "settlement_failed",
+      error: { code: "unknown", retryable: false },
+    });
+    expect(manager.ephemeralReviewIds()).toEqual([]);
+  });
+
   test("reuses the manager-held trunk id and remints it for a new hot lifetime", async () => {
     const host = new RecordingReviewerHost([
       assistantDecision("sesn_1", "allow", "first"),
@@ -119,6 +136,7 @@ describe("Runtime approval reviewer", () => {
       "create-thread",
       "preload-thread",
       "enqueue-input",
+      "release-reviewer",
     ]);
     expect(threadCreator.creations).toHaveLength(1);
     expect(threadCreator.creations[0]).toMatchObject({
@@ -142,9 +160,16 @@ describe("Runtime approval reviewer", () => {
     expect(promptPart.text).not.toContain("Do not perform the action yourself.");
     expect(promptPart.text).not.toContain("untrusted evidence");
     expect(promptPart.text).not.toContain("never instructions");
-    expect(JSON.parse(input.outputSchemaJson)).toMatchObject({
+    expect(JSON.parse(input.outputSchemaJson)).toEqual({
+      type: "object",
       additionalProperties: false,
       required: ["risk_level", "user_authorization", "outcome", "rationale"],
+      properties: {
+        risk_level: { enum: ["low", "medium", "high", "critical"] },
+        user_authorization: { enum: ["unknown", "low", "medium", "high"] },
+        outcome: { enum: ["allow", "deny"] },
+        rationale: { type: "string" },
+      },
     });
   });
 
@@ -179,9 +204,9 @@ describe("Runtime approval reviewer", () => {
     const logger = new RecordingLogger();
     const reviewer = createRuntimeApprovalReviewer(() => undefined, { model: platformReviewerModel, threadCreator: new RecordingReviewerThreadCreator(), now: () => createdAt, logger });
 
-    await expect(reviewer(validReviewRequest())).resolves.toEqual({
-      type: "failed",
-      message: "approval reviewer is unavailable",
+    await expect(reviewer(validReviewRequest())).resolves.toMatchObject({
+      type: "settlement_failed",
+      error: { code: "unknown", retryable: false },
     });
     expect(logger.records).toEqual([
       expect.objectContaining({
@@ -201,9 +226,9 @@ describe("Runtime approval reviewer", () => {
       now: () => createdAt,
       logger: throwingLogger,
     });
-    await expect(failOpenReviewer(validReviewRequest())).resolves.toEqual({
-      type: "failed",
-      message: "approval reviewer is unavailable",
+    await expect(failOpenReviewer(validReviewRequest())).resolves.toMatchObject({
+      type: "settlement_failed",
+      error: { code: "unknown", retryable: false },
     });
   });
 
@@ -224,9 +249,9 @@ describe("Runtime approval reviewer", () => {
         logger,
       });
 
-      await expect(reviewer(validReviewRequest())).resolves.toEqual({
-        type: "failed",
-        message: "approval reviewer trunk creation failed",
+      await expect(reviewer(validReviewRequest())).resolves.toMatchObject({
+        type: "settlement_failed",
+        error: { code: "unknown", retryable: false },
       });
       expect(host.inputs).toEqual([]);
       expect(host.decisions).toEqual([]);
@@ -249,7 +274,7 @@ describe("Runtime approval reviewer", () => {
     }
   });
 
-  test("a preload failure before input acceptance creates no reviewer outcome", async () => {
+  test("a preload failure reaches a durable failure receipt before parent fallback", async () => {
     const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "must not escape")], { throwAt: "preload" });
     const reviewer = createRuntimeApprovalReviewer(() => host, {
       model: platformReviewerModel,
@@ -264,7 +289,11 @@ describe("Runtime approval reviewer", () => {
     });
     expect(host.inputs).toEqual([]);
     expect(host.decisions).toEqual([]);
-    expect(host.failures).toEqual([]);
+    expect(host.failures).toEqual([expect.objectContaining({
+      type: "approval_review.failure",
+      failure_kind: "runtime_failure",
+      message: "approval reviewer preload failed",
+    })]);
   });
 
   test("unexpected reviewer host failures commit one runtime failure after input acceptance", async () => {
@@ -280,7 +309,9 @@ describe("Runtime approval reviewer", () => {
         waitTimeoutMs: 10,
       });
 
-      await expect(reviewer(validReviewRequest())).resolves.toEqual({ type: "failed", message });
+      await expect(reviewer(validReviewRequest())).resolves.toMatchObject(throwAt === "wait"
+        ? { type: "settlement_failed", error: { code: "unknown", retryable: false } }
+        : { type: "failed", message });
       expect(host.decisions).toHaveLength(0);
       expect(host.failures).toEqual([
         expect.objectContaining({
@@ -436,7 +467,7 @@ describe("Runtime approval reviewer", () => {
     expect(JSON.parse(sidecarCreation.threadContextPrefixJson)).toMatchObject({
       review_id: sidecarCreation.reviewId,
       source_parent_thread_id: "thrd_parent",
-      parent_boundary_event_id: "evt_msg_first",
+      parent_boundary_event_id: "sevt_request_start_1",
       runtime_messages_snapshot: [assistantDecision("sesn_1", "allow", "safe")],
     });
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation.reviewerThreadId);
@@ -465,14 +496,16 @@ describe("Runtime approval reviewer", () => {
     });
     const threadCreator = new RecordingReviewerThreadCreator([], undefined, {
       ok: false,
-      message: "scope_superseded",
+      message: "scope_superseded secret-close-detail",
       discardHotState: true,
     });
+    const logger = new RecordingLogger();
     const reviewer = createRuntimeApprovalReviewer(() => host, {
       model: platformReviewerModel,
       threadCreator,
       now: () => createdAt,
       waitTimeoutMs: 100,
+      logger,
     });
     const approvalReviewerManager = new AutoApprovalReviewerManager();
     const parent = userMessage("sesn_1", "msg_parent", "parent");
@@ -489,9 +522,124 @@ describe("Runtime approval reviewer", () => {
       parentTranscript: { generation: 1, messages: [parent] },
     }))).resolves.toEqual({ type: "stale_custody" });
     expect(host.closedThreads).toHaveLength(0);
+    expect(logger.records).toEqual([
+      expect.objectContaining({
+        event: "approval_review_lifecycle_failure",
+        "reviewer.kind": "sidecar",
+        "lifecycle.reason": "durable_close_rejected",
+        "error.class": "reviewer_lifecycle_failure",
+      }),
+    ]);
+    expect(JSON.stringify(logger.records)).not.toContain("secret-close-detail");
 
     blocked.resolve(undefined);
     await busyReview;
+  });
+
+  test("keeps an acknowledged sidecar decision authoritative and evicts its run when durable close fails", async () => {
+    const blocked = deferred<void>();
+    const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "durable allow")], {
+      waitGate: async (command) => {
+        const input = host.inputs.findLast((candidate) => candidate.sessionThreadId === command.sessionThreadId);
+        if (input?.kind === "approval_review" && input.targetModelToolCallId === "tool_call_busy") {
+          await blocked.promise;
+        }
+      },
+    });
+    const threadCreator = new RecordingReviewerThreadCreator([], undefined, {
+      ok: false,
+      message: "temporary close failure",
+    });
+    const logger = new RecordingLogger();
+    const reviewer = createRuntimeApprovalReviewer(() => host, {
+      model: platformReviewerModel,
+      threadCreator,
+      now: () => createdAt,
+      waitTimeoutMs: 100,
+      logger,
+    });
+    const approvalReviewerManager = new AutoApprovalReviewerManager();
+    const parent = userMessage("sesn_1", "msg_parent", "parent");
+    const busyReview = reviewer(validReviewRequest({
+      approvalReviewerManager,
+      targetModelToolCallId: "tool_call_busy",
+      parentTranscript: { generation: 1, messages: [parent] },
+    }));
+    await waitFor(() => host.waits.length >= 1);
+
+    await expect(reviewer(validReviewRequest({
+      approvalReviewerManager,
+      targetModelToolCallId: "tool_call_sidecar",
+      parentTranscript: { generation: 1, messages: [parent] },
+    }))).resolves.toMatchObject({ type: "decision", outcome: "allow", message: "durable allow" });
+    expect(host.decisions).toHaveLength(1);
+    expect(host.failures).toHaveLength(0);
+    expect(host.closedThreads).toHaveLength(0);
+    expect(host.reviewerEvictions).toEqual([expect.objectContaining({
+      reviewerThreadId: expect.stringContaining("thrd_aprv_sidecar"),
+    })]);
+    expect(logger.records).toEqual([
+      expect.objectContaining({
+        event: "approval_review_lifecycle_failure",
+        "reviewer.kind": "sidecar",
+        "lifecycle.reason": "durable_close_rejected",
+      }),
+    ]);
+
+    blocked.resolve(undefined);
+    await busyReview;
+  });
+
+  test("evicts an acknowledged sidecar when hot close fails or durable close throws", async () => {
+    for (const testCase of [
+      { name: "hot close rejected", hostOptions: { markThreadClosedOk: false }, closeThrows: false, reason: "hot_close_failed" },
+      { name: "durable close throws", hostOptions: {}, closeThrows: true, reason: "durable_close_failed" },
+    ] as const) {
+      const blocked = deferred<void>();
+      const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", testCase.name)], {
+        waitGate: async (command) => {
+          const input = host.inputs.findLast((candidate) => candidate.sessionThreadId === command.sessionThreadId);
+          if (input?.kind === "approval_review" && input.targetModelToolCallId === "tool_call_busy") {
+            await blocked.promise;
+          }
+        },
+        ...testCase.hostOptions,
+      });
+      const threadCreator = new RecordingReviewerThreadCreator([], undefined, { ok: true }, testCase.closeThrows);
+      const logger = new RecordingLogger();
+      const reviewer = createRuntimeApprovalReviewer(() => host, {
+        model: platformReviewerModel,
+        threadCreator,
+        now: () => createdAt,
+        waitTimeoutMs: 100,
+        logger,
+      });
+      const approvalReviewerManager = new AutoApprovalReviewerManager();
+      const parent = userMessage("sesn_1", `msg_parent_${testCase.reason}`, "parent");
+      const busyReview = reviewer(validReviewRequest({
+        approvalReviewerManager,
+        targetModelToolCallId: "tool_call_busy",
+        parentTranscript: { generation: 1, messages: [parent] },
+      }));
+      await waitFor(() => host.waits.length >= 1);
+
+      await expect(reviewer(validReviewRequest({
+        approvalReviewerManager,
+        targetModelToolCallId: `tool_call_${testCase.reason}`,
+        parentTranscript: { generation: 1, messages: [parent] },
+      }))).resolves.toMatchObject({ type: "decision", outcome: "allow" });
+      expect(host.reviewerEvictions).toEqual([expect.objectContaining({
+        reviewerThreadId: expect.stringContaining("thrd_aprv_sidecar"),
+      })]);
+      expect(logger.records).toContainEqual(expect.objectContaining({
+        event: "approval_review_lifecycle_failure",
+        "reviewer.kind": "sidecar",
+        "lifecycle.reason": testCase.reason,
+      }));
+
+      blocked.resolve(undefined);
+      await busyReview;
+    }
   });
 
   test("creates the first overlapping sidecar unseeded with a full parent feed", async () => {
@@ -515,7 +663,7 @@ describe("Runtime approval reviewer", () => {
     expect(JSON.parse(sidecarCreation?.threadContextPrefixJson ?? "{}")).toMatchObject({
       review_id: sidecarCreation?.reviewId,
       source_parent_thread_id: "thrd_parent",
-      parent_boundary_event_id: "evt_msg_parent",
+      parent_boundary_event_id: "sevt_request_start_1",
       runtime_messages_snapshot: [],
     });
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation?.reviewerThreadId);
@@ -556,7 +704,7 @@ describe("Runtime approval reviewer", () => {
     await trunk;
   });
 
-  test("abandons an admission-rejected sidecar without inventing close proof", async () => {
+  test("settles a deterministic sidecar admission rejection before closing it", async () => {
     const trunkGate = deferred<void>();
     const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "safe")], {
       enqueueAccepted: (input) => input.kind !== "approval_review" || input.targetModelToolCallId !== "tool_call_rejected",
@@ -584,15 +732,21 @@ describe("Runtime approval reviewer", () => {
     ])).resolves.toEqual({ type: "failed", message: "approval reviewer input was rejected" });
 
     const sidecarThreadId = threadCreator.creations.find((creation) => !creation.isTrunk)?.reviewerThreadId;
+    if (sidecarThreadId === undefined) {
+      throw new Error("admission-rejected sidecar was not created");
+    }
     expect(host.decisions).toHaveLength(0);
-    expect(host.failures).toHaveLength(0);
-    expect(host.closedThreads).not.toContain(sidecarThreadId);
-    expect(threadCreator.closes).toHaveLength(0);
+    expect(host.failures).toEqual([expect.objectContaining({
+      failure_kind: "runtime_failure",
+      message: "approval reviewer input was rejected",
+    })]);
+    expect(host.closedThreads).toContain(sidecarThreadId);
+    expect(threadCreator.closes).toEqual([expect.objectContaining({ reviewerThreadId: sidecarThreadId })]);
     trunkGate.resolve(undefined);
     await trunk;
   });
 
-  test("retains a trunk when enqueue throws after potential admission without fabricating an outcome", async () => {
+  test("keeps an outcome-unknown trunk admission on persistence closeout", async () => {
     const manager = new AutoApprovalReviewerManager();
     const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "must not be observed")], {
       enqueueThrows: () => true,
@@ -608,13 +762,13 @@ describe("Runtime approval reviewer", () => {
     await expect(Promise.race([
       reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_enqueue_throw_trunk" })),
       rejectAfter(100, "enqueue-throw trunk did not degrade promptly"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer input was rejected" });
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unknown", retryable: false } });
 
     const input = host.inputs[0];
     if (input?.kind !== "approval_review") {
       throw new Error("enqueue-throw trunk input was not recorded");
     }
-    expect(manager.executionState(input.reviewId)).toEqual({ kind: "trunk", raceState: "pending" });
+    expect(manager.executionState(input.reviewId)).toEqual({ kind: "trunk", raceState: "outcome_won" });
     const later = manager.beginReview("review_after_enqueue_throw_trunk");
     expect(later.kind).toBe("sidecar");
     later.release();
@@ -623,14 +777,14 @@ describe("Runtime approval reviewer", () => {
     expect(host.interruptions).toHaveLength(0);
     expect(host.inspections).toHaveLength(0);
     expect(host.decisions).toHaveLength(0);
-    expect(host.failures).toHaveLength(0);
+    expect(host.failures).toEqual([expect.objectContaining({ review_id: input.reviewId })]);
     expect(threadCreator.closes).toHaveLength(0);
 
     await Effect.runPromise(manager.dispose());
     expect(manager.executionState(input.reviewId)).toBeUndefined();
   });
 
-  test("releases a sidecar when enqueue acknowledgement is unknown without fabricating close proof", async () => {
+  test("keeps an outcome-unknown sidecar admission on persistence closeout", async () => {
     const trunkGate = deferred<void>();
     const manager = new AutoApprovalReviewerManager();
     let host: RecordingReviewerHost;
@@ -663,29 +817,30 @@ describe("Runtime approval reviewer", () => {
         targetModelToolCallId: "tool_call_enqueue_throw_sidecar",
       })),
       rejectAfter(100, "enqueue-throw sidecar was gated by abandoned close"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer input was rejected" });
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unknown", retryable: false } });
 
     const sidecarInput = host.inputs.find((input) => input.kind === "approval_review"
       && input.targetModelToolCallId === "tool_call_enqueue_throw_sidecar");
     if (sidecarInput?.kind !== "approval_review") {
       throw new Error("enqueue-throw sidecar input was not recorded");
     }
-    expect(manager.ephemeralReviewIds()).not.toContain(sidecarInput.reviewId);
+    expect(manager.ephemeralReviewIds()).toContain(sidecarInput.reviewId);
     expect(host.closedThreads).not.toContain(sidecarInput.sessionThreadId);
     expect(host.reviewerInterruptions).toHaveLength(0);
     expect(host.interruptions).toHaveLength(0);
     expect(host.inspections.filter((control) => control.sessionThreadId === sidecarInput.sessionThreadId)).toHaveLength(0);
     expect(host.decisions.filter((event) => event.review_id === sidecarInput.reviewId)).toHaveLength(0);
-    expect(host.failures.filter((event) => event.review_id === sidecarInput.reviewId)).toHaveLength(0);
+    expect(host.failures.filter((event) => event.review_id === sidecarInput.reviewId)).toHaveLength(1);
 
     expect(threadCreator.closes.filter((creation) => creation.reviewId === sidecarInput.reviewId)).toHaveLength(0);
     expect(host.closedThreads).not.toContain(sidecarInput.sessionThreadId);
     trunkGate.resolve(undefined);
     await trunk;
     await Effect.runPromise(manager.dispose());
+    expect(manager.ephemeralReviewIds()).not.toContain(sidecarInput.reviewId);
   });
 
-  test("retains a tokenless accepted trunk until manager disposal without fabricating an outcome", async () => {
+  test("keeps a tokenless accepted trunk on persistence closeout until manager disposal", async () => {
     const manager = new AutoApprovalReviewerManager();
     const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "must not be observed")], {
       reviewerExecutionToken: () => undefined,
@@ -701,13 +856,13 @@ describe("Runtime approval reviewer", () => {
     await expect(Promise.race([
       reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_tokenless_trunk" })),
       rejectAfter(100, "tokenless accepted trunk did not degrade promptly"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer input was rejected" });
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unknown", retryable: false } });
 
     const input = host.inputs[0];
     if (input?.kind !== "approval_review") {
       throw new Error("tokenless trunk input was not recorded");
     }
-    expect(manager.executionState(input.reviewId)).toEqual({ kind: "trunk", raceState: "pending" });
+    expect(manager.executionState(input.reviewId)).toEqual({ kind: "trunk", raceState: "outcome_won" });
     const later = manager.beginReview("review_after_tokenless_accepted_trunk");
     expect(later.kind).toBe("sidecar");
     later.release();
@@ -716,14 +871,14 @@ describe("Runtime approval reviewer", () => {
     expect(host.interruptions).toHaveLength(0);
     expect(host.inspections).toHaveLength(0);
     expect(host.decisions).toHaveLength(0);
-    expect(host.failures).toHaveLength(0);
+    expect(host.failures).toEqual([expect.objectContaining({ review_id: input.reviewId })]);
     expect(threadCreator.closes).toHaveLength(0);
 
     await Effect.runPromise(manager.dispose());
     expect(manager.executionState(input.reviewId)).toBeUndefined();
   });
 
-  test("retains an accepted sidecar with a mismatched token without closing or fabricating an outcome", async () => {
+  test("keeps a mismatched-token sidecar on persistence closeout", async () => {
     const trunkGate = deferred<void>();
     const manager = new AutoApprovalReviewerManager();
     let host: RecordingReviewerHost;
@@ -760,14 +915,14 @@ describe("Runtime approval reviewer", () => {
         targetModelToolCallId: "tool_call_mismatched_sidecar",
       })),
       rejectAfter(100, "mismatched-token sidecar did not degrade promptly"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer input was rejected" });
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unknown", retryable: false } });
 
     const sidecarInput = host.inputs.find((input) => input.kind === "approval_review"
       && input.targetModelToolCallId === "tool_call_mismatched_sidecar");
     if (sidecarInput?.kind !== "approval_review") {
       throw new Error("mismatched-token sidecar input was not recorded");
     }
-    expect(manager.executionState(sidecarInput.reviewId)).toEqual({ kind: "sidecar", raceState: "pending" });
+    expect(manager.executionState(sidecarInput.reviewId)).toEqual({ kind: "sidecar", raceState: "outcome_won" });
     expect(manager.ephemeralReviewIds()).toContain(sidecarInput.reviewId);
     expect(threadCreator.closes.filter((creation) => creation.reviewId === sidecarInput.reviewId)).toHaveLength(0);
     expect(host.reviewerWaits).toHaveLength(1);
@@ -775,7 +930,7 @@ describe("Runtime approval reviewer", () => {
     expect(host.interruptions).toHaveLength(0);
     expect(host.inspections.filter((control) => control.sessionThreadId === sidecarInput.sessionThreadId)).toHaveLength(0);
     expect(host.decisions.filter((event) => event.review_id === sidecarInput.reviewId)).toHaveLength(0);
-    expect(host.failures.filter((event) => event.review_id === sidecarInput.reviewId)).toHaveLength(0);
+    expect(host.failures.filter((event) => event.review_id === sidecarInput.reviewId)).toHaveLength(1);
 
     trunkGate.resolve(undefined);
     await trunk;
@@ -786,7 +941,7 @@ describe("Runtime approval reviewer", () => {
     expect(threadCreator.closes.filter((creation) => creation.reviewId === sidecarInput.reviewId)).toHaveLength(0);
   });
 
-  test("interrupts an unacknowledged sidecar decision and closes only after quiescence", async () => {
+  test("evicts an unacknowledged sidecar decision without fabricating durable close", async () => {
     const trunkGate = deferred<void>();
     const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "safe")], {
       decisionAck: false,
@@ -811,21 +966,22 @@ describe("Runtime approval reviewer", () => {
     await expect(Promise.race([
       reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_unacknowledged" })),
       rejectAfter(100, "unacknowledged decision was gated by sidecar close"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer decision was not acknowledged" });
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unavailable", retryable: false } });
 
     const sidecarThreadId = threadCreator.creations.find((creation) => !creation.isTrunk)?.reviewerThreadId;
     expect(host.decisions).toHaveLength(1);
     expect(host.failures).toHaveLength(0);
     expect(host.reviewerInterruptions).toHaveLength(1);
-    expect(threadCreator.closes.filter((creation) => creation.reviewerThreadId === sidecarThreadId)).toHaveLength(1);
+    expect(host.reviewerEvictions).toHaveLength(1);
+    expect(threadCreator.closes.filter((creation) => creation.reviewerThreadId === sidecarThreadId)).toHaveLength(0);
     trunkGate.resolve(undefined);
     await trunk;
   });
 
-  test("interrupts a sidecar after its bounded failure write remains unacknowledged", async () => {
+  test("evicts a sidecar when failure settlement remains unknown", async () => {
     const trunkGate = deferred<void>();
     const host = new RecordingReviewerHost([assistantReviewerText("sesn_1", "not json")], {
-      failureCommitMode: "hang",
+      failureCommitMode: "unknown",
       waitGate: async (command) => {
         const input = host.inputs.findLast((candidate) => candidate.sessionThreadId === command.sessionThreadId);
         if (input?.kind === "approval_review" && input.targetModelToolCallId === "tool_call_trunk") {
@@ -839,7 +995,6 @@ describe("Runtime approval reviewer", () => {
       threadCreator,
       now: () => createdAt,
       waitTimeoutMs: 100,
-      failureCommitTimeoutMs: 1,
     });
     const manager = new AutoApprovalReviewerManager();
     const trunk = reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_trunk" }));
@@ -847,14 +1002,15 @@ describe("Runtime approval reviewer", () => {
 
     await expect(Promise.race([
       reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_failure_unacknowledged" })),
-      rejectAfter(100, "failure fallback was gated by sidecar close"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer decision is not JSON" });
+      rejectAfter(100, "unknown failure settlement did not close the parent"),
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unavailable", retryable: true } });
 
     const sidecarThreadId = threadCreator.creations.find((creation) => !creation.isTrunk)?.reviewerThreadId;
     expect(host.decisions).toHaveLength(0);
     expect(host.failures).toHaveLength(1);
     expect(host.reviewerInterruptions).toHaveLength(1);
-    expect(threadCreator.closes.filter((creation) => creation.reviewerThreadId === sidecarThreadId)).toHaveLength(1);
+    expect(host.reviewerEvictions).toHaveLength(1);
+    expect(threadCreator.closes.filter((creation) => creation.reviewerThreadId === sidecarThreadId)).toHaveLength(0);
     trunkGate.resolve(undefined);
     await trunk;
   });
@@ -993,24 +1149,26 @@ describe("Runtime approval reviewer", () => {
     expect(host.decisions).toHaveLength(2);
   });
 
-  test("fails closed when the durable reviewer decision is not acknowledged", async () => {
+  test("routes an unacknowledged reviewer decision to persistence closeout", async () => {
     const logger = new RecordingLogger();
     const host = new RecordingReviewerHost([
       assistantDecision("sesn_1", "allow", "low risk"),
     ], { decisionAck: false });
     const reviewer = createRuntimeApprovalReviewer(() => host, { model: platformReviewerModel, threadCreator: new RecordingReviewerThreadCreator(), now: () => createdAt, waitTimeoutMs: 10, logger });
 
-    await expect(reviewer(validReviewRequest())).resolves.toEqual({
-      type: "failed",
-      message: "approval reviewer decision was not acknowledged",
+    await expect(reviewer(validReviewRequest())).resolves.toMatchObject({
+      type: "settlement_failed",
+      error: { code: "unavailable", retryable: false },
     });
     expect(host.decisions).toHaveLength(1);
     expect(host.failures).toHaveLength(0);
     expect(logger.records).toEqual([
       expect.objectContaining({
-        event: "approval_review_failure",
-        "approval.failure_kind": "runtime_failure",
-        "error.message_safe": "approval reviewer decision was not acknowledged",
+        event: "approval_review_settlement_failure",
+        "settlement.outcome": "rejected",
+        "error.class": "durable_settlement_failure",
+        "error.code": "unavailable",
+        "error.message_safe": "approval reviewer outcome was not durably acknowledged",
       }),
     ]);
   });
@@ -1035,7 +1193,7 @@ describe("Runtime approval reviewer", () => {
     ]);
   });
 
-  test("discards a timed-out trunk when request quiescence cannot be confirmed", async () => {
+  test("retains a timed-out trunk only after reviewer quiescence is confirmed", async () => {
     const interruptGate = deferred<void>();
     let host: RecordingReviewerHost;
     host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "safe")], {
@@ -1054,15 +1212,13 @@ describe("Runtime approval reviewer", () => {
       threadCreator,
       now: () => createdAt,
       waitTimeoutMs: 10,
-      failureCommitTimeoutMs: 5,
     });
 
-    await expect(Promise.race([
-      reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_timeout" })),
-      rejectAfter(100, "timeout ask fallback waited for owner shutdown"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer timed out" });
+    const timedOutReview = reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_timeout" }));
     await waitForCondition(() => host.interruptions.length === 1, "timed-out trunk interruption");
     const timedOutTrunkId = threadCreator.creations.find((creation) => creation.isTrunk)?.reviewerThreadId;
+    interruptGate.resolve(undefined);
+    await expect(timedOutReview).resolves.toEqual({ type: "failed", message: "approval reviewer timed out" });
 
     await expect(reviewer(validReviewRequest({
       approvalReviewerManager: manager,
@@ -1070,35 +1226,43 @@ describe("Runtime approval reviewer", () => {
     }))).resolves.toMatchObject({ type: "decision", outcome: "allow" });
     const overlapInput = host.inputs.findLast((input) => input.kind === "approval_review" && input.targetModelToolCallId === "tool_call_overlap");
     expect(threadCreator.creations.find((creation) => creation.reviewerThreadId === overlapInput?.sessionThreadId)?.isTrunk).toBe(true);
-    expect(overlapInput?.sessionThreadId).not.toBe(timedOutTrunkId);
+    expect(overlapInput?.sessionThreadId).toBe(timedOutTrunkId);
 
-    interruptGate.resolve(undefined);
   });
 
-  test("releases and replaces a timed-out trunk when interruption is rejected", async () => {
+  test("quarantines a timed-out trunk when interruption cannot prove quiescence", async () => {
     const host = new RecordingReviewerHost([], {
       interruptOk: false,
       waitTimedOut: true,
     });
     const manager = new AutoApprovalReviewerManager();
+    const logger = new RecordingLogger();
     const reviewer = createRuntimeApprovalReviewer(() => host, {
       model: platformReviewerModel,
       threadCreator: new RecordingReviewerThreadCreator(),
       now: () => createdAt,
       waitTimeoutMs: 10,
-      failureCommitTimeoutMs: 5,
+      logger,
     });
 
     await expect(Promise.race([
       reviewer(validReviewRequest({ approvalReviewerManager: manager, targetModelToolCallId: "tool_call_interrupt_failure" })),
-      rejectAfter(100, "timeout ask fallback waited for failed owner interruption"),
-    ])).resolves.toEqual({ type: "failed", message: "approval reviewer timed out" });
+      rejectAfter(100, "timeout persistence closeout waited for failed owner interruption"),
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unknown", retryable: false } });
     await waitForCondition(() => host.failures.length === 1 && host.interruptions.length === 1, "timeout failure cleanup attempts");
 
     const overlapLease = manager.beginReview("probe_after_failed_interrupt");
-    expect(overlapLease.kind).toBe("trunk");
+    expect(overlapLease.kind).toBe("sidecar");
     overlapLease.release();
     expect(host.failures).toHaveLength(1);
+    expect(logger.records).toEqual([
+      expect.objectContaining({
+        event: "approval_review_lifecycle_failure",
+        "reviewer.kind": "trunk",
+        "lifecycle.reason": "quiescence_unconfirmed",
+        "error.class": "reviewer_lifecycle_failure",
+      }),
+    ]);
     await Effect.runPromise(manager.dispose());
   });
 
@@ -1145,6 +1309,28 @@ describe("Runtime approval reviewer", () => {
         expect.objectContaining({ type: "approval_review.failure", failure_kind: "parse_failure" }),
       ]);
     }
+  });
+
+  test("accepts an empty rationale exactly as the checked-in schema does", async () => {
+    const host = new RecordingReviewerHost([
+      assistantDecision("sesn_1", "allow", ""),
+    ]);
+    const reviewer = createRuntimeApprovalReviewer(() => host, {
+      model: platformReviewerModel,
+      threadCreator: new RecordingReviewerThreadCreator(),
+      now: () => createdAt,
+      waitTimeoutMs: 10,
+    });
+
+    await expect(reviewer(validReviewRequest())).resolves.toEqual({
+      type: "decision",
+      riskLevel: "low",
+      userAuthorization: "high",
+      outcome: "allow",
+    });
+    expect(host.decisions).toEqual([
+      expect.objectContaining({ rationale: "" }),
+    ]);
   });
 
   test("rejects fenced or prose-wrapped allow decisions as parse failures", async () => {
@@ -1215,25 +1401,21 @@ describe("Runtime approval reviewer", () => {
     ]);
   });
 
-  test("does not gate public ask fallback on a hung failure-record commit", async () => {
+  test("does not publish user fallback when failure settlement is unknown", async () => {
     const host = new RecordingReviewerHost([
       assistantReviewerText("sesn_1", "{\"risk_level\":\"low\",\"user_authorization\":\"high\",\"outcome\":\"maybe\",\"rationale\":\"invalid\"}"),
-    ], { failureCommitMode: "hang" });
+    ], { failureCommitMode: "unknown" });
     const reviewer = createRuntimeApprovalReviewer(() => host, {
       model: platformReviewerModel,
       threadCreator: new RecordingReviewerThreadCreator(),
       now: () => createdAt,
       waitTimeoutMs: 10,
-      failureCommitTimeoutMs: 1,
     });
 
     await expect(Promise.race([
       reviewer(validReviewRequest()),
-      rejectAfter(100, "reviewer fallback timed out"),
-    ])).resolves.toEqual({
-      type: "failed",
-      message: "approval reviewer decision outcome is invalid",
-    });
+      rejectAfter(100, "reviewer persistence closeout timed out"),
+    ])).resolves.toMatchObject({ type: "settlement_failed", error: { code: "unavailable", retryable: true } });
     expect(host.failures).toEqual([
       expect.objectContaining({
         failure_kind: "parse_failure",
@@ -1242,7 +1424,7 @@ describe("Runtime approval reviewer", () => {
     ]);
   });
 
-  test("swallows duplicate and conflicting failure-record outcomes", async () => {
+  test("accepts duplicate failure receipts and preserves conflicting settlement", async () => {
     const duplicateHost = new RecordingReviewerHost([], { failureCommitMode: "duplicate" });
     const duplicateReviewer = createRuntimeApprovalReviewer(() => duplicateHost, { model: platformReviewerModel, threadCreator: new RecordingReviewerThreadCreator(), now: () => createdAt, waitTimeoutMs: 10 });
     await expect(duplicateReviewer(validReviewRequest())).resolves.toEqual({
@@ -1252,9 +1434,9 @@ describe("Runtime approval reviewer", () => {
 
     const conflictingHost = new RecordingReviewerHost([], { failureCommitMode: "reject" });
     const conflictingReviewer = createRuntimeApprovalReviewer(() => conflictingHost, { model: platformReviewerModel, threadCreator: new RecordingReviewerThreadCreator(), now: () => createdAt, waitTimeoutMs: 10 });
-    await expect(conflictingReviewer(validReviewRequest())).resolves.toEqual({
-      type: "failed",
-      message: "approval reviewer returned no decision",
+    await expect(conflictingReviewer(validReviewRequest())).resolves.toMatchObject({
+      type: "settlement_failed",
+      error: { code: "schema_mismatch", retryable: false },
     });
     expect(duplicateHost.failures).toHaveLength(1);
     expect(conflictingHost.failures).toHaveLength(1);
@@ -1448,7 +1630,7 @@ describe("Runtime approval reviewer", () => {
     expect(host.decisions).toHaveLength(2);
   });
 
-  test("cancellation wins while a durable failure receipt is pending and quiesces the reviewer request", async () => {
+  test("a late failure receipt after parent closeout remains historical", async () => {
     const failureRelease = deferred<void>();
     const manager = new AutoApprovalReviewerManager();
     const host = new RecordingReviewerHost([assistantReviewerText("sesn_1", "not json")], {
@@ -1459,13 +1641,15 @@ describe("Runtime approval reviewer", () => {
       threadCreator: new RecordingReviewerThreadCreator(),
       now: () => createdAt,
       waitTimeoutMs: 10_000,
-      failureCommitTimeoutMs: 10_000,
     });
     const request = validReviewRequest({ approvalReviewerManager: manager });
+    let parentGateSettlements = 0;
 
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const scope = yield* Scope.Scope;
-      const fiber = yield* Effect.forkIn(reviewer(request), scope);
+      const fiber = yield* Effect.forkIn(reviewer(request).pipe(Effect.tap(() => Effect.sync(() => {
+        parentGateSettlements += 1;
+      }))), scope);
       yield* Effect.promise(() => waitForCondition(() => host.failureCommands.length === 1, "failure write start"));
       const reviewId = host.inputs[0]?.kind === "approval_review" ? host.inputs[0].reviewId : "";
       expect(manager.executionState(reviewId)?.raceState).toBe("pending");
@@ -1482,6 +1666,7 @@ describe("Runtime approval reviewer", () => {
       failure_kind: "parse_failure",
     })]);
     expect(host.decisions).toHaveLength(0);
+    expect(parentGateSettlements).toBe(0);
   });
 
   test("parent Tool cancellation before the reviewer receipt never dispatches the target Tool", async () => {
@@ -1505,6 +1690,9 @@ describe("Runtime approval reviewer", () => {
       permissionPolicy: "always_ask",
     });
     const parentTool = reviewApproval(request).pipe(Effect.flatMap((reviewerOutcome) => Effect.sync(() => {
+      if (reviewerOutcome.type === "settlement_failed") {
+        return;
+      }
       const gate = evaluateToolGate({ catalog, toolName: "Write", approvalMode: "approve_for_me", reviewerOutcome });
       if (gate.type === "run") {
         toolCalls += 1;
@@ -1583,7 +1771,7 @@ class RecordingReviewerHost {
         input: RuntimeAcceptedInputState,
         runId: number,
       ) => SessionManager.ReviewerExecutionToken | undefined;
-      readonly failureCommitMode?: "ok" | "duplicate" | "reject" | "hang";
+      readonly failureCommitMode?: "ok" | "duplicate" | "reject" | "unknown";
       readonly failureGate?: (() => Promise<void>) | undefined;
       readonly steps?: string[];
       readonly waitOk?: boolean;
@@ -1593,6 +1781,7 @@ class RecordingReviewerHost {
       readonly waitGate?: ((command: RuntimeThreadControlState) => Promise<void>) | undefined;
       readonly interruptGate?: ((command: RuntimeThreadControlState) => Promise<void>) | undefined;
       readonly interruptOk?: boolean;
+      readonly markThreadClosedOk?: boolean;
     } = {},
   ) {}
 
@@ -1630,6 +1819,22 @@ class RecordingReviewerHost {
 
   readonly reviewerWaits: SessionManager.ReviewerExecutionToken[] = [];
   readonly reviewerInterruptions: SessionManager.ReviewerExecutionToken[] = [];
+  readonly reviewerEvictions: SessionManager.ReviewerExecutionToken[] = [];
+  readonly reviewerReleases: SessionManager.ReviewerExecutionToken[] = [];
+
+  async evictReviewerExecution(
+    command: RuntimeThreadControlState,
+    token: SessionManager.ReviewerExecutionToken,
+  ): Promise<SessionManager.ReviewerExecutionControlResult> {
+    this.reviewerEvictions.push(token);
+    return {
+      ok: true,
+      sessionId: command.sessionId,
+      sessionThreadId: command.sessionThreadId,
+      applied: true,
+      terminal: true,
+    };
+  }
 
   async interruptReviewerExecution(
     command: RuntimeThreadControlState,
@@ -1646,6 +1851,21 @@ class RecordingReviewerHost {
         reason: "thread_busy",
       };
     }
+    return {
+      ok: true,
+      sessionId: command.sessionId,
+      sessionThreadId: command.sessionThreadId,
+      applied: true,
+      terminal: true,
+    };
+  }
+
+  async releaseReviewerExecution(
+    command: RuntimeThreadControlState,
+    token: SessionManager.ReviewerExecutionToken,
+  ): Promise<SessionManager.ReviewerExecutionControlResult> {
+    this.reviewerReleases.push(token);
+    this.options.steps?.push("release-reviewer");
     return {
       ok: true,
       sessionId: command.sessionId,
@@ -1717,6 +1937,9 @@ class RecordingReviewerHost {
 
   async markThreadClosed(command: RuntimeThreadControlState): Promise<SessionManager.ThreadLifecycleResult> {
     this.closedThreads.push(command.sessionThreadId);
+    if (this.options.markThreadClosedOk === false) {
+      return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "thread_busy" };
+    }
     return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
   }
 
@@ -1778,11 +2001,33 @@ class RecordingReviewerHost {
     this.failureCommands.push(command);
     this.failures.push(event);
     await this.options.failureGate?.();
-    if (this.options.failureCommitMode === "hang") {
-      return await new Promise<SessionEventWriterAppendResult>(() => undefined);
-    }
     if (this.options.failureCommitMode === "reject") {
-      throw new Error("already exists");
+      return {
+        ok: false,
+        error: {
+          type: "session-event-writer",
+          code: "schema_mismatch",
+          message: "declaration rejected",
+          retryable: false,
+          fatal: true,
+          sessionId: command.sessionId,
+          writeId: `rwrite_${event.review_id}_failure`,
+        },
+      };
+    }
+    if (this.options.failureCommitMode === "unknown") {
+      return {
+        ok: false,
+        error: {
+          type: "session-event-writer",
+          code: "unavailable",
+          message: "settlement unavailable",
+          retryable: true,
+          fatal: false,
+          sessionId: command.sessionId,
+          writeId: `rwrite_${event.review_id}_failure`,
+        },
+      };
     }
     if (this.options.failureCommitMode === "duplicate") {
       return { ok: true, writeId: "rwrite_failure", eventId: "evt_existing_failure", processedAt: createdAt };
@@ -1813,6 +2058,7 @@ class RecordingReviewerThreadCreator {
     private readonly closeResult:
       | { readonly ok: true }
       | { readonly ok: false; readonly message: string; readonly discardHotState?: boolean } = { ok: true },
+    private readonly closeThrows = false,
   ) {}
 
   async createApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
@@ -1824,6 +2070,9 @@ class RecordingReviewerThreadCreator {
   async closeApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
     this.closes.push(input);
     await this.closeGate;
+    if (this.closeThrows) {
+      throw new Error("secret durable close failure");
+    }
     return this.closeResult;
   }
 }
@@ -1838,6 +2087,7 @@ function validReviewRequest(overrides: Partial<RuntimeApprovalReviewRequest> = {
     targetPodUid: "pod_1",
     runtimeBindingToken: "rtbt_1",
     modelRequestId: "mreq_1",
+    parentBoundaryEventId: "sevt_request_start_1",
     targetModelToolCallId: "tool_call_1",
     targetToolName: "Write",
     actionJson: { path: "src/a.ts", content: "ok" },

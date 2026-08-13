@@ -281,6 +281,8 @@ export interface Interface {
     options?: { readonly requirePendingApprovalToolJobs?: boolean | undefined },
   ) => Effect.Effect<ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
+  readonly releaseReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
+  readonly evictReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
   readonly markThreadActive: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
   readonly waitThread: (command: RuntimeThreadControlState, timeoutMs: number | undefined) => Effect.Effect<ThreadWaitResult>;
@@ -461,7 +463,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         for (const sessionEntry of sessions.values()) {
           activeThreads += sessionEntry.threads.size;
           for (const threadEntry of sessionEntry.threads.values()) {
-            if (threadEntry.runSlot !== undefined) {
+            if (threadEntry.runSlot?.ownerFiber !== undefined) {
               activeFibers += 1;
             }
             pendingApprovals += threadEntry.runtimeThread.state.pendingApprovalToolJobs().length;
@@ -855,6 +857,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             .pipe(Scope.provide(runScope), Effect.onExit((exit) => finishThreadRun(sessionEntry, threadEntry, runSlot, exit)));
           const fiber = yield* Effect.forkIn(run, runScope);
           runSlot.ownerFiber = fiber;
+          recordHotStateMetrics();
           return true;
         }));
 
@@ -966,6 +969,38 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             yield* completeRunSlot(runSlot, exit);
             return;
           }
+          if (
+            Exit.isSuccess(exit) &&
+            exit.value.type === "failed" &&
+            runSlot.reviewerExecutionToken !== undefined &&
+            !runSlot.stopping &&
+            exit.value.releaseSession?.reason !== "terminated"
+          ) {
+            // A cleared durable-turn token after accepted input consumption is
+            // the applied FinishIdle receipt. Otherwise failed-run closeout must
+            // land that receipt before this token can become a reusable trunk.
+            const alreadyIdle = runSlot.durableTurnId === undefined &&
+              threadEntry.runtimeThread.state.acceptedInputCount() === 0 &&
+              exit.value.releaseSession === undefined;
+            const closeout = alreadyIdle
+              ? "disposed" as const
+              : yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit);
+            if (closeout === "disposed" && runSlot.durableTurnId === undefined) {
+              threadEntry.lastCompletedReviewerExecutionToken = runSlot.reviewerExecutionToken;
+              // Reviewer orchestration still owns the completed execution until
+              // its outcome receipt and, for a sidecar, durable close receipt land.
+              // Keep the completed slot as the hot ownership fence; the exact
+              // token releases or evicts it after those durable boundaries.
+              runSlot.ownerFiber = undefined;
+              threadEntry.status = "idle";
+              recordHotStateMetrics();
+              yield* completeRunSlot(runSlot, exit);
+              return;
+            }
+            yield* releaseThreadEntry(sessionEntry, threadEntry);
+            yield* completeRunSlot(runSlot, exit);
+            return;
+          }
           if (runRequiresHotStateDiscard(exit)) {
             yield* releaseThreadEntry(sessionEntry, threadEntry);
             yield* completeRunSlot(runSlot, exit);
@@ -997,6 +1032,13 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             threadEntry.runtimeThread.state.discardQueuedApprovalReview(runSlot.reviewerExecutionToken.reviewId);
           }
           threadEntry.lastCompletedReviewerExecutionToken = runSlot.reviewerExecutionToken;
+          if (runSlot.reviewerExecutionToken !== undefined) {
+            runSlot.ownerFiber = undefined;
+            threadEntry.status = "idle";
+            recordHotStateMetrics();
+            yield* completeRunSlot(runSlot, exit);
+            return;
+          }
           threadEntry.runSlot = undefined;
           threadEntry.status = "idle";
           recordHotStateMetrics();
@@ -1446,6 +1488,11 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 ...threadResult.threadEntry.runtimeThread.state.contextManager.messages(),
                 message,
               ]);
+              threadResult.threadEntry.runtimeThread.state.applyThreadTurnFact({
+                fact: "inputs_committed",
+                eventId: committed.receipt.events[0]!.eventId,
+                messageIds: [message.id],
+              });
               threadResult.threadEntry.bridgeScope = command;
               const confirmation = threadResult.threadEntry.controlQueue.resolveToolConfirmation(command);
               if (confirmation === "conflict") {
@@ -1961,7 +2008,16 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
           }
           if (runSlot.ownerFiber === undefined) {
-            return reviewerExecutionRejection(command, "thread_busy");
+            const completed = yield* Deferred.poll(runSlot.doneDeferred);
+            return Option.isSome(completed)
+              ? {
+                  ok: true,
+                  sessionId: command.sessionId,
+                  sessionThreadId: command.sessionThreadId,
+                  applied: false,
+                  terminal: true,
+                }
+              : reviewerExecutionRejection(command, "thread_busy");
           }
           runSlot.stopping = true;
           yield* submitThreadCommand(
@@ -1972,6 +2028,75 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           yield* Fiber.interrupt(runSlot.ownerFiber).pipe(Effect.exit, Effect.asVoid);
           yield* awaitRunSlot(runSlot);
           threadEntry.runtimeThread.state.finishCooperativeCancel();
+          return {
+            ok: true,
+            sessionId: command.sessionId,
+            sessionThreadId: command.sessionThreadId,
+            applied: true,
+            terminal: true,
+          };
+        });
+
+      const evictReviewerExecution = (
+        command: RuntimeThreadControlState,
+        token: ReviewerExecutionToken,
+      ): Effect.Effect<ReviewerExecutionControlResult> =>
+        Effect.gen(function* () {
+          const sessionEntry = sessions.get(commandSessionKey(command));
+          const threadEntry = sessionEntry?.threads.get(command.sessionThreadId);
+          if (
+            sessionEntry === undefined ||
+            threadEntry === undefined ||
+            !reviewerTokenAddressesCommand(token, command)
+          ) {
+            return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
+          }
+          if (threadEntry.runSlot !== undefined) {
+            if (!reviewerTokensEqual(threadEntry.runSlot.reviewerExecutionToken, token)) {
+              return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
+            }
+            const completed = yield* Deferred.poll(threadEntry.runSlot.doneDeferred);
+            if (Option.isNone(completed)) {
+              return reviewerExecutionRejection(command, "thread_busy");
+            }
+          }
+          if (
+            !reviewerTokensEqual(threadEntry.lastCompletedReviewerExecutionToken, token)
+          ) {
+            return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
+          }
+          // Outcome uncertainty cannot fabricate durable close. Eviction is
+          // token-fenced to the completed execution and leaves sibling threads intact.
+          yield* releaseThreadEntry(sessionEntry, threadEntry);
+          return {
+            ok: true,
+            sessionId: command.sessionId,
+            sessionThreadId: command.sessionThreadId,
+            applied: true,
+            terminal: true,
+          };
+        });
+
+      const releaseReviewerExecution = (
+        command: RuntimeThreadControlState,
+        token: ReviewerExecutionToken,
+      ): Effect.Effect<ReviewerExecutionControlResult> =>
+        Effect.gen(function* () {
+          const threadEntry = sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId);
+          if (threadEntry === undefined || !reviewerTokenAddressesCommand(token, command)) {
+            return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
+          }
+          const runSlot = threadEntry.runSlot;
+          if (runSlot === undefined || !reviewerTokensEqual(runSlot.reviewerExecutionToken, token)) {
+            return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
+          }
+          const completed = yield* Deferred.poll(runSlot.doneDeferred);
+          if (Option.isNone(completed)) {
+            return reviewerExecutionRejection(command, "thread_busy");
+          }
+          threadEntry.runSlot = undefined;
+          threadEntry.status = "idle";
+          recordHotStateMetrics();
           return {
             ok: true,
             sessionId: command.sessionId,
@@ -2172,15 +2297,19 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         command: RuntimeThreadControlState,
         token: ReviewerExecutionToken,
       ): Effect.Effect<ReviewerExecutionSnapshotResult> =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           const threadEntry = sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId);
           if (threadEntry === undefined || !reviewerTokenAddressesCommand(token, command)) {
             return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
           }
           if (threadEntry.runSlot !== undefined) {
-            return reviewerTokensEqual(threadEntry.runSlot.reviewerExecutionToken, token)
-              ? reviewerExecutionRejection(command, "thread_busy")
-              : reviewerExecutionRejection(command, "reviewer_execution_mismatch");
+            if (!reviewerTokensEqual(threadEntry.runSlot.reviewerExecutionToken, token)) {
+              return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
+            }
+            const completed = yield* Deferred.poll(threadEntry.runSlot.doneDeferred);
+            if (Option.isNone(completed)) {
+              return reviewerExecutionRejection(command, "thread_busy");
+            }
           }
           if (!reviewerTokensEqual(threadEntry.lastCompletedReviewerExecutionToken, token)) {
             return reviewerExecutionRejection(command, "reviewer_execution_mismatch");
@@ -2259,7 +2388,9 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         commitTaskNotification,
         preloadThread,
         ensureThreadInstalled,
+        evictReviewerExecution,
         interruptReviewerExecution,
+        releaseReviewerExecution,
         interruptControl,
         markThreadActive,
         markThreadClosed,

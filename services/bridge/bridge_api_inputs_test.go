@@ -98,13 +98,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		t.Fatalf("loaded messages = %d; want one committed input", len(loaded.Messages))
 	}
 	var loadedMessage struct {
-		ID            string `json:"id"`
-		Sequence      int64  `json:"sequence"`
-		OwningEventID string `json:"owningEventId"`
-		EventSequence int64  `json:"eventSequence"`
-		ProviderID    string `json:"providerId"`
-		ModelID       string `json:"modelId"`
-		Parts         []struct {
+		ID         string `json:"id"`
+		Sequence   int64  `json:"sequence"`
+		ProviderID string `json:"providerId"`
+		ModelID    string `json:"modelId"`
+		Parts      []struct {
 			ID        string `json:"id"`
 			MessageID string `json:"messageId"`
 			Sequence  int64  `json:"sequence"`
@@ -116,8 +114,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	messageStamp := response.GetDeclaration().GetReceipts()[0].GetMessages()[0]
 	if loadedMessage.ID != messageStamp.GetMessageId() ||
 		loadedMessage.Sequence != messageStamp.GetMessageSequence() ||
-		loadedMessage.OwningEventID != messageStamp.GetOwningEventId() ||
-		loadedMessage.EventSequence != 1 ||
 		loadedMessage.ProviderID != "" ||
 		loadedMessage.ModelID != "" ||
 		len(loadedMessage.Parts) != 1 ||
@@ -580,10 +576,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}); err != nil || !acknowledged {
 		t.Fatalf("ACK resolved inter-agent wake = %v/%v; want true/nil", acknowledged, err)
 	}
-	sourceEventID := beforeReceived.GetReceivedEventId()
 	create := bridgeMessageCreateForTest(
 		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
-		"user", "runtime", &sourceEventID,
+		"user", "runtime",
 		bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"hello child","truncated":false,"status":"completed"}`},
 	)
 	request := &bridgev1.CommitInputsRequest{
@@ -623,43 +618,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}
 	if len(loaded.Messages) != 1 || testJSONPathString(t, string(loaded.Messages[0]), "origin") != "runtime" {
 		t.Fatalf("loaded inter-agent messages = %s; want one runtime-origin message", loadResponse.GetContextJson())
-	}
-	afterReceived, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope:         parentScope,
-		ChildThreadId: "thr_bridge_inter_agent_child",
-		DeliveryId:    "delivery_bridge_inter_agent_0",
-	})
-	if err != nil {
-		t.Fatalf("ResolveInterAgentDelivery after receive: %v", err)
-	}
-	if afterReceived.GetDeliveryId() != beforeReceived.GetDeliveryId() ||
-		afterReceived.GetReceivedEventId() != beforeReceived.GetReceivedEventId() ||
-		afterReceived.GetReceivedSequence() != beforeReceived.GetReceivedSequence() ||
-		afterReceived.GetMessageJson() != beforeReceived.GetMessageJson() {
-		t.Fatalf("delivery replay = %+v; want stable admitted envelope %+v", afterReceived, beforeReceived)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_threads
-		    SET status = 'closed_for_runtime'
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_inter_agent'
-		    AND id = 'thr_bridge_inter_agent_child'`,
-	); err != nil {
-		t.Fatalf("close committed delivery recipient: %v", err)
-	}
-	closedReplay, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope:         parentScope,
-		ChildThreadId: "thr_bridge_inter_agent_child",
-		DeliveryId:    "delivery_bridge_inter_agent_0",
-	})
-	if err != nil {
-		t.Fatalf("ResolveInterAgentDelivery after recipient close: %v", err)
-	}
-	if closedReplay.GetDeliveryId() != beforeReceived.GetDeliveryId() ||
-		closedReplay.GetReceivedEventId() != beforeReceived.GetReceivedEventId() ||
-		closedReplay.GetReceivedSequence() != beforeReceived.GetReceivedSequence() ||
-		closedReplay.GetMessageJson() != beforeReceived.GetMessageJson() {
-		t.Fatalf("closed-recipient delivery replay = %+v; want stable admitted envelope %+v", closedReplay, beforeReceived)
 	}
 	var receivedEventID string
 	var receivedVisibility string
@@ -1326,7 +1284,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			InputKind:      "approval_review",
 			EventIds:       []string{eventID},
 			MessageCreates: []*bridgev1.RuntimeMessageCreate{{
-				SourceEventId:   bridgeAPIString(eventID),
 				MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT,
 				MessageInfoJson: string(messageInfoJSON),
 				Parts: []*bridgev1.RuntimePartCreate{{
@@ -1432,7 +1389,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		wrongTarget.Scope = bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
 		wrongTarget.RuntimeInputId = "rin_bridge_reviewer_wrong_target"
 		wrongTarget.EventIds = []string{"evt_bridge_reviewer_wrong_target"}
-		wrongTarget.MessageCreates[0].SourceEventId = bridgeAPIString("evt_bridge_reviewer_wrong_target")
 		if _, err := store.CommitInputs(context.Background(), wrongTarget); status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("reviewer input wrong-target err = %v; want FailedPrecondition", err)
 		}
@@ -1491,12 +1447,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			MessageCreates: []*bridgev1.RuntimeMessageCreate{
 				bridgeMessageCreateForTest(
 					bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION,
-					"assistant", "agent", bridgeAPIString(eventID1),
+					"assistant", "agent",
 					bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"Input was not accepted.","truncated":false,"status":"completed"}`},
 				),
 				bridgeMessageCreateForTest(
 					bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION,
-					"assistant", "agent", bridgeAPIString(eventID2),
+					"assistant", "agent",
 					bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"Input was not accepted.","truncated":false,"status":"completed"}`},
 				),
 			},
@@ -1539,7 +1495,7 @@ func assertSingleCommitInputReceipt(t *testing.T, response *bridgev1.CommitInput
 	receipts := response.GetDeclaration().GetReceipts()
 	if len(receipts) != 1 || receipts[0].GetSourceKind() != sourceKind || receipts[0].GetOperationId() != sourceID ||
 		len(receipts[0].GetEvents()) != 1 || receipts[0].GetEvents()[0].GetEventId() != eventID ||
-		len(receipts[0].GetMessages()) != 1 || receipts[0].GetMessages()[0].GetOwningEventId() != eventID {
+		len(receipts[0].GetMessages()) != 1 {
 		t.Fatalf("CommitInputs receipt = %+v; want one %s receipt for %s", response.GetDeclaration(), sourceKind, sourceID)
 	}
 }
@@ -1582,5 +1538,59 @@ func TestAdmitAgentMailDeliveryRejectsApprovalReviewerTarget(t *testing.T) {
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("admit completion mail on reviewer err = %v; want FailedPrecondition", err)
+	}
+}
+
+func TestPostgreSQLResolveInterAgentDeliveryReplaysAcceptedColdCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID  = "sesn_agent_mail_accepted_cold"
+		mainID     = "thr_agent_mail_accepted_cold_main"
+		childID    = "thr_agent_mail_accepted_cold_child"
+		bindingID  = "bind_agent_mail_accepted_cold"
+		podUID     = "pod_agent_mail_accepted_cold"
+		deliveryID = "delivery_agent_mail_accepted_cold"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_agent_mail_accepted_cold", completionMailEnvelope("main", "task_"+childID, "done"))
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_agent_mail_accepted_cold_sent", 1, "agent.thread_message_sent",
+		bridgeInterAgentSentEventJSON(t, deliveryID, childID, mainID, "", "evt_agent_mail_accepted_cold_spawn", messageJSON))
+	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+	commitRequest := bridgeAgentMailCommitRequestForTest(t, admin, scope, "agent_mail:"+deliveryID, deliveryID, childID, "evt_agent_mail_accepted_cold_spawn", messageJSON)
+	receivedID := commitRequest.GetEventIds()[0]
+	enqueue, _, err := agentMailWakeEnqueueRequest("default", sessionID, mainID, deliveryID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("build accepted cold Queue custody: %v", err)
+	}
+	if _, err := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)).Enqueue(context.Background(), enqueue); err != nil {
+		t.Fatalf("enqueue accepted cold Queue custody: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	response, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
+		Scope: scope, ChildThreadId: childID, DeliveryId: deliveryID,
+	})
+	if err != nil {
+		t.Fatalf("ResolveInterAgentDelivery accepted cold custody: %v", err)
+	}
+	if response.GetReceivedEventId() != receivedID || response.GetReceivedSequence() != 1 ||
+		!strings.Contains(response.GetMessageJson(), "done") {
+		t.Fatalf("accepted cold mail response = %#v; want existing durable projection", response)
+	}
+	var inboxStatus, queueStatus string
+	var receivedEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id='agent_mail:' || $2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		 AND type='agent.thread_message_received' AND payload_json::jsonb ->> 'delivery_id'=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default'
+		 AND dedupe_key='runtime_input:default:' || $1 || ':agent_mail:' || $2)`,
+		sessionID, deliveryID).Scan(&inboxStatus, &receivedEvents, &queueStatus); err != nil {
+		t.Fatalf("read accepted cold mail replay: %v", err)
+	}
+	if inboxStatus != "accepted" || receivedEvents != 1 || queueStatus != queue.StatusPending {
+		t.Fatalf("accepted cold mail replay = Inbox %q / received events %d / Queue %q; want accepted / one / pending", inboxStatus, receivedEvents, queueStatus)
 	}
 }

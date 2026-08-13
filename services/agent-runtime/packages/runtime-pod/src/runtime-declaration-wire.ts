@@ -61,14 +61,21 @@ export function internalToolRepairDeclarationDigest(request: Pick<CommitInternal
 export function taskNotificationDeclarationDigest(request: Pick<CommitTaskNotificationResultRequest,
   "scope" | "runtimeInputId" | "taskId" | "resultJson" | "messageCreate"
 >): string {
-  const result = canonicalRunToolJSONWithoutObjectFields(request.resultJson, internalProviderPayloadFields);
-  return digestRaw({
-    message_create: canonicalMessageCreate(request.messageCreate),
+  return digest({
+    message_create: {
+      message_info_json: request.messageCreate?.messageInfoJson ?? "",
+      message_kind: request.messageCreate?.messageKind ?? RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED,
+      parts: (request.messageCreate?.parts ?? []).map((part) => ({
+        part_json: part.partJson,
+        part_kind: part.partKind,
+      })),
+    },
     operation_kind: "commit_task_notification_result",
+    result_json: request.resultJson,
     runtime_input_id: request.runtimeInputId,
     session_thread_id: request.scope?.sessionThreadId ?? "",
     task_id: request.taskId,
-  }, "result", result);
+  });
 }
 
 export function writeEventDeclarationDigest(request: Pick<WriteEventRequest,
@@ -192,7 +199,6 @@ function canonicalMessageCreate(create: RuntimeMessageCreate | undefined): unkno
     message_info: JSON.parse(canonicalRunToolJSON(create.messageInfoJson)) as unknown,
     message_kind: runtimeMessageCreateKindName(create.messageKind),
     parts: create.parts.map(canonicalPart),
-    source_event_id: create.sourceEventId ?? null,
   };
 }
 

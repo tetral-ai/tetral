@@ -592,7 +592,6 @@ export function fileAttachmentRejectionReasonToJSON(object: FileAttachmentReject
 }
 
 export interface RuntimeMessageCreate {
-  sourceEventId?: string | undefined;
   messageKind: RuntimeMessageCreateKind;
   messageInfoJson: string;
   parts: RuntimePartCreate[];
@@ -644,7 +643,6 @@ export interface DurablePartStamp {
 
 export interface DurableMessageStamp {
   sessionThreadId: string;
-  owningEventId: string;
   messageId: string;
   messageSequence: number;
   createdAt: string;
@@ -1236,14 +1234,11 @@ export interface RunMemoryResponse {
 }
 
 function createBaseRuntimeMessageCreate(): RuntimeMessageCreate {
-  return { sourceEventId: undefined, messageKind: 0, messageInfoJson: "", parts: [] };
+  return { messageKind: 0, messageInfoJson: "", parts: [] };
 }
 
 export const RuntimeMessageCreate: MessageFns<RuntimeMessageCreate> = {
   encode(message: RuntimeMessageCreate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.sourceEventId !== undefined) {
-      writer.uint32(10).string(message.sourceEventId);
-    }
     if (message.messageKind !== 0) {
       writer.uint32(16).int32(message.messageKind);
     }
@@ -1263,14 +1258,6 @@ export const RuntimeMessageCreate: MessageFns<RuntimeMessageCreate> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.sourceEventId = reader.string();
-          continue;
-        }
         case 2: {
           if (tag !== 16) {
             break;
@@ -1306,11 +1293,6 @@ export const RuntimeMessageCreate: MessageFns<RuntimeMessageCreate> = {
 
   fromJSON(object: any): RuntimeMessageCreate {
     return {
-      sourceEventId: isSet(object.sourceEventId)
-        ? globalThis.String(object.sourceEventId)
-        : isSet(object.source_event_id)
-        ? globalThis.String(object.source_event_id)
-        : undefined,
       messageKind: isSet(object.messageKind)
         ? runtimeMessageCreateKindFromJSON(object.messageKind)
         : isSet(object.message_kind)
@@ -1327,9 +1309,6 @@ export const RuntimeMessageCreate: MessageFns<RuntimeMessageCreate> = {
 
   toJSON(message: RuntimeMessageCreate): unknown {
     const obj: any = {};
-    if (message.sourceEventId !== undefined) {
-      obj.sourceEventId = message.sourceEventId;
-    }
     if (message.messageKind !== 0) {
       obj.messageKind = runtimeMessageCreateKindToJSON(message.messageKind);
     }
@@ -1347,7 +1326,6 @@ export const RuntimeMessageCreate: MessageFns<RuntimeMessageCreate> = {
   },
   fromPartial<I extends Exact<DeepPartial<RuntimeMessageCreate>, I>>(object: I): RuntimeMessageCreate {
     const message = createBaseRuntimeMessageCreate();
-    message.sourceEventId = object.sourceEventId ?? undefined;
     message.messageKind = object.messageKind ?? 0;
     message.messageInfoJson = object.messageInfoJson ?? "";
     message.parts = object.parts?.map((e) => RuntimePartCreate.fromPartial(e)) || [];
@@ -2092,7 +2070,6 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
 function createBaseDurableMessageStamp(): DurableMessageStamp {
   return {
     sessionThreadId: "",
-    owningEventId: "",
     messageId: "",
     messageSequence: 0,
     createdAt: "",
@@ -2106,9 +2083,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
   encode(message: DurableMessageStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.sessionThreadId !== "") {
       writer.uint32(10).string(message.sessionThreadId);
-    }
-    if (message.owningEventId !== "") {
-      writer.uint32(18).string(message.owningEventId);
     }
     if (message.messageId !== "") {
       writer.uint32(26).string(message.messageId);
@@ -2144,14 +2118,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
           }
 
           message.sessionThreadId = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.owningEventId = reader.string();
           continue;
         }
         case 3: {
@@ -2218,11 +2184,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
         : isSet(object.session_thread_id)
         ? globalThis.String(object.session_thread_id)
         : "",
-      owningEventId: isSet(object.owningEventId)
-        ? globalThis.String(object.owningEventId)
-        : isSet(object.owning_event_id)
-        ? globalThis.String(object.owning_event_id)
-        : "",
       messageId: isSet(object.messageId)
         ? globalThis.String(object.messageId)
         : isSet(object.message_id)
@@ -2255,9 +2216,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
     if (message.sessionThreadId !== "") {
       obj.sessionThreadId = message.sessionThreadId;
     }
-    if (message.owningEventId !== "") {
-      obj.owningEventId = message.owningEventId;
-    }
     if (message.messageId !== "") {
       obj.messageId = message.messageId;
     }
@@ -2285,7 +2243,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
   fromPartial<I extends Exact<DeepPartial<DurableMessageStamp>, I>>(object: I): DurableMessageStamp {
     const message = createBaseDurableMessageStamp();
     message.sessionThreadId = object.sessionThreadId ?? "";
-    message.owningEventId = object.owningEventId ?? "";
     message.messageId = object.messageId ?? "";
     message.messageSequence = object.messageSequence ?? 0;
     message.createdAt = object.createdAt ?? "";

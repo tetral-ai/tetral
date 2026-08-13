@@ -662,7 +662,6 @@ func (FileAttachmentRejectionReason) EnumDescriptor() ([]byte, []int) {
 
 type RuntimeMessageCreate struct {
 	state           protoimpl.MessageState   `protogen:"open.v1"`
-	SourceEventId   *string                  `protobuf:"bytes,1,opt,name=source_event_id,json=sourceEventId,proto3,oneof" json:"source_event_id,omitempty"`
 	MessageKind     RuntimeMessageCreateKind `protobuf:"varint,2,opt,name=message_kind,json=messageKind,proto3,enum=tetral.bridge.v1.RuntimeMessageCreateKind" json:"message_kind,omitempty"`
 	MessageInfoJson string                   `protobuf:"bytes,3,opt,name=message_info_json,json=messageInfoJson,proto3" json:"message_info_json,omitempty"`
 	Parts           []*RuntimePartCreate     `protobuf:"bytes,4,rep,name=parts,proto3" json:"parts,omitempty"`
@@ -698,13 +697,6 @@ func (x *RuntimeMessageCreate) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RuntimeMessageCreate.ProtoReflect.Descriptor instead.
 func (*RuntimeMessageCreate) Descriptor() ([]byte, []int) {
 	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{0}
-}
-
-func (x *RuntimeMessageCreate) GetSourceEventId() string {
-	if x != nil && x.SourceEventId != nil {
-		return *x.SourceEventId
-	}
-	return ""
 }
 
 func (x *RuntimeMessageCreate) GetMessageKind() RuntimeMessageCreateKind {
@@ -1217,7 +1209,6 @@ func (x *DurablePartStamp) GetDisposition() DurableProjectionDisposition {
 type DurableMessageStamp struct {
 	state           protoimpl.MessageState       `protogen:"open.v1"`
 	SessionThreadId string                       `protobuf:"bytes,1,opt,name=session_thread_id,json=sessionThreadId,proto3" json:"session_thread_id,omitempty"`
-	OwningEventId   string                       `protobuf:"bytes,2,opt,name=owning_event_id,json=owningEventId,proto3" json:"owning_event_id,omitempty"`
 	MessageId       string                       `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	MessageSequence int64                        `protobuf:"varint,4,opt,name=message_sequence,json=messageSequence,proto3" json:"message_sequence,omitempty"`
 	CreatedAt       string                       `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
@@ -1261,13 +1252,6 @@ func (*DurableMessageStamp) Descriptor() ([]byte, []int) {
 func (x *DurableMessageStamp) GetSessionThreadId() string {
 	if x != nil {
 		return x.SessionThreadId
-	}
-	return ""
-}
-
-func (x *DurableMessageStamp) GetOwningEventId() string {
-	if x != nil {
-		return x.OwningEventId
 	}
 	return ""
 }
@@ -7175,13 +7159,11 @@ var File_tetral_bridge_v1_bridge_proto protoreflect.FileDescriptor
 
 const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\n" +
-	"\x1dtetral/bridge/v1/bridge.proto\x12\x10tetral.bridge.v1\"\x8d\x02\n" +
-	"\x14RuntimeMessageCreate\x12+\n" +
-	"\x0fsource_event_id\x18\x01 \x01(\tH\x00R\rsourceEventId\x88\x01\x01\x12M\n" +
+	"\x1dtetral/bridge/v1/bridge.proto\x12\x10tetral.bridge.v1\"\xcc\x01\n" +
+	"\x14RuntimeMessageCreate\x12M\n" +
 	"\fmessage_kind\x18\x02 \x01(\x0e2*.tetral.bridge.v1.RuntimeMessageCreateKindR\vmessageKind\x12*\n" +
 	"\x11message_info_json\x18\x03 \x01(\tR\x0fmessageInfoJson\x129\n" +
-	"\x05parts\x18\x04 \x03(\v2#.tetral.bridge.v1.RuntimePartCreateR\x05partsB\x12\n" +
-	"\x10_source_event_id\"M\n" +
+	"\x05parts\x18\x04 \x03(\v2#.tetral.bridge.v1.RuntimePartCreateR\x05parts\"M\n" +
 	"\x11RuntimePartCreate\x12\x1b\n" +
 	"\tpart_kind\x18\x01 \x01(\tR\bpartKind\x12\x1b\n" +
 	"\tpart_json\x18\x02 \x01(\tR\bpartJson\"W\n" +
@@ -7217,10 +7199,9 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"created_at\x18\x04 \x01(\tR\tcreatedAt\x12\x1d\n" +
 	"\n" +
 	"updated_at\x18\x05 \x01(\tR\tupdatedAt\x12P\n" +
-	"\vdisposition\x18\x06 \x01(\x0e2..tetral.bridge.v1.DurableProjectionDispositionR\vdisposition\"\xfd\x02\n" +
+	"\vdisposition\x18\x06 \x01(\x0e2..tetral.bridge.v1.DurableProjectionDispositionR\vdisposition\"\xd5\x02\n" +
 	"\x13DurableMessageStamp\x12*\n" +
-	"\x11session_thread_id\x18\x01 \x01(\tR\x0fsessionThreadId\x12&\n" +
-	"\x0fowning_event_id\x18\x02 \x01(\tR\rowningEventId\x12\x1d\n" +
+	"\x11session_thread_id\x18\x01 \x01(\tR\x0fsessionThreadId\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x03 \x01(\tR\tmessageId\x12)\n" +
 	"\x10message_sequence\x18\x04 \x01(\x03R\x0fmessageSequence\x12\x1d\n" +
@@ -8140,7 +8121,6 @@ func file_tetral_bridge_v1_bridge_proto_init() {
 	if File_tetral_bridge_v1_bridge_proto != nil {
 		return
 	}
-	file_tetral_bridge_v1_bridge_proto_msgTypes[0].OneofWrappers = []any{}
 	file_tetral_bridge_v1_bridge_proto_msgTypes[3].OneofWrappers = []any{
 		(*RuntimeToolSettlement_Completed)(nil),
 		(*RuntimeToolSettlement_Error)(nil),

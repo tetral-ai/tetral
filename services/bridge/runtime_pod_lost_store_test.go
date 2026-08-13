@@ -357,9 +357,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		`SELECT count(*), COALESCE(max(data_json), '')
 		   FROM session_messages
 		  WHERE workspace_id = 'default'
-		    AND source_event_id = 'evt_pod_loss_tool'
-		    AND last_event_id = $1`,
-		toolResultEventID).Scan(&messageCount, &messageData); err != nil {
+		    AND source_event_id = 'evt_pod_loss_tool'`).Scan(&messageCount, &messageData); err != nil {
 		t.Fatalf("read pod-loss terminal tool message: %v", err)
 	}
 	if messageCount != 1 || !strings.Contains(messageData, `"status":"completed"`) ||
@@ -476,17 +474,17 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 	if !strings.Contains(payloadJSON, `"reason":"runtime_pod_lost"`) || !strings.Contains(payloadJSON, `"is_error":true`) {
 		t.Fatalf("MCP pod-loss result = %s; want terminal runtime_pod_lost error", payloadJSON)
 	}
-	var lastEventID, messageJSON string
+	var messageJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT last_event_id, data_json FROM session_messages
+		`SELECT data_json FROM session_messages
 		  WHERE workspace_id = 'default' AND session_id = $1 AND message_id = $2`,
 		sessionID, "msg_"+toolUseEventID,
-	).Scan(&lastEventID, &messageJSON); err != nil {
+	).Scan(&messageJSON); err != nil {
 		t.Fatalf("read repaired MCP message: %v", err)
 	}
-	if lastEventID != resultEventID || !strings.Contains(messageJSON, `"status":"error"`) ||
+	if !strings.Contains(messageJSON, `"status":"error"`) ||
 		!strings.Contains(messageJSON, `"retryable":false`) {
-		t.Fatalf("repaired MCP message last event/data = %q/%s; want non-retryable terminal error", lastEventID, messageJSON)
+		t.Fatalf("repaired MCP message = %s; want non-retryable terminal error", messageJSON)
 	}
 	if _, err := runRuntimePodLostRepairTransaction(
 		context.Background(), runtime, sessionID, binding, time.Date(2026, 1, 1, 0, 6, 0, 0, time.UTC),

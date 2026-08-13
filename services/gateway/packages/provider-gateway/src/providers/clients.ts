@@ -261,7 +261,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       model: provider(entry.apiModelId),
       messages: lowered.messages.map(toAIModelMessage),
       tools: toAITools(lowered.tools),
-      ...(lowered.outputSchema !== undefined ? { output: toAIOutput(lowered.outputSchema) } : {}),
+      ...(lowered.structuredOutput !== undefined ? { output: toAIOutput(lowered.structuredOutput) } : {}),
       providerOptions: lowered.options.providerOptions as ProviderOptions,
       maxOutputTokens: lowered.options.maxOutputTokens,
       ...(lowered.options.temperature !== undefined ? { temperature: lowered.options.temperature } : {}),
@@ -377,7 +377,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       model: provider.responses(entry.apiModelId),
       messages: callShape.messages,
       tools: toAITools(lowered.tools, provider.tools?.customTool),
-      ...(lowered.outputSchema !== undefined ? { output: toAIOutput(lowered.outputSchema) } : {}),
+      ...(lowered.structuredOutput !== undefined ? { output: toAIOutput(lowered.structuredOutput) } : {}),
       providerOptions: callShape.providerOptions as ProviderOptions,
       ...(lowered.options.maxOutputTokens !== undefined ? { maxOutputTokens: lowered.options.maxOutputTokens } : {}),
       ...(lowered.options.temperature !== undefined ? { temperature: lowered.options.temperature } : {}),
@@ -443,6 +443,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       baseURL: entry.baseURLs[0] ?? "",
       includeUsage: true,
       name: entry.providerId,
+      supportsStructuredOutputs: rules.structuredOutputStrategy === "native_json_schema",
       fetch: providerFetch({
         fetchImpl: this.fetch,
         allowedBaseURLs: entry.baseURLs,
@@ -457,7 +458,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       model: provider(entry.apiModelId),
       messages: sdkMessages.map(toAIModelMessage),
       tools: toAITools(lowered.tools),
-      ...(lowered.outputSchema !== undefined ? { output: toAIOutput(lowered.outputSchema) } : {}),
+      ...(lowered.structuredOutput !== undefined ? { output: toAIOutput(lowered.structuredOutput) } : {}),
       providerOptions: lowered.options.providerOptions as ProviderOptions,
       maxOutputTokens: lowered.options.maxOutputTokens,
       ...(lowered.options.temperature !== undefined ? { temperature: lowered.options.temperature } : {}),
@@ -1040,9 +1041,9 @@ function toAITools(
   })) as ToolSet;
 }
 
-function toAIOutput(outputSchema: NonNullable<ReturnType<typeof lowerProviderRequest>["outputSchema"]>): ReturnType<typeof Output.object> {
+function toAIOutput(structuredOutput: NonNullable<ReturnType<typeof lowerProviderRequest>["structuredOutput"]>): ReturnType<typeof Output.object> {
   return Output.object({
-    schema: jsonSchema(outputSchema.schema as Parameters<typeof jsonSchema>[0]),
+    schema: jsonSchema(structuredOutput.schema.schema as Parameters<typeof jsonSchema>[0]),
   });
 }
 
@@ -1109,7 +1110,11 @@ function toGatewayStreamPart(
 }
 
 function classifiedProviderError(providerId: GatewayCatalogProviderId, error: unknown): ProviderKeyFailureError {
-  return new ProviderKeyFailureError(classifyProviderFailure(providerId, providerFailureInput(error)));
+  const input = providerFailureInput(error);
+  return new ProviderKeyFailureError(
+    classifyProviderFailure(providerId, input),
+    input.networkError === true || input.timeout === true ? "transport_failure" : "http_rejection",
+  );
 }
 
 function isTerminalProviderStreamEvent(event: ProviderStreamEvent): boolean {

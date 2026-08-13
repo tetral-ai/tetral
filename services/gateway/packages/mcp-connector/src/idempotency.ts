@@ -69,7 +69,7 @@ export type IdempotencyClaim =
   | { readonly status: "stale_custody" }
   | { readonly status: "conflict" };
 
-/** Signals that Bridge durably committed an MCP result for an older Runtime binding. */
+/** Signals that Connector cannot prove current MCP claim custody and must defer to reconciliation. */
 export class McpIdempotencyStaleCustodyError extends Error {
   constructor() {
     super("mcp tool result belongs to stale runtime custody");

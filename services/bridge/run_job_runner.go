@@ -26,6 +26,9 @@ func runJobRunnerLoop(
 	if runner == nil {
 		return nil
 	}
+	if runner.Logger == nil {
+		runner.Logger = logger
+	}
 	interval := runner.Config.PollInterval
 	if interval <= 0 {
 		interval = defaultJobRunnerPollInterval

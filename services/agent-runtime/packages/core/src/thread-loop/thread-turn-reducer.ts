@@ -645,11 +645,19 @@ function applyCommittedInputs(
   messageIds: readonly string[],
 ): ThreadTurnCheckpoint {
   const nextIds = [...checkpoint.pendingInputMessageIds];
+  const pendingBeforeReceipt = new Set(nextIds);
+  const addedByReceipt = new Set<string>();
   for (const messageId of messageIds) {
     assertDurableIdentity(messageId, "messageId");
-    if (nextIds.includes(messageId)) {
+    // Cold reconstruction may already contain a Message whose commit ACK was
+    // lost. Replaying that durable receipt applies no second checkpoint entry.
+    if (pendingBeforeReceipt.has(messageId)) {
+      continue;
+    }
+    if (addedByReceipt.has(messageId)) {
       throw new ThreadTurnContractError("committed input message is already pending");
     }
+    addedByReceipt.add(messageId);
     nextIds.push(messageId);
   }
   return parseThreadTurnCheckpoint({ ...checkpoint, pendingInputMessageIds: nextIds });

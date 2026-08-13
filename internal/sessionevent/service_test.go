@@ -758,6 +758,46 @@ func TestAppendClientEventsWritesIdempotencyAndRuntimeInputQueueJobsAtomically(t
 	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
 }
 
+func TestAppendClientEventsProducesContiguousRuntimeInputRanges(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	const sessionID = "sesn_event_contiguous_runtime_input"
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
+	service := newSessionEventServiceForTest(runtime)
+
+	result, err := service.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, "idem_contiguous_runtime_input", AppendRequest{
+		Events: []IncomingEvent{
+			{Type: EventTypeUserMessage, Content: []TextContentBlock{{Type: ContentBlockTypeText, Text: "first"}}},
+			{Type: EventTypeUserMessage, Content: []TextContentBlock{{Type: ContentBlockTypeText, Text: "second"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AppendClientEvents contiguous messages: %v", err)
+	}
+	jobs := readSessionEventQueueJobs(t, admin, sessionID)
+	if len(result.Data) != 2 || len(jobs) != 1 {
+		t.Fatalf("contiguous producer events/jobs = %d/%d; want 2/1", len(result.Data), len(jobs))
+	}
+	assertRuntimeInputQueueJob(t, jobs[0], RuntimeInputKindMessages, 0,
+		[]string{result.Data[0].ID, result.Data[1].ID}, result.Data[0].Sequence, result.Data[1].Sequence)
+	if result.Data[1].Sequence != result.Data[0].Sequence+1 {
+		t.Fatalf("producer sequence = %d,%d; want contiguous", result.Data[0].Sequence, result.Data[1].Sequence)
+	}
+	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
+}
+
+func TestRuntimeInputSegmentsBreakAcrossNonRuntimeSequenceGaps(t *testing.T) {
+	segments := runtimeInputSegments([]*Event{
+		{ID: "evt_first", ThreadID: "thr_contiguous", Sequence: 1, Type: EventTypeUserMessage},
+		{ID: "evt_non_runtime", ThreadID: "thr_contiguous", Sequence: 2, Type: "session.observation"},
+		{ID: "evt_second", ThreadID: "thr_contiguous", Sequence: 3, Type: EventTypeUserMessage},
+	})
+	if len(segments) != 2 || len(segments[0].events) != 1 || len(segments[1].events) != 1 ||
+		segments[0].events[0].ID != "evt_first" || segments[1].events[0].ID != "evt_second" {
+		t.Fatalf("runtime input segments = %#v; want separate contiguous ranges", segments)
+	}
+}
+
 func TestAppendClientEventsSessionInterruptFansOutToPublicThreads(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	ctx := context.Background()

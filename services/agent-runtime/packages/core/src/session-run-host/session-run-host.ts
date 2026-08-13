@@ -31,7 +31,9 @@ export interface Interface {
     command: Parameters<SessionManager.Interface["ensureThreadInstalled"]>[0],
     options?: Parameters<SessionManager.Interface["ensureThreadInstalled"]>[1],
   ) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
+  readonly handleEvictReviewerExecution: (command: Parameters<SessionManager.Interface["evictReviewerExecution"]>[0], token: SessionManager.ReviewerExecutionToken) => Effect.Effect<SessionManager.ReviewerExecutionControlResult>;
   readonly handleInterruptReviewerExecution: (command: Parameters<SessionManager.Interface["interruptReviewerExecution"]>[0], token: SessionManager.ReviewerExecutionToken) => Effect.Effect<SessionManager.ReviewerExecutionControlResult>;
+  readonly handleReleaseReviewerExecution: (command: Parameters<SessionManager.Interface["releaseReviewerExecution"]>[0], token: SessionManager.ReviewerExecutionToken) => Effect.Effect<SessionManager.ReviewerExecutionControlResult>;
   readonly handleMarkThreadClosed: (command: Parameters<SessionManager.Interface["markThreadClosed"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleMarkThreadActive: (command: Parameters<SessionManager.Interface["markThreadActive"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleWaitThread: (command: Parameters<SessionManager.Interface["waitThread"]>[0], timeoutMs: number | undefined) => Effect.Effect<SessionManager.ThreadWaitResult>;
@@ -64,7 +66,9 @@ export const layer = Layer.effect(
       handleCleanupSession: (sessionId, command) => manager.cleanupSession(sessionId, command),
       handlePreloadThread: (command) => manager.preloadThread(command),
       handleEnsureThreadInstalled: (command, options) => manager.ensureThreadInstalled(command, options),
+      handleEvictReviewerExecution: (command, token) => manager.evictReviewerExecution(command, token),
       handleInterruptReviewerExecution: (command, token) => manager.interruptReviewerExecution(command, token),
+      handleReleaseReviewerExecution: (command, token) => manager.releaseReviewerExecution(command, token),
       handleMarkThreadClosed: (command) => manager.markThreadClosed(command),
       handleMarkThreadActive: (command) => manager.markThreadActive(command),
       handleWaitThread: (command, timeoutMs) => manager.waitThread(command, timeoutMs),

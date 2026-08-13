@@ -16,6 +16,7 @@ import type {
   RuntimeJsonValue,
   RuntimeMessage,
   RuntimePart,
+  SessionEventWriterError,
   RuntimeToolSettlement,
 } from "../contracts/runtime.js";
 import {
@@ -26,7 +27,7 @@ import {
 } from "../contracts/runtime.js";
 import type { LLMEvent } from "../llm/llm-event.js";
 import { ProviderStreamAccumulator } from "../runtime/accumulator.js";
-import type { PublicMcpErrorEvent, PublicToolEvent, RuntimeProcessorSource, ProviderStreamAccumulatorResult } from "../runtime/accumulator.js";
+import type { PublicToolEvent, RuntimeProcessorSource, ProviderStreamAccumulatorResult } from "../runtime/accumulator.js";
 import type { AutoApprovalReviewerManager, ParentTranscriptView } from "../session/approval-reviewer-manager.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
 import type { ToolCatalog, ToolEntry } from "../tools/tool-catalog.js";
@@ -45,7 +46,7 @@ import type * as ContextLoader from "../context/context-loader.js";
 /** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
 export type RuntimeToolExecutionResult =
   | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly attachments?: readonly ProviderRequestAttachment[]; readonly backgroundTask?: RuntimeToolExecutionBackgroundTask | undefined; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly attachments?: readonly ProviderRequestAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly attachments?: readonly ProviderRequestAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
   | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string }
   | { readonly type: "stale_custody" };
 
@@ -118,7 +119,6 @@ export function runtimeToolSettlement(
       return {
         type: result.type,
         error: result.error,
-        ...(result.publicErrorEvent === undefined ? {} : { publicErrorEvent: result.publicErrorEvent }),
         ...(result.serverToolUse === undefined ? {} : { serverToolUse: result.serverToolUse }),
         ...(result.mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle: result.mcpMaterializationHandle }),
         ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),
@@ -156,6 +156,7 @@ export interface RuntimeApprovalReviewRequest {
   readonly targetPodUid: string;
   readonly runtimeBindingToken: string;
   readonly modelRequestId: string;
+  readonly parentBoundaryEventId: string;
   readonly targetModelToolCallId: string;
   readonly targetToolName: string;
   readonly actionJson: RuntimeJsonValue;
@@ -177,10 +178,16 @@ export interface RuntimeApprovalReviewSiblingToolCall {
   readonly actionJson: RuntimeJsonValue;
 }
 
+/** Internal reviewer result; settlement failures return to ThreadLoop's existing persistence closeout. */
+export type RuntimeApprovalReviewResult = ApprovalReviewerOutcome | {
+  readonly type: "settlement_failed";
+  readonly error: SessionEventWriterError;
+};
+
 /** Runs an internal approval review without exposing reviewer failures through the Effect error channel. */
 export type RuntimeApprovalReviewer = (
   request: RuntimeApprovalReviewRequest,
-) => Effect.Effect<ApprovalReviewerOutcome, never>;
+) => Effect.Effect<RuntimeApprovalReviewResult, never>;
 
 export interface RuntimeToolRegistrationState {
   readonly executionPolicy: { readonly toolCatalog?: ToolCatalog };

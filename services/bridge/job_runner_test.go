@@ -848,6 +848,40 @@ func TestJobRunnerDeadLettersStringRuntimeConfigGeneration(t *testing.T) {
 	}
 }
 
+func TestJobRunnerDeadLettersInvalidRuntimeConfigFinalizationUnderItsLease(t *testing.T) {
+	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{{ //nolint:gosec // Test lease token fixture, not a secret.
+		Id:             "qjob_manifest_invalid_finalization",
+		WorkspaceId:    "ws_bridge",
+		Kind:           queue.KindRuntimeConfigUpdate,
+		LeaseToken:     "lease_manifest_invalid_finalization",
+		AttemptCount:   1,
+		MaxAttempts:    1,
+		PayloadVersion: 2,
+		PayloadJson:    `{"workspace_id":"ws_bridge","session_id":"sesn_1","mcp_server_name":"github","manifest_generation":7}`,
+	}}}
+	deliverer := &recordingDeliverer{
+		result: RuntimeDeliveryResult{
+			Status:       RuntimeDeliveryRejected,
+			Retryable:    true,
+			ErrorKind:    "runtime_transport_error",
+			ErrorMessage: "runtime command delivery failed",
+		},
+		finalizeErr: runtimeDeliveryPrepareError{
+			kind:      "invalid_runtime_job_payload",
+			message:   "runtime config finalization identity is invalid",
+			retryable: false,
+		},
+	}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_manifest_invalid_finalization:invalid_runtime_job_payload"}) {
+		t.Fatalf("queue transitions = %v; want fenced dead-letter", queueClient.transitions)
+	}
+}
+
 func TestRuntimeConfigUpdateDecodesReferenceOnlyMCPManifestIntent(t *testing.T) {
 	job := &queuev1.QueueJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		Id:             "qjob_manifest_refs",

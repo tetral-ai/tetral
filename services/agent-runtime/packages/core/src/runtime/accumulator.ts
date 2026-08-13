@@ -7,7 +7,6 @@ import { createHash } from "node:crypto";
 import { MaxProviderRequestMessagePartJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
   DurableRuntimeMessage,
-  PublicMcpErrorEvent,
   RuntimeAssistantPartAppend,
   RuntimeBoundedJson,
   RuntimeDeclarationReceipt,
@@ -65,7 +64,7 @@ export type PublicToolEvent =
   | { readonly kind: "tool" }
   | { readonly kind: "mcp"; readonly mcpServerName: string };
 
-export type { PublicMcpErrorEvent, RuntimeProcessorSource, RuntimeToolSettlement } from "../contracts/runtime.js";
+export type { RuntimeProcessorSource, RuntimeToolSettlement } from "../contracts/runtime.js";
 
 /** Frozen provider-order member owned by one request-local sequencer. */
 export interface FrozenAssistantPartAppend {
@@ -442,10 +441,7 @@ export class ProviderStreamAccumulator {
     this.replaceDurableTool(toolUseEventId, terminalPart);
     const outcome = settlement.type === "completed" ? "success" : settlement.type;
     this.options.onToolResultCommitted?.({ eventId: result.eventId, toolUseEventId, outcome });
-    const base: ProviderStreamAccumulatorResult = { ok: true, events: [event], durableEventIds: [result.eventId] };
-    return settlement.type === "error"
-      ? await this.appendPublicMcpErrorEvent(base, settlement.publicErrorEvent, source)
-      : base;
+    return { ok: true, events: [event], durableEventIds: [result.eventId] };
   }
 
   async commitInternalToolRepair(
@@ -700,13 +696,6 @@ export class ProviderStreamAccumulator {
     return parts.reduce((total, part) => total + byteLength(part.text) + byteLength(stableReasoningMetadataJSON(part.providerMetadata)), 0) <= MaxStableReasoningBytesPerRequest;
   }
 
-  private async appendPublicMcpErrorEvent(result: ProviderStreamAccumulatorResult, error: PublicMcpErrorEvent | undefined, source: RuntimeProcessorSource): Promise<ProviderStreamAccumulatorResult> {
-    if (!result.ok || error === undefined) return result;
-    const event = runtimeMcpErrorSessionEvent(error);
-    const write = await this.options.writer.appendEvent(event, source);
-    return write.ok ? { ...result, events: [...result.events, event] } : { ok: false, events: result.events, error: eventWriterFailure(write.error) };
-  }
-
   private failWithoutWrites(error: RuntimeFailure): ProviderStreamAccumulatorResult {
     this.discardUnreceiptedMembers();
     return { ok: false, events: [], error };
@@ -784,12 +773,6 @@ function mergeProviderMetadata(existing: ReasoningProviderMetadata | undefined, 
   return merged;
 }
 function isMetadataObject(value: unknown): value is Readonly<Record<string, ReasoningProviderMetadata[keyof ReasoningProviderMetadata]>> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-
-export function runtimeMcpErrorSessionEvent(error: PublicMcpErrorEvent): SessionEvent {
-  return error.type === "unknown_error"
-    ? SessionEventSchema.parse({ type: "session.error", error: { type: error.type, message: error.message, retry_status: error.retryStatus } })
-    : SessionEventSchema.parse({ type: "session.error", error: { type: error.type, mcp_server_name: error.mcpServerName, message: error.message, retry_status: error.retryStatus } });
-}
 
 function declarationApplicationFailure(writeId: string): { readonly ok: false; readonly events: readonly SessionEvent[]; readonly error: RuntimeFailure } {
   return { ok: false, events: [], error: eventWriterFailure(normalizeSessionEventWriterError({ code: "schema_mismatch", writeId })) };

@@ -1298,6 +1298,26 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
+  test("does not expose an unmaterialized MCP completion as success", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "must not reach the model",
+      attachments: [],
+      errorKind: undefined,
+      materializationHandle: undefined,
+    };
+
+    await expect(makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }))).resolves.toMatchObject({
+      type: "error",
+      error: {
+        retryable: false,
+        message: "The MCP tool outcome could not be confirmed. Check the external service before retrying.",
+      },
+    });
+    expect(mcp.runMcpToolRequests).toHaveLength(1);
+  });
+
   test("accepts the true 50 KiB escape-dense MCP result without a line-cap shortcut", async () => {
     const mcp = new RecordingMcpConnectorClient();
     const resultText = "\u0001".repeat(50 * 1024);
@@ -1387,6 +1407,7 @@ describe("RuntimePodToolRunner", () => {
       resultText: "invalid repository",
       attachments: [],
       errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
+      materializationHandle: "evt_mcp_tool_error",
     };
     const runner = makeRunner({ mcp });
 
@@ -1409,6 +1430,7 @@ describe("RuntimePodToolRunner", () => {
       resultText: "tool returned an image error",
       attachments: [{ attachmentRef: "att_mcp_error", mime: "image/png", sizeBytes: 3, suggestedFilename: "error.png" }],
       errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
+      materializationHandle: "evt_mcp_tool_error_attachment",
     };
     const runner = makeRunner({ bridge, mcp });
 
@@ -1430,67 +1452,20 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
-  test("preserves terminal MCP authentication retry status for runtime error events", async () => {
-    for (const scenario of [
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-          resultText: "MCP authentication failed after refresh.",
-        },
-        publicErrorEvent: {
-          type: "mcp_authentication_failed_error",
-          mcpServerName: "github",
-          message: "MCP authentication failed after refresh.",
-          retryStatus: { type: "terminal" },
-        },
-      },
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-          resultText: "MCP server github requires a configured credential.",
-        },
-        publicErrorEvent: {
-          type: "mcp_authentication_failed_error",
-          mcpServerName: "github",
-          message: "MCP server github requires a configured credential.",
-          retryStatus: { type: "terminal" },
-        },
-      },
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-          resultText: "MCP tool idempotency conflict.",
-        },
-        publicErrorEvent: {
-          type: "unknown_error",
-          message: "MCP tool idempotency conflict.",
-          retryStatus: { type: "terminal" },
-        },
-      },
-      {
-        response: {
-          errorKind: McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED,
-          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED,
-          resultText: "MCP connection failed.",
-        },
-        publicErrorEvent: {
-          type: "mcp_connection_failed_error",
-          mcpServerName: "github",
-          message: "MCP connection failed.",
-          retryStatus: { type: "exhausted" },
-        },
-      },
+  test("settles MCP infrastructure failures as one generic non-retryable Tool error", async () => {
+    for (const response of [
+      { errorKind: McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED, retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL },
+      { errorKind: McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED, retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL },
+      { errorKind: McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED, retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED },
     ]) {
       const mcp = new RecordingMcpConnectorClient();
       mcp.runMcpToolResponse = {
         status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-        resultText: scenario.response.resultText,
+        resultText: "credential and provider response must not escape",
         attachments: [],
-        errorKind: scenario.response.errorKind,
-        retryStatus: scenario.response.retryStatus,
+        errorKind: response.errorKind,
+        retryStatus: response.retryStatus,
+        materializationHandle: "evt_mcp_infrastructure_failure",
       };
       const runner = makeRunner({ mcp });
 
@@ -1498,37 +1473,47 @@ describe("RuntimePodToolRunner", () => {
 
       expect(result).toMatchObject({
         type: "error",
-        error: {
-          retryable: true,
-          message: scenario.response.resultText,
-          retryStatus: scenario.publicErrorEvent.retryStatus,
-        },
-        publicErrorEvent: scenario.publicErrorEvent,
+        error: expect.objectContaining({
+          retryable: false,
+          message: "MCP tool execution is unavailable.",
+        }),
+        mcpMaterializationHandle: "evt_mcp_infrastructure_failure",
       });
     }
   });
 
-  test("settles internal MCP failures without retry status or a public error event", async () => {
-    const mcp = new RecordingMcpConnectorClient();
-    mcp.runMcpToolResponse = {
-      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-      resultText: "MCP connector failed.",
-      attachments: [],
-      errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
-      retryStatus: undefined,
-    };
-    const runner = makeRunner({ mcp });
-
-    const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
-
-    expect(result).toMatchObject({
-      type: "error",
-      error: {
-        retryable: true,
-        message: "MCP connector failed.",
+  test("projects pre-materialization MCP uncertainty without a discard loop", async () => {
+    for (const testCase of [
+      {
+        errorKind: McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT,
       },
-    });
-    expect(result).not.toHaveProperty("publicErrorEvent");
+      {
+        errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+      },
+      {
+        errorKind: McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT,
+      },
+    ]) {
+      const mcp = new RecordingMcpConnectorClient();
+      mcp.runMcpToolResponse = {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+        resultText: "connector details must not escape",
+        attachments: [],
+        errorKind: testCase.errorKind,
+        retryStatus: undefined,
+      };
+      const runner = makeRunner({ mcp });
+
+      const first = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+      const repeated = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+
+      expect(first).toMatchObject({
+        type: "error",
+        error: { retryable: false, message: expect.stringContaining("Check the external service before retrying.") },
+      });
+      expect(repeated).toEqual(first);
+      expect(mcp.runMcpToolRequests).toHaveLength(2);
+    }
   });
 
   test("returns stale custody without projecting a model-visible MCP failure", async () => {
@@ -1555,6 +1540,7 @@ describe("RuntimePodToolRunner", () => {
       resultText: "image",
       attachments: [{ attachmentRef: "att_mcp_plot", mime: "image/png", sizeBytes: 3, suggestedFilename: "plot.png" }],
       errorKind: undefined,
+      materializationHandle: "evt_mcp_attachment",
     };
     const runner = makeRunner({ bridge, mcp });
 
@@ -2317,7 +2303,7 @@ describe("RuntimePodToolRunner", () => {
             events: [
               { eventId: "sevt_resume_running", eventSequence: 1, type: "session.status_running" as const },
             ],
-            messageLineage: [],
+            internalRepairs: [],
           },
         },
       },
@@ -2331,7 +2317,7 @@ describe("RuntimePodToolRunner", () => {
             events: [
               { eventId: "sevt_resume_start", eventSequence: 1, type: "span.model_request_start" as const, modelRequestId: "mreq_resume_open", requestStart: { requestKind: "agent_provider_request" as const, contextThroughMessageSequence: 0 } },
             ],
-            messageLineage: [],
+            internalRepairs: [],
           },
         },
       },
@@ -2359,7 +2345,7 @@ describe("RuntimePodToolRunner", () => {
         context: {
           messages: [], thread: closedThread,
           pendingToolUses: [], pendingSandboxExecutions: [],
-          turnFacts: { events: [{ eventId: "sevt_resume_interrupt", eventSequence: 1, type: "agent.thread_interrupt_requested" as const }], messageLineage: [] },
+          turnFacts: { events: [{ eventId: "sevt_resume_interrupt", eventSequence: 1, type: "agent.thread_interrupt_requested" as const }], internalRepairs: [] },
         },
       },
       {
@@ -2395,7 +2381,7 @@ describe("RuntimePodToolRunner", () => {
               { eventId: "sevt_resume_failure", eventSequence: 1, type: "session.error" as const, failure: { errorType: "provider_unavailable", retryStatus: "terminal" as const } },
               { eventId: "sevt_resume_terminated", eventSequence: 2, type: "session.status_terminated" as const },
             ],
-            messageLineage: [],
+            internalRepairs: [],
           },
         },
       },
@@ -2696,7 +2682,7 @@ const emptyResumeColdCoverage = {
   undeliveredMailDeliveryIds: [],
 } as const;
 
-const emptyResumeTurnFacts: ThreadTurnLoadFacts = { events: [], messageLineage: [] };
+const emptyResumeTurnFacts: ThreadTurnLoadFacts = { events: [], internalRepairs: [] };
 
 /**
  * Mirrors the disjunct list of validateClosedThreadResumeCheckpoint
@@ -2729,22 +2715,8 @@ function resumeCheckpointTrippedDisjuncts(
 }
 
 function resumeTurnFactsFor(messages: readonly DurableRuntimeMessage[]): ThreadTurnLoadFacts {
-  return {
-    events: [],
-    messageLineage: messages.map((message) => ({
-      messageId: message.id,
-      messageSequence: message.sequence,
-      owningEventId: message.owningEventId,
-      entries: [{
-        lineageKind: "declaration_receipt",
-        operationKind: message.origin === "agent" ? "write_event" : "commit_inputs",
-        sourceKind: message.origin === "agent" ? "runtime_event" : message.origin === "runtime" ? "agent_mail" : "messages",
-        eventId: message.owningEventId,
-        eventSequence: message.eventSequence,
-        disposition: "created",
-      }],
-    })),
-  };
+  void messages;
+  return { events: [], internalRepairs: [] };
 }
 
 function resumeTurnFactsForPendingTool(input: {
@@ -2754,29 +2726,31 @@ function resumeTurnFactsForPendingTool(input: {
   readonly modelToolCallId: string;
   readonly toolName: string;
 }): ThreadTurnLoadFacts {
-  const toolMessage = input.messages.find((message) => message.owningEventId === input.toolUseEventId);
-  if (toolMessage === undefined || toolMessage.eventSequence < 2) {
+  const toolMessage = input.messages.find((message) => message.parts.some((part) =>
+    part.type === "tool" && part.toolUseEventId === input.toolUseEventId
+  ));
+  if (toolMessage === undefined) {
     throw new Error("pending Tool Use fixture requires an ordered assistant projection");
   }
   return {
     events: [
       {
         eventId: `start_${input.modelRequestId}`,
-        eventSequence: toolMessage.eventSequence - 1,
+        eventSequence: 1,
         type: "span.model_request_start",
         modelRequestId: input.modelRequestId,
         requestStart: { requestKind: "agent_provider_request", contextThroughMessageSequence: 1 },
       },
       {
         eventId: input.toolUseEventId,
-        eventSequence: toolMessage.eventSequence,
+        eventSequence: 2,
         type: "agent.tool_use",
         modelRequestId: input.modelRequestId,
-        toolUse: { modelToolCallId: input.modelToolCallId, toolName: input.toolName },
+        toolUse: {},
       },
       {
         eventId: `end_${input.modelRequestId}`,
-        eventSequence: toolMessage.eventSequence + 1,
+        eventSequence: 3,
         type: "span.model_request_end",
         modelRequestId: input.modelRequestId,
         requestEnd: {
@@ -2786,15 +2760,7 @@ function resumeTurnFactsForPendingTool(input: {
         },
       },
     ],
-    messageLineage: resumeTurnFactsFor(input.messages).messageLineage.map((lineage) =>
-      lineage.messageId === toolMessage.id
-        ? {
-            ...lineage,
-            modelRequestId: input.modelRequestId,
-            entries: lineage.entries.map((entry) => ({ ...entry, sourceKind: "agent.tool_use" as const })),
-          }
-        : lineage
-    ),
+    internalRepairs: [],
   };
 }
 
@@ -3512,8 +3478,18 @@ class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
     return this.preloadResults.shift() ?? { ok: true as const, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, applied: true };
   }
 
+  async evictReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["evictReviewerExecution"]>[0]) {
+    this.actions.push("evict-reviewer");
+    return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
+  }
+
   async interruptReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["interruptReviewerExecution"]>[0]) {
     this.actions.push("interrupt-reviewer");
+    return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
+  }
+
+  async releaseReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["releaseReviewerExecution"]>[0]) {
+    this.actions.push("release-reviewer");
     return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
   }
 
@@ -3657,6 +3633,7 @@ class RecordingMcpConnectorClient {
     attachments: [],
     errorKind: undefined,
     retryStatus: undefined,
+    materializationHandle: "evt_mcp_materialized_default",
   };
 
   client(): Pick<McpConnectorServiceClient, "runMcpTool"> {

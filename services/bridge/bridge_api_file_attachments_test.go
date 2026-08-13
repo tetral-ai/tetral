@@ -318,14 +318,13 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedProjectedMessageLookups(t *te
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
+			data_json, source_event_id, created_at, updated_at
 		)
 		SELECT 'default', $1, $2,
 		       'msg_bridge_file_plan_' || value::text,
 		       value + 1,
 		       'user',
 		       '{"parts":[]}',
-		       'sevt_bridge_file_plan_' || value::text,
 		       'sevt_bridge_file_plan_' || value::text,
 		       '2026-01-01T00:00:00Z',
 		       '2026-01-01T00:00:00Z'
@@ -396,16 +395,11 @@ func seedBridgeAPIProjectedUserMessage(t *testing.T, db *sql.DB, sessionID, thre
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, 'user', $5, $6, $6, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			data_json, source_event_id, created_at, updated_at
+		) VALUES ('default', $1, $2, $3, $4, 'user', $5, $6, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		sessionID, threadID, messageID, sequence, dataJSON, sourceEventID); err != nil {
 		t.Fatalf("seed projected user message %s: %v", sourceEventID, err)
 	}
-	seedBridgeAPIMessageLineage(
-		t, db, "default", sessionID, threadID,
-		bridgeOpCommitInputs, "messages", "rin_fixture_"+sourceEventID,
-		sourceEventID, messageID, sequence,
-	)
 }
 
 type rangeRecordingBlobStore struct {

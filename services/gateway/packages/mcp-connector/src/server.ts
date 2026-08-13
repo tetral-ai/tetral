@@ -105,15 +105,15 @@ async function unary<Response>(
 
 function toServiceError(error: unknown): ServiceError {
   if (error instanceof GrpcStatusError) {
-    return serviceError(error.code, error.message);
+    return serviceError(error.code, error.message, error.metadata);
   }
   return serviceError(status.INTERNAL, "mcp connector failed");
 }
 
-function serviceError(code: status, message: string): ServiceError {
+function serviceError(code: status, message: string, metadata = new Metadata()): ServiceError {
   const error = new Error(message) as ServiceError;
   error.code = code;
   error.details = message;
-  error.metadata = new Metadata();
+  error.metadata = metadata;
   return error;
 }

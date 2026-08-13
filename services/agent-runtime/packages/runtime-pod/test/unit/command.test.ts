@@ -716,7 +716,7 @@ describe("Runtime Pod command entrypoint", () => {
           contextLoader: {
             loadThreadContext: async () => ({
               messages: [],
-              turnFacts: { events: [], messageLineage: [] },
+              turnFacts: { events: [], internalRepairs: [] },
               runtimeBindingToken: "runtime-binding-token-command-test",
               coldCoverage: {
                 pendingToolIds: [],
@@ -972,7 +972,9 @@ function fakeDependencies(records: string[]): RuntimePodCommandDependencies {
       subAgentRunHost: {
         enqueueThreadInput: async (input) => ({ ok: true, sessionId: input.sessionId, created: false, started: false }),
         preloadThread: async (input) => ({ ok: true, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, applied: true }),
+        evictReviewerExecution: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true }),
         interruptReviewerExecution: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true }),
+        releaseReviewerExecution: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true }),
         markThreadClosed: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true }),
         markThreadActive: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true }),
         waitThread: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, observed: false, timedOut: false }),

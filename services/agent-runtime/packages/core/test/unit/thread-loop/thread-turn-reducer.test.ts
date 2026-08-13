@@ -149,6 +149,25 @@ describe("Thread-turn reducer", () => {
     });
   });
 
+  test("a replayed committed-input receipt preserves one pending durable message", () => {
+    const cold = initializeThreadTurnReduction({
+      executionRunId: "run_reloaded",
+      pendingInputMessageIds: ["message_committed_before_reload"],
+    }, noRoutes);
+
+    const replayed = reduceThreadTurn(cold, {
+      fact: "inputs_committed",
+      eventId: "event_commit_replayed",
+      messageIds: ["message_committed_before_reload"],
+    }, noRoutes);
+
+    expect(replayed).toMatchObject({
+      checkpoint: { pendingInputMessageIds: ["message_committed_before_reload"] },
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+  });
+
   test("a durable run-open fact clears a prior final closeout before new input is committed", () => {
     const closed = initializeThreadTurnReduction({
       pendingInputMessageIds: [],

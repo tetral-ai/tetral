@@ -157,11 +157,14 @@ describe("provider lowering rule invariants", () => {
     }
   });
 
-  test("the Claude rule family carries request structured-output capability", () => {
-    expect(AnthropicOpus48Rules.requestOutputSchema).toBe("approval-reviewer");
-    expect(AnthropicFable5Rules.requestOutputSchema).toBe("approval-reviewer");
-    for (const rule of rules.filter((rule) => rule !== AnthropicOpus48Rules && rule !== AnthropicFable5Rules)) {
-      expect(rule.requestOutputSchema, `${rule.providerId}/${rule.modelId}`).toBeUndefined();
+  test("model rules declare provider-wire structured-output capability", () => {
+    expect(AnthropicOpus48Rules.structuredOutputStrategy).toBe("native_json_schema");
+    expect(AnthropicFable5Rules.structuredOutputStrategy).toBe("native_json_schema");
+    expect(DeepSeekV4ProRules.structuredOutputStrategy).toBe("json_object");
+    for (const rule of rules.filter((rule) =>
+      rule !== AnthropicOpus48Rules && rule !== AnthropicFable5Rules && rule !== DeepSeekV4ProRules
+    )) {
+      expect(rule.structuredOutputStrategy, `${rule.providerId}/${rule.modelId}`).toBe("unsupported");
     }
   });
 });

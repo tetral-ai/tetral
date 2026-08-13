@@ -134,11 +134,11 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestFiltersPinnedFamilyAndL
 		},
 	}}}
 
-	err := store.enqueueInitialMCPManifestUpdates(context.Background(), RuntimeJob{
+	err := store.captureInitialMCPManifests(context.Background(), RuntimeJob{
 		WorkspaceID: "default", SessionID: "sesn_mcp_collision_initial",
 	}, []MCPManifestToolsetConfig{{MCPServerName: "github", BuiltinFamily: "gpt"}}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
-		t.Fatalf("enqueueInitialMCPManifestUpdates: %v", err)
+		t.Fatalf("captureInitialMCPManifests: %v", err)
 	}
 	assertStoredMCPManifest(t, admin, "sesn_mcp_collision_initial", "connector_etag_initial", []string{"Read", "web", "github_search"})
 	assertMCPFamilyOmissionWarnings(t, logs.Bytes(), ServiceNameJobRunner, "sesn_mcp_collision_initial", "gpt", []string{"apply_patch"})
@@ -158,11 +158,11 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestFailureBeforeAcceptance
 		},
 	}}}
 
-	err := store.enqueueInitialMCPManifestUpdates(context.Background(), RuntimeJob{
+	err := store.captureInitialMCPManifests(context.Background(), RuntimeJob{
 		WorkspaceID: "default", SessionID: "sesn_mcp_collision_initial_fail",
 	}, []MCPManifestToolsetConfig{{MCPServerName: "github", BuiltinFamily: "gpt"}}, time.Now())
-	if err == nil {
-		t.Fatal("enqueueInitialMCPManifestUpdates error = nil; want invalid manifest failure")
+	if err != nil {
+		t.Fatalf("captureInitialMCPManifests: %v", err)
 	}
 	assertMCPFamilyOmissionWarnings(t, logs.Bytes(), ServiceNameJobRunner, "sesn_mcp_collision_initial_fail", "gpt", nil)
 }

@@ -28,7 +28,7 @@ import type {
   McpManifestChangedResponse,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { CallOptions } from "@grpc/grpc-js";
-import { RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { McpErrorKind, McpRetryStatus, RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
 import {
   InMemoryMcpIdempotencyStore,
@@ -316,6 +316,146 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     expect(client.commitRequests[0]).toEqual(client.commitRequests[1]);
   });
 
+  test("materializes one terminal MCP failure after Bridge rejects connector-produced result bytes", async () => {
+    const client = new PayloadRejectThenMaterializeBridgeClient();
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+      sleep: async () => {
+        throw new Error("deterministic commit rejection must not back off");
+      },
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "provider output that Bridge rejects",
+        attachments: [],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP tool result could not be committed.",
+      errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+      retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+      materializationHandle: "sevt_tool_1",
+    });
+    expect(client.commitRequests).toHaveLength(2);
+    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
+    expect(client.commitRequests[1]?.inlineMedia).toEqual([]);
+  });
+
+  test("replays the canonical failure request after its commit outcome becomes unknown", async () => {
+    const client = new PayloadRejectUnknownThenMaterializeBridgeClient();
+    const delays: number[] = [];
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+      sleep: async (delayMs) => {
+        delays.push(delayMs);
+      },
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "provider output that Bridge rejects",
+        attachments: [],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+      materializationHandle: "sevt_tool_1",
+    });
+
+    expect(delays).toEqual([300]);
+    expect(client.commitRequests).toHaveLength(3);
+    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
+    expect(client.commitRequests[2]).toBe(client.commitRequests[1]);
+    expect(client.commitRequests[2]).toEqual(client.commitRequests[1]);
+    expect(client.commitRequests[2]).toMatchObject({
+      scope: client.commitRequests[0]?.scope,
+      toolUseEventId: key.toolUseEventId,
+      normalizedInputHash: key.normalizedInputHash,
+      inlineMedia: [],
+    });
+  });
+
+  test("relinquishes custody when Bridge rejects the canonical failure request", async () => {
+    const client = new PayloadRejectThenCustodyRejectBridgeClient();
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+      sleep: async () => {
+        throw new Error("custody rejection must not back off");
+      },
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "provider output that Bridge rejects",
+        attachments: [],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
+
+    expect(client.commitRequests).toHaveLength(2);
+    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
+    expect(client.commitRequests[1]).toMatchObject({
+      scope: client.commitRequests[0]?.scope,
+      toolUseEventId: key.toolUseEventId,
+      normalizedInputHash: key.normalizedInputHash,
+      inlineMedia: [],
+    });
+  });
+
+  test("stops on a custody rejection without fabricating a replacement result", async () => {
+    const client = new CustodyRejectingBridgeClient();
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+      sleep: async () => {
+        throw new Error("custody rejection must not back off");
+      },
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "must not be replaced",
+        attachments: [],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
+    expect(client.commitRequests).toHaveLength(1);
+  });
+
   test("classifies a durable replay observed under stale custody without local application", async () => {
     const store = new BridgeAPIMcpToolResultIdempotencyStore({
       address: "bridge.tetral-system.svc.cluster.local:9090",
@@ -600,7 +740,7 @@ class UnknownThenReplayBridgeClient extends MaterializationBridgeClient {
   ) {
     this.commitRequests.push(request);
     if (this.commitRequests.length === 1) {
-      callback(Object.assign(new Error("connection closed after commit"), { code: status.UNAVAILABLE }) as ServiceError, {
+      callback(Object.assign(new Error("connection closed after commit"), { code: status.UNKNOWN }) as ServiceError, {
         ack: undefined,
         refsOnlyResultJson: "",
         declaration: undefined,
@@ -608,6 +748,108 @@ class UnknownThenReplayBridgeClient extends MaterializationBridgeClient {
       return;
     }
     super.commitMcpToolResult(request, metadata, options, callback);
+  }
+}
+
+class PayloadRejectThenMaterializeBridgeClient extends MaterializationBridgeClient {
+  readonly commitRequests: CommitMcpToolResultRequest[] = [];
+
+  override commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ) {
+    this.commitRequests.push(request);
+    if (this.commitRequests.length === 1) {
+      callback(Object.assign(new Error("result payload rejected"), { code: status.INVALID_ARGUMENT }) as ServiceError, {
+        ack: undefined,
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
+      return;
+    }
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      refsOnlyResultJson: request.resultJson,
+      materializationHandle: request.toolUseEventId,
+      declaration: mcpMaterializationDeclaration(request, false),
+    });
+  }
+}
+
+class PayloadRejectUnknownThenMaterializeBridgeClient extends MaterializationBridgeClient {
+  readonly commitRequests: CommitMcpToolResultRequest[] = [];
+
+  override commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    metadata: Metadata,
+    options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ) {
+    this.commitRequests.push(request);
+    if (this.commitRequests.length === 1) {
+      callback(Object.assign(new Error("result payload rejected"), { code: status.INVALID_ARGUMENT }) as ServiceError, {
+        ack: undefined,
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
+      return;
+    }
+    if (this.commitRequests.length === 2) {
+      callback(Object.assign(new Error("connection closed after commit"), { code: status.UNKNOWN }) as ServiceError, {
+        ack: undefined,
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
+      return;
+    }
+    void metadata;
+    void options;
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      refsOnlyResultJson: request.resultJson,
+      materializationHandle: request.toolUseEventId,
+      declaration: mcpMaterializationDeclaration(request, false),
+    });
+  }
+}
+
+class PayloadRejectThenCustodyRejectBridgeClient extends MaterializationBridgeClient {
+  readonly commitRequests: CommitMcpToolResultRequest[] = [];
+
+  override commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ) {
+    this.commitRequests.push(request);
+    callback(Object.assign(new Error(this.commitRequests.length === 1 ? "result payload rejected" : "claim is not current"), {
+      code: this.commitRequests.length === 1 ? status.INVALID_ARGUMENT : status.FAILED_PRECONDITION,
+    }) as ServiceError, {
+      ack: undefined,
+      refsOnlyResultJson: "",
+      declaration: undefined,
+    });
+  }
+}
+
+class CustodyRejectingBridgeClient extends MaterializationBridgeClient {
+  readonly commitRequests: CommitMcpToolResultRequest[] = [];
+
+  override commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ) {
+    this.commitRequests.push(request);
+    callback(Object.assign(new Error("claim is not current"), { code: status.FAILED_PRECONDITION }) as ServiceError, {
+      ack: undefined,
+      refsOnlyResultJson: "",
+      declaration: undefined,
+    });
   }
 }
 

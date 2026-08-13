@@ -36,6 +36,66 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("ProviderClientRegistry provider streaming", () => {
+  test("forwards DeepSeek reviewer JSON-object strategy into provider construction", async () => {
+    const calls: GatewayStreamTextInput[] = [];
+    const providerSettings: OpenAICompatibleProviderSettings[] = [];
+    const registry = new ProviderClientRegistry({
+      openAICompatibleProviderFactory: (settings) => {
+        providerSettings.push(settings);
+        return (modelId) => ({ provider: "deepseek", modelId });
+      },
+      streamText: (input) => {
+        calls.push(input);
+        return streamTextResult([finishPart()]);
+      },
+    });
+    const request = deepSeekRequest({
+      requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+      outputSchemaJson: approvalReviewerOutputSchemaJson,
+    });
+
+    await collectEvents(registry.stream({ request, credential: sessionDeepSeekCredential() }));
+
+    expect(providerSettings).toHaveLength(1);
+    expect(providerSettings[0]?.supportsStructuredOutputs).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(await calls[0]?.output?.responseFormat).toEqual({
+      type: "json",
+      schema: JSON.parse(approvalReviewerOutputSchemaJson),
+    });
+  });
+
+  test("rejects unsupported reviewer routes before provider construction", async () => {
+    let providerFactoryCalls = 0;
+    let streamCalls = 0;
+    const registry = new ProviderClientRegistry({
+      openAIProviderFactory: () => {
+        providerFactoryCalls += 1;
+        return { responses: (modelId) => ({ provider: "openai", modelId }) };
+      },
+      streamText: () => {
+        streamCalls += 1;
+        return streamTextResult([finishPart()]);
+      },
+    });
+    const request = openAIRequest({
+      requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+      outputSchemaJson: approvalReviewerOutputSchemaJson,
+    });
+
+    await expect(
+      collectEvents(registry.stream({ request, credential: sessionOpenAICredential() })),
+    ).rejects.toMatchObject({
+      providerError: {
+        code: "provider_configuration_invalid",
+        retryable: false,
+        fatal: true,
+      },
+    });
+    expect(providerFactoryCalls).toBe(0);
+    expect(streamCalls).toBe(0);
+  });
+
   test("lowers approval reviewer output schema and reports route-effective model limits", async () => {
     const calls: GatewayStreamTextInput[] = [];
     const request = anthropicRequest({
@@ -1177,6 +1237,7 @@ describe("ProviderClientRegistry provider streaming", () => {
       baseURL: "https://api.deepseek.com",
       includeUsage: true,
       name: "deepseek",
+      supportsStructuredOutputs: false,
       fetch: expect.any(Function),
     }]);
     expect(calls[0]).toMatchObject({
@@ -1235,6 +1296,7 @@ describe("ProviderClientRegistry provider streaming", () => {
       baseURL: "https://api.z.ai/api/coding/paas/v4",
       includeUsage: true,
       name: "zai",
+      supportsStructuredOutputs: false,
       fetch: expect.any(Function),
     }]);
     expect(calls[0]).toMatchObject({

@@ -11,7 +11,6 @@ const scope = {
 	binding: { bindingId: "binding", bindingGeneration: 1, targetPodUid: "pod" },
 };
 const messageCreate = {
-  sourceEventId: "event",
   messageKind: RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT,
   messageInfoJson: '{"role":"user","origin":"user","status":"completed"}',
   parts: [{ partKind: "text", partJson: '{"type":"text","text":"hello","truncated":false,"status":"completed"}' }],

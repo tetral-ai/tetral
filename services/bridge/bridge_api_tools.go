@@ -551,6 +551,11 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 			return err
 		}
+		if err := verifyModelToolCallIDAvailableTx(
+			ctx, tx, request.GetScope(), request.GetModelRequestId(), request.GetModelToolCallId(),
+		); err != nil {
+			return err
+		}
 		eventID, eventSequence, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
 		if err != nil {
 			return err

@@ -395,7 +395,6 @@ const (
 		kind TEXT NOT NULL,
 		data_json TEXT NOT NULL,
 		source_event_id TEXT,
-		last_event_id TEXT,
 		repair_key TEXT,
 		model_request_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
@@ -1662,7 +1661,6 @@ END $$`
 	createPostgreSQLSessionMessagesSeqIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_messages_seq ON session_messages(workspace_id, session_id, session_thread_id, sequence)`
 	createPostgreSQLSessionMessagesSourceEventIndex         = `CREATE INDEX IF NOT EXISTS idx_session_messages_source_event ON session_messages(workspace_id, source_event_id)`
 	createPostgreSQLSessionMessagesSourceEventUniqueIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_source_event_unique ON session_messages(workspace_id, session_id, session_thread_id, source_event_id) WHERE source_event_id IS NOT NULL`
-	createPostgreSQLSessionMessagesLastEventIndex           = `CREATE INDEX IF NOT EXISTS idx_session_messages_last_event ON session_messages(workspace_id, last_event_id)`
 	createPostgreSQLSessionMessagesRepairKeyIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_repair_key_unique ON session_messages(workspace_id, session_id, session_thread_id, repair_key) WHERE repair_key IS NOT NULL`
 	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
@@ -1934,7 +1932,6 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_messages_seq", createPostgreSQLSessionMessagesSeqIndex},
 		{"index_session_messages_source_event", createPostgreSQLSessionMessagesSourceEventIndex},
 		{"index_session_messages_source_event_unique", createPostgreSQLSessionMessagesSourceEventUniqueIndex},
-		{"index_session_messages_last_event", createPostgreSQLSessionMessagesLastEventIndex},
 		{"index_session_messages_repair_key", createPostgreSQLSessionMessagesRepairKeyIndex},
 		{"index_session_messages_model_request_unique", createPostgreSQLSessionMessagesModelRequestIndex},
 		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
