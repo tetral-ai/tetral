@@ -1863,6 +1863,9 @@ type providerRequestCompositionResult struct {
 type providerCarrierMessage struct {
 	Parts []struct {
 		ID   string `json:"id"`
+		Text *struct {
+			Text string `json:"text"`
+		} `json:"text"`
 		Tool *struct {
 			CallID            string `json:"callId"`
 			Name              string `json:"name"`
@@ -1874,15 +1877,26 @@ type providerCarrierMessage struct {
 }
 
 type providerStrategyComposition struct {
-	ProviderID     string `json:"providerId"`
-	ModelID        string `json:"modelId"`
-	ProviderFamily string `json:"providerFamily"`
-	Validation     struct {
+	ProviderID      string          `json:"providerId"`
+	ModelID         string          `json:"modelId"`
+	ProviderFamily  string          `json:"providerFamily"`
+	ProviderRequest json.RawMessage `json:"providerRequest"`
+	Validation      struct {
 		OK     bool   `json:"ok"`
 		Code   string `json:"code"`
 		Member string `json:"member"`
 	} `json:"validation"`
 	LoweredMessages []json.RawMessage `json:"loweredMessages"`
+}
+
+type invalidToolProviderWireSummary struct {
+	Family       string `json:"family"`
+	Pathname     string `json:"pathname"`
+	CallID       string `json:"callId"`
+	ToolName     string `json:"toolName"`
+	ErrorMessage string `json:"errorMessage"`
+	CallIndex    int    `json:"callIndex"`
+	ResultIndex  int    `json:"resultIndex"`
 }
 
 type runtimeInvalidToolRepairFixtureResult struct {
@@ -1894,20 +1908,27 @@ type runtimeInvalidToolRepairFixtureResult struct {
 		RepairKey       string          `json:"repairKey"`
 		MessageCreate   json.RawMessage `json:"messageCreate"`
 	} `json:"repair"`
-	StoreOrder                  []string `json:"storeOrder"`
-	PublicToolEvents            []string `json:"publicToolEvents"`
-	RunToolCalls                int      `json:"runToolCalls"`
-	AcceptSandboxExecutionCalls int      `json:"acceptSandboxExecutionCalls"`
-	AwaitSandboxExecutionCalls  int      `json:"awaitSandboxExecutionCalls"`
-	ErrorType                   string   `json:"-"`
-	ErrorMessage                string   `json:"-"`
-	ErrorRetryable              bool     `json:"-"`
-	InputJSON                   string   `json:"-"`
+	StoreOrder                  []string          `json:"storeOrder"`
+	PublicToolEvents            []string          `json:"publicToolEvents"`
+	RunToolCalls                int               `json:"runToolCalls"`
+	AcceptSandboxExecutionCalls int               `json:"acceptSandboxExecutionCalls"`
+	AwaitSandboxExecutionCalls  int               `json:"awaitSandboxExecutionCalls"`
+	ProviderRequests            []json.RawMessage `json:"providerRequests"`
+	ErrorType                   string            `json:"-"`
+	ErrorMessage                string            `json:"-"`
+	ErrorRetryable              bool              `json:"-"`
+	InputJSON                   string            `json:"-"`
 }
 
-func runRuntimeInvalidToolRepairFixture(t *testing.T) runtimeInvalidToolRepairFixtureResult {
+func runRuntimeInvalidToolRepairFixture(t *testing.T, address string, identity map[string]any) runtimeInvalidToolRepairFixtureResult {
 	t.Helper()
-	command := exec.CommandContext(context.Background(), "bun", "packages/runtime-pod/test/fixtures/invalid-tool-repair-declaration.ts") //nolint:gosec // Fixed repository fixture.
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatalf("encode Runtime fixture identity: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/invalid-tool-repair-declaration.ts", address, string(identityJSON)) //nolint:gosec // Fixed repository fixture and test-owned address/identity.
 	command.Dir = "../agent-runtime"
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -1955,40 +1976,36 @@ func runRuntimeInvalidToolRepairFixture(t *testing.T) runtimeInvalidToolRepairFi
 	return result
 }
 
-func bridgeRuntimeMessageCreateFromRuntimeJSON(t *testing.T, raw json.RawMessage) *bridgev1.RuntimeMessageCreate {
+func runInvalidToolProviderWireFixture(t *testing.T, composition *providerRequestCompositionResult) []invalidToolProviderWireSummary {
 	t.Helper()
-	var create map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &create); err != nil {
-		t.Fatalf("decode Runtime message create for Bridge: %v", err)
+	requests := make([]json.RawMessage, 0, len(composition.Strategies))
+	for _, strategy := range composition.Strategies {
+		if len(strategy.ProviderRequest) == 0 {
+			t.Fatalf("%s/%s cold composition omitted ProviderRequest", strategy.ProviderID, strategy.ModelID)
+		}
+		requests = append(requests, strategy.ProviderRequest)
 	}
-	var messageKind string
-	if err := json.Unmarshal(create["messageKind"], &messageKind); err != nil || messageKind != "internal_tool_repair" {
-		t.Fatalf("Runtime message kind = %q, %v; want internal_tool_repair", messageKind, err)
-	}
-	var parts []json.RawMessage
-	if err := json.Unmarshal(create["parts"], &parts); err != nil || len(parts) != 1 {
-		t.Fatalf("Runtime repair parts = %d, %v; want one", len(parts), err)
-	}
-	delete(create, "messageKind")
-	delete(create, "parts")
-	messageInfoJSON, err := json.Marshal(create)
+	inputJSON, err := json.Marshal(map[string]any{"requests": requests})
 	if err != nil {
-		t.Fatalf("encode Runtime message info for Bridge: %v", err)
+		t.Fatalf("encode cold provider requests for wire fixture: %v", err)
 	}
-	var partInfo struct {
-		Type string `json:"type"`
+	inputPath := t.TempDir() + "/invalid-tool-provider-requests.json"
+	if err := os.WriteFile(inputPath, inputJSON, 0o600); err != nil {
+		t.Fatalf("write cold provider requests for wire fixture: %v", err)
 	}
-	if err := json.Unmarshal(parts[0], &partInfo); err != nil || partInfo.Type != "tool" {
-		t.Fatalf("Runtime repair part type = %q, %v; want tool", partInfo.Type, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/provider-gateway/test/fixtures/invalid-tool-repair-wire.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	command.Dir = "../gateway"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run invalid-tool provider wire fixture: %v: %s", err, output)
 	}
-	return &bridgev1.RuntimeMessageCreate{
-		MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR,
-		MessageInfoJson: string(messageInfoJSON),
-		Parts: []*bridgev1.RuntimePartCreate{{
-			PartKind: partInfo.Type,
-			PartJson: string(parts[0]),
-		}},
+	var summaries []invalidToolProviderWireSummary
+	if err := json.Unmarshal(output, &summaries); err != nil {
+		t.Fatalf("decode invalid-tool provider wire fixture: %v: %s", err, output)
 	}
+	return summaries
 }
 
 func runColdCheckpointComposition(t *testing.T, contextJSON string) coldCheckpointCompositionResult {

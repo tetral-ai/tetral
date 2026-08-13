@@ -21,6 +21,7 @@ import type {
 } from "../contracts/runtime.js";
 import {
   DurableRuntimeMessageSchema,
+  RuntimeFailureSchema,
   RuntimeJsonValueSchema,
   normalizeContextLoaderError,
   normalizeRuntimeFailure,
@@ -498,7 +499,8 @@ export function invalidToolCallFailure(
   source: RuntimeProcessorSource,
   toolName: string,
 ): RuntimeFailure {
-  return toolContractFailure(sessionId, source, `disabled or unknown tool call: ${toolName}`);
+  const failure = toolContractFailure(sessionId, source, `disabled or unknown tool call: ${toolName}`);
+  return RuntimeFailureSchema.parse({ ...failure, message: "Tool is unavailable." });
 }
 
 export function deniedToolCallFailure(

@@ -287,7 +287,10 @@ function composeProviderRequests(messages: readonly RuntimeMessage[]) {
       providerFamily: rules.providerFamily,
       validation,
       ...(validation.ok
-        ? { loweredMessages: lowerProviderRequest(assembled.request, rules, { modelOutputTokenLimit: 32_000 }).messages }
+        ? {
+            providerRequest: assembled.request,
+            loweredMessages: lowerProviderRequest(assembled.request, rules, { modelOutputTokenLimit: 32_000 }).messages,
+          }
         : {}),
     };
   });

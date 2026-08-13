@@ -1684,6 +1684,17 @@ test("absent cross-family builtins take the durable internal invalid-tool repair
         expect(publicToolEvents).toEqual([]);
         expect(store.repairs).toHaveLength(1);
         expect(store.repairs[0]?.toolName).toBe(tc.absentTool);
+        expect(store.repairs[0]?.messageCreate.parts[0]).toMatchObject({
+            type: "tool",
+            state: {
+                status: "error",
+                error: {
+                    type: "runtime_invalid_sequence",
+                    message: "Tool is unavailable.",
+                    retryable: false,
+                },
+            },
+        });
         expect(order).toContain("store:internal-tool-repair");
     }
 });

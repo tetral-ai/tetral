@@ -1091,7 +1091,7 @@ function failingEventWriter(appendedTypes: string[], shouldFail: (event: Session
 
 function runtimeThreadLoopLayer(loader: TestContextLoader, options: {
     readonly events?: readonly LLMEvent[];
-    readonly store?: ThreadLoopRuntimeStore;
+    readonly store?: RuntimeInternalToolRepairStore;
     readonly writer?: SessionEventWriter;
     readonly llmService?: LLMServiceInterface;
     readonly onStream?: (request: LLMRequest) => void;

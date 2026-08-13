@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +19,7 @@ import (
 
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -1089,7 +1091,45 @@ func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision
 }
 
 func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequest(t *testing.T) {
-	runtimeRepair := runRuntimeInvalidToolRepairFixture(t)
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_bridge_mixed_members"
+		threadID       = "thr_bridge_mixed_members"
+		bindingID      = "bind_bridge_mixed_members"
+		podUID         = "pod_bridge_mixed_members"
+		runtimeInputID = "rin_bridge_mixed_members"
+		userEventID    = "evt_bridge_mixed_members_user"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIRuntimeInput(t, admin, "default", sessionID, threadID, runtimeInputID, bindingID, podUID, userEventID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: runtimeInputID, InputKind: "messages",
+		EventIds: []string{userEventID}, SequenceFrom: 1, SequenceTo: 1,
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
+			"default", sessionID, threadID, runtimeInputID, userEventID, "continue",
+		)},
+	}); err != nil {
+		t.Fatalf("commit fixture user input: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for Runtime-to-Bridge fixture: %v", err)
+	}
+	grpcServer := grpc.NewServer()
+	RegisterBridgeAPI(grpcServer, store)
+	go func() { _ = grpcServer.Serve(listener) }()
+	defer grpcServer.Stop()
+
+	runtimeRepair := runRuntimeInvalidToolRepairFixture(t, listener.Addr().String(), map[string]any{
+		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"runtimeBindingToken": "fixture-binding-token",
+	})
 	if len(runtimeRepair.PublicToolEvents) != 0 || runtimeRepair.RunToolCalls != 0 ||
 		runtimeRepair.AcceptSandboxExecutionCalls != 0 || runtimeRepair.AwaitSandboxExecutionCalls != 0 {
 		t.Fatalf(
@@ -1103,90 +1143,69 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 	if len(runtimeRepair.StoreOrder) != 1 || runtimeRepair.StoreOrder[0] != "store:internal-tool-repair" {
 		t.Fatalf("Runtime invalid-tool durable operations = %v; want only internal repair", runtimeRepair.StoreOrder)
 	}
-	if runtimeRepair.ErrorType == "" || runtimeRepair.ErrorMessage == "" || runtimeRepair.ErrorRetryable {
-		t.Fatalf("Runtime invalid-tool typed error = %q/%q retryable=%t; want typed non-retryable error", runtimeRepair.ErrorType, runtimeRepair.ErrorMessage, runtimeRepair.ErrorRetryable)
+	if runtimeRepair.ErrorType != "runtime_invalid_sequence" || runtimeRepair.ErrorMessage != "Tool is unavailable." || runtimeRepair.ErrorRetryable {
+		t.Fatalf("Runtime invalid-tool typed error = %q/%q retryable=%t; want fixed safe unavailable-Tool error", runtimeRepair.ErrorType, runtimeRepair.ErrorMessage, runtimeRepair.ErrorRetryable)
 	}
-	for _, order := range []string{"ordinary_then_repair", "repair_then_ordinary"} {
-		t.Run(order, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			sessionID := "sesn_bridge_mixed_members_" + order
-			threadID := "thr_bridge_mixed_members_" + order
-			bindingID := "bind_bridge_mixed_members_" + order
-			podUID := "pod_bridge_mixed_members_" + order
-			modelRequestID := runtimeRepair.Repair.ModelRequestID
-			modelToolCallID := runtimeRepair.Repair.ModelToolCallID
-			toolName := runtimeRepair.Repair.ToolName
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-			seedBridgeAPIRequestStart(t, store, scope, "rwrite_mixed_start_"+order, modelRequestID, "agent_provider_request", 0)
+	modelRequestID := runtimeRepair.Repair.ModelRequestID
+	modelToolCallID := runtimeRepair.Repair.ModelToolCallID
+	toolName := runtimeRepair.Repair.ToolName
+	if len(runtimeRepair.ProviderRequests) != 2 {
+		t.Fatalf("Runtime provider requests = %d; want initial and repaired continuation", len(runtimeRepair.ProviderRequests))
+	}
+	var continuation struct {
+		Messages []providerCarrierMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(runtimeRepair.ProviderRequests[1], &continuation); err != nil {
+		t.Fatalf("decode Runtime repaired continuation: %v", err)
+	}
+	var continuationText, continuationTools int
+	for _, message := range continuation.Messages {
+		for _, part := range message.Parts {
+			if part.Text != nil && part.Text.Text == "continuing" {
+				continuationText++
+			}
+			if part.Tool == nil {
+				continue
+			}
+			continuationTools++
+			if part.Tool.CallID != modelToolCallID || part.Tool.Name != toolName ||
+				!strings.Contains(part.Tool.OutputOrErrorJSON, "Tool is unavailable.") {
+				t.Fatalf("Runtime repaired continuation Tool part = %+v", part.Tool)
+			}
+		}
+	}
+	if continuationText != 1 || continuationTools != 1 {
+		t.Fatalf("Runtime repaired continuation text/Tool members = %d/%d; want 1/1", continuationText, continuationTools)
+	}
 
-			writeOrdinary := func() error {
-				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-					Scope: scope, RuntimeWriteId: "rwrite_mixed_text_" + order, ModelRequestId: modelRequestID,
-					EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"continuing"}]}`,
-					Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
-						t, scope, "rwrite_mixed_text_"+order, "agent.message", "streaming",
-						bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"continuing","truncated":false,"status":"completed"}`},
-					)},
-				})
-				return err
-			}
-			writeRepair := func() (*bridgev1.CommitInternalToolRepairResponse, error) {
-				return store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
-					Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: modelToolCallID, ToolName: toolName,
-					MessageCreate: bridgeRuntimeMessageCreateFromRuntimeJSON(t, runtimeRepair.Repair.MessageCreate),
-				})
-			}
-			var repairResponse *bridgev1.CommitInternalToolRepairResponse
-			var contextBeforeRepair *bridgev1.LoadContextResponse
+	var requestMembers, completedRequestMembers, repairRows, requestEnds int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*),
+		        count(*) FILTER (WHERE data_json::jsonb ->> 'status' = 'completed'),
+		        count(*) FILTER (WHERE repair_key IS NOT NULL)
+		   FROM session_messages
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
+		"default", sessionID, threadID, modelRequestID,
+	).Scan(&requestMembers, &completedRequestMembers, &repairRows); err != nil {
+		t.Fatalf("count sealed mixed request members: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_events
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		    AND model_request_id=$4 AND type='span.model_request_end'`,
+		"default", sessionID, threadID, modelRequestID,
+	).Scan(&requestEnds); err != nil {
+		t.Fatalf("count first Runtime Request End: %v", err)
+	}
+	if requestMembers != 2 || completedRequestMembers != 2 || repairRows != 1 || requestEnds != 1 {
+		t.Fatalf("first request members/completed/repairs/ends = %d/%d/%d/%d; want 2/2/1/1", requestMembers, completedRequestMembers, repairRows, requestEnds)
+	}
 
-			if order == "ordinary_then_repair" {
-				if err := writeOrdinary(); err != nil {
-					t.Fatalf("ordinary member: %v", err)
-				}
-				var err error
-				contextBeforeRepair, err = store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-					Scope: scope, RuntimeInputId: "rin_mixed_before_repair_" + order,
-				})
-				if err != nil {
-					t.Fatalf("LoadContext before repair: %v", err)
-				}
-				repairResponse, err = writeRepair()
-				if err != nil {
-					t.Fatalf("repair member: %v", err)
-				}
-			} else {
-				var err error
-				repairResponse, err = writeRepair()
-				if err != nil {
-					t.Fatalf("repair member: %v", err)
-				}
-				if err := writeOrdinary(); err != nil {
-					t.Fatalf("ordinary member: %v", err)
-				}
-			}
-
-			var ordinaryRows, repairRows int
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FILTER (WHERE model_request_id = $4),
-				        count(*) FILTER (WHERE repair_key IS NOT NULL)
-				   FROM session_messages
-				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
-				"default", sessionID, threadID, modelRequestID,
-			).Scan(&ordinaryRows, &repairRows); err != nil {
-				t.Fatalf("count mixed request members: %v", err)
-			}
-			if ordinaryRows != 1 || repairRows != 1 {
-				t.Fatalf("ordinary/repair rows = %d/%d; want 1/1", ordinaryRows, repairRows)
-			}
-			var realToolUses, repairResultEvents, executableToolUses, pendingToolUses, executionJobs int
-			var repairResultPayload, repairResultVisibility string
-			var repairResultSessionVisible bool
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FILTER (WHERE type IN ('agent.tool_use', 'agent.mcp_tool_use')),
+	var realToolUses, repairResultEvents, executableToolUses, pendingToolUses, executionJobs int
+	var repairResultPayload, repairResultVisibility string
+	var repairResultSessionVisible bool
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FILTER (WHERE type IN ('agent.tool_use', 'agent.mcp_tool_use')),
 				        count(*) FILTER (WHERE type IN ('agent.tool_result', 'agent.mcp_tool_result')),
 				        COALESCE(max(payload_json) FILTER (WHERE type = 'agent.tool_result'), '{}'),
 				        COALESCE(max(visibility) FILTER (WHERE type = 'agent.tool_result'), ''),
@@ -1194,120 +1213,114 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 				   FROM session_events
 				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 				    AND type IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.tool_result', 'agent.mcp_tool_result')`,
-				"default", sessionID, threadID,
-			).Scan(&realToolUses, &repairResultEvents, &repairResultPayload, &repairResultVisibility, &repairResultSessionVisible); err != nil {
-				t.Fatalf("read public Tool event census: %v", err)
-			}
-			var repairEvent struct {
-				Type            string `json:"type"`
-				ModelToolCallID string `json:"model_tool_call_id"`
-				ToolName        string `json:"tool_name"`
-				RepairKind      string `json:"repair_kind"`
-				ToolUseID       string `json:"tool_use_id"`
-				ToolUseEventID  string `json:"tool_use_event_id"`
-				MCPToolUseID    string `json:"mcp_tool_use_id"`
-			}
-			if err := json.Unmarshal([]byte(repairResultPayload), &repairEvent); err != nil {
-				t.Fatalf("decode internal repair Tool Result event: %v", err)
-			}
-			if realToolUses != 0 || repairResultEvents != 1 || repairResultVisibility != "public" || !repairResultSessionVisible ||
-				repairEvent.Type != "agent.tool_result" || repairEvent.ModelToolCallID != modelToolCallID ||
-				repairEvent.ToolName != toolName || repairEvent.RepairKind != "invalid_tool" ||
-				repairEvent.ToolUseID != "" || repairEvent.ToolUseEventID != "" || repairEvent.MCPToolUseID != "" {
-				t.Fatalf(
-					"repair Tool event census uses/results=%d/%d visibility=%q/%t payload=%+v; want one public identity-free repair result and no Tool Use",
-					realToolUses, repairResultEvents, repairResultVisibility, repairResultSessionVisible, repairEvent,
-				)
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_runtime_tool_results
-				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
-				"default", sessionID, threadID,
-			).Scan(&executableToolUses); err != nil {
-				t.Fatalf("count executable Tool Uses: %v", err)
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_pending_tool_uses
-				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
-				"default", sessionID, threadID,
-			).Scan(&pendingToolUses); err != nil {
-				t.Fatalf("count pending Tool Uses: %v", err)
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1`, "default",
-			).Scan(&executionJobs); err != nil {
-				t.Fatalf("count execution jobs: %v", err)
-			}
-			if executableToolUses != 0 || pendingToolUses != 0 || executionJobs != 0 {
-				t.Fatalf("repair created executable/pending/queued Tool work = %d/%d/%d; want 0/0/0", executableToolUses, pendingToolUses, executionJobs)
-			}
-
-			loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-				Scope: scope, RuntimeInputId: "rin_mixed_reload_" + order,
-			})
-			if err != nil {
-				t.Fatalf("LoadContext: %v", err)
-			}
-			composed := runColdCheckpointComposition(t, loaded.GetContextJson())
-			if order == "ordinary_then_repair" {
-				receipts := repairResponse.GetDeclaration().GetReceipts()
-				if len(receipts) != 1 || contextBeforeRepair == nil {
-					t.Fatalf("repair declaration = %+v; want one receipt and a pre-repair context", repairResponse.GetDeclaration())
-				}
-				repairKey := internalToolRepairKey(modelRequestID, modelToolCallID, toolName)
-				if repairKey != runtimeRepair.Repair.RepairKey {
-					t.Fatalf("Runtime/Bridge repair keys differ: Runtime=%q Bridge=%q", runtimeRepair.Repair.RepairKey, repairKey)
-				}
-				composed = runColdCheckpointCompositionInput(t, map[string]any{
-					"contextJson": loaded.GetContextJson(), "providerComposition": true,
-					"hotScenario": map[string]any{
-						"kind": "internal_repair", "baseContextJson": contextBeforeRepair.GetContextJson(),
-						"receipt":   runtimeReceiptFixture(t, receipts[0]),
-						"create":    runtimeRepair.Repair.MessageCreate,
-						"sessionId": sessionID, "sessionThreadId": threadID, "modelRequestId": modelRequestID,
-						"repairKey": repairKey, "repairEventId": receipts[0].GetEvents()[0].GetEventId(),
-						"modelToolCallId": modelToolCallID, "toolName": toolName,
-					},
-				})
-				if composed.HotSemantic == nil || !reflect.DeepEqual(composed.HotSemantic, composed.Semantic) {
-					t.Fatalf("repair hot/cold semantics differ: hot=%+v cold=%+v", composed.HotSemantic, composed.Semantic)
-				}
-				if composed.ProviderComposition == nil || composed.HotProviderComposition == nil ||
-					!reflect.DeepEqual(composed.HotProviderComposition, composed.ProviderComposition) {
-					t.Fatalf("repair hot/cold provider composition differs: hot=%+v cold=%+v", composed.HotProviderComposition, composed.ProviderComposition)
-				}
-				assertInvalidToolProviderComposition(
-					t,
-					composed.ProviderComposition,
-					modelToolCallID,
-					toolName,
-					runtimeRepair.ErrorType,
-					runtimeRepair.ErrorMessage,
-					runtimeRepair.InputJSON,
-				)
-			}
-			if composed.Checkpoint.Request == nil || composed.Checkpoint.Request.ModelRequestID != modelRequestID ||
-				composed.Checkpoint.Request.ToolMemberCount != 1 || composed.ReducerAction != "await_request_end" {
-				t.Fatalf("mixed member composition = %+v", composed)
-			}
-			if order == "ordinary_then_repair" {
-				var malformed map[string]any
-				if err := json.Unmarshal([]byte(loaded.GetContextJson()), &malformed); err != nil {
-					t.Fatalf("decode context for fail-closed composition: %v", err)
-				}
-				turnFacts, ok := malformed["turnFacts"].(map[string]any)
-				if !ok {
-					t.Fatalf("context turn facts = %#v; want object", malformed["turnFacts"])
-				}
-				turnFacts["internalRepairs"] = []any{}
-				malformedJSON, err := json.Marshal(malformed)
-				if err != nil {
-					t.Fatalf("encode malformed context: %v", err)
-				}
-				runColdCheckpointCompositionFailure(t, string(malformedJSON), "internal repair direct reference does not match its Event")
-			}
-		})
+		"default", sessionID, threadID,
+	).Scan(&realToolUses, &repairResultEvents, &repairResultPayload, &repairResultVisibility, &repairResultSessionVisible); err != nil {
+		t.Fatalf("read public Tool event census: %v", err)
 	}
+	var repairEvent struct {
+		Type            string `json:"type"`
+		ModelToolCallID string `json:"model_tool_call_id"`
+		ToolName        string `json:"tool_name"`
+		RepairKind      string `json:"repair_kind"`
+		ToolUseID       string `json:"tool_use_id"`
+		ToolUseEventID  string `json:"tool_use_event_id"`
+		MCPToolUseID    string `json:"mcp_tool_use_id"`
+	}
+	if err := json.Unmarshal([]byte(repairResultPayload), &repairEvent); err != nil {
+		t.Fatalf("decode internal repair Tool Result event: %v", err)
+	}
+	if realToolUses != 0 || repairResultEvents != 1 || repairResultVisibility != "public" || !repairResultSessionVisible ||
+		repairEvent.Type != "agent.tool_result" || repairEvent.ModelToolCallID != modelToolCallID ||
+		repairEvent.ToolName != toolName || repairEvent.RepairKind != "invalid_tool" ||
+		repairEvent.ToolUseID != "" || repairEvent.ToolUseEventID != "" || repairEvent.MCPToolUseID != "" {
+		t.Fatalf(
+			"repair Tool event census uses/results=%d/%d visibility=%q/%t payload=%+v; want one public identity-free repair result and no Tool Use",
+			realToolUses, repairResultEvents, repairResultVisibility, repairResultSessionVisible, repairEvent,
+		)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
+		"default", sessionID, threadID,
+	).Scan(&executableToolUses); err != nil {
+		t.Fatalf("count executable Tool Uses: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_pending_tool_uses
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
+		"default", sessionID, threadID,
+	).Scan(&pendingToolUses); err != nil {
+		t.Fatalf("count pending Tool Uses: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1`, "default",
+	).Scan(&executionJobs); err != nil {
+		t.Fatalf("count execution jobs: %v", err)
+	}
+	if executableToolUses != 0 || pendingToolUses != 0 || executionJobs != 0 {
+		t.Fatalf("repair created executable/pending/queued Tool work = %d/%d/%d; want 0/0/0", executableToolUses, pendingToolUses, executionJobs)
+	}
+
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_mixed_reload",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext: %v", err)
+	}
+	composed := runColdCheckpointCompositionInput(t, map[string]any{
+		"contextJson": loaded.GetContextJson(), "providerComposition": true,
+	})
+	if composed.ProviderComposition == nil {
+		t.Fatal("cold Runtime projection omitted provider composition")
+	}
+	assertInvalidToolProviderComposition(
+		t,
+		composed.ProviderComposition,
+		modelToolCallID,
+		toolName,
+		runtimeRepair.ErrorType,
+		runtimeRepair.ErrorMessage,
+		runtimeRepair.InputJSON,
+	)
+	wires := runInvalidToolProviderWireFixture(t, composed.ProviderComposition)
+	if len(wires) != 3 {
+		t.Fatalf("provider wire families = %d; want 3", len(wires))
+	}
+	wireFamilies := map[string]bool{}
+	for _, wire := range wires {
+		wireFamilies[wire.Family] = true
+		if wire.CallID != modelToolCallID || wire.ToolName != toolName || wire.ErrorMessage != "Tool is unavailable." ||
+			wire.CallIndex >= wire.ResultIndex || wire.Pathname == "" {
+			t.Fatalf("invalid-tool provider wire summary = %+v", wire)
+		}
+	}
+	for _, family := range []string{"anthropic", "openai", "openai-compatible"} {
+		if !wireFamilies[family] {
+			t.Fatalf("provider wire omitted family %q", family)
+		}
+	}
+	compositionJSON, err := json.Marshal(composed.ProviderComposition)
+	if err != nil || !strings.Contains(string(compositionJSON), "continuing") {
+		t.Fatalf("cold Gateway composition omitted completed assistant text: %v %s", err, compositionJSON)
+	}
+	repairKey := internalToolRepairKey(modelRequestID, modelToolCallID, toolName)
+	if repairKey != runtimeRepair.Repair.RepairKey {
+		t.Fatalf("Runtime/Bridge repair keys differ: Runtime=%q Bridge=%q", runtimeRepair.Repair.RepairKey, repairKey)
+	}
+	var malformed map[string]any
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &malformed); err != nil {
+		t.Fatalf("decode context for fail-closed composition: %v", err)
+	}
+	turnFacts, ok := malformed["turnFacts"].(map[string]any)
+	if !ok {
+		t.Fatalf("context turn facts = %#v; want object", malformed["turnFacts"])
+	}
+	turnFacts["internalRepairs"] = []any{}
+	malformedJSON, err := json.Marshal(malformed)
+	if err != nil {
+		t.Fatalf("encode malformed context: %v", err)
+	}
+	runColdCheckpointCompositionFailure(t, string(malformedJSON), "internal repair direct reference does not match its Event")
 }
 
 func assertInvalidToolProviderComposition(
