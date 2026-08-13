@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -238,12 +239,14 @@ func TestDropPrivilegesForToolSwitchesRootHelperToRuntimeUser(t *testing.T) {
 	oldSetGID := setRuntimeGID
 	oldSetUID := setRuntimeUID
 	oldClearGroups := clearRuntimeGroups
+	oldNormalizeEnv := normalizeRuntimeEnv
 	t.Cleanup(func() {
 		currentEUID = oldEUID
 		statRuntimeIdentity = oldStat
 		setRuntimeGID = oldSetGID
 		setRuntimeUID = oldSetUID
 		clearRuntimeGroups = oldClearGroups
+		normalizeRuntimeEnv = oldNormalizeEnv
 	})
 
 	currentEUID = func() int { return 0 }
@@ -266,12 +269,46 @@ func TestDropPrivilegesForToolSwitchesRootHelperToRuntimeUser(t *testing.T) {
 		calls = append(calls, "uid:"+strconv.Itoa(uid))
 		return nil
 	}
+	normalizeRuntimeEnv = func() error {
+		calls = append(calls, "env:normalize")
+		return nil
+	}
 
 	if toolErr := dropPrivilegesForTool("/workspace"); toolErr != nil {
 		t.Fatalf("dropPrivilegesForTool error = %+v", toolErr)
 	}
-	if strings.Join(calls, ",") != "groups:clear,gid:1000,uid:1000" {
-		t.Fatalf("drop calls = %v; want supplementary groups cleared before gid and uid", calls)
+	if strings.Join(calls, ",") != "groups:clear,gid:1000,uid:1000,env:normalize" {
+		t.Fatalf("drop calls = %v; want groups, gid, uid, then runtime environment", calls)
+	}
+}
+
+func TestDropPrivilegesForToolFailsClosedWhenRuntimeEnvironmentCannotBeNormalized(t *testing.T) {
+	oldEUID := currentEUID
+	oldStat := statRuntimeIdentity
+	oldSetGID := setRuntimeGID
+	oldSetUID := setRuntimeUID
+	oldClearGroups := clearRuntimeGroups
+	oldNormalizeEnv := normalizeRuntimeEnv
+	t.Cleanup(func() {
+		currentEUID = oldEUID
+		statRuntimeIdentity = oldStat
+		setRuntimeGID = oldSetGID
+		setRuntimeUID = oldSetUID
+		clearRuntimeGroups = oldClearGroups
+		normalizeRuntimeEnv = oldNormalizeEnv
+	})
+	currentEUID = func() int { return 0 }
+	statRuntimeIdentity = func(string) (runtimeIdentity, error) {
+		return runtimeIdentity{uid: 1000, gid: 1000}, nil
+	}
+	clearRuntimeGroups = func() error { return nil }
+	setRuntimeGID = func(int) error { return nil }
+	setRuntimeUID = func(int) error { return nil }
+	normalizeRuntimeEnv = func() error { return errors.New("environment rejected") }
+
+	toolErr := dropPrivilegesForTool("/workspace")
+	if toolErr == nil || toolErr.Kind != health.HelperFailureKind || !strings.Contains(toolErr.Message, "environment normalization") {
+		t.Fatalf("dropPrivilegesForTool error = %+v; want catastrophic environment failure", toolErr)
 	}
 }
 
@@ -382,6 +419,193 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 	}
 	if cancelEnvelope.Status != protocol.ToolStatusSuccess || !cancelResult.Cancelled {
 		t.Fatalf("cancel envelope = %+v; want cancelled success", cancelEnvelope)
+	}
+}
+
+func TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration(t *testing.T) {
+	bin := productionIdentityFixture(t)
+	installProductionIdentityGitConfig(t)
+	payloadPath := writeCLIPayload(t, productionIdentityPayload("evt_runtime_identity_foreground", false, ""))
+
+	envelope := runRootShapedHelper(t, bin, "exec", payloadPath)
+	assertProductionIdentityOutput(t, envelope)
+}
+
+func TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration(t *testing.T) {
+	bin := productionIdentityFixture(t)
+	installProductionIdentityGitConfig(t)
+	taskID := "task_runtime_identity_detached"
+	payloadPath := writeCLIPayload(t, productionIdentityPayload("evt_runtime_identity_detached", true, taskID))
+
+	envelope := runRootShapedHelper(t, bin, "exec", payloadPath)
+	if envelope.Status != protocol.ToolStatusRunning {
+		t.Fatalf("detached exec envelope = %+v; want running", envelope)
+	}
+	var detachedStdout strings.Builder
+	for attempt := 1; attempt <= 5; attempt++ {
+		pollPayloadPath := writeCLIPayload(t, protocol.Payload{
+			SchemaVersion:  protocol.SchemaVersion,
+			Tool:           "poll",
+			ToolUseEventID: "evt_runtime_identity_poll_" + strconv.Itoa(attempt),
+			WorkspaceRoot:  "/workspace",
+			Roots:          []protocol.Root{{Path: "/workspace", Mode: protocol.RootModeReadWrite}},
+			Limits:         protocol.Limits{VisibleBytes: 50 * 1024, VisibleLines: 2000},
+			Input:          json.RawMessage(`{"task_id":"` + taskID + `","wait_ms":1000}`),
+		})
+		pollEnvelope := runRootShapedHelper(t, bin, "poll", pollPayloadPath)
+		result := decodeProductionIdentityResult(t, pollEnvelope)
+		detachedStdout.WriteString(result.Stdout.Text)
+		if pollEnvelope.Status == protocol.ToolStatusRunning {
+			continue
+		}
+		assertProductionIdentityText(t, result.ExitCode, detachedStdout.String())
+		return
+	}
+	t.Fatal("detached identity command did not reach terminal state")
+}
+
+const productionIdentityCommand = `identity_output=$(printf 'uid=%s\ngid=%s\nHOME=%s\nUSER=%s\nLOGNAME=%s\nSUDO_USER=%s\nSUDO_UID=%s\nSUDO_GID=%s\nSUDO_COMMAND=%s\nORDINARY=%s\nTERM=%s\nNO_COLOR=%s\nPAGER=%s\nGIT_PAGER=%s\nurl=' "$(id -u)" "$(id -g)" "$HOME" "$USER" "$LOGNAME" "${SUDO_USER-unset}" "${SUDO_UID-unset}" "${SUDO_GID-unset}" "${SUDO_COMMAND-unset}" "$ORDINARY" "$TERM" "$NO_COLOR" "$PAGER" "$GIT_PAGER"; git ls-remote --get-url https://github.com/acme/repo.git); printf '%s\n' "$identity_output"`
+
+func productionIdentityFixture(t *testing.T) string {
+	t.Helper()
+	if os.Geteuid() != 0 || os.Getenv("TETRAL_RUN_ROOT_IDENTITY_TESTS") != "1" {
+		t.Skip("production-shaped runtime identity proof requires an isolated root test environment")
+	}
+	bin := os.Getenv("TETRAL_TEST_HELPER_BINARY")
+	if bin == "" {
+		t.Fatal("TETRAL_TEST_HELPER_BINARY is required for the isolated root identity proof")
+	}
+	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 { //nolint:gosec // opt-in root test reads only its harness-provided Helper binary.
+		t.Fatalf("helper binary %q is not executable: %v", bin, err)
+	}
+	for _, path := range []string{"/home/daytona", "/workspace", "/tmp/tetral-runtime"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("isolated identity fixture path %s already exists: %v", path, err)
+		}
+	}
+	if err := os.MkdirAll("/home/daytona", 0o755); err != nil {
+		t.Fatalf("create runtime home: %v", err)
+	}
+	if err := os.MkdirAll("/workspace", 0o755); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	if err := os.MkdirAll("/tmp/tetral-runtime", 0o700); err != nil {
+		t.Fatalf("create runtime root: %v", err)
+	}
+	for _, path := range []string{"/home/daytona", "/workspace", "/tmp/tetral-runtime"} {
+		if err := os.Chown(path, 1000, 1000); err != nil {
+			t.Fatalf("chown %s to runtime identity: %v", path, err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll("/tmp/tetral-runtime")
+		_ = os.RemoveAll("/workspace")
+		_ = os.RemoveAll("/home/daytona")
+	})
+	return bin
+}
+
+func installProductionIdentityGitConfig(t *testing.T) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"config", "--global", "url.https://git.tetral.test/github.com/.insteadOf", "https://github.com/"},
+		{"config", "--global", "http.https://git.tetral.test/.extraHeader", "X-Tetral-Git-Ticket: synthetic-test-ticket"},
+	} {
+		command := exec.Command("git", args...)
+		command.Dir = "/home/daytona"
+		command.Env = []string{"HOME=/home/daytona", "PATH=" + os.Getenv("PATH")}
+		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000}}
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("install runtime git config: %v\n%s", err, string(output))
+		}
+	}
+}
+
+func productionIdentityPayload(eventID string, detached bool, taskID string) protocol.Payload {
+	input := map[string]any{
+		"cmd":              productionIdentityCommand,
+		"cwd":              "/workspace",
+		"env":              map[string]any{"HOME": "/tmp/attacker-home", "USER": "attacker", "LOGNAME": "attacker", "SUDO_USER": "attacker", "SUDO_UID": "999", "SUDO_GID": "999", "SUDO_COMMAND": "attacker-command", "ORDINARY": "tool-value", "TERM": "tool-term", "NO_COLOR": "tool-color", "PAGER": "less", "GIT_PAGER": "less"},
+		"on_wait_expiry":   "kill",
+		"wait_ms":          5000,
+		"task_lifetime_ms": 30000,
+	}
+	if detached {
+		input["cmd"] = "sleep 1; " + productionIdentityCommand
+		input["on_wait_expiry"] = "detach"
+		input["wait_ms"] = 250
+		input["task_id"] = taskID
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		panic(err)
+	}
+	return protocol.Payload{
+		SchemaVersion:  protocol.SchemaVersion,
+		Tool:           "exec",
+		ToolUseEventID: eventID,
+		WorkspaceRoot:  "/workspace",
+		Roots:          []protocol.Root{{Path: "/workspace", Mode: protocol.RootModeReadWrite}},
+		Limits:         protocol.Limits{VisibleBytes: 50 * 1024, VisibleLines: 2000},
+		Input:          body,
+	}
+}
+
+func runRootShapedHelper(t *testing.T, bin string, tool string, payloadPath string) protocol.Envelope {
+	t.Helper()
+	command := exec.Command(bin, tool, "--payload", payloadPath)
+	command.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=/root",
+		"USER=root",
+		"LOGNAME=root",
+		"SUDO_USER=daytona",
+		"SUDO_UID=1000",
+		"SUDO_GID=1000",
+		"SUDO_COMMAND=/usr/local/bin/sandbox " + tool,
+		"ORDINARY=inherited-value",
+		"TERM=inherited-term",
+		"NO_COLOR=inherited-color",
+		"PAGER=inherited-pager",
+		"GIT_PAGER=inherited-git-pager",
+	}
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("root-shaped %s helper: %v\n%s", tool, err, string(output))
+	}
+	return decodeSingleEnvelope(t, output)
+}
+
+func assertProductionIdentityOutput(t *testing.T, envelope protocol.Envelope) {
+	t.Helper()
+	if envelope.Status != protocol.ToolStatusSuccess {
+		t.Fatalf("identity envelope = %+v; want success", envelope)
+	}
+	result := decodeProductionIdentityResult(t, envelope)
+	assertProductionIdentityText(t, result.ExitCode, result.Stdout.Text)
+}
+
+type productionIdentityResult struct {
+	ExitCode *int `json:"exit_code"`
+	Stdout   struct {
+		Text string `json:"text"`
+	} `json:"stdout"`
+}
+
+func decodeProductionIdentityResult(t *testing.T, envelope protocol.Envelope) productionIdentityResult {
+	t.Helper()
+	var result productionIdentityResult
+	if err := json.Unmarshal(envelope.Result, &result); err != nil {
+		t.Fatalf("decode identity result: %v", err)
+	}
+	return result
+}
+
+func assertProductionIdentityText(t *testing.T, exitCode *int, stdout string) {
+	t.Helper()
+	want := "uid=1000\ngid=1000\nHOME=/home/daytona\nUSER=daytona\nLOGNAME=daytona\nSUDO_USER=unset\nSUDO_UID=unset\nSUDO_GID=unset\nSUDO_COMMAND=unset\nORDINARY=tool-value\nTERM=dumb\nNO_COLOR=1\nPAGER=cat\nGIT_PAGER=cat\nurl=https://git.tetral.test/github.com/acme/repo.git\n"
+	if exitCode == nil || *exitCode != 0 || stdout != want {
+		t.Fatalf("identity result exit=%v stdout=%q; want exit 0 and %q", exitCode, stdout, want)
 	}
 }
 

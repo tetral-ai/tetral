@@ -25,6 +25,7 @@ import (
 	helpersearch "github.com/tetral-ai/tetral/internal/sandbox/helper/internal/search"
 	helpertask "github.com/tetral-ai/tetral/internal/sandbox/helper/internal/task"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
+	"github.com/tetral-ai/tetral/internal/sandbox/runtimeidentity"
 )
 
 const Version = "0.1.0"
@@ -53,6 +54,7 @@ var (
 	setRuntimeGID       = syscall.Setgid
 	setRuntimeUID       = syscall.Setuid
 	clearRuntimeGroups  = func() error { return syscall.Setgroups([]int{}) }
+	normalizeRuntimeEnv = runtimeidentity.NormalizeProcessEnvironment
 	payloadRoot         = defaultPayloadRoot
 )
 
@@ -396,8 +398,10 @@ func loadPayloadAndDrop(payloadPath string, subcommand string) (protocol.Payload
 			return protocol.Payload{}, &protocol.ToolError{Kind: health.HelperFailureKind, Message: "supervisor authorization initialization failed"}
 		}
 	}
-	// Payload handling may require the helper-only identity; tool effects run as
-	// the owner of the prepared workspace root the model normally observes.
+	// Root owns only the protected-payload transport and detached-supervisor
+	// capability setup. The shared boundary below irreversibly adopts the
+	// prepared workspace owner's credentials and the fixed runtime environment
+	// before any payload-backed Agent Tool effect is dispatched.
 	if toolErr := dropPrivilegesForTool(payload.WorkspaceRoot); toolErr != nil {
 		return protocol.Payload{}, toolErr
 	}
@@ -551,6 +555,12 @@ func dropPrivilegesForTool(runtimeRoot string) *protocol.ToolError {
 	}
 	if err := setRuntimeUID(identity.uid); err != nil {
 		return &protocol.ToolError{Kind: health.HelperFailureKind, Message: "runtime uid drop failed"}
+	}
+	if normalizeRuntimeEnv == nil {
+		return &protocol.ToolError{Kind: health.HelperFailureKind, Message: "runtime environment normalization is unavailable"}
+	}
+	if err := normalizeRuntimeEnv(); err != nil {
+		return &protocol.ToolError{Kind: health.HelperFailureKind, Message: "runtime environment normalization failed"}
 	}
 	return nil
 }

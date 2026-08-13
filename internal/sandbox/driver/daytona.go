@@ -29,7 +29,9 @@ const (
 	// Makefile build-sandbox-helper and install-sandbox-helper (SANDBOX_HELPER_INSTALL_PATH).
 	helperPath = "/usr/local/bin/sandbox"
 	// The helper starts as root only long enough to read/unlink root-owned
-	// payload files; the helper CLI drops to RuntimeUser before tool execution.
+	// payload files and initialize protected supervisor transport. Its shared
+	// payload boundary then drops credentials and establishes RuntimeUser's
+	// identity environment before any Agent Tool effect.
 	helperUser = "root"
 	// Payload staging is two-rooted because the two transports act as
 	// different identities: Daytona's filesystem API writes as the runtime

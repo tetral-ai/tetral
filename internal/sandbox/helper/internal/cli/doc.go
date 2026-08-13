@@ -1,6 +1,6 @@
 // Package cli is the helper's process front door: it dispatches subcommands,
-// loads and unlinks the payload, drops privilege, and enforces the stdout /
-// exit-code discipline that the caller relies on.
+// loads and unlinks the payload, completes the runtime identity transition,
+// and enforces the stdout / exit-code discipline that the caller relies on.
 //
 // The dispatch surface (one Main switch) is: the model tool subcommands (exec,
 // stdin, poll, cancel, read, write, edit, apply_patch, grep, glob,
@@ -11,7 +11,8 @@
 // OWNS:
 //   - Subcommand dispatch and argv shape (sandbox <tool> --payload <path>).
 //   - Payload load, integrity checks, and unlink.
-//   - Privilege drop to the workspace runtime identity.
+//   - Privilege and identity-environment transition to the workspace runtime
+//     identity.
 //   - stdout / exit-code discipline and the stderr redirect.
 //   - maxPayloadBytes and helperIDPattern (see cli.go).
 //
@@ -33,9 +34,12 @@
 //     a directory owned by the current euid with no group/other write bits, the
 //     file is opened with openat2 no-follow (RESOLVE_BENEATH |
 //     RESOLVE_NO_SYMLINKS) and fstat-checked to be a regular file owned by the
-//     euid with no group/other bits. The helper reads it, unlinks it, and only
-//     then drops to the workspace-root runtime user before any tool effect, so
-//     the model's runtime user never reads the payload.
+//     euid with no group/other bits. The helper reads it, unlinks it, clears
+//     supplementary groups, adopts the workspace owner's GID then UID,
+//     establishes daytona's HOME/USER/LOGNAME, and removes inherited sudo
+//     identity variables before any payload-backed Tool effect. The runtime
+//     user never reads the payload. Health and root-only capture are management
+//     paths outside this transition.
 //   - SIGTERM, SIGINT, or SIGHUP, or a closed stdout pipe (which is treated as
 //     SIGTERM), kills the foreground child process group and exits non-zero
 //     with no envelope. Detached supervisors are exempt: they are owned by a

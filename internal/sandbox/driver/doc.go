@@ -54,10 +54,13 @@
 // not a helper_failure.
 //
 // INVARIANTS:
-//   - The helper is invoked as root (helperUser) through sudo; the driver never
-//     runs tool or capture logic as the workspace runtime user. Root ownership
-//     lets tool commands read and unlink their payload before dropping
-//     privilege, while capture mode retains root for descriptor-safe reads.
+//   - The helper is invoked as root (helperUser) through sudo. Root owns only
+//     protected-payload transport for Agent Tools: after reading and unlinking
+//     the payload, the Helper clears groups, adopts the prepared workspace
+//     owner's GID/UID, establishes RuntimeUser's HOME/USER/LOGNAME, removes
+//     sudo identity residue, and only then dispatches the Tool. Health and
+//     descriptor-safe idle-output capture are management paths that retain
+//     their existing identities and do not dispatch Agent Tool effects.
 //   - Once the per-invocation payload directory is created, every return path
 //     removes it: the explicit deletes on the upload and permission-command
 //     failures, and the deferred delete around the helper run.

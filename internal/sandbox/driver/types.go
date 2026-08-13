@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/sandbox/runtimeidentity"
 )
 
 type providerOperationNotSubmittedError struct {
@@ -28,7 +30,10 @@ func ProviderOperationWasNotSubmitted(err error) bool {
 	return errors.As(err, &marker)
 }
 
-const RuntimeUser = "daytona"
+const (
+	RuntimeUser = runtimeidentity.User
+	RuntimeHome = runtimeidentity.Home
+)
 
 type OutputCapturer interface {
 	CaptureOutputs(context.Context, OutputCaptureTarget) (OutputCaptureScan, error)
