@@ -19,7 +19,6 @@ import type {
   RuntimePart,
   RuntimePartCreate,
   RuntimeProcessorSource,
-  RuntimeToolError,
   RuntimeToolSettlement,
   RuntimeToolSettlementDeclaration,
   RuntimeUsage,
@@ -41,6 +40,7 @@ import {
   boundRuntimeText,
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
+  runtimeToolErrorFromFailure,
   stableReasoningMetadataJSON,
 } from "../contracts/runtime.js";
 import type { LLMEvent } from "../llm/llm-event.js";
@@ -345,8 +345,8 @@ export class ProviderStreamAccumulator {
       const existing = this.findDurableTool(projection.toolUseEventId);
       if (existing === undefined || isTerminalTool(existing)) throw new Error("interrupt projection has no unfinished hot Tool");
       const state = projection.terminalState.type === "error"
-        ? { status: "error" as const, ...(existing.state.status === "running" ? { input: existing.state.input } : {}), error: runtimeToolError(projection.terminalState.error) }
-        : { status: "cancelled" as const, ...(existing.state.status === "running" ? { input: existing.state.input } : {}), ...(projection.terminalState.error === undefined ? {} : { error: runtimeToolError(projection.terminalState.error) }) };
+        ? { status: "error" as const, ...(existing.state.status === "running" ? { input: existing.state.input } : {}), error: projection.terminalState.error }
+        : { status: "cancelled" as const, ...(existing.state.status === "running" ? { input: existing.state.input } : {}), ...(projection.terminalState.error === undefined ? {} : { error: projection.terminalState.error }) };
       updated.set(existing.id, { ...existing, state } as RuntimePart);
       this.options.onToolResultCommitted?.({
         eventId: projection.resultEvent.eventId,
@@ -455,7 +455,7 @@ export class ProviderStreamAccumulator {
     if (existing === undefined || existing.state.status !== "running") return { ok: false, events: [], error: semanticSequenceFailure() };
     const repaired = parseToolPart({
       type: "tool", toolCallId: existing.toolCallId, toolName: existing.toolName,
-      state: { status: "error", input: existing.state.input, error: runtimeToolError(failure) },
+      state: { status: "error", input: existing.state.input, error: runtimeToolErrorFromFailure(failure) },
       ...(existing.startedAt === undefined ? {} : { startedAt: existing.startedAt }), completedAt: this.options.now(),
     });
     const messageCreate = runtimeInternalToolRepairCreate({ part: repaired });
@@ -753,11 +753,10 @@ export function runtimeToolResultEvent(toolUseEventId: string, toolEvent: Public
 function terminalToolPart(part: ToolPartCreate, settlement: RuntimeToolSettlement, completedAt: string): ToolPartCreate {
   if (part.state.status !== "running") throw new Error("terminal settlement requires a running Tool");
   if (settlement.type === "completed") return parseToolPart({ ...part, state: { status: "completed", input: part.state.input, output: RuntimeBoundedTextSchema.parse(settlement.output) }, completedAt });
-  if (settlement.type === "error") return parseToolPart({ ...part, state: { status: "error", input: part.state.input, error: runtimeToolError(settlement.error) }, completedAt });
-  return parseToolPart({ ...part, state: { status: "cancelled", input: part.state.input, ...(settlement.error === undefined ? {} : { error: runtimeToolError(settlement.error) }) }, completedAt });
+  if (settlement.type === "error") return parseToolPart({ ...part, state: { status: "error", input: part.state.input, error: runtimeToolErrorFromFailure(settlement.error) }, completedAt });
+  return parseToolPart({ ...part, state: { status: "cancelled", input: part.state.input, ...(settlement.error === undefined ? {} : { error: runtimeToolErrorFromFailure(settlement.error) }) }, completedAt });
 }
 
-function runtimeToolError(error: RuntimeFailure): RuntimeToolError { return { type: error.code, message: error.message, retryable: error.retryable }; }
 function isTerminalTool(part: Extract<RuntimePart, { type: "tool" }>): boolean { return part.state.status === "completed" || part.state.status === "error" || part.state.status === "cancelled"; }
 function isRuntimeJsonObject(value: RuntimeJsonValue): value is { readonly [key: string]: RuntimeJsonValue } { return typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function withinJsonStringBudget(value: string, maxBytes: number): boolean { return byteLength(JSON.stringify(value)) <= maxBytes; }

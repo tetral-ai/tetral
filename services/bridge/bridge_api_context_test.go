@@ -1845,10 +1845,11 @@ type coldCheckpointCompositionResult struct {
 	ToolRouteView struct {
 		Routes []json.RawMessage `json:"routes"`
 	} `json:"toolRouteView"`
-	ReducerAction     string   `json:"-"`
-	DerivedRepairKeys []string `json:"-"`
-	Semantic          any      `json:"-"`
-	HotSemantic       any      `json:"-"`
+	ReducerAction     string         `json:"-"`
+	DerivedRepairKeys []string       `json:"-"`
+	Semantic          any            `json:"-"`
+	HotSemantic       any            `json:"-"`
+	HotToolPart       map[string]any `json:"-"`
 }
 
 func runColdCheckpointComposition(t *testing.T, contextJSON string) coldCheckpointCompositionResult {
@@ -1881,6 +1882,7 @@ func runColdCheckpointCompositionInput(t *testing.T, input any) coldCheckpointCo
 			Checkpoint    json.RawMessage `json:"checkpoint"`
 			ToolRouteView json.RawMessage `json:"toolRouteView"`
 			ReducerAction json.RawMessage `json:"reducerAction"`
+			ToolPart      json.RawMessage `json:"toolPart"`
 		} `json:"hot"`
 	}
 	if err := json.Unmarshal(output, &wire); err != nil {
@@ -1907,6 +1909,11 @@ func runColdCheckpointCompositionInput(t *testing.T, input any) coldCheckpointCo
 	result.Semantic = decodeCheckpointSemantic(t, wire.Checkpoint, wire.ToolRouteView, wire.ReducerAction)
 	if wire.Hot != nil {
 		result.HotSemantic = decodeCheckpointSemantic(t, wire.Hot.Checkpoint, wire.Hot.ToolRouteView, wire.Hot.ReducerAction)
+		if len(wire.Hot.ToolPart) > 0 {
+			if err := json.Unmarshal(wire.Hot.ToolPart, &result.HotToolPart); err != nil {
+				t.Fatalf("decode hot Tool part: %v", err)
+			}
+		}
 	}
 	return result
 }

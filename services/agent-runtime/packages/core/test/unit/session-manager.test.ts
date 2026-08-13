@@ -1345,12 +1345,9 @@ describe("SessionManager", () => {
                 terminalState: {
                   type: "error" as const,
                   error: {
-                    type: "runtime" as const,
-                    code: "runtime_invalid_sequence",
+                    type: "runtime_invalid_sequence",
                     message: "Sandbox outcome is unknown after interruption.",
                     retryable: false,
-                    fatal: false,
-                    reason: "aborted" as const,
                   },
                 },
               },

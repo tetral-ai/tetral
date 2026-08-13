@@ -12,6 +12,7 @@ import {
   RuntimeMessageSchema,
   RuntimePartCreateSchema,
   RuntimeToolSettlementDeclarationSchema,
+  runtimeToolErrorFromFailure,
 } from "../contracts/runtime.js";
 import type {
   DurableRuntimeMessage,
@@ -233,8 +234,8 @@ export function applyInterruptToolProjections(
     const projection = projections[index]!;
     const input = part.state.status === "running" ? { input: part.state.input } : {};
     stateByPartId.set(part.id, projection.terminalState.type === "error"
-      ? { status: "error", ...input, error: failureToolError(projection.terminalState.error) }
-      : { status: "cancelled", ...input, ...(projection.terminalState.error === undefined ? {} : { error: failureToolError(projection.terminalState.error) }) });
+      ? { status: "error", ...input, error: projection.terminalState.error }
+      : { status: "cancelled", ...input, ...(projection.terminalState.error === undefined ? {} : { error: projection.terminalState.error }) });
   });
   return messages.map((message) => {
     const projected = {
@@ -268,11 +269,11 @@ export function applyToolSettlementProjection(
       const state = settlement.type === "completed"
         ? { status: "completed" as const, input: part.state.input, output: settlement.output }
         : settlement.type === "error"
-          ? { status: "error" as const, input: part.state.input, error: failureToolError(settlement.error) }
+          ? { status: "error" as const, input: part.state.input, error: runtimeToolErrorFromFailure(settlement.error) }
           : {
               status: "cancelled" as const,
               input: part.state.input,
-              ...(settlement.error === undefined ? {} : { error: failureToolError(settlement.error) }),
+              ...(settlement.error === undefined ? {} : { error: runtimeToolErrorFromFailure(settlement.error) }),
             };
       return { ...part, state, completedAt };
     });
@@ -825,8 +826,4 @@ function assertCreatedEvents(events: RuntimeDeclarationReceipt["events"], sessio
     ids.add(event.eventId);
     previousSequence = event.eventSequence;
   }
-}
-
-function failureToolError(failure: RuntimeFailure): { readonly type: string; readonly message: string; readonly retryable: boolean } {
-  return { type: failure.code, message: failure.message, retryable: failure.retryable };
 }

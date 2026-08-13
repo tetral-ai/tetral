@@ -163,6 +163,19 @@ describe("incremental Runtime declarations", () => {
       ...projection("tool_a", 5),
       terminalState: { type: "error", error: { unrecognized: true } } as never,
     }, projection("tool_b", 6)])).toThrow();
+    const projected = applyInterruptToolProjections(messages, [{
+      ...projection("tool_a", 5),
+      terminalState: {
+        type: "error" as const,
+        error: { type: "runtime_interrupted_outcome_unknown", message: "Tool outcome is unknown.", retryable: false },
+      },
+    }, projection("tool_b", 6)]);
+    expect(projected[0]?.parts[0]).toMatchObject({
+      state: {
+        status: "error",
+        error: { type: "runtime_interrupted_outcome_unknown", message: "Tool outcome is unknown.", retryable: false },
+      },
+    });
     const contradictory = [{
       ...messages[0]!,
       parts: messages[0]!.parts.map((part) => part.type === "tool" && part.toolUseEventId === "tool_a"

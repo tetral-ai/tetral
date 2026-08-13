@@ -285,10 +285,10 @@ func validateRuntimeTerminationSettlement(settlement *bridgev1.RuntimeToolSettle
 	default:
 		return status.Error(codes.InvalidArgument, "runtime termination Tool settlement must be terminal failure")
 	}
-	var failure struct {
-		Code string `json:"code"`
+	var toolError struct {
+		Type string `json:"type"`
 	}
-	if err := json.Unmarshal([]byte(raw), &failure); err != nil || failure.Code != "runtime_terminated" {
+	if err := json.Unmarshal([]byte(raw), &toolError); err != nil || toolError.Type != "runtime_terminated" {
 		return status.Error(codes.InvalidArgument, "runtime termination Tool settlement failure is invalid")
 	}
 	return nil

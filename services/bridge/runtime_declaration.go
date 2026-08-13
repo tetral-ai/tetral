@@ -519,19 +519,19 @@ func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) 
 		}
 		value["completed"] = json.RawMessage(canonical)
 	case *bridgev1.RuntimeToolSettlement_Error:
-		canonical, err := canonicalRuntimeDeclarationJSON(outcome.Error.GetErrorJson())
+		toolError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool error is invalid")
 		}
-		value["error"] = json.RawMessage(canonical)
+		value["error"] = toolError
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
 		var errorValue any
 		if outcome.Cancelled.ErrorJson != nil {
-			canonical, err := canonicalRuntimeDeclarationJSON(outcome.Cancelled.GetErrorJson())
+			toolError, err := decodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
 			if err != nil {
 				return nil, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
 			}
-			errorValue = json.RawMessage(canonical)
+			errorValue = toolError
 		}
 		value["cancelled"] = errorValue
 	default:
@@ -1203,8 +1203,6 @@ func settleRuntimeToolPartTx(
 		return runtimeToolProjectionPayload{}, status.Error(codes.AlreadyExists, "Tool Use already has a terminal settlement")
 	}
 	nextState := map[string]any{}
-	toolEvent, _ := selected["toolEvent"].(map[string]any)
-	isMCPTool := toolEvent["kind"] == "mcp"
 	if input, present := state["input"]; present {
 		nextState["input"] = input
 	}
@@ -1217,20 +1215,20 @@ func settleRuntimeToolPartTx(
 		nextState["status"] = "completed"
 		nextState["output"] = output
 	case *bridgev1.RuntimeToolSettlement_Error:
-		normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Error.GetErrorJson(), isMCPTool)
+		declaredError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
 		if err != nil {
 			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool error is invalid")
 		}
 		nextState["status"] = "error"
-		nextState["error"] = normalizedError
+		nextState["error"] = declaredError
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
 		nextState["status"] = "cancelled"
 		if outcome.Cancelled.ErrorJson != nil {
-			normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Cancelled.GetErrorJson(), isMCPTool)
+			declaredError, err := decodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
 			if err != nil {
 				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool cancellation error is invalid")
 			}
-			nextState["error"] = normalizedError
+			nextState["error"] = declaredError
 		}
 	default:
 		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
@@ -1261,31 +1259,14 @@ func settleRuntimeToolPartTx(
 	return runtimeToolProjectionFromDurablePart(messageID, selected), nil
 }
 
-// Runtime failures carry lifecycle diagnostics that belong to the declaration
-// receipt, while durable Tool parts expose only the stable model-visible error.
-// Other Tool owners already declare their durable error object directly.
-func runtimeDeclaredToolErrorFromFailureJSON(raw string, normalizeMCP bool) (map[string]any, error) {
-	var declared map[string]any
-	if err := json.Unmarshal([]byte(raw), &declared); err != nil || declared == nil {
-		return nil, fmt.Errorf("invalid Runtime failure")
+// Runtime owns failure projection; Bridge accepts and stores only the strict
+// durable Tool error contract used by Runtime Message-part declarations.
+func decodeRuntimeToolErrorJSON(raw string) (map[string]any, error) {
+	declared, err := decodeRuntimeDeclarationObject(raw)
+	if err != nil || validateRuntimeToolError(declared) != nil {
+		return nil, fmt.Errorf("invalid durable Tool error")
 	}
-	if !normalizeMCP {
-		return declared, nil
-	}
-	code, hasCode := declared["code"].(string)
-	message, hasMessage := declared["message"].(string)
-	retryable, hasRetryable := declared["retryable"].(bool)
-	if !hasCode {
-		return declared, nil
-	}
-	if code == "" || !hasMessage || message == "" || !hasRetryable {
-		return nil, fmt.Errorf("invalid Runtime failure")
-	}
-	return map[string]any{
-		"type":      code,
-		"message":   message,
-		"retryable": retryable,
-	}, nil
+	return declared, nil
 }
 
 func runtimeToolProjectionFromDurablePart(messageID string, part map[string]any) runtimeToolProjectionPayload {

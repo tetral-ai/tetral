@@ -251,8 +251,8 @@ func TestPostgreSQLBridgeAPIStoreInterruptClassifiesStartedAndBackgroundTools(t 
 			if projection.GetCancelled() != nil {
 				errorJSON = projection.GetCancelled().GetErrorJson()
 			}
-			if got := testJSONPathString(t, errorJSON, "code"); got != test.wantCode {
-				t.Fatalf("interrupt code = %q; want %q", got, test.wantCode)
+			if got := testJSONPathString(t, errorJSON, "type"); got != test.wantCode {
+				t.Fatalf("interrupt Tool error type = %q; want %q", got, test.wantCode)
 			}
 			awaited, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{
 				Scope: scope, RootChildThreadId: childID, SourceToolUseEventId: "evt_interrupt_source_" + suffix,

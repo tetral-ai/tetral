@@ -115,7 +115,8 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 			Type  string          `json:"type"`
 			Error json.RawMessage `json:"error"`
 		} `json:"settlement"`
-		Event struct {
+		DeclaredError json.RawMessage `json:"declaredError"`
+		Event         struct {
 			Type       string `json:"type"`
 			MCPToolUse string `json:"mcp_tool_use_id"`
 			IsError    bool   `json:"is_error"`
@@ -144,7 +145,7 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 		McpMaterializationHandle: &composed.Result.MCPMaterializationHandle,
 		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUse.GetEventId(),
-			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: string(composed.Settlement.Error)}},
+			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: string(composed.DeclaredError)}},
 		}},
 	})
 	if err != nil {

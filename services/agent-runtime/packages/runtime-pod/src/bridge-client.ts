@@ -68,10 +68,12 @@ import {
   DurableRuntimeMessageSchema,
   RuntimeMessageSchema,
   RuntimeJsonValueSchema,
+  RuntimeToolErrorSchema,
   SessionEventWriterRetryPolicy,
   normalizeContextLoaderError,
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
+  runtimeToolErrorFromFailure,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
@@ -100,6 +102,7 @@ import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { ApprovalReviewerThreadCreation, RuntimeApprovalReviewerThreadCreator } from "./approval-reviewer.js";
 import type { RuntimeControlInputCommitter } from "./runtime-service.js";
 import {
+  recordDurableMessageParseFailure,
   recordRuntimeReceiptEvidence,
 } from "./logger.js";
 import type {
@@ -1115,7 +1118,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
         reason: response.ack?.errorCode || "load context rejected",
       });
     }
-    const parsed = parseContextPayload(response.contextJson, input);
+    const parsed = parseContextPayload(response.contextJson, input, this.options.logger);
     return { ...parsed, runtimeBindingToken: response.runtimeBindingToken };
   }
 
@@ -2106,11 +2109,11 @@ function runtimeToolSettlementForBridge(toolUseEventId: string, settlement: Runt
     case "completed":
       return { toolUseEventId, completed: { outputJson: JSON.stringify(settlement.output) } };
     case "error":
-      return { toolUseEventId, error: { errorJson: JSON.stringify(settlement.error) } };
+      return { toolUseEventId, error: { errorJson: JSON.stringify(runtimeToolErrorFromFailure(settlement.error)) } };
     case "cancelled":
       return {
         toolUseEventId,
-        cancelled: settlement.error === undefined ? {} : { errorJson: JSON.stringify(settlement.error) },
+        cancelled: settlement.error === undefined ? {} : { errorJson: JSON.stringify(runtimeToolErrorFromFailure(settlement.error)) },
       };
   }
 }
@@ -2155,13 +2158,13 @@ function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDe
         throw new Error("interrupt Tool projection has no result event");
       }
       const terminalState = projection.error !== undefined
-        ? { type: "error" as const, error: JSON.parse(projection.error.errorJson) }
+        ? { type: "error" as const, error: RuntimeToolErrorSchema.parse(JSON.parse(projection.error.errorJson)) }
         : projection.cancelled !== undefined
           ? {
               type: "cancelled" as const,
               ...(projection.cancelled.errorJson === undefined
                 ? {}
-                : { error: JSON.parse(projection.cancelled.errorJson) }),
+                : { error: RuntimeToolErrorSchema.parse(JSON.parse(projection.cancelled.errorJson)) }),
             }
           : undefined;
       if (terminalState === undefined) {
@@ -2636,7 +2639,7 @@ function internalToolRepairStoreFailure(
   };
 }
 
-function parseContextPayload(contextJson: string, input: RuntimeThreadControlState): {
+function parseContextPayload(contextJson: string, input: RuntimeThreadControlState, logger?: RuntimePodLogger | undefined): {
   readonly messages: readonly DurableRuntimeMessage[];
   readonly turnFacts: ThreadTurnLoadFacts;
   readonly threadContextPrefix?: ThreadContextPrefix | undefined;
@@ -2656,7 +2659,13 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
     if (!Array.isArray(parsed.messages)) {
       throw new Error("load context messages are malformed");
     }
-    const messages = parsed.messages.map((message) => DurableRuntimeMessageSchema.parse(message));
+    let messages: readonly DurableRuntimeMessage[];
+    try {
+      messages = parsed.messages.map((message) => DurableRuntimeMessageSchema.parse(message));
+    } catch (error) {
+      recordDurableMessageParseFailure(logger, input, durableMessageParseFailureReason(parsed.messages));
+      throw error;
+    }
     const turnFacts = ThreadTurnLoadFactsSchema.parse(parsed.turnFacts);
     const threadContextPrefix = parseThreadContextPrefix(parsed.threadContextPrefix);
     const durableTurnId = stringField(parsed, "durableTurnId");
@@ -2692,6 +2701,24 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
       reason: "load context returned malformed RuntimeMessage projection",
     });
   }
+}
+
+function durableMessageParseFailureReason(
+  messages: readonly unknown[],
+): "invalid_tool_error_shape" | "invalid_durable_message_shape" {
+  for (const message of messages) {
+    if (!isRecord(message) || !Array.isArray(message.parts)) continue;
+    for (const part of message.parts) {
+      if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state)) continue;
+      const state = part.state;
+      const hasError = Object.prototype.hasOwnProperty.call(state, "error");
+      if ((state.status === "error" || (state.status === "cancelled" && hasError)) &&
+        !RuntimeToolErrorSchema.safeParse(state.error).success) {
+        return "invalid_tool_error_shape";
+      }
+    }
+  }
+  return "invalid_durable_message_shape";
 }
 
 function parseColdCoverage(value: unknown): RuntimeColdCoverage {

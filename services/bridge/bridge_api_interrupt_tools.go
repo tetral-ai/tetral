@@ -243,7 +243,7 @@ func interruptedToolOutcomeTx(
 		}
 	}
 	if cancelledBeforeStart {
-		errorJSON := `{"type":"runtime","code":"runtime_interrupted","message":"Tool execution was cancelled before it started.","retryable":false,"fatal":false}`
+		errorJSON := `{"type":"runtime_interrupted","message":"Tool execution was cancelled before it started.","retryable":false}`
 		return &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUseEventID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{ErrorJson: &errorJSON}},
@@ -256,7 +256,7 @@ func interruptedToolOutcomeTx(
 		code = "runtime_interrupted_result_not_committed"
 	}
 	errorJSON, err := marshalBridgeJSON(map[string]any{
-		"type": "runtime", "code": code, "message": message, "retryable": false, "fatal": false,
+		"type": code, "message": message, "retryable": false,
 	})
 	if err != nil {
 		return nil, "", nil, err

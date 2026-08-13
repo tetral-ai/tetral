@@ -200,7 +200,7 @@ func bridgeRuntimeOutputAppendForTest(
 }
 
 func bridgeCancelledToolSettlementForTest(toolUseEventID, message string) *bridgev1.RuntimeToolSettlement {
-	errorJSON := fmt.Sprintf(`{"type":"runtime","code":"runtime_terminated","message":%q,"retryable":false,"fatal":true}`, message)
+	errorJSON := fmt.Sprintf(`{"type":"runtime_terminated","message":%q,"retryable":false}`, message)
 	return &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUseEventID,
 		Outcome: &bridgev1.RuntimeToolSettlement_Cancelled{

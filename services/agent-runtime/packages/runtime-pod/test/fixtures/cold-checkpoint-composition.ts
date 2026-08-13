@@ -4,12 +4,13 @@ import { BridgeWriteStatus } from "@tetral/agent-runtime-protocol/src/gen-bridge
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { deriveThreadTurnDecision, initializeThreadTurnReduction, reduceThreadTurn } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
-import { DurableRuntimeMessageSchema, RuntimeMessageCreateSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { DurableRuntimeMessageSchema, RuntimeMessageCreateSchema, RuntimeToolSettlementDeclarationSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeDeclarationReceipt } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { internalToolRepairKey } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import {
   applyCompactionReceipt,
   applyInternalToolRepairReceipt,
+  applyToolSettlementProjection,
   applyToolConfirmationReceipt,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
@@ -24,9 +25,9 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
   readonly pendingSandboxExecutions?: readonly unknown[];
   readonly hotScenario?: {
     readonly baseContextJson: string;
-    readonly receipt: RuntimeDeclarationReceipt;
-    readonly create: unknown;
-    readonly kind: "tool_confirmation" | "compaction" | "internal_repair";
+    readonly receipt?: RuntimeDeclarationReceipt;
+    readonly create?: unknown;
+    readonly kind: "tool_confirmation" | "compaction" | "internal_repair" | "tool_settlement";
     readonly sessionId: string;
     readonly sessionThreadId: string;
     readonly runtimeInputId?: string;
@@ -40,6 +41,10 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
     readonly repairEventId?: string;
     readonly modelToolCallId?: string;
     readonly toolName?: string;
+    readonly settlement?: unknown;
+    readonly toolUseEventId?: string;
+    readonly resultEventId?: string;
+    readonly completedAt?: string;
   };
 };
 const rawContext = JSON.parse(input.contextJson) as { readonly messages?: readonly { readonly sessionId?: string }[] };
@@ -88,7 +93,7 @@ const toolRouteView = extractColdThreadToolRouteView({
   pendingToolUses: (input.pendingToolUses ?? context.pendingToolUses ?? []) as never,
   pendingSandboxExecutions: (input.pendingSandboxExecutions ?? context.pendingSandboxExecutions ?? []) as never,
 });
-let hot: { readonly checkpoint: unknown; readonly toolRouteView: unknown; readonly reducerAction: unknown } | undefined;
+let hot: { readonly checkpoint: unknown; readonly toolRouteView: unknown; readonly reducerAction: unknown; readonly toolPart?: unknown } | undefined;
 if (input.hotScenario !== undefined) {
   const scenario = input.hotScenario;
   const base = await loadContext(scenario.baseContextJson);
@@ -99,8 +104,46 @@ if (input.hotScenario !== undefined) {
     pendingSandboxExecutions: (scenario.pendingSandboxExecutions ?? base.pendingSandboxExecutions ?? []) as never,
   });
   let reduction = initializeThreadTurnReduction(baseCheckpoint, hotRouteView);
-  const create = RuntimeMessageCreateSchema.parse(scenario.create);
-  if (scenario.kind === "tool_confirmation") {
+  if (scenario.kind === "tool_settlement") {
+    if (
+      scenario.toolUseEventId === undefined || scenario.resultEventId === undefined ||
+      scenario.completedAt === undefined || scenario.settlement === undefined
+    ) {
+      throw new Error("Tool settlement hot composition identity is incomplete");
+    }
+    const declaration = RuntimeToolSettlementDeclarationSchema.parse({
+      toolUseEventId: scenario.toolUseEventId,
+      outcome: scenario.settlement,
+    });
+    const projectedMessages = applyToolSettlementProjection(
+      base.messages,
+      scenario.toolUseEventId,
+      declaration.outcome,
+      scenario.completedAt,
+    );
+    reduction = reduceThreadTurn(reduction, {
+      fact: "tool_result_committed",
+      eventId: scenario.resultEventId,
+      toolUseEventId: scenario.toolUseEventId,
+      outcome: declaration.outcome.type === "completed" ? "success" : declaration.outcome.type,
+    }, hotRouteView);
+    hotRouteView = {
+      routes: hotRouteView.routes.filter((route) => route.toolUseEventId !== scenario.toolUseEventId),
+    };
+    const toolPart = projectedMessages.flatMap((message) => message.parts)
+      .find((part) => part.type === "tool" && part.toolUseEventId === scenario.toolUseEventId);
+    if (toolPart === undefined) throw new Error("hot Tool settlement projection is missing its Tool part");
+    hot = {
+      checkpoint: reduction.checkpoint,
+      toolRouteView: hotRouteView,
+      reducerAction: deriveThreadTurnDecision(reduction.checkpoint, hotRouteView).action,
+      toolPart,
+    };
+  } else {
+    const create = RuntimeMessageCreateSchema.parse(scenario.create);
+    const receipt = scenario.receipt;
+    if (receipt === undefined) throw new Error("hot composition receipt is missing");
+    if (scenario.kind === "tool_confirmation") {
     if (scenario.runtimeInputId === undefined || scenario.sourceEventId === undefined || scenario.confirmedToolUseEventId === undefined) {
       throw new Error("tool confirmation hot composition identity is incomplete");
     }
@@ -110,7 +153,7 @@ if (input.hotScenario !== undefined) {
       runtimeInputId: scenario.runtimeInputId,
       sourceEventId: scenario.sourceEventId,
       create,
-    }, scenario.receipt);
+    }, receipt);
     hotRouteView = {
       routes: hotRouteView.routes.map((route) => route.toolUseEventId === scenario.confirmedToolUseEventId
         ? { ...route, disposition: "resume_approval_settlement" as const }
@@ -118,14 +161,14 @@ if (input.hotScenario !== undefined) {
     };
     reduction = reduceThreadTurn(reduction, {
       fact: "inputs_committed",
-      eventId: scenario.receipt.events[0]!.eventId,
+      eventId: receipt.events[0]!.eventId,
       messageIds: [message.id],
     }, hotRouteView);
-  } else if (scenario.kind === "compaction") {
+    } else if (scenario.kind === "compaction") {
     if (scenario.modelRequestId === undefined || scenario.compactedThroughMessageSequence === undefined) {
       throw new Error("compaction hot composition identity is incomplete");
     }
-    const requestEnd = scenario.receipt.events[0]!;
+    const requestEnd = receipt.events[0]!;
     const checkpointMessage = applyCompactionReceipt({
       sessionId: scenario.sessionId,
       sessionThreadId: scenario.sessionThreadId,
@@ -133,7 +176,7 @@ if (input.hotScenario !== undefined) {
       requestEndEventId: requestEnd.eventId,
       compactedThroughMessageSequence: scenario.compactedThroughMessageSequence,
       create,
-    }, scenario.receipt);
+    }, receipt);
     reduction = reduceThreadTurn(reduction, {
       fact: "request_ended",
       eventId: requestEnd.eventId,
@@ -143,10 +186,10 @@ if (input.hotScenario !== undefined) {
     }, hotRouteView);
     reduction = reduceThreadTurn(reduction, {
       fact: "inputs_committed",
-      eventId: scenario.receipt.events[1]!.eventId,
+      eventId: receipt.events[1]!.eventId,
       messageIds: [checkpointMessage.id],
     }, hotRouteView);
-  } else {
+    } else {
     if (
       scenario.modelRequestId === undefined || scenario.repairKey === undefined ||
       scenario.repairEventId === undefined || scenario.modelToolCallId === undefined ||
@@ -160,7 +203,7 @@ if (input.hotScenario !== undefined) {
       repairKey: scenario.repairKey,
       eventId: scenario.repairEventId,
       create,
-    }, scenario.receipt);
+    }, receipt);
     reduction = reduceThreadTurn(reduction, {
       fact: "internal_tool_repair_committed",
       eventId: scenario.repairEventId,
@@ -168,12 +211,13 @@ if (input.hotScenario !== undefined) {
       modelToolCallId: scenario.modelToolCallId,
       toolName: scenario.toolName,
     }, hotRouteView);
+    }
+    hot = {
+      checkpoint: reduction.checkpoint,
+      toolRouteView: hotRouteView,
+      reducerAction: reduction.action,
+    };
   }
-  hot = {
-    checkpoint: reduction.checkpoint,
-    toolRouteView: hotRouteView,
-    reducerAction: reduction.action,
-  };
 }
 
 process.stdout.write(JSON.stringify({

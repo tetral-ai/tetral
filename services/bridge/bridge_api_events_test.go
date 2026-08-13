@@ -742,7 +742,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(
 		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUse.GetEventId(),
 			Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
-				ErrorJson: `{"code":"sandbox_failure","detail":{"exit":7}}`,
+				ErrorJson: `{"type":"sandbox_failure","message":"Sandbox command failed.","retryable":false}`,
 			}},
 		}},
 	}
@@ -759,17 +759,17 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(
 		Parts []struct {
 			State struct {
 				Error struct {
-					Code   string `json:"code"`
-					Detail struct {
-						Exit int `json:"exit"`
-					} `json:"detail"`
+					Type      string `json:"type"`
+					Message   string `json:"message"`
+					Retryable bool   `json:"retryable"`
 				} `json:"error"`
 			} `json:"state"`
 		} `json:"parts"`
 	}
 	if err := json.Unmarshal([]byte(durableMessage), &genericProjection); err != nil || len(genericProjection.Parts) != 1 ||
-		genericProjection.Parts[0].State.Error.Code != "sandbox_failure" || genericProjection.Parts[0].State.Error.Detail.Exit != 7 {
-		t.Fatalf("generic Tool error was rewritten: %s", durableMessage)
+		genericProjection.Parts[0].State.Error.Type != "sandbox_failure" ||
+		genericProjection.Parts[0].State.Error.Message != "Sandbox command failed." || genericProjection.Parts[0].State.Error.Retryable {
+		t.Fatalf("durable Tool error changed: %s", durableMessage)
 	}
 	duplicateResult := proto.Clone(resultRequest).(*bridgev1.WriteEventRequest)
 	duplicateResult.RuntimeWriteId = "rwrite_tool_result_membership_second"

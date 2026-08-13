@@ -523,8 +523,8 @@ export interface RuntimeInterruptToolProjection {
   readonly toolUseEventId: string;
   readonly resultEvent: RuntimeDurableEventStamp;
   readonly terminalState:
-    | { readonly type: "error"; readonly error: RuntimeFailure }
-    | { readonly type: "cancelled"; readonly error?: RuntimeFailure | undefined };
+    | { readonly type: "error"; readonly error: RuntimeToolError }
+    | { readonly type: "cancelled"; readonly error?: RuntimeToolError | undefined };
 }
 
 // Boundary contract for persisted runtime parts, not a backend table definition.
@@ -747,6 +747,15 @@ export const RuntimeFailureSchema = z.strictObject({
   retryAfterMs: NonNegativeIntegerSchema.optional(),
 });
 export type RuntimeFailure = z.infer<typeof RuntimeFailureSchema>;
+
+/** Projects Runtime-owned lifecycle failure state into the stable durable Tool error. */
+export function runtimeToolErrorFromFailure(failure: RuntimeFailure): RuntimeToolError {
+  return RuntimeToolErrorSchema.parse({
+    type: failure.code,
+    message: failure.message,
+    retryable: failure.retryable,
+  });
+}
 
 const RuntimeToolSettlementSchema = z.discriminatedUnion("type", [
   z.strictObject({

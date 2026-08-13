@@ -382,7 +382,7 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode Runtime exhaustion event: %v", err)
 	}
-	errorJSON := string(runtimeResult.Settlement.Error)
+	errorJSON := string(runtimeResult.DeclaredError)
 	digest := response.GetResultDigest()
 	committed, err := h.bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_result", ModelRequestId: h.modelRequestID,
@@ -430,8 +430,8 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 type runtimeActivationExhaustionFixtureResult struct {
 	CommandResult runtimeActivationErrorResult     `json:"commandResult"`
 	FileResult    runtimeActivationErrorResult     `json:"fileResult"`
-	Settlement    runtimeActivationSettlement      `json:"settlement"`
 	Event         runtimeActivationToolResultEvent `json:"event"`
+	DeclaredError json.RawMessage                  `json:"declaredError"`
 }
 
 type runtimeActivationErrorResult struct {
@@ -444,11 +444,6 @@ type runtimeActivationErrorResult struct {
 		Fatal     bool   `json:"fatal"`
 	} `json:"error"`
 	SandboxResultDigest string `json:"sandboxResultDigest"`
-}
-
-type runtimeActivationSettlement struct {
-	Type  string          `json:"type"`
-	Error json.RawMessage `json:"error"`
 }
 
 type runtimeActivationToolResultEvent struct {

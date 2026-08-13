@@ -77,6 +77,80 @@ describe("Bridge runtime declaration adapters", () => {
     });
   });
 
+  test("logs a safe durable Tool-error discriminator when cold Message parsing fails", async () => {
+    const secretMessage = "CANARY_TOOL_ERROR_MESSAGE";
+    const secretInput = "CANARY_TOOL_INPUT";
+    const secretProviderBody = "CANARY_PROVIDER_BODY";
+    const bridge = new DeclarationBridge();
+    bridge.loadContextJson = JSON.stringify({
+      messages: [{
+        id: "msg_invalid_tool_error",
+        sessionId: "sesn_1",
+        role: "assistant",
+        origin: "agent",
+        sequence: 1,
+        status: "completed",
+        createdAt: now,
+        parts: [{
+          id: "part_invalid_tool_error",
+          sessionId: "sesn_1",
+          messageId: "msg_invalid_tool_error",
+          sequence: 0,
+          type: "tool",
+          toolCallId: "call_invalid_tool_error",
+          toolName: "Read",
+          state: {
+            status: "error",
+            input: { value: { file_path: secretInput }, preview: secretInput, truncated: false },
+            error: { type: "runtime", message: secretMessage, retryable: false, provider_body: secretProviderBody },
+          },
+          createdAt: now,
+          completedAt: now,
+        }],
+      }],
+      turnFacts: { events: [], internalRepairs: [] },
+      coldCoverage: {
+        pendingToolIds: [],
+        pendingSandboxExecutionIds: [],
+        pendingAttachmentIdentities: [],
+        undeliveredMailDeliveryIds: [],
+      },
+      thread: { parentThreadId: null, role: "main", visibility: "public", taskName: null, agentType: "general", status: "idle" },
+    });
+    const records: Record<string, unknown>[] = [];
+    const loader = new BridgeAPIContextLoader({
+      ...options(bridge),
+      logger: {
+        info: () => undefined,
+        error: (record: Record<string, unknown>) => records.push(record),
+      },
+    });
+
+    await expect(loader.loadThreadContext(control("rin_invalid_tool_error"))).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      retryable: false,
+      fatal: true,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]).toEqual({
+      event: "runtime_context_load_parse_failed",
+      "event.kind": "runtime_context_load_parse_failed",
+      component: "agent-runtime",
+      message: "durable Runtime Message projection was rejected",
+      operation: "load_context",
+      phase: "durable_message_parse",
+      reason: "invalid_tool_error_shape",
+      "workspace.id": "wksp_1",
+      "session.id": "sesn_1",
+      "thread.id": "thrd_1",
+    });
+    const serializedRecords = JSON.stringify(records);
+    expect(serializedRecords).not.toContain(secretMessage);
+    expect(serializedRecords).not.toContain(secretInput);
+    expect(serializedRecords).not.toContain(secretProviderBody);
+  });
+
   test("commits accepted input as positional message creates", async () => {
     const bridge = new DeclarationBridge();
     const loader = new BridgeAPIContextLoader(options(bridge));
@@ -273,6 +347,80 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.writeEventRequests[0]?.toolSettlement).toBeUndefined();
     expect(bridge.writeEventRequests[1]?.assistantPartAppend).toBeUndefined();
     expect(bridge.writeEventRequests[1]?.toolSettlement?.toolUseEventId).toBe("sevt_tool_1");
+  });
+
+  test("projects every error-bearing Tool family through one durable error contract", async () => {
+    const bridge = new DeclarationBridge();
+    const writer = new BridgeAPIEventWriter(options(bridge));
+    const cases = [
+      {
+        name: "ordinary",
+        event: { type: "agent.tool_result" as const, tool_use_id: "sevt_ordinary", is_error: true },
+        outcome: {
+          type: "error" as const,
+          error: { type: "runtime" as const, code: "provider_tool_protocol_error" as const, message: "ordinary failed", retryable: false, fatal: true, retryStatus: { type: "terminal" as const } },
+        },
+      },
+      {
+        name: "MCP",
+        event: { type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", is_error: true },
+        outcome: {
+          type: "error" as const,
+          error: { type: "runtime" as const, code: "provider_tool_protocol_error" as const, message: "MCP failed", retryable: true, fatal: false, reason: "runtime_contract_validation" as const },
+        },
+      },
+      {
+        name: "Sandbox-backed",
+        event: { type: "agent.tool_result" as const, tool_use_id: "sevt_sandbox", is_error: true },
+        outcome: {
+          type: "error" as const,
+          error: { type: "runtime" as const, code: "provider_unavailable" as const, message: "Sandbox failed", retryable: true, fatal: false, retryStatus: { type: "retrying" as const, attempt: 1 } },
+        },
+      },
+      {
+        name: "error-bearing cancellation",
+        event: { type: "agent.tool_result" as const, tool_use_id: "sevt_cancelled", is_error: true },
+        outcome: {
+          type: "cancelled" as const,
+          error: { type: "runtime" as const, code: "provider_cancelled" as const, message: "Tool cancelled", retryable: false, fatal: false, reason: "runtime_shutdown" as const },
+        },
+      },
+    ];
+
+    for (const [index, candidate] of cases.entries()) {
+      const toolUseEventId = "tool_use_id" in candidate.event
+        ? candidate.event.tool_use_id
+        : candidate.event.mcp_tool_use_id;
+      await writer.append({
+        ...eventScope(`write_error_family_${index}`),
+        modelRequestId: "mrq_error_family",
+        event: candidate.event,
+        toolSettlement: { toolUseEventId, outcome: candidate.outcome },
+      });
+      const settlement = bridge.writeEventRequests[index]?.toolSettlement;
+      const rawError = settlement?.error?.errorJson ?? settlement?.cancelled?.errorJson;
+      expect(rawError, candidate.name).toBeDefined();
+      expect(JSON.parse(rawError ?? "null"), candidate.name).toEqual({
+        type: candidate.outcome.error.code,
+        message: candidate.outcome.error.message,
+        retryable: candidate.outcome.error.retryable,
+      });
+      expect(Object.keys(JSON.parse(rawError ?? "null")).sort(), candidate.name).toEqual(["message", "retryable", "type"]);
+    }
+
+    await writer.append({
+      ...eventScope("write_completed_control"),
+      modelRequestId: "mrq_error_family",
+      event: { type: "agent.tool_result", tool_use_id: "sevt_completed", content: [{ type: "text", text: "done" }] },
+      toolSettlement: {
+        toolUseEventId: "sevt_completed",
+        outcome: { type: "completed", output: { text: "done", truncated: false } },
+      },
+    });
+    expect(JSON.parse(bridge.writeEventRequests.at(-1)?.toolSettlement?.completed?.outputJson ?? "null")).toEqual({
+      text: "done",
+      truncated: false,
+    });
   });
 
   test("classifies a rejected reviewer failure ACK as deterministic", async () => {
@@ -607,6 +755,7 @@ class DeclarationBridge {
   readonly repairRequests: CommitInternalToolRepairRequest[] = [];
   readonly taskNotificationErrors: number[] = [];
   readonly taskNotificationRejections: string[] = [];
+  loadContextJson: string | undefined;
   corruptTaskNotificationDigest = false;
   repairOperationId = "repair";
   private eventSequence = 0;
@@ -630,7 +779,7 @@ class DeclarationBridge {
     this.loadContextRequests.push(request);
     callback(null, {
       ack: ack("", BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED),
-      contextJson: JSON.stringify({
+      contextJson: this.loadContextJson ?? JSON.stringify({
         messages: [],
         turnFacts: { events: [], internalRepairs: [] },
         coldCoverage: {

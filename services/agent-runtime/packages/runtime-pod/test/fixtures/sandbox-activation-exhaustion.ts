@@ -1,5 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
+import { BridgeWriteStatus } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type {
+  AgentRuntimeBridgeServiceClient,
+  WriteEventRequest,
+} from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { runtimeToolResultEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
@@ -9,6 +14,7 @@ import type { ProviderGatewayServiceClient } from "@tetral/gateway-protocol/src/
 import type { McpConnectorServiceClient } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 import type { RuntimePodToolRunnerOptions } from "../../src/tool-runner.js";
+import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
 
 interface FixtureInput {
   readonly workspaceId: string;
@@ -87,5 +93,51 @@ if (commandResult.type !== "error" || fileResult.type !== "error") {
 }
 const settlement = runtimeToolSettlement(commandResult);
 const event = runtimeToolResultEvent(input.toolUseEventId, { kind: "tool" }, settlement);
-console.log(JSON.stringify({ commandResult, fileResult, settlement, event }));
+let captured: WriteEventRequest | undefined;
+const eventWriterClient = {
+  writeEvent: (
+    request: WriteEventRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ) => {
+    captured = request;
+    callback(null, {
+      ack: {
+        status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
+        runtimeWriteId: request.runtimeWriteId,
+        errorCode: "fixture_capture_complete",
+      },
+    });
+    return { cancel() {} };
+  },
+} as unknown as AgentRuntimeBridgeServiceClient;
+const writer = new BridgeAPIEventWriter({
+  address: "bridge.test:9090",
+  tokenPath: "/var/run/token",
+  client: eventWriterClient,
+  metadataFactory: async () => new Metadata(),
+});
+await writer.append({
+  requestId: "req_sandbox_activation_exhaustion",
+  workspaceId: input.workspaceId,
+  sessionId: input.sessionId,
+  sessionThreadId: input.sessionThreadId,
+  bindingId: input.bindingId,
+  bindingGeneration: input.bindingGeneration,
+  targetPodUid: input.targetPodUid,
+  writeId: "rwrite_capacity_chain_result",
+  modelRequestId: input.modelRequestId,
+  event,
+  toolSettlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
+  sandboxResultDigest: input.resultDigest,
+});
+if (captured?.toolSettlement?.error === undefined) {
+  throw new Error("Runtime Bridge adapter did not declare the Sandbox Tool error");
+}
+console.log(JSON.stringify({
+  commandResult,
+  fileResult,
+  event,
+  declaredError: JSON.parse(captured.toolSettlement.error.errorJson) as unknown,
+}));
 process.exit(0);

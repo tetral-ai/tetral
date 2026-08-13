@@ -43,6 +43,8 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "mcp.tool_catalog.eligible"?: boolean;
   readonly "reconstruction.phase"?: "cold_checkpoint";
   readonly "failure.kind"?: "invalid_durable_facts";
+  readonly phase?: "durable_message_parse";
+  readonly reason?: "invalid_tool_error_shape" | "invalid_durable_message_shape";
 };
 
 /** Closed, non-sensitive Runtime Pod startup stages. */
@@ -82,6 +84,30 @@ export function recordCheckpointReconstructionFailure(
     });
   } catch {
     // Durable context handling is authoritative; diagnostics are fail-open.
+  }
+}
+
+/** Emits identity-only evidence when strict durable Message parsing rejects cold context. */
+export function recordDurableMessageParseFailure(
+  logger: RuntimePodLogger | undefined,
+  identity: { readonly workspaceId: string; readonly sessionId: string; readonly sessionThreadId: string },
+  reason: "invalid_tool_error_shape" | "invalid_durable_message_shape",
+): void {
+  try {
+    logger?.error({
+      event: "runtime_context_load_parse_failed",
+      "event.kind": "runtime_context_load_parse_failed",
+      component: "agent-runtime",
+      message: "durable Runtime Message projection was rejected",
+      operation: "load_context",
+      phase: "durable_message_parse",
+      reason,
+      "workspace.id": identity.workspaceId,
+      "session.id": identity.sessionId,
+      "thread.id": identity.sessionThreadId,
+    });
+  } catch {
+    // Durable context rejection is authoritative; diagnostics are fail-open.
   }
 }
 
