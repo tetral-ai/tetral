@@ -5,14 +5,19 @@ import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-prot
 import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { deriveThreadTurnDecision, initializeThreadTurnReduction, reduceThreadTurn } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import { DurableRuntimeMessageSchema, RuntimeMessageCreateSchema, RuntimeToolSettlementDeclarationSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeDeclarationReceipt } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeDeclarationReceipt, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { internalToolRepairKey } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
 import {
   applyCompactionReceipt,
   applyInternalToolRepairReceipt,
   applyToolSettlementProjection,
   applyToolConfirmationReceipt,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
+import { assembleProviderCallRequest } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
+import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
+import { validateProviderRequest } from "../../../../../gateway/packages/protocol/src/bounds.js";
+import { GatewayProviderRules } from "../../../../../gateway/packages/lowering/src/rules/index.js";
 import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
 
 const inputPath = process.argv[2];
@@ -21,6 +26,7 @@ if (inputPath === undefined) {
 }
 const input = JSON.parse(await readFile(inputPath, "utf8")) as {
   readonly contextJson: string;
+  readonly providerComposition?: boolean;
   readonly pendingToolUses?: readonly unknown[];
   readonly pendingSandboxExecutions?: readonly unknown[];
   readonly hotScenario?: {
@@ -93,7 +99,13 @@ const toolRouteView = extractColdThreadToolRouteView({
   pendingToolUses: (input.pendingToolUses ?? context.pendingToolUses ?? []) as never,
   pendingSandboxExecutions: (input.pendingSandboxExecutions ?? context.pendingSandboxExecutions ?? []) as never,
 });
-let hot: { readonly checkpoint: unknown; readonly toolRouteView: unknown; readonly reducerAction: unknown; readonly toolPart?: unknown } | undefined;
+let hot: {
+  readonly checkpoint: unknown;
+  readonly toolRouteView: unknown;
+  readonly reducerAction: unknown;
+  readonly toolPart?: unknown;
+  readonly providerComposition?: unknown;
+} | undefined;
 if (input.hotScenario !== undefined) {
   const scenario = input.hotScenario;
   const base = await loadContext(scenario.baseContextJson);
@@ -138,11 +150,15 @@ if (input.hotScenario !== undefined) {
       toolRouteView: hotRouteView,
       reducerAction: deriveThreadTurnDecision(reduction.checkpoint, hotRouteView).action,
       toolPart,
+      ...(input.providerComposition === true
+        ? { providerComposition: composeProviderRequests(projectedMessages) }
+        : {}),
     };
   } else {
     const create = RuntimeMessageCreateSchema.parse(scenario.create);
     const receipt = scenario.receipt;
     if (receipt === undefined) throw new Error("hot composition receipt is missing");
+    let hotProviderMessages: readonly RuntimeMessage[] | undefined;
     if (scenario.kind === "tool_confirmation") {
     if (scenario.runtimeInputId === undefined || scenario.sourceEventId === undefined || scenario.confirmedToolUseEventId === undefined) {
       throw new Error("tool confirmation hot composition identity is incomplete");
@@ -197,13 +213,14 @@ if (input.hotScenario !== undefined) {
     ) {
       throw new Error("internal repair hot composition identity is incomplete");
     }
-    applyInternalToolRepairReceipt({
+    const repairMessage = applyInternalToolRepairReceipt({
       sessionId: scenario.sessionId,
       sessionThreadId: scenario.sessionThreadId,
       repairKey: scenario.repairKey,
       eventId: scenario.repairEventId,
       create,
     }, receipt);
+    hotProviderMessages = [...base.messages, repairMessage];
     reduction = reduceThreadTurn(reduction, {
       fact: "internal_tool_repair_committed",
       eventId: scenario.repairEventId,
@@ -216,6 +233,9 @@ if (input.hotScenario !== undefined) {
       checkpoint: reduction.checkpoint,
       toolRouteView: hotRouteView,
       reducerAction: reduction.action,
+      ...(input.providerComposition === true
+        ? { providerComposition: composeProviderRequests(hotProviderMessages ?? base.messages) }
+        : {}),
     };
   }
 }
@@ -229,5 +249,55 @@ process.stdout.write(JSON.stringify({
       ? [internalToolRepairKey(checkpoint.request!.modelRequestId, member.modelToolCallId, member.toolName)]
       : []
   ),
+  ...(input.providerComposition === true
+    ? { providerComposition: composeProviderRequests(context.messages) }
+    : {}),
   ...(hot === undefined ? {} : { hot }),
 }));
+
+function composeProviderRequests(messages: readonly RuntimeMessage[]) {
+  const projected = toGatewayRuntimeMessages(messages);
+  if (!projected.ok) {
+    throw new Error(`Runtime provider projection failed: ${projected.error.code}`);
+  }
+  const strategies = GatewayProviderRules.map((rules) => {
+    const assembled = assembleProviderCallRequest({
+      identity: {
+        workspaceId: "default",
+        sessionId: messages[0]?.sessionId ?? "composition_session",
+        sessionThreadId: "composition_thread",
+        bindingId: "composition_binding",
+        bindingGeneration: 1,
+        targetPodUid: "composition_pod",
+        runtimeBindingToken: "composition-binding-token",
+      },
+      requestId: "req_provider_composition",
+      modelRequestId: "mreq_provider_composition",
+      currentModel: { providerId: rules.providerId, modelId: rules.modelId },
+      runtimeMessages: projected.messages,
+      runtime: { systemInstructions: "provider composition", timeoutMs: 30_000 },
+    });
+    if (!assembled.ok) {
+      throw new Error(`Runtime ProviderRequest assembly failed for ${rules.providerId}/${rules.modelId}`);
+    }
+    const validation = validateProviderRequest(assembled.request);
+    return {
+      providerId: rules.providerId,
+      modelId: rules.modelId,
+      providerFamily: rules.providerFamily,
+      validation,
+      ...(validation.ok
+        ? { loweredMessages: lowerProviderRequest(assembled.request, rules, { modelOutputTokenLimit: 32_000 }).messages }
+        : {}),
+    };
+  });
+  const carrierMessages = projected.messages;
+  const toolParts = carrierMessages.flatMap((message) =>
+    message.parts.flatMap((part) => part.tool === undefined ? [] : [part.tool])
+  );
+  return {
+    carrierMessages,
+    carrierHasToolUseEventIdProperty: toolParts.some((tool) => Object.hasOwn(tool, "toolUseEventId")),
+    strategies,
+  };
+}

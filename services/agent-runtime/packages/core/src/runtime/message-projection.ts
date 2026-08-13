@@ -213,7 +213,6 @@ function projectToolPart(part: Extract<RuntimePart, { readonly type: "tool" }>):
       tool: {
         callId: part.toolCallId,
         name: part.toolName,
-        toolUseEventId: part.toolUseEventId,
         state: gatewayToolState(part.state.status),
         inputJson: toolInputJson(part),
         outputOrErrorJson: toolOutputOrErrorJson(part),

@@ -249,7 +249,6 @@ describe("Gateway protocol bounds", () => {
             tool: {
               callId: "call_1",
               name: "Read",
-              toolUseEventId: "sevt_tool_1",
               state,
               inputJson: "{}",
               outputOrErrorJson: "{}",
@@ -268,7 +267,6 @@ describe("Gateway protocol bounds", () => {
       tool: {
         callId: "call_1",
         name: "Read",
-        toolUseEventId: "sevt_tool_1",
         state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
         inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes),
         outputOrErrorJson: jsonObjectAtBytes(MaxProviderRequestToolOutputJsonBytes),
@@ -327,15 +325,14 @@ describe("Gateway protocol bounds", () => {
     expect(new TextEncoder().encode(truncateUtf8Bytes("你".repeat(4), 8)).byteLength).toBe(6);
   });
 
-  test("allows an absent tool use event id only for internal error repairs", () => {
+  test("treats terminal Tool part IDs as opaque transport identities", () => {
     const base = validProviderRequest();
     const message = base.messages[0]!;
     const repairPart = {
-      id: "internal_invalid_tool:mreq_1:call_repair:unknown_tool:part",
+      id: "part_bridge_assigned_repair",
       tool: {
         callId: "call_repair",
         name: "unknown_tool",
-        toolUseEventId: undefined,
         state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
         inputJson: "{}",
         outputOrErrorJson: "{}",
@@ -345,20 +342,18 @@ describe("Gateway protocol bounds", () => {
     expect(validateProviderRequest(validProviderRequest({
       messages: [{ ...message, parts: [repairPart] }],
     }))).toEqual({ ok: true });
-    expect(validateProviderRequest(validProviderRequest({
-      messages: [{
-        ...message,
-        parts: [{
-          ...repairPart,
-          tool: { ...repairPart.tool, state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED },
+    for (const state of [
+      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
+      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
+      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED,
+    ]) {
+      expect(validateProviderRequest(validProviderRequest({
+        messages: [{
+          ...message,
+          parts: [{ ...repairPart, tool: { ...repairPart.tool, state } }],
         }],
-      }],
-    }))).toEqual({
-      ok: false,
-      message: "invalid internal request",
-      code: "invalid_message_part",
-      member: "messages.parts",
-    });
+      }))).toEqual({ ok: true });
+    }
   });
 
   test("validates ProviderRequest attachment lowering hints", () => {

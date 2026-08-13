@@ -98,10 +98,10 @@ export function validRunWebRequest(): RunWebRequest {
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
-    toolUseEventId: "sevt_tool_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
     runtimeBindingToken: "binding-token",
+    toolUseEventId: "sevt_tool_1",
     input: {
       searchQuery: [{ q: "tetral", domains: [] }],
       open: [],

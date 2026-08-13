@@ -834,7 +834,6 @@ describe("ProviderClientRegistry provider streaming", () => {
               tool: {
                 callId: "call_history_patch",
                 name: "apply_patch",
-                toolUseEventId: "sevt_history_patch",
                 state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
                 inputJson: JSON.stringify(rawPatch),
                 outputOrErrorJson: JSON.stringify({ status: "success", result: "done" }),

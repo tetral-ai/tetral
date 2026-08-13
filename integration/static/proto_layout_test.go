@@ -201,10 +201,15 @@ func TestGatewayServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"optional int32 line_start = 4;",
 		"optional int32 line_end = 5;",
 		"optional int32 total_lines = 6;",
+		"reserved 3;",
+		`reserved "tool_use_event_id";`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("gateway proto missing %q", required)
 		}
+	}
+	if strings.Contains(text, "optional string tool_use_event_id = 3;") {
+		t.Fatal("Gateway RuntimeToolPart retained Runtime/Bridge durable Tool identity")
 	}
 	for _, generated := range []string{
 		"services/gateway/gen/tetral/provider_gateway/v1/provider_gateway.pb.go",

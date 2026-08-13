@@ -1291,7 +1291,6 @@ type RuntimeToolPart struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	CallId            string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
 	Name              string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	ToolUseEventId    *string                `protobuf:"bytes,3,opt,name=tool_use_event_id,json=toolUseEventId,proto3,oneof" json:"tool_use_event_id,omitempty"`
 	State             RuntimeToolPartState   `protobuf:"varint,4,opt,name=state,proto3,enum=tetral.provider_gateway.v1.RuntimeToolPartState" json:"state,omitempty"`
 	InputJson         string                 `protobuf:"bytes,5,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
 	OutputOrErrorJson string                 `protobuf:"bytes,6,opt,name=output_or_error_json,json=outputOrErrorJson,proto3" json:"output_or_error_json,omitempty"`
@@ -1339,13 +1338,6 @@ func (x *RuntimeToolPart) GetCallId() string {
 func (x *RuntimeToolPart) GetName() string {
 	if x != nil {
 		return x.Name
-	}
-	return ""
-}
-
-func (x *RuntimeToolPart) GetToolUseEventId() string {
-	if x != nil && x.ToolUseEventId != nil {
-		return *x.ToolUseEventId
 	}
 	return ""
 }
@@ -3894,16 +3886,14 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x04text\x18\x01 \x01(\tR\x04text\"O\n" +
 	"\x14RuntimeReasoningPart\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12#\n" +
-	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"\x9c\x02\n" +
+	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"\xef\x01\n" +
 	"\x0fRuntimeToolPart\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12.\n" +
-	"\x11tool_use_event_id\x18\x03 \x01(\tH\x00R\x0etoolUseEventId\x88\x01\x01\x12F\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12F\n" +
 	"\x05state\x18\x04 \x01(\x0e20.tetral.provider_gateway.v1.RuntimeToolPartStateR\x05state\x12\x1d\n" +
 	"\n" +
 	"input_json\x18\x05 \x01(\tR\tinputJson\x12/\n" +
-	"\x14output_or_error_json\x18\x06 \x01(\tR\x11outputOrErrorJsonB\x14\n" +
-	"\x12_tool_use_event_id\"\x8e\x02\n" +
+	"\x14output_or_error_json\x18\x06 \x01(\tR\x11outputOrErrorJsonJ\x04\b\x03\x10\x04R\x11tool_use_event_id\"\x8e\x02\n" +
 	"\x15RuntimeToolDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12W\n" +
@@ -4368,7 +4358,6 @@ func file_tetral_provider_gateway_v1_provider_gateway_proto_init() {
 		(*RuntimePart_Reasoning)(nil),
 		(*RuntimePart_Tool)(nil),
 	}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[7].OneofWrappers = []any{}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[8].OneofWrappers = []any{
 		(*RuntimeToolDefinition_Function)(nil),
 		(*RuntimeToolDefinition_Freeform)(nil),

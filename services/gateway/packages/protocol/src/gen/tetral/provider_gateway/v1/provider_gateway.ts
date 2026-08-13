@@ -766,7 +766,6 @@ export interface RuntimeReasoningPart {
 export interface RuntimeToolPart {
   callId: string;
   name: string;
-  toolUseEventId?: string | undefined;
   state: RuntimeToolPartState;
   inputJson: string;
   outputOrErrorJson: string;
@@ -1974,7 +1973,7 @@ export const RuntimeReasoningPart: MessageFns<RuntimeReasoningPart> = {
 };
 
 function createBaseRuntimeToolPart(): RuntimeToolPart {
-  return { callId: "", name: "", toolUseEventId: undefined, state: 0, inputJson: "", outputOrErrorJson: "" };
+  return { callId: "", name: "", state: 0, inputJson: "", outputOrErrorJson: "" };
 }
 
 export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
@@ -1984,9 +1983,6 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
     }
     if (message.name !== "") {
       writer.uint32(18).string(message.name);
-    }
-    if (message.toolUseEventId !== undefined) {
-      writer.uint32(26).string(message.toolUseEventId);
     }
     if (message.state !== 0) {
       writer.uint32(32).int32(message.state);
@@ -2021,14 +2017,6 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
           }
 
           message.name = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.toolUseEventId = reader.string();
           continue;
         }
         case 4: {
@@ -2072,11 +2060,6 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
         ? globalThis.String(object.call_id)
         : "",
       name: isSet(object.name) ? globalThis.String(object.name) : "",
-      toolUseEventId: isSet(object.toolUseEventId)
-        ? globalThis.String(object.toolUseEventId)
-        : isSet(object.tool_use_event_id)
-        ? globalThis.String(object.tool_use_event_id)
-        : undefined,
       state: isSet(object.state) ? runtimeToolPartStateFromJSON(object.state) : 0,
       inputJson: isSet(object.inputJson)
         ? globalThis.String(object.inputJson)
@@ -2099,9 +2082,6 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
     if (message.name !== "") {
       obj.name = message.name;
     }
-    if (message.toolUseEventId !== undefined) {
-      obj.toolUseEventId = message.toolUseEventId;
-    }
     if (message.state !== 0) {
       obj.state = runtimeToolPartStateToJSON(message.state);
     }
@@ -2121,7 +2101,6 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
     const message = createBaseRuntimeToolPart();
     message.callId = object.callId ?? "";
     message.name = object.name ?? "";
-    message.toolUseEventId = object.toolUseEventId ?? undefined;
     message.state = object.state ?? 0;
     message.inputJson = object.inputJson ?? "";
     message.outputOrErrorJson = object.outputOrErrorJson ?? "";

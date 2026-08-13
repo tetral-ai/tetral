@@ -31,7 +31,6 @@ describe("moonshotai Kimi request lowering", () => {
             tool: {
               callId: "call:with/slashes and spaces",
               name: "Read",
-              toolUseEventId: "sevt_1",
               state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
               inputJson: JSON.stringify({ path: "/tmp/a" }),
               outputOrErrorJson: JSON.stringify({ text: "ok" }),

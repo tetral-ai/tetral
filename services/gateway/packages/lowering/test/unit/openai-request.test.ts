@@ -247,7 +247,6 @@ describe("openai request lowering", () => {
           tool: {
             callId: "call_\uD800",
             name: "tool_\uDC00",
-            toolUseEventId: "evt_tool_surrogate",
             state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
             inputJson: "{}",
             outputOrErrorJson: "{}",

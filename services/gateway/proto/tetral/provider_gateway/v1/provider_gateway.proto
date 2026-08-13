@@ -181,9 +181,10 @@ message RuntimeReasoningPart {
 }
 
 message RuntimeToolPart {
+  reserved 3;
+  reserved "tool_use_event_id";
   string call_id = 1;
   string name = 2;
-  optional string tool_use_event_id = 3;
   RuntimeToolPartState state = 4;
   string input_json = 5;
   string output_or_error_json = 6;

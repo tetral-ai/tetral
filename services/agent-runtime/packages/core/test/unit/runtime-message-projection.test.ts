@@ -6,6 +6,10 @@ import {
 import type { RuntimeMessage, RuntimePart } from "../../src/contracts/runtime.js";
 import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
 import { toGatewayRuntimeMessages } from "../../src/runtime/message-projection.js";
+import { assembleProviderCallRequest } from "../../src/thread-loop/provider-request.js";
+import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
+import { OpenAIGPT55Rules } from "../../../../../gateway/packages/lowering/src/rules/openai.js";
+import { validateProviderRequest } from "../../../../../gateway/packages/protocol/src/bounds.js";
 import {
   buildRuntimeMessageProjectionMessage as message,
 } from "./runtime-message-builders.js";
@@ -97,7 +101,6 @@ describe("RuntimeMessageProjection", () => {
               tool: {
                 callId: "call-1",
                 name: "lookup",
-                toolUseEventId: "event-tool-1",
                 state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
                 inputJson: "{\"q\":\"hi\"}",
                 outputOrErrorJson: "{\"text\":\"result\"}",
@@ -234,9 +237,90 @@ describe("RuntimeMessageProjection", () => {
       expect(result.messages[0]?.parts[0]?.tool).toMatchObject({
         callId: "call-1",
         name: "lookup",
-        toolUseEventId: undefined,
         state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
       });
+    }
+  });
+
+  test("preserves ordinary completed, errored, and cancelled Tool lowering after carrier cleanup", () => {
+    const input = { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false } as const;
+    const cases = [
+      {
+        status: "completed" as const,
+        state: { status: "completed" as const, input, output: { text: "result", truncated: false } },
+        output: { text: "result" },
+        isError: undefined,
+      },
+      {
+        status: "error" as const,
+        state: {
+          status: "error" as const,
+          input,
+          error: { type: "provider_tool_protocol_error" as const, message: "failed", retryable: false },
+        },
+        output: { error: { type: "provider_tool_protocol_error", message: "failed", retryable: false } },
+        isError: true as const,
+      },
+      {
+        status: "cancelled" as const,
+        state: { status: "cancelled" as const, input },
+        output: { type: "text", text: "[tool execution cancelled]" },
+        isError: true as const,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const projected = toGatewayRuntimeMessages([
+        message("assistant-1", "assistant", [toolPart(testCase.state)]),
+      ]);
+      expect(projected.ok).toBe(true);
+      if (!projected.ok) {
+        continue;
+      }
+      const projectedTool = projected.messages[0]?.parts[0]?.tool;
+      expect(projectedTool).toBeDefined();
+      expect(Object.hasOwn(projectedTool ?? {}, "toolUseEventId")).toBe(false);
+      const assembled = assembleProviderCallRequest({
+        identity: {
+          workspaceId: "default",
+          sessionId: "session-a",
+          sessionThreadId: "thread-a",
+          bindingId: "binding-a",
+          bindingGeneration: 1,
+          targetPodUid: "pod-a",
+          runtimeBindingToken: "binding-token",
+        },
+        requestId: `request-${testCase.status}`,
+        modelRequestId: `model-request-${testCase.status}`,
+        currentModel: { providerId: OpenAIGPT55Rules.providerId, modelId: OpenAIGPT55Rules.modelId },
+        runtimeMessages: projected.messages,
+        runtime: { systemInstructions: "ordinary Tool regression", timeoutMs: 30_000 },
+      });
+      expect(assembled.ok).toBe(true);
+      if (!assembled.ok) {
+        continue;
+      }
+      expect(validateProviderRequest(assembled.request)).toEqual({ ok: true });
+      const lowered = lowerProviderRequest(assembled.request, OpenAIGPT55Rules, { modelOutputTokenLimit: 32_000 });
+      const toolMessages = lowered.messages.filter((loweredMessage) =>
+        loweredMessage.role === "assistant" || loweredMessage.role === "tool"
+      );
+      expect(toolMessages).toEqual([
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: { q: "hi" } }],
+        },
+        {
+          role: "tool",
+          content: [{
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "lookup",
+            output: testCase.output,
+            ...(testCase.isError === undefined ? {} : { isError: testCase.isError }),
+          }],
+        },
+      ]);
     }
   });
 

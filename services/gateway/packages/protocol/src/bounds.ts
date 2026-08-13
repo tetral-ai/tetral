@@ -444,10 +444,6 @@ function validRuntimePart(part: RuntimePart): boolean {
   return part.tool !== undefined &&
     !invalidBytes(part.tool.callId, MaxIdBytes) &&
     !invalidBytes(part.tool.name, MaxIdBytes) &&
-    (part.tool.toolUseEventId !== undefined
-      ? !invalidBytes(part.tool.toolUseEventId, MaxIdBytes)
-      : part.tool.state === RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR &&
-        part.id.startsWith("internal_invalid_tool:") && part.id.endsWith(":part")) &&
     validEnumValue(
       part.tool.state,
       RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,

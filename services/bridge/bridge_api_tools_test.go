@@ -1089,6 +1089,23 @@ func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision
 }
 
 func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequest(t *testing.T) {
+	runtimeRepair := runRuntimeInvalidToolRepairFixture(t)
+	if len(runtimeRepair.PublicToolEvents) != 0 || runtimeRepair.RunToolCalls != 0 ||
+		runtimeRepair.AcceptSandboxExecutionCalls != 0 || runtimeRepair.AwaitSandboxExecutionCalls != 0 {
+		t.Fatalf(
+			"Runtime invalid-tool repair crossed public/execution/Sandbox boundaries: events=%v run=%d accept=%d await=%d; want all zero",
+			runtimeRepair.PublicToolEvents,
+			runtimeRepair.RunToolCalls,
+			runtimeRepair.AcceptSandboxExecutionCalls,
+			runtimeRepair.AwaitSandboxExecutionCalls,
+		)
+	}
+	if len(runtimeRepair.StoreOrder) != 1 || runtimeRepair.StoreOrder[0] != "store:internal-tool-repair" {
+		t.Fatalf("Runtime invalid-tool durable operations = %v; want only internal repair", runtimeRepair.StoreOrder)
+	}
+	if runtimeRepair.ErrorType == "" || runtimeRepair.ErrorMessage == "" || runtimeRepair.ErrorRetryable {
+		t.Fatalf("Runtime invalid-tool typed error = %q/%q retryable=%t; want typed non-retryable error", runtimeRepair.ErrorType, runtimeRepair.ErrorMessage, runtimeRepair.ErrorRetryable)
+	}
 	for _, order := range []string{"ordinary_then_repair", "repair_then_ordinary"} {
 		t.Run(order, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -1096,7 +1113,9 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 			threadID := "thr_bridge_mixed_members_" + order
 			bindingID := "bind_bridge_mixed_members_" + order
 			podUID := "pod_bridge_mixed_members_" + order
-			modelRequestID := "mreq_bridge_mixed_members_" + order
+			modelRequestID := runtimeRepair.Repair.ModelRequestID
+			modelToolCallID := runtimeRepair.Repair.ModelToolCallID
+			toolName := runtimeRepair.Repair.ToolName
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -1117,8 +1136,8 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 			}
 			writeRepair := func() (*bridgev1.CommitInternalToolRepairResponse, error) {
 				return store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
-					Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: "call_missing_" + order, ToolName: "missing_tool",
-					MessageCreate: bridgeInternalToolRepairCreateForTest("call_missing_"+order, "missing_tool", "invalid tool"),
+					Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: modelToolCallID, ToolName: toolName,
+					MessageCreate: bridgeRuntimeMessageCreateFromRuntimeJSON(t, runtimeRepair.Repair.MessageCreate),
 				})
 			}
 			var repairResponse *bridgev1.CommitInternalToolRepairResponse
@@ -1163,6 +1182,65 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 			if ordinaryRows != 1 || repairRows != 1 {
 				t.Fatalf("ordinary/repair rows = %d/%d; want 1/1", ordinaryRows, repairRows)
 			}
+			var realToolUses, repairResultEvents, executableToolUses, pendingToolUses, executionJobs int
+			var repairResultPayload, repairResultVisibility string
+			var repairResultSessionVisible bool
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FILTER (WHERE type IN ('agent.tool_use', 'agent.mcp_tool_use')),
+				        count(*) FILTER (WHERE type IN ('agent.tool_result', 'agent.mcp_tool_result')),
+				        COALESCE(max(payload_json) FILTER (WHERE type = 'agent.tool_result'), '{}'),
+				        COALESCE(max(visibility) FILTER (WHERE type = 'agent.tool_result'), ''),
+				        COALESCE(bool_and(session_visible) FILTER (WHERE type = 'agent.tool_result'), false)
+				   FROM session_events
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+				    AND type IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.tool_result', 'agent.mcp_tool_result')`,
+				"default", sessionID, threadID,
+			).Scan(&realToolUses, &repairResultEvents, &repairResultPayload, &repairResultVisibility, &repairResultSessionVisible); err != nil {
+				t.Fatalf("read public Tool event census: %v", err)
+			}
+			var repairEvent struct {
+				Type            string `json:"type"`
+				ModelToolCallID string `json:"model_tool_call_id"`
+				ToolName        string `json:"tool_name"`
+				RepairKind      string `json:"repair_kind"`
+				ToolUseID       string `json:"tool_use_id"`
+				ToolUseEventID  string `json:"tool_use_event_id"`
+				MCPToolUseID    string `json:"mcp_tool_use_id"`
+			}
+			if err := json.Unmarshal([]byte(repairResultPayload), &repairEvent); err != nil {
+				t.Fatalf("decode internal repair Tool Result event: %v", err)
+			}
+			if realToolUses != 0 || repairResultEvents != 1 || repairResultVisibility != "public" || !repairResultSessionVisible ||
+				repairEvent.Type != "agent.tool_result" || repairEvent.ModelToolCallID != modelToolCallID ||
+				repairEvent.ToolName != toolName || repairEvent.RepairKind != "invalid_tool" ||
+				repairEvent.ToolUseID != "" || repairEvent.ToolUseEventID != "" || repairEvent.MCPToolUseID != "" {
+				t.Fatalf(
+					"repair Tool event census uses/results=%d/%d visibility=%q/%t payload=%+v; want one public identity-free repair result and no Tool Use",
+					realToolUses, repairResultEvents, repairResultVisibility, repairResultSessionVisible, repairEvent,
+				)
+			}
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_runtime_tool_results
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
+				"default", sessionID, threadID,
+			).Scan(&executableToolUses); err != nil {
+				t.Fatalf("count executable Tool Uses: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_pending_tool_uses
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
+				"default", sessionID, threadID,
+			).Scan(&pendingToolUses); err != nil {
+				t.Fatalf("count pending Tool Uses: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1`, "default",
+			).Scan(&executionJobs); err != nil {
+				t.Fatalf("count execution jobs: %v", err)
+			}
+			if executableToolUses != 0 || pendingToolUses != 0 || executionJobs != 0 {
+				t.Fatalf("repair created executable/pending/queued Tool work = %d/%d/%d; want 0/0/0", executableToolUses, pendingToolUses, executionJobs)
+			}
 
 			loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 				Scope: scope, RuntimeInputId: "rin_mixed_reload_" + order,
@@ -1176,31 +1254,37 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 				if len(receipts) != 1 || contextBeforeRepair == nil {
 					t.Fatalf("repair declaration = %+v; want one receipt and a pre-repair context", repairResponse.GetDeclaration())
 				}
-				repairKey := internalToolRepairKey(modelRequestID, "call_missing_"+order, "missing_tool")
+				repairKey := internalToolRepairKey(modelRequestID, modelToolCallID, toolName)
+				if repairKey != runtimeRepair.Repair.RepairKey {
+					t.Fatalf("Runtime/Bridge repair keys differ: Runtime=%q Bridge=%q", runtimeRepair.Repair.RepairKey, repairKey)
+				}
 				composed = runColdCheckpointCompositionInput(t, map[string]any{
-					"contextJson": loaded.GetContextJson(),
+					"contextJson": loaded.GetContextJson(), "providerComposition": true,
 					"hotScenario": map[string]any{
 						"kind": "internal_repair", "baseContextJson": contextBeforeRepair.GetContextJson(),
-						"receipt": runtimeReceiptFixture(t, receipts[0]),
-						"create": map[string]any{
-							"messageKind": "internal_tool_repair", "role": "assistant", "origin": "agent", "status": "completed",
-							"parts": []any{map[string]any{
-								"type": "tool", "toolCallId": "call_missing_" + order, "toolName": "missing_tool",
-								"state": map[string]any{
-									"status": "error",
-									"error":  map[string]any{"type": "provider_tool_protocol_error", "message": "invalid tool", "retryable": false},
-								},
-							},
-							},
-						},
+						"receipt":   runtimeReceiptFixture(t, receipts[0]),
+						"create":    runtimeRepair.Repair.MessageCreate,
 						"sessionId": sessionID, "sessionThreadId": threadID, "modelRequestId": modelRequestID,
 						"repairKey": repairKey, "repairEventId": receipts[0].GetEvents()[0].GetEventId(),
-						"modelToolCallId": "call_missing_" + order, "toolName": "missing_tool",
+						"modelToolCallId": modelToolCallID, "toolName": toolName,
 					},
 				})
 				if composed.HotSemantic == nil || !reflect.DeepEqual(composed.HotSemantic, composed.Semantic) {
 					t.Fatalf("repair hot/cold semantics differ: hot=%+v cold=%+v", composed.HotSemantic, composed.Semantic)
 				}
+				if composed.ProviderComposition == nil || composed.HotProviderComposition == nil ||
+					!reflect.DeepEqual(composed.HotProviderComposition, composed.ProviderComposition) {
+					t.Fatalf("repair hot/cold provider composition differs: hot=%+v cold=%+v", composed.HotProviderComposition, composed.ProviderComposition)
+				}
+				assertInvalidToolProviderComposition(
+					t,
+					composed.ProviderComposition,
+					modelToolCallID,
+					toolName,
+					runtimeRepair.ErrorType,
+					runtimeRepair.ErrorMessage,
+					runtimeRepair.InputJSON,
+				)
 			}
 			if composed.Checkpoint.Request == nil || composed.Checkpoint.Request.ModelRequestID != modelRequestID ||
 				composed.Checkpoint.Request.ToolMemberCount != 1 || composed.ReducerAction != "await_request_end" {
@@ -1223,6 +1307,121 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 				runColdCheckpointCompositionFailure(t, string(malformedJSON), "internal repair direct reference does not match its Event")
 			}
 		})
+	}
+}
+
+func assertInvalidToolProviderComposition(
+	t *testing.T,
+	composition *providerRequestCompositionResult,
+	wantCallID string,
+	wantToolName string,
+	wantErrorType string,
+	wantErrorMessage string,
+	wantInputJSON string,
+) {
+	t.Helper()
+	if composition.CarrierHasToolUseEventIDProperty {
+		t.Fatal("Runtime ProviderRequest Tool carrier retained toolUseEventId")
+	}
+	var carrierToolParts int
+	for _, message := range composition.CarrierMessages {
+		for _, part := range message.Parts {
+			if part.Tool == nil {
+				continue
+			}
+			carrierToolParts++
+			if !strings.HasPrefix(part.ID, "part_") || part.Tool.CallID != wantCallID || part.Tool.Name != wantToolName {
+				t.Fatalf("repair carrier Tool part = %+v; want opaque Bridge part_ identity and model Tool identity %q/%q", part, wantCallID, wantToolName)
+			}
+			if part.Tool.InputJSON != wantInputJSON {
+				t.Fatalf("repair carrier Tool input = %s; want exact Runtime input %s", part.Tool.InputJSON, wantInputJSON)
+			}
+			var carrierOutput struct {
+				Error struct {
+					Type      string `json:"type"`
+					Message   string `json:"message"`
+					Retryable bool   `json:"retryable"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(part.Tool.OutputOrErrorJSON), &carrierOutput); err != nil {
+				t.Fatalf("decode repair carrier error: %v", err)
+			}
+			if carrierOutput.Error.Type != wantErrorType || carrierOutput.Error.Message != wantErrorMessage || carrierOutput.Error.Retryable {
+				t.Fatalf("repair carrier error = %+v; want typed non-retryable unavailable-Tool error", carrierOutput)
+			}
+		}
+	}
+	if carrierToolParts != 1 {
+		t.Fatalf("repair carrier Tool parts = %d; want 1", carrierToolParts)
+	}
+	providerFamilies := map[string]bool{}
+	if len(composition.Strategies) == 0 {
+		t.Fatal("repair provider composition has no provider strategies")
+	}
+	for _, strategy := range composition.Strategies {
+		providerFamilies[strategy.ProviderFamily] = true
+		if !strategy.Validation.OK {
+			t.Fatalf("%s/%s Gateway validation = %+v; want accepted", strategy.ProviderID, strategy.ModelID, strategy.Validation)
+		}
+		var toolCallIndex, toolResultIndex = -1, -1
+		var toolCallCount, toolResultCount int
+		for messageIndex, rawMessage := range strategy.LoweredMessages {
+			var message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			}
+			if err := json.Unmarshal(rawMessage, &message); err != nil {
+				t.Fatalf("decode %s/%s lowered message: %v", strategy.ProviderID, strategy.ModelID, err)
+			}
+			var parts []struct {
+				Type       string          `json:"type"`
+				ToolCallID string          `json:"toolCallId"`
+				ToolName   string          `json:"toolName"`
+				Input      json.RawMessage `json:"input"`
+				Output     json.RawMessage `json:"output"`
+				IsError    bool            `json:"isError"`
+			}
+			if len(message.Content) == 0 || message.Content[0] != '[' || json.Unmarshal(message.Content, &parts) != nil {
+				continue
+			}
+			for _, part := range parts {
+				switch part.Type {
+				case "tool-call":
+					toolCallCount++
+					toolCallIndex = messageIndex
+					if part.ToolCallID != wantCallID || part.ToolName != wantToolName {
+						t.Fatalf("%s/%s lowered Tool Call = %+v; want %q/%q", strategy.ProviderID, strategy.ModelID, part, wantCallID, wantToolName)
+					}
+					var wantInput, gotInput any
+					if json.Unmarshal([]byte(wantInputJSON), &wantInput) != nil || json.Unmarshal(part.Input, &gotInput) != nil || !reflect.DeepEqual(gotInput, wantInput) {
+						t.Fatalf("%s/%s lowered Tool input = %s; want Runtime input %s", strategy.ProviderID, strategy.ModelID, part.Input, wantInputJSON)
+					}
+				case "tool-result":
+					toolResultCount++
+					toolResultIndex = messageIndex
+					if part.ToolCallID != wantCallID || part.ToolName != wantToolName || !part.IsError {
+						t.Fatalf("%s/%s lowered Tool Error = %+v; want paired error %q/%q", strategy.ProviderID, strategy.ModelID, part, wantCallID, wantToolName)
+					}
+					var output struct {
+						Error struct {
+							Type    string `json:"type"`
+							Message string `json:"message"`
+						} `json:"error"`
+					}
+					if err := json.Unmarshal(part.Output, &output); err != nil || output.Error.Type != wantErrorType || output.Error.Message != wantErrorMessage {
+						t.Fatalf("%s/%s model-visible Tool Error = %s; want typed invalid-tool error", strategy.ProviderID, strategy.ModelID, part.Output)
+					}
+				}
+			}
+		}
+		if toolCallCount != 1 || toolResultCount != 1 || toolResultIndex != toolCallIndex+1 {
+			t.Fatalf("%s/%s lowered Tool Call/Error count or adjacency = %d/%d at %d/%d", strategy.ProviderID, strategy.ModelID, toolCallCount, toolResultCount, toolCallIndex, toolResultIndex)
+		}
+	}
+	for _, family := range []string{"anthropic", "openai", "openai-compatible"} {
+		if !providerFamilies[family] {
+			t.Fatalf("repair provider composition omitted supported provider family %q", family)
+		}
 	}
 }
 

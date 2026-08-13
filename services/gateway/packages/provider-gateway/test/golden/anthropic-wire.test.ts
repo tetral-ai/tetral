@@ -2072,7 +2072,6 @@ function kimiK3ReplayGoldenRequest(
             tool: {
               callId: toolCallID,
               name: toolName,
-              toolUseEventId: "sevt_k3_replay",
               state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
               inputJson: toolInputJSON,
               outputOrErrorJson: JSON.stringify({ content: "fixture tool result" }),

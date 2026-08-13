@@ -1845,11 +1845,150 @@ type coldCheckpointCompositionResult struct {
 	ToolRouteView struct {
 		Routes []json.RawMessage `json:"routes"`
 	} `json:"toolRouteView"`
-	ReducerAction     string         `json:"-"`
-	DerivedRepairKeys []string       `json:"-"`
-	Semantic          any            `json:"-"`
-	HotSemantic       any            `json:"-"`
-	HotToolPart       map[string]any `json:"-"`
+	ReducerAction          string                            `json:"-"`
+	DerivedRepairKeys      []string                          `json:"-"`
+	Semantic               any                               `json:"-"`
+	HotSemantic            any                               `json:"-"`
+	HotToolPart            map[string]any                    `json:"-"`
+	ProviderComposition    *providerRequestCompositionResult `json:"-"`
+	HotProviderComposition *providerRequestCompositionResult `json:"-"`
+}
+
+type providerRequestCompositionResult struct {
+	CarrierMessages                  []providerCarrierMessage      `json:"carrierMessages"`
+	CarrierHasToolUseEventIDProperty bool                          `json:"carrierHasToolUseEventIdProperty"`
+	Strategies                       []providerStrategyComposition `json:"strategies"`
+}
+
+type providerCarrierMessage struct {
+	Parts []struct {
+		ID   string `json:"id"`
+		Tool *struct {
+			CallID            string `json:"callId"`
+			Name              string `json:"name"`
+			State             int32  `json:"state"`
+			InputJSON         string `json:"inputJson"`
+			OutputOrErrorJSON string `json:"outputOrErrorJson"`
+		} `json:"tool"`
+	} `json:"parts"`
+}
+
+type providerStrategyComposition struct {
+	ProviderID     string `json:"providerId"`
+	ModelID        string `json:"modelId"`
+	ProviderFamily string `json:"providerFamily"`
+	Validation     struct {
+		OK     bool   `json:"ok"`
+		Code   string `json:"code"`
+		Member string `json:"member"`
+	} `json:"validation"`
+	LoweredMessages []json.RawMessage `json:"loweredMessages"`
+}
+
+type runtimeInvalidToolRepairFixtureResult struct {
+	ResultType string `json:"resultType"`
+	Repair     struct {
+		ModelRequestID  string          `json:"modelRequestId"`
+		ModelToolCallID string          `json:"modelToolCallId"`
+		ToolName        string          `json:"toolName"`
+		RepairKey       string          `json:"repairKey"`
+		MessageCreate   json.RawMessage `json:"messageCreate"`
+	} `json:"repair"`
+	StoreOrder                  []string `json:"storeOrder"`
+	PublicToolEvents            []string `json:"publicToolEvents"`
+	RunToolCalls                int      `json:"runToolCalls"`
+	AcceptSandboxExecutionCalls int      `json:"acceptSandboxExecutionCalls"`
+	AwaitSandboxExecutionCalls  int      `json:"awaitSandboxExecutionCalls"`
+	ErrorType                   string   `json:"-"`
+	ErrorMessage                string   `json:"-"`
+	ErrorRetryable              bool     `json:"-"`
+	InputJSON                   string   `json:"-"`
+}
+
+func runRuntimeInvalidToolRepairFixture(t *testing.T) runtimeInvalidToolRepairFixtureResult {
+	t.Helper()
+	command := exec.CommandContext(context.Background(), "bun", "packages/runtime-pod/test/fixtures/invalid-tool-repair-declaration.ts") //nolint:gosec // Fixed repository fixture.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run Runtime invalid-tool repair fixture: %v: %s", err, output)
+	}
+	var result runtimeInvalidToolRepairFixtureResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode Runtime invalid-tool repair fixture: %v: %s", err, output)
+	}
+	var create struct {
+		MessageKind string `json:"messageKind"`
+		Role        string `json:"role"`
+		Origin      string `json:"origin"`
+		Status      string `json:"status"`
+		Parts       []struct {
+			Type  string `json:"type"`
+			State struct {
+				Status string `json:"status"`
+				Input  struct {
+					Value json.RawMessage `json:"value"`
+				} `json:"input"`
+				Error struct {
+					Type      string `json:"type"`
+					Message   string `json:"message"`
+					Retryable bool   `json:"retryable"`
+				} `json:"error"`
+			} `json:"state"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal(result.Repair.MessageCreate, &create); err != nil {
+		t.Fatalf("decode Runtime invalid-tool message create: %v", err)
+	}
+	if result.ResultType != "completed" || create.MessageKind != "internal_tool_repair" ||
+		create.Role != "assistant" || create.Origin != "agent" || create.Status != "completed" ||
+		len(create.Parts) != 1 || create.Parts[0].Type != "tool" || create.Parts[0].State.Status != "error" {
+		t.Fatalf("Runtime invalid-tool repair fixture = %+v create=%+v; want one completed internal Tool error", result, create)
+	}
+	result.ErrorType = create.Parts[0].State.Error.Type
+	result.ErrorMessage = create.Parts[0].State.Error.Message
+	result.ErrorRetryable = create.Parts[0].State.Error.Retryable
+	result.InputJSON = string(create.Parts[0].State.Input.Value)
+	if !json.Valid(create.Parts[0].State.Input.Value) {
+		t.Fatalf("Runtime invalid-tool input = %s; want valid exact JSON", create.Parts[0].State.Input.Value)
+	}
+	return result
+}
+
+func bridgeRuntimeMessageCreateFromRuntimeJSON(t *testing.T, raw json.RawMessage) *bridgev1.RuntimeMessageCreate {
+	t.Helper()
+	var create map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &create); err != nil {
+		t.Fatalf("decode Runtime message create for Bridge: %v", err)
+	}
+	var messageKind string
+	if err := json.Unmarshal(create["messageKind"], &messageKind); err != nil || messageKind != "internal_tool_repair" {
+		t.Fatalf("Runtime message kind = %q, %v; want internal_tool_repair", messageKind, err)
+	}
+	var parts []json.RawMessage
+	if err := json.Unmarshal(create["parts"], &parts); err != nil || len(parts) != 1 {
+		t.Fatalf("Runtime repair parts = %d, %v; want one", len(parts), err)
+	}
+	delete(create, "messageKind")
+	delete(create, "parts")
+	messageInfoJSON, err := json.Marshal(create)
+	if err != nil {
+		t.Fatalf("encode Runtime message info for Bridge: %v", err)
+	}
+	var partInfo struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(parts[0], &partInfo); err != nil || partInfo.Type != "tool" {
+		t.Fatalf("Runtime repair part type = %q, %v; want tool", partInfo.Type, err)
+	}
+	return &bridgev1.RuntimeMessageCreate{
+		MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR,
+		MessageInfoJson: string(messageInfoJSON),
+		Parts: []*bridgev1.RuntimePartCreate{{
+			PartKind: partInfo.Type,
+			PartJson: string(parts[0]),
+		}},
+	}
 }
 
 func runColdCheckpointComposition(t *testing.T, contextJSON string) coldCheckpointCompositionResult {
@@ -1874,15 +2013,17 @@ func runColdCheckpointCompositionInput(t *testing.T, input any) coldCheckpointCo
 		t.Fatalf("run cold checkpoint composition: %v: %s", err, output)
 	}
 	var wire struct {
-		Checkpoint        json.RawMessage `json:"checkpoint"`
-		ToolRouteView     json.RawMessage `json:"toolRouteView"`
-		ReducerAction     json.RawMessage `json:"reducerAction"`
-		DerivedRepairKeys []string        `json:"derivedRepairKeys"`
-		Hot               *struct {
-			Checkpoint    json.RawMessage `json:"checkpoint"`
-			ToolRouteView json.RawMessage `json:"toolRouteView"`
-			ReducerAction json.RawMessage `json:"reducerAction"`
-			ToolPart      json.RawMessage `json:"toolPart"`
+		Checkpoint          json.RawMessage                   `json:"checkpoint"`
+		ToolRouteView       json.RawMessage                   `json:"toolRouteView"`
+		ReducerAction       json.RawMessage                   `json:"reducerAction"`
+		DerivedRepairKeys   []string                          `json:"derivedRepairKeys"`
+		ProviderComposition *providerRequestCompositionResult `json:"providerComposition"`
+		Hot                 *struct {
+			Checkpoint          json.RawMessage                   `json:"checkpoint"`
+			ToolRouteView       json.RawMessage                   `json:"toolRouteView"`
+			ReducerAction       json.RawMessage                   `json:"reducerAction"`
+			ToolPart            json.RawMessage                   `json:"toolPart"`
+			ProviderComposition *providerRequestCompositionResult `json:"providerComposition"`
 		} `json:"hot"`
 	}
 	if err := json.Unmarshal(output, &wire); err != nil {
@@ -1907,6 +2048,7 @@ func runColdCheckpointCompositionInput(t *testing.T, input any) coldCheckpointCo
 	result.ReducerAction = reducerAction.Action
 	result.DerivedRepairKeys = wire.DerivedRepairKeys
 	result.Semantic = decodeCheckpointSemantic(t, wire.Checkpoint, wire.ToolRouteView, wire.ReducerAction)
+	result.ProviderComposition = wire.ProviderComposition
 	if wire.Hot != nil {
 		result.HotSemantic = decodeCheckpointSemantic(t, wire.Hot.Checkpoint, wire.Hot.ToolRouteView, wire.Hot.ReducerAction)
 		if len(wire.Hot.ToolPart) > 0 {
@@ -1914,6 +2056,7 @@ func runColdCheckpointCompositionInput(t *testing.T, input any) coldCheckpointCo
 				t.Fatalf("decode hot Tool part: %v", err)
 			}
 		}
+		result.HotProviderComposition = wire.Hot.ProviderComposition
 	}
 	return result
 }
