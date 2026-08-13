@@ -17,6 +17,41 @@ import type { RuntimeReceiptEvidenceOutcome } from "./metrics.js";
 /** Structured JSON logger accepted by Runtime Pod composition and runtime services. */
 export type RuntimePodLogger = TetralJsonLogger<RuntimePodLogRecord>;
 
+/** Stable phases for strict parsing of one Bridge cold-context response. */
+export type RuntimeContextLoadParsePhase =
+  | "context_json_parse"
+  | "message_collection_parse"
+  | "durable_message_parse"
+  | "turn_facts_parse"
+  | "thread_context_prefix_parse"
+  | "thread_metadata_parse"
+  | "runtime_config_parse"
+  | "mcp_manifests_parse"
+  | "pending_tool_uses_parse"
+  | "pending_sandbox_executions_parse"
+  | "background_tools_parse"
+  | "pending_attachments_parse"
+  | "pending_agent_mail_parse"
+  | "cold_coverage_parse";
+
+/** Stable, payload-free reasons paired with Runtime cold-context parse phases. */
+export type RuntimeContextLoadParseReason =
+  | "invalid_context_json"
+  | "invalid_message_collection_shape"
+  | "invalid_tool_error_shape"
+  | "invalid_durable_message_shape"
+  | "invalid_turn_facts_shape"
+  | "invalid_thread_context_prefix_shape"
+  | "invalid_thread_metadata_shape"
+  | "invalid_runtime_config_shape"
+  | "invalid_mcp_manifests_shape"
+  | "invalid_pending_tool_uses_shape"
+  | "invalid_pending_sandbox_executions_shape"
+  | "invalid_background_tools_shape"
+  | "invalid_pending_attachments_shape"
+  | "invalid_pending_agent_mail_shape"
+  | "invalid_cold_coverage_shape";
+
 /** Enumerates Runtime Pod-specific fields layered on the shared structured log record. */
 export type RuntimePodLogRecord = TetralLogRecord & {
   readonly event: string;
@@ -43,8 +78,8 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "mcp.tool_catalog.eligible"?: boolean;
   readonly "reconstruction.phase"?: "cold_checkpoint";
   readonly "failure.kind"?: "invalid_durable_facts";
-  readonly phase?: "durable_message_parse";
-  readonly reason?: "invalid_tool_error_shape" | "invalid_durable_message_shape";
+  readonly phase?: RuntimeContextLoadParsePhase;
+  readonly reason?: RuntimeContextLoadParseReason;
 };
 
 /** Closed, non-sensitive Runtime Pod startup stages. */
@@ -87,20 +122,21 @@ export function recordCheckpointReconstructionFailure(
   }
 }
 
-/** Emits identity-only evidence when strict durable Message parsing rejects cold context. */
-export function recordDurableMessageParseFailure(
+/** Emits identity-only evidence when a strict cold-context parse phase rejects Bridge data. */
+export function recordContextLoadParseFailure(
   logger: RuntimePodLogger | undefined,
   identity: { readonly workspaceId: string; readonly sessionId: string; readonly sessionThreadId: string },
-  reason: "invalid_tool_error_shape" | "invalid_durable_message_shape",
+  phase: RuntimeContextLoadParsePhase,
+  reason: RuntimeContextLoadParseReason,
 ): void {
   try {
     logger?.error({
       event: "runtime_context_load_parse_failed",
       "event.kind": "runtime_context_load_parse_failed",
       component: "agent-runtime",
-      message: "durable Runtime Message projection was rejected",
+      message: "durable Runtime context projection was rejected",
       operation: "load_context",
-      phase: "durable_message_parse",
+      phase,
       reason,
       "workspace.id": identity.workspaceId,
       "session.id": identity.sessionId,

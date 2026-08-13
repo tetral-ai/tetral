@@ -102,10 +102,12 @@ import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { ApprovalReviewerThreadCreation, RuntimeApprovalReviewerThreadCreator } from "./approval-reviewer.js";
 import type { RuntimeControlInputCommitter } from "./runtime-service.js";
 import {
-  recordDurableMessageParseFailure,
+  recordContextLoadParseFailure,
   recordRuntimeReceiptEvidence,
 } from "./logger.js";
 import type {
+  RuntimeContextLoadParsePhase,
+  RuntimeContextLoadParseReason,
   RuntimePodLogger,
   RuntimeReceiptEvidence,
   RuntimeReceiptEvidenceMetrics,
@@ -2655,29 +2657,110 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
   readonly coldCoverage: RuntimeColdCoverage;
 } {
   try {
-    const parsed = JSON.parse(contextJson) as Record<string, unknown>;
-    if (!Array.isArray(parsed.messages)) {
-      throw new Error("load context messages are malformed");
-    }
-    let messages: readonly DurableRuntimeMessage[];
-    try {
-      messages = parsed.messages.map((message) => DurableRuntimeMessageSchema.parse(message));
-    } catch (error) {
-      recordDurableMessageParseFailure(logger, input, durableMessageParseFailureReason(parsed.messages));
-      throw error;
-    }
-    const turnFacts = ThreadTurnLoadFactsSchema.parse(parsed.turnFacts);
-    const threadContextPrefix = parseThreadContextPrefix(parsed.threadContextPrefix);
+    const parsed = parseContextLoadPhase(logger, input, "context_json_parse", "invalid_context_json", () => {
+      const value: unknown = JSON.parse(contextJson);
+      if (!isRecord(value)) {
+        throw new Error("load context JSON is malformed");
+      }
+      return value;
+    });
+    const messageValues = parseContextLoadPhase(
+      logger,
+      input,
+      "message_collection_parse",
+      "invalid_message_collection_shape",
+      () => {
+        if (!Array.isArray(parsed.messages)) {
+          throw new Error("load context messages are malformed");
+        }
+        return parsed.messages;
+      },
+    );
+    const messages = parseContextLoadPhase(
+      logger,
+      input,
+      "durable_message_parse",
+      () => durableMessageParseFailureReason(messageValues),
+      () => messageValues.map((message) => DurableRuntimeMessageSchema.parse(message)),
+    );
+    const turnFacts = parseContextLoadPhase(
+      logger,
+      input,
+      "turn_facts_parse",
+      "invalid_turn_facts_shape",
+      () => ThreadTurnLoadFactsSchema.parse(parsed.turnFacts),
+    );
+    const threadContextPrefix = parseContextLoadPhase(
+      logger,
+      input,
+      "thread_context_prefix_parse",
+      "invalid_thread_context_prefix_shape",
+      () => parseThreadContextPrefix(parsed.threadContextPrefix),
+    );
     const durableTurnId = stringField(parsed, "durableTurnId");
-    const thread = parseThreadMetadata(parsed.thread);
-    const runtimeConfigPatch = runtimeConfigPatchFromContextPayload(parsed, input);
-    const mcpManifests = mcpManifestPatchesFromContextPayload(parsed.mcpManifests, input);
-    const pendingToolUses = parsePendingToolUses(parsed.pendingToolUses);
-    const pendingSandboxExecutions = parsePendingSandboxExecutions(parsed.pendingSandboxExecutions);
-    const backgroundTools = parseBackgroundTools(parsed.backgroundTools);
-    const pendingAttachments = parsePendingAttachments(parsed.pendingAttachments);
-    const pendingAgentMail = parsePendingAgentMail(parsed.pendingAgentMail);
-    const coldCoverage = parseColdCoverage(parsed.coldCoverage);
+    const thread = parseContextLoadPhase(
+      logger,
+      input,
+      "thread_metadata_parse",
+      "invalid_thread_metadata_shape",
+      () => parseThreadMetadata(parsed.thread),
+    );
+    const runtimeConfigPatch = parseContextLoadPhase(
+      logger,
+      input,
+      "runtime_config_parse",
+      "invalid_runtime_config_shape",
+      () => runtimeConfigPatchFromContextPayload(parsed, input),
+    );
+    const mcpManifests = parseContextLoadPhase(
+      logger,
+      input,
+      "mcp_manifests_parse",
+      "invalid_mcp_manifests_shape",
+      () => mcpManifestPatchesFromContextPayload(parsed.mcpManifests, input),
+    );
+    const pendingToolUses = parseContextLoadPhase(
+      logger,
+      input,
+      "pending_tool_uses_parse",
+      "invalid_pending_tool_uses_shape",
+      () => parsePendingToolUses(parsed.pendingToolUses),
+    );
+    const pendingSandboxExecutions = parseContextLoadPhase(
+      logger,
+      input,
+      "pending_sandbox_executions_parse",
+      "invalid_pending_sandbox_executions_shape",
+      () => parsePendingSandboxExecutions(parsed.pendingSandboxExecutions),
+    );
+    const backgroundTools = parseContextLoadPhase(
+      logger,
+      input,
+      "background_tools_parse",
+      "invalid_background_tools_shape",
+      () => parseBackgroundTools(parsed.backgroundTools),
+    );
+    const pendingAttachments = parseContextLoadPhase(
+      logger,
+      input,
+      "pending_attachments_parse",
+      "invalid_pending_attachments_shape",
+      () => parsePendingAttachments(parsed.pendingAttachments),
+    );
+    const pendingAgentMail = parseContextLoadPhase(
+      logger,
+      input,
+      "pending_agent_mail_parse",
+      "invalid_pending_agent_mail_shape",
+      () => parsePendingAgentMail(parsed.pendingAgentMail),
+    );
+    const coldCoverage = parseContextLoadPhase(
+      logger,
+      input,
+      "cold_coverage_parse",
+      "invalid_cold_coverage_shape",
+      () => parseColdCoverage(parsed.coldCoverage),
+    );
     return {
       messages,
       turnFacts,
@@ -2700,6 +2783,26 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
       sessionId: input.sessionId,
       reason: "load context returned malformed RuntimeMessage projection",
     });
+  }
+}
+
+function parseContextLoadPhase<T>(
+  logger: RuntimePodLogger | undefined,
+  input: RuntimeThreadControlState,
+  phase: RuntimeContextLoadParsePhase,
+  reason: RuntimeContextLoadParseReason | (() => RuntimeContextLoadParseReason),
+  parse: () => T,
+): T {
+  try {
+    return parse();
+  } catch (error) {
+    recordContextLoadParseFailure(
+      logger,
+      input,
+      phase,
+      typeof reason === "function" ? reason() : reason,
+    );
+    throw error;
   }
 }
 

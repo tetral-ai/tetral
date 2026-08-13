@@ -137,7 +137,7 @@ describe("Bridge runtime declaration adapters", () => {
       event: "runtime_context_load_parse_failed",
       "event.kind": "runtime_context_load_parse_failed",
       component: "agent-runtime",
-      message: "durable Runtime Message projection was rejected",
+      message: "durable Runtime context projection was rejected",
       operation: "load_context",
       phase: "durable_message_parse",
       reason: "invalid_tool_error_shape",
@@ -149,6 +149,174 @@ describe("Bridge runtime declaration adapters", () => {
     expect(serializedRecords).not.toContain(secretMessage);
     expect(serializedRecords).not.toContain(secretInput);
     expect(serializedRecords).not.toContain(secretProviderBody);
+  });
+
+  test("logs one safe phase and reason for every rejected cold-context parse boundary", async () => {
+    const canary = "CANARY_REJECTED_COLD_CONTEXT";
+    const validContext = () => ({
+      messages: [],
+      turnFacts: { events: [], internalRepairs: [] },
+      coldCoverage: {
+        pendingToolIds: [],
+        pendingSandboxExecutionIds: [],
+        pendingAttachmentIdentities: [],
+        undeliveredMailDeliveryIds: [],
+      },
+      thread: {
+        parentThreadId: null,
+        role: "main",
+        visibility: "public",
+        taskName: null,
+        agentType: "general",
+        status: "idle",
+      },
+    });
+    const cases = [
+      {
+        name: "context JSON",
+        contextJson: () => `{${canary}`,
+        phase: "context_json_parse",
+        reason: "invalid_context_json",
+      },
+      {
+        name: "Message collection",
+        contextJson: () => JSON.stringify({ ...validContext(), messages: canary }),
+        phase: "message_collection_parse",
+        reason: "invalid_message_collection_shape",
+      },
+      {
+        name: "durable Message",
+        contextJson: () => JSON.stringify({ ...validContext(), messages: [canary] }),
+        phase: "durable_message_parse",
+        reason: "invalid_durable_message_shape",
+      },
+      {
+        name: "turn facts",
+        contextJson: () => JSON.stringify({ ...validContext(), turnFacts: canary }),
+        phase: "turn_facts_parse",
+        reason: "invalid_turn_facts_shape",
+      },
+      {
+        name: "thread context prefix",
+        contextJson: () => JSON.stringify({ ...validContext(), threadContextPrefix: canary }),
+        phase: "thread_context_prefix_parse",
+        reason: "invalid_thread_context_prefix_shape",
+      },
+      {
+        name: "thread metadata",
+        contextJson: () => JSON.stringify({ ...validContext(), thread: canary }),
+        phase: "thread_metadata_parse",
+        reason: "invalid_thread_metadata_shape",
+      },
+      {
+        name: "Runtime config",
+        contextJson: () => JSON.stringify({
+          ...validContext(),
+          runtimeConfig: { configGeneration: canary, installedTools: [] },
+        }),
+        phase: "runtime_config_parse",
+        reason: "invalid_runtime_config_shape",
+      },
+      {
+        name: "MCP manifests",
+        contextJson: () => JSON.stringify({ ...validContext(), mcpManifests: canary }),
+        phase: "mcp_manifests_parse",
+        reason: "invalid_mcp_manifests_shape",
+      },
+      {
+        name: "pending Tool uses",
+        contextJson: () => JSON.stringify({ ...validContext(), pendingToolUses: canary }),
+        phase: "pending_tool_uses_parse",
+        reason: "invalid_pending_tool_uses_shape",
+      },
+      {
+        name: "pending Sandbox executions",
+        contextJson: () => JSON.stringify({ ...validContext(), pendingSandboxExecutions: canary }),
+        phase: "pending_sandbox_executions_parse",
+        reason: "invalid_pending_sandbox_executions_shape",
+      },
+      {
+        name: "background Tools",
+        contextJson: () => JSON.stringify({ ...validContext(), backgroundTools: canary }),
+        phase: "background_tools_parse",
+        reason: "invalid_background_tools_shape",
+      },
+      {
+        name: "pending attachments",
+        contextJson: () => JSON.stringify({ ...validContext(), pendingAttachments: canary }),
+        phase: "pending_attachments_parse",
+        reason: "invalid_pending_attachments_shape",
+      },
+      {
+        name: "pending agent mail",
+        contextJson: () => JSON.stringify({ ...validContext(), pendingAgentMail: canary }),
+        phase: "pending_agent_mail_parse",
+        reason: "invalid_pending_agent_mail_shape",
+      },
+      {
+        name: "cold coverage",
+        contextJson: () => JSON.stringify({ ...validContext(), coldCoverage: canary }),
+        phase: "cold_coverage_parse",
+        reason: "invalid_cold_coverage_shape",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const bridge = new DeclarationBridge();
+      bridge.loadContextJson = testCase.contextJson();
+      const records: Record<string, unknown>[] = [];
+      const loader = new BridgeAPIContextLoader({
+        ...options(bridge),
+        logger: {
+          info: () => undefined,
+          error: (record: Record<string, unknown>) => records.push(record),
+        },
+      });
+
+      await expect(loader.loadThreadContext(control(`rin_invalid_${testCase.phase}`))).rejects.toMatchObject({
+        type: "context-loader",
+        code: "schema_mismatch",
+        retryable: false,
+        fatal: true,
+      });
+      expect(records, testCase.name).toEqual([{
+        event: "runtime_context_load_parse_failed",
+        "event.kind": "runtime_context_load_parse_failed",
+        component: "agent-runtime",
+        message: "durable Runtime context projection was rejected",
+        operation: "load_context",
+        phase: testCase.phase,
+        reason: testCase.reason,
+        "workspace.id": "wksp_1",
+        "session.id": "sesn_1",
+        "thread.id": "thrd_1",
+      }]);
+      expect(JSON.stringify(records), testCase.name).not.toContain(canary);
+    }
+  });
+
+  test("keeps cold-context rejection authoritative when its diagnostic sink throws", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.loadContextJson = "{";
+    let diagnosticAttempts = 0;
+    const loader = new BridgeAPIContextLoader({
+      ...options(bridge),
+      logger: {
+        info: () => undefined,
+        error: () => {
+          diagnosticAttempts += 1;
+          throw new Error("diagnostic sink unavailable");
+        },
+      },
+    });
+
+    await expect(loader.loadThreadContext(control("rin_invalid_json_fail_open"))).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      retryable: false,
+      fatal: true,
+    });
+    expect(diagnosticAttempts).toBe(1);
   });
 
   test("commits accepted input as positional message creates", async () => {
