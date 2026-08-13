@@ -3538,7 +3538,14 @@ function coordinateRuntimeToolJobEffect(
       }
       const reviewerOutcome = yield* Effect.gen(function* () {
         if (options.reviewApproval === undefined || session.approvalReviewerManager === undefined) {
-          return { type: "failed" as const, message: "approval reviewer is unavailable" };
+          return {
+            type: "settlement_failed" as const,
+            error: normalizeSessionEventWriterError({
+              code: "unknown",
+              sessionId: session.sessionId,
+              writeId: `rwrite_${modelRequestId}_${job.modelToolCallId}_reviewer_unavailable`,
+            }),
+          };
         }
         return yield* options.reviewApproval({
             workspaceId: session.identity.workspaceId,

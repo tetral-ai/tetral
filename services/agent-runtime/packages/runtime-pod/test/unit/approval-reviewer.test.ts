@@ -590,6 +590,58 @@ describe("Runtime approval reviewer", () => {
     await busyReview;
   });
 
+  test("evicts an acknowledged sidecar when hot close fails or durable close throws", async () => {
+    for (const testCase of [
+      { name: "hot close rejected", hostOptions: { markThreadClosedOk: false }, closeThrows: false, reason: "hot_close_failed" },
+      { name: "durable close throws", hostOptions: {}, closeThrows: true, reason: "durable_close_failed" },
+    ] as const) {
+      const blocked = deferred<void>();
+      const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", testCase.name)], {
+        waitGate: async (command) => {
+          const input = host.inputs.findLast((candidate) => candidate.sessionThreadId === command.sessionThreadId);
+          if (input?.kind === "approval_review" && input.targetModelToolCallId === "tool_call_busy") {
+            await blocked.promise;
+          }
+        },
+        ...testCase.hostOptions,
+      });
+      const threadCreator = new RecordingReviewerThreadCreator([], undefined, { ok: true }, testCase.closeThrows);
+      const logger = new RecordingLogger();
+      const reviewer = createRuntimeApprovalReviewer(() => host, {
+        model: platformReviewerModel,
+        threadCreator,
+        now: () => createdAt,
+        waitTimeoutMs: 100,
+        logger,
+      });
+      const approvalReviewerManager = new AutoApprovalReviewerManager();
+      const parent = userMessage("sesn_1", `msg_parent_${testCase.reason}`, "parent");
+      const busyReview = reviewer(validReviewRequest({
+        approvalReviewerManager,
+        targetModelToolCallId: "tool_call_busy",
+        parentTranscript: { generation: 1, messages: [parent] },
+      }));
+      await waitFor(() => host.waits.length >= 1);
+
+      await expect(reviewer(validReviewRequest({
+        approvalReviewerManager,
+        targetModelToolCallId: `tool_call_${testCase.reason}`,
+        parentTranscript: { generation: 1, messages: [parent] },
+      }))).resolves.toMatchObject({ type: "decision", outcome: "allow" });
+      expect(host.reviewerEvictions).toEqual([expect.objectContaining({
+        reviewerThreadId: expect.stringContaining("thrd_aprv_sidecar"),
+      })]);
+      expect(logger.records).toContainEqual(expect.objectContaining({
+        event: "approval_review_lifecycle_failure",
+        "reviewer.kind": "sidecar",
+        "lifecycle.reason": testCase.reason,
+      }));
+
+      blocked.resolve(undefined);
+      await busyReview;
+    }
+  });
+
   test("creates the first overlapping sidecar unseeded with a full parent feed", async () => {
     const blocked = deferred<void>();
     const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "safe")], {
@@ -1729,6 +1781,7 @@ class RecordingReviewerHost {
       readonly waitGate?: ((command: RuntimeThreadControlState) => Promise<void>) | undefined;
       readonly interruptGate?: ((command: RuntimeThreadControlState) => Promise<void>) | undefined;
       readonly interruptOk?: boolean;
+      readonly markThreadClosedOk?: boolean;
     } = {},
   ) {}
 
@@ -1884,6 +1937,9 @@ class RecordingReviewerHost {
 
   async markThreadClosed(command: RuntimeThreadControlState): Promise<SessionManager.ThreadLifecycleResult> {
     this.closedThreads.push(command.sessionThreadId);
+    if (this.options.markThreadClosedOk === false) {
+      return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "thread_busy" };
+    }
     return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
   }
 
@@ -2002,6 +2058,7 @@ class RecordingReviewerThreadCreator {
     private readonly closeResult:
       | { readonly ok: true }
       | { readonly ok: false; readonly message: string; readonly discardHotState?: boolean } = { ok: true },
+    private readonly closeThrows = false,
   ) {}
 
   async createApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
@@ -2013,6 +2070,9 @@ class RecordingReviewerThreadCreator {
   async closeApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
     this.closes.push(input);
     await this.closeGate;
+    if (this.closeThrows) {
+      throw new Error("secret durable close failure");
+    }
     return this.closeResult;
   }
 }

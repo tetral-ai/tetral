@@ -93,9 +93,8 @@ export interface ApprovalReviewerThreadCreation {
  * approval-reviewer manager, runs the selected trunk or sidecar through the
  * supplied hot Runtime host, accepts only an exact allow-or-deny JSON shape,
  * and commits the resulting decision before caching and returning it. Runtime,
- * timeout, and parse failures stay in the value channel as failed reviews;
- * caller cancellation interrupts the effect and triggers separately owned
- * settlement and cleanup.
+ * timeout, parse, and caller-cancellation defects are normalized as uncertain
+ * settlement after the review lease has initiated its owned cleanup.
  */
 export function createRuntimeApprovalReviewer(
   hostRef: () => RuntimeSubAgentRunHost | undefined,

@@ -4005,6 +4005,43 @@ test("approve_for_me reviewer failure falls back to public ask approval", async 
         stop_reason: { type: "requires_action", event_ids: ["sevt_tool_1"] },
     });
 });
+test("missing reviewer infrastructure fails progression without publishing a fallback Tool Use", async () => {
+    const session = new ThreadRuntime("sesn_1");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const appended: SessionEvent[] = [];
+    let runToolCalls = 0;
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+        approvalMode: "approve_for_me",
+        events: [
+            { type: "tool-call", id: "tool-1", toolName: "Write", input: { file_path: "src/a.ts", content: "ok" }, inputPreview: { preview: "{}", truncated: false } },
+            { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+            systemInstructions: "approval reviewer unavailable test system",
+            toolCatalog: catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" }),
+        },
+        reviewApproval: () => Effect.succeed({ type: "failed" as const }),
+        runTool: () => {
+            runToolCalls += 1;
+            return { type: "completed", output: { text: "must not run", truncated: false } };
+        },
+    }))));
+
+    expect(result).toMatchObject({
+        type: "failed",
+        error: { type: "session-event-writer", code: "unknown", retryable: false },
+        releaseSession: { reason: "event_write_failed" },
+    });
+    expect(runToolCalls).toBe(0);
+    expect(appended.some((event) => event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use")).toBe(false);
+});
 test("an unexpected reviewer defect fails parent progression without publishing or caching approval", async () => {
     const reviewerManager = new AutoApprovalReviewerManager();
     const rememberDecision = jest.spyOn(reviewerManager, "rememberDecision");

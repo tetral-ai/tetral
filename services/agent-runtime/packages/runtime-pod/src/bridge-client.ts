@@ -413,9 +413,10 @@ export class BridgeAPITaskNotificationCommitter {
       const code = grpcStatusCode(error);
       if (code === status.INVALID_ARGUMENT) {
         return {
-          ok: true as const,
-          rejected: true as const,
-          errorCode: "task_notification_result_invalid" as const,
+          ok: false as const,
+          retryable: false,
+          errorCode: "task_notification_result_invalid",
+          message: "task notification durable commit failed",
         };
       }
       if (code === status.ALREADY_EXISTS) {

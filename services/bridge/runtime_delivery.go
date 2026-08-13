@@ -1042,10 +1042,9 @@ func validateAgentMailFinalizationIdentityTx(ctx context.Context, tx *dbconnect.
 		return invalidRuntimeFinalizationIdentity("agent mail envelope conflicts with Queue custody")
 	}
 	if inbox.status == "queued" {
-		if len(inbox.eventIDs) != 0 || inbox.sequenceFrom.Valid || inbox.sequenceTo.Valid {
-			return invalidRuntimeFinalizationIdentity("queued agent mail has delivery event identity")
+		if len(inbox.eventIDs) == 0 && !inbox.sequenceFrom.Valid && !inbox.sequenceTo.Valid {
+			return nil
 		}
-		return nil
 	}
 	receivedEventID := stableRuntimeID("agent_mail_received_event", job.WorkspaceID, job.SessionID, job.SessionThreadID, deliveryID)
 	if len(inbox.eventIDs) != 1 || inbox.eventIDs[0] != receivedEventID || !inbox.sequenceFrom.Valid || !inbox.sequenceTo.Valid || inbox.sequenceFrom.Int64 != inbox.sequenceTo.Int64 {

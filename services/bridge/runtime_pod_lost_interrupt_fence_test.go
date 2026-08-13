@@ -67,7 +67,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 					receivedEventID := "sevt_inter_agent_above_" + suffix
 					seedBridgeAPIEvent(t, admin, "default", sessionID, targetThreadID, receivedEventID, 3, "agent.thread_message_received", `{"delivery_id":"`+deliveryID+`"}`)
 					if state == "committed_inter_agent_above" {
-						seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, targetThreadID, "agent_mail:"+deliveryID, "agent_mail", `[`+fmt.Sprintf("%q", receivedEventID)+`]`, "accepted", bindingID, binding.PodUID, 3, 3)
+						seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, targetThreadID, "agent_mail:"+deliveryID, "agent_mail", `[`+fmt.Sprintf("%q", receivedEventID)+`]`, "committed", bindingID, binding.PodUID, 3, 3)
 					}
 				}
 				otherThreadID := "thrd_pod_loss_interrupt_other_" + suffix
@@ -131,12 +131,8 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 				).Scan(&completionJobCount); err != nil {
 					t.Fatalf("count pod-loss completion jobs: %v", err)
 				}
-				wantAgentMailJobs := 0
-				if state == "committed_inter_agent_above" {
-					wantAgentMailJobs = 1
-				}
-				if completionMailCount != 0 || completionJobCount != wantAgentMailJobs {
-					t.Fatalf("pod-loss completion rows = mail %d job %d; want 0/%d", completionMailCount, completionJobCount, wantAgentMailJobs)
+				if completionMailCount != 0 || completionJobCount != 0 {
+					t.Fatalf("pod-loss completion rows = mail %d job %d; want 0/0", completionMailCount, completionJobCount)
 				}
 			})
 		}

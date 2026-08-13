@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -199,6 +200,51 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 		if strings.Contains(string(output), forbidden) || strings.Contains(loaded.GetContextJson(), forbidden) {
 			t.Fatalf("MCP failure surface exposed %q", forbidden)
 		}
+	}
+}
+
+func TestPostgreSQLMCPUncertaintySettlesWithoutMaterialization(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID    = "sesn_mcp_uncertain_without_materialization"
+		threadID     = "thr_mcp_uncertain_without_materialization"
+		modelRequest = "mreq_mcp_uncertain_without_materialization"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_mcp_uncertain", 1, "pod_mcp_uncertain")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, "bind_mcp_uncertain", 1, "pod_mcp_uncertain")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_uncertain_start", modelRequest, "agent_provider_request", 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_uncertain_use", ModelRequestId: modelRequest,
+		EventType: "agent.mcp_tool_use", PayloadJson: `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			t, scope, "rwrite_mcp_uncertain_use", "agent.mcp_tool_use", "streaming",
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_mcp_uncertain","toolName":"github_search","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"query":"tetral"},"preview":"{\"query\":\"tetral\"}","truncated":false}}}`},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("write MCP Tool Use: %v", err)
+	}
+	message := "The MCP tool execution is still in progress. Check the external service before retrying."
+	errorSettlement := bridgeErrorToolSettlementForTest(toolUse.GetEventId(), message)
+	result, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_uncertain_result", ModelRequestId: modelRequest,
+		EventType: "agent.mcp_tool_result", PayloadJson: `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":` + fmt.Sprintf("%q", message) + `}],"is_error":true}`,
+		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: errorSettlement},
+	})
+	if err != nil || result.GetEventId() == "" {
+		t.Fatalf("write unmaterialized MCP uncertainty = %#v/%v", result, err)
+	}
+
+	var durableResults int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND type='agent.mcp_tool_result'
+		  AND payload_json::jsonb ->> 'mcp_tool_use_id'=$2`, sessionID, toolUse.GetEventId()).Scan(&durableResults); err != nil {
+		t.Fatalf("count durable MCP uncertainty: %v", err)
+	}
+	if durableResults != 1 {
+		t.Fatalf("durable MCP uncertainty results = %d; want one", durableResults)
 	}
 }
 

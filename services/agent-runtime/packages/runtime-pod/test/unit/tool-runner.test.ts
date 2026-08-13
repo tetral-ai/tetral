@@ -1298,7 +1298,7 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
-  test("does not expose a claimed MCP outcome without durable materialization identity", async () => {
+  test("does not expose an unmaterialized MCP completion as success", async () => {
     const mcp = new RecordingMcpConnectorClient();
     mcp.runMcpToolResponse = {
       status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
@@ -1308,8 +1308,12 @@ describe("RuntimePodToolRunner", () => {
       materializationHandle: undefined,
     };
 
-    await expect(makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }))).resolves.toEqual({
-      type: "stale_custody",
+    await expect(makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }))).resolves.toMatchObject({
+      type: "error",
+      error: {
+        retryable: false,
+        message: "The MCP tool outcome could not be confirmed. Check the external service before retrying.",
+      },
     });
     expect(mcp.runMcpToolRequests).toHaveLength(1);
   });
@@ -1478,7 +1482,7 @@ describe("RuntimePodToolRunner", () => {
     }
   });
 
-  test("does not project pre-materialization MCP uncertainty responses", async () => {
+  test("projects pre-materialization MCP uncertainty without a discard loop", async () => {
     for (const testCase of [
       {
         errorKind: McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT,
@@ -1500,9 +1504,15 @@ describe("RuntimePodToolRunner", () => {
       };
       const runner = makeRunner({ mcp });
 
-      const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+      const first = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+      const repeated = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
 
-      expect(result).toEqual({ type: "stale_custody" });
+      expect(first).toMatchObject({
+        type: "error",
+        error: { retryable: false, message: expect.stringContaining("Check the external service before retrying.") },
+      });
+      expect(repeated).toEqual(first);
+      expect(mcp.runMcpToolRequests).toHaveLength(2);
     }
   });
 

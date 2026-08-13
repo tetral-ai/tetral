@@ -672,7 +672,7 @@ func runtimePodLostInterruptedThenLostTx(
 		    AND inbox.session_thread_id = received.session_thread_id
 		    AND inbox.runtime_input_id = 'agent_mail:' || (received.payload_json::jsonb ->> 'delivery_id')
 		    AND inbox.input_kind = 'agent_mail'
-		    AND inbox.status IN ('queued', 'delivering', 'accepted')
+		    AND inbox.status IN ('queued', 'delivering', 'accepted', 'committed')
 		    AND inbox.event_ids_json::jsonb = jsonb_build_array(received.event_id)
 		    AND inbox.sequence_from = received.sequence
 		    AND inbox.sequence_to = received.sequence
@@ -1226,7 +1226,7 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 
 // Pod-loss delivery repair may declare success only from the same Inbox fact
 // that owns Runtime delivery. Source events and the stored mail envelope prove
-// content identity, but never substitute for nonterminal custody.
+// content identity, but never substitute for current or committed custody.
 func runtimePodLostAgentMailInboxCurrentTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -1278,7 +1278,7 @@ func runtimePodLostAgentMailInboxCurrentTx(
 		if bindingID.Valid || bindingGeneration.Valid || targetPodUID.Valid {
 			return false, nil
 		}
-	case "delivering", "accepted":
+	case "delivering", "accepted", "committed":
 		if !bindingID.Valid || bindingID.String != binding.BindingID ||
 			!bindingGeneration.Valid || bindingGeneration.Int64 != binding.BindingGeneration ||
 			!targetPodUID.Valid || targetPodUID.String != binding.PodUID {

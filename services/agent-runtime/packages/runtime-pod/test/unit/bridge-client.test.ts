@@ -129,26 +129,36 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
   });
 
-  test("contains deterministic task-notification declaration errors to the exact input", async () => {
-    for (const testCase of [
-      { code: status.INVALID_ARGUMENT, errorCode: "task_notification_result_invalid" },
-      { code: status.ALREADY_EXISTS, errorCode: "task_notification_payload_mismatch" },
-    ] as const) {
-      const bridge = new DeclarationBridge();
-      bridge.taskNotificationErrors.push(testCase.code);
-      const loader = new BridgeAPIContextLoader(options(bridge));
-      const input = taskNotificationInput(`rin_task_deterministic_${testCase.code}`);
+  test("retains task-notification custody when raw validation has no durable disposition", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationErrors.push(status.INVALID_ARGUMENT);
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_invalid_without_receipt");
 
-      const result = await loader.commitAcceptedInput(input, {
-        messageCreates: acceptedInputCreates(input),
-      });
+    await expect(loader.commitAcceptedInput(input, {
+      messageCreates: acceptedInputCreates(input),
+    })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      retryable: false,
+      fatal: true,
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
 
-      expect(result).toEqual({
-        type: "task_notification_rejected",
-        errorCode: testCase.errorCode,
-      });
-      expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
-    }
+  test("contains a durable task-notification idempotency conflict to the exact input", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationErrors.push(status.ALREADY_EXISTS);
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_payload_mismatch");
+
+    await expect(loader.commitAcceptedInput(input, {
+      messageCreates: acceptedInputCreates(input),
+    })).resolves.toEqual({
+      type: "task_notification_rejected",
+      errorCode: "task_notification_payload_mismatch",
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
   });
 
   test("returns an input-scoped terminal disposition for a durable notification rejection", async () => {

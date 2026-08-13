@@ -409,6 +409,16 @@ func invalidRuntimeJobPayload(err error) bool {
 }
 
 func (r *JobRunner) deadLetterInvalidRuntimeJob(ctx context.Context, job RuntimeJob) error {
+	if job.Kind != queue.KindRuntimeInput {
+		r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", "invalid_payload_dead_lettered")
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId:  job.WorkspaceID,
+			JobId:        job.JobID,
+			LeaseToken:   job.LeaseToken,
+			ErrorKind:    "invalid_runtime_job_payload",
+			ErrorMessage: "runtime queue payload is invalid",
+		}))
+	}
 	replacer, ok := r.Deliverer.(malformedRuntimeInputCustodyReplacer)
 	if !ok {
 		return errors.New("malformed runtime-input custody replacer is required")

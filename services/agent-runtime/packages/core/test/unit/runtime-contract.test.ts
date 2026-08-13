@@ -453,6 +453,23 @@ describe("runtime boundary contracts", () => {
     }
     expect(SessionEventEnvelopeSchema.safeParse({
       ...projectionBase,
+      event: { type: "agent.mcp_tool_result", mcp_tool_use_id: "sevt_mcp_uncertain", content: [{ type: "text", text: "Result is uncertain." }], is_error: true },
+      toolSettlement: {
+        toolUseEventId: "sevt_mcp_uncertain",
+        outcome: {
+          type: "error",
+          error: {
+            type: "runtime",
+            code: "runtime_invalid_sequence",
+            message: "Result is uncertain.",
+            retryable: false,
+            fatal: false,
+          },
+        },
+      },
+    }).success).toBe(true);
+    expect(SessionEventEnvelopeSchema.safeParse({
+      ...projectionBase,
       event: { type: "span.model_request_start", model_request_id: "mreq_projection" },
     }).success).toBe(false);
   });

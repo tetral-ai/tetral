@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 func TestPostgreSQLRuntimePodLossAgentMailHandoffReclaimsExistingProjection(t *testing.T) {
@@ -51,6 +52,14 @@ func TestPostgreSQLRuntimePodLossAgentMailHandoffReclaimsExistingProjection(t *t
 	}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
+	visiblePodUID := oldPodUID
+	visiblePodName := "runtime-pod-0"
+	visiblePodIP := "10.0.0.10"
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: visiblePodName, PodUID: visiblePodUID, PodIP: visiblePodIP,
+		}})
+	}}
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), originalJob)
 	if err != nil || plan.Request == nil {
 		t.Fatalf("prepare original agent mail = %#v, %v; want Runtime request", plan, err)
@@ -63,33 +72,28 @@ func TestPostgreSQLRuntimePodLossAgentMailHandoffReclaimsExistingProjection(t *t
 		t.Fatalf("agent mail handoff = %d; want one", handedOff)
 	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
-		SET binding_id=$2,binding_generation=2,agent_runtime_pod_uid=$3,agent_runtime_pod_name='runtime-pod-1',updated_at=$4
+		SET binding_id=$2,binding_generation=2,agent_runtime_pod_uid=$3,agent_runtime_pod_name='runtime-pod-1',agent_runtime_pod_ip='10.0.0.11',updated_at=$4
 		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBinding, newPodUID, now.Add(4*time.Second)); err != nil {
 		t.Fatalf("install replacement Runtime binding: %v", err)
 	}
-	replacementLease, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
-		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-agent-mail-new",
-		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(5 * time.Second),
-	})
-	if err != nil || len(replacementLease) != 1 {
-		t.Fatalf("lease replacement agent mail = %#v, %v; want one", replacementLease, err)
-	}
-	replacementJob, err := DecodeRuntimeJob(queueJobProto(replacementLease[0]))
-	if err != nil {
-		t.Fatalf("decode replacement agent mail: %v", err)
-	}
+	visiblePodUID = newPodUID
+	visiblePodName = "runtime-pod-1"
+	visiblePodIP = "10.0.0.11"
 	deliveryStore.Clock = func() time.Time { return now.Add(6 * time.Second) }
 	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
 		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
 	}}
-	result, err := (RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}).DeliverRuntimeJob(context.Background(), replacementJob)
-	if err != nil || result.Status != RuntimeDeliveryAccepted || result.QueueLeaseSettled || len(sender.requests) != 1 {
-		t.Fatalf("replacement agent mail delivery = %#v requests=%d err=%v; want one accepted request with runner-owned Queue settlement", result, len(sender.requests), err)
+	runner := &JobRunner{
+		Queue:      tetralqueue.NewServer(queueStore, nil),
+		Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer:  RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:     JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
-		WorkspaceID: workspace.DefaultID, JobID: replacementLease[0].ID, LeaseToken: replacementLease[0].LeaseToken, Now: now.Add(7 * time.Second),
-	}); err != nil || !acked {
-		t.Fatalf("ACK replacement agent mail = %t, %v; want true", acked, err)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run replacement agent-mail delivery: %v", err)
+	}
+	if len(sender.requests) != 1 {
+		t.Fatalf("replacement agent-mail Runtime requests = %d; want one", len(sender.requests))
 	}
 
 	var sentEvents, receivedEvents, inboxRows, errorEvents int
@@ -101,13 +105,84 @@ func TestPostgreSQLRuntimePodLossAgentMailHandoffReclaimsExistingProjection(t *t
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$3),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$4)`,
-		sessionID, deliveryID, runtimeID, replacementLease[0].ID,
+		sessionID, deliveryID, runtimeID, originalLease[0].ID,
 	).Scan(&sentEvents, &receivedEvents, &inboxRows, &errorEvents, &inboxStatus, &queueStatus); err != nil {
 		t.Fatalf("read replacement agent mail custody: %v", err)
 	}
 	if sentEvents != 1 || receivedEvents != 1 || inboxRows != 1 || errorEvents != 0 || inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged {
 		t.Fatalf("replacement agent mail = sent %d received %d Inbox %d/%s errors %d Queue %s; want 1/1/1 accepted/0/acknowledged",
 			sentEvents, receivedEvents, inboxRows, inboxStatus, errorEvents, queueStatus)
+	}
+}
+
+func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID  = "sesn_agent_mail_replacement_replay"
+		mainID     = "thr_agent_mail_replacement_main"
+		childID    = "thr_agent_mail_replacement_child"
+		deliveryID = "delivery_agent_mail_replacement"
+		bindingID  = "bind_agent_mail_replacement"
+		podUID     = "pod_agent_mail_replacement"
+	)
+	now := time.Now().UTC().Add(-time.Minute)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedCompletionMailSentAt(t, admin, sessionID, mainID, childID, deliveryID, 1, now.Format(time.RFC3339Nano))
+
+	var malformedJobID string
+	if err := admin.QueryRowContext(context.Background(), `UPDATE queue_jobs
+		SET payload_json=jsonb_set(payload_json::jsonb, '{session_thread_id}', to_jsonb($2::text), false)::text
+		WHERE workspace_id='default' AND kind='runtime_input'
+		  AND payload_json::jsonb ->> 'runtime_input_id'=$1
+		RETURNING id`, "agent_mail:"+deliveryID, childID).Scan(&malformedJobID); err != nil {
+		t.Fatalf("corrupt agent-mail Queue thread: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.Clock = func() time.Time { return now }
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "10.0.0.10",
+		}})
+	}}
+	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
+		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
+	}}
+	runner := &JobRunner{
+		Queue:      tetralqueue.NewServer(queueStore, nil),
+		Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer:  RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:     JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("replace malformed agent-mail custody: %v", err)
+	}
+	if len(sender.requests) != 0 {
+		t.Fatalf("Runtime requests after malformed lease = %d; want zero", len(sender.requests))
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("deliver canonical agent-mail replacement: %v", err)
+	}
+	if len(sender.requests) != 1 {
+		t.Fatalf("Runtime requests after canonical replacement = %d; want one", len(sender.requests))
+	}
+	var oldStatus string
+	var deadLetters, pending, acknowledged int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		count(*) FILTER (WHERE status='dead_lettered'),
+		count(*) FILTER (WHERE status='pending'),
+		count(*) FILTER (WHERE status='acknowledged')
+		FROM queue_jobs WHERE workspace_id='default'
+		  AND payload_json::jsonb ->> 'runtime_input_id'=$2`, malformedJobID, "agent_mail:"+deliveryID,
+	).Scan(&oldStatus, &deadLetters, &pending, &acknowledged); err != nil {
+		t.Fatalf("read agent-mail replacement lifecycle: %v", err)
+	}
+	if oldStatus != queue.StatusDeadLettered || deadLetters != 1 || pending != 0 || acknowledged != 1 {
+		t.Fatalf("agent-mail replacement lifecycle = old %s dead/pending/ack %d/%d/%d; want dead_lettered 1/0/1", oldStatus, deadLetters, pending, acknowledged)
 	}
 }
 

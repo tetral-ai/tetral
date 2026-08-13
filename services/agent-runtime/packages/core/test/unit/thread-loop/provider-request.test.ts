@@ -1692,6 +1692,43 @@ test("task notification retries an unknown commit outcome before provider work",
     expect(session.state.peekAcceptedInput()).toBeUndefined();
     expect(JSON.stringify(session.state.contextManager.messages())).toContain("task result recovered from the replayed receipt");
 });
+test("task notification validation failure retains accepted custody without provider work", async () => {
+    const session = new ThreadRuntime("sesn_task_notification_invalid_commit");
+    let providerCalls = 0;
+    const runtimeInputId = "rin_task_notification_invalid_commit";
+    expect(session.state.enqueueAcceptedInput({
+        requestId: "req_task_notification_invalid_commit",
+        ...session.identity,
+        runtimeInputId,
+        eventIds: [],
+        sequenceFrom: 0,
+        sequenceTo: 0,
+        kind: "task_notification",
+        taskId: "task_notification_invalid_commit",
+        sourceToolUseEventId: "sevt_task_notification_invalid_commit",
+        status: "completed",
+        payloadJson: '{"status":"completed"}',
+    })).toBe("applied");
+    const loader = new QueuedContextLoader([], [], [
+        (input: RuntimeAcceptedInputState) => {
+            throw normalizeContextLoaderError({
+                code: "schema_mismatch",
+                sessionId: input.sessionId,
+                reason: "task_notification_result_invalid",
+            });
+        },
+    ]);
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        onStream: () => { providerCalls += 1; },
+    }))));
+
+    expect(result).toMatchObject({ type: "failed" });
+    expect(loader.commitCalls).toHaveLength(1);
+    expect(providerCalls).toBe(0);
+    expect(session.state.peekAcceptedInput()?.runtimeInputId).toBe(runtimeInputId);
+});
 test("terminal task notification rejection drops only that input and continues the thread", async () => {
     const session = new ThreadRuntime("sesn_task_notification_rejected");
     const observations: RuntimeAcceptedInputCommitObservation[] = [];

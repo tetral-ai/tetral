@@ -1000,8 +1000,12 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   if (envelope.mcpMaterializationHandle !== undefined && envelope.event.type !== "agent.mcp_tool_result") {
     context.addIssue({ code: "custom", message: "MCP materialization requires an MCP tool-result event" });
   }
-  if (envelope.event.type === "agent.mcp_tool_result" && envelope.mcpMaterializationHandle === undefined) {
-    context.addIssue({ code: "custom", message: "MCP tool-result event requires materialization" });
+  if (
+    envelope.event.type === "agent.mcp_tool_result" &&
+    envelope.mcpMaterializationHandle === undefined &&
+    envelope.toolSettlement?.outcome.type !== "error"
+  ) {
+    context.addIssue({ code: "custom", message: "successful MCP tool-result event requires materialization" });
   }
   if (envelope.sandboxResultDigest !== undefined && envelope.event.type !== "agent.tool_result") {
     context.addIssue({ code: "custom", message: "sandbox result digest requires a tool-result event" });

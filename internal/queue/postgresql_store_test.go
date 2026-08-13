@@ -1739,6 +1739,141 @@ func TestPostgreSQLStoreAtomicallyReplacesMalformedRuntimeInputCustody(t *testin
 	}
 }
 
+func TestPostgreSQLStoreRebuildsCanonicalEventlessRuntimeInputCustody(t *testing.T) {
+	for _, inputKind := range []string{"agent_mail", "task_notification"} {
+		t.Run(inputKind, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			now := time.Now().UTC()
+			sessionID := "sesn_queue_replace_" + inputKind
+			threadID := "thr_queue_replace_" + inputKind
+			runtimeInputID := inputKind + ":source_1"
+			seedQueueRuntimeInbox(t, admin, sessionID, threadID, runtimeInputID, inputKind, `[]`, 0, 0)
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+				SET sequence_from=NULL, sequence_to=NULL WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID); err != nil {
+				t.Fatalf("clear eventless Inbox sequence: %v", err)
+			}
+			mustEnqueue(t, store, EnqueueRequest{
+				WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+				PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, sessionID), DedupeKey: FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, runtimeInputID),
+				PayloadVersion: 1, PayloadJSON: runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, runtimeInputID, "messages", 9, 9), Now: now,
+			})
+			leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Minute})
+
+			outcome, err := store.ReplaceMalformedRuntimeInputCustody(context.Background(), ReplaceMalformedRuntimeInputCustodyRequest{
+				WorkspaceID: workspace.DefaultID, SessionID: sessionID, RuntimeInputID: runtimeInputID,
+				JobID: leased.ID, LeaseToken: leased.LeaseToken, Now: now.Add(time.Second),
+			})
+			if err != nil || !outcome.DeadLettered || !outcome.Replaced {
+				t.Fatalf("replace %s custody = (%+v,%v); want dead-lettered replacement", inputKind, outcome, err)
+			}
+			var replacementKind, eventIDs string
+			var sequenceFrom, sequenceTo int64
+			if err := admin.QueryRowContext(context.Background(), `SELECT
+				payload_json::jsonb ->> 'input_kind', payload_json::jsonb ->> 'event_ids',
+				(payload_json::jsonb ->> 'sequence_from')::bigint, (payload_json::jsonb ->> 'sequence_to')::bigint
+				FROM queue_jobs WHERE workspace_id='default' AND status='pending' AND dedupe_key=$1`,
+				FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, runtimeInputID),
+			).Scan(&replacementKind, &eventIDs, &sequenceFrom, &sequenceTo); err != nil {
+				t.Fatalf("read %s replacement: %v", inputKind, err)
+			}
+			if replacementKind != inputKind || eventIDs != "[]" || sequenceFrom != 0 || sequenceTo != 0 {
+				t.Fatalf("%s replacement = %s/%s/%d/%d; want canonical eventless shape", inputKind, replacementKind, eventIDs, sequenceFrom, sequenceTo)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLStoreMalformedRuntimeInputNoReplacementDispositions(t *testing.T) {
+	for _, inboxStatus := range []string{"delivering", "accepted", "parked", "missing"} {
+		t.Run(inboxStatus, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			now := time.Now().UTC()
+			sessionID := "sesn_queue_no_replace_" + inboxStatus
+			threadID := "thr_queue_no_replace_" + inboxStatus
+			runtimeInputID := "rin_queue_no_replace_" + inboxStatus
+			seedQueueRuntimeInbox(t, admin, sessionID, threadID, runtimeInputID, "messages", `["evt_1"]`, 1, 1)
+			if inboxStatus == "missing" {
+				if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID); err != nil {
+					t.Fatalf("delete Inbox: %v", err)
+				}
+			} else if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+				SET status=$2,binding_id='bind_1',binding_generation=1,target_pod_uid='pod_1'
+				WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID, inboxStatus); err != nil {
+				t.Fatalf("set Inbox status %s: %v", inboxStatus, err)
+			}
+			mustEnqueue(t, store, EnqueueRequest{
+				WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+				PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, sessionID), DedupeKey: FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, runtimeInputID),
+				PayloadVersion: 1, PayloadJSON: runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, runtimeInputID, "messages", 2, 2), Now: now,
+			})
+			leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Minute})
+			outcome, err := store.ReplaceMalformedRuntimeInputCustody(context.Background(), ReplaceMalformedRuntimeInputCustodyRequest{
+				WorkspaceID: workspace.DefaultID, SessionID: sessionID, RuntimeInputID: runtimeInputID,
+				JobID: leased.ID, LeaseToken: leased.LeaseToken, Now: now.Add(time.Second),
+			})
+			if err != nil || !outcome.DeadLettered || outcome.Replaced {
+				t.Fatalf("%s malformed disposition = (%+v,%v); want dead-letter/no replacement", inboxStatus, outcome, err)
+			}
+			if inboxStatus != "missing" {
+				var current string
+				if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID).Scan(&current); err != nil {
+					t.Fatalf("read Inbox status: %v", err)
+				}
+				want := inboxStatus
+				if inboxStatus == "delivering" || inboxStatus == "accepted" {
+					want = "dead_lettered"
+				}
+				if current != want {
+					t.Fatalf("Inbox status = %s; want %s", current, want)
+				}
+			}
+		})
+	}
+}
+
+func TestPostgreSQLStoreMalformedRuntimeInputIntegrityFailurePreservesLease(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		eventIDsJSON string
+		sequenceFrom int64
+		sequenceTo   int64
+	}{
+		{name: "invalid event json", eventIDsJSON: `not-json`, sequenceFrom: 1, sequenceTo: 1},
+		{name: "invalid event range", eventIDsJSON: `["evt_1"]`, sequenceFrom: 0, sequenceTo: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			now := time.Now().UTC()
+			sessionID := "sesn_queue_integrity_" + strings.ReplaceAll(test.name, " ", "_")
+			threadID := "thr_queue_integrity_" + strings.ReplaceAll(test.name, " ", "_")
+			runtimeInputID := "rin_queue_integrity_" + strings.ReplaceAll(test.name, " ", "_")
+			seedQueueRuntimeInbox(t, admin, sessionID, threadID, runtimeInputID, "messages", test.eventIDsJSON, test.sequenceFrom, test.sequenceTo)
+			mustEnqueue(t, store, EnqueueRequest{
+				WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+				PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, sessionID), DedupeKey: FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, runtimeInputID),
+				PayloadVersion: 1, PayloadJSON: runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, runtimeInputID, "messages", 2, 2), Now: now,
+			})
+			leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Minute})
+			if _, err := store.ReplaceMalformedRuntimeInputCustody(context.Background(), ReplaceMalformedRuntimeInputCustodyRequest{
+				WorkspaceID: workspace.DefaultID, SessionID: sessionID, RuntimeInputID: runtimeInputID,
+				JobID: leased.ID, LeaseToken: leased.LeaseToken, Now: now.Add(time.Second),
+			}); !IsIntegrityError(err) {
+				t.Fatalf("integrity replacement err = %v; want IntegrityError", err)
+			}
+			var queueStatus, leaseToken string
+			if err := admin.QueryRowContext(context.Background(), `SELECT status, COALESCE(lease_token, '') FROM queue_jobs WHERE workspace_id='default' AND id=$1`, leased.ID).Scan(&queueStatus, &leaseToken); err != nil {
+				t.Fatalf("read preserved lease: %v", err)
+			}
+			if queueStatus != StatusLeased || leaseToken != leased.LeaseToken {
+				t.Fatalf("preserved lease = %s/%s; want leased/%s", queueStatus, leaseToken, leased.LeaseToken)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLStoreMalformedRuntimeInputReplacementRollsBackTogether(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))

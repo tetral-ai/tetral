@@ -490,10 +490,30 @@ func seedRuntimePodLostDeliveryFixture(
 func TestPostgreSQLRuntimePodLossDeliveryRequiresExactInboxCustody(t *testing.T) {
 	tests := []struct {
 		name          string
+		withReceived  bool
 		mutate        func(*testing.T, *sql.DB, runtimePodLostDeliveryFixture)
 		wantDelivered bool
 	}{
 		{name: "exact queued Inbox", wantDelivered: true},
+		{
+			name: "committed Inbox is durable delivery truth", withReceived: true, wantDelivered: true,
+			mutate: runtimePodLostDeliveryInboxStatusMutation("committed"),
+		},
+		{
+			name: "accepted Inbox wrong binding", withReceived: true,
+			mutate: runtimePodLostDeliveryInboxBindingMutation("bind_wrong", 0, ""),
+		},
+		{
+			name: "accepted Inbox wrong generation", withReceived: true,
+			mutate: runtimePodLostDeliveryInboxBindingMutation("", 999, ""),
+		},
+		{
+			name: "delivering Inbox wrong pod uid", withReceived: true,
+			mutate: func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
+				runtimePodLostDeliveryInboxStatusMutation("delivering")(t, db, fixture)
+				runtimePodLostDeliveryInboxBindingMutation("", 0, "pod_wrong")(t, db, fixture)
+			},
+		},
 		{
 			name: "missing Inbox",
 			mutate: func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
@@ -548,7 +568,7 @@ func TestPostgreSQLRuntimePodLossDeliveryRequiresExactInboxCustody(t *testing.T)
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			fixture := seedRuntimePodLostDeliveryFixture(t, admin, 100+index, "spawn_agent", "idle", true, false, false, true, false)
+			fixture := seedRuntimePodLostDeliveryFixture(t, admin, 100+index, "spawn_agent", "idle", true, test.withReceived, false, true, false)
 			if test.mutate != nil {
 				test.mutate(t, admin, fixture)
 			}
@@ -573,6 +593,27 @@ func TestPostgreSQLRuntimePodLossDeliveryRequiresExactInboxCustody(t *testing.T)
 				t.Fatalf("delivery settlement delivered=%d failed=%d; want 0/1", delivered, failed)
 			}
 		})
+	}
+}
+
+func runtimePodLostDeliveryInboxBindingMutation(bindingID string, generation int64, podUID string) func(*testing.T, *sql.DB, runtimePodLostDeliveryFixture) {
+	return func(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture) {
+		t.Helper()
+		if bindingID == "" {
+			bindingID = fixture.binding.BindingID
+		}
+		if generation == 0 {
+			generation = fixture.binding.BindingGeneration
+		}
+		if podUID == "" {
+			podUID = fixture.binding.PodUID
+		}
+		if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+			SET binding_id=$3,binding_generation=$4,target_pod_uid=$5
+			WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`,
+			fixture.sessionID, completionRuntimeInputID(fixture.deliveryID), bindingID, generation, podUID); err != nil {
+			t.Fatalf("change agent-mail Inbox binding: %v", err)
+		}
 	}
 }
 

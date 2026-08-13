@@ -1546,7 +1546,26 @@ func (s *PostgreSQLQueueStore) ReplaceMalformedRuntimeInputCustody(
 			return nil
 		}
 		outcome.DeadLettered = true
-		if dbconnect.IsNoRows(inboxErr) || inboxStatus != "queued" {
+		if dbconnect.IsNoRows(inboxErr) {
+			return nil
+		}
+		if inboxStatus == "delivering" || inboxStatus == "accepted" {
+			result, err := tx.Exec(ctx,
+				`UPDATE session_runtime_inbox
+				    SET status = 'dead_lettered', updated_at = $4
+				  WHERE workspace_id = $1 AND session_id = $2 AND runtime_input_id = $3
+				    AND status IN ('delivering', 'accepted')`,
+				string(request.WorkspaceID), request.SessionID, request.RuntimeInputID, request.Now,
+			)
+			if err != nil {
+				return err
+			}
+			if !rowsAffected(result) {
+				return &IntegrityError{Message: "active runtime Inbox custody changed during malformed Queue settlement"}
+			}
+			return nil
+		}
+		if inboxStatus != "queued" {
 			return nil
 		}
 

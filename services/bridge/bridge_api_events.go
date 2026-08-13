@@ -56,8 +56,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		return nil, err
 	}
 	if request.GetEventType() == "agent.mcp_tool_result" {
-		if request.GetMcpMaterializationHandle() == "" {
-			return nil, status.Error(codes.InvalidArgument, "mcp tool result requires a materialization handle")
+		if request.GetMcpMaterializationHandle() == "" && request.GetToolSettlement().GetError() == nil {
+			return nil, status.Error(codes.InvalidArgument, "successful mcp tool result requires a materialization handle")
 		}
 	} else if request.GetMcpMaterializationHandle() != "" {
 		return nil, status.Error(codes.InvalidArgument, "materialization handle requires an mcp tool-result event")

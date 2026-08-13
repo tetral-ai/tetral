@@ -548,7 +548,11 @@ export class RuntimePodToolRunner {
       }
       const materializationHandle = response.materializationHandle;
       if (materializationHandle === undefined || materializationHandle.length === 0) {
-        return { type: "stale_custody" };
+        return toolFailure(
+          request,
+          modelVisibleMcpRuntimeFailure(response.errorKind),
+          false,
+        );
       }
       if (response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED) {
         const attachments = response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment));
