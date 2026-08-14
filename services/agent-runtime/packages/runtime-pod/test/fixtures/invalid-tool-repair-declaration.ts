@@ -1,5 +1,6 @@
 import { Effect } from "effect";
-import { Metadata } from "@grpc/grpc-js";
+import { credentials, Metadata } from "@grpc/grpc-js";
+import { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { RuntimeInternalToolRepairStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
@@ -17,6 +18,7 @@ import {
   queuedLLMService,
   runtimeThreadLoopLayer,
   testRunCustody,
+  withFinishIdleReceiptForTest,
 } from "../../../core/test/unit/thread-loop/thread-loop-test-support.js";
 
 const address = process.argv[2];
@@ -41,10 +43,12 @@ let runToolCalls = 0;
 let acceptSandboxExecutionCalls = 0;
 let awaitSandboxExecutionCalls = 0;
 
+const bridgeClient = new AgentRuntimeBridgeServiceClient(address, credentials.createInsecure());
 const bridgeOptions = {
   address,
   tokenPath: "/unused/test-token",
   metadataFactory: async () => new Metadata(),
+  client: bridgeClient,
 };
 const productionWriter = new BridgeAPIEventWriter(bridgeOptions);
 const writer: SessionEventWriter = {
@@ -60,7 +64,12 @@ const writer: SessionEventWriter = {
     return await productionWriter.append(envelope);
   },
   writeRequestEnd: async (envelope) => await productionWriter.writeRequestEnd(envelope),
-  finishIdle: async (envelope) => await productionWriter.finishIdle(envelope),
+  finishIdle: async (envelope) => withFinishIdleReceiptForTest(envelope, {
+    ok: true,
+    writeId: envelope.durableTurnId,
+    eventId: `evt_${envelope.durableTurnId}`,
+    processedAt: "2026-08-14T00:00:00.000Z",
+  }),
   commitRuntimeTermination: async (envelope) => await productionWriter.commitRuntimeTermination(envelope),
 };
 
@@ -130,9 +139,11 @@ const result = await Effect.runPromise(Effect.gen(function* () {
 
 const repair = store.repairs[0];
 if (result.type !== "completed" || repair === undefined || store.repairs.length !== 1) {
+  bridgeClient.close();
   throw new Error(`Runtime invalid-tool fixture did not produce one completed repair: ${JSON.stringify({ result, repairs: store.repairs })}`);
 }
 
+bridgeClient.close();
 process.stdout.write(JSON.stringify({
   resultType: result.type,
   repair,

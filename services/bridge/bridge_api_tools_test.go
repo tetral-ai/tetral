@@ -1178,16 +1178,31 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 		t.Fatalf("Runtime repaired continuation text/Tool members = %d/%d; want 1/1", continuationText, continuationTools)
 	}
 
-	var requestMembers, completedRequestMembers, repairRows, requestEnds int
+	var requestMembers, completedRequestMembers, repairRows, completedRepairRows, requestEnds int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*),
-		        count(*) FILTER (WHERE data_json::jsonb ->> 'status' = 'completed'),
-		        count(*) FILTER (WHERE repair_key IS NOT NULL)
+		        count(*) FILTER (WHERE data_json::jsonb ->> 'status' = 'completed')
 		   FROM session_messages
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
 		"default", sessionID, threadID, modelRequestID,
-	).Scan(&requestMembers, &completedRequestMembers, &repairRows); err != nil {
+	).Scan(&requestMembers, &completedRequestMembers); err != nil {
 		t.Fatalf("count sealed mixed request members: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*),
+		        count(*) FILTER (WHERE message.data_json::jsonb ->> 'status' = 'completed')
+		   FROM session_messages AS message
+		   JOIN session_events AS repair_event
+		     ON repair_event.workspace_id = message.workspace_id
+		    AND repair_event.session_id = message.session_id
+		    AND repair_event.session_thread_id = message.session_thread_id
+		    AND repair_event.runtime_write_id = message.repair_key
+		    AND repair_event.type = 'agent.tool_result'
+		  WHERE message.workspace_id = $1 AND message.session_id = $2
+		    AND message.session_thread_id = $3 AND repair_event.model_request_id = $4`,
+		"default", sessionID, threadID, modelRequestID,
+	).Scan(&repairRows, &completedRepairRows); err != nil {
+		t.Fatalf("count direct repair members: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_events
@@ -1197,8 +1212,15 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 	).Scan(&requestEnds); err != nil {
 		t.Fatalf("count first Runtime Request End: %v", err)
 	}
-	if requestMembers != 2 || completedRequestMembers != 2 || repairRows != 1 || requestEnds != 1 {
-		t.Fatalf("first request members/completed/repairs/ends = %d/%d/%d/%d; want 2/2/1/1", requestMembers, completedRequestMembers, repairRows, requestEnds)
+	if requestMembers != 1 || completedRequestMembers != 1 || repairRows != 1 || completedRepairRows != 1 || requestEnds != 1 {
+		t.Fatalf(
+			"first request members/completed/repairs/completed repairs/ends = %d/%d/%d/%d/%d; want 1/1/1/1/1",
+			requestMembers,
+			completedRequestMembers,
+			repairRows,
+			completedRepairRows,
+			requestEnds,
+		)
 	}
 
 	var realToolUses, repairResultEvents, executableToolUses, pendingToolUses, executionJobs int
