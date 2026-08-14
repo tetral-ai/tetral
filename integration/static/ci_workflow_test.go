@@ -514,6 +514,16 @@ func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
 
 	command = exec.Command("bash", script, "--verify-output")
 	command.Stdin = bytes.NewBufferString("--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)\n")
+	if err := command.Run(); err == nil {
+		t.Fatal("helper privilege output guard accepted output without runtime identity proofs")
+	}
+
+	command = exec.Command("bash", script, "--verify-output")
+	command.Stdin = bytes.NewBufferString(strings.Join([]string{
+		"--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)",
+		"--- PASS: TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
+		"--- PASS: TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
+	}, "\n") + "\n")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("helper privilege output guard rejected a passing proof: %v\n%s", err, output)
 	}
