@@ -727,7 +727,6 @@ export interface RuntimeBindingRef {
 }
 
 export interface RuntimeScope {
-  requestId: string;
   workspaceId: string;
   sessionId: string;
   sessionThreadId: string;
@@ -798,32 +797,49 @@ export interface McpManifestChangedRequest {
 }
 
 export interface McpManifestChangedResponse {
-  ack: BridgeWriteAck | undefined;
+  committed?: McpManifestCommitted | undefined;
+  duplicate?: McpManifestDuplicate | undefined;
+}
+
+export interface McpManifestCommitted {
+}
+
+export interface McpManifestDuplicate {
 }
 
 export interface ClaimMcpToolResultRequest {
   scope: RuntimeScope | undefined;
   toolUseEventId: string;
-  normalizedInputHash: string;
+  claimId: string;
+}
+
+export interface ClaimMcpToolResultResponse {
+  acquired?: McpToolClaimAcquired | undefined;
+  alreadyCompleted?: McpToolAlreadyCompleted | undefined;
+  inFlight?: McpToolClaimInFlight | undefined;
+  stale?: McpToolClaimStale | undefined;
+}
+
+export interface McpToolClaimAcquired {
   mcpServerName: string;
   toolName: string;
   inputJson: string;
 }
 
-export interface ClaimMcpToolResultResponse {
-  ack: BridgeWriteAck | undefined;
+export interface McpToolAlreadyCompleted {
   resultJson: string;
-  materializationHandle?: string | undefined;
-  declaration: DeclarationResponse | undefined;
+}
+
+export interface McpToolClaimInFlight {
+}
+
+export interface McpToolClaimStale {
 }
 
 export interface CommitMcpToolResultRequest {
   scope: RuntimeScope | undefined;
   toolUseEventId: string;
-  normalizedInputHash: string;
-  mcpServerName: string;
-  toolName: string;
-  inputJson: string;
+  claimId: string;
   resultJson: string;
   inlineMedia: McpInlineMedia[];
 }
@@ -835,10 +851,18 @@ export interface McpInlineMedia {
 }
 
 export interface CommitMcpToolResultResponse {
-  ack: BridgeWriteAck | undefined;
-  refsOnlyResultJson: string;
-  materializationHandle?: string | undefined;
-  declaration: DeclarationResponse | undefined;
+  committed?: McpToolCommitCommitted | undefined;
+  duplicate?: McpToolCommitDuplicate | undefined;
+  stale?: McpToolCommitStale | undefined;
+}
+
+export interface McpToolCommitCommitted {
+}
+
+export interface McpToolCommitDuplicate {
+}
+
+export interface McpToolCommitStale {
 }
 
 export interface CommitInternalToolRepairRequest {
@@ -953,8 +977,6 @@ export interface WriteEventRequest {
   serverToolUse: ServerToolUseUsage | undefined;
   assistantPartAppend?: RuntimeAssistantPartAppend | undefined;
   toolSettlement?: RuntimeToolSettlement | undefined;
-  mcpMaterializationHandle?: string | undefined;
-  sandboxResultDigest?: string | undefined;
   contextThroughMessageSequence?: number | undefined;
   requestKind: string;
 }
@@ -1159,42 +1181,59 @@ export interface ChildLifecycleSource {
 export interface AcceptSandboxExecutionRequest {
   scope: RuntimeScope | undefined;
   toolUseEventId: string;
-  normalizedInputHash: string;
-  toolName: string;
-  inputJson: string;
-  modelToolCallId: string;
 }
 
 export interface AcceptSandboxExecutionResponse {
-  ack: BridgeWriteAck | undefined;
+  committed?: SandboxExecutionCommitted | undefined;
+  duplicate?: SandboxExecutionDuplicate | undefined;
+  stale?: SandboxExecutionStale | undefined;
+}
+
+export interface SandboxExecutionCommitted {
+}
+
+export interface SandboxExecutionDuplicate {
+}
+
+export interface SandboxExecutionStale {
 }
 
 export interface AwaitSandboxExecutionRequest {
   scope: RuntimeScope | undefined;
   toolUseEventId: string;
-  normalizedInputHash: string;
-  toolName: string;
-  inputJson: string;
-  modelToolCallId: string;
 }
 
 export interface AwaitSandboxExecutionResponse {
+  completed?: SandboxExecutionCompleted | undefined;
+  stale?: SandboxExecutionAwaitStale | undefined;
+}
+
+export interface SandboxExecutionCompleted {
   resultJson: string;
-  backgroundTaskStarted: boolean;
   taskId: string;
-  resultDigest: string;
+}
+
+export interface SandboxExecutionAwaitStale {
 }
 
 export interface ReadCommandResultRequest {
   scope: RuntimeScope | undefined;
   taskId: string;
+  operationId: string;
   maxOutputTokens: number;
   toolUseEventId: string;
 }
 
 export interface ReadCommandResultResponse {
-  ack: BridgeWriteAck | undefined;
+  completed?: CommandReadCompleted | undefined;
+  stale?: CommandReadStale | undefined;
+}
+
+export interface CommandReadCompleted {
   resultJson: string;
+}
+
+export interface CommandReadStale {
 }
 
 export interface SendCommandInputRequest {
@@ -1203,12 +1242,24 @@ export interface SendCommandInputRequest {
   maxOutputTokens: number;
   inputJson: string;
   toolUseEventId: string;
+  operationId: string;
 }
 
 export interface SendCommandInputResponse {
-  ack: BridgeWriteAck | undefined;
+  committed?: CommandInputCommitted | undefined;
+  duplicate?: CommandInputDuplicate | undefined;
+  stale?: CommandInputStale | undefined;
+}
+
+export interface CommandInputCommitted {
   resultJson: string;
-  writeSeq: number;
+}
+
+export interface CommandInputDuplicate {
+  resultJson: string;
+}
+
+export interface CommandInputStale {
 }
 
 export interface CancelCommandRequest {
@@ -1216,24 +1267,46 @@ export interface CancelCommandRequest {
   taskId: string;
   reason: string;
   toolUseEventId: string;
+  operationId: string;
 }
 
 export interface CancelCommandResponse {
-  ack: BridgeWriteAck | undefined;
+  committed?: CommandCancelCommitted | undefined;
+  duplicate?: CommandCancelDuplicate | undefined;
+  stale?: CommandCancelStale | undefined;
+}
+
+export interface CommandCancelCommitted {
   resultJson: string;
+}
+
+export interface CommandCancelDuplicate {
+  resultJson: string;
+}
+
+export interface CommandCancelStale {
 }
 
 export interface RunMemoryRequest {
   scope: RuntimeScope | undefined;
   toolUseEventId: string;
-  normalizedInputHash: string;
-  operation: string;
-  inputJson: string;
 }
 
 export interface RunMemoryResponse {
-  ack: BridgeWriteAck | undefined;
+  committed?: MemoryRunCommitted | undefined;
+  duplicate?: MemoryRunDuplicate | undefined;
+  stale?: MemoryRunStale | undefined;
+}
+
+export interface MemoryRunCommitted {
   resultJson: string;
+}
+
+export interface MemoryRunDuplicate {
+  resultJson: string;
+}
+
+export interface MemoryRunStale {
 }
 
 function createBaseRuntimeMessageCreate(): RuntimeMessageCreate {
@@ -3596,14 +3669,11 @@ export const RuntimeBindingRef: MessageFns<RuntimeBindingRef> = {
 };
 
 function createBaseRuntimeScope(): RuntimeScope {
-  return { requestId: "", workspaceId: "", sessionId: "", sessionThreadId: "", binding: undefined };
+  return { workspaceId: "", sessionId: "", sessionThreadId: "", binding: undefined };
 }
 
 export const RuntimeScope: MessageFns<RuntimeScope> = {
   encode(message: RuntimeScope, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.requestId !== "") {
-      writer.uint32(10).string(message.requestId);
-    }
     if (message.workspaceId !== "") {
       writer.uint32(18).string(message.workspaceId);
     }
@@ -3626,14 +3696,6 @@ export const RuntimeScope: MessageFns<RuntimeScope> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.requestId = reader.string();
-          continue;
-        }
         case 2: {
           if (tag !== 18) {
             break;
@@ -3677,11 +3739,6 @@ export const RuntimeScope: MessageFns<RuntimeScope> = {
 
   fromJSON(object: any): RuntimeScope {
     return {
-      requestId: isSet(object.requestId)
-        ? globalThis.String(object.requestId)
-        : isSet(object.request_id)
-        ? globalThis.String(object.request_id)
-        : "",
       workspaceId: isSet(object.workspaceId)
         ? globalThis.String(object.workspaceId)
         : isSet(object.workspace_id)
@@ -3703,9 +3760,6 @@ export const RuntimeScope: MessageFns<RuntimeScope> = {
 
   toJSON(message: RuntimeScope): unknown {
     const obj: any = {};
-    if (message.requestId !== "") {
-      obj.requestId = message.requestId;
-    }
     if (message.workspaceId !== "") {
       obj.workspaceId = message.workspaceId;
     }
@@ -3726,7 +3780,6 @@ export const RuntimeScope: MessageFns<RuntimeScope> = {
   },
   fromPartial<I extends Exact<DeepPartial<RuntimeScope>, I>>(object: I): RuntimeScope {
     const message = createBaseRuntimeScope();
-    message.requestId = object.requestId ?? "";
     message.workspaceId = object.workspaceId ?? "";
     message.sessionId = object.sessionId ?? "";
     message.sessionThreadId = object.sessionThreadId ?? "";
@@ -4840,13 +4893,16 @@ export const McpManifestChangedRequest: MessageFns<McpManifestChangedRequest> = 
 };
 
 function createBaseMcpManifestChangedResponse(): McpManifestChangedResponse {
-  return { ack: undefined };
+  return { committed: undefined, duplicate: undefined };
 }
 
 export const McpManifestChangedResponse: MessageFns<McpManifestChangedResponse> = {
   encode(message: McpManifestChangedResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.committed !== undefined) {
+      McpManifestCommitted.encode(message.committed, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      McpManifestDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -4863,7 +4919,15 @@ export const McpManifestChangedResponse: MessageFns<McpManifestChangedResponse> 
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.committed = McpManifestCommitted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = McpManifestDuplicate.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -4876,13 +4940,19 @@ export const McpManifestChangedResponse: MessageFns<McpManifestChangedResponse> 
   },
 
   fromJSON(object: any): McpManifestChangedResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      committed: isSet(object.committed) ? McpManifestCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? McpManifestDuplicate.fromJSON(object.duplicate) : undefined,
+    };
   },
 
   toJSON(message: McpManifestChangedResponse): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    if (message.committed !== undefined) {
+      obj.committed = McpManifestCommitted.toJSON(message.committed);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = McpManifestDuplicate.toJSON(message.duplicate);
     }
     return obj;
   },
@@ -4892,22 +4962,104 @@ export const McpManifestChangedResponse: MessageFns<McpManifestChangedResponse> 
   },
   fromPartial<I extends Exact<DeepPartial<McpManifestChangedResponse>, I>>(object: I): McpManifestChangedResponse {
     const message = createBaseMcpManifestChangedResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? McpManifestCommitted.fromPartial(object.committed)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? McpManifestDuplicate.fromPartial(object.duplicate)
       : undefined;
     return message;
   },
 };
 
+function createBaseMcpManifestCommitted(): McpManifestCommitted {
+  return {};
+}
+
+export const McpManifestCommitted: MessageFns<McpManifestCommitted> = {
+  encode(_: McpManifestCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpManifestCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpManifestCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpManifestCommitted {
+    return {};
+  },
+
+  toJSON(_: McpManifestCommitted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpManifestCommitted>, I>>(base?: I): McpManifestCommitted {
+    return McpManifestCommitted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpManifestCommitted>, I>>(_: I): McpManifestCommitted {
+    const message = createBaseMcpManifestCommitted();
+    return message;
+  },
+};
+
+function createBaseMcpManifestDuplicate(): McpManifestDuplicate {
+  return {};
+}
+
+export const McpManifestDuplicate: MessageFns<McpManifestDuplicate> = {
+  encode(_: McpManifestDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpManifestDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpManifestDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpManifestDuplicate {
+    return {};
+  },
+
+  toJSON(_: McpManifestDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpManifestDuplicate>, I>>(base?: I): McpManifestDuplicate {
+    return McpManifestDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpManifestDuplicate>, I>>(_: I): McpManifestDuplicate {
+    const message = createBaseMcpManifestDuplicate();
+    return message;
+  },
+};
+
 function createBaseClaimMcpToolResultRequest(): ClaimMcpToolResultRequest {
-  return {
-    scope: undefined,
-    toolUseEventId: "",
-    normalizedInputHash: "",
-    mcpServerName: "",
-    toolName: "",
-    inputJson: "",
-  };
+  return { scope: undefined, toolUseEventId: "", claimId: "" };
 }
 
 export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = {
@@ -4918,17 +5070,8 @@ export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = 
     if (message.toolUseEventId !== "") {
       writer.uint32(18).string(message.toolUseEventId);
     }
-    if (message.normalizedInputHash !== "") {
-      writer.uint32(26).string(message.normalizedInputHash);
-    }
-    if (message.mcpServerName !== "") {
-      writer.uint32(34).string(message.mcpServerName);
-    }
-    if (message.toolName !== "") {
-      writer.uint32(42).string(message.toolName);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(50).string(message.inputJson);
+    if (message.claimId !== "") {
+      writer.uint32(26).string(message.claimId);
     }
     return writer;
   },
@@ -4961,31 +5104,7 @@ export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = 
             break;
           }
 
-          message.normalizedInputHash = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.mcpServerName = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.toolName = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.inputJson = reader.string();
+          message.claimId = reader.string();
           continue;
         }
       }
@@ -5005,11 +5124,226 @@ export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = 
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
-      normalizedInputHash: isSet(object.normalizedInputHash)
-        ? globalThis.String(object.normalizedInputHash)
-        : isSet(object.normalized_input_hash)
-        ? globalThis.String(object.normalized_input_hash)
+      claimId: isSet(object.claimId)
+        ? globalThis.String(object.claimId)
+        : isSet(object.claim_id)
+        ? globalThis.String(object.claim_id)
         : "",
+    };
+  },
+
+  toJSON(message: ClaimMcpToolResultRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.claimId !== "") {
+      obj.claimId = message.claimId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ClaimMcpToolResultRequest>, I>>(base?: I): ClaimMcpToolResultRequest {
+    return ClaimMcpToolResultRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ClaimMcpToolResultRequest>, I>>(object: I): ClaimMcpToolResultRequest {
+    const message = createBaseClaimMcpToolResultRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.claimId = object.claimId ?? "";
+    return message;
+  },
+};
+
+function createBaseClaimMcpToolResultResponse(): ClaimMcpToolResultResponse {
+  return { acquired: undefined, alreadyCompleted: undefined, inFlight: undefined, stale: undefined };
+}
+
+export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> = {
+  encode(message: ClaimMcpToolResultResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.acquired !== undefined) {
+      McpToolClaimAcquired.encode(message.acquired, writer.uint32(10).fork()).join();
+    }
+    if (message.alreadyCompleted !== undefined) {
+      McpToolAlreadyCompleted.encode(message.alreadyCompleted, writer.uint32(18).fork()).join();
+    }
+    if (message.inFlight !== undefined) {
+      McpToolClaimInFlight.encode(message.inFlight, writer.uint32(26).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      McpToolClaimStale.encode(message.stale, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ClaimMcpToolResultResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseClaimMcpToolResultResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.acquired = McpToolClaimAcquired.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.alreadyCompleted = McpToolAlreadyCompleted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.inFlight = McpToolClaimInFlight.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.stale = McpToolClaimStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ClaimMcpToolResultResponse {
+    return {
+      acquired: isSet(object.acquired) ? McpToolClaimAcquired.fromJSON(object.acquired) : undefined,
+      alreadyCompleted: isSet(object.alreadyCompleted)
+        ? McpToolAlreadyCompleted.fromJSON(object.alreadyCompleted)
+        : isSet(object.already_completed)
+        ? McpToolAlreadyCompleted.fromJSON(object.already_completed)
+        : undefined,
+      inFlight: isSet(object.inFlight)
+        ? McpToolClaimInFlight.fromJSON(object.inFlight)
+        : isSet(object.in_flight)
+        ? McpToolClaimInFlight.fromJSON(object.in_flight)
+        : undefined,
+      stale: isSet(object.stale) ? McpToolClaimStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: ClaimMcpToolResultResponse): unknown {
+    const obj: any = {};
+    if (message.acquired !== undefined) {
+      obj.acquired = McpToolClaimAcquired.toJSON(message.acquired);
+    }
+    if (message.alreadyCompleted !== undefined) {
+      obj.alreadyCompleted = McpToolAlreadyCompleted.toJSON(message.alreadyCompleted);
+    }
+    if (message.inFlight !== undefined) {
+      obj.inFlight = McpToolClaimInFlight.toJSON(message.inFlight);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = McpToolClaimStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ClaimMcpToolResultResponse>, I>>(base?: I): ClaimMcpToolResultResponse {
+    return ClaimMcpToolResultResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ClaimMcpToolResultResponse>, I>>(object: I): ClaimMcpToolResultResponse {
+    const message = createBaseClaimMcpToolResultResponse();
+    message.acquired = (object.acquired !== undefined && object.acquired !== null)
+      ? McpToolClaimAcquired.fromPartial(object.acquired)
+      : undefined;
+    message.alreadyCompleted = (object.alreadyCompleted !== undefined && object.alreadyCompleted !== null)
+      ? McpToolAlreadyCompleted.fromPartial(object.alreadyCompleted)
+      : undefined;
+    message.inFlight = (object.inFlight !== undefined && object.inFlight !== null)
+      ? McpToolClaimInFlight.fromPartial(object.inFlight)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? McpToolClaimStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMcpToolClaimAcquired(): McpToolClaimAcquired {
+  return { mcpServerName: "", toolName: "", inputJson: "" };
+}
+
+export const McpToolClaimAcquired: MessageFns<McpToolClaimAcquired> = {
+  encode(message: McpToolClaimAcquired, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.mcpServerName !== "") {
+      writer.uint32(10).string(message.mcpServerName);
+    }
+    if (message.toolName !== "") {
+      writer.uint32(18).string(message.toolName);
+    }
+    if (message.inputJson !== "") {
+      writer.uint32(26).string(message.inputJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolClaimAcquired {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolClaimAcquired();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.mcpServerName = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolName = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.inputJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): McpToolClaimAcquired {
+    return {
       mcpServerName: isSet(object.mcpServerName)
         ? globalThis.String(object.mcpServerName)
         : isSet(object.mcp_server_name)
@@ -5028,17 +5362,8 @@ export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = 
     };
   },
 
-  toJSON(message: ClaimMcpToolResultRequest): unknown {
+  toJSON(message: McpToolClaimAcquired): unknown {
     const obj: any = {};
-    if (message.scope !== undefined) {
-      obj.scope = RuntimeScope.toJSON(message.scope);
-    }
-    if (message.toolUseEventId !== "") {
-      obj.toolUseEventId = message.toolUseEventId;
-    }
-    if (message.normalizedInputHash !== "") {
-      obj.normalizedInputHash = message.normalizedInputHash;
-    }
     if (message.mcpServerName !== "") {
       obj.mcpServerName = message.mcpServerName;
     }
@@ -5051,16 +5376,11 @@ export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ClaimMcpToolResultRequest>, I>>(base?: I): ClaimMcpToolResultRequest {
-    return ClaimMcpToolResultRequest.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<McpToolClaimAcquired>, I>>(base?: I): McpToolClaimAcquired {
+    return McpToolClaimAcquired.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ClaimMcpToolResultRequest>, I>>(object: I): ClaimMcpToolResultRequest {
-    const message = createBaseClaimMcpToolResultRequest();
-    message.scope = (object.scope !== undefined && object.scope !== null)
-      ? RuntimeScope.fromPartial(object.scope)
-      : undefined;
-    message.toolUseEventId = object.toolUseEventId ?? "";
-    message.normalizedInputHash = object.normalizedInputHash ?? "";
+  fromPartial<I extends Exact<DeepPartial<McpToolClaimAcquired>, I>>(object: I): McpToolClaimAcquired {
+    const message = createBaseMcpToolClaimAcquired();
     message.mcpServerName = object.mcpServerName ?? "";
     message.toolName = object.toolName ?? "";
     message.inputJson = object.inputJson ?? "";
@@ -5068,31 +5388,22 @@ export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = 
   },
 };
 
-function createBaseClaimMcpToolResultResponse(): ClaimMcpToolResultResponse {
-  return { ack: undefined, resultJson: "", materializationHandle: undefined, declaration: undefined };
+function createBaseMcpToolAlreadyCompleted(): McpToolAlreadyCompleted {
+  return { resultJson: "" };
 }
 
-export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> = {
-  encode(message: ClaimMcpToolResultResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
-    }
+export const McpToolAlreadyCompleted: MessageFns<McpToolAlreadyCompleted> = {
+  encode(message: McpToolAlreadyCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.resultJson !== "") {
-      writer.uint32(18).string(message.resultJson);
-    }
-    if (message.materializationHandle !== undefined) {
-      writer.uint32(26).string(message.materializationHandle);
-    }
-    if (message.declaration !== undefined) {
-      DeclarationResponse.encode(message.declaration, writer.uint32(34).fork()).join();
+      writer.uint32(10).string(message.resultJson);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): ClaimMcpToolResultResponse {
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolAlreadyCompleted {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseClaimMcpToolResultResponse();
+    const message = createBaseMcpToolAlreadyCompleted();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -5101,31 +5412,7 @@ export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> 
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
           message.resultJson = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.materializationHandle = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -5137,68 +5424,122 @@ export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> 
     return message;
   },
 
-  fromJSON(object: any): ClaimMcpToolResultResponse {
+  fromJSON(object: any): McpToolAlreadyCompleted {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
       resultJson: isSet(object.resultJson)
         ? globalThis.String(object.resultJson)
         : isSet(object.result_json)
         ? globalThis.String(object.result_json)
         : "",
-      materializationHandle: isSet(object.materializationHandle)
-        ? globalThis.String(object.materializationHandle)
-        : isSet(object.materialization_handle)
-        ? globalThis.String(object.materialization_handle)
-        : undefined,
-      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
     };
   },
 
-  toJSON(message: ClaimMcpToolResultResponse): unknown {
+  toJSON(message: McpToolAlreadyCompleted): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
-    }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
-    }
-    if (message.materializationHandle !== undefined) {
-      obj.materializationHandle = message.materializationHandle;
-    }
-    if (message.declaration !== undefined) {
-      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ClaimMcpToolResultResponse>, I>>(base?: I): ClaimMcpToolResultResponse {
-    return ClaimMcpToolResultResponse.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<McpToolAlreadyCompleted>, I>>(base?: I): McpToolAlreadyCompleted {
+    return McpToolAlreadyCompleted.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ClaimMcpToolResultResponse>, I>>(object: I): ClaimMcpToolResultResponse {
-    const message = createBaseClaimMcpToolResultResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
-      : undefined;
+  fromPartial<I extends Exact<DeepPartial<McpToolAlreadyCompleted>, I>>(object: I): McpToolAlreadyCompleted {
+    const message = createBaseMcpToolAlreadyCompleted();
     message.resultJson = object.resultJson ?? "";
-    message.materializationHandle = object.materializationHandle ?? undefined;
-    message.declaration = (object.declaration !== undefined && object.declaration !== null)
-      ? DeclarationResponse.fromPartial(object.declaration)
-      : undefined;
+    return message;
+  },
+};
+
+function createBaseMcpToolClaimInFlight(): McpToolClaimInFlight {
+  return {};
+}
+
+export const McpToolClaimInFlight: MessageFns<McpToolClaimInFlight> = {
+  encode(_: McpToolClaimInFlight, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolClaimInFlight {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolClaimInFlight();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolClaimInFlight {
+    return {};
+  },
+
+  toJSON(_: McpToolClaimInFlight): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolClaimInFlight>, I>>(base?: I): McpToolClaimInFlight {
+    return McpToolClaimInFlight.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolClaimInFlight>, I>>(_: I): McpToolClaimInFlight {
+    const message = createBaseMcpToolClaimInFlight();
+    return message;
+  },
+};
+
+function createBaseMcpToolClaimStale(): McpToolClaimStale {
+  return {};
+}
+
+export const McpToolClaimStale: MessageFns<McpToolClaimStale> = {
+  encode(_: McpToolClaimStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolClaimStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolClaimStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolClaimStale {
+    return {};
+  },
+
+  toJSON(_: McpToolClaimStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolClaimStale>, I>>(base?: I): McpToolClaimStale {
+    return McpToolClaimStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolClaimStale>, I>>(_: I): McpToolClaimStale {
+    const message = createBaseMcpToolClaimStale();
     return message;
   },
 };
 
 function createBaseCommitMcpToolResultRequest(): CommitMcpToolResultRequest {
-  return {
-    scope: undefined,
-    toolUseEventId: "",
-    normalizedInputHash: "",
-    mcpServerName: "",
-    toolName: "",
-    inputJson: "",
-    resultJson: "",
-    inlineMedia: [],
-  };
+  return { scope: undefined, toolUseEventId: "", claimId: "", resultJson: "", inlineMedia: [] };
 }
 
 export const CommitMcpToolResultRequest: MessageFns<CommitMcpToolResultRequest> = {
@@ -5209,17 +5550,8 @@ export const CommitMcpToolResultRequest: MessageFns<CommitMcpToolResultRequest> 
     if (message.toolUseEventId !== "") {
       writer.uint32(18).string(message.toolUseEventId);
     }
-    if (message.normalizedInputHash !== "") {
-      writer.uint32(26).string(message.normalizedInputHash);
-    }
-    if (message.mcpServerName !== "") {
-      writer.uint32(34).string(message.mcpServerName);
-    }
-    if (message.toolName !== "") {
-      writer.uint32(42).string(message.toolName);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(50).string(message.inputJson);
+    if (message.claimId !== "") {
+      writer.uint32(26).string(message.claimId);
     }
     if (message.resultJson !== "") {
       writer.uint32(58).string(message.resultJson);
@@ -5258,31 +5590,7 @@ export const CommitMcpToolResultRequest: MessageFns<CommitMcpToolResultRequest> 
             break;
           }
 
-          message.normalizedInputHash = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.mcpServerName = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.toolName = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.inputJson = reader.string();
+          message.claimId = reader.string();
           continue;
         }
         case 7: {
@@ -5318,25 +5626,10 @@ export const CommitMcpToolResultRequest: MessageFns<CommitMcpToolResultRequest> 
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
-      normalizedInputHash: isSet(object.normalizedInputHash)
-        ? globalThis.String(object.normalizedInputHash)
-        : isSet(object.normalized_input_hash)
-        ? globalThis.String(object.normalized_input_hash)
-        : "",
-      mcpServerName: isSet(object.mcpServerName)
-        ? globalThis.String(object.mcpServerName)
-        : isSet(object.mcp_server_name)
-        ? globalThis.String(object.mcp_server_name)
-        : "",
-      toolName: isSet(object.toolName)
-        ? globalThis.String(object.toolName)
-        : isSet(object.tool_name)
-        ? globalThis.String(object.tool_name)
-        : "",
-      inputJson: isSet(object.inputJson)
-        ? globalThis.String(object.inputJson)
-        : isSet(object.input_json)
-        ? globalThis.String(object.input_json)
+      claimId: isSet(object.claimId)
+        ? globalThis.String(object.claimId)
+        : isSet(object.claim_id)
+        ? globalThis.String(object.claim_id)
         : "",
       resultJson: isSet(object.resultJson)
         ? globalThis.String(object.resultJson)
@@ -5359,17 +5652,8 @@ export const CommitMcpToolResultRequest: MessageFns<CommitMcpToolResultRequest> 
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
     }
-    if (message.normalizedInputHash !== "") {
-      obj.normalizedInputHash = message.normalizedInputHash;
-    }
-    if (message.mcpServerName !== "") {
-      obj.mcpServerName = message.mcpServerName;
-    }
-    if (message.toolName !== "") {
-      obj.toolName = message.toolName;
-    }
-    if (message.inputJson !== "") {
-      obj.inputJson = message.inputJson;
+    if (message.claimId !== "") {
+      obj.claimId = message.claimId;
     }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
@@ -5389,10 +5673,7 @@ export const CommitMcpToolResultRequest: MessageFns<CommitMcpToolResultRequest> 
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.toolUseEventId = object.toolUseEventId ?? "";
-    message.normalizedInputHash = object.normalizedInputHash ?? "";
-    message.mcpServerName = object.mcpServerName ?? "";
-    message.toolName = object.toolName ?? "";
-    message.inputJson = object.inputJson ?? "";
+    message.claimId = object.claimId ?? "";
     message.resultJson = object.resultJson ?? "";
     message.inlineMedia = object.inlineMedia?.map((e) => McpInlineMedia.fromPartial(e)) || [];
     return message;
@@ -5496,22 +5777,19 @@ export const McpInlineMedia: MessageFns<McpInlineMedia> = {
 };
 
 function createBaseCommitMcpToolResultResponse(): CommitMcpToolResultResponse {
-  return { ack: undefined, refsOnlyResultJson: "", materializationHandle: undefined, declaration: undefined };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse> = {
   encode(message: CommitMcpToolResultResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.committed !== undefined) {
+      McpToolCommitCommitted.encode(message.committed, writer.uint32(10).fork()).join();
     }
-    if (message.refsOnlyResultJson !== "") {
-      writer.uint32(18).string(message.refsOnlyResultJson);
+    if (message.duplicate !== undefined) {
+      McpToolCommitDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
     }
-    if (message.materializationHandle !== undefined) {
-      writer.uint32(26).string(message.materializationHandle);
-    }
-    if (message.declaration !== undefined) {
-      DeclarationResponse.encode(message.declaration, writer.uint32(34).fork()).join();
+    if (message.stale !== undefined) {
+      McpToolCommitStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -5528,7 +5806,7 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.committed = McpToolCommitCommitted.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
@@ -5536,7 +5814,7 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
             break;
           }
 
-          message.refsOnlyResultJson = reader.string();
+          message.duplicate = McpToolCommitDuplicate.decode(reader, reader.uint32());
           continue;
         }
         case 3: {
@@ -5544,15 +5822,7 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
             break;
           }
 
-          message.materializationHandle = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          message.stale = McpToolCommitStale.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -5566,34 +5836,22 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
 
   fromJSON(object: any): CommitMcpToolResultResponse {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
-      refsOnlyResultJson: isSet(object.refsOnlyResultJson)
-        ? globalThis.String(object.refsOnlyResultJson)
-        : isSet(object.refs_only_result_json)
-        ? globalThis.String(object.refs_only_result_json)
-        : "",
-      materializationHandle: isSet(object.materializationHandle)
-        ? globalThis.String(object.materializationHandle)
-        : isSet(object.materialization_handle)
-        ? globalThis.String(object.materialization_handle)
-        : undefined,
-      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+      committed: isSet(object.committed) ? McpToolCommitCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? McpToolCommitDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? McpToolCommitStale.fromJSON(object.stale) : undefined,
     };
   },
 
   toJSON(message: CommitMcpToolResultResponse): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    if (message.committed !== undefined) {
+      obj.committed = McpToolCommitCommitted.toJSON(message.committed);
     }
-    if (message.refsOnlyResultJson !== "") {
-      obj.refsOnlyResultJson = message.refsOnlyResultJson;
+    if (message.duplicate !== undefined) {
+      obj.duplicate = McpToolCommitDuplicate.toJSON(message.duplicate);
     }
-    if (message.materializationHandle !== undefined) {
-      obj.materializationHandle = message.materializationHandle;
-    }
-    if (message.declaration !== undefined) {
-      obj.declaration = DeclarationResponse.toJSON(message.declaration);
+    if (message.stale !== undefined) {
+      obj.stale = McpToolCommitStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -5603,14 +5861,144 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
   },
   fromPartial<I extends Exact<DeepPartial<CommitMcpToolResultResponse>, I>>(object: I): CommitMcpToolResultResponse {
     const message = createBaseCommitMcpToolResultResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? McpToolCommitCommitted.fromPartial(object.committed)
       : undefined;
-    message.refsOnlyResultJson = object.refsOnlyResultJson ?? "";
-    message.materializationHandle = object.materializationHandle ?? undefined;
-    message.declaration = (object.declaration !== undefined && object.declaration !== null)
-      ? DeclarationResponse.fromPartial(object.declaration)
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? McpToolCommitDuplicate.fromPartial(object.duplicate)
       : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? McpToolCommitStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMcpToolCommitCommitted(): McpToolCommitCommitted {
+  return {};
+}
+
+export const McpToolCommitCommitted: MessageFns<McpToolCommitCommitted> = {
+  encode(_: McpToolCommitCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolCommitCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolCommitCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolCommitCommitted {
+    return {};
+  },
+
+  toJSON(_: McpToolCommitCommitted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolCommitCommitted>, I>>(base?: I): McpToolCommitCommitted {
+    return McpToolCommitCommitted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolCommitCommitted>, I>>(_: I): McpToolCommitCommitted {
+    const message = createBaseMcpToolCommitCommitted();
+    return message;
+  },
+};
+
+function createBaseMcpToolCommitDuplicate(): McpToolCommitDuplicate {
+  return {};
+}
+
+export const McpToolCommitDuplicate: MessageFns<McpToolCommitDuplicate> = {
+  encode(_: McpToolCommitDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolCommitDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolCommitDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolCommitDuplicate {
+    return {};
+  },
+
+  toJSON(_: McpToolCommitDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolCommitDuplicate>, I>>(base?: I): McpToolCommitDuplicate {
+    return McpToolCommitDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolCommitDuplicate>, I>>(_: I): McpToolCommitDuplicate {
+    const message = createBaseMcpToolCommitDuplicate();
+    return message;
+  },
+};
+
+function createBaseMcpToolCommitStale(): McpToolCommitStale {
+  return {};
+}
+
+export const McpToolCommitStale: MessageFns<McpToolCommitStale> = {
+  encode(_: McpToolCommitStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolCommitStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolCommitStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolCommitStale {
+    return {};
+  },
+
+  toJSON(_: McpToolCommitStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolCommitStale>, I>>(base?: I): McpToolCommitStale {
+    return McpToolCommitStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolCommitStale>, I>>(_: I): McpToolCommitStale {
+    const message = createBaseMcpToolCommitStale();
     return message;
   },
 };
@@ -7361,8 +7749,6 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     serverToolUse: undefined,
     assistantPartAppend: undefined,
     toolSettlement: undefined,
-    mcpMaterializationHandle: undefined,
-    sandboxResultDigest: undefined,
     contextThroughMessageSequence: undefined,
     requestKind: "",
   };
@@ -7396,12 +7782,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.toolSettlement !== undefined) {
       RuntimeToolSettlement.encode(message.toolSettlement, writer.uint32(122).fork()).join();
-    }
-    if (message.mcpMaterializationHandle !== undefined) {
-      writer.uint32(90).string(message.mcpMaterializationHandle);
-    }
-    if (message.sandboxResultDigest !== undefined) {
-      writer.uint32(98).string(message.sandboxResultDigest);
     }
     if (message.contextThroughMessageSequence !== undefined) {
       writer.uint32(104).int64(message.contextThroughMessageSequence);
@@ -7491,22 +7871,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.toolSettlement = RuntimeToolSettlement.decode(reader, reader.uint32());
           continue;
         }
-        case 11: {
-          if (tag !== 90) {
-            break;
-          }
-
-          message.mcpMaterializationHandle = reader.string();
-          continue;
-        }
-        case 12: {
-          if (tag !== 98) {
-            break;
-          }
-
-          message.sandboxResultDigest = reader.string();
-          continue;
-        }
         case 13: {
           if (tag !== 104) {
             break;
@@ -7575,16 +7939,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.tool_settlement)
         ? RuntimeToolSettlement.fromJSON(object.tool_settlement)
         : undefined,
-      mcpMaterializationHandle: isSet(object.mcpMaterializationHandle)
-        ? globalThis.String(object.mcpMaterializationHandle)
-        : isSet(object.mcp_materialization_handle)
-        ? globalThis.String(object.mcp_materialization_handle)
-        : undefined,
-      sandboxResultDigest: isSet(object.sandboxResultDigest)
-        ? globalThis.String(object.sandboxResultDigest)
-        : isSet(object.sandbox_result_digest)
-        ? globalThis.String(object.sandbox_result_digest)
-        : undefined,
       contextThroughMessageSequence: isSet(object.contextThroughMessageSequence)
         ? globalThis.Number(object.contextThroughMessageSequence)
         : isSet(object.context_through_message_sequence)
@@ -7627,12 +7981,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.toolSettlement !== undefined) {
       obj.toolSettlement = RuntimeToolSettlement.toJSON(message.toolSettlement);
     }
-    if (message.mcpMaterializationHandle !== undefined) {
-      obj.mcpMaterializationHandle = message.mcpMaterializationHandle;
-    }
-    if (message.sandboxResultDigest !== undefined) {
-      obj.sandboxResultDigest = message.sandboxResultDigest;
-    }
     if (message.contextThroughMessageSequence !== undefined) {
       obj.contextThroughMessageSequence = Math.round(message.contextThroughMessageSequence);
     }
@@ -7664,8 +8012,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.toolSettlement = (object.toolSettlement !== undefined && object.toolSettlement !== null)
       ? RuntimeToolSettlement.fromPartial(object.toolSettlement)
       : undefined;
-    message.mcpMaterializationHandle = object.mcpMaterializationHandle ?? undefined;
-    message.sandboxResultDigest = object.sandboxResultDigest ?? undefined;
     message.contextThroughMessageSequence = object.contextThroughMessageSequence ?? undefined;
     message.requestKind = object.requestKind ?? "";
     return message;
@@ -11139,14 +11485,7 @@ export const ChildLifecycleSource: MessageFns<ChildLifecycleSource> = {
 };
 
 function createBaseAcceptSandboxExecutionRequest(): AcceptSandboxExecutionRequest {
-  return {
-    scope: undefined,
-    toolUseEventId: "",
-    normalizedInputHash: "",
-    toolName: "",
-    inputJson: "",
-    modelToolCallId: "",
-  };
+  return { scope: undefined, toolUseEventId: "" };
 }
 
 export const AcceptSandboxExecutionRequest: MessageFns<AcceptSandboxExecutionRequest> = {
@@ -11156,18 +11495,6 @@ export const AcceptSandboxExecutionRequest: MessageFns<AcceptSandboxExecutionReq
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(18).string(message.toolUseEventId);
-    }
-    if (message.normalizedInputHash !== "") {
-      writer.uint32(26).string(message.normalizedInputHash);
-    }
-    if (message.toolName !== "") {
-      writer.uint32(34).string(message.toolName);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(42).string(message.inputJson);
-    }
-    if (message.modelToolCallId !== "") {
-      writer.uint32(58).string(message.modelToolCallId);
     }
     return writer;
   },
@@ -11195,38 +11522,6 @@ export const AcceptSandboxExecutionRequest: MessageFns<AcceptSandboxExecutionReq
           message.toolUseEventId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.normalizedInputHash = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.toolName = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.inputJson = reader.string();
-          continue;
-        }
-        case 7: {
-          if (tag !== 58) {
-            break;
-          }
-
-          message.modelToolCallId = reader.string();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11244,26 +11539,6 @@ export const AcceptSandboxExecutionRequest: MessageFns<AcceptSandboxExecutionReq
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
-      normalizedInputHash: isSet(object.normalizedInputHash)
-        ? globalThis.String(object.normalizedInputHash)
-        : isSet(object.normalized_input_hash)
-        ? globalThis.String(object.normalized_input_hash)
-        : "",
-      toolName: isSet(object.toolName)
-        ? globalThis.String(object.toolName)
-        : isSet(object.tool_name)
-        ? globalThis.String(object.tool_name)
-        : "",
-      inputJson: isSet(object.inputJson)
-        ? globalThis.String(object.inputJson)
-        : isSet(object.input_json)
-        ? globalThis.String(object.input_json)
-        : "",
-      modelToolCallId: isSet(object.modelToolCallId)
-        ? globalThis.String(object.modelToolCallId)
-        : isSet(object.model_tool_call_id)
-        ? globalThis.String(object.model_tool_call_id)
-        : "",
     };
   },
 
@@ -11274,18 +11549,6 @@ export const AcceptSandboxExecutionRequest: MessageFns<AcceptSandboxExecutionReq
     }
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
-    }
-    if (message.normalizedInputHash !== "") {
-      obj.normalizedInputHash = message.normalizedInputHash;
-    }
-    if (message.toolName !== "") {
-      obj.toolName = message.toolName;
-    }
-    if (message.inputJson !== "") {
-      obj.inputJson = message.inputJson;
-    }
-    if (message.modelToolCallId !== "") {
-      obj.modelToolCallId = message.modelToolCallId;
     }
     return obj;
   },
@@ -11301,22 +11564,24 @@ export const AcceptSandboxExecutionRequest: MessageFns<AcceptSandboxExecutionReq
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.toolUseEventId = object.toolUseEventId ?? "";
-    message.normalizedInputHash = object.normalizedInputHash ?? "";
-    message.toolName = object.toolName ?? "";
-    message.inputJson = object.inputJson ?? "";
-    message.modelToolCallId = object.modelToolCallId ?? "";
     return message;
   },
 };
 
 function createBaseAcceptSandboxExecutionResponse(): AcceptSandboxExecutionResponse {
-  return { ack: undefined };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const AcceptSandboxExecutionResponse: MessageFns<AcceptSandboxExecutionResponse> = {
   encode(message: AcceptSandboxExecutionResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.committed !== undefined) {
+      SandboxExecutionCommitted.encode(message.committed, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      SandboxExecutionDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      SandboxExecutionStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -11333,7 +11598,23 @@ export const AcceptSandboxExecutionResponse: MessageFns<AcceptSandboxExecutionRe
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.committed = SandboxExecutionCommitted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = SandboxExecutionDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = SandboxExecutionStale.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -11346,13 +11627,23 @@ export const AcceptSandboxExecutionResponse: MessageFns<AcceptSandboxExecutionRe
   },
 
   fromJSON(object: any): AcceptSandboxExecutionResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      committed: isSet(object.committed) ? SandboxExecutionCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? SandboxExecutionDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? SandboxExecutionStale.fromJSON(object.stale) : undefined,
+    };
   },
 
   toJSON(message: AcceptSandboxExecutionResponse): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    if (message.committed !== undefined) {
+      obj.committed = SandboxExecutionCommitted.toJSON(message.committed);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = SandboxExecutionDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = SandboxExecutionStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -11364,22 +11655,150 @@ export const AcceptSandboxExecutionResponse: MessageFns<AcceptSandboxExecutionRe
     object: I,
   ): AcceptSandboxExecutionResponse {
     const message = createBaseAcceptSandboxExecutionResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? SandboxExecutionCommitted.fromPartial(object.committed)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? SandboxExecutionDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? SandboxExecutionStale.fromPartial(object.stale)
       : undefined;
     return message;
   },
 };
 
+function createBaseSandboxExecutionCommitted(): SandboxExecutionCommitted {
+  return {};
+}
+
+export const SandboxExecutionCommitted: MessageFns<SandboxExecutionCommitted> = {
+  encode(_: SandboxExecutionCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SandboxExecutionCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSandboxExecutionCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): SandboxExecutionCommitted {
+    return {};
+  },
+
+  toJSON(_: SandboxExecutionCommitted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SandboxExecutionCommitted>, I>>(base?: I): SandboxExecutionCommitted {
+    return SandboxExecutionCommitted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SandboxExecutionCommitted>, I>>(_: I): SandboxExecutionCommitted {
+    const message = createBaseSandboxExecutionCommitted();
+    return message;
+  },
+};
+
+function createBaseSandboxExecutionDuplicate(): SandboxExecutionDuplicate {
+  return {};
+}
+
+export const SandboxExecutionDuplicate: MessageFns<SandboxExecutionDuplicate> = {
+  encode(_: SandboxExecutionDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SandboxExecutionDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSandboxExecutionDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): SandboxExecutionDuplicate {
+    return {};
+  },
+
+  toJSON(_: SandboxExecutionDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SandboxExecutionDuplicate>, I>>(base?: I): SandboxExecutionDuplicate {
+    return SandboxExecutionDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SandboxExecutionDuplicate>, I>>(_: I): SandboxExecutionDuplicate {
+    const message = createBaseSandboxExecutionDuplicate();
+    return message;
+  },
+};
+
+function createBaseSandboxExecutionStale(): SandboxExecutionStale {
+  return {};
+}
+
+export const SandboxExecutionStale: MessageFns<SandboxExecutionStale> = {
+  encode(_: SandboxExecutionStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SandboxExecutionStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSandboxExecutionStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): SandboxExecutionStale {
+    return {};
+  },
+
+  toJSON(_: SandboxExecutionStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SandboxExecutionStale>, I>>(base?: I): SandboxExecutionStale {
+    return SandboxExecutionStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SandboxExecutionStale>, I>>(_: I): SandboxExecutionStale {
+    const message = createBaseSandboxExecutionStale();
+    return message;
+  },
+};
+
 function createBaseAwaitSandboxExecutionRequest(): AwaitSandboxExecutionRequest {
-  return {
-    scope: undefined,
-    toolUseEventId: "",
-    normalizedInputHash: "",
-    toolName: "",
-    inputJson: "",
-    modelToolCallId: "",
-  };
+  return { scope: undefined, toolUseEventId: "" };
 }
 
 export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionRequest> = {
@@ -11389,18 +11808,6 @@ export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionReque
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(18).string(message.toolUseEventId);
-    }
-    if (message.normalizedInputHash !== "") {
-      writer.uint32(26).string(message.normalizedInputHash);
-    }
-    if (message.toolName !== "") {
-      writer.uint32(34).string(message.toolName);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(42).string(message.inputJson);
-    }
-    if (message.modelToolCallId !== "") {
-      writer.uint32(58).string(message.modelToolCallId);
     }
     return writer;
   },
@@ -11428,38 +11835,6 @@ export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionReque
           message.toolUseEventId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.normalizedInputHash = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.toolName = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.inputJson = reader.string();
-          continue;
-        }
-        case 7: {
-          if (tag !== 58) {
-            break;
-          }
-
-          message.modelToolCallId = reader.string();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11477,26 +11852,6 @@ export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionReque
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
-      normalizedInputHash: isSet(object.normalizedInputHash)
-        ? globalThis.String(object.normalizedInputHash)
-        : isSet(object.normalized_input_hash)
-        ? globalThis.String(object.normalized_input_hash)
-        : "",
-      toolName: isSet(object.toolName)
-        ? globalThis.String(object.toolName)
-        : isSet(object.tool_name)
-        ? globalThis.String(object.tool_name)
-        : "",
-      inputJson: isSet(object.inputJson)
-        ? globalThis.String(object.inputJson)
-        : isSet(object.input_json)
-        ? globalThis.String(object.input_json)
-        : "",
-      modelToolCallId: isSet(object.modelToolCallId)
-        ? globalThis.String(object.modelToolCallId)
-        : isSet(object.model_tool_call_id)
-        ? globalThis.String(object.model_tool_call_id)
-        : "",
     };
   },
 
@@ -11507,18 +11862,6 @@ export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionReque
     }
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
-    }
-    if (message.normalizedInputHash !== "") {
-      obj.normalizedInputHash = message.normalizedInputHash;
-    }
-    if (message.toolName !== "") {
-      obj.toolName = message.toolName;
-    }
-    if (message.inputJson !== "") {
-      obj.inputJson = message.inputJson;
-    }
-    if (message.modelToolCallId !== "") {
-      obj.modelToolCallId = message.modelToolCallId;
     }
     return obj;
   },
@@ -11532,31 +11875,21 @@ export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionReque
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.toolUseEventId = object.toolUseEventId ?? "";
-    message.normalizedInputHash = object.normalizedInputHash ?? "";
-    message.toolName = object.toolName ?? "";
-    message.inputJson = object.inputJson ?? "";
-    message.modelToolCallId = object.modelToolCallId ?? "";
     return message;
   },
 };
 
 function createBaseAwaitSandboxExecutionResponse(): AwaitSandboxExecutionResponse {
-  return { resultJson: "", backgroundTaskStarted: false, taskId: "", resultDigest: "" };
+  return { completed: undefined, stale: undefined };
 }
 
 export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResponse> = {
   encode(message: AwaitSandboxExecutionResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.resultJson !== "") {
-      writer.uint32(10).string(message.resultJson);
+    if (message.completed !== undefined) {
+      SandboxExecutionCompleted.encode(message.completed, writer.uint32(10).fork()).join();
     }
-    if (message.backgroundTaskStarted !== false) {
-      writer.uint32(16).bool(message.backgroundTaskStarted);
-    }
-    if (message.taskId !== "") {
-      writer.uint32(26).string(message.taskId);
-    }
-    if (message.resultDigest !== "") {
-      writer.uint32(34).string(message.resultDigest);
+    if (message.stale !== undefined) {
+      SandboxExecutionAwaitStale.encode(message.stale, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -11573,31 +11906,15 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
             break;
           }
 
-          message.resultJson = reader.string();
+          message.completed = SandboxExecutionCompleted.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
-          if (tag !== 16) {
+          if (tag !== 18) {
             break;
           }
 
-          message.backgroundTaskStarted = reader.bool();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.taskId = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.resultDigest = reader.string();
+          message.stale = SandboxExecutionAwaitStale.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -11611,42 +11928,18 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
 
   fromJSON(object: any): AwaitSandboxExecutionResponse {
     return {
-      resultJson: isSet(object.resultJson)
-        ? globalThis.String(object.resultJson)
-        : isSet(object.result_json)
-        ? globalThis.String(object.result_json)
-        : "",
-      backgroundTaskStarted: isSet(object.backgroundTaskStarted)
-        ? globalThis.Boolean(object.backgroundTaskStarted)
-        : isSet(object.background_task_started)
-        ? globalThis.Boolean(object.background_task_started)
-        : false,
-      taskId: isSet(object.taskId)
-        ? globalThis.String(object.taskId)
-        : isSet(object.task_id)
-        ? globalThis.String(object.task_id)
-        : "",
-      resultDigest: isSet(object.resultDigest)
-        ? globalThis.String(object.resultDigest)
-        : isSet(object.result_digest)
-        ? globalThis.String(object.result_digest)
-        : "",
+      completed: isSet(object.completed) ? SandboxExecutionCompleted.fromJSON(object.completed) : undefined,
+      stale: isSet(object.stale) ? SandboxExecutionAwaitStale.fromJSON(object.stale) : undefined,
     };
   },
 
   toJSON(message: AwaitSandboxExecutionResponse): unknown {
     const obj: any = {};
-    if (message.resultJson !== "") {
-      obj.resultJson = message.resultJson;
+    if (message.completed !== undefined) {
+      obj.completed = SandboxExecutionCompleted.toJSON(message.completed);
     }
-    if (message.backgroundTaskStarted !== false) {
-      obj.backgroundTaskStarted = message.backgroundTaskStarted;
-    }
-    if (message.taskId !== "") {
-      obj.taskId = message.taskId;
-    }
-    if (message.resultDigest !== "") {
-      obj.resultDigest = message.resultDigest;
+    if (message.stale !== undefined) {
+      obj.stale = SandboxExecutionAwaitStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -11658,16 +11951,145 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
     object: I,
   ): AwaitSandboxExecutionResponse {
     const message = createBaseAwaitSandboxExecutionResponse();
+    message.completed = (object.completed !== undefined && object.completed !== null)
+      ? SandboxExecutionCompleted.fromPartial(object.completed)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? SandboxExecutionAwaitStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseSandboxExecutionCompleted(): SandboxExecutionCompleted {
+  return { resultJson: "", taskId: "" };
+}
+
+export const SandboxExecutionCompleted: MessageFns<SandboxExecutionCompleted> = {
+  encode(message: SandboxExecutionCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    if (message.taskId !== "") {
+      writer.uint32(26).string(message.taskId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SandboxExecutionCompleted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSandboxExecutionCompleted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.resultJson = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.taskId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SandboxExecutionCompleted {
+    return {
+      resultJson: isSet(object.resultJson)
+        ? globalThis.String(object.resultJson)
+        : isSet(object.result_json)
+        ? globalThis.String(object.result_json)
+        : "",
+      taskId: isSet(object.taskId)
+        ? globalThis.String(object.taskId)
+        : isSet(object.task_id)
+        ? globalThis.String(object.task_id)
+        : "",
+    };
+  },
+
+  toJSON(message: SandboxExecutionCompleted): unknown {
+    const obj: any = {};
+    if (message.resultJson !== "") {
+      obj.resultJson = message.resultJson;
+    }
+    if (message.taskId !== "") {
+      obj.taskId = message.taskId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SandboxExecutionCompleted>, I>>(base?: I): SandboxExecutionCompleted {
+    return SandboxExecutionCompleted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SandboxExecutionCompleted>, I>>(object: I): SandboxExecutionCompleted {
+    const message = createBaseSandboxExecutionCompleted();
     message.resultJson = object.resultJson ?? "";
-    message.backgroundTaskStarted = object.backgroundTaskStarted ?? false;
     message.taskId = object.taskId ?? "";
-    message.resultDigest = object.resultDigest ?? "";
+    return message;
+  },
+};
+
+function createBaseSandboxExecutionAwaitStale(): SandboxExecutionAwaitStale {
+  return {};
+}
+
+export const SandboxExecutionAwaitStale: MessageFns<SandboxExecutionAwaitStale> = {
+  encode(_: SandboxExecutionAwaitStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SandboxExecutionAwaitStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSandboxExecutionAwaitStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): SandboxExecutionAwaitStale {
+    return {};
+  },
+
+  toJSON(_: SandboxExecutionAwaitStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SandboxExecutionAwaitStale>, I>>(base?: I): SandboxExecutionAwaitStale {
+    return SandboxExecutionAwaitStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SandboxExecutionAwaitStale>, I>>(_: I): SandboxExecutionAwaitStale {
+    const message = createBaseSandboxExecutionAwaitStale();
     return message;
   },
 };
 
 function createBaseReadCommandResultRequest(): ReadCommandResultRequest {
-  return { scope: undefined, taskId: "", maxOutputTokens: 0, toolUseEventId: "" };
+  return { scope: undefined, taskId: "", operationId: "", maxOutputTokens: 0, toolUseEventId: "" };
 }
 
 export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
@@ -11677,6 +12099,9 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
     }
     if (message.taskId !== "") {
       writer.uint32(18).string(message.taskId);
+    }
+    if (message.operationId !== "") {
+      writer.uint32(26).string(message.operationId);
     }
     if (message.maxOutputTokens !== 0) {
       writer.uint32(32).int32(message.maxOutputTokens);
@@ -11708,6 +12133,14 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
           }
 
           message.taskId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.operationId = reader.string();
           continue;
         }
         case 4: {
@@ -11743,6 +12176,11 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
         : isSet(object.task_id)
         ? globalThis.String(object.task_id)
         : "",
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
       maxOutputTokens: isSet(object.maxOutputTokens)
         ? globalThis.Number(object.maxOutputTokens)
         : isSet(object.max_output_tokens)
@@ -11764,6 +12202,9 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
     if (message.taskId !== "") {
       obj.taskId = message.taskId;
     }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
     if (message.maxOutputTokens !== 0) {
       obj.maxOutputTokens = Math.round(message.maxOutputTokens);
     }
@@ -11782,6 +12223,7 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.taskId = object.taskId ?? "";
+    message.operationId = object.operationId ?? "";
     message.maxOutputTokens = object.maxOutputTokens ?? 0;
     message.toolUseEventId = object.toolUseEventId ?? "";
     return message;
@@ -11789,16 +12231,16 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
 };
 
 function createBaseReadCommandResultResponse(): ReadCommandResultResponse {
-  return { ack: undefined, resultJson: "" };
+  return { completed: undefined, stale: undefined };
 }
 
 export const ReadCommandResultResponse: MessageFns<ReadCommandResultResponse> = {
   encode(message: ReadCommandResultResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.completed !== undefined) {
+      CommandReadCompleted.encode(message.completed, writer.uint32(10).fork()).join();
     }
-    if (message.resultJson !== "") {
-      writer.uint32(18).string(message.resultJson);
+    if (message.stale !== undefined) {
+      CommandReadStale.encode(message.stale, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -11815,11 +12257,80 @@ export const ReadCommandResultResponse: MessageFns<ReadCommandResultResponse> = 
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.completed = CommandReadCompleted.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
           if (tag !== 18) {
+            break;
+          }
+
+          message.stale = CommandReadStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ReadCommandResultResponse {
+    return {
+      completed: isSet(object.completed) ? CommandReadCompleted.fromJSON(object.completed) : undefined,
+      stale: isSet(object.stale) ? CommandReadStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: ReadCommandResultResponse): unknown {
+    const obj: any = {};
+    if (message.completed !== undefined) {
+      obj.completed = CommandReadCompleted.toJSON(message.completed);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = CommandReadStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ReadCommandResultResponse>, I>>(base?: I): ReadCommandResultResponse {
+    return ReadCommandResultResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReadCommandResultResponse>, I>>(object: I): ReadCommandResultResponse {
+    const message = createBaseReadCommandResultResponse();
+    message.completed = (object.completed !== undefined && object.completed !== null)
+      ? CommandReadCompleted.fromPartial(object.completed)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? CommandReadStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseCommandReadCompleted(): CommandReadCompleted {
+  return { resultJson: "" };
+}
+
+export const CommandReadCompleted: MessageFns<CommandReadCompleted> = {
+  encode(message: CommandReadCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandReadCompleted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandReadCompleted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
             break;
           }
 
@@ -11835,9 +12346,8 @@ export const ReadCommandResultResponse: MessageFns<ReadCommandResultResponse> = 
     return message;
   },
 
-  fromJSON(object: any): ReadCommandResultResponse {
+  fromJSON(object: any): CommandReadCompleted {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
       resultJson: isSet(object.resultJson)
         ? globalThis.String(object.resultJson)
         : isSet(object.result_json)
@@ -11846,32 +12356,69 @@ export const ReadCommandResultResponse: MessageFns<ReadCommandResultResponse> = 
     };
   },
 
-  toJSON(message: ReadCommandResultResponse): unknown {
+  toJSON(message: CommandReadCompleted): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
-    }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ReadCommandResultResponse>, I>>(base?: I): ReadCommandResultResponse {
-    return ReadCommandResultResponse.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<CommandReadCompleted>, I>>(base?: I): CommandReadCompleted {
+    return CommandReadCompleted.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ReadCommandResultResponse>, I>>(object: I): ReadCommandResultResponse {
-    const message = createBaseReadCommandResultResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
-      : undefined;
+  fromPartial<I extends Exact<DeepPartial<CommandReadCompleted>, I>>(object: I): CommandReadCompleted {
+    const message = createBaseCommandReadCompleted();
     message.resultJson = object.resultJson ?? "";
     return message;
   },
 };
 
+function createBaseCommandReadStale(): CommandReadStale {
+  return {};
+}
+
+export const CommandReadStale: MessageFns<CommandReadStale> = {
+  encode(_: CommandReadStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandReadStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandReadStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CommandReadStale {
+    return {};
+  },
+
+  toJSON(_: CommandReadStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommandReadStale>, I>>(base?: I): CommandReadStale {
+    return CommandReadStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommandReadStale>, I>>(_: I): CommandReadStale {
+    const message = createBaseCommandReadStale();
+    return message;
+  },
+};
+
 function createBaseSendCommandInputRequest(): SendCommandInputRequest {
-  return { scope: undefined, taskId: "", maxOutputTokens: 0, inputJson: "", toolUseEventId: "" };
+  return { scope: undefined, taskId: "", maxOutputTokens: 0, inputJson: "", toolUseEventId: "", operationId: "" };
 }
 
 export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
@@ -11890,6 +12437,9 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(42).string(message.toolUseEventId);
+    }
+    if (message.operationId !== "") {
+      writer.uint32(50).string(message.operationId);
     }
     return writer;
   },
@@ -11941,6 +12491,14 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
           message.toolUseEventId = reader.string();
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11973,6 +12531,11 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
     };
   },
 
@@ -11993,6 +12556,9 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
     }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
     return obj;
   },
 
@@ -12008,24 +12574,25 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
     message.maxOutputTokens = object.maxOutputTokens ?? 0;
     message.inputJson = object.inputJson ?? "";
     message.toolUseEventId = object.toolUseEventId ?? "";
+    message.operationId = object.operationId ?? "";
     return message;
   },
 };
 
 function createBaseSendCommandInputResponse(): SendCommandInputResponse {
-  return { ack: undefined, resultJson: "", writeSeq: 0 };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const SendCommandInputResponse: MessageFns<SendCommandInputResponse> = {
   encode(message: SendCommandInputResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.committed !== undefined) {
+      CommandInputCommitted.encode(message.committed, writer.uint32(10).fork()).join();
     }
-    if (message.resultJson !== "") {
-      writer.uint32(18).string(message.resultJson);
+    if (message.duplicate !== undefined) {
+      CommandInputDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
     }
-    if (message.writeSeq !== 0) {
-      writer.uint32(24).int64(message.writeSeq);
+    if (message.stale !== undefined) {
+      CommandInputStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -12042,7 +12609,7 @@ export const SendCommandInputResponse: MessageFns<SendCommandInputResponse> = {
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.committed = CommandInputCommitted.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
@@ -12050,15 +12617,15 @@ export const SendCommandInputResponse: MessageFns<SendCommandInputResponse> = {
             break;
           }
 
-          message.resultJson = reader.string();
+          message.duplicate = CommandInputDuplicate.decode(reader, reader.uint32());
           continue;
         }
         case 3: {
-          if (tag !== 24) {
+          if (tag !== 26) {
             break;
           }
 
-          message.writeSeq = longToNumber(reader.int64());
+          message.stale = CommandInputStale.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -12072,30 +12639,22 @@ export const SendCommandInputResponse: MessageFns<SendCommandInputResponse> = {
 
   fromJSON(object: any): SendCommandInputResponse {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
-      resultJson: isSet(object.resultJson)
-        ? globalThis.String(object.resultJson)
-        : isSet(object.result_json)
-        ? globalThis.String(object.result_json)
-        : "",
-      writeSeq: isSet(object.writeSeq)
-        ? globalThis.Number(object.writeSeq)
-        : isSet(object.write_seq)
-        ? globalThis.Number(object.write_seq)
-        : 0,
+      committed: isSet(object.committed) ? CommandInputCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? CommandInputDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? CommandInputStale.fromJSON(object.stale) : undefined,
     };
   },
 
   toJSON(message: SendCommandInputResponse): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    if (message.committed !== undefined) {
+      obj.committed = CommandInputCommitted.toJSON(message.committed);
     }
-    if (message.resultJson !== "") {
-      obj.resultJson = message.resultJson;
+    if (message.duplicate !== undefined) {
+      obj.duplicate = CommandInputDuplicate.toJSON(message.duplicate);
     }
-    if (message.writeSeq !== 0) {
-      obj.writeSeq = Math.round(message.writeSeq);
+    if (message.stale !== undefined) {
+      obj.stale = CommandInputStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -12105,17 +12664,192 @@ export const SendCommandInputResponse: MessageFns<SendCommandInputResponse> = {
   },
   fromPartial<I extends Exact<DeepPartial<SendCommandInputResponse>, I>>(object: I): SendCommandInputResponse {
     const message = createBaseSendCommandInputResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? CommandInputCommitted.fromPartial(object.committed)
       : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? CommandInputDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? CommandInputStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseCommandInputCommitted(): CommandInputCommitted {
+  return { resultJson: "" };
+}
+
+export const CommandInputCommitted: MessageFns<CommandInputCommitted> = {
+  encode(message: CommandInputCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandInputCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandInputCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.resultJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CommandInputCommitted {
+    return {
+      resultJson: isSet(object.resultJson)
+        ? globalThis.String(object.resultJson)
+        : isSet(object.result_json)
+        ? globalThis.String(object.result_json)
+        : "",
+    };
+  },
+
+  toJSON(message: CommandInputCommitted): unknown {
+    const obj: any = {};
+    if (message.resultJson !== "") {
+      obj.resultJson = message.resultJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommandInputCommitted>, I>>(base?: I): CommandInputCommitted {
+    return CommandInputCommitted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommandInputCommitted>, I>>(object: I): CommandInputCommitted {
+    const message = createBaseCommandInputCommitted();
     message.resultJson = object.resultJson ?? "";
-    message.writeSeq = object.writeSeq ?? 0;
+    return message;
+  },
+};
+
+function createBaseCommandInputDuplicate(): CommandInputDuplicate {
+  return { resultJson: "" };
+}
+
+export const CommandInputDuplicate: MessageFns<CommandInputDuplicate> = {
+  encode(message: CommandInputDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandInputDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandInputDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.resultJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CommandInputDuplicate {
+    return {
+      resultJson: isSet(object.resultJson)
+        ? globalThis.String(object.resultJson)
+        : isSet(object.result_json)
+        ? globalThis.String(object.result_json)
+        : "",
+    };
+  },
+
+  toJSON(message: CommandInputDuplicate): unknown {
+    const obj: any = {};
+    if (message.resultJson !== "") {
+      obj.resultJson = message.resultJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommandInputDuplicate>, I>>(base?: I): CommandInputDuplicate {
+    return CommandInputDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommandInputDuplicate>, I>>(object: I): CommandInputDuplicate {
+    const message = createBaseCommandInputDuplicate();
+    message.resultJson = object.resultJson ?? "";
+    return message;
+  },
+};
+
+function createBaseCommandInputStale(): CommandInputStale {
+  return {};
+}
+
+export const CommandInputStale: MessageFns<CommandInputStale> = {
+  encode(_: CommandInputStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandInputStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandInputStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CommandInputStale {
+    return {};
+  },
+
+  toJSON(_: CommandInputStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommandInputStale>, I>>(base?: I): CommandInputStale {
+    return CommandInputStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommandInputStale>, I>>(_: I): CommandInputStale {
+    const message = createBaseCommandInputStale();
     return message;
   },
 };
 
 function createBaseCancelCommandRequest(): CancelCommandRequest {
-  return { scope: undefined, taskId: "", reason: "", toolUseEventId: "" };
+  return { scope: undefined, taskId: "", reason: "", toolUseEventId: "", operationId: "" };
 }
 
 export const CancelCommandRequest: MessageFns<CancelCommandRequest> = {
@@ -12131,6 +12865,9 @@ export const CancelCommandRequest: MessageFns<CancelCommandRequest> = {
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(42).string(message.toolUseEventId);
+    }
+    if (message.operationId !== "") {
+      writer.uint32(50).string(message.operationId);
     }
     return writer;
   },
@@ -12174,6 +12911,14 @@ export const CancelCommandRequest: MessageFns<CancelCommandRequest> = {
           message.toolUseEventId = reader.string();
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -12197,6 +12942,11 @@ export const CancelCommandRequest: MessageFns<CancelCommandRequest> = {
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
     };
   },
 
@@ -12214,6 +12964,9 @@ export const CancelCommandRequest: MessageFns<CancelCommandRequest> = {
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
     }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
     return obj;
   },
 
@@ -12228,21 +12981,25 @@ export const CancelCommandRequest: MessageFns<CancelCommandRequest> = {
     message.taskId = object.taskId ?? "";
     message.reason = object.reason ?? "";
     message.toolUseEventId = object.toolUseEventId ?? "";
+    message.operationId = object.operationId ?? "";
     return message;
   },
 };
 
 function createBaseCancelCommandResponse(): CancelCommandResponse {
-  return { ack: undefined, resultJson: "" };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const CancelCommandResponse: MessageFns<CancelCommandResponse> = {
   encode(message: CancelCommandResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.committed !== undefined) {
+      CommandCancelCommitted.encode(message.committed, writer.uint32(10).fork()).join();
     }
-    if (message.resultJson !== "") {
-      writer.uint32(18).string(message.resultJson);
+    if (message.duplicate !== undefined) {
+      CommandCancelDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      CommandCancelStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -12259,11 +13016,95 @@ export const CancelCommandResponse: MessageFns<CancelCommandResponse> = {
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.committed = CommandCancelCommitted.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
           if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = CommandCancelDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = CommandCancelStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CancelCommandResponse {
+    return {
+      committed: isSet(object.committed) ? CommandCancelCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? CommandCancelDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? CommandCancelStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: CancelCommandResponse): unknown {
+    const obj: any = {};
+    if (message.committed !== undefined) {
+      obj.committed = CommandCancelCommitted.toJSON(message.committed);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = CommandCancelDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = CommandCancelStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CancelCommandResponse>, I>>(base?: I): CancelCommandResponse {
+    return CancelCommandResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CancelCommandResponse>, I>>(object: I): CancelCommandResponse {
+    const message = createBaseCancelCommandResponse();
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? CommandCancelCommitted.fromPartial(object.committed)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? CommandCancelDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? CommandCancelStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseCommandCancelCommitted(): CommandCancelCommitted {
+  return { resultJson: "" };
+}
+
+export const CommandCancelCommitted: MessageFns<CommandCancelCommitted> = {
+  encode(message: CommandCancelCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandCancelCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandCancelCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
             break;
           }
 
@@ -12279,9 +13120,8 @@ export const CancelCommandResponse: MessageFns<CancelCommandResponse> = {
     return message;
   },
 
-  fromJSON(object: any): CancelCommandResponse {
+  fromJSON(object: any): CommandCancelCommitted {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
       resultJson: isSet(object.resultJson)
         ? globalThis.String(object.resultJson)
         : isSet(object.result_json)
@@ -12290,32 +13130,133 @@ export const CancelCommandResponse: MessageFns<CancelCommandResponse> = {
     };
   },
 
-  toJSON(message: CancelCommandResponse): unknown {
+  toJSON(message: CommandCancelCommitted): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
-    }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<CancelCommandResponse>, I>>(base?: I): CancelCommandResponse {
-    return CancelCommandResponse.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<CommandCancelCommitted>, I>>(base?: I): CommandCancelCommitted {
+    return CommandCancelCommitted.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<CancelCommandResponse>, I>>(object: I): CancelCommandResponse {
-    const message = createBaseCancelCommandResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
-      : undefined;
+  fromPartial<I extends Exact<DeepPartial<CommandCancelCommitted>, I>>(object: I): CommandCancelCommitted {
+    const message = createBaseCommandCancelCommitted();
     message.resultJson = object.resultJson ?? "";
     return message;
   },
 };
 
+function createBaseCommandCancelDuplicate(): CommandCancelDuplicate {
+  return { resultJson: "" };
+}
+
+export const CommandCancelDuplicate: MessageFns<CommandCancelDuplicate> = {
+  encode(message: CommandCancelDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandCancelDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandCancelDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.resultJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CommandCancelDuplicate {
+    return {
+      resultJson: isSet(object.resultJson)
+        ? globalThis.String(object.resultJson)
+        : isSet(object.result_json)
+        ? globalThis.String(object.result_json)
+        : "",
+    };
+  },
+
+  toJSON(message: CommandCancelDuplicate): unknown {
+    const obj: any = {};
+    if (message.resultJson !== "") {
+      obj.resultJson = message.resultJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommandCancelDuplicate>, I>>(base?: I): CommandCancelDuplicate {
+    return CommandCancelDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommandCancelDuplicate>, I>>(object: I): CommandCancelDuplicate {
+    const message = createBaseCommandCancelDuplicate();
+    message.resultJson = object.resultJson ?? "";
+    return message;
+  },
+};
+
+function createBaseCommandCancelStale(): CommandCancelStale {
+  return {};
+}
+
+export const CommandCancelStale: MessageFns<CommandCancelStale> = {
+  encode(_: CommandCancelStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommandCancelStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommandCancelStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CommandCancelStale {
+    return {};
+  },
+
+  toJSON(_: CommandCancelStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommandCancelStale>, I>>(base?: I): CommandCancelStale {
+    return CommandCancelStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommandCancelStale>, I>>(_: I): CommandCancelStale {
+    const message = createBaseCommandCancelStale();
+    return message;
+  },
+};
+
 function createBaseRunMemoryRequest(): RunMemoryRequest {
-  return { scope: undefined, toolUseEventId: "", normalizedInputHash: "", operation: "", inputJson: "" };
+  return { scope: undefined, toolUseEventId: "" };
 }
 
 export const RunMemoryRequest: MessageFns<RunMemoryRequest> = {
@@ -12325,15 +13266,6 @@ export const RunMemoryRequest: MessageFns<RunMemoryRequest> = {
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(18).string(message.toolUseEventId);
-    }
-    if (message.normalizedInputHash !== "") {
-      writer.uint32(26).string(message.normalizedInputHash);
-    }
-    if (message.operation !== "") {
-      writer.uint32(42).string(message.operation);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(50).string(message.inputJson);
     }
     return writer;
   },
@@ -12361,30 +13293,6 @@ export const RunMemoryRequest: MessageFns<RunMemoryRequest> = {
           message.toolUseEventId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.normalizedInputHash = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.operation = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.inputJson = reader.string();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -12402,17 +13310,6 @@ export const RunMemoryRequest: MessageFns<RunMemoryRequest> = {
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
-      normalizedInputHash: isSet(object.normalizedInputHash)
-        ? globalThis.String(object.normalizedInputHash)
-        : isSet(object.normalized_input_hash)
-        ? globalThis.String(object.normalized_input_hash)
-        : "",
-      operation: isSet(object.operation) ? globalThis.String(object.operation) : "",
-      inputJson: isSet(object.inputJson)
-        ? globalThis.String(object.inputJson)
-        : isSet(object.input_json)
-        ? globalThis.String(object.input_json)
-        : "",
     };
   },
 
@@ -12423,15 +13320,6 @@ export const RunMemoryRequest: MessageFns<RunMemoryRequest> = {
     }
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
-    }
-    if (message.normalizedInputHash !== "") {
-      obj.normalizedInputHash = message.normalizedInputHash;
-    }
-    if (message.operation !== "") {
-      obj.operation = message.operation;
-    }
-    if (message.inputJson !== "") {
-      obj.inputJson = message.inputJson;
     }
     return obj;
   },
@@ -12445,24 +13333,24 @@ export const RunMemoryRequest: MessageFns<RunMemoryRequest> = {
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.toolUseEventId = object.toolUseEventId ?? "";
-    message.normalizedInputHash = object.normalizedInputHash ?? "";
-    message.operation = object.operation ?? "";
-    message.inputJson = object.inputJson ?? "";
     return message;
   },
 };
 
 function createBaseRunMemoryResponse(): RunMemoryResponse {
-  return { ack: undefined, resultJson: "" };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const RunMemoryResponse: MessageFns<RunMemoryResponse> = {
   encode(message: RunMemoryResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.committed !== undefined) {
+      MemoryRunCommitted.encode(message.committed, writer.uint32(10).fork()).join();
     }
-    if (message.resultJson !== "") {
-      writer.uint32(18).string(message.resultJson);
+    if (message.duplicate !== undefined) {
+      MemoryRunDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      MemoryRunStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -12479,11 +13367,95 @@ export const RunMemoryResponse: MessageFns<RunMemoryResponse> = {
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.committed = MemoryRunCommitted.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
           if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = MemoryRunDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = MemoryRunStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RunMemoryResponse {
+    return {
+      committed: isSet(object.committed) ? MemoryRunCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? MemoryRunDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? MemoryRunStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: RunMemoryResponse): unknown {
+    const obj: any = {};
+    if (message.committed !== undefined) {
+      obj.committed = MemoryRunCommitted.toJSON(message.committed);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = MemoryRunDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = MemoryRunStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RunMemoryResponse>, I>>(base?: I): RunMemoryResponse {
+    return RunMemoryResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RunMemoryResponse>, I>>(object: I): RunMemoryResponse {
+    const message = createBaseRunMemoryResponse();
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? MemoryRunCommitted.fromPartial(object.committed)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? MemoryRunDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? MemoryRunStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMemoryRunCommitted(): MemoryRunCommitted {
+  return { resultJson: "" };
+}
+
+export const MemoryRunCommitted: MessageFns<MemoryRunCommitted> = {
+  encode(message: MemoryRunCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MemoryRunCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMemoryRunCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
             break;
           }
 
@@ -12499,9 +13471,8 @@ export const RunMemoryResponse: MessageFns<RunMemoryResponse> = {
     return message;
   },
 
-  fromJSON(object: any): RunMemoryResponse {
+  fromJSON(object: any): MemoryRunCommitted {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
       resultJson: isSet(object.resultJson)
         ? globalThis.String(object.resultJson)
         : isSet(object.result_json)
@@ -12510,26 +13481,127 @@ export const RunMemoryResponse: MessageFns<RunMemoryResponse> = {
     };
   },
 
-  toJSON(message: RunMemoryResponse): unknown {
+  toJSON(message: MemoryRunCommitted): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
-    }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RunMemoryResponse>, I>>(base?: I): RunMemoryResponse {
-    return RunMemoryResponse.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<MemoryRunCommitted>, I>>(base?: I): MemoryRunCommitted {
+    return MemoryRunCommitted.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RunMemoryResponse>, I>>(object: I): RunMemoryResponse {
-    const message = createBaseRunMemoryResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
-      : undefined;
+  fromPartial<I extends Exact<DeepPartial<MemoryRunCommitted>, I>>(object: I): MemoryRunCommitted {
+    const message = createBaseMemoryRunCommitted();
     message.resultJson = object.resultJson ?? "";
+    return message;
+  },
+};
+
+function createBaseMemoryRunDuplicate(): MemoryRunDuplicate {
+  return { resultJson: "" };
+}
+
+export const MemoryRunDuplicate: MessageFns<MemoryRunDuplicate> = {
+  encode(message: MemoryRunDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MemoryRunDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMemoryRunDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.resultJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MemoryRunDuplicate {
+    return {
+      resultJson: isSet(object.resultJson)
+        ? globalThis.String(object.resultJson)
+        : isSet(object.result_json)
+        ? globalThis.String(object.result_json)
+        : "",
+    };
+  },
+
+  toJSON(message: MemoryRunDuplicate): unknown {
+    const obj: any = {};
+    if (message.resultJson !== "") {
+      obj.resultJson = message.resultJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<MemoryRunDuplicate>, I>>(base?: I): MemoryRunDuplicate {
+    return MemoryRunDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MemoryRunDuplicate>, I>>(object: I): MemoryRunDuplicate {
+    const message = createBaseMemoryRunDuplicate();
+    message.resultJson = object.resultJson ?? "";
+    return message;
+  },
+};
+
+function createBaseMemoryRunStale(): MemoryRunStale {
+  return {};
+}
+
+export const MemoryRunStale: MessageFns<MemoryRunStale> = {
+  encode(_: MemoryRunStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MemoryRunStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMemoryRunStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): MemoryRunStale {
+    return {};
+  },
+
+  toJSON(_: MemoryRunStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<MemoryRunStale>, I>>(base?: I): MemoryRunStale {
+    return MemoryRunStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MemoryRunStale>, I>>(_: I): MemoryRunStale {
+    const message = createBaseMemoryRunStale();
     return message;
   },
 };

@@ -363,11 +363,11 @@ per-thread runtime binding token.
 | --- | --- | --- |
 | Authenticate | TokenReview the Runtime workload token, then verify the binding token | gRPC `Unauthenticated` / `PermissionDenied` before any side effect |
 | Validate | `validateRunMcpToolRequest` (`bounds.ts`) | gRPC `INVALID_ARGUMENT` |
-| Claim | `ClaimMcpToolResult` on Bridge with `(scope, tool_use_event_id, normalizedInputHash)` | stored-result hash match → replay; mismatch → fatal conflict; live reservation → retryable; none → reservation inserted |
+| Claim | Create one execution-attempt `claimId`, then call `ClaimMcpToolResult` with `(scope, tool_use_event_id, claimId)`; Bridge loads the durable server, tool, and canonical input | same-claim replay renews the lease; an unexpired different claim remains in flight; an expired lease admits a new claim; a terminal result replays directly |
 | Resolve credential | Match one session-vault credential (table below) | fail closed, no MCP call is made |
 | Establish + execute | Lazy-connect the MCP client, call the tool within `MCP_CALL_TIMEOUT_SECONDS` (120) | reconnect/auth policy below; timeout → `mcp_timeout` |
 | Format | `formatMcpToolResult` → `result_text` + at most one attachment, decoded bytes held in memory only | bounds rejection before commit |
-| Commit | `CommitMcpToolResult` on Bridge — Bridge creates the transient-attachment rows and persists the refs-only result in one transaction | post-effect commit failure → retryable `runtime_error` |
+| Commit | `CommitMcpToolResult` with the same `claimId` plus result/media; Bridge fences the current claimant, creates transient-attachment rows, and persists the refs-only result in one transaction | stale claimant → custody lost; post-effect commit failure → retryable `runtime_error` |
 
 `MCP isError: true` maps to `status = tool_error` with the formatted error as
 `result_text` so the model can self-repair; transport/auth failures after the

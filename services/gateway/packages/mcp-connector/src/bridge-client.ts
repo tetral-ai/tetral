@@ -5,23 +5,19 @@
  * Bridge gRPC calls. Connector composition constructs these adapters, and the service uses them
  * to announce a changed manifest and to claim or commit a tool result around the external MCP
  * side effect. The module guards the inline-media transport ceiling, accepts only explicit Bridge
- * acknowledgements, keeps pending media out of stored responses, and returns the refs-only result
- * produced by Bridge.
+ * acknowledgements, keeps pending media out of stored responses, and reads committed refs-only
+ * results back from Bridge's direct durable facts.
  */
-import { createHash } from "node:crypto";
 import { credentials, status } from "@grpc/grpc-js";
 import type { CallOptions, ChannelOptions, Metadata, ServiceError } from "@grpc/grpc-js";
 import {
   AgentRuntimeBridgeServiceClient,
-  BridgeWriteStatus,
-  ReceiptApplicationDisposition,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
   McpErrorKind,
   McpRetryStatus,
   RunMcpToolStatus,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
 import type {
   ClaimMcpToolResultRequest,
   ClaimMcpToolResultResponse,
@@ -32,7 +28,6 @@ import type {
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
 import {
-  InMemoryMcpIdempotencyStore,
   McpIdempotencyStaleCustodyError,
   parseStoredRunMcpToolResponse,
   serializePendingRunMcpToolResponse,
@@ -51,7 +46,7 @@ const MCP_MANIFEST_TOO_LARGE_DETAILS = "mcp manifest tools exceed the accepted b
 
 const MCP_COMMIT_RETRY_BACKOFF_MS = [100, 300, 1_000] as const;
 
-const MCP_COMMIT_MATERIALIZATION_FAILURE: PendingStoredRunMcpToolResponse = {
+const MCP_COMMIT_PAYLOAD_REJECTION_RESULT: PendingStoredRunMcpToolResponse = {
   response: {
     status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
     resultText: "MCP tool result could not be committed.",
@@ -170,16 +165,16 @@ export class BridgeAPIManifestChangeNotifier {
         message: "mcp manifest change notification failed",
       };
     }
-    if (response.ack?.status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED) {
+    if (response.committed !== undefined) {
       return { ok: true, duplicate: false };
     }
-    if (response.ack?.status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE) {
+    if (response.duplicate !== undefined) {
       return { ok: true, duplicate: true };
     }
     return {
       ok: false,
       retryable: false,
-      code: response.ack?.errorCode || "bridge_manifest_change_rejected",
+      code: "bridge_manifest_change_rejected",
       message: "mcp manifest change notification rejected",
     };
   }
@@ -200,13 +195,13 @@ export interface BridgeAPIMcpToolResultIdempotencyStoreOptions {
 /**
  * Implements MCP tool-result idempotency through Bridge-owned claim and commit RPCs.
  *
- * Claims reserve canonical request identity before the external tool runs. Commits send pending
- * media bytes on the bounded inline leg, parse Bridge's refs-only response, and mirror completed
- * state locally through defensive replay copies. Claims and commits require tenant, binding,
- * server, tool, and caller-pod context supplied by the connector service.
+ * Claims reserve one durable Tool target for an explicit execution attempt. Commits send pending
+ * media bytes on the bounded inline leg, then read the committed durable result through a direct
+ * claim read. Claims and commits require tenant, binding, and caller-pod context supplied by the
+ * connector service; Bridge supplies the immutable executor facts.
  */
 export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencyStore {
-  readonly #local = new InMemoryMcpIdempotencyStore();
+  readonly #localClaims = new Set<string>();
   private readonly client: BridgeMcpToolResultClient;
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   private readonly claimTimeoutMs: number;
@@ -238,34 +233,33 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       }
       throw error;
     }
-    if (response.ack?.status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE) {
-      if (response.materializationHandle === undefined || response.materializationHandle.length === 0) {
-        throw new Error("mcp tool replay is missing its materialization handle");
-      }
-      const disposition = mcpClaimReplayDisposition(response, claimMcpToolResultRequest(key, context), context);
-      if (disposition === undefined) {
-        throw new Error("mcp tool replay returned malformed declaration receipt");
-      }
-      if (disposition === "stale_custody") {
-        return { status: "stale_custody" };
-      }
-      const stored = parseStoredRunMcpToolResponse(response.resultJson);
-      stored.response.materializationHandle = response.materializationHandle;
-      this.#local.storeCompleted(key, stored, context);
+    if (response.alreadyCompleted !== undefined) {
+      const stored = parseStoredRunMcpToolResponse(response.alreadyCompleted.resultJson);
+      this.releaseLocalClaim(key, context);
       return { status: "replay", stored };
     }
-    if (response.ack?.status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED) {
-      const localClaim = this.#local.claim(key, context);
-      if (localClaim.status === "new") {
-        return { status: "new" };
+    if (response.acquired !== undefined) {
+      const localKey = localMcpClaimKey(key, context);
+      if (this.#localClaims.has(localKey)) {
+        return { status: "in_flight" };
       }
-      await this.#local.fail(key, context);
-      return localClaim.status === "conflict" ? { status: "conflict" } : { status: "in_flight" };
+      this.#localClaims.add(localKey);
+      return {
+        status: "new",
+        executor: {
+          mcpServerName: response.acquired.mcpServerName,
+          toolName: response.acquired.toolName,
+          inputJson: response.acquired.inputJson,
+        },
+      };
     }
-    if (response.ack?.status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack.errorCode === "mcp_claim_in_flight") {
+    if (response.inFlight !== undefined) {
       return { status: "in_flight" };
     }
-    return { status: "conflict" };
+    if (response.stale !== undefined) {
+      return { status: "stale_custody" };
+    }
+    throw new Error("mcp tool claim returned no result variant");
   }
 
   async store(key: IdempotencyKey, stored: PendingStoredRunMcpToolResponse, context?: McpIdempotencyContext) {
@@ -273,7 +267,9 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       throw new Error("mcp tool idempotency context is required");
     }
     const request: CommitMcpToolResultRequest = freezeCommitRequest({
-      ...claimMcpToolResultRequest(key, context),
+      scope: claimMcpToolResultRequest(key, context).scope,
+      toolUseEventId: key.toolUseEventId,
+      claimId: context.claimId,
       resultJson: serializePendingRunMcpToolResponse(stored),
       inlineMedia: stored.response.attachments.map((attachment) => ({
         data: new Uint8Array(attachment.data),
@@ -282,7 +278,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       })),
     });
     let activeRequest = request;
-    let materializingFailure = false;
+    let committingPayloadRejection = false;
     let response: CommitMcpToolResultResponse;
     let outcomeUnknown = false;
     for (let attempt = 0; ; attempt++) {
@@ -291,7 +287,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         metadata = await this.metadata();
       } catch (error) {
         if (!outcomeUnknown) {
-          await this.#local.fail(key, context);
+          this.releaseLocalClaim(key, context);
           throw error;
         }
         const delayIndex = Math.min(attempt, MCP_COMMIT_RETRY_BACKOFF_MS.length - 1);
@@ -305,18 +301,18 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         break;
       } catch (error) {
         const disposition = mcpCommitFailureDisposition(error);
-        if (disposition === "result_payload_rejected" && !materializingFailure) {
+        if (disposition === "result_payload_rejected" && !committingPayloadRejection) {
           activeRequest = freezeCommitRequest({
             ...request,
-            resultJson: serializePendingRunMcpToolResponse(MCP_COMMIT_MATERIALIZATION_FAILURE),
+            resultJson: serializePendingRunMcpToolResponse(MCP_COMMIT_PAYLOAD_REJECTION_RESULT),
             inlineMedia: [],
           });
-          materializingFailure = true;
+          committingPayloadRejection = true;
           outcomeUnknown = false;
           continue;
         }
         if (disposition === "stale_custody" || disposition === "result_payload_rejected") {
-          await this.#local.fail(key, context);
+          this.releaseLocalClaim(key, context);
           throw new McpIdempotencyStaleCustodyError();
         }
         outcomeUnknown = true;
@@ -324,33 +320,26 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000);
       }
     }
-    if (
-      response.ack?.status !== BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE &&
-      response.ack?.status !== BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED
-    ) {
-      await this.#local.fail(key, context);
+    if (response.committed === undefined && response.duplicate === undefined) {
+      this.releaseLocalClaim(key, context);
       throw new McpIdempotencyStaleCustodyError();
     }
-    const disposition = mcpCommitDisposition(response, activeRequest, context);
-    if (disposition === undefined) {
-      await this.#local.fail(key, context);
-      throw new Error("mcp tool commit returned malformed declaration receipt");
+    const replay = await this.claim(key, context);
+    if (replay.status !== "replay") {
+      this.releaseLocalClaim(key, context);
+      throw new Error("mcp tool commit could not read its durable result");
     }
-    if (disposition === "stale_custody") {
-      await this.#local.fail(key, context);
-      throw new McpIdempotencyStaleCustodyError();
-    }
-    if (response.materializationHandle === undefined || response.materializationHandle.length === 0) {
-      await this.#local.fail(key, context);
-      throw new Error("mcp tool commit is missing its materialization handle");
-    }
-    const committed = parseStoredRunMcpToolResponse(response.refsOnlyResultJson);
-    committed.response.materializationHandle = response.materializationHandle;
-    return this.#local.storeCompleted(key, committed, context);
+    return replay.stored.response;
   }
 
   async fail(key: IdempotencyKey, context?: McpIdempotencyContext): Promise<void> {
-    await this.#local.fail(key, context);
+    if (context !== undefined) {
+      this.releaseLocalClaim(key, context);
+    }
+  }
+
+  private releaseLocalClaim(key: IdempotencyKey, context: McpIdempotencyContext): void {
+    this.#localClaims.delete(localMcpClaimKey(key, context));
   }
 
   private async metadata(): Promise<Metadata> {
@@ -433,7 +422,6 @@ function commitMcpToolResult(
 function claimMcpToolResultRequest(key: IdempotencyKey, context: McpIdempotencyContext): ClaimMcpToolResultRequest {
   return {
     scope: {
-      requestId: context.requestId,
       workspaceId: context.workspaceId,
       sessionId: context.sessionId,
       sessionThreadId: context.sessionThreadId,
@@ -444,185 +432,12 @@ function claimMcpToolResultRequest(key: IdempotencyKey, context: McpIdempotencyC
       },
     },
     toolUseEventId: key.toolUseEventId,
-    normalizedInputHash: key.normalizedInputHash,
-    mcpServerName: context.mcpServerName,
-    toolName: context.toolName,
-    inputJson: context.inputJson,
+    claimId: context.claimId,
   };
 }
 
-function mcpCommitDisposition(
-  response: CommitMcpToolResultResponse,
-  request: CommitMcpToolResultRequest,
-  context: McpIdempotencyContext,
-): "current_custody" | "stale_custody" | undefined {
-  const declaration = response.declaration;
-  const receipt = declaration?.receipts[0];
-  if (
-    declaration === undefined ||
-    declaration.receipts.length !== 1 ||
-    receipt === undefined ||
-    !validMcpMaterializationReceipt(
-      receipt,
-      request.scope?.sessionThreadId ?? "",
-      request.toolUseEventId,
-      request.mcpServerName,
-      stableMcpMaterializationOperationId(request),
-      mcpMaterializationDeclarationDigest(request),
-      response.refsOnlyResultJson,
-    )
-  ) {
-    return undefined;
-  }
-  return declarationDisposition(declaration, context);
-}
-
-function mcpClaimReplayDisposition(
-  response: ClaimMcpToolResultResponse,
-  request: ClaimMcpToolResultRequest,
-  context: McpIdempotencyContext,
-): "current_custody" | "stale_custody" | undefined {
-  const declaration = response.declaration;
-  const receipt = declaration?.receipts[0];
-  if (
-    declaration === undefined ||
-    declaration.receipts.length !== 1 ||
-    receipt === undefined ||
-    receipt.declarationDigest.length === 0 ||
-    !validMcpMaterializationReceipt(
-      receipt,
-      request.scope?.sessionThreadId ?? "",
-      request.toolUseEventId,
-      request.mcpServerName,
-      stableMcpMaterializationOperationId(request),
-      receipt.declarationDigest,
-      response.resultJson,
-    )
-  ) {
-    return undefined;
-  }
-  return declarationDisposition(declaration, context);
-}
-
-function declarationDisposition(
-  declaration: NonNullable<CommitMcpToolResultResponse["declaration"]>,
-  context: McpIdempotencyContext,
-): "current_custody" | "stale_custody" | undefined {
-  if (
-    declaration.applicationDisposition === ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY &&
-    declaration.observedBindingId === context.bindingId &&
-    declaration.observedBindingGeneration === context.bindingGeneration
-  ) {
-    return "current_custody";
-  }
-  if (declaration.applicationDisposition === ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY) {
-    return "stale_custody";
-  }
-  return undefined;
-}
-
-function validMcpMaterializationReceipt(
-  receipt: NonNullable<CommitMcpToolResultResponse["declaration"]>["receipts"][number],
-  sessionThreadId: string,
-  toolUseEventId: string,
-  mcpServerName: string,
-  operationId: string,
-  declarationDigest: string,
-  refsOnlyResultJson: string,
-): boolean {
-  let stored;
-  try {
-    stored = parseStoredRunMcpToolResponse(refsOnlyResultJson);
-  } catch {
-    return false;
-  }
-  if (
-    receipt.sessionThreadId !== sessionThreadId ||
-    receipt.operationKind !== "commit_mcp_tool_result" ||
-    receipt.sourceKind !== "mcp_tool_execution" ||
-    receipt.operationId !== operationId ||
-    receipt.declarationDigest !== declarationDigest
-  ) {
-    return false;
-  }
-  if (
-    receipt.events.length !== 0 ||
-    receipt.messages.length !== 0 ||
-    receipt.pendingAttachmentDeltaJson.length !== stored.response.attachments.length ||
-    receipt.interruptToolProjections.length !== 0 ||
-    receipt.prefixConsumptions.length !== 0 ||
-    receipt.requestReschedule !== undefined ||
-    receipt.childLifecycle.length !== 0 ||
-    receipt.idleCloseout !== undefined ||
-    receipt.compactedThroughMessageSequence !== undefined
-  ) {
-    return false;
-  }
-  return receipt.pendingAttachmentDeltaJson.every((encoded, index) => {
-    const attachment = stored.response.attachments[index];
-    if (attachment === undefined) {
-      return false;
-    }
-    const expected = {
-      origin: {
-        transient: {
-          attachmentRef: attachment.attachmentRef,
-          sourceToolUseEventId: toolUseEventId,
-          sourcePath: `mcp:${mcpServerName}/${attachment.suggestedFilename}`,
-          detail: "auto",
-        },
-      },
-      mime: attachment.mime,
-      filename: attachment.suggestedFilename,
-    };
-    try {
-      return canonicalRunToolJSON(encoded) === canonicalRunToolJSON(JSON.stringify(expected));
-    } catch {
-      return false;
-    }
-  });
-}
-
-function stableMcpMaterializationOperationId(
-  request: Pick<ClaimMcpToolResultRequest, "toolUseEventId" | "normalizedInputHash">,
-): string {
-  const encoder = new TextEncoder();
-  const parts = [
-    "mcp_tool_execution",
-    request.toolUseEventId,
-    request.normalizedInputHash,
-  ].map((part) => encoder.encode(part));
-  const framed = new Uint8Array(parts.reduce((total, part) => total + 4 + part.byteLength, 0));
-  const view = new DataView(framed.buffer);
-  let offset = 0;
-  for (const part of parts) {
-    view.setUint32(offset, part.byteLength, false);
-    offset += 4;
-    framed.set(part, offset);
-    offset += part.byteLength;
-  }
-  return `stid_${createHash("sha256").update(framed).digest("hex")}`;
-}
-
-/** Returns the SHA-256 digest Bridge must echo for one MCP materialization declaration. */
-export function mcpMaterializationDeclarationDigest(request: CommitMcpToolResultRequest): string {
-  const inlineMedia = request.inlineMedia.map((media) => ({
-      content_sha256: createHash("sha256").update(media.data).digest("hex"),
-      mime: media.mime,
-      suggested_filename: media.suggestedFilename,
-    }));
-  const declaration = `{
-    "inline_media":${JSON.stringify(inlineMedia)},
-    "input":${canonicalRunToolJSON(request.inputJson)},
-    "mcp_server_name":${JSON.stringify(request.mcpServerName)},
-    "normalized_input_hash":${JSON.stringify(request.normalizedInputHash)},
-    "operation_kind":"commit_mcp_tool_result",
-    "result":${canonicalRunToolJSON(request.resultJson)},
-    "session_thread_id":${JSON.stringify(request.scope?.sessionThreadId ?? "")},
-    "tool_name":${JSON.stringify(request.toolName)},
-    "tool_use_event_id":${JSON.stringify(request.toolUseEventId)}
-  }`;
-  return createHash("sha256").update(canonicalRunToolJSON(declaration), "utf8").digest("hex");
+function localMcpClaimKey(key: IdempotencyKey, context: McpIdempotencyContext): string {
+  return `${context.workspaceId}\u0000${context.sessionId}\u0000${context.sessionThreadId}\u0000${key.toolUseEventId}`;
 }
 
 function freezeCommitRequest(request: CommitMcpToolResultRequest): CommitMcpToolResultRequest {

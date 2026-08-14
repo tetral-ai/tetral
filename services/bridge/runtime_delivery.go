@@ -2439,7 +2439,6 @@ func taskNotificationTaskID(runtimeInputID string) string {
 
 func runtimeScopeForDeliveryJob(job RuntimeJob, binding runtimeBindingForDelivery) *bridgev1.RuntimeScope {
 	return &bridgev1.RuntimeScope{
-		RequestId:       job.JobID + ":" + job.LeaseToken,
 		WorkspaceId:     job.WorkspaceID,
 		SessionId:       job.SessionID,
 		SessionThreadId: job.SessionThreadID,
@@ -2453,7 +2452,6 @@ func runtimeScopeForDeliveryJob(job RuntimeJob, binding runtimeBindingForDeliver
 
 func runtimeScopeFromCommandRequest(request *agentruntimev1.RuntimeInputCommandRequest) *bridgev1.RuntimeScope {
 	return &bridgev1.RuntimeScope{
-		RequestId:       request.GetRequestId(),
 		WorkspaceId:     request.GetWorkspaceId(),
 		SessionId:       request.GetSessionId(),
 		SessionThreadId: request.GetSessionThreadId(),

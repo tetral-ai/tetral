@@ -37,25 +37,10 @@ func TestPostgreSQLBridgeAPIStoreManifestAcceptanceUsesMonotonicGenerationAcross
 	if len(lister.requests) != 3 {
 		t.Fatalf("connector list calls = %d; want 3 with current-etag duplicate skipped", len(lister.requests))
 	}
-	if first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		duplicate.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		second.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		third.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("A/A/B/A ACK statuses = %s/%s/%s/%s; want committed/duplicate/committed/committed",
-			first.GetAck().GetStatus(), duplicate.GetAck().GetStatus(), second.GetAck().GetStatus(), third.GetAck().GetStatus())
-	}
-	wantRuntimeInputIDs := []string{
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:1",
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:1",
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:2",
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:3",
-	}
-	gotRuntimeInputIDs := []string{
-		first.GetAck().GetRuntimeInputId(), duplicate.GetAck().GetRuntimeInputId(),
-		second.GetAck().GetRuntimeInputId(), third.GetAck().GetRuntimeInputId(),
-	}
-	if stringSliceJSON(gotRuntimeInputIDs) != stringSliceJSON(wantRuntimeInputIDs) {
-		t.Fatalf("runtime input ids = %v; want %v", gotRuntimeInputIDs, wantRuntimeInputIDs)
+	if first.GetCommitted() == nil || duplicate.GetDuplicate() == nil ||
+		second.GetCommitted() == nil || third.GetCommitted() == nil {
+		t.Fatalf("A/A/B/A results = %#v/%#v/%#v/%#v; want committed/duplicate/committed/committed",
+			first, duplicate, second, third)
 	}
 
 	var etag string
@@ -112,13 +97,17 @@ func TestPostgreSQLBridgeAPIStoreConcurrentFirstManifestInsertAllocatesOneGenera
 			t.Fatalf("concurrent McpManifestChanged: %v", err)
 		}
 	}
-	statuses := map[bridgev1.BridgeWriteStatus]int{}
+	var committed, duplicate int
 	for response := range responses {
-		statuses[response.GetAck().GetStatus()]++
+		if response.GetCommitted() != nil {
+			committed++
+		}
+		if response.GetDuplicate() != nil {
+			duplicate++
+		}
 	}
-	if statuses[bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED] != 1 ||
-		statuses[bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE] != 1 {
-		t.Fatalf("concurrent ACK statuses = %v; want one committed and one duplicate", statuses)
+	if committed != 1 || duplicate != 1 {
+		t.Fatalf("concurrent results = committed %d duplicate %d; want one each", committed, duplicate)
 	}
 	var rowCount int
 	var generation int64
@@ -227,8 +216,8 @@ func TestPostgreSQLBridgeAPIStoreManifestTransitionLoggingIsPostCommitAndFailOpe
 		store.Logger = slog.New(panicSlogHandler{})
 
 		response := mustAcceptMCPManifestChange(t, store, "sesn_mcp_log_fail_open", "etag_log")
-		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-			t.Fatalf("ACK = %s; want committed despite logger panic", response.GetAck().GetStatus())
+		if response.GetCommitted() == nil {
+			t.Fatalf("result = %#v; want committed despite logger panic", response)
 		}
 	})
 
@@ -338,8 +327,8 @@ func TestPostgreSQLBridgeAPIStoreStoredETagDuplicatePathsRestoreReadyAndEnqueue(
 		t.Fatalf("mark stored etag unready: %v", err)
 	}
 	restored := mustAcceptMCPManifestChange(t, store, "sesn_mcp_restore", "etag_restore")
-	if restored.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || lister.calls != 1 {
-		t.Fatalf("pre-list restore ACK/list calls = %s/%d; want committed/1", restored.GetAck().GetStatus(), lister.calls)
+	if restored.GetCommitted() == nil || lister.calls != 1 {
+		t.Fatalf("pre-list restore result/list calls = %#v/%d; want committed/1", restored, lister.calls)
 	}
 	if strings.Count(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) != 2 ||
 		!strings.Contains(logs.String(), `"mcp.manifest.previous_generation":2`) ||

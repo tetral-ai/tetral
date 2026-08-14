@@ -3439,14 +3439,10 @@ func (x *WebRef) GetTotalLines() int32 {
 
 type RunMcpToolRequest struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
-	RequestId           string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	WorkspaceId         string                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
 	SessionId           string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	SessionThreadId     string                 `protobuf:"bytes,4,opt,name=session_thread_id,json=sessionThreadId,proto3" json:"session_thread_id,omitempty"`
 	ToolUseEventId      string                 `protobuf:"bytes,5,opt,name=tool_use_event_id,json=toolUseEventId,proto3" json:"tool_use_event_id,omitempty"`
-	McpServerName       string                 `protobuf:"bytes,6,opt,name=mcp_server_name,json=mcpServerName,proto3" json:"mcp_server_name,omitempty"`
-	ToolName            string                 `protobuf:"bytes,7,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
-	InputJson           string                 `protobuf:"bytes,8,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
 	BindingId           string                 `protobuf:"bytes,9,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
 	BindingGeneration   int64                  `protobuf:"varint,10,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
 	RuntimeBindingToken string                 `protobuf:"bytes,11,opt,name=runtime_binding_token,json=runtimeBindingToken,proto3" json:"runtime_binding_token,omitempty"`
@@ -3484,13 +3480,6 @@ func (*RunMcpToolRequest) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{38}
 }
 
-func (x *RunMcpToolRequest) GetRequestId() string {
-	if x != nil {
-		return x.RequestId
-	}
-	return ""
-}
-
 func (x *RunMcpToolRequest) GetWorkspaceId() string {
 	if x != nil {
 		return x.WorkspaceId
@@ -3519,27 +3508,6 @@ func (x *RunMcpToolRequest) GetToolUseEventId() string {
 	return ""
 }
 
-func (x *RunMcpToolRequest) GetMcpServerName() string {
-	if x != nil {
-		return x.McpServerName
-	}
-	return ""
-}
-
-func (x *RunMcpToolRequest) GetToolName() string {
-	if x != nil {
-		return x.ToolName
-	}
-	return ""
-}
-
-func (x *RunMcpToolRequest) GetInputJson() string {
-	if x != nil {
-		return x.InputJson
-	}
-	return ""
-}
-
 func (x *RunMcpToolRequest) GetBindingId() string {
 	if x != nil {
 		return x.BindingId
@@ -3562,15 +3530,14 @@ func (x *RunMcpToolRequest) GetRuntimeBindingToken() string {
 }
 
 type RunMcpToolResponse struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	Status                RunMcpToolStatus       `protobuf:"varint,1,opt,name=status,proto3,enum=tetral.provider_gateway.v1.RunMcpToolStatus" json:"status,omitempty"`
-	ResultText            string                 `protobuf:"bytes,2,opt,name=result_text,json=resultText,proto3" json:"result_text,omitempty"`
-	Attachments           []*McpAttachmentRef    `protobuf:"bytes,3,rep,name=attachments,proto3" json:"attachments,omitempty"`
-	ErrorKind             *McpErrorKind          `protobuf:"varint,4,opt,name=error_kind,json=errorKind,proto3,enum=tetral.provider_gateway.v1.McpErrorKind,oneof" json:"error_kind,omitempty"`
-	RetryStatus           *McpRetryStatus        `protobuf:"varint,5,opt,name=retry_status,json=retryStatus,proto3,enum=tetral.provider_gateway.v1.McpRetryStatus,oneof" json:"retry_status,omitempty"`
-	MaterializationHandle *string                `protobuf:"bytes,6,opt,name=materialization_handle,json=materializationHandle,proto3,oneof" json:"materialization_handle,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        RunMcpToolStatus       `protobuf:"varint,1,opt,name=status,proto3,enum=tetral.provider_gateway.v1.RunMcpToolStatus" json:"status,omitempty"`
+	ResultText    string                 `protobuf:"bytes,2,opt,name=result_text,json=resultText,proto3" json:"result_text,omitempty"`
+	Attachments   []*McpAttachmentRef    `protobuf:"bytes,3,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	ErrorKind     *McpErrorKind          `protobuf:"varint,4,opt,name=error_kind,json=errorKind,proto3,enum=tetral.provider_gateway.v1.McpErrorKind,oneof" json:"error_kind,omitempty"`
+	RetryStatus   *McpRetryStatus        `protobuf:"varint,5,opt,name=retry_status,json=retryStatus,proto3,enum=tetral.provider_gateway.v1.McpRetryStatus,oneof" json:"retry_status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunMcpToolResponse) Reset() {
@@ -3636,13 +3603,6 @@ func (x *RunMcpToolResponse) GetRetryStatus() McpRetryStatus {
 		return *x.RetryStatus
 	}
 	return McpRetryStatus_MCP_RETRY_STATUS_UNSPECIFIED
-}
-
-func (x *RunMcpToolResponse) GetMaterializationHandle() string {
-	if x != nil && x.MaterializationHandle != nil {
-		return *x.MaterializationHandle
-	}
-	return ""
 }
 
 type McpAttachmentRef struct {
@@ -4187,24 +4147,20 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x06_titleB\r\n" +
 	"\v_line_startB\v\n" +
 	"\t_line_endB\x0e\n" +
-	"\f_total_lines\"\xb1\x03\n" +
-	"\x11RunMcpToolRequest\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\tR\trequestId\x12!\n" +
+	"\f_total_lines\"\xfa\x02\n" +
+	"\x11RunMcpToolRequest\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x03 \x01(\tR\tsessionId\x12*\n" +
 	"\x11session_thread_id\x18\x04 \x01(\tR\x0fsessionThreadId\x12)\n" +
-	"\x11tool_use_event_id\x18\x05 \x01(\tR\x0etoolUseEventId\x12&\n" +
-	"\x0fmcp_server_name\x18\x06 \x01(\tR\rmcpServerName\x12\x1b\n" +
-	"\ttool_name\x18\a \x01(\tR\btoolName\x12\x1d\n" +
-	"\n" +
-	"input_json\x18\b \x01(\tR\tinputJson\x12\x1d\n" +
+	"\x11tool_use_event_id\x18\x05 \x01(\tR\x0etoolUseEventId\x12\x1d\n" +
 	"\n" +
 	"binding_id\x18\t \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\n" +
 	" \x01(\x03R\x11bindingGeneration\x122\n" +
-	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingToken\"\xe4\x03\n" +
+	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingTokenJ\x04\b\x01\x10\x02J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tR\n" +
+	"request_idR\x0fmcp_server_nameR\ttool_nameR\n" +
+	"input_json\"\xab\x03\n" +
 	"\x12RunMcpToolResponse\x12D\n" +
 	"\x06status\x18\x01 \x01(\x0e2,.tetral.provider_gateway.v1.RunMcpToolStatusR\x06status\x12\x1f\n" +
 	"\vresult_text\x18\x02 \x01(\tR\n" +
@@ -4212,11 +4168,9 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\vattachments\x18\x03 \x03(\v2,.tetral.provider_gateway.v1.McpAttachmentRefR\vattachments\x12L\n" +
 	"\n" +
 	"error_kind\x18\x04 \x01(\x0e2(.tetral.provider_gateway.v1.McpErrorKindH\x00R\terrorKind\x88\x01\x01\x12R\n" +
-	"\fretry_status\x18\x05 \x01(\x0e2*.tetral.provider_gateway.v1.McpRetryStatusH\x01R\vretryStatus\x88\x01\x01\x12:\n" +
-	"\x16materialization_handle\x18\x06 \x01(\tH\x02R\x15materializationHandle\x88\x01\x01B\r\n" +
+	"\fretry_status\x18\x05 \x01(\x0e2*.tetral.provider_gateway.v1.McpRetryStatusH\x01R\vretryStatus\x88\x01\x01B\r\n" +
 	"\v_error_kindB\x0f\n" +
-	"\r_retry_statusB\x19\n" +
-	"\x17_materialization_handle\"\x9b\x01\n" +
+	"\r_retry_statusJ\x04\b\x06\x10\aR\x16materialization_handle\"\x9b\x01\n" +
 	"\x10McpAttachmentRef\x12%\n" +
 	"\x0eattachment_ref\x18\x01 \x01(\tR\rattachmentRef\x12\x12\n" +
 	"\x04mime\x18\x02 \x01(\tR\x04mime\x12\x1d\n" +

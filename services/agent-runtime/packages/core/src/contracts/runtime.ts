@@ -68,9 +68,9 @@ export type RuntimeProviderAttachment =
 
 /** Final disposition returned by a Runtime tool route to its request turn. */
 export type RuntimeToolSettlement =
-  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string };
+  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly serverToolUse?: SessionEventWriterServerToolUse }
+  | { readonly type: "cancelled"; readonly error?: RuntimeFailure };
 
 const IdentifierSchema = z.string().min(1);
 const TimestampSchema = z.string().datetime({ offset: true });
@@ -785,20 +785,15 @@ const RuntimeToolSettlementSchema = z.discriminatedUnion("type", [
     type: z.literal("completed"),
     output: RuntimeBoundedTextSchema,
     serverToolUse: z.strictObject({ webSearchRequests: NonNegativeIntegerSchema, webFetchRequests: NonNegativeIntegerSchema }).optional(),
-    mcpMaterializationHandle: RuntimeIdentifierSchema.optional(),
-    sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   }),
   z.strictObject({
     type: z.literal("error"),
     error: RuntimeFailureSchema,
     serverToolUse: z.strictObject({ webSearchRequests: NonNegativeIntegerSchema, webFetchRequests: NonNegativeIntegerSchema }).optional(),
-    mcpMaterializationHandle: RuntimeIdentifierSchema.optional(),
-    sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   }),
   z.strictObject({
     type: z.literal("cancelled"),
     error: RuntimeFailureSchema.optional(),
-    sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   }),
 ]);
 
@@ -1000,8 +995,6 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   toolSettlement: RuntimeToolSettlementDeclarationSchema.optional(),
   modelRequestId: SanitizedIdentifierSchema.optional(),
   serverToolUse: SessionEventWriterServerToolUseSchema.optional(),
-  mcpMaterializationHandle: SanitizedIdentifierSchema.optional(),
-  sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   contextThroughMessageSequence: NonNegativeIntegerSchema.optional(),
   requestKind: z.enum(["agent_provider_request", "compaction_summary", "approval_reviewer"]).optional(),
 }).superRefine((envelope, context) => {
@@ -1028,19 +1021,6 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   }
   if (envelope.serverToolUse !== undefined && envelope.event.type !== "agent.tool_result") {
     context.addIssue({ code: "custom", message: "server tool usage requires a tool-result event" });
-  }
-  if (envelope.mcpMaterializationHandle !== undefined && envelope.event.type !== "agent.mcp_tool_result") {
-    context.addIssue({ code: "custom", message: "MCP materialization requires an MCP tool-result event" });
-  }
-  if (
-    envelope.event.type === "agent.mcp_tool_result" &&
-    envelope.mcpMaterializationHandle === undefined &&
-    envelope.toolSettlement?.outcome.type !== "error"
-  ) {
-    context.addIssue({ code: "custom", message: "successful MCP tool-result event requires materialization" });
-  }
-  if (envelope.sandboxResultDigest !== undefined && envelope.event.type !== "agent.tool_result") {
-    context.addIssue({ code: "custom", message: "sandbox result digest requires a tool-result event" });
   }
   if (envelope.event.type === "span.model_request_start") {
     if (envelope.contextThroughMessageSequence === undefined || envelope.requestKind === undefined) {

@@ -837,7 +837,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextSeparatesApprovalAndSandboxExecution
 	}
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_recovery_result", ModelRequestId: "mrq_pending_approval",
-		EventType: "agent.tool_result", SandboxResultDigest: &resultDigest,
+		EventType:   "agent.tool_result",
 		PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUseEventID + `","content":[{"type":"text","text":"already settled"}],"is_error":false}`,
 		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUseEventID, "already settled")},
 	}); err != nil {
@@ -2307,52 +2307,44 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 	}
 	setBridgeAPIPendingApprovalStatus(t, admin, "default", "sesn_bridge_mcp_projection", "thr_bridge_mcp_projection", toolUse.GetEventId(), "resolving")
 	claim := &bridgev1.ClaimMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      toolUse.GetEventId(),
-		NormalizedInputHash: "hash_bridge_mcp_projection",
-		McpServerName:       "github",
-		ToolName:            "search_code",
-		InputJson:           `{"q":"x"}`,
+		Scope:          scope,
+		ToolUseEventId: toolUse.GetEventId(),
+		ClaimId:        "mcpclaim_bridge_projection",
 	}
 	if _, err := store.ClaimMcpToolResult(context.Background(), claim); err != nil {
 		t.Fatalf("ClaimMcpToolResult: %v", err)
 	}
-	materialized, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      claim.GetToolUseEventId(),
-		NormalizedInputHash: claim.GetNormalizedInputHash(),
-		McpServerName:       claim.GetMcpServerName(),
-		ToolName:            claim.GetToolName(),
-		InputJson:           claim.GetInputJson(),
-		ResultJson:          `{"response":{"status":1,"result_text":"done","attachments":[]},"content_items":1,"refresh_triggered":false}`,
+	_, err = store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope:          scope,
+		ToolUseEventId: claim.GetToolUseEventId(),
+		ClaimId:        claim.GetClaimId(),
+		ResultJson:     `{"response":{"status":1,"result_text":"done","attachments":[]},"content_items":1,"refresh_triggered":false}`,
 	})
 	if err != nil {
 		t.Fatalf("CommitMcpToolResult: %v", err)
 	}
 
 	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:                    scope,
-		RuntimeWriteId:           "rwrite_bridge_mcp_result_conflicting_identity",
-		ModelRequestId:           "mreq_bridge_mcp",
-		EventType:                "agent.mcp_tool_result",
-		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","tool_use_event_id":"evt_conflicting_mcp_alias","content":[{"type":"text","text":"done"}]}`,
-		SessionVisible:           true,
-		McpMaterializationHandle: materialized.MaterializationHandle,
-		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_bridge_mcp_result_conflicting_identity",
+		ModelRequestId: "mreq_bridge_mcp",
+		EventType:      "agent.mcp_tool_result",
+		PayloadJson:    `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","tool_use_event_id":"evt_conflicting_mcp_alias","content":[{"type":"text","text":"done"}]}`,
+		SessionVisible: true,
+		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("WriteEvent conflicting MCP identity err = %v; want FailedPrecondition", err)
 	}
 
 	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:                    scope,
-		RuntimeWriteId:           "rwrite_bridge_mcp_result",
-		ModelRequestId:           "mreq_bridge_mcp",
-		EventType:                "agent.mcp_tool_result",
-		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}]}`,
-		SessionVisible:           true,
-		McpMaterializationHandle: materialized.MaterializationHandle,
-		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_bridge_mcp_result",
+		ModelRequestId: "mreq_bridge_mcp",
+		EventType:      "agent.mcp_tool_result",
+		PayloadJson:    `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}]}`,
+		SessionVisible: true,
+		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent MCP tool result: %v", err)

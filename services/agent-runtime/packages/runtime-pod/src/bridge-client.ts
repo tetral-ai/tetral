@@ -395,7 +395,6 @@ export class BridgeAPITaskNotificationCommitter {
     }
     const request = {
       scope: {
-        requestId: input.scope.requestId,
         workspaceId: input.scope.workspaceId,
         sessionId: input.scope.sessionId,
         sessionThreadId: input.scope.sessionThreadId,
@@ -1168,8 +1167,6 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         payloadJson: JSON.stringify(event),
         sessionVisible: false,
         serverToolUse: envelope.serverToolUse,
-        mcpMaterializationHandle: envelope.mcpMaterializationHandle,
-        sandboxResultDigest: envelope.sandboxResultDigest,
         contextThroughMessageSequence: envelope.contextThroughMessageSequence,
         requestKind: envelope.requestKind ?? "",
         assistantPartAppend: envelope.assistantPartAppend === undefined
@@ -1538,7 +1535,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
     try {
       const metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
       const request: FinishIdleRequest = {
-        scope: bridgeScope({ ...envelope, requestId: envelope.durableTurnId }),
+        scope: bridgeScope(envelope),
         durableTurnId: envelope.durableTurnId,
         stopReasonJson: JSON.stringify(envelope.stopReason),
         completionMailCreate: envelope.completionMailCreate === undefined
@@ -2498,7 +2495,6 @@ function refreshRuntimeBindingToken(
 }
 
 function bridgeScope(input: {
-  readonly requestId: string;
   readonly workspaceId: string;
   readonly sessionId: string;
   readonly sessionThreadId: string;
@@ -2507,7 +2503,6 @@ function bridgeScope(input: {
   readonly targetPodUid: string;
 }): RuntimeScope {
   return {
-    requestId: input.requestId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     sessionThreadId: input.sessionThreadId,
@@ -2521,7 +2516,6 @@ function bridgeScope(input: {
 
 function bindingTokenRefreshScope(identity: RuntimeThreadIdentity): RuntimeScope {
   return {
-    requestId: `binding-token-refresh:${identity.sessionThreadId}`,
     workspaceId: identity.workspaceId,
     sessionId: identity.sessionId,
     sessionThreadId: identity.sessionThreadId,
@@ -2573,7 +2567,6 @@ function grpcStatusCode(error: unknown): unknown {
 
 function approvalReviewerParentScope(input: ApprovalReviewerThreadCreation): RuntimeScope {
   return {
-    requestId: input.request.modelRequestId,
     workspaceId: input.request.workspaceId,
     sessionId: input.request.sessionId,
     sessionThreadId: input.request.sessionThreadId,

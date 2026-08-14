@@ -404,7 +404,6 @@ function largeMemoryToolInputs() {
 /** Carries an exact maximum Read envelope through the real formatter, projection, transport, and provider lowering. */
 export async function runMaximumReadTransportProof() {
   const resultJson = maximumReadEnvelope();
-  const digest = createHash("sha256").update(resultJson).digest("hex");
   const bridgeClient = {
     acceptSandboxExecution(
       _request: AcceptSandboxExecutionRequest,
@@ -412,9 +411,7 @@ export async function runMaximumReadTransportProof() {
       _options: CallOptions,
       callback: (error: Error | null, response?: unknown) => void,
     ) {
-      callback(null, {
-        ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      });
+      callback(null, { committed: {} });
       return noopUnaryCall();
     },
     awaitSandboxExecution(
@@ -422,7 +419,7 @@ export async function runMaximumReadTransportProof() {
       _metadata: Metadata,
       callback: (error: Error | null, response?: unknown) => void,
     ) {
-      callback(null, { resultJson, resultDigest: digest, backgroundTaskStarted: false, taskId: "" });
+      callback(null, { completed: { resultJson, taskId: "" } });
       return noopUnaryCall();
     },
   } as unknown as AgentRuntimeBridgeServiceClient;

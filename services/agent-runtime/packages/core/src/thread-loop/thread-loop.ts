@@ -1783,7 +1783,7 @@ function runOwnedCompactionSummaryAttemptEffect(
         const startAppend = yield* Effect.promise(() => appendRetriedEvent(options, session, {
           type: "span.model_request_start",
           model_request_id: request.modelRequestId,
-        }, undefined, undefined, undefined, undefined, undefined, {
+        }, undefined, undefined, undefined, {
           contextThroughMessageSequence,
           requestKind: "compaction_summary",
         }));
@@ -2325,8 +2325,8 @@ function coordinateProviderTurnEffect(
           : {}),
         now: options.runtime.now,
         writer: {
-          appendEvent: async (event, _source, declaration, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest) =>
-            await appendProcessorEvent(options, session, event, declaration, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest),
+          appendEvent: async (event, _source, declaration, modelRequestId, serverToolUse) =>
+            await appendProcessorEvent(options, session, event, declaration, modelRequestId, serverToolUse),
           commitInternalToolRepair: async (repair, envelope) => await commitInternalToolRepairStable(session, options, repair, envelope, processorWriteSignal()),
         },
         onInternalToolRepairCommitted: (fact) => {
@@ -2376,7 +2376,7 @@ function coordinateProviderTurnEffect(
     const spanStartAppend = yield* nonAbandonablePromise(() => appendRetriedEvent(options, session, {
       type: "span.model_request_start",
       model_request_id: request.modelRequestId,
-    }, undefined, undefined, undefined, undefined, undefined, {
+    }, undefined, undefined, undefined, {
       contextThroughMessageSequence: requestContextAnchorSequence,
       requestKind: runtimeProviderStreamKindFromRequest(request),
     }));
@@ -3358,8 +3358,6 @@ async function commitRecoveredToolSettlement(
     { toolSettlement: declaration },
     pending.modelRequestId,
     settlement.type === "completed" || settlement.type === "error" ? settlement.serverToolUse : undefined,
-    settlement.type === "completed" || settlement.type === "error" ? settlement.mcpMaterializationHandle : undefined,
-    settlement.sandboxResultDigest,
   );
   if (!result.ok) {
     return { ok: false, events: [], error: runtimeFailureFromEventWriter(result.error) };
@@ -5039,15 +5037,13 @@ async function appendEvent(
   declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
-  mcpMaterializationHandle?: string,
-  sandboxResultDigest?: string,
   requestStart?: {
     readonly contextThroughMessageSequence: number;
     readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
   },
 ): Promise<SessionEventWriterAppendResult> {
   const writeId = options.runtime.createId("event_write");
-  return await appendEventWithWriteId(options, session, writeId, event, declaration, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest, requestStart);
+  return await appendEventWithWriteId(options, session, writeId, event, declaration, modelRequestId, serverToolUse, requestStart);
 }
 
 async function appendProcessorEvent(
@@ -5057,8 +5053,6 @@ async function appendProcessorEvent(
   declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
-  mcpMaterializationHandle?: string,
-  sandboxResultDigest?: string,
 ): Promise<SessionEventWriterAppendResult> {
   if (event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use") {
     return await appendRetriedEvent(
@@ -5068,8 +5062,6 @@ async function appendProcessorEvent(
       declaration,
       modelRequestId,
       serverToolUse,
-      mcpMaterializationHandle,
-      sandboxResultDigest,
     );
   }
   return await appendEvent(
@@ -5079,8 +5071,6 @@ async function appendProcessorEvent(
     declaration,
     modelRequestId,
     serverToolUse,
-    mcpMaterializationHandle,
-    sandboxResultDigest,
   );
 }
 
@@ -5091,8 +5081,6 @@ async function appendRetriedEvent(
   declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
-  mcpMaterializationHandle?: string,
-  sandboxResultDigest?: string,
   requestStart?: {
     readonly contextThroughMessageSequence: number;
     readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
@@ -5107,8 +5095,6 @@ async function appendRetriedEvent(
     declaration,
     modelRequestId,
     serverToolUse,
-    mcpMaterializationHandle,
-    sandboxResultDigest,
     requestStart,
   );
 }
@@ -5167,8 +5153,6 @@ async function appendEventWithRetry(
   declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
-  mcpMaterializationHandle?: string,
-  sandboxResultDigest?: string,
   requestStart?: {
     readonly contextThroughMessageSequence: number;
     readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
@@ -5184,8 +5168,6 @@ async function appendEventWithRetry(
       declaration,
       modelRequestId,
       serverToolUse,
-      mcpMaterializationHandle,
-      sandboxResultDigest,
       requestStart,
     );
     if (result.ok) {
@@ -5228,8 +5210,6 @@ async function appendEventWithWriteId(
   declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
-  mcpMaterializationHandle?: string,
-  sandboxResultDigest?: string,
   requestStart?: {
     readonly contextThroughMessageSequence: number;
     readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
@@ -5250,8 +5230,6 @@ async function appendEventWithWriteId(
       ...(modelRequestId !== undefined ? { modelRequestId } : {}),
       ...(declaration ?? {}),
       ...(serverToolUse !== undefined ? { serverToolUse } : {}),
-      ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
-      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
       ...(requestStart !== undefined ? requestStart : {}),
     });
     runtimeMetrics(options).observeEventWriteLatency("append", options.runtime.monotonicMs() - startedAt, result.ok ? "success" : "error");

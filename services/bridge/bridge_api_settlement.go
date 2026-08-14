@@ -1230,7 +1230,6 @@ type createChildThreadResult struct {
 
 func scopeForThread(scope *bridgev1.RuntimeScope, threadID string) *bridgev1.RuntimeScope {
 	return &bridgev1.RuntimeScope{
-		RequestId:       scope.GetRequestId(),
 		WorkspaceId:     scope.GetWorkspaceId(),
 		SessionId:       scope.GetSessionId(),
 		SessionThreadId: threadID,

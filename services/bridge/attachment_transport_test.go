@@ -35,7 +35,7 @@ func (s *attachmentTransportServer) ResolveTransientAttachment(context.Context, 
 
 func (s *attachmentTransportServer) CommitMcpToolResult(_ context.Context, request *bridgev1.CommitMcpToolResultRequest) (*bridgev1.CommitMcpToolResultResponse, error) {
 	s.data = append([]byte(nil), request.GetInlineMedia()[0].GetData()...)
-	return &bridgev1.CommitMcpToolResultResponse{RefsOnlyResultJson: request.GetResultJson()}, nil
+	return &bridgev1.CommitMcpToolResultResponse{Outcome: &bridgev1.CommitMcpToolResultResponse_Committed{Committed: &bridgev1.McpToolCommitCommitted{}}}, nil
 }
 
 func TestBridgeAttachmentResolveTransportCarriesContractSizedPayloads(t *testing.T) {
@@ -113,7 +113,6 @@ func TestBridgeMCPCommitTransportCarriesMaximumBoundedEnvelope(t *testing.T) {
 	maxJSON := `{"value":"` + strings.Repeat("x", 64*1024-12) + `"}`
 	request := &bridgev1.CommitMcpToolResultRequest{
 		Scope: &bridgev1.RuntimeScope{
-			RequestId:       strings.Repeat("r", 128),
 			WorkspaceId:     strings.Repeat("w", 128),
 			SessionId:       strings.Repeat("s", 128),
 			SessionThreadId: strings.Repeat("t", 128),
@@ -123,12 +122,9 @@ func TestBridgeMCPCommitTransportCarriesMaximumBoundedEnvelope(t *testing.T) {
 				TargetPodUid:      strings.Repeat("p", 128),
 			},
 		},
-		ToolUseEventId:      strings.Repeat("u", 128),
-		NormalizedInputHash: strings.Repeat("h", 128),
-		McpServerName:       strings.Repeat("m", 128),
-		ToolName:            strings.Repeat("n", 128),
-		InputJson:           maxJSON,
-		ResultJson:          maxJSON,
+		ToolUseEventId: strings.Repeat("u", 128),
+		ClaimId:        strings.Repeat("c", 128),
+		ResultJson:     maxJSON,
 		InlineMedia: []*bridgev1.McpInlineMedia{{
 			Data:              payload,
 			Mime:              "application/pdf",
@@ -139,7 +135,7 @@ func TestBridgeMCPCommitTransportCarriesMaximumBoundedEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("commit maximum MCP envelope: %v", err)
 	}
-	if response.GetRefsOnlyResultJson() != maxJSON || len(service.data) != len(payload) || service.data[0] != 1 || service.data[len(service.data)-1] != 2 {
+	if response.GetCommitted() == nil || len(service.data) != len(payload) || service.data[0] != 1 || service.data[len(service.data)-1] != 2 {
 		t.Fatal("maximum MCP envelope did not round-trip byte-identically")
 	}
 }

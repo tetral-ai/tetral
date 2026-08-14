@@ -1,39 +1,52 @@
-import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
-import type { ServiceError } from "@grpc/grpc-js";
+import type { CallOptions, ServiceError } from "@grpc/grpc-js";
 import {
   AgentRuntimeBridgeServiceService,
-  BridgeWriteStatus,
-  ReceiptApplicationDisposition,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import type { AgentRuntimeBridgeServiceServer } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type {
+  AgentRuntimeBridgeServiceServer,
+  ClaimMcpToolResultRequest,
+  ClaimMcpToolResultResponse,
+  CommitMcpToolResultRequest,
+  CommitMcpToolResultResponse,
+  McpManifestChangedRequest,
+  McpManifestChangedResponse,
+} from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
-  BridgeAPIMcpToolResultIdempotencyStore,
+  McpErrorKind,
+  McpRetryStatus,
+  RunMcpToolStatus,
+} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import {
   BridgeAPIManifestChangeNotifier,
+  BridgeAPIMcpToolResultIdempotencyStore,
   BridgeMcpCommitGrpcMessageBytes,
   MCP_CLAIM_RPC_TIMEOUT_MS,
   MCP_COMMIT_RPC_TIMEOUT_MS,
   MCP_MANIFEST_CHANGE_RPC_TIMEOUT_MS,
   bridgeMcpCommitGrpcChannelOptions,
 } from "../../src/bridge-client.js";
-import { McpGrpcKeepaliveTimeMs, McpGrpcKeepaliveTimeoutMs } from "../../src/transport.js";
 import type {
-  ClaimMcpToolResultRequest,
-  ClaimMcpToolResultResponse,
-  CommitMcpToolResultRequest,
-  CommitMcpToolResultResponse,
-  DeclarationResponse,
-  McpManifestChangedRequest,
-  McpManifestChangedResponse,
-} from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import type { CallOptions } from "@grpc/grpc-js";
-import { McpErrorKind, McpRetryStatus, RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+  BridgeManifestChangedClient,
+  BridgeMcpToolResultClient,
+} from "../../src/bridge-client.js";
 import {
   InMemoryMcpIdempotencyStore,
   McpIdempotencyStaleCustodyError,
 } from "../../src/idempotency.js";
+import type {
+  McpIdempotencyContext,
+  PendingStoredRunMcpToolResponse,
+} from "../../src/idempotency.js";
+import { McpGrpcKeepaliveTimeMs, McpGrpcKeepaliveTimeoutMs } from "../../src/transport.js";
+
+const key = { toolUseEventId: "sevt_tool_1" };
+const executor = {
+  mcpServerName: "github",
+  toolName: "create_issue",
+  inputJson: '{"title":"Hello"}',
+};
 
 describe("BridgeAPIManifestChangeNotifier", () => {
   test("admits the bounded MCP inline-media commit on both gRPC directions", () => {
@@ -47,75 +60,47 @@ describe("BridgeAPIManifestChangeNotifier", () => {
     });
   });
 
-  test("sends manifest change notifications with outbound service-account metadata", async () => {
-    const client = new RecordingBridgeClient({
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "runtime_config_update:mcp_manifest:github:etag_1", runtimeWriteId: "", errorCode: "" },
-    });
-    const notifier = new BridgeAPIManifestChangeNotifier({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client,
-      metadataFactory: async () => {
-        const metadata = new Metadata();
-        metadata.set("authorization", "bearer projected-token");
-        return metadata;
-      },
+  test("sends manifest notifications with outbound metadata and maps the closed result", async () => {
+    const client = new RecordingManifestClient({ committed: {} });
+    const notifier = manifestNotifier(client, async () => {
+      const metadata = new Metadata();
+      metadata.set("authorization", "bearer projected-token");
+      return metadata;
     });
 
-    await expect(notifier.notify({
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      mcpServerName: "github",
-      manifestEtag: "etag_1",
-    })).resolves.toEqual({ ok: true, duplicate: false });
-
+    await expect(notifier.notify(manifestRequest())).resolves.toEqual({ ok: true, duplicate: false });
     expect(client.calls).toEqual([{
-      request: {
-        workspaceId: "wksp_1",
-        sessionId: "sesn_1",
-        mcpServerName: "github",
-        manifestEtag: "etag_1",
-      },
+      request: manifestRequest(),
       authorization: ["bearer projected-token"],
     }]);
+
+    await expect(manifestNotifier(new RecordingManifestClient({ duplicate: {} })).notify(manifestRequest()))
+      .resolves.toEqual({ ok: true, duplicate: true });
   });
 
-  test("classifies manifest notification token and transport failures", async () => {
-    const request = {
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      mcpServerName: "github",
-      manifestEtag: "etag_1",
-    };
-    const tokenFailure = new BridgeAPIManifestChangeNotifier({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client: new RecordingBridgeClient({ ack: undefined }),
-      metadataFactory: async () => { throw new Error("unavailable"); },
-    });
-    await expect(tokenFailure.notify(request)).resolves.toMatchObject({
+  test("classifies token and transport failures", async () => {
+    const tokenFailure = manifestNotifier(
+      new RecordingManifestClient({ committed: {} }),
+      async () => { throw new Error("unavailable"); },
+    );
+    await expect(tokenFailure.notify(manifestRequest())).resolves.toMatchObject({
       ok: false,
       retryable: true,
       code: "bridge_token_unavailable",
     });
 
     for (const testCase of [
-      { name: "transport without status", code: undefined, retryable: true, resultCode: "bridge_unavailable" },
-      { name: "unavailable", code: status.UNAVAILABLE, retryable: true, resultCode: `grpc_${status.UNAVAILABLE}` },
-      { name: "deadline exceeded", code: status.DEADLINE_EXCEEDED, retryable: true, resultCode: `grpc_${status.DEADLINE_EXCEEDED}` },
-      { name: "defined terminal status", code: status.INVALID_ARGUMENT, retryable: false, resultCode: `grpc_${status.INVALID_ARGUMENT}` },
+      { code: undefined, retryable: true, resultCode: "bridge_unavailable" },
+      { code: status.UNAVAILABLE, retryable: true, resultCode: `grpc_${status.UNAVAILABLE}` },
+      { code: status.DEADLINE_EXCEEDED, retryable: true, resultCode: `grpc_${status.DEADLINE_EXCEEDED}` },
+      { code: status.INVALID_ARGUMENT, retryable: false, resultCode: `grpc_${status.INVALID_ARGUMENT}` },
     ] as const) {
-      const notifier = new BridgeAPIManifestChangeNotifier({
-        address: "bridge.tetral-system.svc.cluster.local:9090",
-        tokenPath: "/token",
-        client: new FailingBridgeClient(testCase.code),
-        metadataFactory: async () => new Metadata(),
-      });
-      await expect(notifier.notify(request), testCase.name).resolves.toMatchObject({
-        ok: false,
-        retryable: testCase.retryable,
-        code: testCase.resultCode,
-      });
+      await expect(manifestNotifier(new FailingManifestClient(testCase.code)).notify(manifestRequest()))
+        .resolves.toMatchObject({
+          ok: false,
+          retryable: testCase.retryable,
+          code: testCase.resultCode,
+        });
     }
   });
 
@@ -132,13 +117,7 @@ describe("BridgeAPIManifestChangeNotifier", () => {
         metadataFactory: async () => new Metadata(),
         timeoutMs: 20,
       });
-
-      await expect(notifier.notify({
-        workspaceId: "wksp_1",
-        sessionId: "sesn_1",
-        mcpServerName: "github",
-        manifestEtag: "etag_1",
-      })).resolves.toMatchObject({
+      await expect(notifier.notify(manifestRequest())).resolves.toMatchObject({
         ok: false,
         retryable: true,
         code: `grpc_${status.DEADLINE_EXCEEDED}`,
@@ -149,354 +128,84 @@ describe("BridgeAPIManifestChangeNotifier", () => {
     }
   });
 
-  test("treats Bridge ResourceExhausted as the terminal durable over-cap settlement", async () => {
-    const notifier = new BridgeAPIManifestChangeNotifier({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client: new FailingBridgeClient(status.RESOURCE_EXHAUSTED, "mcp manifest tools exceed the accepted byte limit"),
-      metadataFactory: async () => new Metadata(),
-    });
+  test("accepts only the durable over-cap ResourceExhausted settlement", async () => {
+    await expect(manifestNotifier(new FailingManifestClient(
+      status.RESOURCE_EXHAUSTED,
+      "mcp manifest tools exceed the accepted byte limit",
+    )).notify(manifestRequest())).resolves.toEqual({ ok: true, duplicate: false });
 
-    await expect(notifier.notify({
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      mcpServerName: "github",
-      manifestEtag: "etag_over_cap",
-    })).resolves.toEqual({ ok: true, duplicate: false });
-  });
-
-  test("does not acknowledge an unrelated ResourceExhausted rejection", async () => {
-    const notifier = new BridgeAPIManifestChangeNotifier({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client: new FailingBridgeClient(status.RESOURCE_EXHAUSTED, "upstream response exceeded transport capacity"),
-      metadataFactory: async () => new Metadata(),
-    });
-
-    await expect(notifier.notify({
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      mcpServerName: "github",
-      manifestEtag: "etag_transport_limit",
-    })).resolves.toEqual({
+    await expect(manifestNotifier(new FailingManifestClient(
+      status.RESOURCE_EXHAUSTED,
+      "upstream response exceeded transport capacity",
+    )).notify(manifestRequest())).resolves.toMatchObject({
       ok: false,
       retryable: false,
       code: `grpc_${status.RESOURCE_EXHAUSTED}`,
-      message: "mcp manifest change notification failed",
     });
   });
 
-  test("treats a defined Bridge ACK rejection as terminal", async () => {
-    const notifier = new BridgeAPIManifestChangeNotifier({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client: new RecordingBridgeClient({
-        ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "manifest_rejected" },
-      }),
-      metadataFactory: async () => new Metadata(),
-    });
-    await expect(notifier.notify({
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      mcpServerName: "github",
-      manifestEtag: "etag_1",
-    })).resolves.toEqual({
-      ok: false,
-      retryable: false,
-      code: "manifest_rejected",
-      message: "mcp manifest change notification rejected",
-    });
+  test("rejects a response without a closed result variant", async () => {
+    await expect(manifestNotifier(new RecordingManifestClient({})).notify(manifestRequest()))
+      .resolves.toEqual({
+        ok: false,
+        retryable: false,
+        code: "bridge_manifest_change_rejected",
+        message: "mcp manifest change notification rejected",
+      });
   });
 });
 
 describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
-  test("keeps the same tool-use event id isolated across thread-scoped local caches", () => {
-    const store = new InMemoryMcpIdempotencyStore();
-    const key = { toolUseEventId: "sevt_shared", normalizedInputHash: "hash_shared" };
-    const main = mcpIdempotencyContext();
-    const child = { ...main, sessionThreadId: "thrd_child" };
+  test("keeps the same tool-use event isolated across thread-scoped local caches", () => {
+    const store = new InMemoryMcpIdempotencyStore(executor);
+    const main = mcpContext();
+    const child = { ...main, sessionThreadId: "thrd_child", claimId: "mcpclaim_child" };
 
-    expect(store.claim(key, main)).toEqual({ status: "new" });
-    expect(store.claim(key, child)).toEqual({ status: "new" });
-    store.store(key, {
-      response: { status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED, resultText: "main", attachments: [] },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, main);
-    store.store(key, {
-      response: { status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED, resultText: "child", attachments: [] },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, child);
+    expect(store.claim(key, main)).toEqual({ status: "new", executor });
+    expect(store.claim(key, child)).toEqual({ status: "new", executor });
+    store.store(key, pendingResult("main"), main);
+    store.store(key, pendingResult("child"), child);
 
     expect(store.claim(key, main)).toMatchObject({ status: "replay", stored: { response: { resultText: "main" } } });
     expect(store.claim(key, child)).toMatchObject({ status: "replay", stored: { response: { resultText: "child" } } });
   });
 
-  test("returns Bridge's durable materialization handle with the refs-only response", async () => {
-    const client = new MaterializationBridgeClient();
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client,
-      metadataFactory: async () => new Metadata(),
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
+  test("claims only target and custody while Bridge supplies executor facts", async () => {
+    const client = new ScriptedMcpClient([{ response: { acquired: executor } }]);
+    const store = durableStore(client);
 
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "ok",
-        attachments: [],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).resolves.toMatchObject({
-      resultText: "ok",
-      materializationHandle: "sevt_tool_1",
+    await expect(store.claim(key, mcpContext())).resolves.toEqual({ status: "new", executor });
+    expect(client.claimRequests).toEqual([claimRequest()]);
+  });
+
+  test("reads already-completed direct durable facts without a receipt", async () => {
+    const client = new ScriptedMcpClient([{
+      response: { alreadyCompleted: { resultJson: storedResultJSON("durable") } },
+    }]);
+    await expect(durableStore(client).claim(key, mcpContext())).resolves.toMatchObject({
+      status: "replay",
+      stored: { response: { resultText: "durable" } },
     });
   });
 
-  test("rejects a committed MCP result whose declaration names stale custody", async () => {
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client: new MaterializationBridgeClient({ staleCustody: true }),
-      metadataFactory: async () => new Metadata(),
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
-
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "ok",
-        attachments: [],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
+  test("maps in-flight, stale, conflict, and missing result variants", async () => {
+    await expect(durableStore(new ScriptedMcpClient([{ response: { inFlight: {} } }])).claim(key, mcpContext()))
+      .resolves.toEqual({ status: "in_flight" });
+    await expect(durableStore(new ScriptedMcpClient([{ response: { stale: {} } }])).claim(key, mcpContext()))
+      .resolves.toEqual({ status: "stale_custody" });
+    await expect(durableStore(new ScriptedMcpClient([{ error: serviceError(status.ALREADY_EXISTS) }])).claim(key, mcpContext()))
+      .resolves.toEqual({ status: "conflict" });
+    await expect(durableStore(new ScriptedMcpClient([{ response: {} }])).claim(key, mcpContext()))
+      .rejects.toThrow("mcp tool claim returned no result variant");
   });
 
-  test("retries an unknown commit outcome with the exact frozen declaration", async () => {
-    const client = new UnknownThenReplayBridgeClient();
-    const delays: number[] = [];
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client,
-      metadataFactory: async () => new Metadata(),
-      sleep: async (delayMs) => {
-        delays.push(delayMs);
-      },
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
-
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "ok",
-        attachments: [],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).resolves.toMatchObject({
-      resultText: "ok",
-      materializationHandle: "sevt_tool_1",
-    });
-
-    expect(delays).toEqual([100]);
-    expect(client.commitRequests).toHaveLength(2);
-    expect(client.commitRequests[0]).toBe(client.commitRequests[1]);
-    expect(client.commitRequests[0]).toEqual(client.commitRequests[1]);
+  test("requires authenticated claim context", async () => {
+    const store = durableStore(new ScriptedMcpClient([]));
+    await expect(store.claim(key)).rejects.toThrow("mcp tool idempotency context is required");
+    await expect(store.store(key, pendingResult("ok"))).rejects.toThrow("mcp tool idempotency context is required");
   });
 
-  test("materializes one terminal MCP failure after Bridge rejects connector-produced result bytes", async () => {
-    const client = new PayloadRejectThenMaterializeBridgeClient();
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client,
-      metadataFactory: async () => new Metadata(),
-      sleep: async () => {
-        throw new Error("deterministic commit rejection must not back off");
-      },
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
-
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "provider output that Bridge rejects",
-        attachments: [],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).resolves.toMatchObject({
-      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-      resultText: "MCP tool result could not be committed.",
-      errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
-      retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-      materializationHandle: "sevt_tool_1",
-    });
-    expect(client.commitRequests).toHaveLength(2);
-    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
-    expect(client.commitRequests[1]?.inlineMedia).toEqual([]);
-  });
-
-  test("replays the canonical failure request after its commit outcome becomes unknown", async () => {
-    const client = new PayloadRejectUnknownThenMaterializeBridgeClient();
-    const delays: number[] = [];
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client,
-      metadataFactory: async () => new Metadata(),
-      sleep: async (delayMs) => {
-        delays.push(delayMs);
-      },
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
-
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "provider output that Bridge rejects",
-        attachments: [],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).resolves.toMatchObject({
-      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-      errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
-      materializationHandle: "sevt_tool_1",
-    });
-
-    expect(delays).toEqual([300]);
-    expect(client.commitRequests).toHaveLength(3);
-    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
-    expect(client.commitRequests[2]).toBe(client.commitRequests[1]);
-    expect(client.commitRequests[2]).toEqual(client.commitRequests[1]);
-    expect(client.commitRequests[2]).toMatchObject({
-      scope: client.commitRequests[0]?.scope,
-      toolUseEventId: key.toolUseEventId,
-      normalizedInputHash: key.normalizedInputHash,
-      inlineMedia: [],
-    });
-  });
-
-  test("relinquishes custody when Bridge rejects the canonical failure request", async () => {
-    const client = new PayloadRejectThenCustodyRejectBridgeClient();
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client,
-      metadataFactory: async () => new Metadata(),
-      sleep: async () => {
-        throw new Error("custody rejection must not back off");
-      },
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
-
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "provider output that Bridge rejects",
-        attachments: [],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
-
-    expect(client.commitRequests).toHaveLength(2);
-    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
-    expect(client.commitRequests[1]).toMatchObject({
-      scope: client.commitRequests[0]?.scope,
-      toolUseEventId: key.toolUseEventId,
-      normalizedInputHash: key.normalizedInputHash,
-      inlineMedia: [],
-    });
-  });
-
-  test("stops on a custody rejection without fabricating a replacement result", async () => {
-    const client = new CustodyRejectingBridgeClient();
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client,
-      metadataFactory: async () => new Metadata(),
-      sleep: async () => {
-        throw new Error("custody rejection must not back off");
-      },
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
-
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "must not be replaced",
-        attachments: [],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
-    expect(client.commitRequests).toHaveLength(1);
-  });
-
-  test("classifies a durable replay observed under stale custody without local application", async () => {
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client: new StaleClaimReplayBridgeClient(),
-      metadataFactory: async () => new Metadata(),
-    });
-
-    await expect(store.claim(
-      { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" },
-      mcpIdempotencyContext(),
-    )).resolves.toEqual({ status: "stale_custody" });
-  });
-
-  test("rejects an attachment receipt whose delta differs from the refs-only result", async () => {
-    const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
-      tokenPath: "/token",
-      client: new MalformedAttachmentReceiptBridgeClient(),
-      metadataFactory: async () => new Metadata(),
-    });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = mcpIdempotencyContext();
-
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
-    await expect(store.store(key, {
-      response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "image",
-        attachments: [{
-          data: Uint8Array.from([1, 2, 3]),
-          mime: "image/png",
-          suggestedFilename: "plot.png",
-        }],
-      },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).rejects.toThrow("mcp tool commit returned malformed declaration receipt");
-  });
-
-  test("bounds a hung Claim RPC before any external tool execution can begin", async () => {
+  test("bounds a hung Claim RPC before external execution begins", async () => {
     const server = new Server();
     server.addService(AgentRuntimeBridgeServiceService, {
       claimMcpToolResult: () => undefined,
@@ -509,24 +218,112 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
         metadataFactory: async () => new Metadata(),
         claimTimeoutMs: 20,
       });
-
-      await expect(store.claim({
-        toolUseEventId: "sevt_tool_1",
-        normalizedInputHash: "hash_1",
-      }, mcpIdempotencyContext())).rejects.toMatchObject({ code: status.DEADLINE_EXCEEDED });
+      await expect(store.claim(key, mcpContext())).rejects.toMatchObject({ code: status.DEADLINE_EXCEEDED });
       expect(MCP_CLAIM_RPC_TIMEOUT_MS).toBe(10_000);
     } finally {
       server.forceShutdown();
     }
   });
 
-  test("keeps an unknown commit receipt awaiting past the capped backoff without rebuilding the declaration", async () => {
-    const client = new RepeatedUnknownThenReplayBridgeClient();
-    const sleepDelays: number[] = [];
+  test("retries an unknown commit with the exact frozen request then reads durable facts", async () => {
+    const client = new ScriptedMcpClient([
+      { response: { acquired: executor } },
+      { response: { alreadyCompleted: { resultJson: storedResultJSON("ok") } } },
+    ], [
+      { error: serviceError(status.UNKNOWN) },
+      { response: { committed: {} } },
+    ]);
+    const delays: number[] = [];
+    const store = durableStore(client, async (delayMs) => { delays.push(delayMs); });
+
+    await store.claim(key, mcpContext());
+    await expect(store.store(key, pendingResult("ok"), mcpContext())).resolves.toMatchObject({ resultText: "ok" });
+
+    expect(delays).toEqual([100]);
+    expect(client.commitRequests).toHaveLength(2);
+    expect(client.commitRequests[0]).toBe(client.commitRequests[1]);
+    expect(client.commitRequests[0]).toEqual(commitRequest(storedResultJSON("ok")));
+    expect(client.claimRequests).toHaveLength(2);
+  });
+
+  test("materializes one terminal failure after Bridge rejects provider result bytes", async () => {
+    const terminal = storedTerminalFailureJSON();
+    const client = new ScriptedMcpClient([
+      { response: { acquired: executor } },
+      { response: { alreadyCompleted: { resultJson: terminal } } },
+    ], [
+      { error: serviceError(status.INVALID_ARGUMENT) },
+      { response: { committed: {} } },
+    ]);
+    const store = durableStore(client, async () => {
+      throw new Error("deterministic rejection must not back off");
+    });
+
+    await store.claim(key, mcpContext());
+    await expect(store.store(key, pendingResult("provider output"), mcpContext())).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP tool result could not be committed.",
+      errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+      retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+    });
+    expect(client.commitRequests).toHaveLength(2);
+    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
+    expect(client.commitRequests[1]?.inlineMedia).toEqual([]);
+    expect(client.commitRequests[1]?.resultJson).toBe(terminal);
+  });
+
+  test("retries the same canonical failure bytes after an unknown outcome", async () => {
+    const terminal = storedTerminalFailureJSON();
+    const client = new ScriptedMcpClient([
+      { response: { acquired: executor } },
+      { response: { alreadyCompleted: { resultJson: terminal } } },
+    ], [
+      { error: serviceError(status.INVALID_ARGUMENT) },
+      { error: serviceError(status.UNKNOWN) },
+      { response: { committed: {} } },
+    ]);
+    const delays: number[] = [];
+    const store = durableStore(client, async (delayMs) => { delays.push(delayMs); });
+
+    await store.claim(key, mcpContext());
+    await store.store(key, pendingResult("provider output"), mcpContext());
+
+    expect(delays).toEqual([300]);
+    expect(client.commitRequests).toHaveLength(3);
+    expect(client.commitRequests[1]).not.toBe(client.commitRequests[0]);
+    expect(client.commitRequests[2]).toBe(client.commitRequests[1]);
+  });
+
+  test("relinquishes custody without fabricating a replacement on a stale commit", async () => {
+    const client = new ScriptedMcpClient([
+      { response: { acquired: executor } },
+    ], [{ error: serviceError(status.FAILED_PRECONDITION) }]);
+    const store = durableStore(client, async () => {
+      throw new Error("stale custody must not back off");
+    });
+
+    await store.claim(key, mcpContext());
+    await expect(store.store(key, pendingResult("must not be replaced"), mcpContext()))
+      .rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
+    expect(client.commitRequests).toHaveLength(1);
+  });
+
+  test("keeps unknown commit bytes frozen through capped backoff and refreshed metadata", async () => {
     const attachmentBytes = Uint8Array.from([1, 2, 3]);
+    const client = new ScriptedMcpClient([
+      { response: { acquired: executor } },
+      { response: { alreadyCompleted: { resultJson: storedResultJSON("ok") } } },
+    ], [
+      { error: serviceError(status.DEADLINE_EXCEEDED) },
+      { error: serviceError(status.UNKNOWN) },
+      { error: serviceError(status.INTERNAL) },
+      { error: serviceError(status.RESOURCE_EXHAUSTED) },
+      { response: { duplicate: {} } },
+    ]);
+    const delays: number[] = [];
     let metadataGeneration = 0;
     const store = new BridgeAPIMcpToolResultIdempotencyStore({
-      address: "bridge.tetral-system.svc.cluster.local:9090",
+      address: "unused",
       tokenPath: "/token",
       client,
       metadataFactory: async () => {
@@ -538,51 +335,27 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
       commitTimeoutMs: 1_234,
       now: () => 1_000,
       sleep: async (delayMs) => {
-        sleepDelays.push(delayMs);
+        delays.push(delayMs);
         attachmentBytes[0] = 9;
       },
     });
-    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
-    const context = {
-      requestId: "req_1",
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      sessionThreadId: "thrd_1",
-      bindingId: "bind_1",
-      bindingGeneration: 1,
-      runtimePodUid: "pod_1",
-      mcpServerName: "github",
-      toolName: "create_issue",
-      inputJson: "{}",
-    };
 
-    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await store.claim(key, mcpContext());
     await expect(store.store(key, {
+      ...pendingResult("ok"),
       response: {
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-        resultText: "ok",
-        attachments: [{
-          data: attachmentBytes,
-          mime: "image/png",
-          suggestedFilename: "plot.png",
-        }],
+        ...pendingResult("ok").response,
+        attachments: [{ data: attachmentBytes, mime: "image/png", suggestedFilename: "plot.png" }],
       },
-      contentItems: 1,
-      refreshTriggered: false,
-    }, context)).resolves.toMatchObject({
-      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
-      resultText: "ok",
-    });
+    }, mcpContext())).resolves.toMatchObject({ resultText: "ok" });
 
-    expect(client.claimOptions).toEqual([{ deadline: new Date(1_321) }]);
-    expect(client.commitOptions).toHaveLength(5);
-    expect(client.commitOptions).toEqual(
-      Array.from({ length: 5 }, () => ({ deadline: new Date(2_234) })),
-    );
+    expect(client.claimOptions).toEqual([
+      { deadline: new Date(1_321) },
+      { deadline: new Date(1_321) },
+    ]);
+    expect(client.commitOptions).toEqual(Array.from({ length: 5 }, () => ({ deadline: new Date(2_234) })));
     expect(new Set(client.commitRequests).size).toBe(1);
-    expect(client.commitAttachmentSnapshots).toEqual(
-      Array.from({ length: 5 }, () => [1, 2, 3]),
-    );
+    expect(client.commitAttachmentSnapshots).toEqual(Array.from({ length: 5 }, () => [1, 2, 3]));
     expect(client.commitAuthorizations).toEqual([
       ["bearer token_2"],
       ["bearer token_3"],
@@ -590,17 +363,15 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
       ["bearer token_5"],
       ["bearer token_6"],
     ]);
-    expect(sleepDelays).toEqual([100, 300, 1_000, 1_000]);
+    expect(delays).toEqual([100, 300, 1_000, 1_000]);
     expect(MCP_COMMIT_RPC_TIMEOUT_MS).toBe(10_000);
   });
-
 });
 
-class RecordingBridgeClient {
-  readonly calls: Array<{
-    readonly request: McpManifestChangedRequest;
-    readonly authorization: unknown;
-  }> = [];
+type Scripted<T> = { readonly response: T } | { readonly error: ServiceError };
+
+class RecordingManifestClient implements BridgeManifestChangedClient {
+  readonly calls: Array<{ readonly request: McpManifestChangedRequest; readonly authorization: unknown }> = [];
 
   constructor(private readonly response: McpManifestChangedResponse) {}
 
@@ -608,11 +379,190 @@ class RecordingBridgeClient {
     request: McpManifestChangedRequest,
     metadata: Metadata,
     _options: CallOptions,
-    callback: (error: null, response: McpManifestChangedResponse) => void,
-  ) {
+    callback: (error: ServiceError | null, response: McpManifestChangedResponse) => void,
+  ): unknown {
     this.calls.push({ request, authorization: metadata.get("authorization") });
     callback(null, this.response);
+    return undefined;
   }
+}
+
+class FailingManifestClient implements BridgeManifestChangedClient {
+  constructor(private readonly code: number | undefined, private readonly details?: string) {}
+
+  mcpManifestChanged(
+    _request: McpManifestChangedRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: McpManifestChangedResponse) => void,
+  ): unknown {
+    callback(serviceError(this.code, this.details), {});
+    return undefined;
+  }
+}
+
+class ScriptedMcpClient implements BridgeMcpToolResultClient {
+  readonly claimRequests: ClaimMcpToolResultRequest[] = [];
+  readonly claimOptions: CallOptions[] = [];
+  readonly commitRequests: CommitMcpToolResultRequest[] = [];
+  readonly commitOptions: CallOptions[] = [];
+  readonly commitAttachmentSnapshots: number[][] = [];
+  readonly commitAuthorizations: unknown[] = [];
+
+  constructor(
+    private readonly claims: Scripted<ClaimMcpToolResultResponse>[],
+    private readonly commits: Scripted<CommitMcpToolResultResponse>[] = [],
+  ) {}
+
+  claimMcpToolResult(
+    request: ClaimMcpToolResultRequest,
+    _metadata: Metadata,
+    options: CallOptions,
+    callback: (error: ServiceError | null, response: ClaimMcpToolResultResponse) => void,
+  ): unknown {
+    this.claimRequests.push(request);
+    this.claimOptions.push(options);
+    const scripted = this.claims.shift();
+    if (scripted === undefined) throw new Error("missing scripted claim response");
+    if ("error" in scripted) callback(scripted.error, {});
+    else callback(null, scripted.response);
+    return undefined;
+  }
+
+  commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    metadata: Metadata,
+    options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ): unknown {
+    this.commitRequests.push(request);
+    this.commitOptions.push(options);
+    this.commitAttachmentSnapshots.push(Array.from(request.inlineMedia[0]?.data ?? []));
+    this.commitAuthorizations.push(metadata.get("authorization"));
+    const scripted = this.commits.shift();
+    if (scripted === undefined) throw new Error("missing scripted commit response");
+    if ("error" in scripted) callback(scripted.error, {});
+    else callback(null, scripted.response);
+    return undefined;
+  }
+}
+
+function manifestNotifier(
+  client: BridgeManifestChangedClient,
+  metadataFactory: () => Promise<Metadata> = async () => new Metadata(),
+): BridgeAPIManifestChangeNotifier {
+  return new BridgeAPIManifestChangeNotifier({
+    address: "unused",
+    tokenPath: "/token",
+    client,
+    metadataFactory,
+  });
+}
+
+function durableStore(
+  client: BridgeMcpToolResultClient,
+  sleep: (delayMs: number) => Promise<void> = async () => undefined,
+): BridgeAPIMcpToolResultIdempotencyStore {
+  return new BridgeAPIMcpToolResultIdempotencyStore({
+    address: "unused",
+    tokenPath: "/token",
+    client,
+    metadataFactory: async () => new Metadata(),
+    sleep,
+  });
+}
+
+function manifestRequest(): McpManifestChangedRequest {
+  return {
+    workspaceId: "wksp_1",
+    sessionId: "sesn_1",
+    mcpServerName: "github",
+    manifestEtag: "etag_1",
+  };
+}
+
+function mcpContext(): McpIdempotencyContext {
+  return {
+    claimId: "mcpclaim_1",
+    workspaceId: "wksp_1",
+    sessionId: "sesn_1",
+    sessionThreadId: "thrd_1",
+    bindingId: "bind_1",
+    bindingGeneration: 1,
+    runtimePodUid: "pod_1",
+  };
+}
+
+function claimRequest(): ClaimMcpToolResultRequest {
+  const context = mcpContext();
+  return {
+    scope: {
+      workspaceId: context.workspaceId,
+      sessionId: context.sessionId,
+      sessionThreadId: context.sessionThreadId,
+      binding: {
+        bindingId: context.bindingId,
+        bindingGeneration: context.bindingGeneration,
+        targetPodUid: context.runtimePodUid,
+      },
+    },
+    toolUseEventId: key.toolUseEventId,
+    claimId: context.claimId,
+  };
+}
+
+function commitRequest(resultJson: string): CommitMcpToolResultRequest {
+  return {
+    scope: claimRequest().scope,
+    toolUseEventId: key.toolUseEventId,
+    claimId: mcpContext().claimId,
+    resultJson,
+    inlineMedia: [],
+  };
+}
+
+function pendingResult(resultText: string): PendingStoredRunMcpToolResponse {
+  return {
+    response: {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText,
+      attachments: [],
+    },
+    contentItems: 1,
+    refreshTriggered: false,
+  };
+}
+
+function storedResultJSON(resultText: string): string {
+  return JSON.stringify({
+    response: {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      result_text: resultText,
+      attachments: [],
+      error_kind: null,
+      retry_status: null,
+    },
+    content_items: 1,
+    refresh_triggered: false,
+  });
+}
+
+function storedTerminalFailureJSON(): string {
+  return JSON.stringify({
+    response: {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      result_text: "MCP tool result could not be committed.",
+      attachments: [],
+      error_kind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+      retry_status: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+    },
+    content_items: 0,
+    refresh_triggered: false,
+  });
+}
+
+function serviceError(code: number | undefined, details?: string): ServiceError {
+  return Object.assign(new Error("bridge unavailable"), { code, details }) as ServiceError;
 }
 
 async function bindLocalServer(server: Server): Promise<number> {
@@ -625,395 +575,4 @@ async function bindLocalServer(server: Server): Promise<number> {
       resolve(port);
     });
   });
-}
-
-class FailingBridgeClient {
-  readonly options: CallOptions[] = [];
-
-  constructor(private readonly code: number | undefined, private readonly details?: string) {}
-
-  mcpManifestChanged(
-    _request: McpManifestChangedRequest,
-    _metadata: Metadata,
-    options: CallOptions,
-    callback: (error: ServiceError | null, response: McpManifestChangedResponse) => void,
-  ) {
-    this.options.push(options);
-    callback(Object.assign(new Error("bridge unavailable"), { code: this.code, details: this.details }) as ServiceError, { ack: undefined });
-  }
-}
-
-class RepeatedUnknownThenReplayBridgeClient {
-  readonly claimOptions: CallOptions[] = [];
-  readonly commitOptions: CallOptions[] = [];
-  readonly commitRequests: CommitMcpToolResultRequest[] = [];
-  readonly commitAttachmentSnapshots: number[][] = [];
-  readonly commitAuthorizations: unknown[] = [];
-
-  claimMcpToolResult(
-    _request: ClaimMcpToolResultRequest,
-    _metadata: Metadata,
-    options: CallOptions,
-    callback: (error: ServiceError | null, response: ClaimMcpToolResultResponse) => void,
-  ) {
-    this.claimOptions.push(options);
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: "",
-      declaration: undefined,
-    });
-  }
-
-  commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    metadata: Metadata,
-    options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    this.commitOptions.push(options);
-    this.commitRequests.push(request);
-    this.commitAttachmentSnapshots.push(Array.from(request.inlineMedia[0]?.data ?? []));
-    this.commitAuthorizations.push(metadata.get("authorization"));
-    if (this.commitRequests.length <= 4) {
-      const codes = [
-        status.DEADLINE_EXCEEDED,
-        status.UNKNOWN,
-        status.INTERNAL,
-        status.RESOURCE_EXHAUSTED,
-      ];
-      callback(Object.assign(new Error("commit result unavailable"), { code: codes[this.commitRequests.length - 1] }) as ServiceError, {
-        ack: undefined,
-        refsOnlyResultJson: "",
-        declaration: undefined,
-      });
-      return;
-    }
-    void metadata;
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      refsOnlyResultJson: `{"response":{"status":1,"result_text":"ok","attachments":[]},"content_items":1,"refresh_triggered":false}`,
-      materializationHandle: "sevt_tool_1",
-      declaration: mcpMaterializationDeclaration(request, false),
-    });
-  }
-}
-
-class MaterializationBridgeClient {
-  constructor(private readonly options: { readonly staleCustody?: boolean } = {}) {}
-
-  claimMcpToolResult(
-    _request: ClaimMcpToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: ServiceError | null, response: ClaimMcpToolResultResponse) => void,
-  ) {
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: "",
-      declaration: undefined,
-    });
-  }
-
-  commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      refsOnlyResultJson: `{"response":{"status":1,"result_text":"ok","attachments":[]},"content_items":1,"refresh_triggered":false}`,
-      materializationHandle: "sevt_tool_1",
-      declaration: mcpMaterializationDeclaration(request, this.options.staleCustody === true),
-    });
-  }
-}
-
-class UnknownThenReplayBridgeClient extends MaterializationBridgeClient {
-  readonly commitRequests: CommitMcpToolResultRequest[] = [];
-
-  override commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    metadata: Metadata,
-    options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    this.commitRequests.push(request);
-    if (this.commitRequests.length === 1) {
-      callback(Object.assign(new Error("connection closed after commit"), { code: status.UNKNOWN }) as ServiceError, {
-        ack: undefined,
-        refsOnlyResultJson: "",
-        declaration: undefined,
-      });
-      return;
-    }
-    super.commitMcpToolResult(request, metadata, options, callback);
-  }
-}
-
-class PayloadRejectThenMaterializeBridgeClient extends MaterializationBridgeClient {
-  readonly commitRequests: CommitMcpToolResultRequest[] = [];
-
-  override commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    this.commitRequests.push(request);
-    if (this.commitRequests.length === 1) {
-      callback(Object.assign(new Error("result payload rejected"), { code: status.INVALID_ARGUMENT }) as ServiceError, {
-        ack: undefined,
-        refsOnlyResultJson: "",
-        declaration: undefined,
-      });
-      return;
-    }
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      refsOnlyResultJson: request.resultJson,
-      materializationHandle: request.toolUseEventId,
-      declaration: mcpMaterializationDeclaration(request, false),
-    });
-  }
-}
-
-class PayloadRejectUnknownThenMaterializeBridgeClient extends MaterializationBridgeClient {
-  readonly commitRequests: CommitMcpToolResultRequest[] = [];
-
-  override commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    metadata: Metadata,
-    options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    this.commitRequests.push(request);
-    if (this.commitRequests.length === 1) {
-      callback(Object.assign(new Error("result payload rejected"), { code: status.INVALID_ARGUMENT }) as ServiceError, {
-        ack: undefined,
-        refsOnlyResultJson: "",
-        declaration: undefined,
-      });
-      return;
-    }
-    if (this.commitRequests.length === 2) {
-      callback(Object.assign(new Error("connection closed after commit"), { code: status.UNKNOWN }) as ServiceError, {
-        ack: undefined,
-        refsOnlyResultJson: "",
-        declaration: undefined,
-      });
-      return;
-    }
-    void metadata;
-    void options;
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      refsOnlyResultJson: request.resultJson,
-      materializationHandle: request.toolUseEventId,
-      declaration: mcpMaterializationDeclaration(request, false),
-    });
-  }
-}
-
-class PayloadRejectThenCustodyRejectBridgeClient extends MaterializationBridgeClient {
-  readonly commitRequests: CommitMcpToolResultRequest[] = [];
-
-  override commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    this.commitRequests.push(request);
-    callback(Object.assign(new Error(this.commitRequests.length === 1 ? "result payload rejected" : "claim is not current"), {
-      code: this.commitRequests.length === 1 ? status.INVALID_ARGUMENT : status.FAILED_PRECONDITION,
-    }) as ServiceError, {
-      ack: undefined,
-      refsOnlyResultJson: "",
-      declaration: undefined,
-    });
-  }
-}
-
-class CustodyRejectingBridgeClient extends MaterializationBridgeClient {
-  readonly commitRequests: CommitMcpToolResultRequest[] = [];
-
-  override commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    this.commitRequests.push(request);
-    callback(Object.assign(new Error("claim is not current"), { code: status.FAILED_PRECONDITION }) as ServiceError, {
-      ack: undefined,
-      refsOnlyResultJson: "",
-      declaration: undefined,
-    });
-  }
-}
-
-class StaleClaimReplayBridgeClient extends MaterializationBridgeClient {
-  override claimMcpToolResult(
-    request: ClaimMcpToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: ServiceError | null, response: ClaimMcpToolResultResponse) => void,
-  ) {
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: `{"response":{"status":1,"result_text":"ok","attachments":[]},"content_items":1,"refresh_triggered":false}`,
-      materializationHandle: request.toolUseEventId,
-      declaration: {
-        receipts: [{
-          sessionThreadId: request.scope?.sessionThreadId ?? "",
-          operationKind: "commit_mcp_tool_result",
-          sourceKind: "mcp_tool_execution",
-          operationId: stableMcpMaterializationOperationId(request),
-          events: [],
-          messages: [],
-          pendingAttachmentDeltaJson: [],
-          interruptToolProjections: [],
-          prefixConsumptions: [],
-          declarationDigest: "digest_from_durable_operation",
-          requestReschedule: undefined,
-          childLifecycle: [],
-          requestStart: undefined,
-          idleCloseout: undefined,
-          compactedThroughMessageSequence: undefined,
-        }],
-        observedBindingId: "bind_new",
-        observedBindingGeneration: 2,
-        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY,
-      },
-    });
-  }
-}
-
-class MalformedAttachmentReceiptBridgeClient extends MaterializationBridgeClient {
-  override commitMcpToolResult(
-    request: CommitMcpToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
-  ) {
-    const raw = JSON.parse(request.resultJson) as {
-      response: {
-        attachments: Array<{
-          mime: string;
-          size_bytes: number;
-          suggested_filename: string;
-          attachment_ref?: string;
-        }>;
-      };
-    };
-    const attachment = raw.response.attachments[0]!;
-    attachment.attachment_ref = "att_1";
-    const refsOnlyResultJson = JSON.stringify(raw);
-    const declaration = mcpMaterializationDeclaration(request, false);
-    declaration.receipts[0]!.pendingAttachmentDeltaJson = [JSON.stringify({
-      origin: {
-        transient: {
-          attachmentRef: "att_wrong",
-          sourceToolUseEventId: request.toolUseEventId,
-          sourcePath: `mcp:${request.mcpServerName}/${attachment.suggested_filename}`,
-          detail: "auto",
-        },
-      },
-      mime: attachment.mime,
-      filename: attachment.suggested_filename,
-    })];
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      refsOnlyResultJson,
-      materializationHandle: request.toolUseEventId,
-      declaration,
-    });
-  }
-}
-
-function mcpMaterializationDeclaration(
-  request: CommitMcpToolResultRequest,
-  staleCustody: boolean,
-): DeclarationResponse {
-  return {
-    receipts: [{
-      sessionThreadId: request.scope?.sessionThreadId ?? "",
-      operationKind: "commit_mcp_tool_result",
-      sourceKind: "mcp_tool_execution",
-      operationId: stableMcpMaterializationOperationId(request),
-      events: [],
-      messages: [],
-      pendingAttachmentDeltaJson: [],
-      interruptToolProjections: [],
-      prefixConsumptions: [],
-      declarationDigest: mcpMaterializationDeclarationDigest(request),
-      requestReschedule: undefined,
-      childLifecycle: [],
-      requestStart: undefined,
-      idleCloseout: undefined,
-      compactedThroughMessageSequence: undefined,
-    }],
-    observedBindingId: request.scope?.binding?.bindingId ?? "",
-    observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
-    applicationDisposition: staleCustody
-      ? ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
-      : ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
-  };
-}
-
-function stableMcpMaterializationOperationId(
-  request: Pick<ClaimMcpToolResultRequest, "toolUseEventId" | "normalizedInputHash">,
-): string {
-  const encoder = new TextEncoder();
-  const parts = [
-    "mcp_tool_execution",
-    request.toolUseEventId,
-    request.normalizedInputHash,
-  ].map((part) => encoder.encode(part));
-  const framed = new Uint8Array(parts.reduce((total, part) => total + 4 + part.byteLength, 0));
-  const view = new DataView(framed.buffer);
-  let offset = 0;
-  for (const part of parts) {
-    view.setUint32(offset, part.byteLength, false);
-    offset += 4;
-    framed.set(part, offset);
-    offset += part.byteLength;
-  }
-  return `stid_${createHash("sha256").update(framed).digest("hex")}`;
-}
-
-function mcpMaterializationDeclarationDigest(request: CommitMcpToolResultRequest): string {
-  const inlineMedia = request.inlineMedia.map((media) => ({
-      content_sha256: createHash("sha256").update(media.data).digest("hex"),
-      mime: media.mime,
-      suggested_filename: media.suggestedFilename,
-    }));
-  const declaration = `{
-    "inline_media":${JSON.stringify(inlineMedia)},
-    "input":${canonicalRunToolJSON(request.inputJson)},
-    "mcp_server_name":${JSON.stringify(request.mcpServerName)},
-    "normalized_input_hash":${JSON.stringify(request.normalizedInputHash)},
-    "operation_kind":"commit_mcp_tool_result",
-    "result":${canonicalRunToolJSON(request.resultJson)},
-    "session_thread_id":${JSON.stringify(request.scope?.sessionThreadId ?? "")},
-    "tool_name":${JSON.stringify(request.toolName)},
-    "tool_use_event_id":${JSON.stringify(request.toolUseEventId)}
-  }`;
-  return createHash("sha256").update(canonicalRunToolJSON(declaration), "utf8").digest("hex");
-}
-
-function mcpIdempotencyContext() {
-  return {
-    requestId: "req_1",
-    workspaceId: "wksp_1",
-    sessionId: "sesn_1",
-    sessionThreadId: "thrd_1",
-    bindingId: "bind_1",
-    bindingGeneration: 1,
-    runtimePodUid: "pod_1",
-    mcpServerName: "github",
-    toolName: "create_issue",
-    inputJson: "{}",
-  };
 }

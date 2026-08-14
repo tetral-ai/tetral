@@ -48,6 +48,11 @@ func closeoutSentinelCode(err error) (string, bool) {
 	return sentinel.code, true
 }
 
+func isScopeSupersededError(err error) bool {
+	code, ok := closeoutSentinelCode(err)
+	return ok && code == closeoutScopeSupersededCode
+}
+
 func closeoutWriteRejectionCode(err error) (string, bool) {
 	if err == nil {
 		return "", false

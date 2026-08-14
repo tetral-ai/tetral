@@ -24,7 +24,6 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
   readonly modelRequestId: string;
   readonly modelToolCallId: string;
   readonly toolUseEventId: string;
-  readonly materializationHandle: string;
 };
 let connectorCalls = 0;
 const mcpConnectorClient = {
@@ -36,7 +35,6 @@ const mcpConnectorClient = {
       attachments: [],
       errorKind: McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED,
       retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-      materializationHandle: input.materializationHandle,
     });
     return { cancel() {} };
   },
@@ -80,7 +78,7 @@ const request: RuntimeToolExecutionRequest = {
   abortSignal: new AbortController().signal,
 };
 const result = await runner.runTool(request);
-if (result.type === "stale_custody") throw new Error("MCP failure lost materialization custody");
+if (result.type === "stale_custody") throw new Error("MCP failure lost result custody");
 const settlement = runtimeToolSettlement(result);
 const event = runtimeToolResultEvent(input.toolUseEventId, { kind: "mcp", mcpServerName: "github" }, settlement);
 let captured: WriteEventRequest | undefined;
@@ -119,7 +117,6 @@ await writer.append({
   modelRequestId: input.modelRequestId,
   event,
   toolSettlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
-  mcpMaterializationHandle: input.materializationHandle,
 });
 if (captured?.toolSettlement?.error === undefined) {
   throw new Error("Runtime Bridge adapter did not declare the MCP Tool error");

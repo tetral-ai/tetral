@@ -197,7 +197,6 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 		return nil, fmt.Errorf("runtime input payload does not contain one text message")
 	}
 	scope := &bridgev1.RuntimeScope{
-		RequestId:       "req_transport_" + s.suffix,
 		WorkspaceId:     request.GetWorkspaceId(),
 		SessionId:       request.GetSessionId(),
 		SessionThreadId: s.threadID,

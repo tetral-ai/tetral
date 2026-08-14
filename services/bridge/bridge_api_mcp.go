@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -72,15 +71,14 @@ func (s *PostgreSQLBridgeAPIStore) McpManifestChanged(ctx context.Context, reque
 	if !acceptance.Duplicate {
 		logMCPManifestOmissions(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance.BuiltinFamily, acceptance.Omissions)
 	}
-	ack := committedAck(acceptance.RuntimeInputID, "")
 	if acceptance.Duplicate {
-		ack = duplicateAck(acceptance.RuntimeInputID, "")
+		return &bridgev1.McpManifestChangedResponse{Outcome: &bridgev1.McpManifestChangedResponse_Duplicate{Duplicate: &bridgev1.McpManifestDuplicate{}}}, nil
 	}
-	return &bridgev1.McpManifestChangedResponse{Ack: ack}, nil
+	return &bridgev1.McpManifestChangedResponse{Outcome: &bridgev1.McpManifestChangedResponse_Committed{Committed: &bridgev1.McpManifestCommitted{}}}, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, request *bridgev1.ClaimMcpToolResultRequest) (*bridgev1.ClaimMcpToolResultResponse, error) {
-	if err := validateMCPToolResultIdentity(request.GetScope(), request.GetToolUseEventId(), request.GetNormalizedInputHash(), request.GetMcpServerName(), request.GetToolName(), request.GetInputJson()); err != nil {
+	if err := validateMCPClaimTarget(request.GetScope(), request.GetToolUseEventId(), request.GetClaimId()); err != nil {
 		return nil, err
 	}
 	now := s.now()
@@ -97,54 +95,41 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
-		if err != nil {
-			return err
-		}
-		if ok && (existing.MCPClaimStatus.String == mcpClaimStatusStored || existing.MCPClaimStatus.String == mcpClaimStatusConsumed) {
-			response, err = claimExistingMCPToolResultTx(ctx, tx, request, existing, now)
-			return err
-		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		claimed, err := claimMCPToolResultTx(ctx, tx, request, now)
+		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
 		if err != nil {
 			return err
 		}
-		response = claimed
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	if response.GetDeclaration() != nil {
-		observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
-		if err != nil {
-			return nil, err
+		if tool.MCPServerName == "" {
+			return status.Error(codes.FailedPrecondition, "durable tool is not an MCP operation")
 		}
-		response.Declaration.ObservedBindingId = observation.BindingID
-		response.Declaration.ObservedBindingGeneration = observation.BindingGeneration
-		response.Declaration.ApplicationDisposition = observation.Disposition
+		response, err = claimMCPToolResultTx(ctx, tx, request, tool, now)
+		return err
+	}); err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolClaimStale{}}}, nil
+		}
+		return nil, err
 	}
 	return response, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, request *bridgev1.CommitMcpToolResultRequest) (*bridgev1.CommitMcpToolResultResponse, error) {
-	if err := validateMCPToolResultIdentity(request.GetScope(), request.GetToolUseEventId(), request.GetNormalizedInputHash(), request.GetMcpServerName(), request.GetToolName(), request.GetInputJson()); err != nil {
+	if err := validateMCPClaimTarget(request.GetScope(), request.GetToolUseEventId(), request.GetClaimId()); err != nil {
 		return nil, err
 	}
 	if err := validateMCPCommitPayload(request); err != nil {
 		return nil, err
 	}
-	sourceID := mcpMaterializationSourceID(request)
-	declarationDigest, err := mcpMaterializationDeclarationDigest(request)
+	sourceID := request.GetClaimId()
+	declarationDigest, err := mcpToolCommitDeclarationDigest(request)
 	if err != nil {
 		return nil, err
 	}
-	var (
-		response *bridgev1.CommitMcpToolResultResponse
-		receipt  *bridgev1.DeclarationReceipt
-	)
+	var response *bridgev1.CommitMcpToolResultResponse
+	var tool durableToolExecution
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_mcp_tool_result_preflight", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
 			ctx,
@@ -158,31 +143,29 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			return err
 		}
 		var replayed bool
-		response, receipt, replayed, err = replayMCPMaterializationDeclarationTx(
-			ctx,
-			tx,
-			request,
-			sourceID,
-			declarationDigest,
-		)
+		response, replayed, err = replayMCPCommitTx(ctx, tx, request, sourceID, declarationDigest)
 		if err != nil || replayed {
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		tool, err = loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
+		if err != nil {
+			return err
+		}
 		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		} else if ok {
-			if !sameMCPToolResult(existing, request.GetNormalizedInputHash(), request.GetMcpServerName(), request.GetToolName()) {
+			if !sameMCPToolResult(existing, tool) {
 				return status.Error(codes.AlreadyExists, "mcp tool use id conflicts with existing result")
 			}
 			switch existing.MCPClaimStatus.String {
 			case mcpClaimStatusStored, mcpClaimStatusConsumed:
-				return status.Error(codes.FailedPrecondition, "mcp materialization receipt is missing")
+				return status.Error(codes.FailedPrecondition, "mcp tool result commit operation is missing")
 			case mcpClaimStatusInFlight:
-				if !existing.MCPClaimOwnerRequestID.Valid || existing.MCPClaimOwnerRequestID.String != request.GetScope().GetRequestId() {
-					response = &bridgev1.CommitMcpToolResultResponse{Ack: rejectedAck(mcpClaimNotOwnedCode)}
+				if !existing.MCPClaimID.Valid || existing.MCPClaimID.String != request.GetClaimId() {
+					response = staleMCPCommitResponse()
 				}
 			default:
 				return status.Error(codes.Internal, "invalid mcp claim state")
@@ -191,10 +174,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		}
 		return status.Error(codes.FailedPrecondition, "mcp tool claim is missing")
 	}); err != nil || response != nil {
-		if err != nil || receipt == nil {
-			return response, err
+		if isScopeSupersededError(err) {
+			return staleMCPCommitResponse(), nil
 		}
-		return s.completeMCPMaterializationDeclaration(ctx, request, response, receipt, sourceID, declarationDigest)
+		return response, err
 	}
 
 	var attachment *bridgev1.TransientAttachmentRef
@@ -211,7 +194,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			return nil, status.Error(codes.FailedPrecondition, "transient attachment blob store is unavailable")
 		}
 		media := request.GetInlineMedia()[0]
-		attachmentCreate := mcpTransientAttachmentCreate(request, media)
+		attachmentCreate := mcpTransientAttachmentCreate(request, tool, media)
 		var err error
 		attachment, err = newTransientAttachmentRef(attachmentCreate)
 		if err != nil {
@@ -226,6 +209,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 	refsOnlyResultJSON, err := completeMCPAttachmentRefs(request.GetResultJson(), request.GetInlineMedia(), attachment)
 	if err != nil {
 		cleanupBlob()
+		if isScopeSupersededError(err) {
+			return staleMCPCommitResponse(), nil
+		}
 		return nil, err
 	}
 	now := s.now()
@@ -242,13 +228,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			return err
 		}
 		var replayed bool
-		response, receipt, replayed, err = replayMCPMaterializationDeclarationTx(
-			ctx,
-			tx,
-			request,
-			sourceID,
-			declarationDigest,
-		)
+		response, replayed, err = replayMCPCommitTx(ctx, tx, request, sourceID, declarationDigest)
 		if err != nil {
 			return err
 		}
@@ -259,6 +239,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		tool, err = loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
+		if err != nil {
+			return err
+		}
 		existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 		if err != nil {
 			return err
@@ -266,15 +250,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if !ok {
 			return status.Error(codes.FailedPrecondition, "mcp tool claim is missing")
 		}
-		if !sameMCPToolResult(existing, request.GetNormalizedInputHash(), request.GetMcpServerName(), request.GetToolName()) {
+		if !sameMCPToolResult(existing, tool) {
 			return status.Error(codes.AlreadyExists, "mcp tool use id conflicts with existing result")
 		}
 		switch existing.MCPClaimStatus.String {
 		case mcpClaimStatusStored, mcpClaimStatusConsumed:
-			return status.Error(codes.FailedPrecondition, "mcp materialization receipt is missing")
+			return status.Error(codes.FailedPrecondition, "mcp tool result commit operation is missing")
 		case mcpClaimStatusInFlight:
-			if !existing.MCPClaimOwnerRequestID.Valid || existing.MCPClaimOwnerRequestID.String != request.GetScope().GetRequestId() {
-				response = &bridgev1.CommitMcpToolResultResponse{Ack: rejectedAck(mcpClaimNotOwnedCode)}
+			if !existing.MCPClaimID.Valid || existing.MCPClaimID.String != request.GetClaimId() {
+				response = staleMCPCommitResponse()
 				cleanupBlob()
 				return nil
 			}
@@ -282,24 +266,11 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			return status.Error(codes.Internal, "invalid mcp claim state")
 		}
 		if attachment != nil {
-			if err := insertStagedTransientAttachmentTx(ctx, tx, mcpTransientAttachmentCreate(request, request.GetInlineMedia()[0]), attachment, blobPointer, now); err != nil {
+			if err := insertStagedTransientAttachmentTx(ctx, tx, mcpTransientAttachmentCreate(request, tool, request.GetInlineMedia()[0]), attachment, blobPointer, now); err != nil {
 				return err
 			}
 		}
-		if err := storeMCPToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), refsOnlyResultJSON, now); err != nil {
-			return err
-		}
-		receipt, err = mcpMaterializationDeclarationReceipt(
-			request,
-			sourceID,
-			declarationDigest,
-			attachment,
-		)
-		if err != nil {
-			return err
-		}
-		receiptJSON, err := marshalDeclarationReceipt(receipt)
-		if err != nil {
+		if err := storeMCPToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), request.GetClaimId(), refsOnlyResultJSON, now); err != nil {
 			return err
 		}
 		if err := insertBridgeDeclarationOperationTx(
@@ -310,17 +281,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			"mcp_tool_execution",
 			sourceID,
 			declarationDigest,
-			receiptJSON,
+			`{}`,
 			now,
 		); err != nil {
 			return err
 		}
-		handle := request.GetToolUseEventId()
-		response = &bridgev1.CommitMcpToolResultResponse{
-			Ack:                   committedAck("", ""),
-			RefsOnlyResultJson:    refsOnlyResultJSON,
-			MaterializationHandle: &handle,
-		}
+		response = &bridgev1.CommitMcpToolResultResponse{Outcome: &bridgev1.CommitMcpToolResultResponse_Committed{Committed: &bridgev1.McpToolCommitCommitted{}}}
 		return nil
 	}, cleanupBlob)
 	if err != nil {
@@ -328,19 +294,16 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		return nil, err
 	}
 	blobStored = false
-	if receipt == nil {
-		return response, nil
-	}
-	return s.completeMCPMaterializationDeclaration(ctx, request, response, receipt, sourceID, declarationDigest)
+	return response, nil
 }
 
-func replayMCPMaterializationDeclarationTx(
+func replayMCPCommitTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.CommitMcpToolResultRequest,
 	sourceID string,
 	declarationDigest string,
-) (*bridgev1.CommitMcpToolResultResponse, *bridgev1.DeclarationReceipt, bool, error) {
+) (*bridgev1.CommitMcpToolResultResponse, bool, error) {
 	existingOperation, ok, err := readBridgeDeclarationOperationTx(
 		ctx,
 		tx,
@@ -350,141 +313,28 @@ func replayMCPMaterializationDeclarationTx(
 		sourceID,
 	)
 	if err != nil || !ok {
-		return nil, nil, false, err
+		return nil, false, err
 	}
-	if existingOperation.DeclarationDigest == "" || existingOperation.ReceiptJSON == "" {
-		return nil, nil, false, status.Error(codes.FailedPrecondition, "mcp materialization receipt is invalid")
+	if existingOperation.DeclarationDigest == "" {
+		return nil, false, status.Error(codes.FailedPrecondition, "mcp tool commit operation is invalid")
 	}
 	if existingOperation.DeclarationDigest != declarationDigest {
-		return nil, nil, false, status.Error(codes.AlreadyExists, "mcp materialization idempotency conflict")
+		return nil, false, status.Error(codes.AlreadyExists, "mcp tool commit idempotency conflict")
 	}
 	existingResult, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 	if err != nil {
-		return nil, nil, false, err
+		return nil, false, err
 	}
-	if !ok || !sameMCPToolResult(existingResult, request.GetNormalizedInputHash(), request.GetMcpServerName(), request.GetToolName()) {
-		return nil, nil, false, status.Error(codes.FailedPrecondition, "mcp materialization result is invalid")
+	if !ok {
+		return nil, false, status.Error(codes.FailedPrecondition, "mcp tool result is missing")
 	}
 	if existingResult.MCPClaimStatus.String != mcpClaimStatusStored &&
 		existingResult.MCPClaimStatus.String != mcpClaimStatusConsumed {
-		return nil, nil, false, status.Error(codes.FailedPrecondition, "mcp materialization result is not stored")
+		return nil, false, status.Error(codes.FailedPrecondition, "mcp tool result is not stored")
 	}
-	receipt, err := unmarshalDeclarationReceipt(existingOperation.ReceiptJSON)
-	if err != nil || !validMCPMaterializationReceipt(receipt, request, sourceID, declarationDigest, existingResult.ResultJSON) {
-		return nil, nil, false, status.Error(codes.FailedPrecondition, "mcp materialization receipt is invalid")
-	}
-	handle := request.GetToolUseEventId()
 	return &bridgev1.CommitMcpToolResultResponse{
-		Ack:                   duplicateAck("", ""),
-		RefsOnlyResultJson:    existingResult.ResultJSON,
-		MaterializationHandle: &handle,
-	}, receipt, true, nil
-}
-
-func mcpMaterializationDeclarationReceipt(
-	request *bridgev1.CommitMcpToolResultRequest,
-	sourceID string,
-	declarationDigest string,
-	attachment *bridgev1.TransientAttachmentRef,
-) (*bridgev1.DeclarationReceipt, error) {
-	receipt := &bridgev1.DeclarationReceipt{
-		SessionThreadId:   request.GetScope().GetSessionThreadId(),
-		OperationKind:     bridgeOpCommitMcpToolResult,
-		SourceKind:        "mcp_tool_execution",
-		OperationId:       sourceID,
-		DeclarationDigest: declarationDigest,
-	}
-	if attachment == nil {
-		return receipt, nil
-	}
-	encoded, err := marshalBridgeJSON(bridgeLoadContextPendingAttachment{
-		Origin: bridgeLoadContextAttachmentOrigin{
-			Transient: &bridgeLoadContextTransientAttachment{
-				AttachmentRef:        attachment.GetAttachmentRef(),
-				SourceToolUseEventID: request.GetToolUseEventId(),
-				SourcePath:           attachment.GetSourcePath(),
-				PageRange:            attachment.GetPageRange(),
-				Detail:               attachment.GetDetail(),
-			},
-		},
-		Mime:     attachment.GetMime(),
-		Filename: attachment.GetFilename(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	receipt.PendingAttachmentDeltaJson = []string{encoded}
-	return receipt, nil
-}
-
-func validMCPMaterializationReceipt(
-	receipt *bridgev1.DeclarationReceipt,
-	request *bridgev1.CommitMcpToolResultRequest,
-	sourceID string,
-	declarationDigest string,
-	resultJSON string,
-) bool {
-	return validStoredMCPMaterializationReceipt(
-		receipt,
-		request.GetScope().GetSessionThreadId(),
-		request.GetToolUseEventId(),
-		request.GetMcpServerName(),
-		sourceID,
-		declarationDigest,
-		resultJSON,
-	)
-}
-
-func validStoredMCPMaterializationReceipt(
-	receipt *bridgev1.DeclarationReceipt,
-	sessionThreadID string,
-	toolUseEventID string,
-	mcpServerName string,
-	sourceID string,
-	declarationDigest string,
-	resultJSON string,
-) bool {
-	attachments, ok := storedMCPAttachmentMetadata(resultJSON)
-	if !ok || receipt == nil ||
-		receipt.GetSessionThreadId() != sessionThreadID ||
-		receipt.GetOperationKind() != bridgeOpCommitMcpToolResult ||
-		receipt.GetSourceKind() != "mcp_tool_execution" ||
-		receipt.GetOperationId() != sourceID ||
-		receipt.GetDeclarationDigest() != declarationDigest ||
-		len(receipt.GetEvents()) != 0 ||
-		len(receipt.GetMessages()) != 0 ||
-		len(receipt.GetInterruptToolProjections()) != 0 ||
-		len(receipt.GetPrefixConsumptions()) != 0 ||
-		receipt.GetRequestReschedule() != nil ||
-		len(receipt.GetChildLifecycle()) != 0 ||
-		receipt.GetIdleCloseout() != nil ||
-		receipt.CompactedThroughMessageSequence != nil ||
-		len(receipt.GetPendingAttachmentDeltaJson()) != len(attachments) {
-		return false
-	}
-	for index, encoded := range receipt.GetPendingAttachmentDeltaJson() {
-		var delta bridgeLoadContextPendingAttachment
-		decoder := json.NewDecoder(strings.NewReader(encoded))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&delta); err != nil ||
-			decoder.Decode(&struct{}{}) != io.EOF ||
-			delta.Origin.Transient == nil ||
-			delta.Origin.FileBacked != nil {
-			return false
-		}
-		transient := delta.Origin.Transient
-		attachment := attachments[index]
-		if transient.AttachmentRef != attachment.AttachmentRef ||
-			transient.SourceToolUseEventID != toolUseEventID ||
-			transient.SourcePath != "mcp:"+mcpServerName+"/"+attachment.Filename ||
-			transient.PageRange != "" ||
-			transient.Detail != "auto" ||
-			delta.Mime != attachment.Mime ||
-			delta.Filename != attachment.Filename {
-			return false
-		}
-	}
-	return true
+		Outcome: &bridgev1.CommitMcpToolResultResponse_Duplicate{Duplicate: &bridgev1.McpToolCommitDuplicate{}},
+	}, true, nil
 }
 
 type storedMCPAttachment struct {
@@ -532,131 +382,73 @@ func storedMCPAttachmentMetadata(resultJSON string) ([]storedMCPAttachment, bool
 	return attachments, true
 }
 
-func (s *PostgreSQLBridgeAPIStore) completeMCPMaterializationDeclaration(
-	ctx context.Context,
-	request *bridgev1.CommitMcpToolResultRequest,
-	response *bridgev1.CommitMcpToolResultResponse,
-	receipt *bridgev1.DeclarationReceipt,
-	sourceID string,
-	declarationDigest string,
-) (*bridgev1.CommitMcpToolResultResponse, error) {
-	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
-	if err != nil {
-		return nil, err
-	}
-	response.Declaration = &bridgev1.DeclarationResponse{
-		Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
-		ObservedBindingId:         observation.BindingID,
-		ObservedBindingGeneration: observation.BindingGeneration,
-		ApplicationDisposition:    observation.Disposition,
-	}
-	outcome := "committed"
-	if response.GetAck().GetStatus() == bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		outcome = "replayed"
-	}
-	logMCPMaterialization(s.Logger, "mcp_materialization_staged", request, response.GetMaterializationHandle(), outcome)
-	logRuntimeDeclaration(
-		s.Logger,
-		request.GetScope(),
-		bridgeOpCommitMcpToolResult,
-		"mcp_tool_execution",
-		sourceID,
-		declarationDigest,
-		response.GetAck(),
-		observation,
-	)
-	return response, nil
-}
-
-func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
+func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool durableToolExecution, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
 	existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 	if err != nil {
 		return nil, err
 	}
 	if ok {
-		return claimExistingMCPToolResultTx(ctx, tx, request, existing, now)
+		return claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
 	}
-	inserted, err := insertMCPToolResultClaimTx(ctx, tx, request, now)
+	inserted, err := insertMCPToolResultClaimTx(ctx, tx, request, tool, now)
 	if err != nil {
 		return nil, err
 	}
 	if inserted {
-		return &bridgev1.ClaimMcpToolResultResponse{Ack: committedAck("", "")}, nil
+		return acquiredMCPClaimResponse(tool), nil
 	}
 	existing, ok, err = readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, status.Error(codes.Internal, "mcp tool claim race was not materialized")
+		return nil, status.Error(codes.Internal, "mcp tool claim race was not stored")
 	}
-	return claimExistingMCPToolResultTx(ctx, tx, request, existing, now)
+	return claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
 }
 
-func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, existing runtimeToolResult, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
-	if !sameMCPToolResult(existing, request.GetNormalizedInputHash(), request.GetMcpServerName(), request.GetToolName()) {
+func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool durableToolExecution, existing runtimeToolResult, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
+	if !sameMCPToolResult(existing, tool) {
 		return nil, status.Error(codes.AlreadyExists, "mcp tool use id conflicts with existing result")
 	}
 	switch existing.MCPClaimStatus.String {
 	case mcpClaimStatusStored, mcpClaimStatusConsumed:
-		sourceID := stableRuntimeID(
-			"mcp_tool_execution",
-			request.GetToolUseEventId(),
-			request.GetNormalizedInputHash(),
-		)
-		operation, ok, err := readBridgeDeclarationOperationTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			bridgeOpCommitMcpToolResult,
-			"mcp_tool_execution",
-			sourceID,
-		)
-		if err != nil {
-			return nil, err
+		if _, ok := storedMCPAttachmentMetadata(existing.ResultJSON); !ok {
+			return nil, status.Error(codes.FailedPrecondition, "stored mcp tool result is invalid")
 		}
-		if !ok || operation.DeclarationDigest == "" || operation.ReceiptJSON == "" {
-			return nil, status.Error(codes.FailedPrecondition, "mcp materialization receipt is missing")
-		}
-		receipt, err := unmarshalDeclarationReceipt(operation.ReceiptJSON)
-		if err != nil || !validStoredMCPMaterializationReceipt(
-			receipt,
-			request.GetScope().GetSessionThreadId(),
-			request.GetToolUseEventId(),
-			request.GetMcpServerName(),
-			sourceID,
-			operation.DeclarationDigest,
-			existing.ResultJSON,
-		) {
-			return nil, status.Error(codes.FailedPrecondition, "mcp materialization receipt is invalid")
-		}
-		handle := request.GetToolUseEventId()
-		return &bridgev1.ClaimMcpToolResultResponse{
-			Ack:                   duplicateAck("", ""),
-			ResultJson:            existing.ResultJSON,
-			MaterializationHandle: &handle,
-			Declaration: &bridgev1.DeclarationResponse{
-				Receipts: []*bridgev1.DeclarationReceipt{receipt},
-			},
-		}, nil
+		return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_AlreadyCompleted{AlreadyCompleted: &bridgev1.McpToolAlreadyCompleted{ResultJson: existing.ResultJSON}}}, nil
 	case mcpClaimStatusInFlight:
+		if existing.MCPClaimID.Valid && existing.MCPClaimID.String == request.GetClaimId() {
+			if err := renewMCPToolResultClaimTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), request.GetClaimId(), now); err != nil {
+				return nil, err
+			}
+			return acquiredMCPClaimResponse(tool), nil
+		}
 		active, err := mcpClaimLeaseActive(existing, now)
 		if err != nil {
 			return nil, err
 		}
 		if active {
-			return &bridgev1.ClaimMcpToolResultResponse{Ack: rejectedAck(mcpClaimInFlightCode)}, nil
+			return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_InFlight{InFlight: &bridgev1.McpToolClaimInFlight{}}}, nil
 		}
-		if err := renewMCPToolResultClaimTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), now); err != nil {
+		if err := renewMCPToolResultClaimTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), request.GetClaimId(), now); err != nil {
 			return nil, err
 		}
-		return &bridgev1.ClaimMcpToolResultResponse{Ack: committedAck("", "")}, nil
+		return acquiredMCPClaimResponse(tool), nil
 	default:
 		return nil, status.Error(codes.Internal, "invalid mcp claim state")
 	}
 }
 
-func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, now time.Time) (bool, error) {
+func acquiredMCPClaimResponse(tool durableToolExecution) *bridgev1.ClaimMcpToolResultResponse {
+	return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_Acquired{Acquired: &bridgev1.McpToolClaimAcquired{
+		McpServerName: tool.MCPServerName,
+		ToolName:      tool.ToolName,
+		InputJson:     tool.InputJSON,
+	}}}
+}
+
+func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool durableToolExecution, now time.Time) (bool, error) {
 	result, err := tx.Exec(ctx,
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
@@ -669,10 +461,10 @@ func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *
 		request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(),
 		request.GetToolUseEventId(),
-		request.GetNormalizedInputHash(),
-		mcpRuntimeToolName(request.GetMcpServerName(), request.GetToolName()),
-		request.GetInputJson(),
-		request.GetScope().GetRequestId(),
+		tool.NormalizedInputHash,
+		mcpRuntimeToolName(tool.MCPServerName, tool.ToolName),
+		tool.InputJSON,
+		request.GetClaimId(),
 		now.Add(mcpClaimLeaseTTL),
 		now,
 	)
@@ -682,7 +474,7 @@ func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *
 	return rowsAffected(result), nil
 }
 
-func renewMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, now time.Time) error {
+func renewMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, claimID string, now time.Time) error {
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
 		    SET mcp_claim_owner_request_id = $5,
@@ -698,7 +490,7 @@ func renewMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		toolUseEventID,
-		scope.GetRequestId(),
+		claimID,
 		now.Add(mcpClaimLeaseTTL),
 		now,
 	)
@@ -711,7 +503,7 @@ func renewMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 	return nil
 }
 
-func storeMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, resultJSON string, now time.Time) error {
+func storeMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, claimID string, resultJSON string, now time.Time) error {
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
 		    SET result_json = $5,
@@ -724,13 +516,15 @@ func storeMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4
 		    AND tool_kind = 'mcp'
-		    AND mcp_claim_status = 'in_flight'`,
+		    AND mcp_claim_status = 'in_flight'
+		    AND mcp_claim_owner_request_id = $7`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		toolUseEventID,
 		resultJSON,
 		now,
+		claimID,
 	)
 	if err != nil {
 		return err
@@ -752,23 +546,25 @@ func mcpClaimLeaseActive(existing runtimeToolResult, now time.Time) (bool, error
 	return now.Before(expiresAt), nil
 }
 
-func validateMCPToolResultIdentity(scope *bridgev1.RuntimeScope, toolUseEventID string, normalizedInputHash string, mcpServerName string, toolName string, inputJSON string) error {
+func validateMCPClaimTarget(scope *bridgev1.RuntimeScope, toolUseEventID string, claimID string) error {
 	if err := validateRuntimeScope(scope); err != nil {
 		return err
 	}
-	if toolUseEventID == "" || normalizedInputHash == "" || mcpServerName == "" || toolName == "" || inputJSON == "" {
+	if toolUseEventID == "" || claimID == "" {
 		return status.Error(codes.InvalidArgument, "invalid mcp tool result request")
-	}
-	if !json.Valid([]byte(inputJSON)) {
-		return status.Error(codes.InvalidArgument, "mcp tool input must be JSON")
 	}
 	return nil
 }
 
-func sameMCPToolResult(existing runtimeToolResult, normalizedInputHash string, mcpServerName string, toolName string) bool {
+func sameMCPToolResult(existing runtimeToolResult, tool durableToolExecution) bool {
 	return existing.ToolKind == bridgeToolKindMCP &&
-		existing.NormalizedInputHash == normalizedInputHash &&
-		existing.ToolName == mcpRuntimeToolName(mcpServerName, toolName)
+		existing.NormalizedInputHash == tool.NormalizedInputHash &&
+		existing.ToolName == mcpRuntimeToolName(tool.MCPServerName, tool.ToolName) &&
+		existing.InputJSON == tool.InputJSON
+}
+
+func staleMCPCommitResponse() *bridgev1.CommitMcpToolResultResponse {
+	return &bridgev1.CommitMcpToolResultResponse{Outcome: &bridgev1.CommitMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolCommitStale{}}}
 }
 
 func mcpRuntimeToolName(mcpServerName string, toolName string) string {
@@ -809,12 +605,10 @@ func (s *PostgreSQLBridgeAPIStore) replayedMCPManifestChanged(ctx context.Contex
 			acceptance.QueueCustody = "created"
 			acceptance.Transitioned = true
 			restored = acceptance
-			response = &bridgev1.McpManifestChangedResponse{Ack: committedAck(acceptance.RuntimeInputID, "")}
+			response = &bridgev1.McpManifestChangedResponse{Outcome: &bridgev1.McpManifestChangedResponse_Committed{Committed: &bridgev1.McpManifestCommitted{}}}
 			return nil
 		}
-		response = &bridgev1.McpManifestChangedResponse{
-			Ack: duplicateAck(runtimeMCPManifestInputID(sessionID, mcpServerName, row.Generation), ""),
-		}
+		response = &bridgev1.McpManifestChangedResponse{Outcome: &bridgev1.McpManifestChangedResponse_Duplicate{Duplicate: &bridgev1.McpManifestDuplicate{}}}
 		return nil
 	})
 	if err != nil {
@@ -853,13 +647,13 @@ func validateMCPCommitPayload(request *bridgev1.CommitMcpToolResultRequest) erro
 	return err
 }
 
-func mcpTransientAttachmentCreate(request *bridgev1.CommitMcpToolResultRequest, media *bridgev1.McpInlineMedia) transientAttachmentCreate {
+func mcpTransientAttachmentCreate(request *bridgev1.CommitMcpToolResultRequest, tool durableToolExecution, media *bridgev1.McpInlineMedia) transientAttachmentCreate {
 	return transientAttachmentCreate{
 		Scope:                request.GetScope(),
 		SourceToolUseEventID: request.GetToolUseEventId(),
 		Mime:                 media.GetMime(),
 		Filename:             media.GetSuggestedFilename(),
-		SourcePath:           "mcp:" + request.GetMcpServerName() + "/" + media.GetSuggestedFilename(),
+		SourcePath:           "mcp:" + tool.MCPServerName + "/" + media.GetSuggestedFilename(),
 		Detail:               "auto",
 		Data:                 media.GetData(),
 	}
@@ -1303,26 +1097,6 @@ func logMCPManifestTransitionCommitted(logger *slog.Logger, component string, wo
 		slog.String("mcp.manifest.diagnostic", acceptance.Diagnostic),
 		slog.String("queue.custody", acceptance.QueueCustody),
 		slog.Bool("runtime.input.continued", inputContinued),
-	)
-}
-
-func logMCPMaterialization(logger *slog.Logger, eventKind string, request *bridgev1.CommitMcpToolResultRequest, handle string, outcome string) {
-	if logger == nil || request == nil || request.GetScope() == nil {
-		return
-	}
-	defer func() { _ = recover() }()
-	logger.Info("bridge.mcp_materialization",
-		slog.String("operation", "mcp_materialization"),
-		slog.String("event.kind", eventKind),
-		slog.String("component", ServiceNameBridgeAPI),
-		slog.String("workspace.id", request.GetScope().GetWorkspaceId()),
-		slog.String("session.id", request.GetScope().GetSessionId()),
-		slog.String("thread.id", request.GetScope().GetSessionThreadId()),
-		slog.String("mcp.tool_use_event_id", request.GetToolUseEventId()),
-		slog.String("mcp.server.name", request.GetMcpServerName()),
-		slog.String("mcp.tool.name", request.GetToolName()),
-		slog.String("mcp.materialization_handle", handle),
-		slog.String("outcome", outcome),
 	)
 }
 

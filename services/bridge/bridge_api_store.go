@@ -406,7 +406,7 @@ type runtimeToolResult struct {
 	TaskID                 sql.NullString
 	MemoryProjectionState  sql.NullString
 	MCPClaimStatus         sql.NullString
-	MCPClaimOwnerRequestID sql.NullString
+	MCPClaimID             sql.NullString
 	MCPClaimLeaseExpiresAt sql.NullString
 }
 
@@ -422,7 +422,7 @@ type runtimeToolResultInsert struct {
 	TaskID                 sql.NullString
 	MemoryProjectionState  sql.NullString
 	MCPClaimStatus         string
-	MCPClaimOwnerRequestID sql.NullString
+	MCPClaimID             sql.NullString
 	MCPClaimLeaseExpiresAt sql.NullString
 	Now                    time.Time
 }
@@ -461,7 +461,7 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON,
 		&existing.AckStatus, &existing.ResultJSON, &existing.ResultDigest, &existing.ModelToolCallID, &existing.ExecutionState,
 		&existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState,
-		&existing.MCPClaimStatus, &existing.MCPClaimOwnerRequestID, &existing.MCPClaimLeaseExpiresAt,
+		&existing.MCPClaimStatus, &existing.MCPClaimID, &existing.MCPClaimLeaseExpiresAt,
 	); dbconnect.IsNoRows(err) {
 		return runtimeToolResult{}, false, nil
 	} else if err != nil {
@@ -493,7 +493,7 @@ func insertRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		tool.TaskID,
 		tool.MemoryProjectionState,
 		claimStatus,
-		tool.MCPClaimOwnerRequestID,
+		tool.MCPClaimID,
 		tool.MCPClaimLeaseExpiresAt,
 		tool.Now,
 	)

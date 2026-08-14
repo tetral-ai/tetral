@@ -55,18 +55,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	if err != nil {
 		return nil, err
 	}
-	if request.GetEventType() == "agent.mcp_tool_result" {
-		if request.GetMcpMaterializationHandle() == "" && request.GetToolSettlement().GetError() == nil {
-			return nil, status.Error(codes.InvalidArgument, "successful mcp tool result requires a materialization handle")
-		}
-	} else if request.GetMcpMaterializationHandle() != "" {
-		return nil, status.Error(codes.InvalidArgument, "materialization handle requires an mcp tool-result event")
-	}
-	if request.GetSandboxResultDigest() != "" {
-		if request.GetEventType() != "agent.tool_result" || !validSandboxResultDigest(request.GetSandboxResultDigest()) {
-			return nil, status.Error(codes.InvalidArgument, "sandbox result digest requires a valid tool-result event")
-		}
-	}
 	serverToolUse, err := normalizeServerToolUseUsage(request)
 	if err != nil {
 		return nil, err
@@ -113,10 +101,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	key := request.GetRuntimeWriteId()
 	now := s.now()
 	var (
-		ack                    *bridgev1.BridgeWriteAck
-		receipt                *bridgev1.DeclarationReceipt
-		mcpMaterialization     mcpMaterializationIdentity
-		mcpMaterializationUsed bool
+		ack                 *bridgev1.BridgeWriteAck
+		receipt             *bridgev1.DeclarationReceipt
+		stagedMCPResult     stagedMCPResultIdentity
+		stagedMCPResultUsed bool
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.write_event", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
@@ -322,6 +310,21 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			); err != nil {
 				return err
 			}
+			projectionJSON, err := marshalBridgeJSON(map[string]string{
+				"model_tool_call_id": toolProjection.ModelToolCallID,
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE session_events
+				    SET projection_json = $5
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
+				request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+				request.GetScope().GetSessionThreadId(), eventID, projectionJSON,
+			); err != nil {
+				return err
+			}
 		}
 		if serverToolUse.Present {
 			if err := verifyWebToolResultUsageTx(ctx, tx, request.GetScope(), eventType, eventPayloadJSON, toolProjection); err != nil {
@@ -336,25 +339,23 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			eventType,
 			eventPayloadJSON,
 			toolProjection,
-			request.GetSandboxResultDigest(),
 			now,
 		); err != nil {
 			return err
 		}
-		if request.GetMcpMaterializationHandle() != "" {
-			mcpMaterialization, err = consumeMCPMaterializationTx(
+		if eventType == "agent.mcp_tool_result" {
+			stagedMCPResult, err = consumeStagedMCPResultTx(
 				ctx,
 				tx,
 				request.GetScope(),
 				eventType,
 				eventPayloadJSON,
-				request.GetMcpMaterializationHandle(),
 				now,
 			)
 			if err != nil {
 				return err
 			}
-			mcpMaterializationUsed = true
+			stagedMCPResultUsed = stagedMCPResult.ToolUseEventID != ""
 		}
 		// This is the SECOND writer of sessions.usage: the web server_tool_use
 		// counters settle here, inside the durable web agent.tool_result WriteEvent
@@ -399,12 +400,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	if receipt == nil || len(receipt.GetEvents()) != 1 {
 		return nil, status.Error(codes.FailedPrecondition, "write event receipt is invalid")
 	}
-	if mcpMaterializationUsed {
-		logMCPMaterializationConsumed(
+	if stagedMCPResultUsed {
+		logStagedMCPResultConsumed(
 			s.Logger,
 			request.GetScope(),
-			request.GetMcpMaterializationHandle(),
-			mcpMaterialization,
+			stagedMCPResult,
 		)
 	}
 	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
@@ -701,44 +701,45 @@ func writeEventOperationSourceKindTx(
 	return eventType, nil
 }
 
-type mcpMaterializationIdentity struct {
+type stagedMCPResultIdentity struct {
 	ToolUseEventID string
 	MCPServerName  string
 	ToolName       string
 }
 
-func consumeMCPMaterializationTx(
+func consumeStagedMCPResultTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	eventType string,
 	payloadJSON string,
-	handle string,
 	now time.Time,
-) (mcpMaterializationIdentity, error) {
+) (stagedMCPResultIdentity, error) {
 	if eventType != "agent.mcp_tool_result" {
-		return mcpMaterializationIdentity{}, status.Error(codes.InvalidArgument, "materialization handle requires an mcp tool result")
+		return stagedMCPResultIdentity{}, status.Error(codes.InvalidArgument, "stored MCP result requires an mcp tool result")
 	}
 	var resultPayload runtimeToolResultEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &resultPayload); err != nil ||
-		resultPayload.MCPToolUseID == "" ||
-		resultPayload.MCPToolUseID != handle {
-		return mcpMaterializationIdentity{}, status.Error(codes.InvalidArgument, "mcp materialization handle does not match the tool result")
+	if err := json.Unmarshal([]byte(payloadJSON), &resultPayload); err != nil || resultPayload.MCPToolUseID == "" {
+		return stagedMCPResultIdentity{}, status.Error(codes.InvalidArgument, "mcp tool result target is invalid")
 	}
-	stored, ok, err := readRuntimeToolResultTx(ctx, tx, scope, handle)
+	toolUseEventID := resultPayload.MCPToolUseID
+	stored, ok, err := readRuntimeToolResultTx(ctx, tx, scope, toolUseEventID)
 	if err != nil {
-		return mcpMaterializationIdentity{}, err
+		return stagedMCPResultIdentity{}, err
 	}
-	if !ok || stored.ToolKind != bridgeToolKindMCP || stored.MCPClaimStatus.String != mcpClaimStatusStored {
-		return mcpMaterializationIdentity{}, status.Error(codes.FailedPrecondition, "mcp materialization is not staged")
+	if !ok {
+		return stagedMCPResultIdentity{}, nil
+	}
+	if stored.ToolKind != bridgeToolKindMCP || stored.MCPClaimStatus.String != mcpClaimStatusStored {
+		return stagedMCPResultIdentity{}, status.Error(codes.FailedPrecondition, "mcp tool result is not staged")
 	}
 	mcpServerName, toolName, ok := strings.Cut(stored.ToolName, "/")
 	if !ok || mcpServerName == "" || toolName == "" {
-		return mcpMaterializationIdentity{}, status.Error(codes.Internal, "stored mcp tool identity is invalid")
+		return stagedMCPResultIdentity{}, status.Error(codes.Internal, "stored mcp tool identity is invalid")
 	}
-	attachmentRefs, err := mcpMaterializationAttachmentRefs(stored.ResultJSON)
+	attachmentRefs, err := stagedMCPResultAttachmentRefs(stored.ResultJSON)
 	if err != nil {
-		return mcpMaterializationIdentity{}, err
+		return stagedMCPResultIdentity{}, err
 	}
 	for _, attachmentRef := range attachmentRefs {
 		update, err := tx.Exec(ctx,
@@ -754,15 +755,15 @@ func consumeMCPMaterializationTx(
 			scope.GetWorkspaceId(),
 			scope.GetSessionId(),
 			scope.GetSessionThreadId(),
-			handle,
+			toolUseEventID,
 			attachmentRef,
 			now,
 		)
 		if err != nil {
-			return mcpMaterializationIdentity{}, err
+			return stagedMCPResultIdentity{}, err
 		}
 		if !rowsAffected(update) {
-			return mcpMaterializationIdentity{}, status.Error(codes.FailedPrecondition, "mcp materialization attachment is not staged")
+			return stagedMCPResultIdentity{}, status.Error(codes.FailedPrecondition, "mcp result attachment is not staged")
 		}
 	}
 	update, err := tx.Exec(ctx,
@@ -778,23 +779,23 @@ func consumeMCPMaterializationTx(
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		handle,
+		toolUseEventID,
 		now,
 	)
 	if err != nil {
-		return mcpMaterializationIdentity{}, err
+		return stagedMCPResultIdentity{}, err
 	}
 	if !rowsAffected(update) {
-		return mcpMaterializationIdentity{}, status.Error(codes.FailedPrecondition, "mcp materialization consume failed")
+		return stagedMCPResultIdentity{}, status.Error(codes.FailedPrecondition, "staged mcp result consume failed")
 	}
-	return mcpMaterializationIdentity{
-		ToolUseEventID: handle,
+	return stagedMCPResultIdentity{
+		ToolUseEventID: toolUseEventID,
 		MCPServerName:  mcpServerName,
 		ToolName:       toolName,
 	}, nil
 }
 
-func mcpMaterializationAttachmentRefs(resultJSON string) ([]string, error) {
+func stagedMCPResultAttachmentRefs(resultJSON string) ([]string, error) {
 	var stored struct {
 		Response struct {
 			Attachments []struct {
@@ -820,19 +821,18 @@ func mcpMaterializationAttachmentRefs(resultJSON string) ([]string, error) {
 	return refs, nil
 }
 
-func logMCPMaterializationConsumed(
+func logStagedMCPResultConsumed(
 	logger *slog.Logger,
 	scope *bridgev1.RuntimeScope,
-	handle string,
-	identity mcpMaterializationIdentity,
+	identity stagedMCPResultIdentity,
 ) {
 	if logger == nil || scope == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	logger.Info("bridge.mcp_materialization",
-		slog.String("operation", "mcp_materialization"),
-		slog.String("event.kind", "mcp_materialization_consumed"),
+	logger.Info("bridge.mcp_result_consumed",
+		slog.String("operation", "mcp_result_consume"),
+		slog.String("event.kind", "mcp_result_consumed"),
 		slog.String("component", ServiceNameBridgeAPI),
 		slog.String("workspace.id", scope.GetWorkspaceId()),
 		slog.String("session.id", scope.GetSessionId()),
@@ -840,7 +840,6 @@ func logMCPMaterializationConsumed(
 		slog.String("mcp.tool_use_event_id", identity.ToolUseEventID),
 		slog.String("mcp.server.name", identity.MCPServerName),
 		slog.String("mcp.tool.name", identity.ToolName),
-		slog.String("mcp.materialization_handle", handle),
 		slog.String("outcome", "committed"),
 	)
 }
@@ -1533,7 +1532,6 @@ func applyWriteEventToolBookkeepingTx(
 	eventType string,
 	payloadJSON string,
 	projection runtimeToolProjectionPayload,
-	sandboxResultDigest string,
 	now time.Time,
 ) error {
 	switch eventType {
@@ -1589,7 +1587,7 @@ func applyWriteEventToolBookkeepingTx(
 			return err
 		}
 		if eventType == "agent.tool_result" {
-			return consumeSandboxExecutionTx(ctx, tx, scope, toolUseEventID, eventID, projection, sandboxResultDigest, now)
+			return consumeSandboxExecutionTx(ctx, tx, scope, toolUseEventID, eventID, projection, now)
 		}
 		return nil
 	default:
@@ -1604,7 +1602,6 @@ func consumeSandboxExecutionTx(
 	toolUseEventID string,
 	terminalEventID string,
 	projection runtimeToolProjectionPayload,
-	sandboxResultDigest string,
 	now time.Time,
 ) error {
 	var toolKind, toolName string
@@ -1619,18 +1616,12 @@ func consumeSandboxExecutionTx(
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
 	).Scan(&toolKind, &toolName, &modelToolCallID, &executionState, &backgroundOperationState, &resultJSON, &resultDigest)
 	if dbconnect.IsNoRows(err) {
-		if sandboxResultDigest != "" {
-			return status.Error(codes.FailedPrecondition, "sandbox result digest has no execution")
-		}
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if toolKind == bridgeToolKindSandboxBackground {
-		if sandboxResultDigest != "" {
-			return status.Error(codes.FailedPrecondition, "sandbox result digest does not belong to a background result")
-		}
 		if !backgroundOperationState.Valid || backgroundOperationState.String != "terminal" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
 			return status.Error(codes.FailedPrecondition, "sandbox background result is not ready for conversation settlement")
 		}
@@ -1653,9 +1644,6 @@ func consumeSandboxExecutionTx(
 		return nil
 	}
 	if toolKind != bridgeToolKindSandbox {
-		if sandboxResultDigest != "" {
-			return status.Error(codes.FailedPrecondition, "sandbox result digest does not belong to this tool result")
-		}
 		return nil
 	}
 	if !modelToolCallID.Valid || modelToolCallID.String != projection.ModelToolCallID || toolName != projection.ToolName {
@@ -1664,8 +1652,8 @@ func consumeSandboxExecutionTx(
 	if !executionState.Valid || executionState.String != "terminal_unconsumed" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
 		return status.Error(codes.FailedPrecondition, "sandbox tool execution is not ready for conversation settlement")
 	}
-	if sandboxResultDigest == "" || !resultDigest.Valid || resultDigest.String != sandboxResultDigest {
-		return status.Error(codes.FailedPrecondition, "sandbox tool result digest does not match its execution")
+	if !resultDigest.Valid || !validSandboxResultDigest(resultDigest.String) {
+		return status.Error(codes.FailedPrecondition, "sandbox tool result digest is invalid")
 	}
 	attachmentRefs, err := sandboxExecutionAttachmentRefs(resultJSON.String)
 	if err != nil {

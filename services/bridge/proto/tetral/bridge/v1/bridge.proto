@@ -261,7 +261,8 @@ message RuntimeBindingRef {
 }
 
 message RuntimeScope {
-  string request_id = 1;
+  reserved 1;
+  reserved "request_id";
   string workspace_id = 2;
   string session_id = 3;
   string session_thread_id = 4;
@@ -337,32 +338,48 @@ message McpManifestChangedRequest {
 }
 
 message McpManifestChangedResponse {
-  BridgeWriteAck ack = 1;
+  oneof outcome {
+    McpManifestCommitted committed = 1;
+    McpManifestDuplicate duplicate = 2;
+  }
 }
+
+message McpManifestCommitted {}
+message McpManifestDuplicate {}
 
 message ClaimMcpToolResultRequest {
   RuntimeScope scope = 1;
   string tool_use_event_id = 2;
-  string normalized_input_hash = 3;
-  string mcp_server_name = 4;
-  string tool_name = 5;
-  string input_json = 6;
+  string claim_id = 3;
+  reserved 4, 5, 6;
+  reserved "mcp_server_name", "tool_name", "input_json";
 }
 
 message ClaimMcpToolResultResponse {
-  BridgeWriteAck ack = 1;
-  string result_json = 2;
-  optional string materialization_handle = 3;
-  DeclarationResponse declaration = 4;
+  oneof outcome {
+    McpToolClaimAcquired acquired = 1;
+    McpToolAlreadyCompleted already_completed = 2;
+    McpToolClaimInFlight in_flight = 3;
+    McpToolClaimStale stale = 4;
+  }
 }
+
+message McpToolClaimAcquired {
+  string mcp_server_name = 1;
+  string tool_name = 2;
+  string input_json = 3;
+}
+
+message McpToolAlreadyCompleted { string result_json = 1; }
+message McpToolClaimInFlight {}
+message McpToolClaimStale {}
 
 message CommitMcpToolResultRequest {
   RuntimeScope scope = 1;
   string tool_use_event_id = 2;
-  string normalized_input_hash = 3;
-  string mcp_server_name = 4;
-  string tool_name = 5;
-  string input_json = 6;
+  string claim_id = 3;
+  reserved 4, 5, 6;
+  reserved "mcp_server_name", "tool_name", "input_json";
   string result_json = 7;
   repeated McpInlineMedia inline_media = 8;
 }
@@ -374,11 +391,16 @@ message McpInlineMedia {
 }
 
 message CommitMcpToolResultResponse {
-  BridgeWriteAck ack = 1;
-  string refs_only_result_json = 2;
-  optional string materialization_handle = 3;
-  DeclarationResponse declaration = 4;
+  oneof outcome {
+    McpToolCommitCommitted committed = 1;
+    McpToolCommitDuplicate duplicate = 2;
+    McpToolCommitStale stale = 3;
+  }
 }
+
+message McpToolCommitCommitted {}
+message McpToolCommitDuplicate {}
+message McpToolCommitStale {}
 
 message CommitInternalToolRepairRequest {
   RuntimeScope scope = 1;
@@ -509,8 +531,8 @@ message WriteEventRequest {
     RuntimeAssistantPartAppend assistant_part_append = 10;
     RuntimeToolSettlement tool_settlement = 15;
   }
-  optional string mcp_materialization_handle = 11;
-  optional string sandbox_result_digest = 12;
+  reserved 11, 12;
+  reserved "mcp_materialization_handle", "sandbox_result_digest";
   optional int64 context_through_message_sequence = 13;
   string request_kind = 14;
 }
@@ -725,85 +747,128 @@ message ChildLifecycleSource {
 message AcceptSandboxExecutionRequest {
   RuntimeScope scope = 1;
   string tool_use_event_id = 2;
-  string normalized_input_hash = 3;
-  string tool_name = 4;
-  string input_json = 5;
-  reserved 6;
-  string model_tool_call_id = 7;
+  reserved 3, 4, 5, 6, 7;
+  reserved "normalized_input_hash", "tool_name", "input_json", "model_tool_call_id";
 }
 
 message AcceptSandboxExecutionResponse {
-  BridgeWriteAck ack = 1;
+  oneof outcome {
+    SandboxExecutionCommitted committed = 1;
+    SandboxExecutionDuplicate duplicate = 2;
+    SandboxExecutionStale stale = 3;
+  }
 }
+
+message SandboxExecutionCommitted {}
+message SandboxExecutionDuplicate {}
+message SandboxExecutionStale {}
 
 message AwaitSandboxExecutionRequest {
   RuntimeScope scope = 1;
   string tool_use_event_id = 2;
-  string normalized_input_hash = 3;
-  string tool_name = 4;
-  string input_json = 5;
-  reserved 6;
-  string model_tool_call_id = 7;
+  reserved 3, 4, 5, 6, 7;
+  reserved "normalized_input_hash", "tool_name", "input_json", "model_tool_call_id";
 }
 
 message AwaitSandboxExecutionResponse {
-  string result_json = 1;
-  bool background_task_started = 2;
-  string task_id = 3;
-  string result_digest = 4;
+  oneof outcome {
+    SandboxExecutionCompleted completed = 1;
+    SandboxExecutionAwaitStale stale = 2;
+  }
 }
+
+message SandboxExecutionCompleted {
+  string result_json = 1;
+  reserved 2, 4;
+  reserved "background_task_started", "result_digest";
+  string task_id = 3;
+}
+message SandboxExecutionAwaitStale {}
 
 message ReadCommandResultRequest {
   RuntimeScope scope = 1;
   string task_id = 2;
+  string operation_id = 3;
   int32 max_output_tokens = 4;
   string tool_use_event_id = 5;
 }
 
 message ReadCommandResultResponse {
-  BridgeWriteAck ack = 1;
-  string result_json = 2;
+  oneof outcome {
+    CommandReadCompleted completed = 1;
+    CommandReadStale stale = 2;
+  }
 }
 
+message CommandReadCompleted { string result_json = 1; }
+message CommandReadStale {}
+
 message SendCommandInputRequest {
-  reserved 6;
   reserved "stdin_write_sequence";
   RuntimeScope scope = 1;
   string task_id = 2;
   int32 max_output_tokens = 3;
   string input_json = 4;
   string tool_use_event_id = 5;
+  string operation_id = 6;
 }
 
 message SendCommandInputResponse {
-  BridgeWriteAck ack = 1;
-  string result_json = 2;
-  int64 write_seq = 3;
+  oneof outcome {
+    CommandInputCommitted committed = 1;
+    CommandInputDuplicate duplicate = 2;
+    CommandInputStale stale = 3;
+  }
 }
+
+message CommandInputCommitted {
+  string result_json = 1;
+  reserved 2;
+  reserved "write_seq";
+}
+message CommandInputDuplicate {
+  string result_json = 1;
+  reserved 2;
+  reserved "write_seq";
+}
+message CommandInputStale {}
 
 message CancelCommandRequest {
   RuntimeScope scope = 1;
   string task_id = 2;
   string reason = 4;
   string tool_use_event_id = 5;
+  string operation_id = 6;
 }
 
 message CancelCommandResponse {
-  BridgeWriteAck ack = 1;
-  string result_json = 2;
+  oneof outcome {
+    CommandCancelCommitted committed = 1;
+    CommandCancelDuplicate duplicate = 2;
+    CommandCancelStale stale = 3;
+  }
 }
 
+message CommandCancelCommitted { string result_json = 1; }
+message CommandCancelDuplicate { string result_json = 1; }
+message CommandCancelStale {}
+
 message RunMemoryRequest {
-  reserved 4;
+  reserved 3, 4, 5, 6;
+  reserved "normalized_input_hash", "operation", "input_json";
 
   RuntimeScope scope = 1;
   string tool_use_event_id = 2;
-  string normalized_input_hash = 3;
-  string operation = 5;
-  string input_json = 6;
 }
 
 message RunMemoryResponse {
-  BridgeWriteAck ack = 1;
-  string result_json = 2;
+  oneof outcome {
+    MemoryRunCommitted committed = 1;
+    MemoryRunDuplicate duplicate = 2;
+    MemoryRunStale stale = 3;
+  }
 }
+
+message MemoryRunCommitted { string result_json = 1; }
+message MemoryRunDuplicate { string result_json = 1; }
+message MemoryRunStale {}

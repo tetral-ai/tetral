@@ -141,18 +141,12 @@ func writeEventDeclarationDigest(
 	declaration := map[string]any{
 		"assistant_part_append": assistantAppend,
 		"event_type":            request.GetEventType(),
-		"mcp_materialization_handle": nullableDeclarationString(
-			request.GetMcpMaterializationHandle(),
-		),
-		"model_request_id": nullableDeclarationString(request.GetModelRequestId()),
-		"operation_kind":   bridgeOpWriteEvent,
-		"runtime_write_id": request.GetRuntimeWriteId(),
-		"sandbox_result_digest": nullableDeclarationString(
-			request.GetSandboxResultDigest(),
-		),
-		"server_tool_use":   json.RawMessage(serverToolUseJSON),
-		"session_thread_id": request.GetScope().GetSessionThreadId(),
-		"tool_settlement":   toolSettlement,
+		"model_request_id":      nullableDeclarationString(request.GetModelRequestId()),
+		"operation_kind":        bridgeOpWriteEvent,
+		"runtime_write_id":      request.GetRuntimeWriteId(),
+		"server_tool_use":       json.RawMessage(serverToolUseJSON),
+		"session_thread_id":     request.GetScope().GetSessionThreadId(),
+		"tool_settlement":       toolSettlement,
 	}
 	if request.GetEventType() == "span.model_request_start" {
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
@@ -393,19 +387,7 @@ func taskNotificationDeclarationDigest(
 	return sha256Hex(canonical), nil
 }
 
-func mcpMaterializationSourceID(request *bridgev1.CommitMcpToolResultRequest) string {
-	return stableRuntimeID(
-		"mcp_tool_execution",
-		request.GetToolUseEventId(),
-		request.GetNormalizedInputHash(),
-	)
-}
-
-func mcpMaterializationDeclarationDigest(request *bridgev1.CommitMcpToolResultRequest) (string, error) {
-	inputJSON, err := canonicalRuntimeDeclarationJSON(request.GetInputJson())
-	if err != nil {
-		return "", status.Error(codes.InvalidArgument, "mcp tool input is invalid")
-	}
+func mcpToolCommitDeclarationDigest(request *bridgev1.CommitMcpToolResultRequest) (string, error) {
 	resultJSON, err := canonicalRuntimeDeclarationJSON(request.GetResultJson())
 	if err != nil {
 		return "", status.Error(codes.InvalidArgument, "mcp tool result is invalid")
@@ -423,15 +405,12 @@ func mcpMaterializationDeclarationDigest(request *bridgev1.CommitMcpToolResultRe
 		})
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"inline_media":          inlineMedia,
-		"input":                 json.RawMessage(inputJSON),
-		"mcp_server_name":       request.GetMcpServerName(),
-		"normalized_input_hash": request.GetNormalizedInputHash(),
-		"operation_kind":        bridgeOpCommitMcpToolResult,
-		"result":                json.RawMessage(resultJSON),
-		"session_thread_id":     request.GetScope().GetSessionThreadId(),
-		"tool_name":             request.GetToolName(),
-		"tool_use_event_id":     request.GetToolUseEventId(),
+		"claim_id":          request.GetClaimId(),
+		"inline_media":      inlineMedia,
+		"operation_kind":    bridgeOpCommitMcpToolResult,
+		"result":            json.RawMessage(resultJSON),
+		"session_thread_id": request.GetScope().GetSessionThreadId(),
+		"tool_use_event_id": request.GetToolUseEventId(),
 	})
 	if err != nil {
 		return "", err

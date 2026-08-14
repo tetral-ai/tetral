@@ -221,8 +221,6 @@ type daytonaCapacityWaiter struct {
 	threadID        string
 	toolUseEventID  string
 	modelToolCallID string
-	inputJSON       string
-	inputHash       string
 	resultWriteID   string
 	operationID     string
 }
@@ -279,8 +277,7 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	}
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	bridgeScope := &bridgev1.RuntimeScope{
-		RequestId: "req_capacity_chain", WorkspaceId: "ws_execution_store",
-		SessionId: "sesn_execution_store", SessionThreadId: "thr_execution_store",
+		WorkspaceId: "ws_execution_store", SessionId: "sesn_execution_store", SessionThreadId: "thr_execution_store",
 		Binding: &bridgev1.RuntimeBindingRef{BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID},
 	}
 	zero := int64(0)
@@ -396,7 +393,6 @@ func (h *daytonaActivationHarness) primaryWaiter() daytonaCapacityWaiter {
 	return daytonaCapacityWaiter{
 		sessionID: "sesn_execution_store", threadID: "thr_execution_store",
 		toolUseEventID: h.toolUseEventID, modelToolCallID: h.modelToolCallID,
-		inputJSON: h.inputJSON, inputHash: h.inputHash,
 		resultWriteID: "rwrite_capacity_chain_result", operationID: h.operationID,
 	}
 }
@@ -452,7 +448,6 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 	return daytonaCapacityWaiter{
 		sessionID: "sesn_execution_store", threadID: "thr_execution_store",
 		toolUseEventID: written.GetEventId(), modelToolCallID: modelToolCallID,
-		inputJSON: inputJSON, inputHash: inputHash,
 		resultWriteID: "rwrite_capacity_chain_shared_result", operationID: operationID,
 	}
 }
@@ -500,8 +495,7 @@ func (h *daytonaActivationHarness) attachOtherActivationWaiter(t *testing.T) day
 	}
 	return daytonaCapacityWaiter{
 		sessionID: sessionID, threadID: threadID, toolUseEventID: toolUseEventID,
-		modelToolCallID: "call_capacity_other", inputJSON: `{"cmd":"printf other"}`,
-		inputHash: "other_hash", operationID: operationID,
+		modelToolCallID: "call_capacity_other", operationID: operationID,
 	}
 }
 
@@ -513,18 +507,21 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testing.T, waiter daytonaCapacityWaiter) {
 	t.Helper()
 	response, err := h.bridgeStore.AwaitSandboxExecution(context.Background(), &bridgev1.AwaitSandboxExecutionRequest{
-		Scope: h.bridgeScope, ToolUseEventId: waiter.toolUseEventID, ModelToolCallId: waiter.modelToolCallID,
-		NormalizedInputHash: waiter.inputHash, ToolName: "exec_command", InputJson: waiter.inputJSON,
+		Scope: h.bridgeScope, ToolUseEventId: waiter.toolUseEventID,
 	})
 	if err != nil {
 		t.Fatalf("AwaitSandboxExecution from exhausted receipt: %v", err)
 	}
+	if response.GetCompleted() == nil {
+		t.Fatalf("AwaitSandboxExecution from exhausted receipt = %#v; want completed", response)
+	}
+	resultJSON := response.GetCompleted().GetResultJson()
 	fixtureInput := map[string]any{
 		"workspaceId": h.bridgeScope.GetWorkspaceId(), "sessionId": h.bridgeScope.GetSessionId(),
 		"sessionThreadId": h.bridgeScope.GetSessionThreadId(), "bindingId": h.bridgeScope.GetBinding().GetBindingId(),
 		"bindingGeneration": h.bridgeScope.GetBinding().GetBindingGeneration(), "targetPodUid": h.bridgeScope.GetBinding().GetTargetPodUid(),
 		"modelRequestId": h.modelRequestID, "modelToolCallId": waiter.modelToolCallID,
-		"toolUseEventId": waiter.toolUseEventID, "resultJson": response.GetResultJson(), "resultDigest": response.GetResultDigest(),
+		"toolUseEventId": waiter.toolUseEventID, "resultJson": resultJSON,
 	}
 	inputJSON, err := json.Marshal(fixtureInput)
 	if err != nil {
@@ -549,8 +546,7 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testi
 		"file":    runtimeResult.FileResult,
 	} {
 		if result.Type != "error" || result.Error.Type != "runtime" || result.Error.Code != "runtime_invalid_sequence" ||
-			result.Error.Message != "The requested operation could not be completed." || result.Error.Retryable || result.Error.Fatal ||
-			result.SandboxResultDigest != response.GetResultDigest() {
+			result.Error.Message != "The requested operation could not be completed." || result.Error.Retryable || result.Error.Fatal {
 			t.Fatalf("%s Runtime exhaustion result = %+v; want exact generic rejoin failure", name, result)
 		}
 	}
@@ -564,10 +560,9 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testi
 		t.Fatalf("encode Runtime exhaustion event: %v", err)
 	}
 	errorJSON := string(runtimeResult.DeclaredError)
-	digest := response.GetResultDigest()
 	writeRequest := &bridgev1.WriteEventRequest{
 		Scope: h.bridgeScope, RuntimeWriteId: waiter.resultWriteID, ModelRequestId: h.modelRequestID,
-		EventType: "agent.tool_result", PayloadJson: string(payloadJSON), SandboxResultDigest: &digest,
+		EventType: "agent.tool_result", PayloadJson: string(payloadJSON),
 		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: waiter.toolUseEventID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: errorJSON}},
@@ -608,7 +603,7 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testi
 		publicEvent.Content[0].Type != "text" || publicEvent.Content[0].Text != "The requested operation could not be completed." {
 		t.Fatalf("public exhaustion Tool Result = %+v; want one exact error text block", publicEvent)
 	}
-	for _, surface := range []string{response.GetResultJson(), string(output), durablePayload, string(publicJSON)} {
+	for _, surface := range []string{resultJSON, string(output), durablePayload, string(publicJSON)} {
 		for _, forbidden := range append([]string{"quota_exceeded"}, daytonaCapacityForbiddenDetails()...) {
 			if strings.Contains(surface, forbidden) {
 				t.Fatalf("exhaustion proof surface exposed %q: %s", forbidden, surface)
@@ -730,7 +725,6 @@ type runtimeActivationErrorResult struct {
 		Retryable bool   `json:"retryable"`
 		Fatal     bool   `json:"fatal"`
 	} `json:"error"`
-	SandboxResultDigest string `json:"sandboxResultDigest"`
 }
 
 type runtimeActivationToolResultEvent struct {

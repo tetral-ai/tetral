@@ -1,32 +1,33 @@
 /**
  * @packageDocumentation
  *
- * Defines canonical MCP request identity and the tool-result states shared by the connector
- * service and its Bridge adapter. Callers hash parsed object JSON before claiming an external
- * side effect, serialize pending results for Bridge, and parse only refs-only committed results
- * for replay. The module guards payload conflicts for one tool-use event, separates inline media
- * from durable attachment references, and clones replay values so consumers cannot mutate cached
- * state.
+ * Defines MCP execution-attempt identity and the tool-result states shared by the connector
+ * service and its Bridge adapter. Bridge selects the immutable executor payload from the durable
+ * Tool Use; Connector serializes pending results and parses refs-only committed results on replay.
+ * The module separates inline media from durable attachment references and clones replay values
+ * so consumers cannot mutate cached state.
  */
-import { createHash } from "node:crypto";
 import type { RunMcpToolResponse } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { McpInlineMedia } from "./formatter.js";
 
-/** Pairs a public tool-use event with the canonical hash of its MCP argument object. */
+/** Selects one durable MCP Tool Use. */
 export interface IdempotencyKey {
   readonly toolUseEventId: string;
-  readonly normalizedInputHash: string;
 }
 
-/** Carries the tenant, binding, caller-pod, server, tool, and request fields Bridge binds to a claim. */
+/** Carries the explicit claim and authenticated Runtime scope Bridge fences. */
 export interface McpIdempotencyContext {
-  readonly requestId: string;
+  readonly claimId: string;
   readonly workspaceId: string;
   readonly sessionId: string;
   readonly sessionThreadId: string;
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly runtimePodUid: string;
+}
+
+/** Immutable executor facts loaded by Bridge from the durable Tool declaration. */
+export interface McpExecutorPayload {
   readonly mcpServerName: string;
   readonly toolName: string;
   readonly inputJson: string;
@@ -62,7 +63,7 @@ export interface PendingStoredRunMcpToolResponse extends RunMcpToolObservation {
  * observes a remote reservation, or conflicts with a different payload.
  */
 export type IdempotencyClaim =
-  | { readonly status: "new" }
+  | { readonly status: "new"; readonly executor: McpExecutorPayload }
   | { readonly status: "replay"; readonly stored: StoredRunMcpToolResponse }
   | { readonly status: "wait"; readonly stored: Promise<StoredRunMcpToolResponse | undefined> }
   | { readonly status: "in_flight" }
@@ -80,8 +81,8 @@ export class McpIdempotencyStaleCustodyError extends Error {
 /**
  * Defines the claim, commit, and failure lifecycle surrounding one external MCP side effect.
  *
- * Implementations reserve before execution, materialize a refs-only response on commit, and
- * release unresolved local work after failure. Durable implementations require the full context.
+ * Implementations reserve before execution, store a refs-only response on commit, and release
+ * unresolved local work after failure. Durable implementations require the full context.
  */
 export interface McpIdempotencyStore {
   claim(key: IdempotencyKey, context?: McpIdempotencyContext): IdempotencyClaim | Promise<IdempotencyClaim>;
@@ -91,26 +92,26 @@ export interface McpIdempotencyStore {
 
 type InFlightResponse = {
   readonly status: "in_flight";
-  readonly inputHash: string;
+  readonly executor: McpExecutorPayload;
   readonly promise: Promise<StoredRunMcpToolResponse | undefined>;
   readonly resolve: (stored: StoredRunMcpToolResponse | undefined) => void;
 };
 
 type CompletedResponse = {
   readonly status: "completed";
-  readonly inputHash: string;
   readonly stored: StoredRunMcpToolResponse;
 };
 
 /**
- * Coalesces pending calls and replays already materialized MCP results within one process.
+ * Coalesces pending calls and replays already stored MCP results within one process.
  *
  * Its store path rejects pending media because only Bridge can create durable attachment
- * references; it detects different canonical hashes for the same tool-use event and returns
- * cloned responses.
+ * references. Callers supply the executor fixture explicitly; results are cloned on replay.
  */
 export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
   readonly #responses = new Map<string, InFlightResponse | CompletedResponse>();
+
+  constructor(private readonly executor: McpExecutorPayload) {}
 
   claim(key: IdempotencyKey, context?: McpIdempotencyContext): IdempotencyClaim {
     const mapKey = idempotencyMapKey(key, context);
@@ -122,14 +123,11 @@ export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
       });
       this.#responses.set(mapKey, {
         status: "in_flight",
-        inputHash: key.normalizedInputHash,
+        executor: this.executor,
         promise,
         resolve,
       });
-      return { status: "new" };
-    }
-    if (existing.inputHash !== key.normalizedInputHash) {
-      return { status: "conflict" };
+      return { status: "new", executor: this.executor };
     }
     if (existing.status === "in_flight") {
       return {
@@ -142,7 +140,7 @@ export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
 
   store(key: IdempotencyKey, stored: PendingStoredRunMcpToolResponse, context?: McpIdempotencyContext): RunMcpToolResponse {
     if (stored.response.attachments.length > 0) {
-      throw new Error("in-memory MCP idempotency cannot materialize media refs");
+      throw new Error("in-memory MCP idempotency cannot store media refs");
     }
     return this.storeCompleted(key, {
       response: {
@@ -163,10 +161,9 @@ export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
     const existing = this.#responses.get(mapKey);
     this.#responses.set(mapKey, {
       status: "completed",
-      inputHash: key.normalizedInputHash,
       stored: frozen,
     });
-    if (existing?.status === "in_flight" && existing.inputHash === key.normalizedInputHash) {
+    if (existing?.status === "in_flight") {
       existing.resolve(cloneStoredResponse(frozen));
     }
     return cloneResponse(frozen.response);
@@ -175,7 +172,7 @@ export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
   fail(key: IdempotencyKey, context?: McpIdempotencyContext): void {
     const mapKey = idempotencyMapKey(key, context);
     const existing = this.#responses.get(mapKey);
-    if (existing?.status === "in_flight" && existing.inputHash === key.normalizedInputHash) {
+    if (existing?.status === "in_flight") {
       this.#responses.delete(mapKey);
       existing.resolve(undefined);
     }
@@ -187,11 +184,6 @@ function idempotencyMapKey(key: IdempotencyKey, context?: McpIdempotencyContext)
     return key.toolUseEventId;
   }
   return `${context.workspaceId}\u0000${context.sessionId}\u0000${context.sessionThreadId}\u0000${key.toolUseEventId}`;
-}
-
-/** Parses an MCP argument object, canonicalizes it, and returns its lowercase SHA-256 identity. */
-export function normalizedInputHash(inputJson: string): string {
-  return createHash("sha256").update(canonicalJson(parseJSONObject(inputJson))).digest("hex");
 }
 
 /**
@@ -276,7 +268,6 @@ export function parseStoredRunMcpToolResponse(value: string): StoredRunMcpToolRe
       attachments: attachments.map((attachment) => parseStoredAttachment(attachment)),
       errorKind: typeof responseRecord.error_kind === "number" ? responseRecord.error_kind : undefined,
       retryStatus: typeof responseRecord.retry_status === "number" ? responseRecord.retry_status : undefined,
-      materializationHandle: "",
     },
     contentItems: record.content_items,
     refreshTriggered: record.refresh_triggered,
@@ -316,7 +307,6 @@ export function cloneResponse(response: RunMcpToolResponse): RunMcpToolResponse 
     })),
     errorKind: response.errorKind,
     retryStatus: response.retryStatus,
-    materializationHandle: response.materializationHandle,
   };
 }
 

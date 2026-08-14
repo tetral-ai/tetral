@@ -14,7 +14,7 @@
  * delivery to `McpManifestChangeNotifier`.
  */
 import { Metadata, status } from "@grpc/grpc-js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { semanticErrorFields } from "@tetral/ts-observability";
 import type { TetralLogRecord } from "@tetral/ts-observability";
 import {
@@ -31,10 +31,10 @@ import type {
   RunMcpToolResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { catalogEntryByName } from "./catalog.js";
-import { validateListMcpToolsRequest, validateListMcpToolsResponse, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
+import { validateListMcpToolsRequest, validateListMcpToolsResponse, validateMcpExecutorPayload, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
 import { McpConnectorError, mcpErrorKind } from "./errors.js";
 import { formatMcpToolResult } from "./formatter.js";
-import { McpIdempotencyStaleCustodyError, canonicalJson, normalizedInputHash } from "./idempotency.js";
+import { McpIdempotencyStaleCustodyError, canonicalJson } from "./idempotency.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import type { McpConnectorErrorCode } from "./errors.js";
 import type { McpCallToolResult } from "./formatter.js";
@@ -154,6 +154,13 @@ type RunMcpToolLogRecordFields = {
 
 type RunMcpToolLogRecord = RunMcpToolLogRecordFields & TetralLogRecord;
 
+type ResolvedMcpToolRequest = RunMcpToolRequest & {
+  readonly claimId: string;
+  readonly mcpServerName: string;
+  readonly toolName: string;
+  readonly inputJson: string;
+};
+
 /**
  * Collects the admission, execution, durability, notification, observability,
  * and readiness dependencies required by the MCP service shell.
@@ -169,6 +176,7 @@ export interface McpConnectorServiceOptions {
   readonly manifestNotifySleep?: McpManifestNotifySleep | undefined;
   readonly metrics?: McpConnectorMetricsRegistry | undefined;
   readonly activeSessionCount?: (() => number) | undefined;
+  readonly claimIdFactory?: (() => string) | undefined;
 }
 
 /**
@@ -184,10 +192,12 @@ export interface McpConnectorServiceOptions {
 export class McpConnectorServiceShell {
   readonly #idempotencyStore: McpIdempotencyStore;
   readonly #metrics: McpConnectorMetricsRegistry;
+  readonly #claimIdFactory: () => string;
 
   constructor(private readonly options: McpConnectorServiceOptions) {
     this.#idempotencyStore = options.idempotencyStore;
     this.#metrics = options.metrics ?? new McpConnectorMetricsRegistry();
+    this.#claimIdFactory = options.claimIdFactory ?? (() => `mcpclaim_${randomUUID()}`);
   }
 
   /**
@@ -358,15 +368,16 @@ export class McpConnectorServiceShell {
    */
   async runMcpTool(request: RunMcpToolRequest, metadata: Metadata): Promise<RunMcpToolResponse> {
     const started = performance.now();
+    const claimId = this.#claimIdFactory();
     try {
-      return await this.runMcpToolCore(request, metadata, started);
+      return await this.runMcpToolCore(request, metadata, started, claimId);
     } catch (error) {
-      this.recordRunToolFailure(request, runMcpToolThrownErrorKind(error), started);
+      this.recordRunToolFailure(resolvedMcpRequest(request, claimId), runMcpToolThrownErrorKind(error), started);
       throw error;
     }
   }
 
-  private async runMcpToolCore(request: RunMcpToolRequest, metadata: Metadata, started: number): Promise<RunMcpToolResponse> {
+  private async runMcpToolCore(request: RunMcpToolRequest, metadata: Metadata, started: number, claimId: string): Promise<RunMcpToolResponse> {
     const caller = await this.authorize(metadata, "/tetral.provider_gateway.v1.McpConnectorService/RunMcpTool");
     this.ensureReady();
     const validation = validateRunMcpToolRequest(request);
@@ -380,25 +391,21 @@ export class McpConnectorServiceShell {
     })) {
       throw new GrpcStatusError(status.PERMISSION_DENIED, "runtime binding token rejected");
     }
-    if (catalogEntryByName(request.mcpServerName) === undefined) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
-    }
-    const inputHash = normalizedInputHash(request.inputJson);
-    const idempotencyContext = mcpIdempotencyContext(request, caller.serviceAccount.podUid);
+    const idempotencyContext = mcpIdempotencyContext(request, caller.serviceAccount.podUid, claimId);
     const idempotencyKey = {
       toolUseEventId: request.toolUseEventId,
-      normalizedInputHash: inputHash,
     };
     const claim = await this.#idempotencyStore.claim(idempotencyKey, idempotencyContext);
+    const unresolved = resolvedMcpRequest(request, claimId);
     if (claim.status === "replay") {
-      return this.finishRunMcpTool(request, claim.stored.response, claim.stored, started);
+      return this.finishRunMcpTool(unresolved, claim.stored.response, claim.stored, started);
     }
     if (claim.status === "wait") {
       const stored = await claim.stored;
       if (stored === undefined) {
-        return this.finishRunMcpTool(request, mcpIdempotencyRuntimeError("mcp_in_flight", "MCP tool result is still in flight."), { contentItems: 0, refreshTriggered: false }, started);
+        return this.finishRunMcpTool(unresolved, mcpIdempotencyRuntimeError("mcp_in_flight", "MCP tool result is still in flight."), { contentItems: 0, refreshTriggered: false }, started);
       }
-      return this.finishRunMcpTool(request, stored.response, stored, started);
+      return this.finishRunMcpTool(unresolved, stored.response, stored, started);
     }
     if (claim.status === "in_flight") {
       const response: RunMcpToolResponse = {
@@ -409,22 +416,26 @@ export class McpConnectorServiceShell {
         retryStatus: McpRetryStatus.MCP_RETRY_STATUS_RETRYING,
       };
       const execution = { contentItems: 0, refreshTriggered: false };
-      return this.finishRunMcpTool(request, response, execution, started);
+      return this.finishRunMcpTool(unresolved, response, execution, started);
     }
     if (claim.status === "stale_custody") {
       return this.finishRunMcpTool(
-        request,
+        unresolved,
         mcpIdempotencyRuntimeError("mcp_custody_lost", "MCP tool execution lost runtime custody."),
         { contentItems: 0, refreshTriggered: false },
         started,
       );
     }
     if (claim.status === "conflict") {
-      return this.finishRunMcpTool(request, mcpIdempotencyRuntimeError("mcp_claim_conflict", "MCP tool idempotency conflict."), { contentItems: 0, refreshTriggered: false }, started);
+      return this.finishRunMcpTool(unresolved, mcpIdempotencyRuntimeError("mcp_claim_conflict", "MCP tool idempotency conflict."), { contentItems: 0, refreshTriggered: false }, started);
+    }
+    const executionRequest = resolvedMcpRequest(request, claimId, claim.executor);
+    if (!validateMcpExecutorPayload(claim.executor).ok || catalogEntryByName(executionRequest.mcpServerName) === undefined) {
+      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid durable MCP server");
     }
     try {
-      const parsedInput = JSON.parse(request.inputJson) as Record<string, unknown>;
-      const execution = await this.executeTool(request, parsedInput);
+      const parsedInput = JSON.parse(executionRequest.inputJson) as Record<string, unknown>;
+      const execution = await this.executeTool(executionRequest, parsedInput);
       const response = execution.response;
       const responseValidation = validatePendingRunMcpToolResponse(response);
       if (!responseValidation.ok) {
@@ -436,18 +447,18 @@ export class McpConnectorServiceShell {
           contentItems: execution.contentItems,
           refreshTriggered: execution.refreshTriggered,
         }, idempotencyContext);
-        return this.finishRunMcpTool(request, storedResponse, execution, started);
+        return this.finishRunMcpTool(executionRequest, storedResponse, execution, started);
       } catch (error) {
         await this.#idempotencyStore.fail(idempotencyKey, idempotencyContext);
         if (error instanceof McpIdempotencyStaleCustodyError) {
           return this.finishRunMcpTool(
-            request,
+            executionRequest,
             mcpIdempotencyRuntimeError("mcp_custody_lost", "MCP tool execution lost runtime custody."),
             execution,
             started,
           );
         }
-        return this.finishRunMcpTool(request, mcpIdempotencyRuntimeError("mcp_commit_failed", "MCP tool result could not be committed."), execution, started);
+        return this.finishRunMcpTool(executionRequest, mcpIdempotencyRuntimeError("mcp_commit_failed", "MCP tool result could not be committed."), execution, started);
       }
     } catch (error) {
       await this.#idempotencyStore.fail(idempotencyKey, idempotencyContext);
@@ -455,7 +466,7 @@ export class McpConnectorServiceShell {
     }
   }
 
-  private async executeTool(request: RunMcpToolRequest, input: Record<string, unknown>): Promise<{
+  private async executeTool(request: ResolvedMcpToolRequest, input: Record<string, unknown>): Promise<{
     readonly response: PendingRunMcpToolResponse;
     readonly contentItems: number;
     readonly refreshTriggered: boolean;
@@ -546,7 +557,7 @@ export class McpConnectorServiceShell {
   }
 
   private recordRunToolMetrics(
-    request: RunMcpToolRequest,
+    request: ResolvedMcpToolRequest,
     response: RunMcpToolResponse,
     started: number,
   ): void {
@@ -559,7 +570,7 @@ export class McpConnectorServiceShell {
   }
 
   private finishRunMcpTool(
-    request: RunMcpToolRequest,
+    request: ResolvedMcpToolRequest,
     response: RunMcpToolResponse,
     execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
     started: number,
@@ -569,7 +580,7 @@ export class McpConnectorServiceShell {
     return response;
   }
 
-  private recordRunToolFailure(request: RunMcpToolRequest, errorCode: string, started: number): void {
+  private recordRunToolFailure(request: ResolvedMcpToolRequest, errorCode: string, started: number): void {
     this.#metrics.recordRunTool({
       tool: request.toolName,
       status: "runtime_error",
@@ -631,7 +642,7 @@ function runMcpToolThrownErrorKind(error: unknown): string {
 }
 
 function runMcpToolLogRecord(
-  request: RunMcpToolRequest,
+  request: ResolvedMcpToolRequest,
   response: RunMcpToolResponse,
   execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
   started: number,
@@ -640,7 +651,7 @@ function runMcpToolLogRecord(
   const errorCode = response.errorKind === undefined ? "" : mcpErrorKindName(response.errorKind);
   const durationMs = Math.round(performance.now() - started);
   const record: RunMcpToolLogRecord = {
-    "request.id": request.requestId,
+    "request.id": request.claimId,
     "workspace.id": request.workspaceId,
     "session.id": request.sessionId,
     "thread.id": request.sessionThreadId,
@@ -667,12 +678,12 @@ function runMcpToolLogRecord(
 }
 
 function runMcpToolFailureLogRecord(
-  request: RunMcpToolRequest,
+  request: ResolvedMcpToolRequest,
   errorCode: string,
   started: number,
 ): RunMcpToolLogRecord {
   return {
-    "request.id": request.requestId,
+    "request.id": request.claimId,
     "workspace.id": request.workspaceId,
     "session.id": request.sessionId,
     "thread.id": request.sessionThreadId,
@@ -760,18 +771,29 @@ function logInitialDiscoveryFailure(
   }
 }
 
-function mcpIdempotencyContext(request: RunMcpToolRequest, runtimePodUid: string): McpIdempotencyContext {
+function mcpIdempotencyContext(request: RunMcpToolRequest, runtimePodUid: string, claimId: string): McpIdempotencyContext {
   return {
-    requestId: request.requestId,
+    claimId,
     workspaceId: request.workspaceId,
     sessionId: request.sessionId,
     sessionThreadId: request.sessionThreadId,
     bindingId: request.bindingId,
     bindingGeneration: request.bindingGeneration,
     runtimePodUid,
-    mcpServerName: request.mcpServerName,
-    toolName: request.toolName,
-    inputJson: request.inputJson,
+  };
+}
+
+function resolvedMcpRequest(
+  request: RunMcpToolRequest,
+  claimId: string,
+  executor?: { readonly mcpServerName: string; readonly toolName: string; readonly inputJson: string },
+): ResolvedMcpToolRequest {
+  return {
+    ...request,
+    claimId,
+    mcpServerName: executor?.mcpServerName ?? "",
+    toolName: executor?.toolName ?? "",
+    inputJson: executor?.inputJson ?? "{}",
   };
 }
 

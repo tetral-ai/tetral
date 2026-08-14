@@ -4635,16 +4635,10 @@ test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
         appended.push(envelope.event);
-        if (envelope.event.type === "agent.tool_result") {
-            sandboxResultDigests.push((envelope as unknown as {
-                readonly sandboxResultDigest?: string;
-            }).sandboxResultDigest);
-        }
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
     }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: durableToolMessage }]);
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
-    const sandboxResultDigests: Array<string | undefined> = [];
     let refreshAttempts = 0;
     const store = new ThreadLoopRuntimeStore([]);
     const sandboxCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
@@ -4674,7 +4668,6 @@ test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use
             return {
                 type: "completed",
                 output: { text: "cold sandbox write", truncated: false },
-                sandboxResultDigest: "a".repeat(64),
             };
         },
         refreshRuntimeBindingToken: async () => {
@@ -4704,7 +4697,6 @@ test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use
     }).pipe(Effect.provide(layer)));
     expect(result).toMatchObject({ type: "completed" });
     expect(refreshAttempts).toBe(3);
-    expect(sandboxResultDigests).toEqual(["a".repeat(64)]);
     expect(runToolCalls).toEqual(["mrq_cold_sandbox:tool-sandbox-1:sevt_sandbox_tool_1"]);
     expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(0);
     expect(appended.some((event) => event.type === "agent.tool_result")).toBe(true);

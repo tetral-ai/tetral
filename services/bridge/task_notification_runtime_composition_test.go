@@ -358,7 +358,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 	composed, err := runTaskNotificationRuntimeComposition(
 		context.Background(), t.TempDir()+"/task-notification-receipt.json",
 		&agentruntimev1.RuntimeInputCommandRequest{
-			RequestId: sender.declaration.GetScope().GetRequestId(), WorkspaceId: "default", SessionId: sessionID,
+			RequestId: "req_task_notification_composition", WorkspaceId: "default", SessionId: sessionID,
 			SessionThreadId: threadID, BindingId: bindingID, BindingGeneration: 1,
 			TargetPodNamespace: "engine", TargetPodName: "runtime-pod-composition", TargetPodUid: podUID,
 			TargetPodIp: "127.0.0.1", RuntimeInputId: inputID,

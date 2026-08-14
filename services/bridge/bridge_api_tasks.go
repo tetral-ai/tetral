@@ -8,14 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -567,31 +565,28 @@ func logTaskNotificationDeclarationRejected(
 }
 
 func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, request *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {
-	if request.GetScope() == nil || request.GetTaskId() == "" || request.GetToolUseEventId() == "" {
+	if request.GetScope() == nil || request.GetTaskId() == "" || request.GetToolUseEventId() == "" || request.GetOperationId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid read command result request")
 	}
 	maxOutputTokens := positiveInt32(request.GetMaxOutputTokens())
-	requestID, _, _ := readCommandResultOwnerIdentity(
-		request.GetToolUseEventId(),
-		request.GetTaskId(),
-		maxOutputTokens,
-	)
-	scope := copyRuntimeScopeWithRequestID(request.GetScope(), requestID)
 	inputJSON, err := marshalBridgeJSON(map[string]any{
 		"task_id": request.GetTaskId(), "max_output_tokens": maxOutputTokens,
 	})
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.acceptAndAwaitBackgroundCommand(ctx, scope, request.GetTaskId(), request.GetToolUseEventId(), "poll", inputJSON, maxOutputTokens)
+	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "poll", inputJSON, maxOutputTokens)
 	if err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.ReadCommandResultResponse{Outcome: &bridgev1.ReadCommandResultResponse_Stale{Stale: &bridgev1.CommandReadStale{}}}, nil
+		}
 		return nil, err
 	}
-	return &bridgev1.ReadCommandResultResponse{Ack: committedAck("", ""), ResultJson: result.ResultJSON}, nil
+	return &bridgev1.ReadCommandResultResponse{Outcome: &bridgev1.ReadCommandResultResponse_Completed{Completed: &bridgev1.CommandReadCompleted{ResultJson: result.ResultJSON}}}, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) SendCommandInput(ctx context.Context, request *bridgev1.SendCommandInputRequest) (*bridgev1.SendCommandInputResponse, error) {
-	if request.GetScope().GetRequestId() == "" || request.GetTaskId() == "" {
+	if request.GetOperationId() == "" || request.GetTaskId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid send command input request")
 	}
 	if strings.TrimSpace(request.GetInputJson()) == "" {
@@ -604,27 +599,40 @@ func (s *PostgreSQLBridgeAPIStore) SendCommandInput(ctx context.Context, request
 		return nil, status.Error(codes.InvalidArgument, "empty command chars must use read command result")
 	}
 	maxOutputTokens := positiveInt32(request.GetMaxOutputTokens())
-	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetTaskId(), request.GetToolUseEventId(), "stdin", request.GetInputJson(), maxOutputTokens)
+	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "stdin", request.GetInputJson(), maxOutputTokens)
 	if err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.SendCommandInputResponse{Outcome: &bridgev1.SendCommandInputResponse_Stale{Stale: &bridgev1.CommandInputStale{}}}, nil
+		}
 		return nil, err
 	}
-	return &bridgev1.SendCommandInputResponse{Ack: committedAck("", ""), ResultJson: result.ResultJSON, WriteSeq: result.WriteSeq}, nil
+	if result.Duplicate {
+		return &bridgev1.SendCommandInputResponse{Outcome: &bridgev1.SendCommandInputResponse_Duplicate{Duplicate: &bridgev1.CommandInputDuplicate{ResultJson: result.ResultJSON}}}, nil
+	}
+	return &bridgev1.SendCommandInputResponse{Outcome: &bridgev1.SendCommandInputResponse_Committed{Committed: &bridgev1.CommandInputCommitted{ResultJson: result.ResultJSON}}}, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) CancelCommand(ctx context.Context, request *bridgev1.CancelCommandRequest) (*bridgev1.CancelCommandResponse, error) {
-	if request.GetScope().GetRequestId() == "" || request.GetTaskId() == "" {
+	if request.GetOperationId() == "" || request.GetTaskId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid cancel command request")
 	}
-	result, err := s.acceptAndAwaitBackgroundCancel(ctx, request.GetScope(), request.GetTaskId(), request.GetToolUseEventId(), request.GetReason())
+	result, err := s.acceptAndAwaitBackgroundCancel(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), request.GetReason())
 	if err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.CancelCommandResponse{Outcome: &bridgev1.CancelCommandResponse_Stale{Stale: &bridgev1.CommandCancelStale{}}}, nil
+		}
 		return nil, err
 	}
-	return &bridgev1.CancelCommandResponse{Ack: committedAck("", ""), ResultJson: result.ResultJSON}, nil
+	if result.Duplicate {
+		return &bridgev1.CancelCommandResponse{Outcome: &bridgev1.CancelCommandResponse_Duplicate{Duplicate: &bridgev1.CommandCancelDuplicate{ResultJson: result.ResultJSON}}}, nil
+	}
+	return &bridgev1.CancelCommandResponse{Outcome: &bridgev1.CancelCommandResponse_Committed{Committed: &bridgev1.CommandCancelCommitted{ResultJson: result.ResultJSON}}}, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	ctx context.Context,
 	scope *bridgev1.RuntimeScope,
+	operationID string,
 	taskID string,
 	toolUseEventID string,
 	kind string,
@@ -638,7 +646,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	if err != nil {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background command input must be JSON")
 	}
-	requestID := scope.GetRequestId()
+	requestID := operationID
 	if requestID == "" || toolUseEventID == "" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background command identity is incomplete")
 	}
@@ -675,6 +683,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 				return status.Error(codes.AlreadyExists, "background command idempotency conflict")
 			}
 			result.WriteSeq = existingWriteSeq.Int64
+			result.Duplicate = true
 			if existingState == "terminal" {
 				switch {
 				case existingResult.Valid:
@@ -732,18 +741,21 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	if err != nil || result.ResultJSON != "" {
 		return result, err
 	}
-	return s.waitForBackgroundCommandResult(ctx, scope, toolUseEventID)
+	waited, err := s.waitForBackgroundCommandResult(ctx, scope, toolUseEventID)
+	waited.Duplicate = result.Duplicate
+	return waited, err
 }
 
 func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	ctx context.Context,
 	scope *bridgev1.RuntimeScope,
+	operationID string,
 	taskID string,
 	toolUseEventID string,
 	reason string,
 ) (commandOperationResult, error) {
-	requestID := scope.GetRequestId() + ":cancel"
-	if scope.GetRequestId() == "" || toolUseEventID == "" {
+	requestID := operationID
+	if requestID == "" || toolUseEventID == "" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background cancellation identity is incomplete")
 	}
 	inputJSON, err := marshalBridgeJSON(map[string]string{"reason": reason})
@@ -785,6 +797,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 				existingInputHash != inputHash || existingInputJSON != canonicalInput {
 				return status.Error(codes.AlreadyExists, "background cancellation idempotency conflict")
 			}
+			result.Duplicate = true
 			if existingState == "terminal" {
 				switch {
 				case existingResult.Valid:
@@ -831,7 +844,9 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	if err != nil || result.ResultJSON != "" {
 		return result, err
 	}
-	return s.waitForBackgroundResult(ctx, scope, receiptID)
+	waited, err := s.waitForBackgroundResult(ctx, scope, receiptID)
+	waited.Duplicate = result.Duplicate
+	return waited, err
 }
 
 func loadBackgroundTaskForCommandAcceptanceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, taskID string) (string, error) {
@@ -992,6 +1007,7 @@ func commandInputCharsEmpty(inputJSON string) bool {
 type commandOperationResult struct {
 	ResultJSON string
 	WriteSeq   int64
+	Duplicate  bool
 }
 
 func positiveInt32(value int32) int {
@@ -999,23 +1015,6 @@ func positiveInt32(value int32) int {
 		return 0
 	}
 	return int(value)
-}
-
-func readCommandResultOwnerIdentity(sourceToolUseEventID string, taskID string, maxOutputTokens int) (string, string, string) {
-	digest := sha256.Sum256([]byte("command-followup:" + sourceToolUseEventID))
-	requestID := "req_" + hex.EncodeToString(digest[:])[:32]
-	payload := "max_output_tokens=" + strconv.Itoa(maxOutputTokens)
-	key := requestID + ":" + taskID + ":" + bridgeRequestHash(payload)[:32]
-	return requestID, key, payload
-}
-
-func copyRuntimeScopeWithRequestID(scope *bridgev1.RuntimeScope, requestID string) *bridgev1.RuntimeScope {
-	if scope == nil {
-		return nil
-	}
-	result := proto.Clone(scope).(*bridgev1.RuntimeScope)
-	result.RequestId = requestID
-	return result
 }
 
 func validBackgroundTaskTerminalStatus(status string) bool {

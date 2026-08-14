@@ -922,14 +922,10 @@ export interface WebRef {
 }
 
 export interface RunMcpToolRequest {
-  requestId: string;
   workspaceId: string;
   sessionId: string;
   sessionThreadId: string;
   toolUseEventId: string;
-  mcpServerName: string;
-  toolName: string;
-  inputJson: string;
   bindingId: string;
   bindingGeneration: number;
   runtimeBindingToken: string;
@@ -941,7 +937,6 @@ export interface RunMcpToolResponse {
   attachments: McpAttachmentRef[];
   errorKind?: McpErrorKind | undefined;
   retryStatus?: McpRetryStatus | undefined;
-  materializationHandle?: string | undefined;
 }
 
 export interface McpAttachmentRef {
@@ -5436,14 +5431,10 @@ export const WebRef: MessageFns<WebRef> = {
 
 function createBaseRunMcpToolRequest(): RunMcpToolRequest {
   return {
-    requestId: "",
     workspaceId: "",
     sessionId: "",
     sessionThreadId: "",
     toolUseEventId: "",
-    mcpServerName: "",
-    toolName: "",
-    inputJson: "",
     bindingId: "",
     bindingGeneration: 0,
     runtimeBindingToken: "",
@@ -5452,9 +5443,6 @@ function createBaseRunMcpToolRequest(): RunMcpToolRequest {
 
 export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
   encode(message: RunMcpToolRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.requestId !== "") {
-      writer.uint32(10).string(message.requestId);
-    }
     if (message.workspaceId !== "") {
       writer.uint32(18).string(message.workspaceId);
     }
@@ -5466,15 +5454,6 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(42).string(message.toolUseEventId);
-    }
-    if (message.mcpServerName !== "") {
-      writer.uint32(50).string(message.mcpServerName);
-    }
-    if (message.toolName !== "") {
-      writer.uint32(58).string(message.toolName);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(66).string(message.inputJson);
     }
     if (message.bindingId !== "") {
       writer.uint32(74).string(message.bindingId);
@@ -5495,14 +5474,6 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.requestId = reader.string();
-          continue;
-        }
         case 2: {
           if (tag !== 18) {
             break;
@@ -5533,30 +5504,6 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
           }
 
           message.toolUseEventId = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.mcpServerName = reader.string();
-          continue;
-        }
-        case 7: {
-          if (tag !== 58) {
-            break;
-          }
-
-          message.toolName = reader.string();
-          continue;
-        }
-        case 8: {
-          if (tag !== 66) {
-            break;
-          }
-
-          message.inputJson = reader.string();
           continue;
         }
         case 9: {
@@ -5594,11 +5541,6 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
 
   fromJSON(object: any): RunMcpToolRequest {
     return {
-      requestId: isSet(object.requestId)
-        ? globalThis.String(object.requestId)
-        : isSet(object.request_id)
-        ? globalThis.String(object.request_id)
-        : "",
       workspaceId: isSet(object.workspaceId)
         ? globalThis.String(object.workspaceId)
         : isSet(object.workspace_id)
@@ -5618,21 +5560,6 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
         ? globalThis.String(object.toolUseEventId)
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
-        : "",
-      mcpServerName: isSet(object.mcpServerName)
-        ? globalThis.String(object.mcpServerName)
-        : isSet(object.mcp_server_name)
-        ? globalThis.String(object.mcp_server_name)
-        : "",
-      toolName: isSet(object.toolName)
-        ? globalThis.String(object.toolName)
-        : isSet(object.tool_name)
-        ? globalThis.String(object.tool_name)
-        : "",
-      inputJson: isSet(object.inputJson)
-        ? globalThis.String(object.inputJson)
-        : isSet(object.input_json)
-        ? globalThis.String(object.input_json)
         : "",
       bindingId: isSet(object.bindingId)
         ? globalThis.String(object.bindingId)
@@ -5654,9 +5581,6 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
 
   toJSON(message: RunMcpToolRequest): unknown {
     const obj: any = {};
-    if (message.requestId !== "") {
-      obj.requestId = message.requestId;
-    }
     if (message.workspaceId !== "") {
       obj.workspaceId = message.workspaceId;
     }
@@ -5668,15 +5592,6 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     }
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
-    }
-    if (message.mcpServerName !== "") {
-      obj.mcpServerName = message.mcpServerName;
-    }
-    if (message.toolName !== "") {
-      obj.toolName = message.toolName;
-    }
-    if (message.inputJson !== "") {
-      obj.inputJson = message.inputJson;
     }
     if (message.bindingId !== "") {
       obj.bindingId = message.bindingId;
@@ -5695,14 +5610,10 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
   },
   fromPartial<I extends Exact<DeepPartial<RunMcpToolRequest>, I>>(object: I): RunMcpToolRequest {
     const message = createBaseRunMcpToolRequest();
-    message.requestId = object.requestId ?? "";
     message.workspaceId = object.workspaceId ?? "";
     message.sessionId = object.sessionId ?? "";
     message.sessionThreadId = object.sessionThreadId ?? "";
     message.toolUseEventId = object.toolUseEventId ?? "";
-    message.mcpServerName = object.mcpServerName ?? "";
-    message.toolName = object.toolName ?? "";
-    message.inputJson = object.inputJson ?? "";
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.runtimeBindingToken = object.runtimeBindingToken ?? "";
@@ -5711,14 +5622,7 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
 };
 
 function createBaseRunMcpToolResponse(): RunMcpToolResponse {
-  return {
-    status: 0,
-    resultText: "",
-    attachments: [],
-    errorKind: undefined,
-    retryStatus: undefined,
-    materializationHandle: undefined,
-  };
+  return { status: 0, resultText: "", attachments: [], errorKind: undefined, retryStatus: undefined };
 }
 
 export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
@@ -5737,9 +5641,6 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
     }
     if (message.retryStatus !== undefined) {
       writer.uint32(40).int32(message.retryStatus);
-    }
-    if (message.materializationHandle !== undefined) {
-      writer.uint32(50).string(message.materializationHandle);
     }
     return writer;
   },
@@ -5791,14 +5692,6 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
           message.retryStatus = reader.int32() as any;
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.materializationHandle = reader.string();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5829,11 +5722,6 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
         : isSet(object.retry_status)
         ? mcpRetryStatusFromJSON(object.retry_status)
         : undefined,
-      materializationHandle: isSet(object.materializationHandle)
-        ? globalThis.String(object.materializationHandle)
-        : isSet(object.materialization_handle)
-        ? globalThis.String(object.materialization_handle)
-        : undefined,
     };
   },
 
@@ -5854,9 +5742,6 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
     if (message.retryStatus !== undefined) {
       obj.retryStatus = mcpRetryStatusToJSON(message.retryStatus);
     }
-    if (message.materializationHandle !== undefined) {
-      obj.materializationHandle = message.materializationHandle;
-    }
     return obj;
   },
 
@@ -5870,7 +5755,6 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
     message.attachments = object.attachments?.map((e) => McpAttachmentRef.fromPartial(e)) || [];
     message.errorKind = object.errorKind ?? undefined;
     message.retryStatus = object.retryStatus ?? undefined;
-    message.materializationHandle = object.materializationHandle ?? undefined;
     return message;
   },
 };

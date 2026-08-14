@@ -433,6 +433,32 @@ func bridgeAPIFinishIdleRequest(
 	}
 }
 
+func seedReadySandboxForSharedToolExecution(t *testing.T, db *sql.DB, workspaceID string, sessionID string) {
+	t.Helper()
+	environmentID := "env_" + sessionID
+	if _, err := db.Exec(`UPDATE environments SET current_generation=1 WHERE workspace_id=$1 AND id=$2`, workspaceID, environmentID); err != nil {
+		t.Fatalf("set shared-tool environment generation: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO environment_artifacts (
+		workspace_id, environment_id, generation, status, provider, provider_artifact_ref,
+		normalized_config_hash, artifact_input_hash, runtime_network_policy_json, packages_json,
+		created_at, updated_at
+	) VALUES ($1, $2, 1, 'ready', 'daytona', 'artifact_shared_tool_execution',
+		'config_hash', 'artifact_hash', '{"type":"unrestricted"}', '{}', clock_timestamp(), clock_timestamp())`, workspaceID, environmentID); err != nil {
+		t.Fatalf("seed shared-tool environment artifact: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id, environment_generation,
+		provider, provider_resource_id, binding_revision, materialized_resource_revision,
+		resource_credential_expires_at, resource_roots_json, provider_metadata_json,
+		helper_verified_at, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, 1,
+		clock_timestamp()+interval '2 hours', '[]', '{}', clock_timestamp(), clock_timestamp(), clock_timestamp())`,
+		workspaceID, sessionID, "sbox_"+sessionID, environmentID, "provider_"+sessionID); err != nil {
+		t.Fatalf("seed ready shared-tool Sandbox binding: %v", err)
+	}
+}
+
 func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity")
@@ -442,35 +468,27 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_identity_other", "bind_bridge_tool_identity_foreign", 1, "pod_uid_tool_identity_foreign")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity", 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf '<>&'","workdir":"/workspace"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_events SET model_request_id = 'mreq_tool_identity' WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
+		`UPDATE session_events
+		    SET model_request_id = 'mreq_tool_identity', projection_json = '{"model_tool_call_id":"call_tool_identity"}'
+		  WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "mreq_tool_identity", "evt_tool_identity", "call_tool_identity", "exec_command")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	canonicalInput := `{"cmd":"printf '<>&'","workdir":"/workspace"}`
 	request := &bridgev1.AcceptSandboxExecutionRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_identity", "thr_bridge_tool_identity", "bind_bridge_tool_identity", 1, "pod_uid_tool_identity"),
-		ToolUseEventId:      "evt_tool_identity",
-		ModelToolCallId:     "call_tool_identity",
-		NormalizedInputHash: sha256Hex(canonicalInput),
-		ToolName:            "exec_command",
-		InputJson:           canonicalInput,
+		Scope:          bridgeAPIScope("sesn_bridge_tool_identity", "thr_bridge_tool_identity", "bind_bridge_tool_identity", 1, "pod_uid_tool_identity"),
+		ToolUseEventId: "evt_tool_identity",
 	}
 	first, err := store.AcceptSandboxExecution(context.Background(), request)
 	if err != nil {
 		t.Fatalf("AcceptSandboxExecution: %v", err)
 	}
-	reordered := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
-	reordered.Scope.RequestId = "req_bridge_tool_identity_replay"
-	reordered.InputJson = "{ \"workdir\" : \"/workspace\", \"cmd\" : \"printf '<>&'\" }"
-	replay, err := store.AcceptSandboxExecution(context.Background(), reordered)
+	replay, err := store.AcceptSandboxExecution(context.Background(), request)
 	if err != nil {
-		t.Fatalf("AcceptSandboxExecution canonical replay: %v", err)
+		t.Fatalf("AcceptSandboxExecution replay: %v", err)
 	}
-	if first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+	if first.GetCommitted() == nil || replay.GetDuplicate() == nil {
 		t.Fatalf("accept first/replay = %+v / %+v; want committed then duplicate", first, replay)
 	}
 
@@ -479,15 +497,6 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 		wantCode codes.Code
 		mutate   func(*bridgev1.AcceptSandboxExecutionRequest)
 	}{
-		{name: "hash", wantCode: codes.InvalidArgument, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
-			conflict.NormalizedInputHash = "different_hash"
-		}},
-		{name: "name", wantCode: codes.AlreadyExists, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
-			conflict.ToolName = "Bash"
-		}},
-		{name: "payload_reusing_hash", wantCode: codes.InvalidArgument, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
-			conflict.InputJson = `{"cmd":"printf different","workdir":"/workspace"}`
-		}},
 		{name: "other_thread", wantCode: codes.FailedPrecondition, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.Scope.SessionThreadId = "thr_bridge_tool_identity_other"
 		}},
@@ -502,18 +511,11 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	} {
 		t.Run(test.name+" conflict", func(t *testing.T) {
 			conflict := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
-			conflict.Scope.RequestId = "req_bridge_tool_identity_conflict_" + test.name
 			test.mutate(conflict)
 			if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != test.wantCode {
 				t.Fatalf("AcceptSandboxExecution %s conflict error = %v; want %s", test.name, err, test.wantCode)
 			}
 		})
-	}
-	if _, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
-		Scope: request.GetScope(), ToolUseEventId: request.GetToolUseEventId(), NormalizedInputHash: request.GetNormalizedInputHash(),
-		McpServerName: "github", ToolName: "create_issue", InputJson: request.GetInputJson(),
-	}); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("cross-kind MCP claim error = %v; want AlreadyExists", err)
 	}
 	var rowCount int
 	var claimStatus, claimOwner, claimLease sql.NullString
@@ -561,7 +563,6 @@ func sourceFunctionBody(t *testing.T, source string, signature string) string {
 
 func bridgeAPIScope(sessionID string, threadID string, bindingID string, generation int64, podUID string) *bridgev1.RuntimeScope {
 	return &bridgev1.RuntimeScope{
-		RequestId:       "req_" + sessionID,
 		WorkspaceId:     "default",
 		SessionId:       sessionID,
 		SessionThreadId: threadID,
@@ -2100,25 +2101,6 @@ func assertToolResultRuntimeMessage(t *testing.T, raw string, wantCallID string,
 		t.Fatalf("runtime tool part = type %q call %q name %q event %q state %q output %q input %#v; want tool/%s/%s/%s/%s/%s in %s",
 			part.Type, part.ToolCallID, part.ToolName, part.ToolUseEventID, part.State.Status,
 			part.State.Output.Text, part.State.Input.Value, wantCallID, wantName, wantToolUseEventID, wantState, wantOutput, raw)
-	}
-}
-
-func assertNoRuntimeToolResult(t *testing.T, db *sql.DB, sessionID string, toolUseEventID string) {
-	t.Helper()
-	var count int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND tool_use_event_id = $2`,
-		sessionID,
-		toolUseEventID,
-	).Scan(&count); err != nil {
-		t.Fatalf("count runtime tool results: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("runtime tool result count for %s/%s = %d; want none", sessionID, toolUseEventID, count)
 	}
 }
 

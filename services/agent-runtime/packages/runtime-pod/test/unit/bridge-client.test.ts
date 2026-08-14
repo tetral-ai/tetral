@@ -651,7 +651,7 @@ describe("Bridge runtime declaration adapters", () => {
 
   test("does not retry a definitive MCP settlement rejection", async () => {
     const bridge = new DeclarationBridge();
-    bridge.writeEventRejections.push("mcp_materialization_invalid");
+    bridge.writeEventRejections.push("mcp_result_commit_invalid");
     const transport = new BridgeAPIEventWriter(options(bridge));
     const writer = createSessionEventWriter({
       append: async (envelope) => await transport.append(envelope),
@@ -898,13 +898,11 @@ function mcpSettlementEnvelope(writeId: string): SessionEventEnvelope {
       mcp_tool_use_id: "sevt_mcp_use",
       content: [{ type: "text", text: "done" }],
     },
-    mcpMaterializationHandle: "sevt_mcp_materialized",
     toolSettlement: {
       toolUseEventId: "sevt_mcp_use",
       outcome: {
         type: "completed",
         output: { text: "done", truncated: false },
-        mcpMaterializationHandle: "sevt_mcp_materialized",
       },
     },
   };

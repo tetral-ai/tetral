@@ -24,7 +24,7 @@ describe("Runtime declaration wire digests", () => {
   });
 
   test("Assistant append and target settlement are distinct digest carriers", () => {
-		const common = { scope, runtimeWriteId: "write", modelRequestId: "model_request", payloadJson: "{}", serverToolUse: undefined, mcpMaterializationHandle: undefined, sandboxResultDigest: undefined, contextThroughMessageSequence: undefined, requestKind: "" };
+		const common = { scope, runtimeWriteId: "write", modelRequestId: "model_request", payloadJson: "{}", serverToolUse: undefined, contextThroughMessageSequence: undefined, requestKind: "" };
 		const appendRequest: Parameters<typeof writeEventDeclarationDigest>[0] = { ...common, eventType: "agent.message", assistantPartAppend: { parts: messageCreate.parts }, toolSettlement: undefined };
 		const settlementRequest: Parameters<typeof writeEventDeclarationDigest>[0] = { ...common, eventType: "agent.tool_result", assistantPartAppend: undefined, toolSettlement: { toolUseEventId: "tool_event", completed: { outputJson: '{"text":"done","truncated":false}' }, error: undefined, cancelled: undefined } };
 		const append = writeEventDeclarationDigest(appendRequest);

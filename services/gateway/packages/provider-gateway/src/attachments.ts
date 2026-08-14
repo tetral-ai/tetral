@@ -395,7 +395,6 @@ function readFileAttachmentChunk(
 
 function bridgeScope(request: ProviderRequest, runtimePodUid: string): RuntimeScope {
   return {
-    requestId: request.requestId,
     workspaceId: request.workspaceId,
     sessionId: request.sessionId,
     sessionThreadId: request.sessionThreadId,

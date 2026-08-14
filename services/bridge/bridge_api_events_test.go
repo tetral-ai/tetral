@@ -1357,12 +1357,11 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 		t.Fatalf("seed terminal sandbox execution: %v", err)
 	}
 
-	resultRequest := func(runtimeWriteID string, digest *string) *bridgev1.WriteEventRequest {
+	resultRequest := func(runtimeWriteID string) *bridgev1.WriteEventRequest {
 		return &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: runtimeWriteID, ModelRequestId: "mreq_bridge_sandbox_consume",
 			EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"created a.txt"}]}`,
-			SandboxResultDigest: digest,
-			Declaration:         &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "created a.txt")},
+			Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "created a.txt")},
 		}
 	}
 	assertRejectedResultHasNoSideEffects := func(runtimeWriteID string) {
@@ -1402,18 +1401,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 				runtimeWriteID, resultEvents, bridgeOperations, assistantMessages, executionState, storedResult, messageDataJSON)
 		}
 	}
-	missingDigest := resultRequest("rwrite_bridge_sandbox_consume_missing_digest", nil)
-	if _, err := store.WriteEvent(context.Background(), missingDigest); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("WriteEvent sandbox tool result without digest err = %v; want FailedPrecondition", err)
-	}
-	assertRejectedResultHasNoSideEffects(missingDigest.GetRuntimeWriteId())
-	wrongDigest := strings.Repeat("f", 64)
-	mismatchedDigest := resultRequest("rwrite_bridge_sandbox_consume_wrong_digest", &wrongDigest)
-	if _, err := store.WriteEvent(context.Background(), mismatchedDigest); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("WriteEvent sandbox tool result with wrong digest err = %v; want FailedPrecondition", err)
-	}
-	assertRejectedResultHasNoSideEffects(mismatchedDigest.GetRuntimeWriteId())
-	missingAttachment := resultRequest("rwrite_bridge_sandbox_consume_missing_attachment", &resultDigest)
+	missingAttachment := resultRequest("rwrite_bridge_sandbox_consume_missing_attachment")
 	if _, err := store.WriteEvent(context.Background(), missingAttachment); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("WriteEvent sandbox tool result with missing staged attachment err = %v; want FailedPrecondition", err)
 	}
@@ -1431,7 +1419,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	); err != nil {
 		t.Fatalf("seed staged-first and non-staged-second sandbox attachments: %v", err)
 	}
-	activeAttachment := resultRequest("rwrite_bridge_sandbox_consume_active_attachment", &resultDigest)
+	activeAttachment := resultRequest("rwrite_bridge_sandbox_consume_active_attachment")
 	if _, err := store.WriteEvent(context.Background(), activeAttachment); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("WriteEvent sandbox tool result with staged-first and active-second attachments err = %v; want FailedPrecondition", err)
 	}
@@ -1456,20 +1444,16 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	); err != nil {
 		t.Fatalf("stage sandbox attachments: %v", err)
 	}
-	settled, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result", &resultDigest))
+	settled, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result"))
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool result: %v", err)
 	}
-	replayed, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result", &resultDigest))
+	replayed, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result"))
 	if err != nil {
 		t.Fatalf("replay WriteEvent sandbox tool result: %v", err)
 	}
 	if replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("replay status = %s; want duplicate", replayed.GetAck().GetStatus())
-	}
-	changedDigest := strings.Repeat("e", 64)
-	if _, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result", &changedDigest)); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("replay WriteEvent sandbox tool result with changed digest err = %v; want AlreadyExists", err)
 	}
 	var state string
 	var storedResult sql.NullString
@@ -1511,24 +1495,6 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreRejectsMCPHandleOnSandboxToolResult(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_non_mcp_handle", "thr_bridge_non_mcp_handle")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_non_mcp_handle", "bind_bridge_non_mcp_handle", 1, "pod_bridge_non_mcp_handle")
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_non_mcp_handle", "thr_bridge_non_mcp_handle", "bind_bridge_non_mcp_handle", 1, "pod_bridge_non_mcp_handle")
-	materializationHandle := "evt_bridge_non_mcp_handle"
-
-	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_bridge_non_mcp_handle", ModelRequestId: "mreq_bridge_non_mcp_handle",
-		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"evt_bridge_non_mcp_handle","content":[{"type":"text","text":"done"}]}`,
-		McpMaterializationHandle: &materializationHandle,
-	})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteEvent non-MCP result with MCP handle err = %v; want InvalidArgument", err)
-	}
-}
-
 func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_background_consume", "thr_bridge_background_consume")
@@ -1566,12 +1532,6 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *te
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_background_consume_result", ModelRequestId: "mreq_bridge_background_consume",
 		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"accepted"}]}`,
 		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "accepted")},
-	}
-	backgroundDigest := sha256Hex(resultJSON)
-	withDigest := proto.Clone(resultRequest).(*bridgev1.WriteEventRequest)
-	withDigest.SandboxResultDigest = &backgroundDigest
-	if _, err := store.WriteEvent(context.Background(), withDigest); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("WriteEvent background result with sandbox digest err = %v; want FailedPrecondition", err)
 	}
 	settled, err := store.WriteEvent(context.Background(), resultRequest)
 	if err != nil {

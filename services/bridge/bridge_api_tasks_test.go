@@ -59,10 +59,9 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC) }
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_stdin_replay")
-	scope.RequestId = "req_bridge_stdin_replay"
 	request := &bridgev1.SendCommandInputRequest{
 		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID,
-		InputJson: `{"chars":"hello\n"}`,
+		OperationId: "cmdop_bridge_stdin_replay", InputJson: `{"chars":"hello\n"}`,
 	}
 
 	type callResult struct {
@@ -98,12 +97,12 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 		t.Fatalf("settle accepted stdin operation: %v", err)
 	}
 	first := <-firstDone
-	if first.err != nil || first.response.GetWriteSeq() != 1 || first.response.GetResultJson() != terminalJSON {
-		t.Fatalf("first SendCommandInput = response %+v err %v; want sequence 1", first.response, first.err)
+	if first.err != nil || first.response.GetCommitted().GetResultJson() != terminalJSON {
+		t.Fatalf("first SendCommandInput = response %+v err %v; want committed result", first.response, first.err)
 	}
 	replay, err := store.SendCommandInput(context.Background(), request)
-	if err != nil || replay.GetWriteSeq() != 1 || replay.GetResultJson() != terminalJSON {
-		t.Fatalf("replay SendCommandInput = response %+v err %v; want original sequence 1", replay, err)
+	if err != nil || replay.GetDuplicate().GetResultJson() != terminalJSON {
+		t.Fatalf("replay SendCommandInput = response %+v err %v; want original result", replay, err)
 	}
 	var taskSequence int64
 	if err := admin.QueryRowContext(context.Background(), `SELECT stdin_write_sequence FROM session_background_tasks
@@ -133,7 +132,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", terminalJSON)
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, terminalEventID, 2, "agent.tool_result", `{"tool_use_id":"`+toolUseEventID+`"}`)
-	requestID, _, _ := readCommandResultOwnerIdentity(toolUseEventID, taskID, 0)
+	requestID := "cmdop_bridge_poll_consumed"
 	inputJSON, err := marshalBridgeJSON(map[string]any{
 		"task_id": taskID, "max_output_tokens": 0,
 	})
@@ -161,9 +160,9 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	defer cancel()
 	response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).ReadCommandResult(ctx, &bridgev1.ReadCommandResultRequest{
 		Scope:  bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_poll_consumed"),
-		TaskId: taskID, ToolUseEventId: toolUseEventID,
+		TaskId: taskID, ToolUseEventId: toolUseEventID, OperationId: requestID,
 	})
-	if err != nil || response.GetResultJson() != terminalJSON {
+	if err != nil || response.GetCompleted().GetResultJson() != terminalJSON {
 		t.Fatalf("ReadCommandResult consumed replay = response %+v err %v; want stored terminal result", response, err)
 	}
 }
@@ -195,7 +194,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 	go func() {
 		response, err := store.ReadCommandResult(ctx, &bridgev1.ReadCommandResultRequest{
 			Scope:  bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_poll_wait_consumed"),
-			TaskId: taskID, ToolUseEventId: toolUseEventID,
+			TaskId: taskID, ToolUseEventId: toolUseEventID, OperationId: "cmdop_bridge_poll_wait_consumed",
 		})
 		done <- callResult{response: response, err: err}
 	}()
@@ -246,7 +245,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 		t.Fatalf("commit terminal consumption: %v", err)
 	}
 	result := <-done
-	if result.err != nil || result.response.GetResultJson() != terminalJSON {
+	if result.err != nil || result.response.GetCompleted().GetResultJson() != terminalJSON {
 		t.Fatalf("ReadCommandResult waiting consumption = response %+v err %v; want stored terminal result", result.response, result.err)
 	}
 }
@@ -311,9 +310,9 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_cancel_receipt")
-	scope.RequestId = "req_bridge_cancel_receipt"
 	request := &bridgev1.CancelCommandRequest{
-		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID, Reason: "runtime_interrupted",
+		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID,
+		OperationId: "cmdop_bridge_cancel_receipt", Reason: "runtime_interrupted",
 	}
 	type callResult struct {
 		response *bridgev1.CancelCommandResponse
@@ -325,7 +324,7 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 		done <- callResult{response: response, err: err}
 	}()
 
-	requestID := scope.RequestId + ":cancel"
+	requestID := request.GetOperationId()
 	receiptID := backgroundCommandReceiptID(requestID)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -362,11 +361,11 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 		t.Fatalf("settle cancel receipt: %v", err)
 	}
 	first := <-done
-	if first.err != nil || first.response.GetResultJson() != terminalJSON {
+	if first.err != nil || first.response.GetCommitted().GetResultJson() != terminalJSON {
 		t.Fatalf("CancelCommand = response %+v err %v", first.response, first.err)
 	}
 	replay, err := store.CancelCommand(context.Background(), request)
-	if err != nil || replay.GetResultJson() != terminalJSON {
+	if err != nil || replay.GetDuplicate().GetResultJson() != terminalJSON {
 		t.Fatalf("replay CancelCommand = response %+v err %v", replay, err)
 	}
 	var receipts int

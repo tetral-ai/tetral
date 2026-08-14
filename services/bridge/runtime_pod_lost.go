@@ -486,7 +486,7 @@ func settleRuntimePodLostLiveScopeTx(
 	binding runtimeBindingForDelivery,
 	now time.Time,
 ) error {
-	scope := runtimePodLostRepairScope(workspaceID, sessionID, threadID, binding, "settlement")
+	scope := runtimePodLostRepairScope(workspaceID, sessionID, threadID, binding)
 	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
 	if err != nil {
 		return err
@@ -1024,7 +1024,7 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 }
 
 func insertRuntimePodLostRequestEndTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, start runtimeOpenRequestStart, now time.Time) (bool, error) {
-	scope := runtimePodLostRepairScope(workspaceID, sessionID, start.SessionThreadID, binding, start.ModelRequestID)
+	scope := runtimePodLostRepairScope(workspaceID, sessionID, start.SessionThreadID, binding)
 	return insertRuntimeTerminalRequestEndTx(ctx, tx, scope, start, "runtime_pod_lost", "rwrite_runtime_pod_lost_", now)
 }
 
@@ -1187,7 +1187,7 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 			continue
 		}
 
-		parentScope := runtimePodLostRepairScope(workspaceID, sessionID, delivery.ToolUse.SessionThreadID, binding, envelope.DeliveryID)
+		parentScope := runtimePodLostRepairScope(workspaceID, sessionID, delivery.ToolUse.SessionThreadID, binding)
 		if err := requireAgentMailInputTargetTx(ctx, tx, scopeForThread(parentScope, envelope.TargetThreadID)); err != nil {
 			switch status.Code(err) {
 			case codes.FailedPrecondition, codes.NotFound:
@@ -1435,7 +1435,7 @@ type runtimeTerminalToolResult struct {
 }
 
 func insertRuntimeTerminalToolResultTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, terminal runtimeTerminalToolResult, now time.Time) (bool, error) {
-	scope := runtimePodLostRepairScope(workspaceID, sessionID, toolUse.SessionThreadID, binding, toolUse.ModelRequestID)
+	scope := runtimePodLostRepairScope(workspaceID, sessionID, toolUse.SessionThreadID, binding)
 	return insertRuntimeTerminalToolResultForScopeTx(ctx, tx, scope, toolUse, terminal, now)
 }
 
@@ -1727,9 +1727,8 @@ func requestKindFromModelRequestStartProjection(projectionJSON string) (string, 
 	return requestKind, nil
 }
 
-func runtimePodLostRepairScope(workspaceID string, sessionID string, sessionThreadID string, binding runtimeBindingForDelivery, requestIDPart string) *bridgev1.RuntimeScope {
+func runtimePodLostRepairScope(workspaceID string, sessionID string, sessionThreadID string, binding runtimeBindingForDelivery) *bridgev1.RuntimeScope {
 	return &bridgev1.RuntimeScope{
-		RequestId:       "repair_runtime_pod_lost:" + requestIDPart,
 		WorkspaceId:     workspaceID,
 		SessionId:       sessionID,
 		SessionThreadId: sessionThreadID,

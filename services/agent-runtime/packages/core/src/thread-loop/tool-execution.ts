@@ -46,9 +46,9 @@ import type * as ContextLoader from "../context/context-loader.js";
 
 /** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
 export type RuntimeToolExecutionResult =
-  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly attachments?: readonly RuntimeProviderAttachment[]; readonly backgroundTask?: RuntimeToolExecutionBackgroundTask | undefined; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly attachments?: readonly RuntimeProviderAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
-  | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string }
+  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly attachments?: readonly RuntimeProviderAttachment[]; readonly backgroundTask?: RuntimeToolExecutionBackgroundTask | undefined; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number } }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly attachments?: readonly RuntimeProviderAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number } }
+  | { readonly type: "cancelled"; readonly error?: RuntimeFailure }
   | { readonly type: "stale_custody" };
 
 /** Identifies durable background work whose later notification updates the originating tool. */
@@ -113,22 +113,17 @@ export function runtimeToolSettlement(
         type: result.type,
         output: result.output,
         ...(result.serverToolUse === undefined ? {} : { serverToolUse: result.serverToolUse }),
-        ...(result.mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle: result.mcpMaterializationHandle }),
-        ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),
       };
     case "error":
       return {
         type: result.type,
         error: result.error,
         ...(result.serverToolUse === undefined ? {} : { serverToolUse: result.serverToolUse }),
-        ...(result.mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle: result.mcpMaterializationHandle }),
-        ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),
       };
     case "cancelled":
       return {
         type: result.type,
         ...(result.error === undefined ? {} : { error: result.error }),
-        ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),
       };
   }
 }

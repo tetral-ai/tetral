@@ -105,7 +105,6 @@ describe("RuntimePodToolRunner", () => {
         sandbox_process_id: "pid-secret",
       },
     });
-    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
     const runner = makeRunner({ bridge });
 
     const result = await runner.runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }));
@@ -116,7 +115,6 @@ describe("RuntimePodToolRunner", () => {
         text: "status: success\nsummary: created notes/a.txt",
         truncated: false,
       },
-      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
     expect(JSON.stringify(result)).not.toContain("payload");
     expect(JSON.stringify(result)).not.toContain("provider-secret");
@@ -132,12 +130,8 @@ describe("RuntimePodToolRunner", () => {
     );
     expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
     expect(bridge.awaitSandboxExecutionRequests[0]).toEqual(bridge.acceptSandboxExecutionRequests[0]);
-    expect(bridge.acceptSandboxExecutionRequests[0]).toMatchObject({
-      modelToolCallId: "tool_call_1",
+    expect(bridge.acceptSandboxExecutionRequests[0]).toEqual({
       toolUseEventId: "sevt_tool_1",
-      toolName: "Write",
-      inputJson: '{"content":"hello","file_path":"notes/a.txt"}',
-      normalizedInputHash: sha256('{"content":"hello","file_path":"notes/a.txt"}'),
       scope: {
         workspaceId: "wksp_1",
         sessionId: "sesn_1",
@@ -159,7 +153,6 @@ describe("RuntimePodToolRunner", () => {
       message: "memory projection failed",
       retryable: false,
     });
-    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
 
     const result = await makeRunner({ bridge }).runTool(
       toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
@@ -171,7 +164,6 @@ describe("RuntimePodToolRunner", () => {
         code: "runtime_invalid_sequence",
         retryable: false,
       },
-      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
   });
 
@@ -192,7 +184,6 @@ describe("RuntimePodToolRunner", () => {
         },
       });
       bridge.awaitSandboxExecutionResultJson = activationResult;
-      bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
       if (testCase.commandRoute === "send") bridge.sendCommandInputResultJson = activationResult;
       if (testCase.commandRoute === "poll") bridge.readCommandResultResultJson = activationResult;
 
@@ -208,7 +199,6 @@ describe("RuntimePodToolRunner", () => {
           fatal: false,
           sessionId: "sesn_1",
         },
-        ...(testCase.commandRoute !== undefined ? {} : { sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest }),
       });
       const projected = JSON.stringify(result);
       expect(projected).not.toContain("Partial result");
@@ -238,7 +228,6 @@ describe("RuntimePodToolRunner", () => {
       message: "bad retry marker",
       retryable: "yes",
     });
-    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
 
     const result = await makeRunner({ bridge }).runTool(
       toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
@@ -250,7 +239,6 @@ describe("RuntimePodToolRunner", () => {
         message: "Tool route returned malformed retryability.",
         retryable: false,
       },
-      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
   });
 
@@ -500,11 +488,7 @@ describe("RuntimePodToolRunner", () => {
       ...toolRequest("Edit", { file_path: "notes/a.txt", old_string: "line", new_string: "row" }),
       committedMessages: [readMessage],
     });
-    expect(JSON.parse(editBridge.acceptSandboxExecutionRequests[0]?.inputJson ?? "{}")).toEqual({
-      file_path: "notes/a.txt",
-      old_string: "line",
-      new_string: "row",
-    });
+    expect(editBridge.acceptSandboxExecutionRequests[0]).toMatchObject({ toolUseEventId: "sevt_tool_1" });
 
     const writeBridge = new RecordingBridgeClient();
     writeBridge.awaitSandboxExecutionResultJson = JSON.stringify({
@@ -620,7 +604,7 @@ describe("RuntimePodToolRunner", () => {
         ...toolRequest(testCase.tool, testCase.input),
         committedMessages: [readMessage],
       });
-      expect(JSON.parse(bridge.acceptSandboxExecutionRequests[0]?.inputJson ?? "{}"), testCase.tool).not.toHaveProperty("expected");
+      expect(bridge.acceptSandboxExecutionRequests[0], testCase.tool).toEqual(expect.objectContaining({ toolUseEventId: "sevt_tool_1" }));
     }
 
     const stdinBridge = new RecordingBridgeClient();
@@ -640,7 +624,6 @@ describe("RuntimePodToolRunner", () => {
         stdout: { text: "started", truncated: false },
       },
     });
-    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
     bridge.awaitSandboxExecutionTaskId = "task_bridge_1";
     const runner = makeRunner({ bridge });
 
@@ -653,7 +636,6 @@ describe("RuntimePodToolRunner", () => {
         truncated: false,
       },
       backgroundTask: { taskId: "task_bridge_1" },
-      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
   });
 
@@ -663,7 +645,6 @@ describe("RuntimePodToolRunner", () => {
       status: "running",
       result: { task_id: "sevt_tool_1" },
     });
-    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
     bridge.awaitSandboxExecutionTaskId = "sevt_tool_1";
 
     const result = await makeRunner({ bridge }).runTool(toolRequest("Bash", {
@@ -676,8 +657,6 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
     expect(bridge.acceptSandboxExecutionRequests[0]).toMatchObject({
       toolUseEventId: "sevt_tool_1",
-      toolName: "Bash",
-      inputJson: '{"command":"sleep 60","cwd":"/workspace","run_in_background":true,"timeout":120000}',
     });
     expect(result).toMatchObject({
       type: "completed",
@@ -855,9 +834,7 @@ describe("RuntimePodToolRunner", () => {
 
     expect(bridge.sendCommandInputRequests).toEqual([
       expect.objectContaining({
-        scope: expect.objectContaining({
-          requestId: stableTestId("req", "command-followup:sevt_tool_send"),
-        }),
+        operationId: stableTestId("req", "command-followup:sevt_tool_send"),
         taskId: "task_1",
         maxOutputTokens: 123,
         inputJson: '{"chars":"hello","max_output_tokens":123,"session_id":"task_1"}',
@@ -866,9 +843,7 @@ describe("RuntimePodToolRunner", () => {
     ]);
     expect(bridge.readCommandResultRequests).toEqual([
       expect.objectContaining({
-        scope: expect.objectContaining({
-          requestId: stableTestId("req", "command-followup:sevt_tool_poll"),
-        }),
+        operationId: stableTestId("req", "command-followup:sevt_tool_poll"),
         taskId: "task_1",
         maxOutputTokens: 123,
         toolUseEventId: "sevt_tool_poll",
@@ -922,14 +897,14 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.sendCommandInputRequests[0]?.maxOutputTokens).toBe(0);
   });
 
-  test("uses distinct stable request ids for multiple stdin writes in one runtime input", async () => {
+  test("uses distinct explicit operation ids for multiple stdin writes in one runtime input", async () => {
     const bridge = new RecordingBridgeClient();
     const runner = makeRunner({ bridge });
 
     await runner.runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "first" }, "sevt_tool_send_1"));
     await runner.runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "second" }, "sevt_tool_send_2"));
 
-    expect(bridge.sendCommandInputRequests.map((request) => request.scope?.requestId)).toEqual([
+    expect(bridge.sendCommandInputRequests.map((request) => request.operationId)).toEqual([
       stableTestId("req", "command-followup:sevt_tool_send_1"),
       stableTestId("req", "command-followup:sevt_tool_send_2"),
     ]);
@@ -986,12 +961,19 @@ describe("RuntimePodToolRunner", () => {
 
     expect(result.type).toBe("completed");
     expect(bridge.runMemoryRequests).toEqual([
-      expect.objectContaining({
+      {
         toolUseEventId: "sevt_tool_1",
-        operation: "create",
-        inputJson: '{"action":"create","content":"one","path":"notes/todo.md"}',
-        normalizedInputHash: sha256('{"action":"create","content":"one","path":"notes/todo.md"}'),
-      }),
+        scope: {
+          workspaceId: "wksp_1",
+          sessionId: "sesn_1",
+          sessionThreadId: "thrd_1",
+          binding: {
+            bindingId: "bind_1",
+            bindingGeneration: 42,
+            targetPodUid: "pod_1",
+          },
+        },
+      },
     ]);
   });
 
@@ -1271,7 +1253,6 @@ describe("RuntimePodToolRunner", () => {
       resultText: "mcp result",
       attachments: [],
       errorKind: undefined,
-      materializationHandle: "evt_mcp_materialized",
     };
     const runner = makeRunner({ mcp });
 
@@ -1280,18 +1261,13 @@ describe("RuntimePodToolRunner", () => {
     expect(result).toEqual({
       type: "completed",
       output: { text: "mcp result", truncated: false },
-      mcpMaterializationHandle: "evt_mcp_materialized",
     });
     expect(mcp.runMcpToolRequests).toEqual([
       {
-        requestId: `req_${sha256("tool:mreq_1:tool_call_1").slice(0, 32)}`,
         workspaceId: "wksp_1",
         sessionId: "sesn_1",
         sessionThreadId: "thrd_1",
         toolUseEventId: "sevt_tool_1",
-        mcpServerName: "github",
-        toolName: "github_search",
-        inputJson: '{"query":"issues"}',
         bindingId: "bind_1",
         bindingGeneration: 42,
         runtimeBindingToken: "binding-token",
@@ -1299,23 +1275,16 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
-  test("does not expose an unmaterialized MCP completion as success", async () => {
+  test("accepts a completed MCP result without a cross-service result alias", async () => {
     const mcp = new RecordingMcpConnectorClient();
     mcp.runMcpToolResponse = {
       status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
       resultText: "must not reach the model",
       attachments: [],
       errorKind: undefined,
-      materializationHandle: undefined,
     };
 
-    await expect(makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }))).resolves.toMatchObject({
-      type: "error",
-      error: {
-        retryable: false,
-        message: "The MCP tool outcome could not be confirmed. Check the external service before retrying.",
-      },
-    });
+    await expect(makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }))).resolves.toMatchObject({ type: "completed" });
     expect(mcp.runMcpToolRequests).toHaveLength(1);
   });
 
@@ -1353,7 +1322,6 @@ describe("RuntimePodToolRunner", () => {
       status: "running",
       result: { task_id: "task_contract", stdout: { text: `COMMAND_HEAD${"x".repeat(20_000)}COMMAND_TAIL`, truncated: false } },
     });
-    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
     bridge.awaitSandboxExecutionTaskId = "task_contract";
     const commandResult = await makeRunner({ bridge }).runTool(toolRequest("exec_command", { cmd: "build" }));
 
@@ -1382,7 +1350,6 @@ describe("RuntimePodToolRunner", () => {
       status: "success",
       result: { content: "\u0001".repeat(87_380) },
     });
-    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
     const sleep = new ControlledSleep();
 
     const result = await makeRunner({ bridge, sleep: sleep.sleep }).runTool(
@@ -1395,7 +1362,6 @@ describe("RuntimePodToolRunner", () => {
         message: "Tool result exceeds the 512 KiB model-visible output limit.",
         retryable: false,
       },
-      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
     expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
     expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
@@ -1409,7 +1375,6 @@ describe("RuntimePodToolRunner", () => {
       resultText: "invalid repository",
       attachments: [],
       errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
-      materializationHandle: "evt_mcp_tool_error",
     };
     const runner = makeRunner({ mcp });
 
@@ -1432,7 +1397,6 @@ describe("RuntimePodToolRunner", () => {
       resultText: "tool returned an image error",
       attachments: [{ attachmentRef: "att_mcp_error", mime: "image/png", sizeBytes: 3, suggestedFilename: "error.png" }],
       errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
-      materializationHandle: "evt_mcp_tool_error_attachment",
     };
     const runner = makeRunner({ bridge, mcp });
 
@@ -1467,7 +1431,6 @@ describe("RuntimePodToolRunner", () => {
         attachments: [],
         errorKind: response.errorKind,
         retryStatus: response.retryStatus,
-        materializationHandle: "evt_mcp_infrastructure_failure",
       };
       const runner = makeRunner({ mcp });
 
@@ -1479,12 +1442,11 @@ describe("RuntimePodToolRunner", () => {
           retryable: false,
           message: "MCP tool execution is unavailable.",
         }),
-        mcpMaterializationHandle: "evt_mcp_infrastructure_failure",
       });
     }
   });
 
-  test("projects pre-materialization MCP uncertainty without a discard loop", async () => {
+  test("projects pre-commit MCP uncertainty without a discard loop", async () => {
     for (const testCase of [
       {
         errorKind: McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT,
@@ -1542,7 +1504,6 @@ describe("RuntimePodToolRunner", () => {
       resultText: "image",
       attachments: [{ attachmentRef: "att_mcp_plot", mime: "image/png", sizeBytes: 3, suggestedFilename: "plot.png" }],
       errorKind: undefined,
-      materializationHandle: "evt_mcp_attachment",
     };
     const runner = makeRunner({ bridge, mcp });
 
@@ -2993,8 +2954,6 @@ class RecordingBridgeClient {
   childInterruptOutcome = ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_COMPLETED;
   childInterruptErrorCode: string | undefined;
   awaitSandboxExecutionResultJson = '{"status":"success","result":{"text":"ok"}}';
-  awaitSandboxExecutionResultDigest = sha256(this.awaitSandboxExecutionResultJson);
-  awaitSandboxExecutionBackgroundTaskStarted = false;
   awaitSandboxExecutionTaskId = "";
   sendCommandInputResultJson = '{"status":"accepted"}';
   readCommandResultResultJson = '{"status":"running","task_id":"task_1"}';
@@ -3110,7 +3069,7 @@ class RecordingBridgeClient {
       return grpcCall();
     }
     callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      committed: {},
     });
     return grpcCall();
   }
@@ -3123,10 +3082,10 @@ class RecordingBridgeClient {
       return grpcCall();
     }
     callback(null, {
-      resultJson: this.awaitSandboxExecutionResultJson,
-      resultDigest: this.awaitSandboxExecutionResultDigest,
-      backgroundTaskStarted: this.awaitSandboxExecutionBackgroundTaskStarted,
-      taskId: this.awaitSandboxExecutionTaskId,
+      completed: {
+        resultJson: this.awaitSandboxExecutionResultJson,
+        taskId: this.awaitSandboxExecutionTaskId,
+      },
     });
     return grpcCall();
   }
@@ -3142,8 +3101,7 @@ class RecordingBridgeClient {
     const resultJson = this.runMemoryResultJsons.shift() ?? this.runMemoryResultJson;
     const respond = (): void => {
       callback(null, {
-        ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-        resultJson,
+        committed: { resultJson },
       });
       this.afterRunMemoryResponse?.(this.runMemoryRequests.length);
     };
@@ -3172,9 +3130,7 @@ class RecordingBridgeClient {
       return grpcCall();
     }
     callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: this.sendCommandInputResultJson,
-      writeSeq: this.sendCommandInputRequests.length,
+      committed: { resultJson: this.sendCommandInputResultJson },
     });
     return grpcCall();
   }
@@ -3190,8 +3146,7 @@ class RecordingBridgeClient {
       return grpcCall();
     }
     callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: this.readCommandResultResultJson,
+      completed: { resultJson: this.readCommandResultResultJson },
     });
     return grpcCall();
   }
@@ -3199,8 +3154,7 @@ class RecordingBridgeClient {
   private cancelCommand(request: CancelCommandRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.cancelCommandRequests.push(request);
     callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: '{"status":"cancelled"}',
+      committed: { resultJson: '{"status":"cancelled"}' },
     });
     return grpcCall();
   }
@@ -3635,7 +3589,6 @@ class RecordingMcpConnectorClient {
     attachments: [],
     errorKind: undefined,
     retryStatus: undefined,
-    materializationHandle: "evt_mcp_materialized_default",
   };
 
   client(): Pick<McpConnectorServiceClient, "runMcpTool"> {

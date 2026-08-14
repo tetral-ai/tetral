@@ -80,18 +80,16 @@ export function taskNotificationDeclarationDigest(request: Pick<CommitTaskNotifi
 
 export function writeEventDeclarationDigest(request: Pick<WriteEventRequest,
   "scope" | "runtimeWriteId" | "modelRequestId" | "eventType" | "payloadJson" |
-  "serverToolUse" | "assistantPartAppend" | "toolSettlement" | "mcpMaterializationHandle" |
-  "sandboxResultDigest" | "contextThroughMessageSequence" | "requestKind"
+  "serverToolUse" | "assistantPartAppend" | "toolSettlement" |
+  "contextThroughMessageSequence" | "requestKind"
 >): string {
   const payload = canonicalRunToolJSONWithoutObjectFields(request.payloadJson, internalProviderPayloadFields);
   const declaration: Record<string, unknown> = {
     assistant_part_append: canonicalAssistantAppend(request.assistantPartAppend),
     event_type: request.eventType,
-    mcp_materialization_handle: nullableString(request.mcpMaterializationHandle),
     model_request_id: nullableString(request.modelRequestId),
     operation_kind: "write_event",
     runtime_write_id: request.runtimeWriteId,
-    sandbox_result_digest: nullableString(request.sandboxResultDigest),
     server_tool_use: request.serverToolUse === undefined ? null : {
       web_fetch_requests: request.serverToolUse.webFetchRequests,
       web_search_requests: request.serverToolUse.webSearchRequests,

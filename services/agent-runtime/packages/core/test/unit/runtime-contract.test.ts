@@ -430,9 +430,9 @@ describe("runtime boundary contracts", () => {
       writeId: "rwrite_projection",
       modelRequestId: "mreq_projection",
     };
-    for (const { event, mcpMaterializationHandle } of [
+    for (const { event } of [
       { event: { type: "agent.tool_result" as const, tool_use_id: "sevt_tool", content: [{ type: "text" as const, text: "done" }] } },
-      { event: { type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", content: [{ type: "text" as const, text: "done" }] }, mcpMaterializationHandle: "sevt_mcp" },
+      { event: { type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", content: [{ type: "text" as const, text: "done" }] } },
       { event: { type: "agent.message" as const, content: [{ type: "text" as const, text: "answer" }] } },
     ]) {
       const envelope = {
@@ -446,7 +446,6 @@ describe("runtime boundary contracts", () => {
             outcome: { type: "completed" as const, output: { text: "done", truncated: false } },
           },
         }),
-        ...(mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle }),
       };
       expect(SessionEventEnvelopeSchema.safeParse(envelope).success).toBe(true);
       expect(SessionEventEnvelopeSchema.safeParse({ ...envelope, modelRequestId: undefined }).success).toBe(false);

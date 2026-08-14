@@ -27,7 +27,6 @@ interface FixtureInput {
   readonly modelToolCallId: string;
   readonly toolUseEventId: string;
   readonly resultJson: string;
-  readonly resultDigest: string;
 }
 
 const inputPath = process.argv[2];
@@ -42,10 +41,10 @@ const bridgeClient = {
     callback: (error: Error | null, response: unknown) => void,
   ) => {
     callback(null, {
-      resultJson: input.resultJson,
-      resultDigest: input.resultDigest,
-      backgroundTaskStarted: false,
-      taskId: "",
+      completed: {
+        resultJson: input.resultJson,
+        taskId: "",
+      },
     });
     return { cancel() {} };
   },
@@ -129,7 +128,6 @@ await writer.append({
   modelRequestId: input.modelRequestId,
   event,
   toolSettlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
-  sandboxResultDigest: input.resultDigest,
 });
 if (captured?.toolSettlement?.error === undefined) {
   throw new Error("Runtime Bridge adapter did not declare the Sandbox Tool error");

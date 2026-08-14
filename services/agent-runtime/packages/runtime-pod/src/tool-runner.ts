@@ -265,19 +265,14 @@ export class RuntimePodToolRunner {
   /** Durably registers one Sandbox execution before any result wait begins. */
   async acceptSandboxExecution(request: RuntimeSandboxExecutionRequest): Promise<RuntimeSandboxExecutionAcceptanceResult> {
     const scope = this.scope(request);
-    const inputJson = stableJsonStringify(request.input);
     const durableRequest: AcceptSandboxExecutionRequest = {
       scope,
       toolUseEventId: request.toolUseEventId,
-      modelToolCallId: request.modelToolCallId,
-      normalizedInputHash: normalizedInputHash(inputJson),
-      toolName: request.entry.name,
-      inputJson,
     };
     for (;;) {
       try {
         const response = await acceptSandboxExecution(this.bridgeClient, durableRequest, await this.metadata());
-        if (!bridgeAckAccepted(response.ack?.status)) {
+        if (response.committed === undefined && response.duplicate === undefined) {
           return toolFailure(request, "Bridge rejected the sandbox tool call.", true);
         }
         return { type: "accepted" };
@@ -293,28 +288,21 @@ export class RuntimePodToolRunner {
   /** Waits for one already-accepted Sandbox execution without re-registering it. */
   async awaitSandboxExecution(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     const scope = this.scope(request);
-    const inputJson = stableJsonStringify(request.input);
     const durableRequest: AwaitSandboxExecutionRequest = {
       scope,
       toolUseEventId: request.toolUseEventId,
-      modelToolCallId: request.modelToolCallId,
-      normalizedInputHash: normalizedInputHash(inputJson),
-      toolName: request.entry.name,
-      inputJson,
     };
     for (;;) {
       try {
         const response = await awaitSandboxExecution(this.bridgeClient, durableRequest, await this.metadata(), request.abortSignal);
-        if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
-          return withSandboxResultDigest(
-            await this.mediaResultToAttachment(request, response.resultJson, response.resultDigest),
-            response.resultDigest,
-          );
+        const completed = response.completed;
+        if (completed === undefined) {
+          return { type: "stale_custody" };
         }
-        return withSandboxResultDigest(
-          resultJsonToExecutionResult(request, withBackgroundTask(response.resultJson, response.taskId), response.resultDigest),
-          response.resultDigest,
-        );
+        if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
+          return await this.mediaResultToAttachment(request, completed.resultJson);
+        }
+        return resultJsonToExecutionResult(request, withBackgroundTask(completed.resultJson, completed.taskId));
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Sandbox tool execution was cancelled.");
@@ -333,11 +321,10 @@ export class RuntimePodToolRunner {
   private async mediaResultToAttachment(
     request: RuntimeToolExecutionRequest,
     resultJson: string,
-    resultDigest: string,
   ): Promise<RuntimeToolExecutionResult> {
     const parsed = parseResultJson(resultJson);
     if (!isRecord(parsed) || stringField(parsed, "status") !== "success") {
-      return resultJsonToExecutionResult(request, resultJson, resultDigest);
+      return resultJsonToExecutionResult(request, resultJson);
     }
     const result = recordField(parsed, "result");
     const source = isRecord(result) ? result : parsed;
@@ -361,7 +348,6 @@ export class RuntimePodToolRunner {
       return {
         type: "completed",
         output: capturedToolText(lines.join("\n")),
-        sandboxResultDigest: resultDigest,
         attachments: [providerAttachmentFromBridge({
           attachmentRef,
           mime,
@@ -378,7 +364,7 @@ export class RuntimePodToolRunner {
     }
     if (mime === undefined) {
       if (request.entry.route.kind === "sandbox" && request.entry.route.helperSubcommand === "read") {
-        return resultJsonToExecutionResult(request, resultJson, resultDigest);
+        return resultJsonToExecutionResult(request, resultJson);
       }
       return toolFailure(request, `${request.entry.name} returned malformed media payload.`, false);
     }
@@ -393,36 +379,36 @@ export class RuntimePodToolRunner {
     }
     const chars = stringField(request.input, "chars");
     const maxOutputTokens = positiveIntegerField(request.input, "max_output_tokens") ?? 0;
-    const commandScope = {
-      ...scope,
-      requestId: stableId("req", `command-followup:${request.toolUseEventId}`),
-    };
+    const operationId = stableId("req", `command-followup:${request.toolUseEventId}`);
     for (;;) {
       try {
         const metadata = await this.metadata();
         if (chars === undefined || chars.length === 0) {
           const response = await readCommandResult(this.bridgeClient, {
-            scope: commandScope,
+            scope,
             taskId,
+            operationId,
             maxOutputTokens,
             toolUseEventId: request.toolUseEventId,
           }, metadata, request.abortSignal);
-          if (!bridgeAckAccepted(response.ack?.status)) {
+          if (response.completed === undefined) {
             return toolFailure(request, "Bridge rejected the command poll.", true);
           }
-          return resultJsonToExecutionResult(request, response.resultJson);
+          return resultJsonToExecutionResult(request, response.completed.resultJson);
         }
         const response = await sendCommandInput(this.bridgeClient, {
-          scope: commandScope,
+          scope,
           taskId,
+          operationId,
           maxOutputTokens,
           inputJson: stableJsonStringify(request.input),
           toolUseEventId: request.toolUseEventId,
         }, metadata, request.abortSignal);
-        if (!bridgeAckAccepted(response.ack?.status)) {
+        const applied = response.committed ?? response.duplicate;
+        if (applied === undefined) {
           return toolFailure(request, "Bridge rejected the command input.", true);
         }
-        return resultJsonToExecutionResult(request, response.resultJson);
+        return resultJsonToExecutionResult(request, applied.resultJson);
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Command task was cancelled.");
@@ -440,13 +426,9 @@ export class RuntimePodToolRunner {
       return toolFailure(request, `Bridge tool route ${request.entry.route.operation} is not installed.`, false);
     }
     const scope = this.scope(request);
-    const inputJson = stableJsonStringify(request.input);
     const runMemoryRequest: RunMemoryRequest = {
       scope,
       toolUseEventId: request.toolUseEventId,
-      normalizedInputHash: normalizedInputHash(inputJson),
-      operation: stringField(request.input, "action") ?? "",
-      inputJson,
     };
     while (true) {
       try {
@@ -454,10 +436,11 @@ export class RuntimePodToolRunner {
         const metadata = await this.metadata();
         throwIfToolRouteAborted(request.abortSignal);
         const response = await runMemory(this.bridgeClient, runMemoryRequest, metadata, request.abortSignal);
-        if (!bridgeAckAccepted(response.ack?.status)) {
+        const applied = response.committed ?? response.duplicate;
+        if (applied === undefined) {
           return toolFailure(request, "Bridge rejected the memory tool call.", true);
         }
-        return resultJsonToExecutionResult(request, response.resultJson);
+        return resultJsonToExecutionResult(request, applied.resultJson);
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Memory tool execution was cancelled.");
@@ -526,32 +509,18 @@ export class RuntimePodToolRunner {
     if (mcpServerName.length === 0) {
       return toolFailure(request, "MCP tool route is missing mcp_server_name.", false);
     }
-    const scope = this.scope(request);
-    const inputJson = stableJsonStringify(request.input);
     try {
       const response = await runMcpTool(this.mcpConnectorClient, {
-        requestId: scope.requestId,
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
         sessionThreadId: request.sessionThreadId,
         toolUseEventId: request.toolUseEventId,
-        mcpServerName,
-        toolName: request.entry.name,
-        inputJson,
         bindingId: request.bindingId,
         bindingGeneration: request.bindingGeneration,
         runtimeBindingToken: request.runtimeBindingToken,
       }, await this.metadata(), request.abortSignal);
       if (response.errorKind === McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST) {
         return { type: "stale_custody" };
-      }
-      const materializationHandle = response.materializationHandle;
-      if (materializationHandle === undefined || materializationHandle.length === 0) {
-        return toolFailure(
-          request,
-          modelVisibleMcpRuntimeFailure(response.errorKind),
-          false,
-        );
       }
       if (response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED) {
         const attachments = response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment));
@@ -562,7 +531,6 @@ export class RuntimePodToolRunner {
         return {
           ...completed,
           ...(attachments.length > 0 ? { attachments } : {}),
-          mcpMaterializationHandle: materializationHandle,
         };
       }
       const attachments = response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR
@@ -579,7 +547,6 @@ export class RuntimePodToolRunner {
         undefined,
         attachments,
         undefined,
-        materializationHandle,
       );
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
@@ -1325,7 +1292,6 @@ export class RuntimePodToolRunner {
 
   private scope(request: RuntimeSandboxExecutionRequest): RuntimeScope {
     return {
-      requestId: stableId("req", `tool:${request.modelRequestId}:${request.modelToolCallId}`),
       workspaceId: request.workspaceId,
       sessionId: request.sessionId,
       sessionThreadId: request.sessionThreadId,
@@ -1945,14 +1911,13 @@ function bridgeAckAccepted(status: BridgeWriteStatus | undefined): boolean {
 function resultJsonToExecutionResult(
   request: RuntimeToolExecutionRequest,
   resultJson: string,
-  sandboxResultDigest?: string,
 ): RuntimeToolExecutionResult {
   const parsed = parseResultJson(resultJson);
   if (parsed === undefined) {
     return toolFailure(request, "Tool route returned malformed result JSON.", false);
   }
   const visible = filterVisibleToolResult(request, parsed);
-  const activationFailure = sandboxActivationExhaustionResult(request, visible, sandboxResultDigest);
+  const activationFailure = sandboxActivationExhaustionResult(request, visible);
   if (activationFailure !== undefined) {
     return activationFailure;
   }
@@ -1961,10 +1926,7 @@ function resultJsonToExecutionResult(
     ? visible.retryable
     : undefined;
   if (retryableValue !== undefined && typeof retryableValue !== "boolean") {
-    return {
-      ...toolFailure(request, "Tool route returned malformed retryability.", false),
-      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
-    };
+    return toolFailure(request, "Tool route returned malformed retryability.", false);
   }
   if (status === "success" || status === "completed" || status === "running" || status === "accepted") {
     const backgroundTask = status === "running" ? backgroundTaskFromResult(visible) : undefined;
@@ -1976,10 +1938,7 @@ function resultJsonToExecutionResult(
       });
     } catch (error) {
       if (error instanceof ToolResultContractError) {
-        return {
-          ...toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false),
-          ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
-        };
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       throw error;
     }
@@ -1987,14 +1946,12 @@ function resultJsonToExecutionResult(
       type: "completed",
       output,
       ...(backgroundTask !== undefined ? { backgroundTask } : {}),
-      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
   }
   if (status === "cancelled" || status === "expired") {
     return {
       type: "cancelled",
       error: runtimeFailure(request, resultErrorMessage(request, visible, `Tool route ${status}.`), false),
-      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
   }
   return {
@@ -2004,7 +1961,6 @@ function resultJsonToExecutionResult(
       resultErrorMessage(request, visible, "Tool route failed."),
       typeof retryableValue === "boolean" ? retryableValue : status === "runtime_error" || status === "failed",
     ),
-    ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
   };
 }
 
@@ -2015,7 +1971,6 @@ function resultJsonToExecutionResult(
 function sandboxActivationExhaustionResult(
   request: RuntimeToolExecutionRequest,
   parsed: RuntimeJsonValue,
-  sandboxResultDigest?: string,
 ): RuntimeToolExecutionResult | undefined {
   if (request.entry.route.kind !== "sandbox" || !isRecord(parsed)) {
     return undefined;
@@ -2024,17 +1979,7 @@ function sandboxActivationExhaustionResult(
   if (!isRecord(error) || stringField(error, "kind") !== "sandbox_activation_attempts_exhausted") {
     return undefined;
   }
-  return {
-    ...toolFailure(request, "The requested operation could not be completed.", false),
-    ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
-  };
-}
-
-function withSandboxResultDigest(
-  result: RuntimeToolExecutionResult,
-  sandboxResultDigest: string,
-): RuntimeToolExecutionResult {
-  return result.type === "stale_custody" ? result : { ...result, sandboxResultDigest };
+  return toolFailure(request, "The requested operation could not be completed.", false);
 }
 
 function backgroundTaskFromResult(parsed: RuntimeJsonValue): { readonly taskId: string } | undefined {
@@ -2309,14 +2254,12 @@ function toolFailure(
   retryStatus?: ReturnType<typeof runtimeRetryStatusFromMcp>,
   attachments?: readonly RuntimeProviderAttachment[],
   serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
-  mcpMaterializationHandle?: string,
 ): Extract<RuntimeToolExecutionResult, { readonly type: "error" }> {
   return {
     type: "error",
     error: runtimeFailure(request, message, retryable, retryStatus),
     ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     ...(serverToolUse !== undefined ? { serverToolUse } : {}),
-    ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
   };
 }
 
@@ -2401,10 +2344,6 @@ function mediaAttachmentHelper(helperSubcommand: string): boolean {
 function filenameFromPath(value: string): string {
   const parts = value.split(/[\\/]/).filter((part) => part.length > 0);
   return parts.at(-1) ?? "image";
-}
-
-function normalizedInputHash(inputJson: string): string {
-  return createHash("sha256").update(inputJson).digest("hex");
 }
 
 function stableJsonStringify(value: RuntimeJsonValue): string {

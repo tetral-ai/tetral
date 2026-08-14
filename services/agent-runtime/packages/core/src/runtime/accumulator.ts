@@ -111,8 +111,6 @@ export interface ProviderStreamAccumulatorWriter {
       | { readonly toolSettlement: RuntimeToolSettlementDeclaration },
     modelRequestId?: string,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
-    mcpMaterializationHandle?: string,
-    sandboxResultDigest?: string,
   ) => Promise<SessionEventWriterAppendResult>;
   readonly commitInternalToolRepair: (
     repair: RuntimeInternalToolRepairCommit,
@@ -419,8 +417,6 @@ export class ProviderStreamAccumulator {
       { toolSettlement: declaration },
       this.options.modelRequestId,
       settlement.type === "completed" || settlement.type === "error" ? settlement.serverToolUse : undefined,
-      settlement.type === "completed" || settlement.type === "error" ? settlement.mcpMaterializationHandle : undefined,
-      settlement.sandboxResultDigest,
     );
     if (!result.ok) return { ok: false, events: [], error: eventWriterFailure(result.error) };
     if (result.declaration?.applicationDisposition !== "current_custody") return declarationApplicationFailure(result.writeId);

@@ -390,14 +390,12 @@ message WebRef {
 }
 
 message RunMcpToolRequest {
-  string request_id = 1;
+  reserved 1, 6, 7, 8;
+  reserved "request_id", "mcp_server_name", "tool_name", "input_json";
   string workspace_id = 2;
   string session_id = 3;
   string session_thread_id = 4;
   string tool_use_event_id = 5;
-  string mcp_server_name = 6;
-  string tool_name = 7;
-  string input_json = 8;
   string binding_id = 9;
   int64 binding_generation = 10;
   string runtime_binding_token = 11;
@@ -409,7 +407,8 @@ message RunMcpToolResponse {
   repeated McpAttachmentRef attachments = 3;
   optional McpErrorKind error_kind = 4;
   optional McpRetryStatus retry_status = 5;
-  optional string materialization_handle = 6;
+  reserved 6;
+  reserved "materialization_handle";
 }
 
 message McpAttachmentRef {
