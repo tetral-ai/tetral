@@ -46,6 +46,7 @@ func TestSandboxActivationRunnerLogsResolutionAndDurableAttemptOutcome(t *testin
 	for _, want := range []string{
 		`"event":"sandbox_activation_resolved"`, `"resolution":"owned_found"`, `"provider.state":"started"`,
 		`"event":"sandbox_activation_attempt_completed"`, `"outcome":"success"`,
+		`"queue.attempt.count":1`, `"queue.attempt.max":5`,
 		`"workspace.id":"ws_lifecycle"`, `"session.id":"sesn_lifecycle"`, `"sandbox.id":"sbox_lifecycle"`,
 		`"operation.id":"sop_activation"`, `"job.id":"qjob_activation"`, `"provider.name":"daytona"`, `"duration.ms":`,
 	} {
@@ -66,25 +67,27 @@ func TestSandboxActivationRunnerLogsResolutionAndDurableAttemptOutcome(t *testin
 
 func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T) {
 	tests := []struct {
-		name            string
-		resolution      ProviderOutcome[ActivationResolution]
-		wantTransition  string
-		wantLevel       string
-		wantOutcome     string
-		wantErrorFields bool
+		name           string
+		resolution     ProviderOutcome[ActivationResolution]
+		wantTransition string
+		wantLevel      string
+		wantOutcome    string
+		wantErrorCode  string
 	}{
 		{
 			name: "retry", resolution: ProviderOutcome[ActivationResolution]{
 				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderRetryable, ErrorKind: "provider_transition_in_progress",
 			},
 			wantTransition: "retry:qjob_activation:provider_transition_in_progress", wantLevel: "INFO", wantOutcome: "retry",
+			wantErrorCode: "provider_transition_in_progress",
 		},
 		{
 			name: "terminal failure", resolution: ProviderOutcome[ActivationResolution]{
 				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderTerminal,
 				ErrorKind: "provider_activation_rejected", SafeMessage: "provider rejected activation",
 			},
-			wantTransition: "dead:qjob_activation:provider_activation_rejected", wantLevel: "ERROR", wantOutcome: "terminal_failure", wantErrorFields: true,
+			wantTransition: "dead:qjob_activation:provider_activation_rejected", wantLevel: "ERROR", wantOutcome: "terminal_failure",
+			wantErrorCode: "provider_activation_rejected",
 		},
 	}
 	for _, test := range tests {
@@ -110,19 +113,21 @@ func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T
 				t.Fatalf("Queue transitions = %v; want %q", queueClient.transitions, test.wantTransition)
 			}
 			got := logs.String()
-			for _, want := range []string{`"level":"` + test.wantLevel + `"`, `"event":"sandbox_activation_attempt_completed"`, `"outcome":"` + test.wantOutcome + `"`} {
+			for _, want := range []string{
+				`"level":"` + test.wantLevel + `"`, `"event":"sandbox_activation_attempt_completed"`,
+				`"outcome":"` + test.wantOutcome + `"`, `"queue.attempt.count":1`, `"queue.attempt.max":5`,
+				`"error.class":"sandbox_activation_error"`, `"error.code":"` + test.wantErrorCode + `"`,
+			} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("attempt log missing %s: %s", want, got)
 				}
 			}
-			if test.wantErrorFields {
-				for _, want := range []string{`"error.class":"sandbox_activation_error"`, `"error.code":"provider_activation_rejected"`, `"error.message_safe":"sandbox activation failed"`} {
-					if !strings.Contains(got, want) {
-						t.Fatalf("terminal log missing %s: %s", want, got)
-					}
-				}
-			} else if strings.Contains(got, `"error.`) {
-				t.Fatalf("retry log contains error fields: %s", got)
+			wantSafeMessage := "sandbox activation will be retried"
+			if test.wantOutcome == "terminal_failure" {
+				wantSafeMessage = "sandbox activation failed"
+			}
+			if !strings.Contains(got, `"error.message_safe":"`+wantSafeMessage+`"`) {
+				t.Fatalf("attempt log missing safe message %q: %s", wantSafeMessage, got)
 			}
 		})
 	}

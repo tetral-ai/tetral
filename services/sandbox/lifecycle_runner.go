@@ -164,7 +164,10 @@ func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *q
 	}()
 	ctx = workCtx
 	ctx = withActivationAttemptStarted(ctx, attemptStarted)
-	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	jobIdentity := SandboxLifecycleJob{
+		JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId(),
+		AttemptCount: int(queueJob.GetAttemptCount()), MaxAttempts: int(queueJob.GetMaxAttempts()),
+	}
 	defer func() {
 		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
 			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindSandboxActivate, writer)
@@ -443,7 +446,9 @@ func (r *SandboxActivationJobRunner) retry(ctx context.Context, job SandboxLifec
 		ErrorKind: kind, ErrorMessage: "sandbox activation will be retried",
 	}))
 	if err == nil {
-		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "retry", "", "")
+		// The Queue owns attempt custody and budget. Observability preserves the
+		// normalized cause and the leased N/M values without affecting Retry.
+		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "retry", kind, "sandbox activation will be retried")
 	}
 	return err
 }

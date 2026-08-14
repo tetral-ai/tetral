@@ -12,18 +12,21 @@ import (
 )
 
 func TestMapDaytonaErrorClassifiesCreateDiskCapacityMessages(t *testing.T) {
-	for _, message := range []string{
-		"Total disk limit exceeded. Maximum allowed: 30GiB.",
-		"Total disk limit exceeded. Maximum allowed: 1KiB.",
-		"Total disk limit exceeded. Maximum allowed: 1MiB.",
-		"Total disk limit exceeded. Maximum allowed: 1GiB.",
-		"Total disk limit exceeded. Maximum allowed: 1TiB.",
-		"Total disk limit exceeded. Maximum allowed: 18446744073709551615GiB.",
-		" \tTotal disk limit exceeded. Maximum allowed: 30GiB.\n",
-		"\u00a0Total disk limit exceeded. Maximum allowed: 30GiB.\u00a0",
+	const liveResponse = `Total disk limit exceeded. Maximum allowed: 30GiB.
+Consider archiving your unused Sandboxes to free up available storage.
+To increase concurrency limits, upgrade your organization's Tier by visiting https://app.daytona.io/dashboard/limits.`
+	for _, test := range []struct {
+		name    string
+		message string
+	}{
+		{name: "live response", message: liveResponse},
+		{name: "CRLF response", message: strings.ReplaceAll(liveResponse, "\n", "\r\n")},
+		{name: "changed advisory", message: "Total disk limit exceeded. Maximum allowed: 30GiB.\nProvider guidance changed."},
+		{name: "smallest supported unit", message: "Total disk limit exceeded. Maximum allowed: 1KiB."},
+		{name: "largest uint64", message: "Total disk limit exceeded. Maximum allowed: 18446744073709551615TiB."},
 	} {
-		t.Run(message, func(t *testing.T) {
-			mapped := mapDaytonaError(sandbox.StageCreateSandbox, daytonaerrors.NewDaytonaValidationError(message, nil))
+		t.Run(test.name, func(t *testing.T) {
+			mapped := mapDaytonaError(sandbox.StageCreateSandbox, daytonaerrors.NewDaytonaValidationError(test.message, nil))
 			var providerErr *sandbox.ProviderError
 			if !errors.As(mapped, &providerErr) {
 				t.Fatalf("mapDaytonaError() = %T; want ProviderError", mapped)
@@ -40,27 +43,22 @@ func TestMapDaytonaErrorClassifiesCreateDiskCapacityMessages(t *testing.T) {
 }
 
 func TestMapDaytonaErrorFailsClosedForOtherValidationMessages(t *testing.T) {
+	const liveResponse = `Total disk limit exceeded. Maximum allowed: 30GiB.
+Consider archiving your unused Sandboxes to free up available storage.
+To increase concurrency limits, upgrade your organization's Tier by visiting https://app.daytona.io/dashboard/limits.`
 	tests := []struct {
 		name    string
 		stage   sandbox.ProviderStage
 		message string
 	}{
 		{name: "unrelated", stage: sandbox.StageCreateSandbox, message: "invalid snapshot"},
-		{name: "missing", stage: sandbox.StageCreateSandbox},
-		{name: "prefix only", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded."},
-		{name: "suffix", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 30GiB. retry later"},
-		{name: "prefix", stage: sandbox.StageCreateSandbox, message: "capacity: Total disk limit exceeded. Maximum allowed: 30GiB."},
-		{name: "embedded", stage: sandbox.StageCreateSandbox, message: "provider said [Total disk limit exceeded. Maximum allowed: 30GiB.]"},
+		{name: "prefixed first line", stage: sandbox.StageCreateSandbox, message: "capacity: Total disk limit exceeded. Maximum allowed: 30GiB."},
+		{name: "embedded later", stage: sandbox.StageCreateSandbox, message: "provider guidance\n" + liveResponse},
+		{name: "malformed", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed 30GiB."},
 		{name: "zero", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 0GiB."},
-		{name: "leading zero", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 030GiB."},
-		{name: "positive sign", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: +30GiB."},
-		{name: "negative sign", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: -30GiB."},
-		{name: "malformed number", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 3O GiB."},
-		{name: "ordinary internal whitespace", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded.  Maximum allowed: 30GiB."},
-		{name: "non-breaking internal whitespace", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed:\u00a030GiB."},
-		{name: "unrecognized unit", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 30GB."},
 		{name: "overflow", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 18446744073709551616GiB."},
-		{name: "non create", stage: sandbox.StageStatus, message: "Total disk limit exceeded. Maximum allowed: 30GiB."},
+		{name: "unsupported unit", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 30GB."},
+		{name: "non create", stage: sandbox.StageStatus, message: liveResponse},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,12 +29,15 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-const daytonaDiskCapacityResponse = "Total disk limit exceeded. Maximum allowed: 30GiB."
+const daytonaDiskCapacityResponse = `Total disk limit exceeded. Maximum allowed: 30GiB.
+Consider archiving your unused Sandboxes to free up available storage.
+To increase concurrency limits, upgrade your organization's Tier by visiting https://app.daytona.io/dashboard/limits.`
 
 func TestDaytonaAdapterExposesCreateCapacityAsProvedNotStarted(t *testing.T) {
 	sdkClient := &scriptedDaytonaLifecycleClient{createErrors: []error{
@@ -89,10 +93,17 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 			!strings.Contains(got, `"provider.name":"daytona"`) ||
 			!strings.Contains(got, `"provider.status_code":400`) ||
 			!strings.Contains(got, `"error.code":"quota_exceeded"`) ||
-			!strings.Contains(got, `"error.message_safe":"sandbox provider capacity is unavailable"`) {
+			!strings.Contains(got, `"error.message_safe":"sandbox provider capacity is unavailable"`) ||
+			!strings.Contains(got, `"event":"sandbox_activation_attempt_completed"`) ||
+			!strings.Contains(got, `"outcome":"retry"`) ||
+			!strings.Contains(got, `"queue.attempt.count":1`) ||
+			!strings.Contains(got, `"queue.attempt.max":`+strconv.Itoa(sandboxActivationMaxAttempts)) ||
+			!strings.Contains(got, `"session.id":"sesn_execution_store"`) ||
+			!strings.Contains(got, `"operation.id":"`+harness.operationID+`"`) ||
+			!strings.Contains(got, `"job.id":"`+harness.queueJobID+`"`) {
 			t.Fatalf("quota provider completion log = %s", got)
 		}
-		for _, forbidden := range []string{daytonaDiskCapacityResponse, "30GiB"} {
+		for _, forbidden := range daytonaCapacityForbiddenDetails() {
 			if strings.Contains(harness.logs.String(), forbidden) {
 				t.Fatalf("provider completion log exposed %q: %s", forbidden, harness.logs.String())
 			}
@@ -169,17 +180,57 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 		if resultJSON != want {
 			t.Fatalf("exhausted Sandbox settlement = %s; want %s", resultJSON, want)
 		}
-		for _, forbidden := range []string{"quota_exceeded", daytonaDiskCapacityResponse, "30GiB"} {
+		for _, forbidden := range append([]string{"quota_exceeded"}, daytonaCapacityForbiddenDetails()...) {
 			if strings.Contains(resultJSON, forbidden) {
 				t.Fatalf("exhausted Sandbox settlement exposed %q: %s", forbidden, resultJSON)
 			}
 		}
 		harness.assertExhaustionPublicChain(t)
 	})
+
+	t.Run("persistent capacity contains shared operation failure", func(t *testing.T) {
+		errorsByAttempt := make([]error, sandboxActivationSubmissionMaxAttempts)
+		for index := range errorsByAttempt {
+			errorsByAttempt[index] = daytonaerrors.NewDaytonaValidationError(daytonaDiskCapacityResponse, nil)
+		}
+		harness := newDaytonaActivationHarness(t, errorsByAttempt)
+		sharedWaiter := harness.attachSharedActivationWaiter(t)
+		otherWaiter := harness.attachOtherActivationWaiter(t)
+
+		for attempt := 1; attempt <= sandboxActivationMaxAttempts; attempt++ {
+			if attempt > 1 {
+				harness.makeQueueJobAvailable(t)
+			}
+			harness.runOnce(t)
+		}
+		if harness.sdk.createCalls != sandboxActivationSubmissionMaxAttempts {
+			t.Fatalf("Daytona Create calls = %d; want bounded %d", harness.sdk.createCalls, sandboxActivationSubmissionMaxAttempts)
+		}
+		harness.assertQueue(t, queue.StatusDeadLettered, sandboxActivationMaxAttempts, "sandbox_activation_attempts_exhausted")
+		for _, waiter := range []daytonaCapacityWaiter{harness.primaryWaiter(), sharedWaiter} {
+			harness.assertExhaustedWaiter(t, waiter)
+			harness.assertExhaustionPublicChainForWaiter(t, waiter)
+		}
+		harness.assertOtherOperationUnaffected(t, otherWaiter)
+		harness.assertSessionAndThreadRemainUsable(t)
+	})
+}
+
+type daytonaCapacityWaiter struct {
+	sessionID       string
+	threadID        string
+	toolUseEventID  string
+	modelToolCallID string
+	inputJSON       string
+	inputHash       string
+	resultWriteID   string
+	operationID     string
 }
 
 type daytonaActivationHarness struct {
+	runtime         *sql.DB
 	admin           *sql.DB
+	client          *dbconnect.Client
 	queueJobID      string
 	operationID     string
 	runner          *SandboxActivationJobRunner
@@ -209,6 +260,15 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	if _, err := adminDB.Exec(`UPDATE session_threads SET visibility='public'
 		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND id='thr_execution_store'`); err != nil {
 		t.Fatalf("make capacity-chain Thread public: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE sessions SET lifecycle_state='active', main_thread_id='thr_execution_store'
+		WHERE workspace_id='ws_execution_store' AND id='sesn_execution_store'`); err != nil {
+		t.Fatalf("make capacity-chain Session input-admissible: %v", err)
+	}
+	if _, err := adminDB.Exec(`INSERT INTO session_runtime_status (
+		workspace_id, session_id, status, idle_since, created_at, updated_at
+	) VALUES ('ws_execution_store', 'sesn_execution_store', 'idle', clock_timestamp(), clock_timestamp(), clock_timestamp())`); err != nil {
+		t.Fatalf("seed capacity-chain Runtime status: %v", err)
 	}
 	if _, err := adminDB.Exec(`INSERT INTO session_runtime_bindings (
 			workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace,
@@ -263,6 +323,7 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	sdkClient := &scriptedDaytonaLifecycleClient{createErrors: append([]error{}, createErrors...)}
 	lifecycle := sandboxdriver.NewDaytonaLifecycleProviderForClient(sdkClient, time.Minute)
 	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(logs, nil))
 	adapter := &DaytonaAdapter{
 		Lifecycle: lifecycle,
 		Resolver:  lifecycle,
@@ -270,14 +331,15 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 		Resources: &adapterResourceMaterializerFake{},
 		Artifacts: &recordingArtifactBuilder{},
 		BlobStore: blob.NewFakeBlobStore(),
-		Logger:    slog.New(slog.NewJSONHandler(logs, nil)),
+		Logger:    logger,
 	}
 	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
 	if err != nil {
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	return &daytonaActivationHarness{
-		admin: adminDB, queueJobID: identity.queueJobID, operationID: identity.operationID,
+		runtime: runtimeDB, admin: adminDB, client: client,
+		queueJobID: identity.queueJobID, operationID: identity.operationID,
 		sdk: sdkClient, logs: logs, bridgeStore: bridgeStore, bridgeScope: bridgeScope,
 		toolUseEventID: toolUse.GetEventId(), modelRequestID: modelRequestID,
 		modelToolCallID: modelToolCallID, inputJSON: inputJSON, inputHash: inputHash,
@@ -285,6 +347,7 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 			Queue:     sandboxProductionQueueClient(t, queue.NewPostgreSQLStore(client)),
 			Store:     NewPostgreSQLSandboxLifecycleStore(client, &fixedSandboxResourceSource{}, 30*time.Minute),
 			Providers: registry,
+			Logger:    logger,
 			Config: SandboxLifecycleRunnerConfig{
 				WorkspaceID: "ws_execution_store", LeaseOwner: "sandbox-capacity-test", MaxJobs: 1,
 				LeaseDuration: 30 * time.Second, HeartbeatInterval: 5 * time.Second,
@@ -329,11 +392,129 @@ func (h *daytonaActivationHarness) activationIdentity(t *testing.T) daytonaActiv
 	return readDaytonaActivationIdentity(t, h.admin)
 }
 
+func (h *daytonaActivationHarness) primaryWaiter() daytonaCapacityWaiter {
+	return daytonaCapacityWaiter{
+		sessionID: "sesn_execution_store", threadID: "thr_execution_store",
+		toolUseEventID: h.toolUseEventID, modelToolCallID: h.modelToolCallID,
+		inputJSON: h.inputJSON, inputHash: h.inputHash,
+		resultWriteID: "rwrite_capacity_chain_result", operationID: h.operationID,
+	}
+}
+
+func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) daytonaCapacityWaiter {
+	t.Helper()
+	const (
+		modelToolCallID = "call_capacity_chain_shared"
+		inputJSON       = `{"cmd":"printf shared"}`
+	)
+	written, err := h.bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_shared_tool_use", ModelRequestId: h.modelRequestID,
+		EventType:   "agent.tool_use",
+		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"printf shared"},"evaluated_permission":"allow"}`,
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
+			Parts: []*bridgev1.RuntimePartCreate{{
+				PartKind: "tool",
+				PartJson: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"exec_command","state":{"status":"running","input":{"value":{"cmd":"printf shared"},"preview":"{\"cmd\":\"printf shared\"}","truncated":false}}}`,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("commit shared capacity Tool Use: %v", err)
+	}
+	inputHash := sandboxCapacitySHA256(inputJSON)
+	if _, err := h.admin.Exec(`UPDATE session_runtime_tool_results
+		SET tool_use_event_id=$1, normalized_input_hash=$2, tool_name='exec_command', input_json=$3,
+			model_tool_call_id=$4
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND tool_use_event_id='evt_execution_b'`, written.GetEventId(), inputHash, inputJSON, modelToolCallID); err != nil {
+		t.Fatalf("bind shared capacity execution to durable Tool Use: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(h.client, 30*time.Minute)
+	work, current, err := coordinator.LoadExecution(context.Background(), SandboxExecutionJob{Ref: SandboxExecutionRef{
+		WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+		SessionThreadID: "thr_execution_store", ToolUseEventID: written.GetEventId(),
+	}, AttemptGeneration: 1})
+	if err != nil || !current || work.Binding == nil {
+		t.Fatalf("load shared capacity execution = current %t binding %+v err %v", current, work.Binding, err)
+	}
+	if err := coordinator.WaitForActivation(sandboxTestQueueContext(t, h.runtime), work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("attach shared capacity waiter: %v", err)
+	}
+	var operationID string
+	if err := h.admin.QueryRow(`SELECT waiting_activation_operation_id FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND tool_use_event_id=$1`,
+		written.GetEventId()).Scan(&operationID); err != nil {
+		t.Fatalf("read shared waiter operation: %v", err)
+	}
+	if operationID != h.operationID {
+		t.Fatalf("shared waiter operation = %q; want %q", operationID, h.operationID)
+	}
+	return daytonaCapacityWaiter{
+		sessionID: "sesn_execution_store", threadID: "thr_execution_store",
+		toolUseEventID: written.GetEventId(), modelToolCallID: modelToolCallID,
+		inputJSON: inputJSON, inputHash: inputHash,
+		resultWriteID: "rwrite_capacity_chain_shared_result", operationID: operationID,
+	}
+}
+
+func (h *daytonaActivationHarness) attachOtherActivationWaiter(t *testing.T) daytonaCapacityWaiter {
+	t.Helper()
+	const (
+		sessionID      = "sesn_capacity_other"
+		threadID       = "thr_capacity_other"
+		toolUseEventID = "evt_capacity_other"
+	)
+	seedEnvironmentArtifactStoreSession(t, h.admin, "ws_execution_store", sessionID, "env_execution_store")
+	if _, err := h.admin.Exec(`INSERT INTO session_threads (
+		workspace_id, session_id, id, role, status, visibility, created_at, last_active_at, updated_at
+	) VALUES ('ws_execution_store', $1, $2, 'main', 'idle', 'public', clock_timestamp(), clock_timestamp(), clock_timestamp())`,
+		sessionID, threadID); err != nil {
+		t.Fatalf("seed other capacity Thread: %v", err)
+	}
+	if _, err := h.admin.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, model_tool_call_id,
+		execution_state, execution_attempt_generation, created_at, updated_at
+	) VALUES ('ws_execution_store', $1, $2, $3, 'sandbox_tool', 'other_hash', 'exec_command',
+		'{"cmd":"printf other"}', 'committed', 'call_capacity_other', 'pending', 1, clock_timestamp(), clock_timestamp())`,
+		sessionID, threadID, toolUseEventID); err != nil {
+		t.Fatalf("seed other capacity execution: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(h.client, 30*time.Minute)
+	work, current, err := coordinator.LoadExecution(context.Background(), SandboxExecutionJob{Ref: SandboxExecutionRef{
+		WorkspaceID: "ws_execution_store", SessionID: sessionID, SessionThreadID: threadID, ToolUseEventID: toolUseEventID,
+	}, AttemptGeneration: 1})
+	if err != nil || !current || work.Binding != nil {
+		t.Fatalf("load other capacity execution = current %t binding %+v err %v", current, work.Binding, err)
+	}
+	if err := coordinator.WaitForActivation(sandboxTestQueueContext(t, h.runtime), work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("attach other capacity waiter: %v", err)
+	}
+	var operationID string
+	if err := h.admin.QueryRow(`SELECT waiting_activation_operation_id FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID).Scan(&operationID); err != nil {
+		t.Fatalf("read other waiter operation: %v", err)
+	}
+	if operationID == "" || operationID == h.operationID {
+		t.Fatalf("other waiter operation = %q; want distinct from %q", operationID, h.operationID)
+	}
+	return daytonaCapacityWaiter{
+		sessionID: sessionID, threadID: threadID, toolUseEventID: toolUseEventID,
+		modelToolCallID: "call_capacity_other", inputJSON: `{"cmd":"printf other"}`,
+		inputHash: "other_hash", operationID: operationID,
+	}
+}
+
 func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 	t.Helper()
+	h.assertExhaustionPublicChainForWaiter(t, h.primaryWaiter())
+}
+
+func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testing.T, waiter daytonaCapacityWaiter) {
+	t.Helper()
 	response, err := h.bridgeStore.AwaitSandboxExecution(context.Background(), &bridgev1.AwaitSandboxExecutionRequest{
-		Scope: h.bridgeScope, ToolUseEventId: h.toolUseEventID, ModelToolCallId: h.modelToolCallID,
-		NormalizedInputHash: h.inputHash, ToolName: "exec_command", InputJson: h.inputJSON,
+		Scope: h.bridgeScope, ToolUseEventId: waiter.toolUseEventID, ModelToolCallId: waiter.modelToolCallID,
+		NormalizedInputHash: waiter.inputHash, ToolName: "exec_command", InputJson: waiter.inputJSON,
 	})
 	if err != nil {
 		t.Fatalf("AwaitSandboxExecution from exhausted receipt: %v", err)
@@ -342,8 +523,8 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 		"workspaceId": h.bridgeScope.GetWorkspaceId(), "sessionId": h.bridgeScope.GetSessionId(),
 		"sessionThreadId": h.bridgeScope.GetSessionThreadId(), "bindingId": h.bridgeScope.GetBinding().GetBindingId(),
 		"bindingGeneration": h.bridgeScope.GetBinding().GetBindingGeneration(), "targetPodUid": h.bridgeScope.GetBinding().GetTargetPodUid(),
-		"modelRequestId": h.modelRequestID, "modelToolCallId": h.modelToolCallID,
-		"toolUseEventId": h.toolUseEventID, "resultJson": response.GetResultJson(), "resultDigest": response.GetResultDigest(),
+		"modelRequestId": h.modelRequestID, "modelToolCallId": waiter.modelToolCallID,
+		"toolUseEventId": waiter.toolUseEventID, "resultJson": response.GetResultJson(), "resultDigest": response.GetResultDigest(),
 	}
 	inputJSON, err := json.Marshal(fixtureInput)
 	if err != nil {
@@ -368,14 +549,14 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 		"file":    runtimeResult.FileResult,
 	} {
 		if result.Type != "error" || result.Error.Type != "runtime" || result.Error.Code != "runtime_invalid_sequence" ||
-			result.Error.Message != "sandbox activation could not be completed" || result.Error.Retryable || result.Error.Fatal ||
+			result.Error.Message != "The requested operation could not be completed." || result.Error.Retryable || result.Error.Fatal ||
 			result.SandboxResultDigest != response.GetResultDigest() {
 			t.Fatalf("%s Runtime exhaustion result = %+v; want exact generic rejoin failure", name, result)
 		}
 	}
-	if runtimeResult.Event.Type != "agent.tool_result" || runtimeResult.Event.ToolUseID != h.toolUseEventID ||
+	if runtimeResult.Event.Type != "agent.tool_result" || runtimeResult.Event.ToolUseID != waiter.toolUseEventID ||
 		!runtimeResult.Event.IsError || len(runtimeResult.Event.Content) != 1 ||
-		runtimeResult.Event.Content[0].Type != "text" || runtimeResult.Event.Content[0].Text != "sandbox activation could not be completed" {
+		runtimeResult.Event.Content[0].Type != "text" || runtimeResult.Event.Content[0].Text != "The requested operation could not be completed." {
 		t.Fatalf("Runtime exhaustion event = %+v; want one exact error text block", runtimeResult.Event)
 	}
 	payloadJSON, err := json.Marshal(runtimeResult.Event)
@@ -384,16 +565,25 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 	}
 	errorJSON := string(runtimeResult.DeclaredError)
 	digest := response.GetResultDigest()
-	committed, err := h.bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_result", ModelRequestId: h.modelRequestID,
+	writeRequest := &bridgev1.WriteEventRequest{
+		Scope: h.bridgeScope, RuntimeWriteId: waiter.resultWriteID, ModelRequestId: h.modelRequestID,
 		EventType: "agent.tool_result", PayloadJson: string(payloadJSON), SandboxResultDigest: &digest,
 		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
-			ToolUseEventId: h.toolUseEventID,
+			ToolUseEventId: waiter.toolUseEventID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: errorJSON}},
 		}},
-	})
+	}
+	committed, err := h.bridgeStore.WriteEvent(context.Background(), writeRequest)
 	if err != nil {
 		t.Fatalf("commit Runtime exhaustion Tool Result: %v", err)
+	}
+	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("Runtime exhaustion Tool Result ack = %s; want committed", committed.GetAck().GetStatus())
+	}
+	replayed, err := h.bridgeStore.WriteEvent(context.Background(), writeRequest)
+	if err != nil || replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		replayed.GetEventId() != committed.GetEventId() {
+		t.Fatalf("Runtime exhaustion Tool Result replay = %+v, %v; want duplicate original", replayed, err)
 	}
 	var durablePayload, visibility string
 	var sessionVisible bool
@@ -413,17 +603,114 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChain(t *testing.T) {
 	if err := json.Unmarshal(publicJSON, &publicEvent); err != nil {
 		t.Fatalf("decode public exhaustion Tool Result: %v", err)
 	}
-	if publicEvent.Type != "agent.tool_result" || publicEvent.ToolUseID != h.toolUseEventID ||
+	if publicEvent.Type != "agent.tool_result" || publicEvent.ToolUseID != waiter.toolUseEventID ||
 		!publicEvent.IsError || len(publicEvent.Content) != 1 ||
-		publicEvent.Content[0].Type != "text" || publicEvent.Content[0].Text != "sandbox activation could not be completed" {
+		publicEvent.Content[0].Type != "text" || publicEvent.Content[0].Text != "The requested operation could not be completed." {
 		t.Fatalf("public exhaustion Tool Result = %+v; want one exact error text block", publicEvent)
 	}
 	for _, surface := range []string{response.GetResultJson(), string(output), durablePayload, string(publicJSON)} {
-		for _, forbidden := range []string{"quota_exceeded", daytonaDiskCapacityResponse, "30GiB", "Partial result"} {
+		for _, forbidden := range append([]string{"quota_exceeded"}, daytonaCapacityForbiddenDetails()...) {
 			if strings.Contains(surface, forbidden) {
 				t.Fatalf("exhaustion proof surface exposed %q: %s", forbidden, surface)
 			}
 		}
+	}
+	for _, surface := range []string{string(output), durablePayload, string(publicJSON)} {
+		for _, forbidden := range []string{"Partial result", "sandbox activation", "daytona", "capacity", "provider.status_code", "queue.attempt"} {
+			if strings.Contains(surface, forbidden) {
+				t.Fatalf("public projection surface exposed %q: %s", forbidden, surface)
+			}
+		}
+	}
+	var settlementEvents int
+	if err := h.admin.QueryRow(`SELECT count(*) FROM session_events
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND type='agent.tool_result' AND payload_json::jsonb ->> 'tool_use_id'=$1`, waiter.toolUseEventID).Scan(&settlementEvents); err != nil {
+		t.Fatalf("count durable exhaustion Tool Results: %v", err)
+	}
+	if settlementEvents != 1 {
+		t.Fatalf("durable exhaustion Tool Results for %s = %d; want exactly one", waiter.toolUseEventID, settlementEvents)
+	}
+}
+
+func (h *daytonaActivationHarness) assertExhaustedWaiter(t *testing.T, waiter daytonaCapacityWaiter) {
+	t.Helper()
+	var state, resultJSON string
+	var waitingOperation sql.NullString
+	if err := h.admin.QueryRow(`SELECT execution_state, result_json, waiting_activation_operation_id
+		FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		waiter.sessionID, waiter.threadID, waiter.toolUseEventID).Scan(&state, &resultJSON, &waitingOperation); err != nil {
+		t.Fatalf("read exhausted waiter %s: %v", waiter.toolUseEventID, err)
+	}
+	const want = `{"error":{"kind":"sandbox_activation_attempts_exhausted","message":"sandbox activation could not be completed"},"status":"error"}`
+	if state != "terminal_unconsumed" || resultJSON != want || waitingOperation.String != waiter.operationID {
+		t.Fatalf("exhausted waiter %s = state %q result %s operation %+v", waiter.toolUseEventID, state, resultJSON, waitingOperation)
+	}
+}
+
+func (h *daytonaActivationHarness) assertOtherOperationUnaffected(t *testing.T, waiter daytonaCapacityWaiter) {
+	t.Helper()
+	var state string
+	var operationID string
+	var resultJSON sql.NullString
+	if err := h.admin.QueryRow(`SELECT execution_state, waiting_activation_operation_id, result_json
+		FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		waiter.sessionID, waiter.threadID, waiter.toolUseEventID).Scan(&state, &operationID, &resultJSON); err != nil {
+		t.Fatalf("read other-operation waiter: %v", err)
+	}
+	if state != "waiting_activation" || operationID != waiter.operationID || resultJSON.Valid {
+		t.Fatalf("other-operation waiter = state %q operation %q result %+v; want unchanged waiting state", state, operationID, resultJSON)
+	}
+}
+
+func (h *daytonaActivationHarness) assertSessionAndThreadRemainUsable(t *testing.T) {
+	t.Helper()
+	var sessionStatus, threadStatus, visibility string
+	var archivedAt sql.NullTime
+	if err := h.admin.QueryRow(`SELECT s.status, t.status, t.visibility, t.archived_at
+		FROM sessions s JOIN session_threads t ON t.workspace_id=s.workspace_id AND t.session_id=s.id
+		WHERE s.workspace_id='ws_execution_store' AND s.id='sesn_execution_store' AND t.id='thr_execution_store'`).Scan(
+		&sessionStatus, &threadStatus, &visibility, &archivedAt,
+	); err != nil {
+		t.Fatalf("read capacity Session and Thread: %v", err)
+	}
+	if sessionStatus != "idle" || threadStatus != "idle" || visibility != "public" || archivedAt.Valid {
+		t.Fatalf("capacity Session/Thread = %q/%q visibility=%q archived=%+v; want usable public idle lane", sessionStatus, threadStatus, visibility, archivedAt)
+	}
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(h.client))
+	appended, err := eventService.AppendClientEvents(
+		context.Background(), workspace.ID("ws_execution_store"), "sesn_execution_store", "idem_capacity_later_input",
+		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+			Type: sessionevent.EventTypeUserMessage,
+			Content: []sessionevent.ContentBlock{{
+				Type: sessionevent.ContentBlockTypeText, Text: "continue after the Tool failure",
+			}},
+		}}},
+	)
+	if err != nil || len(appended.Data) != 1 {
+		t.Fatalf("append later ordinary Session input = %+v, %v; want one accepted event", appended, err)
+	}
+	var sessionErrors int
+	if err := h.admin.QueryRow(`SELECT count(*) FROM session_events
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND type='session.error'`).Scan(&sessionErrors); err != nil {
+		t.Fatalf("count capacity session.error events: %v", err)
+	}
+	if sessionErrors != 0 {
+		t.Fatalf("capacity session.error events = %d; want zero", sessionErrors)
+	}
+}
+
+func daytonaCapacityForbiddenDetails() []string {
+	return []string{
+		daytonaDiskCapacityResponse,
+		"30GiB",
+		"organization",
+		"upgrade",
+		"https://app.daytona.io/dashboard/limits",
+		"credential",
+		"ticket",
 	}
 }
 

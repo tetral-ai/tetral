@@ -203,7 +203,7 @@ describe("RuntimePodToolRunner", () => {
         error: {
           type: "runtime",
           code: "runtime_invalid_sequence",
-          message: "sandbox activation could not be completed",
+          message: "The requested operation could not be completed.",
           retryable: false,
           fatal: false,
           sessionId: "sesn_1",
@@ -214,6 +214,7 @@ describe("RuntimePodToolRunner", () => {
       expect(projected).not.toContain("Partial result");
       expect(projected).not.toContain("sandbox_activation_attempts_exhausted");
       expect(projected).not.toContain("quota_exceeded");
+      expect(projected).not.toContain("sandbox activation");
       if (result.type !== "error") {
         throw new Error("activation exhaustion did not produce a Runtime error");
       }
@@ -224,7 +225,7 @@ describe("RuntimePodToolRunner", () => {
       )).toEqual({
         type: "agent.tool_result",
         tool_use_id: "sevt_tool_1",
-        content: [{ type: "text", text: "sandbox activation could not be completed" }],
+        content: [{ type: "text", text: "The requested operation could not be completed." }],
         is_error: true,
       });
     }

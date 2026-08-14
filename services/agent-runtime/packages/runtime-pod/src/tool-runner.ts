@@ -2011,8 +2011,8 @@ function resultJsonToExecutionResult(
 
 // Activation exhaustion is a private lifecycle settlement. Every Sandbox Tool
 // family converges here before Runtime failure and public Tool Result creation,
-// so route envelopes, partial output, and provider diagnosis cannot alter the
-// single model-visible failure text.
+// where Runtime replaces Sandbox, route, attempt, and provider detail with one
+// provider-neutral model-visible failure text.
 function sandboxActivationExhaustionResult(
   request: RuntimeToolExecutionRequest,
   parsed: RuntimeJsonValue,
@@ -2026,7 +2026,7 @@ function sandboxActivationExhaustionResult(
     return undefined;
   }
   return {
-    ...toolFailure(request, "sandbox activation could not be completed", false),
+    ...toolFailure(request, "The requested operation could not be completed.", false),
     ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
   };
 }

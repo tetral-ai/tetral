@@ -265,8 +265,8 @@ returned to Bridge with the loop-authored tool-result declaration.
 Sandbox activation exhaustion is normalized at this shared rejoin boundary for
 command, file, media, and command-I/O routes: the private lifecycle settlement
 becomes one non-retryable Runtime error whose public Tool Result contains only
-`sandbox activation could not be completed`, with no route status, partial
-result, attempt metadata, or provider diagnosis.
+`The requested operation could not be completed.`, with no Sandbox concept,
+route status, partial result, attempt metadata, or provider diagnosis.
 
 `RunWeb` reaches the web-connector through `TETRAL_WEB_CONNECTOR_GRPC_ADDR`,
 which boot config requires and gives no default: a Runtime Pod whose Deployment

@@ -104,16 +104,20 @@ func logSandboxActivationAttemptCompleted(ctx context.Context, logger *slog.Logg
 		slog.String("event.kind", "sandbox_activation_attempt_completed"),
 		slog.String("provider.name", "daytona"),
 		slog.String("outcome", outcome),
+		slog.Int("queue.attempt.count", job.AttemptCount),
+		slog.Int("queue.attempt.max", job.MaxAttempts),
 		slog.Int64("duration.ms", activationAttemptDuration(ctx).Milliseconds()),
 	)
 	level := slog.LevelInfo
 	if errorCode != "" {
-		level = slog.LevelError
 		attrs = append(attrs,
 			slog.String("error.class", "sandbox_activation_error"),
 			slog.String("error.code", errorCode),
 			slog.String("error.message_safe", boundedProviderLogMessage(safeMessage)),
 		)
+	}
+	if outcome == "terminal_failure" {
+		level = slog.LevelError
 	}
 	logger.LogAttrs(context.Background(), level, "sandbox.activation.attempt_completed", attrs...)
 }
