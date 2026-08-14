@@ -192,7 +192,7 @@ Previous anchored summary.
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(requests[0]?.limits?.maxOutputTokens).toBe(4096);
-    const prompt = requests[0]?.messages[0]?.parts.flatMap((part) => part.text?.text ?? []).join("") ?? "";
+    const prompt = requests[0]?.context[0]?.content.flatMap((part) => part.text?.text ?? []).join("") ?? "";
     expect(prompt).toStartWith("Update the anchored summary below using the conversation history above.");
     expect(prompt).toContain("<previous-summary>\nPrevious anchored summary.\n</previous-summary>");
     expect(prompt).toContain('{"legacy":"recent"}');
@@ -437,7 +437,7 @@ test("task notification survives interrupted compaction and commits on the next 
         expect(result).toMatchObject({ type: "completed" });
         expect(replayLoader.commitCalls).toHaveLength(1);
         expect(requests).toHaveLength(1);
-        expect(JSON.stringify(requests[0]?.messages).match(/task completed during interrupted compaction/g)).toHaveLength(1);
+        expect(JSON.stringify(requests[0]?.context).match(/task completed during interrupted compaction/g)).toHaveLength(1);
         expect(active.session.state.peekAcceptedInput()).toBeUndefined();
     }
     finally {
@@ -672,9 +672,9 @@ test("compaction hot apply preserves messages ACKed after the compaction snapsho
         },
     }))));
     expect(result).toMatchObject({ type: "completed", modelMessageCount: 2 });
-    expect(requests[1]?.messages).toHaveLength(2);
-    expect(JSON.stringify(requests[1]?.messages[0])).toContain("<conversation-checkpoint>");
-    expect(JSON.stringify(requests[1]?.messages[1])).toContain("later ACKed input");
+    expect(requests[1]?.context).toHaveLength(2);
+    expect(JSON.stringify(requests[1]?.context[0])).toContain("<conversation-checkpoint>");
+    expect(JSON.stringify(requests[1]?.context[1])).toContain("later ACKed input");
     expect(session.state.contextManager.messages().map((message) => message.id)).toContain("user-later");
     expect(session.state.lastRequestContextAnchorSequence()).toBe(2);
 });
@@ -785,10 +785,10 @@ test("task notification arriving during reactive compaction joins the preserved 
     expect(commitCalls).toBe(1);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
     const resumedRequest = requests.find((request) =>
-        JSON.stringify(request.messages).includes("task completed while compaction was open"));
+        JSON.stringify(request.context).includes("task completed while compaction was open"));
     expect(resumedRequest).toBeDefined();
-    expect(JSON.stringify(resumedRequest?.messages).match(/task completed while compaction was open/g)).toHaveLength(1);
-    expect(JSON.stringify(resumedRequest?.messages)).toContain("<conversation-checkpoint>");
+    expect(JSON.stringify(resumedRequest?.context).match(/task completed while compaction was open/g)).toHaveLength(1);
+    expect(JSON.stringify(resumedRequest?.context)).toContain("<conversation-checkpoint>");
     expect(order.indexOf("running-2")).toBeLessThan(order.indexOf("task-commit"));
     expect(order.indexOf("task-commit")).toBeLessThan(order.indexOf("provider-3"));
     expect(JSON.stringify(session.state.contextManager.messages()).match(/task completed while compaction was open/g)).toHaveLength(1);

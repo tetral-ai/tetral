@@ -64,7 +64,6 @@ describe("BridgeAPIAttachmentResolver", () => {
       attachments: [{
         transient: {
           attachmentRef: "att_1",
-          sourceToolUseEventId: "sevt_tool_1",
           sourcePath: "/tmp/image.png",
           pageRange: "",
           detail: "auto",
@@ -78,7 +77,6 @@ describe("BridgeAPIAttachmentResolver", () => {
     });
     expect(client.requests[0]).toMatchObject({
       attachmentRef: "att_1",
-      sourceToolUseEventId: "sevt_tool_1",
       scope: {
         workspaceId: "wksp_1",
         sessionId: "sesn_1",
@@ -163,7 +161,7 @@ describe("BridgeAPIAttachmentResolver", () => {
       ok: true,
       attachments: [{ ...first, data: new Uint8Array([1]) }],
       rejections: [{
-        transient: undefined,
+        transientAttachmentRef: undefined,
         fileBacked: second.fileBacked,
         reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_OVER_ENVELOPE,
       }],
@@ -198,7 +196,7 @@ describe("BridgeAPIAttachmentResolver", () => {
       ok: true,
       attachments: [{ ...first, data: new Uint8Array([1]) }],
       rejections: [{
-        transient: undefined,
+        transientAttachmentRef: undefined,
         fileBacked: deleted.fileBacked,
         reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
       }],
@@ -333,7 +331,7 @@ describe("BridgeAPIAttachmentResolver", () => {
       ok: true,
       attachments: [],
       rejections: [{
-        transient: validProviderAttachment().transient,
+        transientAttachmentRef: validProviderAttachment().transient?.attachmentRef,
         fileBacked: undefined,
         reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
       }],
@@ -368,7 +366,7 @@ describe("BridgeAPIAttachmentResolver", () => {
       ok: true,
       attachments: [{ ...valid, data: new Uint8Array([2]) }],
       rejections: [{
-        transient: undefined,
+        transientAttachmentRef: undefined,
         fileBacked: deleted.fileBacked,
         reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
       }],
@@ -461,17 +459,13 @@ function resolvedTransientAttachment(
 ): ResolveTransientAttachmentResponse {
   return {
     resolved: {
-      attachment: {
-        attachmentRef: request.attachmentRef,
-        mime: input.mime,
-        filename: input.filename,
-        sourceToolUseEventId: request.sourceToolUseEventId,
-        sourcePath: input.sourcePath,
-        pageRange: "",
-        detail: "auto",
-      },
+      attachmentRef: request.attachmentRef,
+      mime: input.mime,
+      filename: input.filename,
+      sourcePath: input.sourcePath,
+      pageRange: "",
+      detail: "auto",
       data: input.data,
-      expiresAt: "2026-01-01T00:15:00Z",
     },
     unavailable: undefined,
   };

@@ -7,7 +7,7 @@ import { deriveThreadTurnDecision, initializeThreadTurnReduction, reduceThreadTu
 import { DurableRuntimeMessageSchema, RuntimeMessageCreateSchema, RuntimeToolSettlementDeclarationSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeDeclarationReceipt, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { internalToolRepairKey } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
-import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
+import { toGatewayProviderContext } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
 import {
   applyCompactionReceipt,
   applyInternalToolRepairReceipt,
@@ -256,7 +256,7 @@ process.stdout.write(JSON.stringify({
 }));
 
 function composeProviderRequests(messages: readonly RuntimeMessage[]) {
-  const projected = toGatewayRuntimeMessages(messages);
+  const projected = toGatewayProviderContext(messages);
   if (!projected.ok) {
     throw new Error(`Runtime provider projection failed: ${projected.error.code}`);
   }
@@ -274,7 +274,7 @@ function composeProviderRequests(messages: readonly RuntimeMessage[]) {
       requestId: "req_provider_composition",
       modelRequestId: "mreq_provider_composition",
       currentModel: { providerId: rules.providerId, modelId: rules.modelId },
-      runtimeMessages: projected.messages,
+      providerContext: projected.context,
       runtime: { systemInstructions: "provider composition", timeoutMs: 30_000 },
     });
     if (!assembled.ok) {
@@ -294,13 +294,13 @@ function composeProviderRequests(messages: readonly RuntimeMessage[]) {
         : {}),
     };
   });
-  const carrierMessages = projected.messages;
-  const toolParts = carrierMessages.flatMap((message) =>
-    message.parts.flatMap((part) => part.tool === undefined ? [] : [part.tool])
+  const carrierMessages = projected.context;
+  const toolItems = carrierMessages.flatMap((message) =>
+    message.content.filter((item) => item.toolCall !== undefined || item.toolResult !== undefined)
   );
   return {
     carrierMessages,
-    carrierHasToolUseEventIdProperty: toolParts.some((tool) => Object.hasOwn(tool, "toolUseEventId")),
+    carrierHasToolUseEventIdProperty: toolItems.some((item) => Object.hasOwn(item, "toolUseEventId")),
     strategies,
   };
 }

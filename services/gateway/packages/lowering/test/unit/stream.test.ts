@@ -14,7 +14,6 @@ const TestModelLimits = {
 describe("Gateway stream raising", () => {
   test("maps streaming text, reasoning, tool, finish, and drops raw chunks", () => {
     const raiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       {
         usageWireFamily: "openai-wire",
         modelLimits: TestModelLimits,
@@ -73,7 +72,6 @@ describe("Gateway stream raising", () => {
 
   test("synthesizes missing fragment ids and rejects contradictory tool-call names", () => {
     const raiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
 
@@ -88,7 +86,6 @@ describe("Gateway stream raising", () => {
     expect(nextStart?.text?.id).toBe("text_2");
 
     const reasoningRaiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
     const [reasoningStart] = reasoningRaiser.map({ type: "reasoning-start" });
@@ -99,7 +96,6 @@ describe("Gateway stream raising", () => {
     expect(nextReasoningStart?.reasoning?.id).toBe("reasoning_2");
 
     const implicitToolRaiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
     const [toolStart] = implicitToolRaiser.map({ type: "tool-input-start", name: "Read" });
@@ -112,7 +108,6 @@ describe("Gateway stream raising", () => {
     expect(nextToolStart?.toolInput?.id).toBe("tool_2");
 
     const toolRaiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
     toolRaiser.map({ type: "tool-input-start", id: "tool_1", name: "Read" });
@@ -121,7 +116,6 @@ describe("Gateway stream raising", () => {
 
   test("rejects events after terminal finish", () => {
     const raiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
 
@@ -132,7 +126,6 @@ describe("Gateway stream raising", () => {
 
   test("redacts raw provider metadata while preserving signed reasoning metadata", () => {
     const raiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
 
@@ -168,7 +161,6 @@ describe("Gateway stream raising", () => {
 
   test("bounds provider metadata JSON", () => {
     const raiser = new ProviderStreamRaiser(
-      { requestId: "req_1", modelRequestId: "mreq_1" },
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
 

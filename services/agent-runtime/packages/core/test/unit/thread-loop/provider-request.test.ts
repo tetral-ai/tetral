@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Effect, Stream } from "effect";
-import { ProviderRequestKind, RuntimeMessageRole, SystemCacheHint, SystemSegmentKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { ProviderRequestKind, ProviderContextRole, SystemCacheHint, SystemSegmentKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type { SessionEvent, SessionEventWriter, SessionEventWriterRequestEndEnvelope } from "../../../src/contracts/runtime.js";
 import { RuntimeMessageSchema, normalizeContextLoaderError } from "../../../src/contracts/runtime.js";
@@ -88,13 +88,10 @@ test("provider-call assembler builds the complete non-persistent LLM request sha
         requestId: "provider_request_1",
         modelRequestId: "model_request_1",
         currentModel: { providerId: "fake", modelId: "fake-chat" },
-        runtimeMessages: [
+        providerContext: [
             {
-                id: "message_user_1",
-                role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-                status: "completed",
-                origin: "user",
-                parts: [{ id: "part_user_1", text: { text: "hello" } }],
+                role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+                content: [{ text: { text: "hello" } }],
             },
         ],
         runtime: {
@@ -133,6 +130,7 @@ test("provider-call assembler builds the complete non-persistent LLM request sha
         ],
         maxOutputTokens: 321,
         timeoutMs: 456,
+        runtimeAttachments: [],
         request: {
             requestId: "provider_request_1",
             modelRequestId: "model_request_1",
@@ -140,7 +138,6 @@ test("provider-call assembler builds the complete non-persistent LLM request sha
             workspaceId: "workspace_1",
             sessionId: "sesn_1",
             sessionThreadId: "thread_1",
-            parentThreadId: "parent_thread_1",
             bindingId: "binding_1",
             bindingGeneration: 7,
             runtimeBindingToken: "runtime-binding-token",
@@ -157,13 +154,10 @@ test("provider-call assembler builds the complete non-persistent LLM request sha
                     cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_SESSION,
                 },
             ],
-            messages: [
+            context: [
                 {
-                    id: "message_user_1",
-                    role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-                    status: "completed",
-                    origin: "user",
-                    parts: [{ id: "part_user_1", text: { text: "hello" } }],
+                    role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+                    content: [{ text: { text: "hello" } }],
                 },
             ],
             tools: [
@@ -669,7 +663,7 @@ test("runtime layer compacts context before the next provider request", async ()
     expect(requests[0]?.limits?.timeoutMs).toBe(765432);
     expect(requests[0]?.model?.variant).toBe("");
     expect(requests[0]?.tools).toEqual([]);
-    const compactionPromptParts = requests[0]?.messages[0]?.parts.flatMap((part) => part.text?.text ?? []) ?? [];
+    const compactionPromptParts = requests[0]?.context[0]?.content.flatMap((part) => part.text?.text ?? []) ?? [];
     expect(compactionPromptParts).toHaveLength(1);
     const compactionPrompt = compactionPromptParts[0] ?? "";
     expect(new TextEncoder().encode(compactionPrompt).byteLength).toBeLessThanOrEqual(64 * 1024);
@@ -687,9 +681,9 @@ test("runtime layer compacts context before the next provider request", async ()
     expect(requests[1]?.model).toEqual({ providerId: "fake", modelId: "fake-chat", variant: "" });
     expect(requests[1]?.model?.variant).toBe("");
     expect(requests[1]?.tools.map((tool) => tool.name)).toEqual(["search"]);
-    expect(requests[1]?.messages).toHaveLength(1);
-    expect(JSON.stringify(requests[1]?.messages[0])).toContain("<conversation-checkpoint>");
-    expect(JSON.stringify(requests[1]?.messages[0])).toContain("Summary carried forward.");
+    expect(requests[1]?.context).toHaveLength(1);
+    expect(JSON.stringify(requests[1]?.context[0])).toContain("<conversation-checkpoint>");
+    expect(JSON.stringify(requests[1]?.context[0])).toContain("Summary carried forward.");
     expect(appended.map((event) => event.type)).toEqual([
         "session.status_running",
         "span.model_request_start",
@@ -813,10 +807,10 @@ test("failed-attempt reasoning is absent from reschedule and successful retry co
         [pendingFileAttachment],
         [pendingFileAttachment],
     ]);
-    expect(JSON.stringify(requests[1]?.messages)).toContain("retry this request");
-    expect(JSON.stringify(requests[1]?.messages)).not.toContain("temporary provider failure");
-    expect(JSON.stringify(requests[1]?.messages)).not.toContain(failedReasoning);
-    expect(JSON.stringify(requests[1]?.messages)).not.toContain(failedDraft);
+    expect(JSON.stringify(requests[1]?.context)).toContain("retry this request");
+    expect(JSON.stringify(requests[1]?.context)).not.toContain("temporary provider failure");
+    expect(JSON.stringify(requests[1]?.context)).not.toContain(failedReasoning);
+    expect(JSON.stringify(requests[1]?.context)).not.toContain(failedDraft);
     expect(requestEnds).toHaveLength(2);
     expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
     expect(requestEnds[0]?.consumedFileAttachments ?? []).toEqual([]);
@@ -1600,7 +1594,7 @@ test("task notification commits after the running receipt and reaches the provid
     expect(result).toMatchObject({ type: "completed" });
     expect(order.slice(0, 3)).toEqual(["running-receipt", "task-commit", "provider"]);
     expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests[0]?.messages).match(/task result for next turn/g)).toHaveLength(1);
+    expect(JSON.stringify(requests[0]?.context).match(/task result for next turn/g)).toHaveLength(1);
     expect(JSON.stringify(session.state.contextManager.messages()).match(/task result for next turn/g)).toHaveLength(1);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
     expect(session.state.backgroundTool("task_notification_turn")).toMatchObject({
@@ -1855,8 +1849,8 @@ test("task notification arriving during provider reschedule joins the next safe 
     expect(currentTurn).toMatchObject({ type: "completed" });
     expect(commitCalls).toBe(1);
     expect(requests).toHaveLength(3);
-    expect(JSON.stringify(requests[1]?.messages)).not.toContain("task result after the retried request");
-    expect(JSON.stringify(requests[2]?.messages).match(/task result after the retried request/g)).toHaveLength(1);
+    expect(JSON.stringify(requests[1]?.context)).not.toContain("task result after the retried request");
+    expect(JSON.stringify(requests[2]?.context).match(/task result after the retried request/g)).toHaveLength(1);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
 });
 test("stale task notification custody discards the resident thread before provider work", async () => {
@@ -2324,12 +2318,9 @@ function providerInput(skillsIndex: readonly SkillGuidanceIndexEntry[], requestK
         requestId: "provider_request_1",
         modelRequestId: "model_request_1",
         currentModel: { providerId: "openai", modelId: "gpt-5.5" },
-        runtimeMessages: [{
-                id: "message_1",
-                role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-                status: "completed",
-                origin: "user",
-                parts: [{ id: "part_1", text: { text: "hello" } }],
+        providerContext: [{
+                role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+                content: [{ text: { text: "hello" } }],
             }],
         runtime: {
             systemInstructions: "You are Tetral Agent.",

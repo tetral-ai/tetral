@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import {
   ProviderFinishReason,
   ProviderStreamEventType,
-  RuntimeMessageRole,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -114,14 +114,10 @@ function liveProviderRequest(entry: LiveProviderCase): ProviderRequest {
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: `msg_live_smoke_${entry.name}`,
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: `part_live_smoke_${entry.name}`,
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: { text: "Reply with exactly: ok" },
         }],
       },

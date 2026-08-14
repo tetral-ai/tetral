@@ -4,8 +4,7 @@ import {
   ProviderFinishReason,
   ProviderRequestKind,
   ProviderStreamEventType,
-  RuntimeMessageRole,
-  RuntimeToolPartState,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
   providerFinishReasonToJSON,
@@ -1022,30 +1021,21 @@ describe("Session provider golden wire path", () => {
     try {
       await collectEvents(registry.stream({
         request: zaiGoldenRequest({
-          messages: [
+          context: [
             {
-              id: "msg_zai_assistant_reasoning",
-              role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-              status: "completed",
-              origin: "agent",
-              parts: [
-                { id: "part_zai_reasoning", reasoning: { text: "hidden thought", metadataJson: "{}" } },
-                { id: "part_zai_visible", text: { text: "visible history" } },
+              role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+              content: [
+                { reasoning: { text: "hidden thought", metadataJson: "{}" } },
+                { text: { text: "visible history" } },
               ],
             },
             {
-              id: "msg_zai_assistant_empty_reasoning",
-              role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-              status: "completed",
-              origin: "agent",
-              parts: [{ id: "part_zai_plain", text: { text: "plain history" } }],
+              role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+              content: [{ text: { text: "plain history" } }],
             },
             {
-              id: "msg_zai_user_after_history",
-              role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-              status: "completed",
-              origin: "user",
-              parts: [{ id: "part_zai_user_after_history", text: { text: "continue" } }],
+              role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+              content: [{ text: { text: "continue" } }],
             },
           ],
         }),
@@ -1088,30 +1078,21 @@ describe("Session provider golden wire path", () => {
     try {
       const events = await collectEvents(registry.stream({
         request: deepSeekGoldenRequest({
-          messages: [
+          context: [
             {
-              id: "msg_deepseek_user",
-              role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-              status: "completed",
-              origin: "user",
-              parts: [{ id: "part_deepseek_user", text: { text: "Remember the prior answer." } }],
+              role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+              content: [{ text: { text: "Remember the prior answer." } }],
             },
             {
-              id: "msg_deepseek_assistant",
-              role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-              status: "completed",
-              origin: "agent",
-              parts: [
-                { id: "part_deepseek_reasoning", reasoning: { text: "User asks for capital.", metadataJson: "{}" } },
-                { id: "part_deepseek_visible", text: { text: "Paris." } },
+              role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+              content: [
+                { reasoning: { text: "User asks for capital.", metadataJson: "{}" } },
+                { text: { text: "Paris." } },
               ],
             },
             {
-              id: "msg_deepseek_user_after_history",
-              role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-              status: "completed",
-              origin: "user",
-              parts: [{ id: "part_deepseek_user_after_history", text: { text: "Continue." } }],
+              role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+              content: [{ text: { text: "Continue." } }],
             },
           ],
         }),
@@ -1202,12 +1183,9 @@ describe("Session provider golden wire path", () => {
               cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
             },
           ],
-          messages: [{
-            id: "msg_reviewer_prompt",
-            role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-            status: "completed",
-            origin: "runtime",
-            parts: [{ id: "part_reviewer_prompt", text: { text: prompt } }],
+          context: [{
+            role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+            content: [{ text: { text: prompt } }],
           }],
         }),
         credential: sessionDeepSeekCredential(),
@@ -1792,14 +1770,10 @@ function openAIGoldenRequest(): ProviderRequest {
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "msg_openai_prior_reasoning",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [{
-          id: "part_openai_prior_reasoning",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{
           reasoning: {
             text: "",
             metadataJson: JSON.stringify({
@@ -1813,12 +1787,8 @@ function openAIGoldenRequest(): ProviderRequest {
         }],
       },
       {
-        id: "msg_openai_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: "part_openai_user",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: {
             text: "Use brief hidden reasoning to verify 7 + 8 = 15. Then emit visible text exactly: ok. Then call Search exactly once with JSON input {\"query\":\"tetral\"}. Do not add any other visible text.",
           },
@@ -1857,12 +1827,9 @@ function openAIGPT56SolGoldenRequest(sessionId = "sesn_live_gpt56_sol_official_f
       text: "Reply tersely and do not call tools.",
       cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
     }],
-    messages: [{
-      id: "msg_live_gpt56_sol_user",
-      role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-      status: "completed",
-      origin: "user",
-      parts: [{ id: "part_live_gpt56_sol_user", text: { text: "Reply with exactly: ok" } }],
+    context: [{
+      role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+      content: [{ text: { text: "Reply with exactly: ok" } }],
     }],
     tools: [],
     limits: { maxOutputTokens: 128, timeoutMs: 120_000 },
@@ -1892,14 +1859,10 @@ function anthropicGoldenRequest(): ProviderRequest {
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_SESSION,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "msg_live_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: "part_live_user",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: {
             text: "Use your thinking block to verify this checksum before acting: 271828 + 314159 = 585987. After that, emit visible text exactly: reading now. Then call the Read tool exactly once with JSON input {\"path\":\"/workspace/app.ts\"}. Do not add other visible text.",
           },
@@ -1937,12 +1900,9 @@ function anthropicFableGoldenRequest(): ProviderRequest {
       text: "Reply tersely and do not call tools.",
       cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
     }],
-    messages: [{
-      id: "msg_live_fable_user",
-      role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-      status: "completed",
-      origin: "user",
-      parts: [{ id: "part_live_fable_user", text: { text: "Reply with exactly: ok" } }],
+    context: [{
+      role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+      content: [{ text: { text: "Reply with exactly: ok" } }],
     }],
     tools: [],
     attachments: [],
@@ -1963,14 +1923,10 @@ function anthropicCacheHitGoldenRequest(): ProviderRequest {
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "msg_cache_hit_anthropic_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: "part_cache_hit_anthropic_user",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: { text: "Reply with exactly: ok" },
         }],
       },
@@ -1995,12 +1951,9 @@ function kimiK3GoldenRequest(): ProviderRequest {
       text: "Reply tersely and do not call tools.",
       cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
     }],
-    messages: [{
-      id: "msg_live_k3_user",
-      role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-      status: "completed",
-      origin: "user",
-      parts: [{ id: "part_live_k3_user", text: { text: "Reply with exactly: ok" } }],
+    context: [{
+      role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+      content: [{ text: { text: "Reply with exactly: ok" } }],
     }],
     tools: [],
     attachments: [],
@@ -2018,13 +1971,9 @@ function kimiK3ToolGoldenRequest(): ProviderRequest {
       text: "Call the Read tool exactly once with the requested path.",
       cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
     }],
-    messages: [{
-      id: "msg_live_k3_tool_user",
-      role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-      status: "completed",
-      origin: "user",
-      parts: [{
-        id: "part_live_k3_tool_user",
+    context: [{
+      role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+      content: [{
         text: { text: "Call Read exactly once with JSON input {\"path\":\"/workspace/app.ts\"}." },
       }],
     }],
@@ -2053,38 +2002,36 @@ function kimiK3ReplayGoldenRequest(
     ...request,
     requestId: "req_live_k3_replay_1",
     modelRequestId: "mreq_live_k3_replay_1",
-    messages: [
+    context: [
       {
-        id: "msg_live_k3_assistant",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
           {
-            id: "part_live_k3_reasoning",
             reasoning: {
               text: reasoningText,
               metadataJson: JSON.stringify({ anthropic: { signature } }),
             },
           },
           {
-            id: "part_live_k3_tool",
-            tool: {
-              callId: toolCallID,
+            toolCall: {
+              modelToolCallId: toolCallID,
               name: toolName,
-              state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
               inputJson: toolInputJSON,
-              outputOrErrorJson: JSON.stringify({ content: "fixture tool result" }),
+            },
+          },
+          {
+            toolResult: {
+              modelToolCallId: toolCallID,
+              completed: { outputJson: JSON.stringify({ content: "fixture tool result" }) },
+              error: undefined,
+              cancelled: undefined,
             },
           },
         ],
       },
       {
-        id: "msg_live_k3_user_after_tool",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{ id: "part_live_k3_user_after_tool", text: { text: "Continue." } }],
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{ text: { text: "Continue." } }],
       },
     ],
   };
@@ -2103,14 +2050,10 @@ function kimiCacheHitGoldenRequest(): ProviderRequest {
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "msg_cache_hit_kimi_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: "part_cache_hit_kimi_user",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: { text: "Reply with exactly: ok" },
         }],
       },
@@ -2143,14 +2086,10 @@ function zaiGoldenRequest(overrides: Partial<ProviderRequest> = {}): ProviderReq
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "msg_zai_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: "part_zai_user",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: {
             text: "Use brief hidden reasoning to verify 7 + 8 = 15. Then emit visible text exactly: ok. Then call Search exactly once with JSON input {\"query\":\"tetral\"}. Do not add any other visible text.",
           },
@@ -2191,14 +2130,10 @@ function deepSeekGoldenRequest(overrides: Partial<ProviderRequest> = {}): Provid
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_NONE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "msg_deepseek_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: "part_deepseek_user",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: { text: "Say ok." },
         }],
       },

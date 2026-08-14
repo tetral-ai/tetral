@@ -420,13 +420,18 @@ message TransientAttachmentRef {
 message ResolveTransientAttachmentRequest {
   RuntimeScope scope = 1;
   string attachment_ref = 2;
-  string source_tool_use_event_id = 3;
+  reserved 3;
+  reserved "source_tool_use_event_id";
 }
 
 message ResolvedTransientAttachment {
-  TransientAttachmentRef attachment = 1;
-  bytes data = 2;
-  string expires_at = 3;
+  string attachment_ref = 1;
+  string mime = 2;
+  string filename = 3;
+  string source_path = 4;
+  string page_range = 5;
+  string detail = 6;
+  bytes data = 7;
 }
 
 message TransientAttachmentUnavailable {}

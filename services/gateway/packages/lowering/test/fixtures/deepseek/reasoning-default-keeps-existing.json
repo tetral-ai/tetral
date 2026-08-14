@@ -3,12 +3,12 @@
   "rule": "deepseek-reasoning-default",
   "input": {
     "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
-    "messages": [
+    "context": [
       {
-        "role": "assistant",
-        "parts": [
-          { "type": "reasoning", "id": "r1", "text": "Existing reasoning." },
-          { "type": "text", "id": "t1", "text": "Paris." }
+        "role": 2,
+        "content": [
+          { "reasoning": { "text": "Existing reasoning.", "metadataJson": "{}" } },
+          { "text": { "text": "Paris." } }
         ]
       }
     ]

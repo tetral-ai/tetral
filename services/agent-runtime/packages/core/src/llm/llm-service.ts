@@ -221,14 +221,10 @@ class ProviderStreamValidator {
     }
     const requestOrigins = new Set(this.request.attachments.map(providerAttachmentOriginIdentity));
     const rejections = event.attachmentRejections?.rejections.map((rejection) => {
-      const origin = rejection.transient !== undefined
+      const origin = rejection.transientAttachmentRef !== undefined
         ? {
             type: "transient" as const,
-            attachmentRef: rejection.transient.attachmentRef,
-            sourceToolUseEventId: rejection.transient.sourceToolUseEventId,
-            sourcePath: rejection.transient.sourcePath,
-            pageRange: rejection.transient.pageRange,
-            detail: rejection.transient.detail,
+            attachmentRef: rejection.transientAttachmentRef,
           }
         : rejection.fileBacked !== undefined
           ? {
@@ -264,7 +260,7 @@ class ProviderStreamValidator {
     if (this.terminal) {
       return gatewayProtocolFailure(this.request);
     }
-    const validation = validateProviderStreamEvent(event, this.request);
+    const validation = validateProviderStreamEvent(event);
     if (!validation.ok) {
       return gatewayProtocolFailure(this.request);
     }
@@ -378,14 +374,7 @@ class ProviderStreamValidator {
 
 function providerAttachmentOriginIdentity(attachment: ProviderRequest["attachments"][number]): string {
   if (attachment.transient !== undefined) {
-    return JSON.stringify([
-      "transient",
-      attachment.transient.attachmentRef,
-      attachment.transient.sourceToolUseEventId,
-      attachment.transient.sourcePath,
-      attachment.transient.pageRange,
-      attachment.transient.detail,
-    ]);
+    return JSON.stringify(["transient", attachment.transient.attachmentRef]);
   }
   if (attachment.fileBacked !== undefined) {
     return JSON.stringify(["file-backed", attachment.fileBacked.sourceEventId, attachment.fileBacked.fileId]);
@@ -397,14 +386,7 @@ function runtimeAttachmentRejectionOriginIdentity(
   origin: Extract<LLMEvent, { readonly type: "attachment-rejections" }>["rejections"][number]["origin"],
 ): string {
   return origin.type === "transient"
-    ? JSON.stringify([
-        "transient",
-        origin.attachmentRef,
-        origin.sourceToolUseEventId,
-        origin.sourcePath,
-        origin.pageRange,
-        origin.detail,
-      ])
+    ? JSON.stringify(["transient", origin.attachmentRef])
     : JSON.stringify(["file-backed", origin.sourceEventId, origin.fileId]);
 }
 

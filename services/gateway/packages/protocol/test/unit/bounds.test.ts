@@ -6,8 +6,7 @@ import {
   ProviderRequestKind,
   ProviderStreamEvent as ProviderStreamEventMessage,
   ProviderStreamEventType,
-  RuntimeMessageRole,
-  RuntimeToolPartState,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -17,7 +16,7 @@ import {
   MaxMetadataBytes,
   MaxProviderRequestToolOutputJsonBytes,
   MaxProviderRequestAttachments,
-  MaxProviderRequestMessagePartJsonBytes,
+  MaxProviderContextTextJsonBytes,
   MaxProviderToolCallInputJsonBytes,
   MaxProviderUsageJsonBytes,
   MaxSchemaBytes,
@@ -37,8 +36,6 @@ describe("Gateway protocol bounds", () => {
   test("keeps outbound reasoning deltas at the 64 KiB text and 16 KiB metadata boundaries", () => {
     const request = validProviderRequest();
     const base = {
-      requestId: request.requestId,
-      modelRequestId: request.modelRequestId,
       sequence: 1,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
     };
@@ -46,15 +43,15 @@ describe("Gateway protocol bounds", () => {
     expect(validateProviderStreamEvent({
       ...base,
       reasoning: { id: "reasoning_1", text: "x".repeat(MaxTextBytes), metadataJson: metadataAtLimit },
-    }, request)).toEqual({ ok: true });
+    })).toEqual({ ok: true });
     expect(validateProviderStreamEvent({
       ...base,
       reasoning: { id: "reasoning_1", text: "x".repeat(MaxTextBytes + 1), metadataJson: "{}" },
-    }, request)).not.toEqual({ ok: true });
+    })).not.toEqual({ ok: true });
     expect(validateProviderStreamEvent({
       ...base,
       reasoning: { id: "reasoning_1", text: "x", metadataJson: `{"x":"${"m".repeat(MaxMetadataBytes - 7)}"}` },
-    }, request)).not.toEqual({ ok: true });
+    })).not.toEqual({ ok: true });
   });
 
   test("accepts a valid Runtime-to-Gateway ProviderRequest snapshot", () => {
@@ -82,17 +79,17 @@ describe("Gateway protocol bounds", () => {
     }
   });
 
-  test("admits multi-megabyte message parts while keeping system segments at 64 KiB", () => {
-    expect(MaxProviderRequestMessagePartJsonBytes).toBe(16 * 1024 * 1024);
+  test("admits multi-megabyte provider context items while keeping system segments at 64 KiB", () => {
+    expect(MaxProviderContextTextJsonBytes).toBe(16 * 1024 * 1024);
     const multiMegabyteText = "x".repeat(2 * 1024 * 1024);
     const base = validProviderRequest();
-    for (const part of [
-      { id: "part_text", text: { text: multiMegabyteText } },
-      { id: "part_reasoning", reasoning: { text: multiMegabyteText, metadataJson: "{}" } },
-    ]) {
+    for (const [role, part] of [
+      [ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER, { text: { text: multiMegabyteText } }],
+      [ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT, { reasoning: { text: multiMegabyteText, metadataJson: "{}" } }],
+    ] as const) {
       expect(validateProviderRequest({
         ...base,
-        messages: [{ ...base.messages[0]!, parts: [part] }],
+        context: [{ role, content: [part] }],
       })).toEqual({ ok: true });
     }
 
@@ -106,18 +103,17 @@ describe("Gateway protocol bounds", () => {
     const base = validProviderRequest();
     expectInvalid(validateProviderRequest({
       ...base,
-      messages: [{
-        ...base.messages[0]!,
-        parts: [{ id: "part_empty_text", text: { text: "" } }],
+      context: [{
+        ...base.context[0]!,
+        content: [{ text: { text: "" } }],
       }],
     }));
     expect(validateProviderRequest({
       ...base,
-      messages: [{
-        ...base.messages[0]!,
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        parts: [{
-          id: "part_signed_empty_reasoning",
+      context: [{
+        ...base.context[0]!,
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{
           reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) },
         }],
       }],
@@ -128,37 +124,34 @@ describe("Gateway protocol bounds", () => {
     const base = validProviderRequest();
     const withReasoning = (text: string) => ({
       ...base,
-      messages: [{
-        ...base.messages[0]!,
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        parts: [{
-          id: "part_signed_reasoning",
+      context: [{
+        ...base.context[0]!,
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{
           reasoning: { text, metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) },
         }],
       }],
     });
 
     expect(validateProviderRequest(withReasoning(""))).toEqual({ ok: true });
-    expect(validateProviderRequest(withReasoning("x".repeat(MaxProviderRequestMessagePartJsonBytes - 2)))).toEqual({ ok: true });
-    expectInvalid(validateProviderRequest(withReasoning("x".repeat(MaxProviderRequestMessagePartJsonBytes - 1))));
+    expect(validateProviderRequest(withReasoning("x".repeat(MaxProviderContextTextJsonBytes - 2)))).toEqual({ ok: true });
+    expectInvalid(validateProviderRequest(withReasoning("x".repeat(MaxProviderContextTextJsonBytes - 1))));
   });
 
   test("uses the protocol identifier limit for provider stream ids", () => {
     const base = validProviderRequest();
     const eventBase = {
-      requestId: base.requestId,
-      modelRequestId: base.modelRequestId,
       sequence: 1,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
     };
     expect(validateProviderStreamEvent({
       ...eventBase,
       text: { id: "i".repeat(MaxIdBytes), text: "", metadataJson: "{}" },
-    }, base)).toEqual({ ok: true });
+    })).toEqual({ ok: true });
     expect(validateProviderStreamEvent({
       ...eventBase,
       text: { id: "i".repeat(MaxIdBytes + 1), text: "", metadataJson: "{}" },
-    }, base)).not.toEqual({ ok: true });
+    })).not.toEqual({ ok: true });
   });
 
   test("accepts all contract-owned ProviderRequest request kinds", () => {
@@ -212,7 +205,7 @@ describe("Gateway protocol bounds", () => {
     expect(validateProviderRequest(decoded)).toEqual({ ok: true });
   });
 
-  test("accepts all contract-owned system segment and runtime tool states", () => {
+  test("accepts all contract-owned system segments and closed provider Tool outcomes", () => {
     const base = validProviderRequest();
     const system = base.system[0]!;
     for (const kind of [
@@ -236,24 +229,23 @@ describe("Gateway protocol bounds", () => {
         system: [{ ...system, cacheHint }],
       }))).toEqual({ ok: true });
     }
-    for (const state of [
-      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
-      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
-      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED,
+    for (const outcome of [
+      { completed: { outputJson: "{}" }, error: undefined, cancelled: undefined },
+      { completed: undefined, error: { errorJson: "{}" }, cancelled: undefined },
+      { completed: undefined, error: undefined, cancelled: {} },
     ]) {
       expect(validateProviderRequest(validProviderRequest({
-        messages: [{
-          ...base.messages[0]!,
-          parts: [{
-            id: "part_tool",
-            tool: {
-              callId: "call_1",
+        context: [{
+          ...base.context[0]!,
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            { toolCall: {
+              modelToolCallId: "call_1",
               name: "Read",
-              state,
               inputJson: "{}",
-              outputOrErrorJson: "{}",
-            },
-          }],
+            } },
+            { toolResult: { modelToolCallId: "call_1", ...outcome } },
+          ],
         }],
       }))).toEqual({ ok: true });
     }
@@ -261,49 +253,53 @@ describe("Gateway protocol bounds", () => {
 
   test("uses independent byte ceilings for provider tool input, tool output, and usage JSON", () => {
     const base = validProviderRequest();
-    const message = base.messages[0]!;
-    const toolPart = {
-      id: "part_tool",
-      tool: {
-        callId: "call_1",
+    const message = base.context[0]!;
+    const toolCall = {
+      toolCall: {
+        modelToolCallId: "call_1",
         name: "Read",
-        state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
         inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes),
-        outputOrErrorJson: jsonObjectAtBytes(MaxProviderRequestToolOutputJsonBytes),
+      },
+    };
+    const toolResult = {
+      toolResult: {
+        modelToolCallId: "call_1",
+        completed: { outputJson: jsonObjectAtBytes(MaxProviderRequestToolOutputJsonBytes) },
+        error: undefined,
+        cancelled: undefined,
       },
     };
     expect(validateProviderRequest({
       ...base,
-      messages: [{ ...message, parts: [toolPart] }],
+      context: [{ ...message, role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT, content: [toolCall, toolResult] }],
     })).toEqual({ ok: true });
     expectInvalid(validateProviderRequest({
       ...base,
-      messages: [{
+      context: [{
         ...message,
-        parts: [{
-          ...toolPart,
-          tool: { ...toolPart.tool, outputOrErrorJson: jsonObjectAtBytes(MaxProviderRequestToolOutputJsonBytes + 1) },
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [toolCall, {
+          toolResult: {
+            ...toolResult.toolResult,
+            completed: { outputJson: jsonObjectAtBytes(MaxProviderRequestToolOutputJsonBytes + 1) },
+          },
         }],
       }],
     }));
 
     const eventBase = {
-      requestId: base.requestId,
-      modelRequestId: base.modelRequestId,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
     };
     expect(validateProviderStreamEvent({
       ...eventBase,
       toolCall: { id: "call_large", name: "memory", inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes), metadataJson: "{}" },
-    }, base)).toEqual({ ok: true });
+    })).toEqual({ ok: true });
     expectInvalid(validateProviderStreamEvent({
       ...eventBase,
       toolCall: { id: "call_large", name: "memory", inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes + 1), metadataJson: "{}" },
-    }, base));
+    }));
 
     const finish = (providerUsageJson: string): ProviderStreamEvent => ({
-      requestId: base.requestId,
-      modelRequestId: base.modelRequestId,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       finish: {
         reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
@@ -316,8 +312,8 @@ describe("Gateway protocol bounds", () => {
         metadataJson: "{}",
       },
     });
-    expect(validateProviderStreamEvent(finish(jsonObjectAtBytes(MaxProviderUsageJsonBytes)), base)).toEqual({ ok: true });
-    expectInvalid(validateProviderStreamEvent(finish(jsonObjectAtBytes(MaxProviderUsageJsonBytes + 1)), base));
+    expect(validateProviderStreamEvent(finish(jsonObjectAtBytes(MaxProviderUsageJsonBytes)))).toEqual({ ok: true });
+    expectInvalid(validateProviderStreamEvent(finish(jsonObjectAtBytes(MaxProviderUsageJsonBytes + 1))));
   });
 
   test("truncates provider errors by UTF-8 bytes without splitting code points", () => {
@@ -325,32 +321,30 @@ describe("Gateway protocol bounds", () => {
     expect(new TextEncoder().encode(truncateUtf8Bytes("你".repeat(4), 8)).byteLength).toBe(6);
   });
 
-  test("treats terminal Tool part IDs as opaque transport identities", () => {
+  test("pairs provider Tool calls and terminal results only by modelToolCallId", () => {
     const base = validProviderRequest();
-    const message = base.messages[0]!;
-    const repairPart = {
-      id: "part_bridge_assigned_repair",
-      tool: {
-        callId: "call_repair",
+    const message = base.context[0]!;
+    const call = {
+      toolCall: {
+        modelToolCallId: "call_repair",
         name: "unknown_tool",
-        state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
         inputJson: "{}",
-        outputOrErrorJson: "{}",
       },
     };
 
     expect(validateProviderRequest(validProviderRequest({
-      messages: [{ ...message, parts: [repairPart] }],
+      context: [{ ...message, role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT, content: [call] }],
     }))).toEqual({ ok: true });
-    for (const state of [
-      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
-      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
-      RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED,
+    for (const outcome of [
+      { completed: { outputJson: "{}" }, error: undefined, cancelled: undefined },
+      { completed: undefined, error: { errorJson: "{}" }, cancelled: undefined },
+      { completed: undefined, error: undefined, cancelled: {} },
     ]) {
       expect(validateProviderRequest(validProviderRequest({
-        messages: [{
+        context: [{
           ...message,
-          parts: [{ ...repairPart, tool: { ...repairPart.tool, state } }],
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [call, { toolResult: { modelToolCallId: "call_repair", ...outcome } }],
         }],
       }))).toEqual({ ok: true });
     }
@@ -469,10 +463,8 @@ describe("Gateway protocol bounds", () => {
       { ...base, attachments: [{ ...base.attachments[0]!, mime: "text/plain" }] },
       { ...base, limits: undefined },
       { ...base, limits: { maxOutputTokens: -1, timeoutMs: 30_000 } },
-      { ...base, messages: [{ ...base.messages[0]!, role: 99 as RuntimeMessageRole }] },
-      { ...base, messages: [{ ...base.messages[0]!, status: "streaming" }] },
-      { ...base, messages: [{ ...base.messages[0]!, status: "pending" }] },
-      { ...base, messages: [{ ...base.messages[0]!, origin: "system" }] },
+      { ...base, context: [{ ...base.context[0]!, role: 99 as ProviderContextRole }] },
+      { ...base, context: [{ ...base.context[0]!, content: [] }] },
     ]) {
       expectInvalid(validateProviderRequest(request));
     }
@@ -486,11 +478,8 @@ describe("Gateway protocol bounds", () => {
     })).toEqual({ ok: true });
   });
 
-  test("validates ProviderStreamEvent request identity and payload shape", () => {
-    const request = validProviderRequest();
+  test("validates ProviderStreamEvent payload shape", () => {
     expect(validateProviderStreamEvent({
-      requestId: request.requestId,
-      modelRequestId: request.modelRequestId,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
       providerError: {
         metadataJson: "{}",
@@ -503,46 +492,21 @@ describe("Gateway protocol bounds", () => {
           retryAfterMs: 0,
         },
       },
-    }, request)).toEqual({ ok: true });
-    expectInvalid(validateProviderStreamEvent({
-      requestId: "wrong",
-      modelRequestId: request.modelRequestId,
-      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
-      providerError: {
-        metadataJson: "{}",
-        error: {
-          code: "provider_unavailable",
-          message: "unavailable",
-          retryable: true,
-          fatal: false,
-          statusCode: 503,
-          retryAfterMs: 0,
-        },
-      },
-    }, request));
+    })).toEqual({ ok: true });
   });
 
   test("accepts one bounded non-terminal attachment rejection envelope", () => {
-    const request = validProviderRequest();
     const event = {
-      requestId: request.requestId,
-      modelRequestId: request.modelRequestId,
       type: 13,
       attachmentRejections: {
         rejections: [
           {
-            transient: {
-              attachmentRef: "att_expired",
-              sourceToolUseEventId: "sevt_tool_expired",
-              sourcePath: "mcp:test/expired.png",
-              pageRange: "",
-              detail: "auto",
-            },
+            transientAttachmentRef: "att_expired",
             fileBacked: undefined,
             reason: 1,
           },
           {
-            transient: undefined,
+            transientAttachmentRef: undefined,
             fileBacked: {
               sourceEventId: "sevt_user_large",
               fileId: "file_large",
@@ -553,11 +517,10 @@ describe("Gateway protocol bounds", () => {
       },
     } as unknown as ProviderStreamEvent;
 
-    expect(validateProviderStreamEvent(event, request)).toEqual({ ok: true });
+    expect(validateProviderStreamEvent(event)).toEqual({ ok: true });
   });
 
   test("rejects negative ProviderError numeric fields", () => {
-    const request = validProviderRequest();
     const providerError = {
       metadataJson: "{}",
       error: {
@@ -575,20 +538,14 @@ describe("Gateway protocol bounds", () => {
       { ...providerError.error, retryAfterMs: -1 },
     ]) {
       expectInvalid(validateProviderStreamEvent({
-        requestId: request.requestId,
-        modelRequestId: request.modelRequestId,
         type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
         providerError: { ...providerError, error },
-      }, request));
+      }));
     }
   });
 
   test("rejects malformed ProviderStreamEvent payloads per event variant", () => {
-    const request = validProviderRequest();
-    const base = {
-      requestId: request.requestId,
-      modelRequestId: request.modelRequestId,
-    };
+    const base = {};
     const finishUsage = {
       inputTotalTokens: 1,
       inputUncachedTokens: 1,
@@ -608,7 +565,7 @@ describe("Gateway protocol bounds", () => {
         inputLimitTokens: 372_000,
         outputTokenLimit: 128_000,
       },
-    }, request)).toEqual({ ok: true });
+    })).toEqual({ ok: true });
     const finishRoundTrip = ProviderStreamEventMessage.decode(ProviderStreamEventMessage.encode({
       ...base,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
@@ -643,16 +600,10 @@ describe("Gateway protocol bounds", () => {
           usage: finishUsage,
           metadataJson: "{}",
         },
-      }, request)).toEqual({ ok: true });
+      })).toEqual({ ok: true });
     }
 
     for (const malformed of [
-      {
-        ...base,
-        modelRequestId: "wrong",
-        type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-        text: { id: "text_1", text: "hello", metadataJson: "{}" },
-      },
       {
         ...base,
         type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED,
@@ -761,7 +712,7 @@ describe("Gateway protocol bounds", () => {
         providerError: { error: undefined, metadataJson: "{}" },
       },
     ] satisfies readonly ProviderStreamEvent[]) {
-      expectInvalid(validateProviderStreamEvent(malformed, request));
+      expectInvalid(validateProviderStreamEvent(malformed));
     }
   });
 });

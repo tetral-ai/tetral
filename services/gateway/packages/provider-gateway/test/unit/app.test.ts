@@ -28,12 +28,12 @@ describe("ProviderGatewayApp lifecycle", () => {
       tokenReviewClient: new AllowingTokenReviewClient(),
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
           await new Promise<void>((resolve) => {
             releaseStream = resolve;
           });
-          yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
-          yield finishEvent(request);
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield finishEvent();
         },
       },
     });
@@ -182,13 +182,10 @@ function metadata(): Metadata {
 }
 
 function textEvent(
-  request: { readonly requestId: string; readonly modelRequestId: string },
   type: ProviderStreamEventType,
   text: string,
 ): ProviderStreamEvent {
   return {
-    requestId: request.requestId,
-    modelRequestId: request.modelRequestId,
     type,
     text: {
       id: "text_1",
@@ -198,10 +195,8 @@ function textEvent(
   };
 }
 
-function finishEvent(request: { readonly requestId: string; readonly modelRequestId: string }): ProviderStreamEvent {
+function finishEvent(): ProviderStreamEvent {
   return {
-    requestId: request.requestId,
-    modelRequestId: request.modelRequestId,
     type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
     finish: {
       reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,

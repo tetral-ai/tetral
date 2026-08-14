@@ -182,85 +182,40 @@ export function systemCacheHintToJSON(object: SystemCacheHint): string {
   }
 }
 
-export enum RuntimeMessageRole {
-  RUNTIME_MESSAGE_ROLE_UNSPECIFIED = 0,
-  RUNTIME_MESSAGE_ROLE_USER = 1,
-  RUNTIME_MESSAGE_ROLE_ASSISTANT = 2,
+export enum ProviderContextRole {
+  PROVIDER_CONTEXT_ROLE_UNSPECIFIED = 0,
+  PROVIDER_CONTEXT_ROLE_USER = 1,
+  PROVIDER_CONTEXT_ROLE_ASSISTANT = 2,
   UNRECOGNIZED = -1,
 }
 
-export function runtimeMessageRoleFromJSON(object: any): RuntimeMessageRole {
+export function providerContextRoleFromJSON(object: any): ProviderContextRole {
   switch (object) {
     case 0:
-    case "RUNTIME_MESSAGE_ROLE_UNSPECIFIED":
-      return RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_UNSPECIFIED;
+    case "PROVIDER_CONTEXT_ROLE_UNSPECIFIED":
+      return ProviderContextRole.PROVIDER_CONTEXT_ROLE_UNSPECIFIED;
     case 1:
-    case "RUNTIME_MESSAGE_ROLE_USER":
-      return RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER;
+    case "PROVIDER_CONTEXT_ROLE_USER":
+      return ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER;
     case 2:
-    case "RUNTIME_MESSAGE_ROLE_ASSISTANT":
-      return RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT;
+    case "PROVIDER_CONTEXT_ROLE_ASSISTANT":
+      return ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT;
     case -1:
     case "UNRECOGNIZED":
     default:
-      return RuntimeMessageRole.UNRECOGNIZED;
+      return ProviderContextRole.UNRECOGNIZED;
   }
 }
 
-export function runtimeMessageRoleToJSON(object: RuntimeMessageRole): string {
+export function providerContextRoleToJSON(object: ProviderContextRole): string {
   switch (object) {
-    case RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_UNSPECIFIED:
-      return "RUNTIME_MESSAGE_ROLE_UNSPECIFIED";
-    case RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER:
-      return "RUNTIME_MESSAGE_ROLE_USER";
-    case RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT:
-      return "RUNTIME_MESSAGE_ROLE_ASSISTANT";
-    case RuntimeMessageRole.UNRECOGNIZED:
-    default:
-      return "UNRECOGNIZED";
-  }
-}
-
-export enum RuntimeToolPartState {
-  RUNTIME_TOOL_PART_STATE_UNSPECIFIED = 0,
-  RUNTIME_TOOL_PART_STATE_COMPLETED = 1,
-  RUNTIME_TOOL_PART_STATE_ERROR = 2,
-  RUNTIME_TOOL_PART_STATE_CANCELLED = 3,
-  UNRECOGNIZED = -1,
-}
-
-export function runtimeToolPartStateFromJSON(object: any): RuntimeToolPartState {
-  switch (object) {
-    case 0:
-    case "RUNTIME_TOOL_PART_STATE_UNSPECIFIED":
-      return RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_UNSPECIFIED;
-    case 1:
-    case "RUNTIME_TOOL_PART_STATE_COMPLETED":
-      return RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED;
-    case 2:
-    case "RUNTIME_TOOL_PART_STATE_ERROR":
-      return RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR;
-    case 3:
-    case "RUNTIME_TOOL_PART_STATE_CANCELLED":
-      return RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED;
-    case -1:
-    case "UNRECOGNIZED":
-    default:
-      return RuntimeToolPartState.UNRECOGNIZED;
-  }
-}
-
-export function runtimeToolPartStateToJSON(object: RuntimeToolPartState): string {
-  switch (object) {
-    case RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_UNSPECIFIED:
-      return "RUNTIME_TOOL_PART_STATE_UNSPECIFIED";
-    case RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED:
-      return "RUNTIME_TOOL_PART_STATE_COMPLETED";
-    case RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR:
-      return "RUNTIME_TOOL_PART_STATE_ERROR";
-    case RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED:
-      return "RUNTIME_TOOL_PART_STATE_CANCELLED";
-    case RuntimeToolPartState.UNRECOGNIZED:
+    case ProviderContextRole.PROVIDER_CONTEXT_ROLE_UNSPECIFIED:
+      return "PROVIDER_CONTEXT_ROLE_UNSPECIFIED";
+    case ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER:
+      return "PROVIDER_CONTEXT_ROLE_USER";
+    case ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT:
+      return "PROVIDER_CONTEXT_ROLE_ASSISTANT";
+    case ProviderContextRole.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
@@ -714,13 +669,12 @@ export interface ProviderRequest {
   workspaceId: string;
   sessionId: string;
   sessionThreadId: string;
-  parentThreadId?: string | undefined;
   bindingId: string;
   bindingGeneration: number;
   runtimeBindingToken: string;
   model: ModelRef | undefined;
   system: SystemSegment[];
-  messages: RuntimeMessage[];
+  context: ProviderContextEntry[];
   tools: RuntimeToolDefinition[];
   attachments: ProviderRequestAttachment[];
   limits: ProviderRequestLimits | undefined;
@@ -739,36 +693,49 @@ export interface SystemSegment {
   cacheHint: SystemCacheHint;
 }
 
-export interface RuntimeMessage {
-  id: string;
-  role: RuntimeMessageRole;
-  parts: RuntimePart[];
-  status: string;
-  origin: string;
+export interface ProviderContextEntry {
+  role: ProviderContextRole;
+  content: ProviderContextItem[];
 }
 
-export interface RuntimePart {
-  id: string;
-  text?: RuntimeTextPart | undefined;
-  reasoning?: RuntimeReasoningPart | undefined;
-  tool?: RuntimeToolPart | undefined;
+export interface ProviderContextItem {
+  text?: ProviderContextText | undefined;
+  reasoning?: ProviderContextReasoning | undefined;
+  toolCall?: ProviderToolCall | undefined;
+  toolResult?: ProviderToolResult | undefined;
 }
 
-export interface RuntimeTextPart {
+export interface ProviderContextText {
   text: string;
 }
 
-export interface RuntimeReasoningPart {
+export interface ProviderContextReasoning {
   text: string;
   metadataJson: string;
 }
 
-export interface RuntimeToolPart {
-  callId: string;
+export interface ProviderToolCall {
+  modelToolCallId: string;
   name: string;
-  state: RuntimeToolPartState;
   inputJson: string;
-  outputOrErrorJson: string;
+}
+
+export interface ProviderToolResult {
+  modelToolCallId: string;
+  completed?: ProviderCompletedToolResult | undefined;
+  error?: ProviderErrorToolResult | undefined;
+  cancelled?: ProviderCancelledToolResult | undefined;
+}
+
+export interface ProviderCompletedToolResult {
+  outputJson: string;
+}
+
+export interface ProviderErrorToolResult {
+  errorJson: string;
+}
+
+export interface ProviderCancelledToolResult {
 }
 
 export interface RuntimeToolDefinition {
@@ -796,7 +763,6 @@ export interface ProviderRequestAttachment {
 
 export interface ProviderRequestTransientAttachment {
   attachmentRef: string;
-  sourceToolUseEventId: string;
   sourcePath: string;
   pageRange: string;
   detail: string;
@@ -813,8 +779,6 @@ export interface ProviderRequestLimits {
 }
 
 export interface ProviderStreamEvent {
-  requestId: string;
-  modelRequestId: string;
   type: ProviderStreamEventType;
   text?: ProviderTextPayload | undefined;
   reasoning?: ProviderReasoningPayload | undefined;
@@ -826,7 +790,7 @@ export interface ProviderStreamEvent {
 }
 
 export interface ProviderAttachmentRejection {
-  transient?: ProviderRequestTransientAttachment | undefined;
+  transientAttachmentRef?: string | undefined;
   fileBacked?: ProviderRequestFileAttachment | undefined;
   reason: ProviderAttachmentRejectionReason;
 }
@@ -1018,13 +982,12 @@ function createBaseProviderRequest(): ProviderRequest {
     workspaceId: "",
     sessionId: "",
     sessionThreadId: "",
-    parentThreadId: undefined,
     bindingId: "",
     bindingGeneration: 0,
     runtimeBindingToken: "",
     model: undefined,
     system: [],
-    messages: [],
+    context: [],
     tools: [],
     attachments: [],
     limits: undefined,
@@ -1052,9 +1015,6 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     if (message.sessionThreadId !== "") {
       writer.uint32(50).string(message.sessionThreadId);
     }
-    if (message.parentThreadId !== undefined) {
-      writer.uint32(58).string(message.parentThreadId);
-    }
     if (message.bindingId !== "") {
       writer.uint32(66).string(message.bindingId);
     }
@@ -1070,8 +1030,8 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     for (const v of message.system) {
       SystemSegment.encode(v!, writer.uint32(98).fork()).join();
     }
-    for (const v of message.messages) {
-      RuntimeMessage.encode(v!, writer.uint32(106).fork()).join();
+    for (const v of message.context) {
+      ProviderContextEntry.encode(v!, writer.uint32(106).fork()).join();
     }
     for (const v of message.tools) {
       RuntimeToolDefinition.encode(v!, writer.uint32(114).fork()).join();
@@ -1143,14 +1103,6 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
           message.sessionThreadId = reader.string();
           continue;
         }
-        case 7: {
-          if (tag !== 58) {
-            break;
-          }
-
-          message.parentThreadId = reader.string();
-          continue;
-        }
         case 8: {
           if (tag !== 66) {
             break;
@@ -1196,7 +1148,7 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
             break;
           }
 
-          message.messages.push(RuntimeMessage.decode(reader, reader.uint32()));
+          message.context.push(ProviderContextEntry.decode(reader, reader.uint32()));
           continue;
         }
         case 14: {
@@ -1272,11 +1224,6 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
         : isSet(object.session_thread_id)
         ? globalThis.String(object.session_thread_id)
         : "",
-      parentThreadId: isSet(object.parentThreadId)
-        ? globalThis.String(object.parentThreadId)
-        : isSet(object.parent_thread_id)
-        ? globalThis.String(object.parent_thread_id)
-        : undefined,
       bindingId: isSet(object.bindingId)
         ? globalThis.String(object.bindingId)
         : isSet(object.binding_id)
@@ -1296,8 +1243,8 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
       system: globalThis.Array.isArray(object?.system)
         ? object.system.map((e: any) => SystemSegment.fromJSON(e))
         : [],
-      messages: globalThis.Array.isArray(object?.messages)
-        ? object.messages.map((e: any) => RuntimeMessage.fromJSON(e))
+      context: globalThis.Array.isArray(object?.context)
+        ? object.context.map((e: any) => ProviderContextEntry.fromJSON(e))
         : [],
       tools: globalThis.Array.isArray(object?.tools)
         ? object.tools.map((e: any) => RuntimeToolDefinition.fromJSON(e))
@@ -1334,9 +1281,6 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     if (message.sessionThreadId !== "") {
       obj.sessionThreadId = message.sessionThreadId;
     }
-    if (message.parentThreadId !== undefined) {
-      obj.parentThreadId = message.parentThreadId;
-    }
     if (message.bindingId !== "") {
       obj.bindingId = message.bindingId;
     }
@@ -1352,8 +1296,8 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     if (message.system?.length) {
       obj.system = message.system.map((e) => SystemSegment.toJSON(e));
     }
-    if (message.messages?.length) {
-      obj.messages = message.messages.map((e) => RuntimeMessage.toJSON(e));
+    if (message.context?.length) {
+      obj.context = message.context.map((e) => ProviderContextEntry.toJSON(e));
     }
     if (message.tools?.length) {
       obj.tools = message.tools.map((e) => RuntimeToolDefinition.toJSON(e));
@@ -1381,7 +1325,6 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     message.workspaceId = object.workspaceId ?? "";
     message.sessionId = object.sessionId ?? "";
     message.sessionThreadId = object.sessionThreadId ?? "";
-    message.parentThreadId = object.parentThreadId ?? undefined;
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.runtimeBindingToken = object.runtimeBindingToken ?? "";
@@ -1389,7 +1332,7 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
       ? ModelRef.fromPartial(object.model)
       : undefined;
     message.system = object.system?.map((e) => SystemSegment.fromPartial(e)) || [];
-    message.messages = object.messages?.map((e) => RuntimeMessage.fromPartial(e)) || [];
+    message.context = object.context?.map((e) => ProviderContextEntry.fromPartial(e)) || [];
     message.tools = object.tools?.map((e) => RuntimeToolDefinition.fromPartial(e)) || [];
     message.attachments = object.attachments?.map((e) => ProviderRequestAttachment.fromPartial(e)) || [];
     message.limits = (object.limits !== undefined && object.limits !== null)
@@ -1596,164 +1539,34 @@ export const SystemSegment: MessageFns<SystemSegment> = {
   },
 };
 
-function createBaseRuntimeMessage(): RuntimeMessage {
-  return { id: "", role: 0, parts: [], status: "", origin: "" };
+function createBaseProviderContextEntry(): ProviderContextEntry {
+  return { role: 0, content: [] };
 }
 
-export const RuntimeMessage: MessageFns<RuntimeMessage> = {
-  encode(message: RuntimeMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.id !== "") {
-      writer.uint32(10).string(message.id);
-    }
+export const ProviderContextEntry: MessageFns<ProviderContextEntry> = {
+  encode(message: ProviderContextEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.role !== 0) {
-      writer.uint32(16).int32(message.role);
+      writer.uint32(8).int32(message.role);
     }
-    for (const v of message.parts) {
-      RuntimePart.encode(v!, writer.uint32(26).fork()).join();
-    }
-    if (message.status !== "") {
-      writer.uint32(34).string(message.status);
-    }
-    if (message.origin !== "") {
-      writer.uint32(42).string(message.origin);
+    for (const v of message.content) {
+      ProviderContextItem.encode(v!, writer.uint32(18).fork()).join();
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeMessage {
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderContextEntry {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeMessage();
+    const message = createBaseProviderContextEntry();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
         case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.id = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
+          if (tag !== 8) {
             break;
           }
 
           message.role = reader.int32() as any;
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.parts.push(RuntimePart.decode(reader, reader.uint32()));
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.status = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.origin = reader.string();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): RuntimeMessage {
-    return {
-      id: isSet(object.id) ? globalThis.String(object.id) : "",
-      role: isSet(object.role) ? runtimeMessageRoleFromJSON(object.role) : 0,
-      parts: globalThis.Array.isArray(object?.parts) ? object.parts.map((e: any) => RuntimePart.fromJSON(e)) : [],
-      status: isSet(object.status) ? globalThis.String(object.status) : "",
-      origin: isSet(object.origin) ? globalThis.String(object.origin) : "",
-    };
-  },
-
-  toJSON(message: RuntimeMessage): unknown {
-    const obj: any = {};
-    if (message.id !== "") {
-      obj.id = message.id;
-    }
-    if (message.role !== 0) {
-      obj.role = runtimeMessageRoleToJSON(message.role);
-    }
-    if (message.parts?.length) {
-      obj.parts = message.parts.map((e) => RuntimePart.toJSON(e));
-    }
-    if (message.status !== "") {
-      obj.status = message.status;
-    }
-    if (message.origin !== "") {
-      obj.origin = message.origin;
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<RuntimeMessage>, I>>(base?: I): RuntimeMessage {
-    return RuntimeMessage.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<RuntimeMessage>, I>>(object: I): RuntimeMessage {
-    const message = createBaseRuntimeMessage();
-    message.id = object.id ?? "";
-    message.role = object.role ?? 0;
-    message.parts = object.parts?.map((e) => RuntimePart.fromPartial(e)) || [];
-    message.status = object.status ?? "";
-    message.origin = object.origin ?? "";
-    return message;
-  },
-};
-
-function createBaseRuntimePart(): RuntimePart {
-  return { id: "", text: undefined, reasoning: undefined, tool: undefined };
-}
-
-export const RuntimePart: MessageFns<RuntimePart> = {
-  encode(message: RuntimePart, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.id !== "") {
-      writer.uint32(10).string(message.id);
-    }
-    if (message.text !== undefined) {
-      RuntimeTextPart.encode(message.text, writer.uint32(18).fork()).join();
-    }
-    if (message.reasoning !== undefined) {
-      RuntimeReasoningPart.encode(message.reasoning, writer.uint32(26).fork()).join();
-    }
-    if (message.tool !== undefined) {
-      RuntimeToolPart.encode(message.tool, writer.uint32(34).fork()).join();
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimePart {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimePart();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.id = reader.string();
           continue;
         }
         case 2: {
@@ -1761,23 +1574,7 @@ export const RuntimePart: MessageFns<RuntimePart> = {
             break;
           }
 
-          message.text = RuntimeTextPart.decode(reader, reader.uint32());
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.reasoning = RuntimeReasoningPart.decode(reader, reader.uint32());
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.tool = RuntimeToolPart.decode(reader, reader.uint32());
+          message.content.push(ProviderContextItem.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -1789,67 +1586,177 @@ export const RuntimePart: MessageFns<RuntimePart> = {
     return message;
   },
 
-  fromJSON(object: any): RuntimePart {
+  fromJSON(object: any): ProviderContextEntry {
     return {
-      id: isSet(object.id) ? globalThis.String(object.id) : "",
-      text: isSet(object.text) ? RuntimeTextPart.fromJSON(object.text) : undefined,
-      reasoning: isSet(object.reasoning) ? RuntimeReasoningPart.fromJSON(object.reasoning) : undefined,
-      tool: isSet(object.tool) ? RuntimeToolPart.fromJSON(object.tool) : undefined,
+      role: isSet(object.role) ? providerContextRoleFromJSON(object.role) : 0,
+      content: globalThis.Array.isArray(object?.content)
+        ? object.content.map((e: any) => ProviderContextItem.fromJSON(e))
+        : [],
     };
   },
 
-  toJSON(message: RuntimePart): unknown {
+  toJSON(message: ProviderContextEntry): unknown {
     const obj: any = {};
-    if (message.id !== "") {
-      obj.id = message.id;
+    if (message.role !== 0) {
+      obj.role = providerContextRoleToJSON(message.role);
     }
-    if (message.text !== undefined) {
-      obj.text = RuntimeTextPart.toJSON(message.text);
-    }
-    if (message.reasoning !== undefined) {
-      obj.reasoning = RuntimeReasoningPart.toJSON(message.reasoning);
-    }
-    if (message.tool !== undefined) {
-      obj.tool = RuntimeToolPart.toJSON(message.tool);
+    if (message.content?.length) {
+      obj.content = message.content.map((e) => ProviderContextItem.toJSON(e));
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimePart>, I>>(base?: I): RuntimePart {
-    return RuntimePart.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<ProviderContextEntry>, I>>(base?: I): ProviderContextEntry {
+    return ProviderContextEntry.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimePart>, I>>(object: I): RuntimePart {
-    const message = createBaseRuntimePart();
-    message.id = object.id ?? "";
+  fromPartial<I extends Exact<DeepPartial<ProviderContextEntry>, I>>(object: I): ProviderContextEntry {
+    const message = createBaseProviderContextEntry();
+    message.role = object.role ?? 0;
+    message.content = object.content?.map((e) => ProviderContextItem.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseProviderContextItem(): ProviderContextItem {
+  return { text: undefined, reasoning: undefined, toolCall: undefined, toolResult: undefined };
+}
+
+export const ProviderContextItem: MessageFns<ProviderContextItem> = {
+  encode(message: ProviderContextItem, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.text !== undefined) {
+      ProviderContextText.encode(message.text, writer.uint32(10).fork()).join();
+    }
+    if (message.reasoning !== undefined) {
+      ProviderContextReasoning.encode(message.reasoning, writer.uint32(18).fork()).join();
+    }
+    if (message.toolCall !== undefined) {
+      ProviderToolCall.encode(message.toolCall, writer.uint32(26).fork()).join();
+    }
+    if (message.toolResult !== undefined) {
+      ProviderToolResult.encode(message.toolResult, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderContextItem {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderContextItem();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.text = ProviderContextText.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.reasoning = ProviderContextReasoning.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.toolCall = ProviderToolCall.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.toolResult = ProviderToolResult.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProviderContextItem {
+    return {
+      text: isSet(object.text) ? ProviderContextText.fromJSON(object.text) : undefined,
+      reasoning: isSet(object.reasoning) ? ProviderContextReasoning.fromJSON(object.reasoning) : undefined,
+      toolCall: isSet(object.toolCall)
+        ? ProviderToolCall.fromJSON(object.toolCall)
+        : isSet(object.tool_call)
+        ? ProviderToolCall.fromJSON(object.tool_call)
+        : undefined,
+      toolResult: isSet(object.toolResult)
+        ? ProviderToolResult.fromJSON(object.toolResult)
+        : isSet(object.tool_result)
+        ? ProviderToolResult.fromJSON(object.tool_result)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ProviderContextItem): unknown {
+    const obj: any = {};
+    if (message.text !== undefined) {
+      obj.text = ProviderContextText.toJSON(message.text);
+    }
+    if (message.reasoning !== undefined) {
+      obj.reasoning = ProviderContextReasoning.toJSON(message.reasoning);
+    }
+    if (message.toolCall !== undefined) {
+      obj.toolCall = ProviderToolCall.toJSON(message.toolCall);
+    }
+    if (message.toolResult !== undefined) {
+      obj.toolResult = ProviderToolResult.toJSON(message.toolResult);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderContextItem>, I>>(base?: I): ProviderContextItem {
+    return ProviderContextItem.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderContextItem>, I>>(object: I): ProviderContextItem {
+    const message = createBaseProviderContextItem();
     message.text = (object.text !== undefined && object.text !== null)
-      ? RuntimeTextPart.fromPartial(object.text)
+      ? ProviderContextText.fromPartial(object.text)
       : undefined;
     message.reasoning = (object.reasoning !== undefined && object.reasoning !== null)
-      ? RuntimeReasoningPart.fromPartial(object.reasoning)
+      ? ProviderContextReasoning.fromPartial(object.reasoning)
       : undefined;
-    message.tool = (object.tool !== undefined && object.tool !== null)
-      ? RuntimeToolPart.fromPartial(object.tool)
+    message.toolCall = (object.toolCall !== undefined && object.toolCall !== null)
+      ? ProviderToolCall.fromPartial(object.toolCall)
+      : undefined;
+    message.toolResult = (object.toolResult !== undefined && object.toolResult !== null)
+      ? ProviderToolResult.fromPartial(object.toolResult)
       : undefined;
     return message;
   },
 };
 
-function createBaseRuntimeTextPart(): RuntimeTextPart {
+function createBaseProviderContextText(): ProviderContextText {
   return { text: "" };
 }
 
-export const RuntimeTextPart: MessageFns<RuntimeTextPart> = {
-  encode(message: RuntimeTextPart, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const ProviderContextText: MessageFns<ProviderContextText> = {
+  encode(message: ProviderContextText, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.text !== "") {
       writer.uint32(10).string(message.text);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeTextPart {
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderContextText {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeTextPart();
+    const message = createBaseProviderContextText();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -1870,11 +1777,11 @@ export const RuntimeTextPart: MessageFns<RuntimeTextPart> = {
     return message;
   },
 
-  fromJSON(object: any): RuntimeTextPart {
+  fromJSON(object: any): ProviderContextText {
     return { text: isSet(object.text) ? globalThis.String(object.text) : "" };
   },
 
-  toJSON(message: RuntimeTextPart): unknown {
+  toJSON(message: ProviderContextText): unknown {
     const obj: any = {};
     if (message.text !== "") {
       obj.text = message.text;
@@ -1882,22 +1789,22 @@ export const RuntimeTextPart: MessageFns<RuntimeTextPart> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeTextPart>, I>>(base?: I): RuntimeTextPart {
-    return RuntimeTextPart.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<ProviderContextText>, I>>(base?: I): ProviderContextText {
+    return ProviderContextText.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeTextPart>, I>>(object: I): RuntimeTextPart {
-    const message = createBaseRuntimeTextPart();
+  fromPartial<I extends Exact<DeepPartial<ProviderContextText>, I>>(object: I): ProviderContextText {
+    const message = createBaseProviderContextText();
     message.text = object.text ?? "";
     return message;
   },
 };
 
-function createBaseRuntimeReasoningPart(): RuntimeReasoningPart {
+function createBaseProviderContextReasoning(): ProviderContextReasoning {
   return { text: "", metadataJson: "" };
 }
 
-export const RuntimeReasoningPart: MessageFns<RuntimeReasoningPart> = {
-  encode(message: RuntimeReasoningPart, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const ProviderContextReasoning: MessageFns<ProviderContextReasoning> = {
+  encode(message: ProviderContextReasoning, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.text !== "") {
       writer.uint32(10).string(message.text);
     }
@@ -1907,10 +1814,10 @@ export const RuntimeReasoningPart: MessageFns<RuntimeReasoningPart> = {
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeReasoningPart {
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderContextReasoning {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeReasoningPart();
+    const message = createBaseProviderContextReasoning();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -1939,7 +1846,7 @@ export const RuntimeReasoningPart: MessageFns<RuntimeReasoningPart> = {
     return message;
   },
 
-  fromJSON(object: any): RuntimeReasoningPart {
+  fromJSON(object: any): ProviderContextReasoning {
     return {
       text: isSet(object.text) ? globalThis.String(object.text) : "",
       metadataJson: isSet(object.metadataJson)
@@ -1950,7 +1857,7 @@ export const RuntimeReasoningPart: MessageFns<RuntimeReasoningPart> = {
     };
   },
 
-  toJSON(message: RuntimeReasoningPart): unknown {
+  toJSON(message: ProviderContextReasoning): unknown {
     const obj: any = {};
     if (message.text !== "") {
       obj.text = message.text;
@@ -1961,45 +1868,39 @@ export const RuntimeReasoningPart: MessageFns<RuntimeReasoningPart> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeReasoningPart>, I>>(base?: I): RuntimeReasoningPart {
-    return RuntimeReasoningPart.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<ProviderContextReasoning>, I>>(base?: I): ProviderContextReasoning {
+    return ProviderContextReasoning.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeReasoningPart>, I>>(object: I): RuntimeReasoningPart {
-    const message = createBaseRuntimeReasoningPart();
+  fromPartial<I extends Exact<DeepPartial<ProviderContextReasoning>, I>>(object: I): ProviderContextReasoning {
+    const message = createBaseProviderContextReasoning();
     message.text = object.text ?? "";
     message.metadataJson = object.metadataJson ?? "";
     return message;
   },
 };
 
-function createBaseRuntimeToolPart(): RuntimeToolPart {
-  return { callId: "", name: "", state: 0, inputJson: "", outputOrErrorJson: "" };
+function createBaseProviderToolCall(): ProviderToolCall {
+  return { modelToolCallId: "", name: "", inputJson: "" };
 }
 
-export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
-  encode(message: RuntimeToolPart, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.callId !== "") {
-      writer.uint32(10).string(message.callId);
+export const ProviderToolCall: MessageFns<ProviderToolCall> = {
+  encode(message: ProviderToolCall, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.modelToolCallId !== "") {
+      writer.uint32(10).string(message.modelToolCallId);
     }
     if (message.name !== "") {
       writer.uint32(18).string(message.name);
     }
-    if (message.state !== 0) {
-      writer.uint32(32).int32(message.state);
-    }
     if (message.inputJson !== "") {
-      writer.uint32(42).string(message.inputJson);
-    }
-    if (message.outputOrErrorJson !== "") {
-      writer.uint32(50).string(message.outputOrErrorJson);
+      writer.uint32(26).string(message.inputJson);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeToolPart {
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderToolCall {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeToolPart();
+    const message = createBaseProviderToolCall();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -2008,7 +1909,7 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
             break;
           }
 
-          message.callId = reader.string();
+          message.modelToolCallId = reader.string();
           continue;
         }
         case 2: {
@@ -2019,28 +1920,12 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
           message.name = reader.string();
           continue;
         }
-        case 4: {
-          if (tag !== 32) {
-            break;
-          }
-
-          message.state = reader.int32() as any;
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
+        case 3: {
+          if (tag !== 26) {
             break;
           }
 
           message.inputJson = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.outputOrErrorJson = reader.string();
           continue;
         }
       }
@@ -2052,58 +1937,333 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
     return message;
   },
 
-  fromJSON(object: any): RuntimeToolPart {
+  fromJSON(object: any): ProviderToolCall {
     return {
-      callId: isSet(object.callId)
-        ? globalThis.String(object.callId)
-        : isSet(object.call_id)
-        ? globalThis.String(object.call_id)
+      modelToolCallId: isSet(object.modelToolCallId)
+        ? globalThis.String(object.modelToolCallId)
+        : isSet(object.model_tool_call_id)
+        ? globalThis.String(object.model_tool_call_id)
         : "",
       name: isSet(object.name) ? globalThis.String(object.name) : "",
-      state: isSet(object.state) ? runtimeToolPartStateFromJSON(object.state) : 0,
       inputJson: isSet(object.inputJson)
         ? globalThis.String(object.inputJson)
         : isSet(object.input_json)
         ? globalThis.String(object.input_json)
         : "",
-      outputOrErrorJson: isSet(object.outputOrErrorJson)
-        ? globalThis.String(object.outputOrErrorJson)
-        : isSet(object.output_or_error_json)
-        ? globalThis.String(object.output_or_error_json)
-        : "",
     };
   },
 
-  toJSON(message: RuntimeToolPart): unknown {
+  toJSON(message: ProviderToolCall): unknown {
     const obj: any = {};
-    if (message.callId !== "") {
-      obj.callId = message.callId;
+    if (message.modelToolCallId !== "") {
+      obj.modelToolCallId = message.modelToolCallId;
     }
     if (message.name !== "") {
       obj.name = message.name;
     }
-    if (message.state !== 0) {
-      obj.state = runtimeToolPartStateToJSON(message.state);
-    }
     if (message.inputJson !== "") {
       obj.inputJson = message.inputJson;
-    }
-    if (message.outputOrErrorJson !== "") {
-      obj.outputOrErrorJson = message.outputOrErrorJson;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeToolPart>, I>>(base?: I): RuntimeToolPart {
-    return RuntimeToolPart.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<ProviderToolCall>, I>>(base?: I): ProviderToolCall {
+    return ProviderToolCall.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeToolPart>, I>>(object: I): RuntimeToolPart {
-    const message = createBaseRuntimeToolPart();
-    message.callId = object.callId ?? "";
+  fromPartial<I extends Exact<DeepPartial<ProviderToolCall>, I>>(object: I): ProviderToolCall {
+    const message = createBaseProviderToolCall();
+    message.modelToolCallId = object.modelToolCallId ?? "";
     message.name = object.name ?? "";
-    message.state = object.state ?? 0;
     message.inputJson = object.inputJson ?? "";
-    message.outputOrErrorJson = object.outputOrErrorJson ?? "";
+    return message;
+  },
+};
+
+function createBaseProviderToolResult(): ProviderToolResult {
+  return { modelToolCallId: "", completed: undefined, error: undefined, cancelled: undefined };
+}
+
+export const ProviderToolResult: MessageFns<ProviderToolResult> = {
+  encode(message: ProviderToolResult, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.modelToolCallId !== "") {
+      writer.uint32(10).string(message.modelToolCallId);
+    }
+    if (message.completed !== undefined) {
+      ProviderCompletedToolResult.encode(message.completed, writer.uint32(18).fork()).join();
+    }
+    if (message.error !== undefined) {
+      ProviderErrorToolResult.encode(message.error, writer.uint32(26).fork()).join();
+    }
+    if (message.cancelled !== undefined) {
+      ProviderCancelledToolResult.encode(message.cancelled, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderToolResult {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderToolResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.modelToolCallId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.completed = ProviderCompletedToolResult.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.error = ProviderErrorToolResult.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.cancelled = ProviderCancelledToolResult.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProviderToolResult {
+    return {
+      modelToolCallId: isSet(object.modelToolCallId)
+        ? globalThis.String(object.modelToolCallId)
+        : isSet(object.model_tool_call_id)
+        ? globalThis.String(object.model_tool_call_id)
+        : "",
+      completed: isSet(object.completed) ? ProviderCompletedToolResult.fromJSON(object.completed) : undefined,
+      error: isSet(object.error) ? ProviderErrorToolResult.fromJSON(object.error) : undefined,
+      cancelled: isSet(object.cancelled) ? ProviderCancelledToolResult.fromJSON(object.cancelled) : undefined,
+    };
+  },
+
+  toJSON(message: ProviderToolResult): unknown {
+    const obj: any = {};
+    if (message.modelToolCallId !== "") {
+      obj.modelToolCallId = message.modelToolCallId;
+    }
+    if (message.completed !== undefined) {
+      obj.completed = ProviderCompletedToolResult.toJSON(message.completed);
+    }
+    if (message.error !== undefined) {
+      obj.error = ProviderErrorToolResult.toJSON(message.error);
+    }
+    if (message.cancelled !== undefined) {
+      obj.cancelled = ProviderCancelledToolResult.toJSON(message.cancelled);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderToolResult>, I>>(base?: I): ProviderToolResult {
+    return ProviderToolResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderToolResult>, I>>(object: I): ProviderToolResult {
+    const message = createBaseProviderToolResult();
+    message.modelToolCallId = object.modelToolCallId ?? "";
+    message.completed = (object.completed !== undefined && object.completed !== null)
+      ? ProviderCompletedToolResult.fromPartial(object.completed)
+      : undefined;
+    message.error = (object.error !== undefined && object.error !== null)
+      ? ProviderErrorToolResult.fromPartial(object.error)
+      : undefined;
+    message.cancelled = (object.cancelled !== undefined && object.cancelled !== null)
+      ? ProviderCancelledToolResult.fromPartial(object.cancelled)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseProviderCompletedToolResult(): ProviderCompletedToolResult {
+  return { outputJson: "" };
+}
+
+export const ProviderCompletedToolResult: MessageFns<ProviderCompletedToolResult> = {
+  encode(message: ProviderCompletedToolResult, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.outputJson !== "") {
+      writer.uint32(10).string(message.outputJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderCompletedToolResult {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderCompletedToolResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.outputJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProviderCompletedToolResult {
+    return {
+      outputJson: isSet(object.outputJson)
+        ? globalThis.String(object.outputJson)
+        : isSet(object.output_json)
+        ? globalThis.String(object.output_json)
+        : "",
+    };
+  },
+
+  toJSON(message: ProviderCompletedToolResult): unknown {
+    const obj: any = {};
+    if (message.outputJson !== "") {
+      obj.outputJson = message.outputJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderCompletedToolResult>, I>>(base?: I): ProviderCompletedToolResult {
+    return ProviderCompletedToolResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderCompletedToolResult>, I>>(object: I): ProviderCompletedToolResult {
+    const message = createBaseProviderCompletedToolResult();
+    message.outputJson = object.outputJson ?? "";
+    return message;
+  },
+};
+
+function createBaseProviderErrorToolResult(): ProviderErrorToolResult {
+  return { errorJson: "" };
+}
+
+export const ProviderErrorToolResult: MessageFns<ProviderErrorToolResult> = {
+  encode(message: ProviderErrorToolResult, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.errorJson !== "") {
+      writer.uint32(10).string(message.errorJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderErrorToolResult {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderErrorToolResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.errorJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProviderErrorToolResult {
+    return {
+      errorJson: isSet(object.errorJson)
+        ? globalThis.String(object.errorJson)
+        : isSet(object.error_json)
+        ? globalThis.String(object.error_json)
+        : "",
+    };
+  },
+
+  toJSON(message: ProviderErrorToolResult): unknown {
+    const obj: any = {};
+    if (message.errorJson !== "") {
+      obj.errorJson = message.errorJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderErrorToolResult>, I>>(base?: I): ProviderErrorToolResult {
+    return ProviderErrorToolResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderErrorToolResult>, I>>(object: I): ProviderErrorToolResult {
+    const message = createBaseProviderErrorToolResult();
+    message.errorJson = object.errorJson ?? "";
+    return message;
+  },
+};
+
+function createBaseProviderCancelledToolResult(): ProviderCancelledToolResult {
+  return {};
+}
+
+export const ProviderCancelledToolResult: MessageFns<ProviderCancelledToolResult> = {
+  encode(_: ProviderCancelledToolResult, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderCancelledToolResult {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderCancelledToolResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ProviderCancelledToolResult {
+    return {};
+  },
+
+  toJSON(_: ProviderCancelledToolResult): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderCancelledToolResult>, I>>(base?: I): ProviderCancelledToolResult {
+    return ProviderCancelledToolResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderCancelledToolResult>, I>>(_: I): ProviderCancelledToolResult {
+    const message = createBaseProviderCancelledToolResult();
     return message;
   },
 };
@@ -2489,7 +2649,7 @@ export const ProviderRequestAttachment: MessageFns<ProviderRequestAttachment> = 
 };
 
 function createBaseProviderRequestTransientAttachment(): ProviderRequestTransientAttachment {
-  return { attachmentRef: "", sourceToolUseEventId: "", sourcePath: "", pageRange: "", detail: "" };
+  return { attachmentRef: "", sourcePath: "", pageRange: "", detail: "" };
 }
 
 export const ProviderRequestTransientAttachment: MessageFns<ProviderRequestTransientAttachment> = {
@@ -2497,17 +2657,14 @@ export const ProviderRequestTransientAttachment: MessageFns<ProviderRequestTrans
     if (message.attachmentRef !== "") {
       writer.uint32(10).string(message.attachmentRef);
     }
-    if (message.sourceToolUseEventId !== "") {
-      writer.uint32(18).string(message.sourceToolUseEventId);
-    }
     if (message.sourcePath !== "") {
-      writer.uint32(26).string(message.sourcePath);
+      writer.uint32(18).string(message.sourcePath);
     }
     if (message.pageRange !== "") {
-      writer.uint32(34).string(message.pageRange);
+      writer.uint32(26).string(message.pageRange);
     }
     if (message.detail !== "") {
-      writer.uint32(42).string(message.detail);
+      writer.uint32(34).string(message.detail);
     }
     return writer;
   },
@@ -2532,7 +2689,7 @@ export const ProviderRequestTransientAttachment: MessageFns<ProviderRequestTrans
             break;
           }
 
-          message.sourceToolUseEventId = reader.string();
+          message.sourcePath = reader.string();
           continue;
         }
         case 3: {
@@ -2540,19 +2697,11 @@ export const ProviderRequestTransientAttachment: MessageFns<ProviderRequestTrans
             break;
           }
 
-          message.sourcePath = reader.string();
+          message.pageRange = reader.string();
           continue;
         }
         case 4: {
           if (tag !== 34) {
-            break;
-          }
-
-          message.pageRange = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
             break;
           }
 
@@ -2575,11 +2724,6 @@ export const ProviderRequestTransientAttachment: MessageFns<ProviderRequestTrans
         : isSet(object.attachment_ref)
         ? globalThis.String(object.attachment_ref)
         : "",
-      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
-        ? globalThis.String(object.sourceToolUseEventId)
-        : isSet(object.source_tool_use_event_id)
-        ? globalThis.String(object.source_tool_use_event_id)
-        : "",
       sourcePath: isSet(object.sourcePath)
         ? globalThis.String(object.sourcePath)
         : isSet(object.source_path)
@@ -2598,9 +2742,6 @@ export const ProviderRequestTransientAttachment: MessageFns<ProviderRequestTrans
     const obj: any = {};
     if (message.attachmentRef !== "") {
       obj.attachmentRef = message.attachmentRef;
-    }
-    if (message.sourceToolUseEventId !== "") {
-      obj.sourceToolUseEventId = message.sourceToolUseEventId;
     }
     if (message.sourcePath !== "") {
       obj.sourcePath = message.sourcePath;
@@ -2624,7 +2765,6 @@ export const ProviderRequestTransientAttachment: MessageFns<ProviderRequestTrans
   ): ProviderRequestTransientAttachment {
     const message = createBaseProviderRequestTransientAttachment();
     message.attachmentRef = object.attachmentRef ?? "";
-    message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
     message.sourcePath = object.sourcePath ?? "";
     message.pageRange = object.pageRange ?? "";
     message.detail = object.detail ?? "";
@@ -2804,8 +2944,6 @@ export const ProviderRequestLimits: MessageFns<ProviderRequestLimits> = {
 
 function createBaseProviderStreamEvent(): ProviderStreamEvent {
   return {
-    requestId: "",
-    modelRequestId: "",
     type: 0,
     text: undefined,
     reasoning: undefined,
@@ -2819,12 +2957,6 @@ function createBaseProviderStreamEvent(): ProviderStreamEvent {
 
 export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
   encode(message: ProviderStreamEvent, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.requestId !== "") {
-      writer.uint32(10).string(message.requestId);
-    }
-    if (message.modelRequestId !== "") {
-      writer.uint32(18).string(message.modelRequestId);
-    }
     if (message.type !== 0) {
       writer.uint32(24).int32(message.type);
     }
@@ -2859,22 +2991,6 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.requestId = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.modelRequestId = reader.string();
-          continue;
-        }
         case 3: {
           if (tag !== 24) {
             break;
@@ -2950,16 +3066,6 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
 
   fromJSON(object: any): ProviderStreamEvent {
     return {
-      requestId: isSet(object.requestId)
-        ? globalThis.String(object.requestId)
-        : isSet(object.request_id)
-        ? globalThis.String(object.request_id)
-        : "",
-      modelRequestId: isSet(object.modelRequestId)
-        ? globalThis.String(object.modelRequestId)
-        : isSet(object.model_request_id)
-        ? globalThis.String(object.model_request_id)
-        : "",
       type: isSet(object.type) ? providerStreamEventTypeFromJSON(object.type) : 0,
       text: isSet(object.text) ? ProviderTextPayload.fromJSON(object.text) : undefined,
       reasoning: isSet(object.reasoning) ? ProviderReasoningPayload.fromJSON(object.reasoning) : undefined,
@@ -2989,12 +3095,6 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
 
   toJSON(message: ProviderStreamEvent): unknown {
     const obj: any = {};
-    if (message.requestId !== "") {
-      obj.requestId = message.requestId;
-    }
-    if (message.modelRequestId !== "") {
-      obj.modelRequestId = message.modelRequestId;
-    }
     if (message.type !== 0) {
       obj.type = providerStreamEventTypeToJSON(message.type);
     }
@@ -3027,8 +3127,6 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
   },
   fromPartial<I extends Exact<DeepPartial<ProviderStreamEvent>, I>>(object: I): ProviderStreamEvent {
     const message = createBaseProviderStreamEvent();
-    message.requestId = object.requestId ?? "";
-    message.modelRequestId = object.modelRequestId ?? "";
     message.type = object.type ?? 0;
     message.text = (object.text !== undefined && object.text !== null)
       ? ProviderTextPayload.fromPartial(object.text)
@@ -3056,13 +3154,13 @@ export const ProviderStreamEvent: MessageFns<ProviderStreamEvent> = {
 };
 
 function createBaseProviderAttachmentRejection(): ProviderAttachmentRejection {
-  return { transient: undefined, fileBacked: undefined, reason: 0 };
+  return { transientAttachmentRef: undefined, fileBacked: undefined, reason: 0 };
 }
 
 export const ProviderAttachmentRejection: MessageFns<ProviderAttachmentRejection> = {
   encode(message: ProviderAttachmentRejection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.transient !== undefined) {
-      ProviderRequestTransientAttachment.encode(message.transient, writer.uint32(10).fork()).join();
+    if (message.transientAttachmentRef !== undefined) {
+      writer.uint32(10).string(message.transientAttachmentRef);
     }
     if (message.fileBacked !== undefined) {
       ProviderRequestFileAttachment.encode(message.fileBacked, writer.uint32(18).fork()).join();
@@ -3085,7 +3183,7 @@ export const ProviderAttachmentRejection: MessageFns<ProviderAttachmentRejection
             break;
           }
 
-          message.transient = ProviderRequestTransientAttachment.decode(reader, reader.uint32());
+          message.transientAttachmentRef = reader.string();
           continue;
         }
         case 2: {
@@ -3115,7 +3213,11 @@ export const ProviderAttachmentRejection: MessageFns<ProviderAttachmentRejection
 
   fromJSON(object: any): ProviderAttachmentRejection {
     return {
-      transient: isSet(object.transient) ? ProviderRequestTransientAttachment.fromJSON(object.transient) : undefined,
+      transientAttachmentRef: isSet(object.transientAttachmentRef)
+        ? globalThis.String(object.transientAttachmentRef)
+        : isSet(object.transient_attachment_ref)
+        ? globalThis.String(object.transient_attachment_ref)
+        : undefined,
       fileBacked: isSet(object.fileBacked)
         ? ProviderRequestFileAttachment.fromJSON(object.fileBacked)
         : isSet(object.file_backed)
@@ -3127,8 +3229,8 @@ export const ProviderAttachmentRejection: MessageFns<ProviderAttachmentRejection
 
   toJSON(message: ProviderAttachmentRejection): unknown {
     const obj: any = {};
-    if (message.transient !== undefined) {
-      obj.transient = ProviderRequestTransientAttachment.toJSON(message.transient);
+    if (message.transientAttachmentRef !== undefined) {
+      obj.transientAttachmentRef = message.transientAttachmentRef;
     }
     if (message.fileBacked !== undefined) {
       obj.fileBacked = ProviderRequestFileAttachment.toJSON(message.fileBacked);
@@ -3144,9 +3246,7 @@ export const ProviderAttachmentRejection: MessageFns<ProviderAttachmentRejection
   },
   fromPartial<I extends Exact<DeepPartial<ProviderAttachmentRejection>, I>>(object: I): ProviderAttachmentRejection {
     const message = createBaseProviderAttachmentRejection();
-    message.transient = (object.transient !== undefined && object.transient !== null)
-      ? ProviderRequestTransientAttachment.fromPartial(object.transient)
-      : undefined;
+    message.transientAttachmentRef = object.transientAttachmentRef ?? undefined;
     message.fileBacked = (object.fileBacked !== undefined && object.fileBacked !== null)
       ? ProviderRequestFileAttachment.fromPartial(object.fileBacked)
       : undefined;

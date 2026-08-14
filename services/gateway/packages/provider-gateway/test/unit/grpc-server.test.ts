@@ -18,14 +18,12 @@ describe("Gateway gRPC streaming transport", () => {
     const request = validAnthropicProviderRequest();
     const service = createService({
       stream: async function* () {
-        yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+        yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
         for (let index = 0; index < 32; index += 1) {
-          yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, `chunk-${index}`);
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, `chunk-${index}`);
         }
-        yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+        yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
         yield {
-          requestId: request.requestId,
-          modelRequestId: request.modelRequestId,
           type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
           finish: {
             reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
@@ -110,8 +108,6 @@ describe("Gateway gRPC streaming transport", () => {
       const service = createService({
         stream: async function* () {
           yield {
-            requestId: request.requestId,
-            modelRequestId: request.modelRequestId,
             type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
             toolCall: { id: `call_${scenario.name}`, name: "bounded_tool", inputJson: scenario.inputJson, metadataJson: "{}" },
           };
@@ -134,8 +130,8 @@ describe("Gateway gRPC streaming transport", () => {
   }, 15_000);
 
   test("honors writable backpressure before consuming the next provider event", async () => {
-    const first = textEvent(validProviderRequest(), ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
-    const second = textEvent(validProviderRequest(), ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "two");
+    const first = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
+    const second = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "two");
     const call = new BackpressureCall();
     const writeTask = writeProviderStreamEvents(call, asyncEvents([first, second]));
 
@@ -150,8 +146,8 @@ describe("Gateway gRPC streaming transport", () => {
   });
 
   test("stops waiting for drain when the client cancels during backpressure", async () => {
-    const first = textEvent(validProviderRequest(), ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
-    const second = textEvent(validProviderRequest(), ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "two");
+    const first = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
+    const second = textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "two");
     const call = new BackpressureCall();
     const writeTask = writeProviderStreamEvents(call, asyncEvents([first, second]));
 
@@ -176,7 +172,7 @@ describe("Gateway gRPC streaming transport", () => {
           aborted = true;
           release?.();
         }, { once: true });
-        yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+        yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
         await new Promise<void>((resolve) => {
           release = resolve;
         });
@@ -234,13 +230,10 @@ function validAnthropicProviderRequest() {
 }
 
 function textEvent(
-  request: { readonly requestId: string; readonly modelRequestId: string },
   type: ProviderStreamEventType,
   text: string,
 ): ProviderStreamEvent {
   return {
-    requestId: request.requestId,
-    modelRequestId: request.modelRequestId,
     type,
     text: {
       id: "text_1",

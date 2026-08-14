@@ -1,18 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import {
-  RuntimeMessageRole,
-  RuntimeToolPartState,
-} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { RuntimeMessage, RuntimePart } from "../../src/contracts/runtime.js";
+import { ProviderContextRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { RuntimePart } from "../../src/contracts/runtime.js";
 import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
-import { toGatewayRuntimeMessages } from "../../src/runtime/message-projection.js";
+import { toGatewayProviderContext } from "../../src/runtime/message-projection.js";
 import { assembleProviderCallRequest } from "../../src/thread-loop/provider-request.js";
 import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
 import { OpenAIGPT55Rules } from "../../../../../gateway/packages/lowering/src/rules/openai.js";
 import { validateProviderRequest } from "../../../../../gateway/packages/protocol/src/bounds.js";
-import {
-  buildRuntimeMessageProjectionMessage as message,
-} from "./runtime-message-builders.js";
+import { buildRuntimeMessageProjectionMessage as message } from "./runtime-message-builders.js";
 
 const createdAt = "2026-06-14T00:00:00.000Z";
 
@@ -45,9 +40,9 @@ function toolPart(state: Extract<RuntimePart, { readonly type: "tool" }>["state"
   };
 }
 
-describe("RuntimeMessageProjection", () => {
-  test("projects Tetral RuntimeMessage context into Gateway generated RuntimeMessage shape", () => {
-    const result = toGatewayRuntimeMessages([
+describe("Runtime provider-context projection", () => {
+  test("projects provider-visible Runtime facts without Runtime identities or lifecycle metadata", () => {
+    const result = toGatewayProviderContext([
       message("user-1", "user", [textPart("user-text-1", "user-1", "hello")]),
       message("assistant-1", "assistant", [
         textPart("assistant-text-1", "assistant-1", "answer"),
@@ -74,36 +69,23 @@ describe("RuntimeMessageProjection", () => {
 
     expect(result).toEqual({
       ok: true,
-      messages: [
+      context: [
         {
-          id: "user-1",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-          status: "completed",
-          origin: "user",
-          parts: [{ id: "user-text-1", text: { text: "hello" } }],
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+          content: [{ text: { text: "hello" } }],
         },
         {
-          id: "assistant-1",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-          status: "completed",
-          origin: "agent",
-          parts: [
-            { id: "assistant-text-1", text: { text: "answer" } },
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            { text: { text: "answer" } },
+            { reasoning: { text: "thinking", metadataJson: "{\"anthropic\":{\"signature\":\"sig_1\"}}" } },
+            { toolCall: { modelToolCallId: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}" } },
             {
-              id: "reasoning-1",
-              reasoning: {
-                text: "thinking",
-                metadataJson: "{\"anthropic\":{\"signature\":\"sig_1\"}}",
-              },
-            },
-            {
-              id: "tool-part-1",
-              tool: {
-                callId: "call-1",
-                name: "lookup",
-                state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
-                inputJson: "{\"q\":\"hi\"}",
-                outputOrErrorJson: "{\"text\":\"result\"}",
+              toolResult: {
+                modelToolCallId: "call-1",
+                completed: { outputJson: "{\"text\":\"result\"}" },
+                error: undefined,
+                cancelled: undefined,
               },
             },
           ],
@@ -112,7 +94,7 @@ describe("RuntimeMessageProjection", () => {
     });
   });
 
-  test("omits streaming messages from Gateway provider context", () => {
+  test("omits open assistant drafts from provider context", () => {
     const streaming = RuntimeMessageSchema.parse({
       id: "assistant-streaming",
       sessionId: "session-a",
@@ -124,125 +106,132 @@ describe("RuntimeMessageProjection", () => {
       parts: [],
     });
 
-    expect(toGatewayRuntimeMessages([
+    expect(toGatewayProviderContext([
       message("user-1", "user", [textPart("user-text-1", "user-1", "hello")]),
       streaming,
     ])).toEqual({
       ok: true,
-      messages: [
-        {
-          id: "user-1",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-          status: "completed",
-          origin: "user",
-          parts: [{ id: "user-text-1", text: { text: "hello" } }],
-        },
-      ],
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{ text: { text: "hello" } }],
+      }],
     });
   });
 
-  test("preserves signed empty reasoning parts for provider replay", () => {
-    const result = toGatewayRuntimeMessages([
-      message("assistant-1", "assistant", [
-        {
-          id: "reasoning-1",
-          sessionId: "session-a",
-          messageId: "assistant-1",
-          sequence: 0,
-          type: "reasoning",
-          providerPartId: "reasoning-provider-1",
-          providerMetadata: { anthropic: { signature: "sig_empty" } },
-          text: "",
-          truncated: false,
-          status: "completed",
-          createdAt,
-        },
-      ]),
+  test("preserves signed empty reasoning for provider replay", () => {
+    const result = toGatewayProviderContext([
+      message("assistant-1", "assistant", [{
+        id: "reasoning-1",
+        sessionId: "session-a",
+        messageId: "assistant-1",
+        sequence: 0,
+        type: "reasoning",
+        providerPartId: "reasoning-provider-1",
+        providerMetadata: { anthropic: { signature: "sig_empty" } },
+        text: "",
+        truncated: false,
+        status: "completed",
+        createdAt,
+      }]),
     ]);
 
     expect(result).toEqual({
       ok: true,
-      messages: [
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{ reasoning: { text: "", metadataJson: "{\"anthropic\":{\"signature\":\"sig_empty\"}}" } }],
+      }],
+    });
+  });
+
+  test("keeps a pending public Tool Call in place and adds only its later paired result", () => {
+    const pending = message("assistant-1", "assistant", [toolPart({
+        status: "running",
+        input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
+      })]);
+    const terminal = message("assistant-2", "assistant", [{
+      ...toolPart({
+        status: "completed",
+        input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
+        output: { text: "result", truncated: false },
+      }),
+      id: "tool-part-terminal",
+      messageId: "assistant-2",
+    }]);
+    expect(toGatewayProviderContext([pending])).toEqual({
+      ok: true,
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{ toolCall: { modelToolCallId: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}" } }],
+      }],
+    });
+    expect(toGatewayProviderContext([pending, terminal])).toEqual({
+      ok: true,
+      context: [
         {
-          id: "assistant-1",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-          status: "completed",
-          origin: "agent",
-          parts: [
-            {
-              id: "reasoning-1",
-              reasoning: {
-                text: "",
-                metadataJson: "{\"anthropic\":{\"signature\":\"sig_empty\"}}",
-              },
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [{ toolCall: { modelToolCallId: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}" } }],
+        },
+        {
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [{
+            toolResult: {
+              modelToolCallId: "call-1",
+              completed: { outputJson: "{\"text\":\"result\"}" },
+              error: undefined,
+              cancelled: undefined,
             },
-          ],
+          }],
         },
       ],
     });
   });
 
-  test("rejects pending public tool state and completed tools without a durable tool-use identity", () => {
-    expect(toGatewayRuntimeMessages([
-      message("assistant-1", "assistant", [
-        toolPart({
-          status: "running",
-          input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
-        }),
-      ]),
-    ])).toMatchObject({ ok: false, error: { code: "provider_invalid_request" } });
-
-    expect(toGatewayRuntimeMessages([
-      message("assistant-1", "assistant", [{
-        ...toolPart({
-          status: "completed",
-          input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
-          output: { text: "result", truncated: false },
-        }, ""),
-      }]),
+  test("rejects a terminal public Tool without durable identity", () => {
+    expect(toGatewayProviderContext([
+      message("assistant-1", "assistant", [toolPart({
+        status: "completed",
+        input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
+        output: { text: "result", truncated: false },
+      }, "")]),
     ])).toMatchObject({ ok: false, error: { code: "provider_invalid_request" } });
   });
 
-  test("projects internal invalid-tool repair without persisting a public tool use id", () => {
-    const result = toGatewayRuntimeMessages([
-      message("assistant-1", "assistant", [
-        toolPart({
-          status: "running",
+  test("projects internal invalid-tool repair only as its model Tool Call/Error pair", () => {
+    const result = toGatewayProviderContext([
+      message("assistant-1", "assistant", [toolPart({
+        status: "running",
+        input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
+      }, "")]),
+      message("assistant-repair-1", "assistant", [{
+        id: `part_repair_${"a".repeat(64)}`,
+        sessionId: "session-a",
+        messageId: "assistant-repair-1",
+        sequence: 0,
+        type: "tool",
+        toolCallId: "call-1",
+        toolName: "lookup",
+        state: {
+          status: "error",
           input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
-        }, ""),
-      ]),
-      message("assistant-repair-1", "assistant", [
-        {
-          id: `part_repair_${"a".repeat(64)}`,
-          sessionId: "session-a",
-          messageId: "assistant-repair-1",
-          sequence: 0,
-          type: "tool",
-          toolCallId: "call-1",
-          toolName: "lookup",
-          state: {
-            status: "error",
-            input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
-            error: { type: "provider_tool_protocol_error", message: "invalid tool", retryable: false },
-          },
-          createdAt,
-          completedAt: createdAt,
+          error: { type: "provider_tool_protocol_error", message: "invalid tool", retryable: false },
         },
-      ]),
+        createdAt,
+        completedAt: createdAt,
+      }]),
     ]);
 
     expect(result).toMatchObject({ ok: true });
     if (result.ok) {
-      expect(result.messages).toHaveLength(1);
-      expect(result.messages[0]?.parts[0]?.tool).toMatchObject({
-        callId: "call-1",
-        name: "lookup",
-        state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
-      });
+      expect(result.context).toHaveLength(2);
+      expect(result.context.flatMap((entry) => entry.content)).toMatchObject([
+        { toolCall: { modelToolCallId: "call-1", name: "lookup" } },
+        { toolResult: { modelToolCallId: "call-1", error: { errorJson: expect.any(String) } } },
+      ]);
     }
   });
 
-  test("preserves ordinary completed, errored, and cancelled Tool lowering after carrier cleanup", () => {
+  test("keeps completed, errored, and cancelled Tool wire lowering unchanged", () => {
     const input = { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false } as const;
     const cases = [
       {
@@ -253,11 +242,7 @@ describe("RuntimeMessageProjection", () => {
       },
       {
         status: "error" as const,
-        state: {
-          status: "error" as const,
-          input,
-          error: { type: "provider_tool_protocol_error" as const, message: "failed", retryable: false },
-        },
+        state: { status: "error" as const, input, error: { type: "provider_tool_protocol_error" as const, message: "failed", retryable: false } },
         output: { error: { type: "provider_tool_protocol_error", message: "failed", retryable: false } },
         isError: true as const,
       },
@@ -270,16 +255,12 @@ describe("RuntimeMessageProjection", () => {
     ];
 
     for (const testCase of cases) {
-      const projected = toGatewayRuntimeMessages([
+      const projected = toGatewayProviderContext([
         message("assistant-1", "assistant", [toolPart(testCase.state)]),
       ]);
       expect(projected.ok).toBe(true);
-      if (!projected.ok) {
-        continue;
-      }
-      const projectedTool = projected.messages[0]?.parts[0]?.tool;
-      expect(projectedTool).toBeDefined();
-      expect(Object.hasOwn(projectedTool ?? {}, "toolUseEventId")).toBe(false);
+      if (!projected.ok) continue;
+
       const assembled = assembleProviderCallRequest({
         identity: {
           workspaceId: "default",
@@ -293,23 +274,17 @@ describe("RuntimeMessageProjection", () => {
         requestId: `request-${testCase.status}`,
         modelRequestId: `model-request-${testCase.status}`,
         currentModel: { providerId: OpenAIGPT55Rules.providerId, modelId: OpenAIGPT55Rules.modelId },
-        runtimeMessages: projected.messages,
+        providerContext: projected.context,
         runtime: { systemInstructions: "ordinary Tool regression", timeoutMs: 30_000 },
       });
       expect(assembled.ok).toBe(true);
-      if (!assembled.ok) {
-        continue;
-      }
+      if (!assembled.ok) continue;
+
       expect(validateProviderRequest(assembled.request)).toEqual({ ok: true });
       const lowered = lowerProviderRequest(assembled.request, OpenAIGPT55Rules, { modelOutputTokenLimit: 32_000 });
-      const toolMessages = lowered.messages.filter((loweredMessage) =>
-        loweredMessage.role === "assistant" || loweredMessage.role === "tool"
-      );
+      const toolMessages = lowered.messages.filter((entry) => entry.role === "assistant" || entry.role === "tool");
       expect(toolMessages).toEqual([
-        {
-          role: "assistant",
-          content: [{ type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: { q: "hi" } }],
-        },
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: { q: "hi" } }] },
         {
           role: "tool",
           content: [{
@@ -323,5 +298,4 @@ describe("RuntimeMessageProjection", () => {
       ]);
     }
   });
-
 });

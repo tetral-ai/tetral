@@ -3,12 +3,12 @@
   "rule": "deepseek-reasoning-remap",
   "input": {
     "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
-    "messages": [
+    "context": [
       {
-        "role": "assistant",
-        "parts": [
-          { "type": "reasoning", "id": "r1", "text": "User asks for capital." },
-          { "type": "text", "id": "t1", "text": "Paris." }
+        "role": 2,
+        "content": [
+          { "reasoning": { "text": "User asks for capital.", "metadataJson": "{}" } },
+          { "text": { "text": "Paris." } }
         ]
       }
     ]

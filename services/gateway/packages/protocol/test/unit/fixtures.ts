@@ -1,6 +1,6 @@
 import {
   ProviderRequestKind,
-  RuntimeMessageRole,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "../../src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -17,7 +17,6 @@ export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): 
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
-    parentThreadId: undefined,
     bindingId: "bind_1",
     bindingGeneration: 42,
     runtimeBindingToken: "binding-token",
@@ -33,15 +32,11 @@ export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): 
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "msg_1",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [
           {
-            id: "part_1",
             text: { text: "hello" },
           },
         ],
@@ -58,7 +53,6 @@ export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): 
       {
         transient: {
           attachmentRef: "att_1",
-          sourceToolUseEventId: "sevt_tool_1",
           sourcePath: "/tmp/image.png",
           pageRange: "",
           detail: "auto",

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import {
-  RuntimeMessageRole,
+  ProviderContextRole,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { createJsonLogger, startupFailureLogRecord } from "../../src/logger.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
@@ -92,13 +92,10 @@ function openAIRequest(): ProviderRequest {
     requestId: "req_leak_openai_1",
     modelRequestId: "mreq_leak_openai_1",
     model: { providerId: "openai", modelId: "gpt-5.5", variant: "xhigh" },
-    messages: [
+    context: [
       {
-        id: "msg_leak_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{ id: "part_leak_user", text: { text: "Say ok and call Search once." } }],
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{ text: { text: "Say ok and call Search once." } }],
       },
     ],
     tools: [{

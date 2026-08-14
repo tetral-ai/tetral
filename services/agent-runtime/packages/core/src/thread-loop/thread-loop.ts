@@ -30,10 +30,11 @@
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore, Stream } from "effect";
 import type { ProviderError } from "../contracts/provider.js";
 import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { ProviderRequestAttachment, RuntimeMessage as GatewayRuntimeMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderContextEntry as GatewayProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
   RuntimeDependencies,
   RuntimeFailure,
+  RuntimeProviderAttachment,
   RuntimeFinishReason,
   DurableRuntimeMessage,
   RuntimeMessage,
@@ -137,6 +138,7 @@ import {
   attachmentConsumptionUnion,
   providerRequestAttachmentIdentity,
   providerRequestWithoutRejectedAttachments,
+  runtimeAttachmentsWithoutRejectedAttachments,
   providerStreamMetricOutcome,
   providerStreamExhaustedFailure,
   recordAttachmentRejections,
@@ -173,7 +175,7 @@ import {
   ProviderStreamAccumulator,
   runtimeToolResultEvent,
 } from "../runtime/accumulator.js";
-import { toGatewayRuntimeMessages } from "../runtime/message-projection.js";
+import { toGatewayProviderContext } from "../runtime/message-projection.js";
 import {
   acceptedInputCreates,
   applyAcceptedInputReceipt,
@@ -541,6 +543,7 @@ interface ProviderTurnStreamState {
   allToolDeclarationBarriers: Deferred.Deferred<boolean>[];
   nextToolModelOrder: number;
   rejectedAttachments: RejectedProviderAttachment[];
+  carriedAttachments: readonly RuntimeProviderAttachment[];
 }
 
 class ProviderTurnShortCircuit {
@@ -865,7 +868,7 @@ function runThreadLoopEffect(
             messageIds: [committedMessage.id],
           });
           session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
-          session.state.setProviderRequestOutputSchemaJson(undefined);
+          session.state.setProviderOutputSchemaJson(undefined);
           acceptedContextCommitted = true;
         } else {
           // CommitInputs and its receipt application form one local ownership boundary:
@@ -908,7 +911,7 @@ function runThreadLoopEffect(
             );
             session.state.addPendingAttachments(declaration.result.receipt.pendingAttachmentDelta);
             session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
-            session.state.setProviderRequestOutputSchemaJson(
+            session.state.setProviderOutputSchemaJson(
               acceptedInput.kind === "approval_review" ? acceptedInput.outputSchemaJson : undefined,
             );
             const makesRequestReady = acceptedInput.kind === "messages" ||
@@ -1006,7 +1009,7 @@ function runThreadLoopEffect(
       const providerContextMessages = session.state.contextManager.providerMessages();
       const messages = providerContextMessages;
       let currentModel = session.state.currentModel();
-      const projected = messages.length === 0 ? undefined : toGatewayRuntimeMessages(messages);
+      const projected = messages.length === 0 ? undefined : toGatewayProviderContext(messages);
       if (projected !== undefined && !projected.ok) {
         session.state.clear();
         return { type: "failed", error: projected.error, releaseSession: { reason: "crashed" } };
@@ -1030,7 +1033,7 @@ function runThreadLoopEffect(
           ...(terminalAppend.failureEventId === undefined ? {} : { failureEventId: terminalAppend.failureEventId }),
         };
       }
-      if (projected === undefined || projected.messages.length === 0) {
+      if (projected === undefined || projected.context.length === 0) {
         return yield* nonAbandonablePromise(() => completeRun(session, options, custody));
       }
       const bindingTokenRefresh = yield* Effect.promise(() => refreshSessionRuntimeBindingToken(session, options));
@@ -1081,7 +1084,7 @@ function runThreadLoopEffect(
         statusRunningAlreadyAppended = true;
         runStatusRunningAppended = true;
       }
-      let providerMessages = projected.messages;
+      let providerContext = projected.context;
       let requestContextAnchorSequence = Math.max(0, highestMessageSequence(committedMessages));
       const compactionResult = yield* coordinateCompactionBeforeProviderRequestEffect(
         session,
@@ -1106,12 +1109,12 @@ function runThreadLoopEffect(
           continue;
         }
         currentModel = compactionResult.currentModel;
-        providerMessages = compactionResult.projectedMessages;
+        providerContext = compactionResult.projectedContext;
         requestContextAnchorSequence = compactionResult.contextAnchorSequence;
       }
       const baseResult = {
         type: "completed" as const,
-        modelMessageCount: providerMessages.length,
+        modelMessageCount: providerContext.length,
         currentModel,
       };
       if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested() || session.state.cooperativeCancelRequested()) {
@@ -1130,7 +1133,7 @@ function runThreadLoopEffect(
         toolCatalogJson: JSON.stringify(executionPolicy.toolCatalog ?? null),
       });
       const assembledRequest = yield* Effect.promise(() =>
-        assembleLLMRequest(session, options, currentModel, providerMessages, executionPolicy)
+        assembleLLMRequest(session, options, currentModel, providerContext, executionPolicy)
       );
       if (!assembledRequest.ok) {
         const terminalAppend = yield* nonAbandonablePromise(() => appendTerminalEventsBestEffort(options, session, assembledRequest.error));
@@ -1144,11 +1147,16 @@ function runThreadLoopEffect(
         };
       }
       const requestForAttempt = providerRequestWithoutRejectedAttachments(assembledRequest.request, rejectedAttachments);
+      const runtimeAttachmentsForAttempt = runtimeAttachmentsWithoutRejectedAttachments(
+        assembledRequest.runtimeAttachments,
+        rejectedAttachments,
+      );
       pendingProviderRequestReschedule = false;
       const runtimeResult = yield* coordinateProviderTurnEffect(
         session,
         options,
         requestForAttempt,
+        runtimeAttachmentsForAttempt,
         turnRetryCounters,
         rejectedAttachments,
         options.compaction !== undefined && !reactiveContextOverflowPending,
@@ -1551,7 +1559,7 @@ type CompactionDecisionResult =
   | {
       readonly type: "applied";
       readonly currentModel: RuntimeModelRef;
-      readonly projectedMessages: readonly GatewayRuntimeMessage[];
+      readonly projectedContext: readonly GatewayProviderContextEntry[];
       readonly contextAnchorSequence: number;
     }
   | { readonly type: "interrupted"; readonly discardHotState?: true }
@@ -1709,14 +1717,14 @@ function runCompactionSummaryAttemptEffect(
         failedCompactionResult(session, options, compactionFailure(session, currentModel, "runtime_invalid_sequence", "runtime_contract_validation", "compaction prompt projection failed")),
       );
     }
-    const projectedPrompt = toGatewayRuntimeMessages([promptMessage]);
+    const projectedPrompt = toGatewayProviderContext([promptMessage]);
     if (!projectedPrompt.ok) {
       return yield* Effect.promise(() =>
         failedCompactionResult(session, options, compactionFailure(session, currentModel, "runtime_invalid_sequence", "runtime_contract_validation", "compaction prompt projection failed")),
       );
     }
     const assembled = yield* Effect.promise(() =>
-      assembleCompactionLLMRequest(session, options, currentModel, projectedPrompt.messages, compaction, summaryOutputTokens)
+      assembleCompactionLLMRequest(session, options, currentModel, projectedPrompt.context, compaction, summaryOutputTokens)
     );
     if (!assembled.ok) {
       return yield* Effect.promise(() => failedCompactionResult(session, options, assembled.error));
@@ -2085,8 +2093,8 @@ function runOwnedCompactionSummaryAttemptEffect(
           session.state.contextManager.installThreadContextPrefix(undefined);
         }
         session.state.clearLastRequestUsage();
-        const projectedCheckpoint = toGatewayRuntimeMessages(compactedMessages);
-        if (!projectedCheckpoint.ok || projectedCheckpoint.messages.length === 0) {
+        const projectedCheckpoint = toGatewayProviderContext(compactedMessages);
+        if (!projectedCheckpoint.ok || projectedCheckpoint.context.length === 0) {
           return yield* Effect.promise(() =>
             failedCompactionResult(session, options, compactionFailure(session, currentModel, "runtime_invalid_sequence", "runtime_contract_validation", "compaction checkpoint projection failed")),
           );
@@ -2094,7 +2102,7 @@ function runOwnedCompactionSummaryAttemptEffect(
         return {
           type: "applied",
           currentModel,
-          projectedMessages: projectedCheckpoint.messages,
+          projectedContext: projectedCheckpoint.context,
           contextAnchorSequence: highestMessageSequence(compactedMessages),
         } as const;
       }),
@@ -2242,6 +2250,7 @@ function coordinateProviderTurnEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
   request: LLMRequest,
+  carriedAttachments: readonly RuntimeProviderAttachment[],
   turnRetryCounters: { providerAttempts: number; compactionAttempts: number },
   rejectedAttachments: RejectedProviderAttachment[],
   allowContextOverflowRecovery: boolean,
@@ -2461,6 +2470,7 @@ function coordinateProviderTurnEffect(
       allToolDeclarationBarriers: [],
       nextToolModelOrder: 0,
       rejectedAttachments,
+      carriedAttachments,
     };
 
     return yield* Effect.uninterruptibleMask((restore) =>
@@ -2533,7 +2543,7 @@ function coordinateProviderTurnEffect(
             return session.state.cooperativeCancelRequested()
               ? yield* settleCooperativeCancellationEffect(
                   session, options, processor, source, spanStartAppend.eventId, request.modelRequestId,
-                  request.attachments, streamState.modelUsage,
+                  streamState.carriedAttachments, streamState.modelUsage,
                   beginSettlementWrites, endSettlementWrites, durableOperations, streamState,
                 )
               : yield* settleRuntimeShutdownEffect(
@@ -2543,7 +2553,7 @@ function coordinateProviderTurnEffect(
               source,
               spanStartAppend.eventId,
               request.modelRequestId,
-              request.attachments,
+              streamState.carriedAttachments,
               streamState.modelUsage,
               durableOperations,
               streamState,
@@ -2597,7 +2607,7 @@ function coordinateProviderTurnEffect(
               undefined,
               streamState.modelFinishReason ?? "unknown",
               streamState.modelUsage,
-              attachmentConsumptionUnion(request.attachments, streamState.rejectedAttachments),
+              attachmentConsumptionUnion(streamState.carriedAttachments, streamState.rejectedAttachments),
               requestEndKind,
               undefined,
               trailingAppend,
@@ -2696,7 +2706,7 @@ function coordinateProviderTurnEffect(
           return session.state.cooperativeCancelRequested()
             ? yield* settleCooperativeCancellationEffect(
                 session, options, processor, source, spanStartAppend.eventId, request.modelRequestId,
-                request.attachments, streamState.modelUsage,
+                streamState.carriedAttachments, streamState.modelUsage,
                 beginSettlementWrites, endSettlementWrites, durableOperations, streamState,
               )
             : yield* settleRuntimeShutdownEffect(
@@ -2706,7 +2716,7 @@ function coordinateProviderTurnEffect(
             source,
             spanStartAppend.eventId,
             request.modelRequestId,
-            request.attachments,
+            streamState.carriedAttachments,
             streamState.modelUsage,
             durableOperations,
             streamState,
@@ -2732,7 +2742,7 @@ function coordinateProviderTurnEffect(
             spanStartAppend.eventId,
             processed.error,
             streamState.modelUsage,
-            request.attachments,
+            streamState.carriedAttachments,
             requestEndKind,
           ));
         }
@@ -2788,7 +2798,7 @@ function processProviderEventEffect(
       state.terminalProviderEventSeen = true;
     }
     if (event.type === "attachment-rejections") {
-      recordAttachmentRejections(request.attachments, state.rejectedAttachments, event.rejections);
+      recordAttachmentRejections(state.carriedAttachments, state.rejectedAttachments, event.rejections);
     }
     const processEvent = async (): Promise<ProviderStreamAccumulatorResult> => {
       const result = await processor.process({ ...source, event });
@@ -2811,7 +2821,7 @@ function processProviderEventEffect(
         modelRequestStartId,
         processed.error,
         state.modelUsage,
-        request.attachments,
+        state.carriedAttachments,
         requestEndKindFromRequest(request),
       ));
       return yield* Effect.fail(new ProviderTurnShortCircuit(result));
@@ -2845,7 +2855,7 @@ function processProviderEventEffect(
           requestErrorKindFromFailure(terminalFailure),
           "error",
           state.modelUsage,
-          request.attachments,
+          state.carriedAttachments,
           requestEndKindFromRequest(request),
           undefined,
           undefined,
@@ -2911,7 +2921,7 @@ function processProviderEventEffect(
             modelRequestStartId,
             settled.error,
             state.modelUsage,
-            request.attachments,
+            state.carriedAttachments,
             requestEndKindFromRequest(request),
           ));
           return yield* Effect.fail(new ProviderTurnShortCircuit(result));
@@ -3928,7 +3938,7 @@ function handleProviderStreamExhaustedEffect(
         modelRequestStartId,
         processed.error,
         modelUsage,
-        request.attachments,
+        state.carriedAttachments,
         requestEndKindFromRequest(request),
       ));
     }
@@ -3972,7 +3982,7 @@ function closeProviderFailureEffect(
       requestErrorKindFromFailure(failure),
       "error",
       usage,
-      request.attachments,
+      state.carriedAttachments,
       requestEndKindFromRequest(request),
       plan.type === "proposed" ? plan.reschedule : undefined,
       undefined,
@@ -4209,7 +4219,7 @@ function settleRuntimeShutdownEffect(
   source: RuntimeProcessorSource,
   modelRequestStartId: string | undefined,
   modelRequestId: string | undefined,
-  consumedAttachments: readonly ProviderRequestAttachment[],
+  consumedAttachments: readonly RuntimeProviderAttachment[],
   modelUsage: RuntimeUsage | undefined,
   durableOperations: HotDurableOperationOwner,
   streamState?: ProviderTurnStreamState,
@@ -4390,7 +4400,7 @@ function settleCooperativeCancellationEffect(
   source: RuntimeProcessorSource,
   modelRequestStartId: string,
   modelRequestId: string,
-  consumedAttachments: readonly ProviderRequestAttachment[],
+  consumedAttachments: readonly RuntimeProviderAttachment[],
   modelUsage: RuntimeUsage | undefined,
   beginSettlementWrites: () => void,
   endSettlementWrites: () => void,
@@ -4674,7 +4684,7 @@ function interruptAndAwaitFibersWithinBound<A, E>(
 
 function completedRunResult(session: ThreadRuntime): ThreadLoopRunResult {
   const messages = session.state.contextManager.messages();
-  const projected = messages.length === 0 ? undefined : toGatewayRuntimeMessages(messages);
+  const projected = messages.length === 0 ? undefined : toGatewayProviderContext(messages);
   if (projected !== undefined && !projected.ok) {
     session.state.clear();
     return { type: "failed", error: projected.error, releaseSession: { reason: "crashed" } };
@@ -4682,7 +4692,7 @@ function completedRunResult(session: ThreadRuntime): ThreadLoopRunResult {
   const currentModel = session.state.currentModel();
   return {
     type: "completed",
-    modelMessageCount: projected !== undefined && projected.ok ? projected.messages.length : 0,
+    modelMessageCount: projected !== undefined && projected.ok ? projected.context.length : 0,
     ...(currentModel !== undefined ? { currentModel } : {}),
   };
 }
@@ -4728,7 +4738,7 @@ async function closeStartedRequestAfterProcessorFailure(
   modelRequestStartId: string,
   failure: RuntimeFailure,
   usage: RuntimeUsage | undefined,
-  consumedAttachments: readonly ProviderRequestAttachment[],
+  consumedAttachments: readonly RuntimeProviderAttachment[],
   requestKind: SessionEventWriterRequestEndEnvelope["requestKind"],
 ): Promise<ProviderTurnResult> {
   processor.discardUnreceiptedMembers();
@@ -4818,7 +4828,7 @@ async function appendModelRequestEndEvent(
   errorKind: RuntimeRequestErrorKind | undefined,
   finishReason: RuntimeFinishReason,
   usage: RuntimeUsage | undefined,
-  consumedAttachments: readonly ProviderRequestAttachment[] = [],
+  consumedAttachments: readonly RuntimeProviderAttachment[] = [],
   requestKind?: NonNullable<SessionEventWriterRequestEndEnvelope["requestKind"]>,
   reschedule?: NonNullable<SessionEventWriterRequestEndEnvelope["reschedule"]>,
   trailingPartAppend?: RuntimeAssistantPartAppend,

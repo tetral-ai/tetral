@@ -29,10 +29,10 @@ import type {
   ReadFileAttachmentChunkResponse,
   ResolveFileAttachmentMetadataRequest,
   ResolveFileAttachmentMetadataResponse,
+  ResolvedTransientAttachment,
   ResolveTransientAttachmentRequest,
   ResolveTransientAttachmentResponse,
   RuntimeScope,
-  TransientAttachmentRef,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { ProviderAttachmentRejectionReason } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
@@ -202,7 +202,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
       fileIndex += 1;
       if (rejectionReason !== undefined) {
         rejections.push({
-          transient: undefined,
+          transientAttachmentRef: undefined,
           fileBacked: attachment.fileBacked,
           reason: rejectionReason,
         });
@@ -248,7 +248,6 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
       response = await resolveTransientAttachment(this.client, {
         scope,
         attachmentRef: transient.attachmentRef,
-        sourceToolUseEventId: transient.sourceToolUseEventId,
       }, metadata);
     } catch (error) {
       return { ok: false, error: classifyAttachmentBridgeError(error) };
@@ -259,17 +258,16 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
         ok: true,
         type: "rejection",
         rejection: {
-          transient,
+          transientAttachmentRef: transient.attachmentRef,
           fileBacked: undefined,
           reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
         },
       };
     }
     if (
-      response.resolved?.attachment === undefined
-      || response.unavailable !== undefined
+      response.resolved === undefined || response.unavailable !== undefined
       || response.resolved.data.length === 0
-      || !sameTransientAttachmentMetadata(attachment, response.resolved.attachment)
+      || !sameTransientAttachmentMetadata(attachment, response.resolved)
     ) {
       return { ok: false, error: providerRequestInvalidError() };
     }
@@ -324,7 +322,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
           ok: true,
           type: "rejection",
           rejection: {
-            transient: undefined,
+            transientAttachmentRef: undefined,
             fileBacked: attachment.fileBacked,
             reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
           },
@@ -409,13 +407,12 @@ function bridgeScope(request: ProviderRequest, runtimePodUid: string): RuntimeSc
   };
 }
 
-function sameTransientAttachmentMetadata(left: ProviderRequestAttachment, right: TransientAttachmentRef): boolean {
+function sameTransientAttachmentMetadata(left: ProviderRequestAttachment, right: ResolvedTransientAttachment): boolean {
   return left.transient !== undefined &&
     right !== undefined &&
     left.transient.attachmentRef === right.attachmentRef &&
     left.mime === right.mime &&
     left.filename === right.filename &&
-    left.transient.sourceToolUseEventId === right.sourceToolUseEventId &&
     left.transient.sourcePath === right.sourcePath &&
     left.transient.pageRange === right.pageRange &&
     left.transient.detail === right.detail;

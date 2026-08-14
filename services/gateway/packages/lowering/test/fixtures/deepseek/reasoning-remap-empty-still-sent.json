@@ -3,11 +3,11 @@
   "rule": "deepseek-reasoning-remap",
   "input": {
     "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
-    "messages": [
+    "context": [
       {
-        "role": "assistant",
-        "parts": [
-          { "type": "reasoning", "id": "r1", "text": "" }
+        "role": 2,
+        "content": [
+          { "reasoning": { "text": "", "metadataJson": "{}" } }
         ]
       }
     ]

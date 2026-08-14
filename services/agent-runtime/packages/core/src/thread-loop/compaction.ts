@@ -8,7 +8,7 @@
 
 import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Exit, Fiber, Scope } from "effect";
-import type { RuntimeMessage as GatewayRuntimeMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderContextEntry as GatewayProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeUsage } from "../contracts/runtime.js";
 import { normalizeRuntimeFailure, RuntimeMessageSchema } from "../contracts/runtime.js";
 import type { LLMEvent, RuntimeModelLimits } from "../llm/llm-event.js";
@@ -112,7 +112,7 @@ export async function assembleCompactionLLMRequest(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
   currentModel: RuntimeModelRef,
-  runtimeMessages: readonly GatewayRuntimeMessage[],
+  providerContext: readonly GatewayProviderContextEntry[],
   compaction: ThreadLoopCompactionOptions,
   summaryOutputTokens: number,
 ): Promise<{ readonly ok: true; readonly request: LLMRequest } | { readonly ok: false; readonly error: RuntimeFailure }> {
@@ -132,7 +132,7 @@ export async function assembleCompactionLLMRequest(
       requestId: options.runtime.createId("provider_request"),
       modelRequestId: options.runtime.createId("model_request"),
       currentModel,
-      runtimeMessages,
+      providerContext,
       runtime: runtimeConfig,
     });
     return result.ok ? { ok: true, request: result.request } : { ok: false, error: result.error };

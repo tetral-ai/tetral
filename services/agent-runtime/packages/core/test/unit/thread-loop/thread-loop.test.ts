@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { Effect, Layer, Stream } from "effect";
-import { ProviderRequestKind, RuntimeMessageRole, SystemCacheHint, SystemSegmentKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { ProviderRequestKind, ProviderContextRole, SystemCacheHint, SystemSegmentKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { PendingInputResult, RuntimeMessage, SessionEvent, SessionEventWriter } from "../../../src/contracts/runtime.js";
 import { DurableRuntimeMessageSchema, normalizeContextLoaderError, normalizeSessionEventWriterError, RuntimeMessageSchema } from "../../../src/contracts/runtime.js";
 import { runtimeFailureFromProviderError } from "../../../src/llm/llm-event.js";
@@ -12,11 +12,11 @@ import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeAcceptedInputState, RuntimeTaskNotificationState } from "../../../src/thread-loop/thread-state.js";
-import { MaxProviderRequestAttachments, ThreadState } from "../../../src/thread-loop/thread-state.js";
+import { MaxProviderAttachments, ThreadState } from "../../../src/thread-loop/thread-state.js";
 import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, catalogForTest, createdAt, failingEventWriter, installLoaderStateForTest, llmService, runtimeThreadLoopLayer, testRunCustody, threadLoopRuntime, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, catalogForTest, createdAt, failingEventWriter, installLoaderStateForTest, llmService, providerAttachmentsForTest, runtimeThreadLoopLayer, testRunCustody, threadLoopRuntime, writerFrom } from "./thread-loop-test-support.js";
 import type { PackageJson, TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -99,7 +99,7 @@ test("refreshes the binding token without advancing the request anchor past its 
     expect(result).toMatchObject({ type: "completed" });
     expect(identities).toEqual(["runtime-binding-token-test"]);
     expect(requests[0]?.runtimeBindingToken).toBe("runtime-binding-token-refreshed");
-    expect(JSON.stringify(requests[0]?.messages)).not.toContain("committed after request snapshot");
+    expect(JSON.stringify(requests[0]?.context)).not.toContain("committed after request snapshot");
     expect(session.identity.runtimeBindingToken).toBe("runtime-binding-token-refreshed");
     expect(session.state.lastRequestContextAnchorSequence()).toBe(session.state.contextManager.messages().find((message) => message.role === "user")?.sequence);
 });
@@ -195,12 +195,10 @@ test("assembles non-persistent runtime inputs into LLMRequest without storing th
                 cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
             },
         ],
-        messages: [
+        context: [
             {
-                role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-                status: "completed",
-                origin: "user",
-                parts: [{ text: { text: "hello" } }],
+                role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+                content: [{ text: { text: "hello" } }],
             },
         ],
         tools: [
@@ -307,13 +305,13 @@ test("input accepted during an empty provider response prevents premature idle c
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(requests).toHaveLength(2);
-    expect(requests[0]?.messages.map((message) => message.role)).toEqual([
-        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    expect(requests[0]?.context.map((message) => message.role)).toEqual([
+        ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
     ]);
-    expect(requests[1]?.messages.map((message) => message.role)).toEqual([
-        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    expect(requests[1]?.context.map((message) => message.role)).toEqual([
+        ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
     ]);
     expect(appended.filter((event) => event.type === "session.status_idle")).toHaveLength(1);
 });
@@ -464,9 +462,9 @@ test("one request cut commits every input accepted before the boundary", async (
         "rin_plural_second",
     ]);
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.messages.map((message) => message.role)).toEqual([
-        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    expect(requests[0]?.context.map((message) => message.role)).toEqual([
+        ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
     ]);
 });
 test("inputs admitted during a commit are reducer-selected before the finite request cut", async () => {
@@ -501,7 +499,7 @@ test("inputs admitted during a commit are reducer-selected before the finite req
         third.runtimeInputId,
     ]);
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(3);
+    expect(requests[0]?.context.filter((message) => message.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER)).toHaveLength(3);
 });
 test("lost CommitInputs acknowledgement cold-loads the database-stamped input exactly once", async () => {
     const session = new ThreadRuntime("sesn_cold_committed_input");
@@ -527,9 +525,9 @@ test("lost CommitInputs acknowledgement cold-loads the database-stamped input ex
     expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([replayedInput.runtimeInputId]);
     expect(session.state.threadTurnReduction().checkpoint.pendingInputMessageIds).toEqual([]);
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(1);
-    expect(requests[0]?.messages.map((message) => message.role)).toEqual([
-        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    expect(requests[0]?.context.filter((message) => message.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER)).toHaveLength(1);
+    expect(requests[0]?.context.map((message) => message.role)).toEqual([
+        ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
     ]);
 });
 test("cold recovery opens a run before continuing a sealed request with terminal tool results", async () => {
@@ -971,7 +969,11 @@ test("hot input reconciliation preserves a full retry ride and advances new medi
         runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
     }))));
     expect(result).toMatchObject({ type: "completed" });
-    expect(requests.map((request) => request.attachments)).toEqual([activeRide, activeRide, [nextRide]]);
+    expect(requests.map((request) => request.attachments)).toEqual([
+        providerAttachmentsForTest(activeRide),
+        providerAttachmentsForTest(activeRide),
+        providerAttachmentsForTest([nextRide]),
+    ]);
     expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
         expect.stringMatching(/^rin_test_harness_/),
         followUp.runtimeInputId,
@@ -1043,7 +1045,7 @@ test("runtime layer admits an input accepted during an empty request before idle
         ]);
         expect(request.limits?.maxOutputTokens).toBe(222);
     }
-    expect(capturedRequests[0]?.messages.map((message) => message.role)).toEqual([RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER]);
+    expect(capturedRequests[0]?.context.map((message) => message.role)).toEqual([ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER]);
     expect(session.state.peekAcceptedInput()).toBeUndefined();
     expect(loader.pendingCalls).toEqual(["sesn_1"]);
     expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
@@ -1193,7 +1195,7 @@ describe("ThreadState", () => {
 
   test("caps pending provider attachments", () => {
     const state = new ThreadState("sesn_attachments");
-    state.addPendingAttachments(Array.from({ length: MaxProviderRequestAttachments + 3 }, (_, index) => ({
+    state.addPendingAttachments(Array.from({ length: MaxProviderAttachments + 3 }, (_, index) => ({
       transient: {
         attachmentRef: `att_${index}`,
         sourceToolUseEventId: `sevt_tool_${index}`,
@@ -1206,7 +1208,7 @@ describe("ThreadState", () => {
       filename: `image-${index}.png`,
     })));
 
-    expect(state.pendingAttachments()).toHaveLength(MaxProviderRequestAttachments);
+    expect(state.pendingAttachments()).toHaveLength(MaxProviderAttachments);
     expect(state.pendingAttachments().at(-1)?.transient?.attachmentRef).toBe("att_31");
   });
 
@@ -1228,14 +1230,14 @@ describe("ThreadState", () => {
     state.addPendingAttachments([attachment]);
     attachment.transient.attachmentRef = "att_mutated_input";
     const snapshot = state.pendingAttachments();
-    snapshot[0]!.transient!.attachmentRef = "att_mutated_output";
+    (snapshot[0]!.transient as { attachmentRef: string }).attachmentRef = "att_mutated_output";
 
     expect(state.pendingAttachments()[0]?.transient?.attachmentRef).toBe("att_original");
   });
 
   test("keeps a full active ride separate from attachments queued for the next request", () => {
     const state = new ThreadState("sesn_attachment_rides");
-    const activeRide = Array.from({ length: MaxProviderRequestAttachments }, (_, index) => ({
+    const activeRide = Array.from({ length: MaxProviderAttachments }, (_, index) => ({
       transient: {
         attachmentRef: `att_active_${index}`,
         sourceToolUseEventId: `sevt_active_${index}`,

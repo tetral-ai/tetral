@@ -58,7 +58,7 @@ import type {
   ThreadTurnLoadFacts,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
-import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
+import { toGatewayProviderContext } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
 import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
@@ -552,14 +552,14 @@ describe("RuntimePodToolRunner", () => {
       if (startLine === Number.MAX_SAFE_INTEGER) {
         expect(result.output.text).toContain(`${(BigInt(startLine) + 1n).toString()}\t`);
       }
-      const projected = toGatewayRuntimeMessages([completedToolMessage(
+      const projected = toGatewayProviderContext([completedToolMessage(
         "Read",
         { file_path: "notes/deep.txt", offset: startLine, limit: 2000 },
         result.output.text,
       )]);
       expect(projected.ok, String(startLine)).toBe(true);
       if (!projected.ok) throw new Error("expected projected Read result");
-      const outputJson = projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson ?? "";
+      const outputJson = projected.context[0]?.content.find((item) => item.toolResult !== undefined)?.toolResult?.completed?.outputJson ?? "";
       expect(Buffer.byteLength(outputJson, "utf8"), String(startLine)).toBeLessThanOrEqual(MaxProviderRequestToolOutputJsonBytes);
       expect(JSON.parse(outputJson).text, String(startLine)).toBe(result.output.text);
     }
@@ -1364,13 +1364,14 @@ describe("RuntimePodToolRunner", () => {
     ] as const) {
       expect(result.type, toolName).toBe("completed");
       if (result.type !== "completed") throw new Error(`expected completed ${toolName} result`);
-      const projected = toGatewayRuntimeMessages([completedToolMessage(toolName, input, result.output.text)]);
+      const projected = toGatewayProviderContext([completedToolMessage(toolName, input, result.output.text)]);
       expect(projected.ok, toolName).toBe(true);
       if (!projected.ok) throw new Error(`expected projected ${toolName} result`);
-      expect(projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson, toolName).toBe(
+      const outputJson = projected.context[0]?.content.find((item) => item.toolResult !== undefined)?.toolResult?.completed?.outputJson ?? "";
+      expect(outputJson, toolName).toBe(
         JSON.stringify({ text: result.output.text }),
       );
-      expect(Buffer.byteLength(projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson ?? "", "utf8"), toolName)
+      expect(Buffer.byteLength(outputJson, "utf8"), toolName)
         .toBeLessThanOrEqual(MaxProviderRequestToolOutputJsonBytes);
     }
   });

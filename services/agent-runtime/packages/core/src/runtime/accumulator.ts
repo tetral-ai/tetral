@@ -4,7 +4,7 @@
  * local accumulator only freezes provider order and applies Bridge receipts.
  */
 import { createHash } from "node:crypto";
-import { MaxProviderRequestMessagePartJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
+import { MaxProviderContextTextJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
   DurableRuntimeMessage,
   RuntimeAssistantPartAppend,
@@ -515,7 +515,7 @@ export class ProviderStreamAccumulator {
   private appendText(envelope: LLMEventEnvelope & { readonly event: Extract<LLMEvent, { type: "text-delta" }> }): ProviderStreamAccumulatorResult {
     if (this.activeTextPart === undefined) return { ok: true, events: [] };
     const text = `${this.activeTextPart.text}${envelope.event.text_delta}`;
-    if (!withinJsonStringBudget(text, MaxProviderRequestMessagePartJsonBytes)) return this.failWithoutWrites(boundedSemanticFailure());
+    if (!withinJsonStringBudget(text, MaxProviderContextTextJsonBytes)) return this.failWithoutWrites(boundedSemanticFailure());
     this.activeTextPart = parseTextPart({ ...this.activeTextPart, text });
     return { ok: true, events: [] };
   }
@@ -551,7 +551,7 @@ export class ProviderStreamAccumulator {
     if (part === undefined) return { ok: true, events: [] };
     const metadata = mergeProviderMetadata(part.providerMetadata, envelope.event.providerMetadata);
     const updated = parseReasoningPart({ ...part, ...(metadata === undefined ? {} : { providerMetadata: metadata }), text: `${part.text}${envelope.event.text_delta}` });
-    if (!withinJsonStringBudget(updated.text, MaxProviderRequestMessagePartJsonBytes) || !this.reasoningSetFits(updated)) return this.failWithoutWrites(boundedSemanticFailure());
+    if (!withinJsonStringBudget(updated.text, MaxProviderContextTextJsonBytes) || !this.reasoningSetFits(updated)) return this.failWithoutWrites(boundedSemanticFailure());
     this.reasoningParts.set(envelope.event.id, updated);
     return { ok: true, events: [] };
   }

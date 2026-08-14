@@ -1,43 +1,26 @@
 /**
  * @packageDocumentation
- * Projects the durable RuntimeMessage view that a provider request is assembled
- * from.
+ * Projects Runtime-owned conversation state into the provider-only context
+ * carrier consumed by Gateway.
  *
- * OWNS:
- *   - toGatewayRuntimeMessages: the RuntimeMessage -> Gateway RuntimeMessage lowering.
+ * The projection is the ownership seam: durable Message and Part identity,
+ * Runtime status/origin, Tool lifecycle identity, and repair conventions stop
+ * here. Gateway receives only ordered provider roles and content. Tool calls and
+ * results are independent items paired solely by `modelToolCallId`.
  *
- * STATE MACHINE (per message, at lowering time):
- *   status=streaming                 -> skipped, never lowered.
- *   status in {completed,failed,cancelled} -> lowered; empty text and empty
- *                                        reasoning parts drop out, and a message
- *                                        that lowers to zero parts is omitted.
- *   tool part status pending|running -> skipped only when a later message carries
- *                                        the same tool-use identity in a terminal
- *                                        state; otherwise rejected. Internal
- *                                        provider tool calls lower to nothing.
- *
- * INVARIANTS:
- *   - Only non-streaming messages are projected. Text and reasoning part status is
- *     not rechecked here; unresolved pending/running tool state is rejected, while
- *     Provider deltas and Gateway raw stream chunks never reach this input.
- *     Message usage may be present but is ignored by lowering.
- *   - The sole retained provider-native field is a reasoning part's
- *     metadata, kept for reasoning round-trip; it is internal cold-start context and
- *     never surfaces on any public event or message API.
- * UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts,
- *              services/agent-runtime/packages/core/src/runtime/accumulator.ts
- *
- * ThreadLoop calls toGatewayRuntimeMessages while assembling provider requests.
- * Lowering calls the generated Gateway message protocol shapes for provider
- * request assembly.
+ * Until the durable context model owns this source directly, the projector
+ * reads the current Runtime conversation representation. Streaming messages are
+ * omitted; public Tool state still requires Runtime-owned Tool identity, while
+ * an internal invalid-tool repair is recognized only on this side of the
+ * boundary. Calls remain at their first provider position and later terminal
+ * snapshots contribute only the paired result. Neither Runtime distinction is
+ * encoded in provider context.
  */
-import {
-  RuntimeMessageRole,
-  RuntimeToolPartState,
-} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { ProviderContextRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
-  RuntimeMessage as GatewayRuntimeMessage,
-  RuntimePart as GatewayRuntimePart,
+  ProviderContextEntry,
+  ProviderContextItem,
+  ProviderToolResult,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { RuntimeMessage, RuntimePart } from "../contracts/runtime.js";
 import type { ProviderError } from "../contracts/provider.js";
@@ -47,13 +30,13 @@ import {
 } from "../contracts/runtime.js";
 import { normalizeProviderError } from "../contracts/provider.js";
 
-/** Success or normalized provider-input failure from lowering Runtime messages. */
-export type RuntimeGatewayMessagesResult =
-  | { readonly ok: true; readonly messages: readonly GatewayRuntimeMessage[] }
+/** Success or normalized provider-input failure from Runtime context projection. */
+export type RuntimeProviderContextResult =
+  | { readonly ok: true; readonly context: readonly ProviderContextEntry[] }
   | { readonly ok: false; readonly error: ProviderError };
 
-/** Lowers completed, failed, and cancelled Runtime history into provider-request messages. */
-export function toGatewayRuntimeMessages(input: unknown): RuntimeGatewayMessagesResult {
+/** Lowers completed Runtime conversation history into provider-only context. */
+export function toGatewayProviderContext(input: unknown): RuntimeProviderContextResult {
   if (!Array.isArray(input) || input.length === 0) {
     return { ok: false, error: runtimeInputError("schema") };
   }
@@ -66,119 +49,95 @@ export function toGatewayRuntimeMessages(input: unknown): RuntimeGatewayMessages
     }
     parsedMessages.push(parsed.data);
   }
-  const terminalToolMessageIndex = new Map<string, number>();
-  for (const [messageIndex, message] of parsedMessages.entries()) {
-    for (const part of message.parts) {
-      if (
-        part.type === "tool" &&
-        part.toolUseEventId !== undefined &&
-        part.state.status !== "pending" &&
-        part.state.status !== "running"
-      ) {
-        terminalToolMessageIndex.set(part.toolUseEventId, messageIndex);
-      }
-    }
-  }
-  const messages: GatewayRuntimeMessage[] = [];
-  for (const [messageIndex, message] of parsedMessages.entries()) {
+  const toolTracker: ToolProjectionTracker = {
+    ownerByModelCallId: new Map(),
+    modelCallIdByOwner: new Map(),
+    settledModelCallIds: new Set(),
+  };
+  const context: ProviderContextEntry[] = [];
+  for (const message of parsedMessages) {
     if (message.role !== "user" && message.role !== "assistant") {
       return { ok: false, error: runtimeInputError("unsupported_role") };
     }
     if (message.status === "streaming") {
       continue;
     }
-    const projected = projectRuntimeMessage(message, messageIndex, terminalToolMessageIndex);
+    const projected = projectRuntimeMessage(message, toolTracker);
     if (!projected.ok) {
       return { ok: false, error: runtimeInputError(projected.reason) };
     }
-    if (projected.message.parts.length > 0) {
-      messages.push(projected.message);
+    if (projected.entry.content.length > 0) {
+      context.push(projected.entry);
     }
   }
-  return { ok: true, messages };
+  return { ok: true, context };
 }
 
 type ProjectionResult =
-  | { readonly ok: true; readonly message: GatewayRuntimeMessage }
+  | { readonly ok: true; readonly entry: ProviderContextEntry }
   | { readonly ok: false; readonly reason: string };
 
 function projectRuntimeMessage(
   message: RuntimeMessage,
-  messageIndex: number,
-  terminalToolMessageIndex: ReadonlyMap<string, number>,
+  toolTracker: ToolProjectionTracker,
 ): ProjectionResult {
-  const parts: GatewayRuntimePart[] = [];
+  const content: ProviderContextItem[] = [];
   for (const part of [...message.parts].sort((left, right) => left.sequence - right.sequence)) {
-    if (
-      part.type === "tool" &&
-      (part.state.status === "pending" || part.state.status === "running") &&
-      part.toolUseEventId !== undefined &&
-      (terminalToolMessageIndex.get(part.toolUseEventId) ?? -1) > messageIndex
-    ) {
-      continue;
-    }
-    const projected = projectRuntimePart(message, part);
+    const projected = projectRuntimeContent(message, part, toolTracker);
     if (!projected.ok) {
       return projected;
     }
-    if (projected.part !== undefined) {
-      parts.push(projected.part);
-    }
+    content.push(...projected.content);
   }
   return {
     ok: true,
-    message: {
-      id: message.id,
-      role: message.role === "user" ? RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER : RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-      parts,
-      status: message.status,
-      origin: message.origin,
+    entry: {
+      role: message.role === "user"
+        ? ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER
+        : ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+      content,
     },
   };
 }
 
-type PartProjectionResult =
-  | { readonly ok: true; readonly part?: GatewayRuntimePart | undefined }
+type ContentProjectionResult =
+  | { readonly ok: true; readonly content: readonly ProviderContextItem[] }
   | { readonly ok: false; readonly reason: string };
 
-function projectRuntimePart(message: RuntimeMessage, part: RuntimePart): PartProjectionResult {
+function projectRuntimeContent(
+  message: RuntimeMessage,
+  part: RuntimePart,
+  toolTracker: ToolProjectionTracker,
+): ContentProjectionResult {
   switch (part.type) {
     case "text":
-      if (part.text.length === 0) {
-        return { ok: true };
-      }
-      return {
-        ok: true,
-        part: {
-          id: part.id,
-          text: { text: part.text },
-        },
-      };
+      return part.text.length === 0
+        ? { ok: true, content: [] }
+        : { ok: true, content: [{ text: { text: part.text } }] };
     case "reasoning":
       if (message.role !== "assistant") {
         return { ok: false, reason: "unsupported_content" };
       }
       if (part.text.length === 0 && !hasProviderMetadata(part.providerMetadata)) {
-        return { ok: true };
+        return { ok: true, content: [] };
       }
       return {
         ok: true,
-        part: {
-          id: part.id,
+        content: [{
           reasoning: {
             text: part.text,
-            metadataJson: providerMetadataJson(part.providerMetadata),
+            metadataJson: JSON.stringify(part.providerMetadata ?? {}),
           },
-        },
+        }],
       };
     case "tool":
       if (message.role !== "assistant") {
         return { ok: false, reason: "unsupported_content" };
       }
-      return projectToolPart(part);
+      return projectToolContent(part, toolTracker);
     case "step-start":
     case "step-finish":
-      return { ok: true };
+      return { ok: true, content: [] };
     default: {
       const unsupportedPart: never = part;
       return unsupportedPart;
@@ -186,54 +145,71 @@ function projectRuntimePart(message: RuntimeMessage, part: RuntimePart): PartPro
   }
 }
 
-function providerMetadataJson(metadata: Extract<RuntimePart, { readonly type: "reasoning" }>["providerMetadata"]): string {
-  return JSON.stringify(metadata ?? {});
-}
-
 function hasProviderMetadata(metadata: Extract<RuntimePart, { readonly type: "reasoning" }>["providerMetadata"]): boolean {
   return metadata !== undefined && Object.keys(metadata).length > 0;
 }
 
-function projectToolPart(part: Extract<RuntimePart, { readonly type: "tool" }>): PartProjectionResult {
-  if (part.state.status === "pending" || part.state.status === "running") {
-    if (isInternalProviderToolCall(part)) {
-      return { ok: true };
-    }
-    return { ok: false, reason: "pending_tool_state" };
-  }
-  const internalRepair = part.state.status === "error" &&
-    isInternalProviderToolCall(part);
-  if (!internalRepair && (part.toolUseEventId === undefined || part.toolUseEventId.length === 0)) {
+interface ToolProjectionTracker {
+  readonly ownerByModelCallId: Map<string, string>;
+  readonly modelCallIdByOwner: Map<string, string>;
+  readonly settledModelCallIds: Set<string>;
+}
+
+function projectToolContent(
+  part: Extract<RuntimePart, { readonly type: "tool" }>,
+  tracker: ToolProjectionTracker,
+): ContentProjectionResult {
+  const unsettled = part.state.status === "pending" || part.state.status === "running";
+  const internalRepair = part.state.status === "error" && isInternalProviderToolCall(part);
+  const durableOwner = part.toolUseEventId !== undefined && part.toolUseEventId.length > 0;
+  if (!unsettled && !internalRepair && !durableOwner) {
     return { ok: false, reason: "missing_tool_use_event_id" };
   }
+  const owner = durableOwner ? `runtime:${part.toolUseEventId}` : `internal:${part.toolCallId}`;
+  const existingOwner = tracker.ownerByModelCallId.get(part.toolCallId);
+  const existingModelCallId = tracker.modelCallIdByOwner.get(owner);
+  if (
+    (existingOwner !== undefined && existingOwner !== owner) ||
+    (existingModelCallId !== undefined && existingModelCallId !== part.toolCallId)
+  ) {
+    return { ok: false, reason: "conflicting_tool_call_pair" };
+  }
+  if (unsettled && tracker.settledModelCallIds.has(part.toolCallId)) {
+    return { ok: false, reason: "settled_tool_reopened" };
+  }
+  const firstCall = existingOwner === undefined;
+  if (firstCall) {
+    tracker.ownerByModelCallId.set(part.toolCallId, owner);
+    tracker.modelCallIdByOwner.set(owner, part.toolCallId);
+  }
+  const toolCall: ProviderContextItem = {
+    toolCall: {
+      modelToolCallId: part.toolCallId,
+      name: part.toolName,
+      inputJson: toolInputJson(part),
+    },
+  };
+  if (unsettled) {
+    return { ok: true, content: firstCall ? [toolCall] : [] };
+  }
+  if (tracker.settledModelCallIds.has(part.toolCallId)) {
+    return { ok: false, reason: "duplicate_tool_result" };
+  }
+  tracker.settledModelCallIds.add(part.toolCallId);
+  const toolResult: ProviderContextItem = {
+    toolResult: {
+      modelToolCallId: part.toolCallId,
+      ...toolResultOutcome(part),
+    },
+  };
   return {
     ok: true,
-    part: {
-      id: part.id,
-      tool: {
-        callId: part.toolCallId,
-        name: part.toolName,
-        state: gatewayToolState(part.state.status),
-        inputJson: toolInputJson(part),
-        outputOrErrorJson: toolOutputOrErrorJson(part),
-      },
-    },
+    content: firstCall ? [toolCall, toolResult] : [toolResult],
   };
 }
 
 function isInternalProviderToolCall(part: Extract<RuntimePart, { readonly type: "tool" }>): boolean {
   return part.toolUseEventId === undefined && part.toolEvent === undefined;
-}
-
-function gatewayToolState(status: Exclude<Extract<RuntimePart, { readonly type: "tool" }>["state"]["status"], "pending" | "running">): RuntimeToolPartState {
-  switch (status) {
-    case "completed":
-      return RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED;
-    case "error":
-      return RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR;
-    case "cancelled":
-      return RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED;
-  }
 }
 
 function toolInputJson(part: Extract<RuntimePart, { readonly type: "tool" }>): string {
@@ -243,17 +219,19 @@ function toolInputJson(part: Extract<RuntimePart, { readonly type: "tool" }>): s
   return "{}";
 }
 
-function toolOutputOrErrorJson(part: Extract<RuntimePart, { readonly type: "tool" }>): string {
+function toolResultOutcome(
+  part: Extract<RuntimePart, { readonly type: "tool" }>,
+): Pick<ProviderToolResult, "completed" | "error" | "cancelled"> {
   switch (part.state.status) {
     case "completed":
-      return JSON.stringify({ text: part.state.output.text });
+      return { completed: { outputJson: JSON.stringify({ text: part.state.output.text }) } };
     case "error":
-      return JSON.stringify({ error: part.state.error });
+      return { error: { errorJson: JSON.stringify({ error: part.state.error }) } };
     case "cancelled":
-      return JSON.stringify({ error: part.state.error ?? { type: "cancelled", message: "tool call was cancelled" } });
+      return { cancelled: {} };
     case "pending":
     case "running":
-      return "{}";
+      throw new Error("unsettled Tool cannot produce a provider Tool Result");
   }
 }
 

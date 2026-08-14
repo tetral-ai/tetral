@@ -10,7 +10,6 @@
  */
 
 import { z } from "zod/v4";
-import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
   MaxProviderRequestToolOutputJsonBytes,
   MaxProviderToolCallInputJsonBytes,
@@ -42,6 +41,30 @@ export interface SessionEventWriterServerToolUse {
   readonly webSearchRequests: number;
   readonly webFetchRequests: number;
 }
+
+/** Runtime-owned attachment custody retained until a settled provider request consumes it. */
+export type RuntimeProviderAttachment =
+  | {
+      readonly transient: {
+        readonly attachmentRef: string;
+        readonly sourceToolUseEventId: string;
+        readonly sourcePath: string;
+        readonly pageRange: string;
+        readonly detail: string;
+      };
+      readonly fileBacked?: undefined;
+      readonly mime: string;
+      readonly filename: string;
+    }
+  | {
+      readonly transient?: undefined;
+      readonly fileBacked: {
+        readonly sourceEventId: string;
+        readonly fileId: string;
+      };
+      readonly mime: string;
+      readonly filename: string;
+    };
 
 /** Final disposition returned by a Runtime tool route to its request turn. */
 export type RuntimeToolSettlement =
@@ -509,7 +532,7 @@ export interface RuntimeDeclarationReceipt {
   readonly declarationDigest: string;
   readonly events: readonly RuntimeDurableEventStamp[];
   readonly messages: readonly RuntimeDurableMessageStamp[];
-  readonly pendingAttachmentDelta: readonly ProviderRequestAttachment[];
+  readonly pendingAttachmentDelta: readonly RuntimeProviderAttachment[];
   readonly interruptToolProjections: readonly RuntimeInterruptToolProjection[];
   readonly prefixConsumptions: readonly RuntimePrefixConsumptionStamp[];
   readonly requestReschedule?: RuntimeRequestRescheduleStamp | undefined;

@@ -5,8 +5,8 @@
  * `LoweredProviderMessage` values. Provider-gateway alone converts that
  * SDK-free plan to concrete AI SDK `ModelMessage` values.
  *
- * Pure transformer between Runtime shapes and SDK-free provider request/stream
- * plans. It lowers RuntimeMessages to intermediate provider messages, raises
+ * Pure transformer between the provider carrier and SDK-free request/stream
+ * plans. It lowers provider context entries to intermediate provider messages, raises
  * package-defined Gateway stream parts to ProviderStreamEvents, normalizes
  * provider usage, and classifies provider errors. It runs no I/O of its own;
  * provider-gateway performs both concrete AI SDK adaptations.
@@ -17,7 +17,7 @@
  * provider-gateway adapter converts through the AI SDK.
  *
  * OWNS:
- * - RuntimeMessage -> LoweredProviderMessage planning (request.ts:
+ * - ProviderContextEntry -> LoweredProviderMessage planning (request.ts:
  *   lowerProviderRequest) including attachment lowering, cache-control marking,
  *   output-schema / provider-option assembly, and JSON-schema lowering.
  *   The concrete message records are this package's `LoweredProviderMessage`
@@ -63,7 +63,7 @@
  *   and routes each provider to a client).
  * - services/agent-runtime/packages/core/src/llm/llm-service.ts
  *   (ProviderStreamValidator, the consumer that re-checks the stream contract).
- * - services/gateway/packages/protocol/src (generated RuntimeMessage /
+ * - services/gateway/packages/protocol/src (generated ProviderContextEntry /
  *   ProviderStreamEvent / RequestUsage shapes these transforms target).
  */
 export {};

@@ -7,7 +7,7 @@
  * ThreadLoop calls the declaration writer and binding-token adapter.
  */
 import { Context, Layer } from "effect";
-import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { RuntimeProviderAttachment } from "../contracts/runtime.js";
 import type {
   DurableRuntimeMessage,
   RuntimeJsonValue,
@@ -48,7 +48,7 @@ export interface ContextLoader {
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
     readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
     readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
-    readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
+    readonly pendingAttachments?: readonly RuntimeProviderAttachment[] | undefined;
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
     readonly coldCoverage: RuntimeColdCoverage;
   }>;

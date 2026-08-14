@@ -166,7 +166,11 @@ func TestGatewayServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"ProviderRequestKind request_kind = 3;",
 		"string runtime_binding_token = 10;",
 		"repeated SystemSegment system = 12;",
-		"repeated RuntimeMessage messages = 13;",
+		"repeated ProviderContextEntry context = 13;",
+		"message ProviderContextEntry",
+		"repeated ProviderContextItem content = 2;",
+		"message ProviderToolCall",
+		"string model_tool_call_id = 1;",
 		"repeated RuntimeToolDefinition tools = 14;",
 		"repeated ProviderRequestAttachment attachments = 15;",
 		"ProviderRequestLimits limits = 16;",
@@ -201,15 +205,21 @@ func TestGatewayServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"optional int32 line_start = 4;",
 		"optional int32 line_end = 5;",
 		"optional int32 total_lines = 6;",
-		"reserved 3;",
-		`reserved "tool_use_event_id";`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("gateway proto missing %q", required)
 		}
 	}
-	if strings.Contains(text, "optional string tool_use_event_id = 3;") {
-		t.Fatal("Gateway RuntimeToolPart retained Runtime/Bridge durable Tool identity")
+	for _, retired := range []string{
+		"message RuntimeMessage",
+		"message RuntimePart",
+		"optional string tool_use_event_id = 3;",
+		"string source_tool_use_event_id",
+		"repeated RuntimeMessage messages = 13;",
+	} {
+		if strings.Contains(text, retired) {
+			t.Fatalf("Gateway provider carrier retained Runtime-owned member %q", retired)
+		}
 	}
 	for _, generated := range []string{
 		"services/gateway/gen/tetral/provider_gateway/v1/provider_gateway.pb.go",

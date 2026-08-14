@@ -880,13 +880,16 @@ export interface TransientAttachmentRef {
 export interface ResolveTransientAttachmentRequest {
   scope: RuntimeScope | undefined;
   attachmentRef: string;
-  sourceToolUseEventId: string;
 }
 
 export interface ResolvedTransientAttachment {
-  attachment: TransientAttachmentRef | undefined;
+  attachmentRef: string;
+  mime: string;
+  filename: string;
+  sourcePath: string;
+  pageRange: string;
+  detail: string;
   data: Uint8Array;
-  expiresAt: string;
 }
 
 export interface TransientAttachmentUnavailable {
@@ -6259,7 +6262,7 @@ export const TransientAttachmentRef: MessageFns<TransientAttachmentRef> = {
 };
 
 function createBaseResolveTransientAttachmentRequest(): ResolveTransientAttachmentRequest {
-  return { scope: undefined, attachmentRef: "", sourceToolUseEventId: "" };
+  return { scope: undefined, attachmentRef: "" };
 }
 
 export const ResolveTransientAttachmentRequest: MessageFns<ResolveTransientAttachmentRequest> = {
@@ -6269,9 +6272,6 @@ export const ResolveTransientAttachmentRequest: MessageFns<ResolveTransientAttac
     }
     if (message.attachmentRef !== "") {
       writer.uint32(18).string(message.attachmentRef);
-    }
-    if (message.sourceToolUseEventId !== "") {
-      writer.uint32(26).string(message.sourceToolUseEventId);
     }
     return writer;
   },
@@ -6299,14 +6299,6 @@ export const ResolveTransientAttachmentRequest: MessageFns<ResolveTransientAttac
           message.attachmentRef = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.sourceToolUseEventId = reader.string();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6324,11 +6316,6 @@ export const ResolveTransientAttachmentRequest: MessageFns<ResolveTransientAttac
         : isSet(object.attachment_ref)
         ? globalThis.String(object.attachment_ref)
         : "",
-      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
-        ? globalThis.String(object.sourceToolUseEventId)
-        : isSet(object.source_tool_use_event_id)
-        ? globalThis.String(object.source_tool_use_event_id)
-        : "",
     };
   },
 
@@ -6339,9 +6326,6 @@ export const ResolveTransientAttachmentRequest: MessageFns<ResolveTransientAttac
     }
     if (message.attachmentRef !== "") {
       obj.attachmentRef = message.attachmentRef;
-    }
-    if (message.sourceToolUseEventId !== "") {
-      obj.sourceToolUseEventId = message.sourceToolUseEventId;
     }
     return obj;
   },
@@ -6359,25 +6343,44 @@ export const ResolveTransientAttachmentRequest: MessageFns<ResolveTransientAttac
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.attachmentRef = object.attachmentRef ?? "";
-    message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
     return message;
   },
 };
 
 function createBaseResolvedTransientAttachment(): ResolvedTransientAttachment {
-  return { attachment: undefined, data: new Uint8Array(0), expiresAt: "" };
+  return {
+    attachmentRef: "",
+    mime: "",
+    filename: "",
+    sourcePath: "",
+    pageRange: "",
+    detail: "",
+    data: new Uint8Array(0),
+  };
 }
 
 export const ResolvedTransientAttachment: MessageFns<ResolvedTransientAttachment> = {
   encode(message: ResolvedTransientAttachment, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.attachment !== undefined) {
-      TransientAttachmentRef.encode(message.attachment, writer.uint32(10).fork()).join();
+    if (message.attachmentRef !== "") {
+      writer.uint32(10).string(message.attachmentRef);
+    }
+    if (message.mime !== "") {
+      writer.uint32(18).string(message.mime);
+    }
+    if (message.filename !== "") {
+      writer.uint32(26).string(message.filename);
+    }
+    if (message.sourcePath !== "") {
+      writer.uint32(34).string(message.sourcePath);
+    }
+    if (message.pageRange !== "") {
+      writer.uint32(42).string(message.pageRange);
+    }
+    if (message.detail !== "") {
+      writer.uint32(50).string(message.detail);
     }
     if (message.data.length !== 0) {
-      writer.uint32(18).bytes(message.data);
-    }
-    if (message.expiresAt !== "") {
-      writer.uint32(26).string(message.expiresAt);
+      writer.uint32(58).bytes(message.data);
     }
     return writer;
   },
@@ -6394,7 +6397,7 @@ export const ResolvedTransientAttachment: MessageFns<ResolvedTransientAttachment
             break;
           }
 
-          message.attachment = TransientAttachmentRef.decode(reader, reader.uint32());
+          message.attachmentRef = reader.string();
           continue;
         }
         case 2: {
@@ -6402,7 +6405,7 @@ export const ResolvedTransientAttachment: MessageFns<ResolvedTransientAttachment
             break;
           }
 
-          message.data = reader.bytes();
+          message.mime = reader.string();
           continue;
         }
         case 3: {
@@ -6410,7 +6413,39 @@ export const ResolvedTransientAttachment: MessageFns<ResolvedTransientAttachment
             break;
           }
 
-          message.expiresAt = reader.string();
+          message.filename = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.sourcePath = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.pageRange = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.detail = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.data = reader.bytes();
           continue;
         }
       }
@@ -6424,26 +6459,50 @@ export const ResolvedTransientAttachment: MessageFns<ResolvedTransientAttachment
 
   fromJSON(object: any): ResolvedTransientAttachment {
     return {
-      attachment: isSet(object.attachment) ? TransientAttachmentRef.fromJSON(object.attachment) : undefined,
-      data: isSet(object.data) ? bytesFromBase64(object.data) : new Uint8Array(0),
-      expiresAt: isSet(object.expiresAt)
-        ? globalThis.String(object.expiresAt)
-        : isSet(object.expires_at)
-        ? globalThis.String(object.expires_at)
+      attachmentRef: isSet(object.attachmentRef)
+        ? globalThis.String(object.attachmentRef)
+        : isSet(object.attachment_ref)
+        ? globalThis.String(object.attachment_ref)
         : "",
+      mime: isSet(object.mime) ? globalThis.String(object.mime) : "",
+      filename: isSet(object.filename) ? globalThis.String(object.filename) : "",
+      sourcePath: isSet(object.sourcePath)
+        ? globalThis.String(object.sourcePath)
+        : isSet(object.source_path)
+        ? globalThis.String(object.source_path)
+        : "",
+      pageRange: isSet(object.pageRange)
+        ? globalThis.String(object.pageRange)
+        : isSet(object.page_range)
+        ? globalThis.String(object.page_range)
+        : "",
+      detail: isSet(object.detail) ? globalThis.String(object.detail) : "",
+      data: isSet(object.data) ? bytesFromBase64(object.data) : new Uint8Array(0),
     };
   },
 
   toJSON(message: ResolvedTransientAttachment): unknown {
     const obj: any = {};
-    if (message.attachment !== undefined) {
-      obj.attachment = TransientAttachmentRef.toJSON(message.attachment);
+    if (message.attachmentRef !== "") {
+      obj.attachmentRef = message.attachmentRef;
+    }
+    if (message.mime !== "") {
+      obj.mime = message.mime;
+    }
+    if (message.filename !== "") {
+      obj.filename = message.filename;
+    }
+    if (message.sourcePath !== "") {
+      obj.sourcePath = message.sourcePath;
+    }
+    if (message.pageRange !== "") {
+      obj.pageRange = message.pageRange;
+    }
+    if (message.detail !== "") {
+      obj.detail = message.detail;
     }
     if (message.data.length !== 0) {
       obj.data = base64FromBytes(message.data);
-    }
-    if (message.expiresAt !== "") {
-      obj.expiresAt = message.expiresAt;
     }
     return obj;
   },
@@ -6453,11 +6512,13 @@ export const ResolvedTransientAttachment: MessageFns<ResolvedTransientAttachment
   },
   fromPartial<I extends Exact<DeepPartial<ResolvedTransientAttachment>, I>>(object: I): ResolvedTransientAttachment {
     const message = createBaseResolvedTransientAttachment();
-    message.attachment = (object.attachment !== undefined && object.attachment !== null)
-      ? TransientAttachmentRef.fromPartial(object.attachment)
-      : undefined;
+    message.attachmentRef = object.attachmentRef ?? "";
+    message.mime = object.mime ?? "";
+    message.filename = object.filename ?? "";
+    message.sourcePath = object.sourcePath ?? "";
+    message.pageRange = object.pageRange ?? "";
+    message.detail = object.detail ?? "";
     message.data = object.data ?? new Uint8Array(0);
-    message.expiresAt = object.expiresAt ?? "";
     return message;
   },
 };

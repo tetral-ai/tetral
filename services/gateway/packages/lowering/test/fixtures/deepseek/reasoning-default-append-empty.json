@@ -3,11 +3,11 @@
   "rule": "deepseek-reasoning-default",
   "input": {
     "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
-    "messages": [
+    "context": [
       {
-        "role": "assistant",
-        "parts": [
-          { "type": "text", "id": "t1", "text": "Paris is the capital." }
+        "role": 2,
+        "content": [
+          { "text": { "text": "Paris is the capital." } }
         ]
       }
     ]

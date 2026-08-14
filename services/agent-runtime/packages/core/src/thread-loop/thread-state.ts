@@ -38,7 +38,7 @@
  *     once a settled request-end records it, later turns keep only the text projection
  *     (message-projection.ts).
  *   - The approval-reviewer model is platform runtime config: clients never choose it,
- *     Runtime Core sets it on ProviderRequest, and Gateway injects credentials but
+ *     Runtime Core sets it on the provider invocation, and Gateway injects credentials but
  *     never chooses or replaces it.
  *   - Hot state is not the source of truth and stays recoverable from durable state.
  *
@@ -62,13 +62,13 @@ import type {
 } from "./thread-turn-reducer.js";
 import type { DurableRuntimeMessage, RuntimeDeclarationReceipt, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageCreate, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
-import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { RuntimeProviderAttachment } from "../contracts/runtime.js";
 import type { ToolEntry } from "../tools/tool-catalog.js";
 import type { ToolJob } from "../tools/tool-scheduler.js";
 import type { RuntimeConfigurationPatch } from "../session/session-configuration.js";
 
 /** Combined cap for file-backed and transient attachments on one provider request. */
-export const MaxProviderRequestAttachments = 32;
+export const MaxProviderAttachments = 32;
 
 /** Current provider/model selection held by a hot session thread. */
 export interface SessionCurrentModel {
@@ -226,7 +226,7 @@ export interface RuntimeThreadPreloadState extends RuntimeThreadControlState {
   readonly pendingToolUses?: readonly RuntimePreloadedPendingToolUseState[] | undefined;
   readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
   readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
-  readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
+  readonly pendingAttachments?: readonly RuntimeProviderAttachment[] | undefined;
   readonly pendingAgentMail?: readonly RuntimeInterAgentAcceptedInputState[] | undefined;
   readonly coldCoverage: RuntimeColdCoverage;
 }
@@ -502,8 +502,8 @@ export class ThreadState {
     string,
     RuntimeBackgroundToolState | undefined
   >;
-  #activeAttachmentRide: ProviderRequestAttachment[] | undefined;
-  #pendingAttachments: ProviderRequestAttachment[] = [];
+  #activeAttachmentRide: RuntimeProviderAttachment[] | undefined;
+  #pendingAttachments: RuntimeProviderAttachment[] = [];
   #threadProcessor: ThreadProcessor | undefined;
   #lastRequestUsage: RuntimeUsage | undefined;
   #lastRequestModelLimits: RuntimeModelLimits | undefined;
@@ -753,37 +753,37 @@ export class ThreadState {
     };
   }
 
-  addPendingAttachments(attachments: readonly ProviderRequestAttachment[]): void {
-    const available = Math.max(0, MaxProviderRequestAttachments - this.#pendingAttachments.length);
-    this.#pendingAttachments.push(...attachments.slice(0, available).map(cloneProviderRequestAttachment));
+  addPendingAttachments(attachments: readonly RuntimeProviderAttachment[]): void {
+    const available = Math.max(0, MaxProviderAttachments - this.#pendingAttachments.length);
+    this.#pendingAttachments.push(...attachments.slice(0, available).map(cloneRuntimeProviderAttachment));
   }
 
-  pendingAttachments(): readonly ProviderRequestAttachment[] {
+  pendingAttachments(): readonly RuntimeProviderAttachment[] {
     return [
       ...(this.#activeAttachmentRide ?? []),
       ...this.#pendingAttachments,
-    ].map(cloneProviderRequestAttachment);
+    ].map(cloneRuntimeProviderAttachment);
   }
 
-  beginPendingAttachmentRide(): readonly ProviderRequestAttachment[] {
+  beginPendingAttachmentRide(): readonly RuntimeProviderAttachment[] {
     if (this.#activeAttachmentRide === undefined && this.#pendingAttachments.length > 0) {
       this.#activeAttachmentRide = this.#pendingAttachments;
       this.#pendingAttachments = [];
     }
-    return (this.#activeAttachmentRide ?? []).map(cloneProviderRequestAttachment);
+    return (this.#activeAttachmentRide ?? []).map(cloneRuntimeProviderAttachment);
   }
 
   settlePendingAttachmentRide(): void {
     this.#activeAttachmentRide = undefined;
   }
 
-  replacePendingAttachments(attachments: readonly ProviderRequestAttachment[]): void {
+  replacePendingAttachments(attachments: readonly RuntimeProviderAttachment[]): void {
     this.#activeAttachmentRide = undefined;
     this.#pendingAttachments = [];
     this.addPendingAttachments(attachments);
   }
 
-  reconcilePendingAttachments(attachments: readonly ProviderRequestAttachment[]): void {
+  reconcilePendingAttachments(attachments: readonly RuntimeProviderAttachment[]): void {
     if (this.#activeAttachmentRide === undefined) {
       this.replacePendingAttachments(attachments);
       return;
@@ -835,7 +835,7 @@ export class ThreadState {
     this.#lastRequestContextAnchorSequence = undefined;
   }
 
-  setProviderRequestOutputSchemaJson(outputSchemaJson: string | undefined): void {
+  setProviderOutputSchemaJson(outputSchemaJson: string | undefined): void {
     this.#providerRequestOutputSchemaJson = outputSchemaJson;
   }
 
@@ -1016,15 +1016,13 @@ export class ThreadState {
   }
 }
 
-function cloneProviderRequestAttachment(attachment: ProviderRequestAttachment): ProviderRequestAttachment {
-  return {
-    ...attachment,
-    transient: attachment.transient === undefined ? undefined : { ...attachment.transient },
-    fileBacked: attachment.fileBacked === undefined ? undefined : { ...attachment.fileBacked },
-  };
+function cloneRuntimeProviderAttachment(attachment: RuntimeProviderAttachment): RuntimeProviderAttachment {
+  return attachment.transient !== undefined
+    ? { ...attachment, transient: { ...attachment.transient }, fileBacked: undefined }
+    : { ...attachment, transient: undefined, fileBacked: { ...attachment.fileBacked } };
 }
 
-function providerRequestAttachmentIdentity(attachment: ProviderRequestAttachment): string {
+function providerRequestAttachmentIdentity(attachment: RuntimeProviderAttachment): string {
   if (attachment.transient !== undefined) {
     return JSON.stringify(["transient", attachment.transient.attachmentRef]);
   }

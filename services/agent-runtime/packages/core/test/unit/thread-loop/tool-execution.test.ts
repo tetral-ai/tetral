@@ -21,7 +21,7 @@ import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { SessionToolCoordinator } from "../../../src/tools/tool-scheduler.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage, buildThreadLoopDurableRuntimeNotificationMessage as durableRuntimeNotificationMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, approvalReviewerOutputSchemaJson, approvalReviewerPolicy, catalogForTest, createdAt, deferred, emptyColdCoverage, flushMicrotasks, installRecoveredToolTurn, memoryCatalogForTest, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, approvalReviewerOutputSchemaJson, approvalReviewerPolicy, catalogForTest, createdAt, deferred, emptyColdCoverage, flushMicrotasks, installRecoveredToolTurn, memoryCatalogForTest, providerAttachmentsForTest, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, writerFrom } from "./thread-loop-test-support.js";
 import type { TestContextLoader, TestDurableSequence } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -213,7 +213,7 @@ test("first accepted turn rides the file attachments returned by CommitInputs", 
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.attachments).toEqual([attachment]);
+    expect(requests[0]?.attachments).toEqual(providerAttachmentsForTest([attachment]));
 });
 for (const finishReason of ["stop", "unknown"] as const) {
 test(`lost Tool Use acknowledgement retries one write identity and continues after ${finishReason}`, async () => {
@@ -288,7 +288,7 @@ test(`lost Tool Use acknowledgement retries one write identity and continues aft
     expect(new Set(toolUseWriteIds).size).toBe(1);
     expect(toolExecutions).toBe(1);
     expect(requests).toHaveLength(2);
-    expect(JSON.stringify(requests[1]?.messages)).toContain("found");
+    expect(JSON.stringify(requests[1]?.context)).toContain("found");
 });
 }
 test("approval reviewer sessions mark provider requests, request-end events, and metrics as reviewer work", async () => {
@@ -486,7 +486,7 @@ test("approval reviewer tools settle before the reviewer produces its final deci
     expect(result).toMatchObject({ type: "completed" });
     expect(toolCalls).toBe(1);
     expect(requests).toHaveLength(2);
-    expect(JSON.stringify(requests[1]?.messages)).toContain("file contents");
+    expect(JSON.stringify(requests[1]?.context)).toContain("file contents");
 });
 test("accepted declarations preserve approval-reviewer thread metadata without reloading context", async () => {
     const session = new ThreadRuntime({
@@ -643,8 +643,8 @@ test("provider reschedule does not repeat committed RunTool effect", async () =>
         const threadLoop = yield* ThreadLoop.Service;
         return yield* threadLoop.run(session, testRunCustody());
     }).pipe(Effect.provide(layer)));
-    const requestTwoContext = JSON.stringify(requests[1]?.messages);
-    const requestThreeContext = JSON.stringify(requests[2]?.messages);
+    const requestTwoContext = JSON.stringify(requests[1]?.context);
+    const requestThreeContext = JSON.stringify(requests[2]?.context);
     const hotContext = JSON.stringify(session.state.contextManager.messages());
     const durableAppendEvents = JSON.stringify(appended);
     const terminalToolResults = appended.filter((event) => event.type === "agent.tool_result");
@@ -775,7 +775,7 @@ test("same-request committed tool is repaired and rebased before provider resche
     expect(result).toMatchObject({ type: "completed" });
     expect(helperMutations).toBe(1);
     expect(requests).toHaveLength(2);
-    const retryContext = JSON.stringify(requests[1]?.messages);
+    const retryContext = JSON.stringify(requests[1]?.context);
     for (const durableValue of ["mutate_record", "mutation committed", "reason before mutation"]) {
         expect(retryContext.split(durableValue)).toHaveLength(2);
     }
@@ -985,7 +985,7 @@ test("served request consumes its exact mixed-origin ride and preserves attachme
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(capturedRequests).toHaveLength(1);
-    expect(capturedRequests[0]?.attachments).toEqual(initialRide);
+    expect(capturedRequests[0]?.attachments).toEqual(providerAttachmentsForTest(initialRide));
     expect(requestEndEnvelopes).toHaveLength(1);
     expect(requestEndEnvelopes[0]?.consumedAttachmentRefs).toEqual([
         "att_1",
@@ -1030,8 +1030,8 @@ test("runtime layer caps pending attachments", async () => {
         return yield* threadLoop.run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, { llmService: llm }))));
     expect(result).toMatchObject({ type: "completed" });
-    expect(capturedRequests[0]?.attachments).toEqual(attachments.slice(0, 32));
-    expect(JSON.stringify(capturedRequests[0]?.messages)).not.toContain("plot-35.png");
+    expect(capturedRequests[0]?.attachments).toEqual(providerAttachmentsForTest(attachments.slice(0, 32)));
+    expect(JSON.stringify(capturedRequests[0]?.context)).not.toContain("plot-35.png");
 });
 test("runtime layer keeps pending attachments when request-end ACK fails before consumption", async () => {
     const session = new ThreadRuntime("sesn_1");
@@ -1356,8 +1356,8 @@ test("attachment rejections survive reschedule and settle in the cumulative orig
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(capturedRequests).toHaveLength(2);
-    expect(capturedRequests[0]?.attachments).toEqual([transientAttachment, fileAttachment]);
-    expect(capturedRequests[1]?.attachments).toEqual([transientAttachment]);
+    expect(capturedRequests[0]?.attachments).toEqual(providerAttachmentsForTest([transientAttachment, fileAttachment]));
+    expect(capturedRequests[1]?.attachments).toEqual(providerAttachmentsForTest([transientAttachment]));
     expect(requestEndEnvelopes).toHaveLength(2);
     expect(requestEndEnvelopes[0]).toMatchObject({
         isError: true,
@@ -1537,9 +1537,9 @@ test("a lost continuation Request Start acknowledgement retries one identity wit
     expect(requests).toHaveLength(3);
     expect(continuationStartWriteIds).toHaveLength(3);
     expect(continuationStartWriteIds[0]).toBe(continuationStartWriteIds[1]);
-    expect(requests.filter((request) => JSON.stringify(request.messages).includes("file contents tool-read"))).toHaveLength(2);
-    expect(JSON.stringify(requests[1]?.messages)).toContain("file contents tool-read");
-    expect(JSON.stringify(requests[2]?.messages)).toContain("file contents tool-read-second");
+    expect(requests.filter((request) => JSON.stringify(request.context).includes("file contents tool-read"))).toHaveLength(2);
+    expect(JSON.stringify(requests[1]?.context)).toContain("file contents tool-read");
+    expect(JSON.stringify(requests[2]?.context)).toContain("file contents tool-read-second");
     expect(session.state.contextManager.messages().at(-1)?.parts).toEqual([
         expect.objectContaining({ type: "text", text: "done", status: "completed" }),
     ]);
@@ -1623,7 +1623,7 @@ test("the continuation request combines terminal Tool Results with user input an
         "agent_mail:delivery_mixed_agent_mail",
     ]);
     expect(requests).toHaveLength(2);
-    const continuation = JSON.stringify(requests[1]?.messages);
+    const continuation = JSON.stringify(requests[1]?.context);
     expect(continuation).toContain("mixed tool result");
     expect(continuation).toContain("test input");
     expect(continuation).toContain("mail result");
@@ -1756,7 +1756,7 @@ test("mixed internal repair and public Tool Use waits for the public terminal re
     expect(await run).toMatchObject({ type: "completed" });
     expect(publicToolCalls).toBe(1);
     expect(requests).toHaveLength(2);
-    const continuation = JSON.stringify(requests[1]?.messages);
+    const continuation = JSON.stringify(requests[1]?.context);
     expect(continuation).toContain("exec_command");
     expect(continuation).toContain("public tool result");
 });

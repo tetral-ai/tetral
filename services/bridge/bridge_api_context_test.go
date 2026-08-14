@@ -1855,25 +1855,32 @@ type coldCheckpointCompositionResult struct {
 }
 
 type providerRequestCompositionResult struct {
-	CarrierMessages                  []providerCarrierMessage      `json:"carrierMessages"`
+	CarrierMessages                  []providerCarrierContextEntry `json:"carrierMessages"`
 	CarrierHasToolUseEventIDProperty bool                          `json:"carrierHasToolUseEventIdProperty"`
 	Strategies                       []providerStrategyComposition `json:"strategies"`
 }
 
-type providerCarrierMessage struct {
-	Parts []struct {
-		ID   string `json:"id"`
+type providerCarrierContextEntry struct {
+	Content []struct {
 		Text *struct {
 			Text string `json:"text"`
 		} `json:"text"`
-		Tool *struct {
-			CallID            string `json:"callId"`
-			Name              string `json:"name"`
-			State             int32  `json:"state"`
-			InputJSON         string `json:"inputJson"`
-			OutputOrErrorJSON string `json:"outputOrErrorJson"`
-		} `json:"tool"`
-	} `json:"parts"`
+		ToolCall *struct {
+			ModelToolCallID string `json:"modelToolCallId"`
+			Name            string `json:"name"`
+			InputJSON       string `json:"inputJson"`
+		} `json:"toolCall"`
+		ToolResult *struct {
+			ModelToolCallID string `json:"modelToolCallId"`
+			Completed       *struct {
+				OutputJSON string `json:"outputJson"`
+			} `json:"completed"`
+			Error *struct {
+				ErrorJSON string `json:"errorJson"`
+			} `json:"error"`
+			Cancelled map[string]any `json:"cancelled"`
+		} `json:"toolResult"`
+	} `json:"content"`
 }
 
 type providerStrategyComposition struct {

@@ -24,8 +24,10 @@ func (s *attachmentTransportServer) ResolveTransientAttachment(context.Context, 
 	return &bridgev1.ResolveTransientAttachmentResponse{
 		Outcome: &bridgev1.ResolveTransientAttachmentResponse_Resolved{
 			Resolved: &bridgev1.ResolvedTransientAttachment{
-				Attachment: &bridgev1.TransientAttachmentRef{AttachmentRef: "att_transport"},
-				Data:       append([]byte(nil), s.data...),
+				AttachmentRef: "att_transport",
+				Mime:          "image/png",
+				Filename:      "transport.png",
+				Data:          append([]byte(nil), s.data...),
 			},
 		},
 	}, nil

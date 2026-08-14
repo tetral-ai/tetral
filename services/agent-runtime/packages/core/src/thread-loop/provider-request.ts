@@ -15,14 +15,15 @@ import {
 import { Cause, Effect, Exit, Fiber, Scope } from "effect";
 import type {
   ProviderRequest,
-  ProviderRequestAttachment,
-  RuntimeMessage as GatewayRuntimeMessage,
+  ProviderRequestAttachment as GatewayProviderRequestAttachment,
+  ProviderContextEntry as GatewayProviderContextEntry,
   RuntimeToolDefinition as GatewayRuntimeToolDefinition,
   SystemSegment,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
   RuntimeFailure,
+  RuntimeProviderAttachment,
   RuntimeJsonValue,
   RuntimeAssistantPartAppend,
   RuntimeRequestErrorKind,
@@ -75,13 +76,13 @@ export interface ProviderCallRuntimeConfig {
   readonly modelVariant?: string;
   readonly requestKind?: ProviderRequestKind;
   readonly outputSchemaJson?: string;
-  readonly attachments?: readonly ProviderRequestAttachment[];
+  readonly attachments?: readonly RuntimeProviderAttachment[];
   readonly skillsIndex?: readonly SkillGuidanceIndexEntry[];
   readonly memoryStores?: readonly MemoryStorePromptEntry[];
   readonly skillGuidanceDescriptionBudgetBytes?: number;
 }
 
-/** Supplies the durable identity, model selection, message view, and runtime config for one call. */
+/** Supplies authenticated identity, model selection, provider context, and runtime config for one call. */
 export interface ProviderCallAssemblyInput {
   readonly identity: RuntimeThreadIdentity;
   readonly requestId: string;
@@ -90,7 +91,7 @@ export interface ProviderCallAssemblyInput {
     readonly providerId: string;
     readonly modelId: string;
   };
-  readonly runtimeMessages: readonly GatewayRuntimeMessage[];
+  readonly providerContext: readonly GatewayProviderContextEntry[];
   readonly runtime: ProviderCallRuntimeConfig;
 }
 
@@ -102,6 +103,7 @@ export interface ProviderCallAssemblySuccess {
   readonly maxOutputTokens?: number;
   readonly timeoutMs: number;
   readonly request: ProviderRequest;
+  readonly runtimeAttachments: readonly RuntimeProviderAttachment[];
 }
 
 /** Reports a normalized, non-retryable failure when local request invariants do not hold. */
@@ -127,7 +129,7 @@ export type ProviderCallAssembler = (
 
 /** One provider attachment excluded after a normalized Gateway rejection. */
 export interface RejectedProviderAttachment {
-  readonly attachment: ProviderRequestAttachment;
+  readonly attachment: RuntimeProviderAttachment;
   readonly reason: RuntimeAttachmentRejection["reason"];
 }
 
@@ -200,9 +202,12 @@ export async function assembleLLMRequest(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
   currentModel: { readonly providerId: string; readonly modelId: string },
-  runtimeMessages: readonly GatewayRuntimeMessage[],
+  providerContext: readonly GatewayProviderContextEntry[],
   executionPolicy: Readonly<ThreadLoopRuntimePolicy>,
-): Promise<{ readonly ok: true; readonly request: LLMRequest } | { readonly ok: false; readonly error: RuntimeFailure }> {
+): Promise<
+  | { readonly ok: true; readonly request: LLMRequest; readonly runtimeAttachments: readonly RuntimeProviderAttachment[] }
+  | { readonly ok: false; readonly error: RuntimeFailure }
+> {
   const assembler = options.providerCallAssembler ?? assembleProviderCallRequest;
   const requestId = options.runtime.createId("provider_request");
   const modelRequestId = options.runtime.createId("model_request");
@@ -212,7 +217,7 @@ export async function assembleLLMRequest(
       requestId,
       modelRequestId,
       currentModel,
-      runtimeMessages,
+      providerContext,
       runtime: providerCallRuntimeForSession(session, options, executionPolicy),
     });
     if (!result.ok && result.toolDeclarationRejection !== undefined) {
@@ -224,7 +229,9 @@ export async function assembleLLMRequest(
         result.toolDeclarationRejection,
       );
     }
-    return result.ok ? { ok: true, request: result.request } : { ok: false, error: result.error };
+    return result.ok
+      ? { ok: true, request: result.request, runtimeAttachments: result.runtimeAttachments }
+      : { ok: false, error: result.error };
   } catch (error) {
     return {
       ok: false,
@@ -265,7 +272,7 @@ function recordProviderToolDeclarationRejection(
 }
 
 export function recordAttachmentRejections(
-  requestAttachments: readonly ProviderRequestAttachment[],
+  requestAttachments: readonly RuntimeProviderAttachment[],
   rejectedAttachments: RejectedProviderAttachment[],
   rejections: readonly RuntimeAttachmentRejection[],
 ): void {
@@ -287,10 +294,10 @@ export function recordAttachmentRejections(
 }
 
 export function attachmentConsumptionUnion(
-  carriedAttachments: readonly ProviderRequestAttachment[],
+  carriedAttachments: readonly RuntimeProviderAttachment[],
   rejectedAttachments: Iterable<RejectedProviderAttachment>,
-): readonly ProviderRequestAttachment[] {
-  const union: ProviderRequestAttachment[] = [];
+): readonly RuntimeProviderAttachment[] {
+  const union: RuntimeProviderAttachment[] = [];
   const identities = new Set<string>();
   for (const attachment of carriedAttachments) {
     const identity = providerRequestAttachmentIdentity(attachment);
@@ -311,14 +318,7 @@ export function attachmentConsumptionUnion(
 
 function attachmentRejectionOriginIdentity(origin: RuntimeAttachmentRejection["origin"]): string {
   return origin.type === "transient"
-    ? JSON.stringify([
-        "transient",
-        origin.attachmentRef,
-        origin.sourceToolUseEventId,
-        origin.sourcePath,
-        origin.pageRange,
-        origin.detail,
-      ])
+    ? JSON.stringify(["transient", origin.attachmentRef])
     : JSON.stringify(["file-backed", origin.sourceEventId, origin.fileId]);
 }
 
@@ -445,16 +445,22 @@ export function providerRequestWithoutRejectedAttachments(
   };
 }
 
-export function providerRequestAttachmentIdentity(attachment: ProviderRequestAttachment): string {
+export function runtimeAttachmentsWithoutRejectedAttachments(
+  attachments: readonly RuntimeProviderAttachment[],
+  rejectedAttachments: readonly RejectedProviderAttachment[],
+): readonly RuntimeProviderAttachment[] {
+  return attachments.filter((attachment) =>
+    !rejectedAttachments.some((rejection) =>
+      providerRequestAttachmentIdentity(rejection.attachment) === providerRequestAttachmentIdentity(attachment)
+    )
+  );
+}
+
+type ProviderAttachmentIdentity = Pick<GatewayProviderRequestAttachment, "transient" | "fileBacked">;
+
+export function providerRequestAttachmentIdentity(attachment: ProviderAttachmentIdentity): string {
   if (attachment.transient !== undefined) {
-    return JSON.stringify([
-      "transient",
-      attachment.transient.attachmentRef,
-      attachment.transient.sourceToolUseEventId,
-      attachment.transient.sourcePath,
-      attachment.transient.pageRange,
-      attachment.transient.detail,
-    ]);
+    return JSON.stringify(["transient", attachment.transient.attachmentRef]);
   }
   if (attachment.fileBacked !== undefined) {
     return JSON.stringify(["file-backed", attachment.fileBacked.sourceEventId, attachment.fileBacked.fileId]);
@@ -639,7 +645,7 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
   const systemInstructions = input.runtime.systemInstructions.trim();
   if (
     (!compactionRequest && systemInstructions.length === 0) ||
-    input.runtimeMessages.length === 0 ||
+    input.providerContext.length === 0 ||
     input.identity.runtimeBindingToken.length === 0 ||
     input.identity.bindingGeneration <= 0
   ) {
@@ -732,7 +738,6 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
     workspaceId: input.identity.workspaceId,
     sessionId: input.identity.sessionId,
     sessionThreadId: input.identity.sessionThreadId,
-    parentThreadId: input.identity.parentThreadId,
     bindingId: input.identity.bindingId,
     bindingGeneration: input.identity.bindingGeneration,
     runtimeBindingToken: input.identity.runtimeBindingToken,
@@ -742,9 +747,9 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
       variant: input.runtime.modelVariant ?? "",
     },
     system,
-    messages: [...input.runtimeMessages],
+    context: [...input.providerContext],
     tools,
-    attachments: [...(input.runtime.attachments ?? [])],
+    attachments: (input.runtime.attachments ?? []).map(toGatewayProviderAttachment),
     limits: {
       // Zero is the wire encoding of "unset": the provider's documented model
       // output limit governs at Gateway lowering.
@@ -758,10 +763,35 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
     ok: true,
     system,
     tools,
+    runtimeAttachments: [...(input.runtime.attachments ?? [])],
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     timeoutMs,
     request,
   };
+}
+
+function toGatewayProviderAttachment(attachment: RuntimeProviderAttachment): GatewayProviderRequestAttachment {
+  return attachment.transient !== undefined
+    ? {
+        transient: {
+          attachmentRef: attachment.transient.attachmentRef,
+          sourcePath: attachment.transient.sourcePath,
+          pageRange: attachment.transient.pageRange,
+          detail: attachment.transient.detail,
+        },
+        fileBacked: undefined,
+        mime: attachment.mime,
+        filename: attachment.filename,
+      }
+    : {
+        transient: undefined,
+        fileBacked: {
+          sourceEventId: attachment.fileBacked.sourceEventId,
+          fileId: attachment.fileBacked.fileId,
+        },
+        mime: attachment.mime,
+        filename: attachment.filename,
+      };
 }
 
 function projectProviderTools(input: ProviderCallAssemblyInput):

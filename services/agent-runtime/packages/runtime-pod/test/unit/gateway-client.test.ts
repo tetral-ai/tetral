@@ -5,7 +5,7 @@ import {
   ProviderRequestKind,
   ProviderGatewayServiceService,
   ProviderStreamEventType,
-  RuntimeMessageRole,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -120,8 +120,7 @@ describe("Runtime Pod Gateway client", () => {
     let transportCalls = 0;
     const records: unknown[] = [];
     const request = providerRequest();
-    request.messages[0]!.parts = [{
-      id: "part_oversized",
+    request.context[0]!.content = [{
       text: { text: "x".repeat(MaxGatewayRequestGrpcMessageBytes) },
     }];
     const client = new RuntimePodGatewayClient({
@@ -362,16 +361,12 @@ describe("Runtime Pod Gateway client", () => {
       streamProviderRequest(call) {
         for (let index = 0; index < 17; index += 1) {
           const accepted = call.write({
-            requestId: request.requestId,
-            modelRequestId: request.modelRequestId,
             type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
             text: { id: "text_1", text: String(index), metadataJson: "" },
           });
           if (!accepted) crossedHighWaterMark = true;
         }
         call.write({
-          requestId: request.requestId,
-          modelRequestId: request.modelRequestId,
           type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
           finish: {
             reason: 1,
@@ -417,56 +412,44 @@ describe("Runtime Pod Gateway client", () => {
     }
   });
 
-  test("cancels generated grpc-js calls on LLM validation failure and downstream early exit", async () => {
-    for (const scenario of ["validation", "early_exit"] as const) {
-      const request = providerRequest();
-      let cancelledCalls = 0;
-      const implementation: ProviderGatewayServiceServer = {
-        streamProviderRequest(call) {
-          call.on("cancelled", () => { cancelledCalls += 1; });
-          call.write({
-            requestId: scenario === "validation" ? "wrong_request" : request.requestId,
-            modelRequestId: request.modelRequestId,
-            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-            text: { id: "text_1", text: "", metadataJson: "" },
-          });
-        },
-        runWeb(_call, callback) {
-          callback(new Error("not implemented"));
-        },
-      };
-      const server = new Server();
-      server.addService(ProviderGatewayServiceService, implementation);
-      const port = await new Promise<number>((resolve, reject) => {
-        server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) => {
-          if (error !== null) reject(error);
-          else resolve(boundPort);
+  test("cancels generated grpc-js calls on downstream early exit", async () => {
+    const request = providerRequest();
+    let cancelledCalls = 0;
+    const implementation: ProviderGatewayServiceServer = {
+      streamProviderRequest(call) {
+        call.on("cancelled", () => { cancelledCalls += 1; });
+        call.write({
+          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+          text: { id: "text_1", text: "", metadataJson: "" },
         });
+      },
+      runWeb(_call, callback) {
+        callback(new Error("not implemented"));
+      },
+    };
+    const server = new Server();
+    server.addService(ProviderGatewayServiceService, implementation);
+    const port = await new Promise<number>((resolve, reject) => {
+      server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) => {
+        if (error !== null) reject(error);
+        else resolve(boundPort);
       });
-      const client = new RuntimePodGatewayClient({
-        address: `127.0.0.1:${port}`,
-        tokenPath: "/unused",
-        metadataFactory: async () => new Metadata(),
-      });
-      try {
-        const stream = createLLMService(client).stream(request);
-        if (scenario === "validation") {
-      const events = Array.from(await Effect.runPromise(Stream.runCollect(stream)));
-      expect(events).toEqual([expect.objectContaining({
-        type: "provider-error",
-        error: expect.objectContaining({ code: "gateway_protocol_error" }),
-      })]);
-        } else {
-          const events = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(stream, 1))));
-          expect(events).toHaveLength(1);
-        }
-        for (let attempt = 0; attempt < 50 && cancelledCalls === 0; attempt += 1) {
-          await Bun.sleep(2);
-        }
-        expect(cancelledCalls).toBe(1);
-      } finally {
-        server.forceShutdown();
+    });
+    const client = new RuntimePodGatewayClient({
+      address: `127.0.0.1:${port}`,
+      tokenPath: "/unused",
+      metadataFactory: async () => new Metadata(),
+    });
+    try {
+      const stream = createLLMService(client).stream(request);
+      const events = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(stream, 1))));
+      expect(events).toHaveLength(1);
+      for (let attempt = 0; attempt < 50 && cancelledCalls === 0; attempt += 1) {
+        await Bun.sleep(2);
       }
+      expect(cancelledCalls).toBe(1);
+    } finally {
+      server.forceShutdown();
     }
   });
 
@@ -474,10 +457,8 @@ describe("Runtime Pod Gateway client", () => {
     const records: unknown[] = [];
     const request = providerRequest();
     request.runtimeBindingToken = "CANARY_TOKEN_VALUE";
-    request.messages[0]!.parts = [{ id: "part_1", text: { text: "raw provider payload marker" } }];
+    request.context[0]!.content = [{ text: { text: "raw provider payload marker" } }];
     const finish: ProviderStreamEvent = {
-      requestId: request.requestId,
-      modelRequestId: request.modelRequestId,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       finish: {
         reason: 1,
@@ -528,8 +509,6 @@ describe("Runtime Pod Gateway client", () => {
 
   test("records a validated terminal candidate once when transport cleanup fails", async () => {
     const finish: ProviderStreamEvent = {
-      requestId: "req_gateway_client",
-      modelRequestId: "mreq_gateway_client",
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       finish: {
         reason: 1,
@@ -541,7 +520,7 @@ describe("Runtime Pod Gateway client", () => {
     };
     const request = providerRequest();
     request.runtimeBindingToken = "CANARY_TOKEN_VALUE";
-    request.messages[0]!.parts = [{ id: "part_1", text: { text: "raw provider payload marker" } }];
+    request.context[0]!.content = [{ text: { text: "raw provider payload marker" } }];
 
     const transportRecords: unknown[] = [];
     const transportLogger = { info: (record: unknown) => transportRecords.push(record), error: (record: unknown) => transportRecords.push(record) };
@@ -616,8 +595,6 @@ function eventThenFailingGatewayClient(code: number, details: string): ProviderG
     streamProviderRequest(request: ProviderRequest) {
       return readableCall((async function* () {
           yield {
-            requestId: request.requestId,
-            modelRequestId: request.modelRequestId,
             type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
             text: { id: "text_1", text: "", metadataJson: "" },
           };
@@ -650,7 +627,6 @@ function providerRequest(): ProviderRequest {
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thr_1",
-    parentThreadId: undefined,
     bindingId: "bind_1",
     bindingGeneration: 1,
     runtimeBindingToken: "binding-token",
@@ -660,12 +636,9 @@ function providerRequest(): ProviderRequest {
       text: "System",
       cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
     }],
-    messages: [{
-      id: "msg_1",
-      role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-      status: "completed",
-      origin: "user",
-      parts: [{ id: "part_1", text: { text: "hello" } }],
+    context: [{
+      role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+      content: [{ text: { text: "hello" } }],
     }],
     tools: [],
     attachments: [],

@@ -1153,29 +1153,34 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 		t.Fatalf("Runtime provider requests = %d; want initial and repaired continuation", len(runtimeRepair.ProviderRequests))
 	}
 	var continuation struct {
-		Messages []providerCarrierMessage `json:"messages"`
+		Context []providerCarrierContextEntry `json:"context"`
 	}
 	if err := json.Unmarshal(runtimeRepair.ProviderRequests[1], &continuation); err != nil {
 		t.Fatalf("decode Runtime repaired continuation: %v", err)
 	}
-	var continuationText, continuationTools int
-	for _, message := range continuation.Messages {
-		for _, part := range message.Parts {
-			if part.Text != nil && part.Text.Text == "continuing" {
+	var continuationText, continuationToolCalls, continuationToolResults int
+	for _, entry := range continuation.Context {
+		for _, item := range entry.Content {
+			if item.Text != nil && item.Text.Text == "continuing" {
 				continuationText++
 			}
-			if part.Tool == nil {
-				continue
+			if item.ToolCall != nil {
+				continuationToolCalls++
+				if item.ToolCall.ModelToolCallID != modelToolCallID || item.ToolCall.Name != toolName {
+					t.Fatalf("Runtime repaired continuation Tool Call = %+v", item.ToolCall)
+				}
 			}
-			continuationTools++
-			if part.Tool.CallID != modelToolCallID || part.Tool.Name != toolName ||
-				!strings.Contains(part.Tool.OutputOrErrorJSON, "Tool is unavailable.") {
-				t.Fatalf("Runtime repaired continuation Tool part = %+v", part.Tool)
+			if item.ToolResult != nil {
+				continuationToolResults++
+				if item.ToolResult.ModelToolCallID != modelToolCallID || item.ToolResult.Error == nil ||
+					!strings.Contains(item.ToolResult.Error.ErrorJSON, "Tool is unavailable.") {
+					t.Fatalf("Runtime repaired continuation Tool Result = %+v", item.ToolResult)
+				}
 			}
 		}
 	}
-	if continuationText != 1 || continuationTools != 1 {
-		t.Fatalf("Runtime repaired continuation text/Tool members = %d/%d; want 1/1", continuationText, continuationTools)
+	if continuationText != 1 || continuationToolCalls != 1 || continuationToolResults != 1 {
+		t.Fatalf("Runtime repaired continuation text/Tool Call/Tool Result members = %d/%d/%d; want 1/1/1", continuationText, continuationToolCalls, continuationToolResults)
 	}
 
 	var requestMembers, completedRequestMembers, repairRows, completedRepairRows, requestEnds int
@@ -1358,18 +1363,24 @@ func assertInvalidToolProviderComposition(
 	if composition.CarrierHasToolUseEventIDProperty {
 		t.Fatal("Runtime ProviderRequest Tool carrier retained toolUseEventId")
 	}
-	var carrierToolParts int
-	for _, message := range composition.CarrierMessages {
-		for _, part := range message.Parts {
-			if part.Tool == nil {
+	var carrierToolCalls, carrierToolResults int
+	for _, entry := range composition.CarrierMessages {
+		for _, item := range entry.Content {
+			if item.ToolCall != nil {
+				carrierToolCalls++
+				if item.ToolCall.ModelToolCallID != wantCallID || item.ToolCall.Name != wantToolName {
+					t.Fatalf("repair carrier Tool Call = %+v; want model Tool identity %q/%q", item.ToolCall, wantCallID, wantToolName)
+				}
+				if item.ToolCall.InputJSON != wantInputJSON {
+					t.Fatalf("repair carrier Tool input = %s; want exact Runtime input %s", item.ToolCall.InputJSON, wantInputJSON)
+				}
+			}
+			if item.ToolResult == nil {
 				continue
 			}
-			carrierToolParts++
-			if !strings.HasPrefix(part.ID, "part_") || part.Tool.CallID != wantCallID || part.Tool.Name != wantToolName {
-				t.Fatalf("repair carrier Tool part = %+v; want opaque Bridge part_ identity and model Tool identity %q/%q", part, wantCallID, wantToolName)
-			}
-			if part.Tool.InputJSON != wantInputJSON {
-				t.Fatalf("repair carrier Tool input = %s; want exact Runtime input %s", part.Tool.InputJSON, wantInputJSON)
+			carrierToolResults++
+			if item.ToolResult.ModelToolCallID != wantCallID || item.ToolResult.Error == nil {
+				t.Fatalf("repair carrier Tool Result = %+v; want error for %q", item.ToolResult, wantCallID)
 			}
 			var carrierOutput struct {
 				Error struct {
@@ -1378,7 +1389,7 @@ func assertInvalidToolProviderComposition(
 					Retryable bool   `json:"retryable"`
 				} `json:"error"`
 			}
-			if err := json.Unmarshal([]byte(part.Tool.OutputOrErrorJSON), &carrierOutput); err != nil {
+			if err := json.Unmarshal([]byte(item.ToolResult.Error.ErrorJSON), &carrierOutput); err != nil {
 				t.Fatalf("decode repair carrier error: %v", err)
 			}
 			if carrierOutput.Error.Type != wantErrorType || carrierOutput.Error.Message != wantErrorMessage || carrierOutput.Error.Retryable {
@@ -1386,8 +1397,8 @@ func assertInvalidToolProviderComposition(
 			}
 		}
 	}
-	if carrierToolParts != 1 {
-		t.Fatalf("repair carrier Tool parts = %d; want 1", carrierToolParts)
+	if carrierToolCalls != 1 || carrierToolResults != 1 {
+		t.Fatalf("repair carrier Tool Call/Tool Result items = %d/%d; want 1/1", carrierToolCalls, carrierToolResults)
 	}
 	providerFamilies := map[string]bool{}
 	if len(composition.Strategies) == 0 {

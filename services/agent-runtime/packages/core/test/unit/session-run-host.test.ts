@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Context, Effect, Exit, Layer, Scope, Stream } from "effect";
 import {
-  RuntimeMessageRole,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";

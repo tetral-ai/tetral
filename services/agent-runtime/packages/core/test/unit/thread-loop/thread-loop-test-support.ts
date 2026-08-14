@@ -1,8 +1,8 @@
 import { expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { Cause, Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect";
-import { ProviderRequestKind, RuntimeMessageRole, SystemCacheHint, SystemSegmentKind, } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { DurableRuntimeMessage, PendingInputResult, RuntimeDeclarationReceipt, RuntimeDependencies, RuntimeInternalToolRepairCommit, RuntimeMessage, RuntimeMessageInfo, RuntimeDeclarationOperationControls, RuntimePart, RuntimePartCreate, SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterAppendResult, SessionEventWriterFinishIdleEnvelope, SessionEventWriterRequestEndEnvelope, SessionEventWriterRuntimeTerminationEnvelope, } from "../../../src/contracts/runtime.js";
+import { ProviderRequestKind, ProviderContextRole, SystemCacheHint, SystemSegmentKind, } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { DurableRuntimeMessage, PendingInputResult, RuntimeDeclarationReceipt, RuntimeDependencies, RuntimeInternalToolRepairCommit, RuntimeMessage, RuntimeMessageInfo, RuntimeDeclarationOperationControls, RuntimePart, RuntimePartCreate, RuntimeProviderAttachment, SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterAppendResult, SessionEventWriterFinishIdleEnvelope, SessionEventWriterRequestEndEnvelope, SessionEventWriterRuntimeTerminationEnvelope, } from "../../../src/contracts/runtime.js";
 import { DurableRuntimeMessageSchema, RuntimeMessageSchema, RuntimeInternalToolRepairStore, SessionEventWriterRetryPolicy, normalizeContextLoaderError, normalizeRuntimeMessageStoreError, normalizeSessionEventWriterError, } from "../../../src/contracts/runtime.js";
 import { LLMEventSchema } from "../../../src/llm/llm-event.js";
 import type { LLMEvent, RuntimeUsage } from "../../../src/llm/llm-event.js";
@@ -39,6 +39,20 @@ const emptyColdCoverage = {
     pendingAttachmentIdentities: [],
     undeliveredMailDeliveryIds: [],
 } as const;
+
+function providerAttachmentsForTest(attachments: readonly RuntimeProviderAttachment[]) {
+    return attachments.map((attachment) => ({
+        transient: attachment.transient === undefined ? undefined : {
+            attachmentRef: attachment.transient.attachmentRef,
+            sourcePath: attachment.transient.sourcePath,
+            pageRange: attachment.transient.pageRange,
+            detail: attachment.transient.detail,
+        },
+        fileBacked: attachment.fileBacked,
+        mime: attachment.mime,
+        filename: attachment.filename,
+    }));
+}
 
 const approvalReviewerOutputSchemaJson = JSON.stringify({
     type: "object",
@@ -1239,6 +1253,7 @@ export {
   llmService,
   memoryCatalogForTest,
   queuedLLMService,
+  providerAttachmentsForTest,
   recordCompactionHint,
   runtimeThreadLoopLayer,
   sleepUntilAborted,

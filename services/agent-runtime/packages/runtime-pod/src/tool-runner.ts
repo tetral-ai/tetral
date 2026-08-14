@@ -72,7 +72,6 @@ import type {
   RunWebRequest,
   RunWebResponse,
   McpAttachmentRef,
-  ProviderRequestAttachment,
   WebToolInput,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
@@ -81,7 +80,7 @@ import {
   SessionEventWriterRetryPolicy,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeBoundedText, RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeBoundedText, RuntimeJsonValue, RuntimeMessage, RuntimeProviderAttachment } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeSandboxExecutionAcceptanceResult,
   RuntimeSandboxExecutionRequest,
@@ -2308,7 +2307,7 @@ function toolFailure(
   message: string,
   retryable: boolean,
   retryStatus?: ReturnType<typeof runtimeRetryStatusFromMcp>,
-  attachments?: readonly ProviderRequestAttachment[],
+  attachments?: readonly RuntimeProviderAttachment[],
   serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
   mcpMaterializationHandle?: string,
 ): Extract<RuntimeToolExecutionResult, { readonly type: "error" }> {
@@ -2361,7 +2360,7 @@ function runtimeRetryStatusFromMcp(retryStatus: McpRetryStatus | undefined) {
   }
 }
 
-function providerAttachmentFromBridge(attachment: TransientAttachmentRef): ProviderRequestAttachment {
+function providerAttachmentFromBridge(attachment: TransientAttachmentRef): RuntimeProviderAttachment {
   return {
     transient: {
       attachmentRef: attachment.attachmentRef,
@@ -2380,7 +2379,7 @@ function providerAttachmentFromMcp(
   request: RuntimeToolExecutionRequest,
   mcpServerName: string,
   attachment: McpAttachmentRef,
-): ProviderRequestAttachment {
+): RuntimeProviderAttachment {
   return {
     transient: {
       attachmentRef: attachment.attachmentRef,

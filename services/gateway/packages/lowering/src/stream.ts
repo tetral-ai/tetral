@@ -2,7 +2,7 @@
  * @packageDocumentation
  *
  * Raises provider SDK stream parts into generated `ProviderStreamEvent` values.
- * It guards request identity propagation, stable synthesized IDs for id-less
+ * It guards stable synthesized IDs for id-less
  * fragments, streamed tool names, metadata redaction, finish-reason mapping,
  * finish-only usage, and a single successful terminal event. Provider client
  * adapters call the raiser after converting SDK parts to `GatewayStreamPart`;
@@ -14,10 +14,7 @@ import {
   ProviderFinishReason,
   ProviderStreamEventType,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type {
-  ProviderRequest,
-  ProviderStreamEvent,
-} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { boundedRedactedJson } from "./redaction.js";
 import { normalizeProviderUsage } from "./usage.js";
 import type { ProviderUsageInput, ProviderUsageWireFamily } from "./usage.js";
@@ -95,10 +92,7 @@ export class ProviderStreamRaiser {
   private terminal = false;
   private finalStepUsage: ProviderUsageInput | undefined;
 
-  constructor(
-    private readonly request: Pick<ProviderRequest, "requestId" | "modelRequestId">,
-    private readonly options: ProviderStreamRaiserOptions,
-  ) {}
+  constructor(private readonly options: ProviderStreamRaiserOptions) {}
 
   /**
    * Raises one adapted SDK part into zero or one Gateway events.
@@ -150,8 +144,6 @@ export class ProviderStreamRaiser {
       case "finish":
         this.terminal = true;
         return [{
-          requestId: this.request.requestId,
-          modelRequestId: this.request.modelRequestId,
           type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
           finish: {
             reason: finishReason(part.finishReason),
@@ -170,8 +162,6 @@ export class ProviderStreamRaiser {
 
   private textEvent(type: ProviderStreamEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
     return {
-      requestId: this.request.requestId,
-      modelRequestId: this.request.modelRequestId,
       type,
       text: {
         id,
@@ -183,8 +173,6 @@ export class ProviderStreamRaiser {
 
   private reasoningEvent(type: ProviderStreamEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
     return {
-      requestId: this.request.requestId,
-      modelRequestId: this.request.modelRequestId,
       type,
       reasoning: {
         id,
@@ -196,8 +184,6 @@ export class ProviderStreamRaiser {
 
   private toolInputEvent(type: ProviderStreamEventType, id: string, name: string, text: string, metadata: unknown): ProviderStreamEvent {
     return {
-      requestId: this.request.requestId,
-      modelRequestId: this.request.modelRequestId,
       type,
       toolInput: {
         id,
@@ -219,8 +205,6 @@ export class ProviderStreamRaiser {
       this.activeImplicitIds.delete("tool");
     }
     return {
-      requestId: this.request.requestId,
-      modelRequestId: this.request.modelRequestId,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
       toolCall: {
         id,

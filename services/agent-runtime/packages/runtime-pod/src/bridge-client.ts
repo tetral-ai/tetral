@@ -49,7 +49,6 @@ import type {
   WriteRequestEndRequest,
   WriteRequestEndResponse,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { AcceptedInputCommitResult, ContextLoader, RuntimeLoadedAgentMail, RuntimeLoadedPendingToolUse, RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
   RuntimeAcceptedInputState,
@@ -78,6 +77,7 @@ import {
 import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
   DurableRuntimeMessage,
+  RuntimeProviderAttachment,
   RuntimeMessageCreate as CoreRuntimeMessageCreate,
   RuntimePartCreate as CoreRuntimePartCreate,
   RuntimeToolSettlementDeclaration,
@@ -798,7 +798,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
     readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
     readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
-    readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
+    readonly pendingAttachments?: readonly RuntimeProviderAttachment[] | undefined;
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
     readonly coldCoverage: RuntimeColdCoverage;
   }> {
@@ -1102,7 +1102,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
     readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
     readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
-    readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
+    readonly pendingAttachments?: readonly RuntimeProviderAttachment[] | undefined;
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
     readonly coldCoverage: RuntimeColdCoverage;
   }> {
@@ -2652,7 +2652,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
   readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
   readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
   readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
-  readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
+  readonly pendingAttachments?: readonly RuntimeProviderAttachment[] | undefined;
   readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
   readonly coldCoverage: RuntimeColdCoverage;
 } {
@@ -2952,14 +2952,14 @@ function parsePendingAgentMail(value: unknown): readonly RuntimeLoadedAgentMail[
   return parsed;
 }
 
-function parsePendingAttachments(value: unknown): readonly ProviderRequestAttachment[] | undefined {
+function parsePendingAttachments(value: unknown): readonly RuntimeProviderAttachment[] | undefined {
   if (value === undefined) {
     return undefined;
   }
   if (!Array.isArray(value)) {
     throw new Error("load context pendingAttachments is malformed");
   }
-  return value.map((item): ProviderRequestAttachment => {
+  return value.map((item): RuntimeProviderAttachment => {
     if (!isRecord(item) || !isRecord(item.origin)) {
       throw new Error("load context pendingAttachments is malformed");
     }

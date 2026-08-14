@@ -226,10 +226,6 @@ export const RuntimeAttachmentRejectionSchema = z.strictObject({
     z.strictObject({
       type: z.literal("transient"),
       attachmentRef: RuntimeIdentifierSchema,
-      sourceToolUseEventId: RuntimeIdentifierSchema,
-      sourcePath: RuntimeTextSchema,
-      pageRange: RuntimeTextSchema,
-      detail: RuntimeTextSchema,
     }),
     z.strictObject({
       type: z.literal("file-backed"),

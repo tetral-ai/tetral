@@ -25,7 +25,7 @@ import type {
 import { Effect, Stream } from "effect";
 import { RuntimeMessageSchema } from "../../../core/src/contracts/runtime.js";
 import type { RuntimeMessage, RuntimePart } from "../../../core/src/contracts/runtime.js";
-import { toGatewayRuntimeMessages } from "../../../core/src/runtime/message-projection.js";
+import { toGatewayProviderContext } from "../../../core/src/runtime/message-projection.js";
 import { estimatedRuntimeMessagesTokens } from "../../../core/src/thread-loop/compaction.js";
 import { assembleProviderCallRequest } from "../../../core/src/thread-loop/provider-request.js";
 import { createToolCatalog, lookupToolEntry } from "../../../core/src/tools/tool-catalog.js";
@@ -283,15 +283,11 @@ export async function runLargeToolInputMappingProof() {
       stream: async function* () {
         for (const [index, input] of inputs.entries()) {
           yield {
-            requestId: request.requestId,
-            modelRequestId: request.modelRequestId,
             type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
             toolCall: { id: `call_large_memory_${index}`, name: "memory", inputJson: JSON.stringify(input), metadataJson: "{}" },
           };
         }
         yield {
-          requestId: request.requestId,
-          modelRequestId: request.modelRequestId,
           type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
           finish: {
             reason: ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
@@ -528,7 +524,7 @@ export async function runMaximumReadTransportProof() {
   } finally {
     await server.shutdown();
   }
-  const projected = toGatewayRuntimeMessages([message("message_maximum_read", 1, "assistant", [runtimePart])]);
+  const projected = toGatewayProviderContext([message("message_maximum_read", 1, "assistant", [runtimePart])]);
   if (!projected.ok) {
     throw new Error("maximum Read proof did not project");
   }
@@ -537,9 +533,9 @@ export async function runMaximumReadTransportProof() {
     providerRequestBytes: ProviderRequestMessage.encode(request).finish().byteLength,
     providerBodyContainsMarkers:
       providerBody.includes("TETRAL_MAXIMUM_READ_HEAD") && providerBody.includes("TETRAL_MAXIMUM_READ_TAIL"),
-    projectedOutputBytes: Buffer.byteLength(projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson ?? "", "utf8"),
+    projectedOutputBytes: Buffer.byteLength(projected.context[0]?.content.find((item) => item.toolResult !== undefined)?.toolResult?.completed?.outputJson ?? "", "utf8"),
     outputPreserved:
-      projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson === JSON.stringify({ text: result.output.text }),
+      projected.context[0]?.content.find((item) => item.toolResult !== undefined)?.toolResult?.completed?.outputJson === JSON.stringify({ text: result.output.text }),
     truncated: result.output.truncated,
   };
 }
@@ -551,8 +547,6 @@ export async function runGatewayReceiveFuseProof() {
   const implementation: ProviderGatewayServiceServer = {
     streamProviderRequest(call) {
       call.write({
-        requestId: request.requestId,
-        modelRequestId: request.modelRequestId,
         type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
         toolCall: {
           id: "call_oversized",
@@ -621,8 +615,6 @@ export async function runGatewayAbsentRetryDelayProof() {
     providerStreamer: {
       stream: async function* () {
         yield {
-          requestId: request.requestId,
-          modelRequestId: request.modelRequestId,
           type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
           providerError: {
             metadataJson: "{}",
@@ -726,8 +718,6 @@ function capacityCredentialResolver(): ProviderCredentialResolver {
 
 async function* successfulCapacityStream(request: ProviderRequest) {
   yield {
-    requestId: request.requestId,
-    modelRequestId: request.modelRequestId,
     type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
     finish: {
       reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
@@ -863,7 +853,7 @@ function assembledVector(
   toolCatalog: ToolCatalog | undefined = undefined,
   wireMarkers: readonly string[] = [],
 ) {
-  const projected = toGatewayRuntimeMessages(runtimeMessages);
+  const projected = toGatewayProviderContext(runtimeMessages);
   if (!projected.ok) {
     throw new Error(`capacity vector ${name} did not project`);
   }
@@ -880,7 +870,7 @@ function assembledVector(
     requestId: `req_${name}`,
     modelRequestId: `mreq_${name}`,
     currentModel: { providerId: "openai", modelId: "gpt-5.5" },
-    runtimeMessages: projected.messages,
+    providerContext: projected.context,
     runtime: {
       requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
       systemInstructions: `${SystemWireMarkers[0]} Operate within the declared tool and context contract.`,
