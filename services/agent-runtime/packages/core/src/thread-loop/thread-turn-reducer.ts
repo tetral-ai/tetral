@@ -99,7 +99,6 @@ export type ThreadTurnFact =
     }
   | {
       readonly fact: "tool_result_committed";
-      readonly eventId: string;
       readonly toolUseEventId: string;
       readonly outcome: "success" | "error" | "cancelled" | "unknown";
     }
@@ -307,15 +306,20 @@ export function reduceThreadTurn(
   routeView: ThreadToolRouteView,
   acceptedInputIds: readonly string[] = [],
 ): ThreadTurnReduction {
-  assertDurableIdentity(fact.eventId, "eventId");
-  if (current.appliedEventIds.includes(fact.eventId)) {
+  const eventId = fact.fact === "tool_result_committed" ? undefined : fact.eventId;
+  if (eventId !== undefined) {
+    assertDurableIdentity(eventId, "eventId");
+  }
+  if (eventId !== undefined && current.appliedEventIds.includes(eventId)) {
     if (fact.fact === "run_opened") {
       return current;
     }
     return { ...current, action: { action: "none" } };
   }
 
-  const appliedEventIds = [...current.appliedEventIds, fact.eventId];
+  const appliedEventIds = eventId === undefined
+    ? current.appliedEventIds
+    : [...current.appliedEventIds, eventId];
   switch (fact.fact) {
     case "run_opened": {
       if (current.checkpoint.executionRunId === fact.eventId) {
@@ -446,21 +450,29 @@ export function reduceThreadTurn(
         throw new ThreadTurnContractError("Tool Result does not name a request member");
       }
       let matched = false;
+      let replayed = false;
       const toolMembers = request.toolMembers.map((member) => {
         if (member.memberKind !== "public_tool_use" || member.toolUseEventId !== fact.toolUseEventId) {
           return member;
         }
         matched = true;
         if (member.terminalResult !== undefined) {
-          throw new ThreadTurnContractError("Tool Use already has a terminal Tool Result");
+          if (member.terminalResult.outcome === fact.outcome) {
+            replayed = true;
+            return member;
+          }
+          throw new ThreadTurnContractError("Tool Use has a conflicting terminal Tool Result");
         }
         return {
           ...member,
-          terminalResult: { resultEventId: fact.eventId, outcome: fact.outcome },
+          terminalResult: { outcome: fact.outcome },
         } as const;
       });
       if (!matched) {
         throw new ThreadTurnContractError("Tool Result does not name a request member");
+      }
+      if (replayed) {
+        return { ...current, action: { action: "none" } };
       }
       const activeCheckpoint = current.checkpoint.idleCloseout === undefined
         ? current.checkpoint

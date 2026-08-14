@@ -751,6 +751,7 @@ const (
 			'commit_inputs',
 			'commit_task_notification_result',
 			'write_event',
+			'settle_tool_result',
 			'write_request_end',
 			'finish_idle',
 			'create_child_thread',
@@ -765,6 +766,7 @@ const (
 			'create_transient_attachment',
 			'mcp_manifest_changed',
 			'commit_mcp_tool_result',
+			'relinquish_mcp_tool_result',
 			'commit_internal_tool_repair',
 			'commit_runtime_termination'
 		)),
@@ -810,7 +812,7 @@ const (
 		background_write_sequence BIGINT,
 		memory_projection_state TEXT,
 		mcp_claim_status TEXT,
-		mcp_claim_owner_request_id TEXT,
+		mcp_claim_id TEXT,
 		mcp_claim_lease_expires_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
@@ -932,11 +934,11 @@ const (
 			mcp_claim_status IS NULL OR mcp_claim_status IN ('stored', 'in_flight', 'consumed')
 		),
 		CONSTRAINT session_runtime_tool_results_mcp_claim_shape CHECK (
-			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 			OR (tool_kind = 'mcp' AND mcp_claim_status IS NOT NULL AND (
-				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-				OR (mcp_claim_status = 'consumed' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
+				(mcp_claim_status = 'stored' AND mcp_claim_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'consumed' AND mcp_claim_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'in_flight' AND mcp_claim_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
 			))
 		),
 		CONSTRAINT session_runtime_tool_results_input_shape CHECK (normalized_input_hash <> '' AND tool_name <> '' AND input_json <> '')

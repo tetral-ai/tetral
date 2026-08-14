@@ -1,12 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
-import { BridgeWriteStatus } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type { CallOptions } from "@grpc/grpc-js";
 import type {
   AgentRuntimeBridgeServiceClient,
-  WriteEventRequest,
+  SettleToolResultRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
-import { runtimeToolResultEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import type { RuntimeJsonValue } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
@@ -91,22 +90,16 @@ if (commandResult.type !== "error" || fileResult.type !== "error") {
   throw new Error("activation exhaustion did not produce Runtime errors");
 }
 const settlement = runtimeToolSettlement(commandResult);
-const event = runtimeToolResultEvent(input.toolUseEventId, { kind: "tool" }, settlement);
-let captured: WriteEventRequest | undefined;
+let captured: SettleToolResultRequest | undefined;
 const eventWriterClient = {
-  writeEvent: (
-    request: WriteEventRequest,
+  settleToolResult: (
+    request: SettleToolResultRequest,
     _metadata: Metadata,
+    _options: CallOptions,
     callback: (error: Error | null, response: unknown) => void,
   ) => {
     captured = request;
-    callback(null, {
-      ack: {
-        status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
-        runtimeWriteId: request.runtimeWriteId,
-        errorCode: "fixture_capture_complete",
-      },
-    });
+    callback(null, { committed: {} });
     return { cancel() {} };
   },
 } as unknown as AgentRuntimeBridgeServiceClient;
@@ -116,26 +109,21 @@ const writer = new BridgeAPIEventWriter({
   client: eventWriterClient,
   metadataFactory: async () => new Metadata(),
 });
-await writer.append({
-  requestId: "req_sandbox_activation_exhaustion",
+const attempt = await writer.settleToolResult({
   workspaceId: input.workspaceId,
   sessionId: input.sessionId,
   sessionThreadId: input.sessionThreadId,
   bindingId: input.bindingId,
   bindingGeneration: input.bindingGeneration,
   targetPodUid: input.targetPodUid,
-  writeId: "rwrite_capacity_chain_result",
-  modelRequestId: input.modelRequestId,
-  event,
-  toolSettlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
+  settlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
 });
-if (captured?.toolSettlement?.error === undefined) {
+if (!attempt.ok || attempt.result.type !== "committed" || captured?.settlement?.error === undefined) {
   throw new Error("Runtime Bridge adapter did not declare the Sandbox Tool error");
 }
 console.log(JSON.stringify({
   commandResult,
   fileResult,
-  event,
-  declaredError: JSON.parse(captured.toolSettlement.error.errorJson) as unknown,
+  declaredError: JSON.parse(captured.settlement.error.errorJson) as unknown,
 }));
 process.exit(0);

@@ -59,6 +59,7 @@ const (
 	bridgeOpCommitTaskNotificationResult   = "commit_task_notification_result"
 	runtimeTaskNotificationPayloadMaxBytes = 16 * 1024
 	bridgeOpWriteEvent                     = "write_event"
+	bridgeOpSettleToolResult               = "settle_tool_result"
 	bridgeOpWriteRequestEnd                = "write_request_end"
 	bridgeOpFinishIdle                     = "finish_idle"
 	bridgeOpCreateChildThread              = "create_child_thread"
@@ -72,6 +73,7 @@ const (
 	bridgeOpRunMemory                      = "run_memory"
 	bridgeOpMcpManifestChanged             = "mcp_manifest_changed"
 	bridgeOpCommitMcpToolResult            = "commit_mcp_tool_result"
+	bridgeOpRelinquishMcpToolResult        = "relinquish_mcp_tool_result"
 	bridgeOpCommitInternalToolRepair       = "commit_internal_tool_repair"
 	bridgeOpCommitRuntimeTermination       = "commit_runtime_termination"
 	mcpManifestAcceptanceLockCategory      = int32(0x6D63_7061) // "mcpa"
@@ -87,7 +89,8 @@ const (
 	// concurrency fence: it prevents two replicas from executing one
 	// tool_use_event_id's side effect at once (a timeout-retry racing the
 	// still-running original). An expired reservation is superseded by the next
-	// Claim, and a replay after Commit is served from the stored result.
+	// Claim, a deterministic pre-commit failure relinquishes the exact claim,
+	// and a replay after Commit is served from the stored result.
 	mcpClaimStatusStored   = "stored"
 	mcpClaimStatusInFlight = "in_flight"
 	mcpClaimStatusConsumed = "consumed"
@@ -439,7 +442,7 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status,
 	               COALESCE(result_json, ''), COALESCE(result_digest, ''), model_tool_call_id, execution_state,
 	               background_task_started, task_id, memory_projection_state,
-	               mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
+	               mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -477,7 +480,7 @@ func insertRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
 			background_task_started, task_id, memory_projection_state, mcp_claim_status,
-			mcp_claim_owner_request_id, mcp_claim_lease_expires_at, created_at, updated_at
+			mcp_claim_id, mcp_claim_lease_expires_at, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),

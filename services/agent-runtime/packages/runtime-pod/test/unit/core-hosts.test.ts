@@ -10,6 +10,7 @@ import type {
   SessionEventWriter,
   SessionEventWriterAppendResult,
   SessionEventWriterRequestEndEnvelope,
+  SessionEventWriterToolSettlementEnvelope,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import type { RuntimeControlInputDeclaration, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
@@ -1080,6 +1081,7 @@ describe("Runtime core host production assembly", () => {
     const observations: string[] = [];
     const runToolCalls: string[] = [];
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const terminalResultAppended = deferred<void>();
     const pendingInput = { query: "tetral" };
     const loadedMessages = [
@@ -1189,11 +1191,13 @@ describe("Runtime core host production assembly", () => {
             return policy;
           },
           sessionEventWriter: {
+            settleToolResult: async (envelope) => {
+              settlements.push(envelope);
+              terminalResultAppended.resolve();
+              return { ok: true, result: { type: "committed" } };
+            },
             append: async (envelope) => {
               appended.push(envelope.event);
-              if (envelope.event.type === "agent.mcp_tool_result") {
-                terminalResultAppended.resolve();
-              }
               return successfulEventAppend(envelope);
             },
             writeRequestEnd: async (envelope) => ({ ok: true, writeId: envelope.writeId, eventId: `evt_${envelope.writeId}`, processedAt: "2026-06-16T00:00:00.000Z" }),
@@ -1243,15 +1247,14 @@ describe("Runtime core host production assembly", () => {
       expect(manifestInstalledAt).toBeGreaterThan(0);
       expect(toolInvokedAt).toBeGreaterThan(manifestInstalledAt);
       expect(runToolCalls).toEqual(["mrq_cold_confirm:tool-1:sevt_tool_1"]);
-      const terminalMcpResults = appended.filter((event) => event.type === "agent.mcp_tool_result");
-      expect(terminalMcpResults).toEqual([
+      expect(settlements).toEqual([
         expect.objectContaining({
-          mcp_tool_use_id: "sevt_tool_1",
-          content: [{ type: "text", text: "approved" }],
+          settlement: {
+            toolUseEventId: "sevt_tool_1",
+            outcome: { type: "completed", output: { text: "approved", truncated: false } },
+          },
         }),
       ]);
-      expect(terminalMcpResults[0]).not.toHaveProperty("is_error");
-      expect(appended.filter((event) => event.type === "agent.tool_result")).toHaveLength(0);
       expect(JSON.stringify(appended)).not.toContain("unknown");
     } finally {
       await hosts.close();
@@ -1451,6 +1454,7 @@ describe("Runtime core host production assembly", () => {
         },
         threadLoop: {
           sessionEventWriter: {
+            settleToolResult: async () => ({ ok: true, result: { type: "committed" } }),
             append: async (envelope) => {
               appendCalls += 1;
               return successfulEventAppend(envelope);
@@ -1563,6 +1567,7 @@ describe("Runtime core host production assembly", () => {
             },
           },
           sessionEventWriter: {
+            settleToolResult: async () => ({ ok: true, result: { type: "committed" } }),
             append: async (envelope) => {
               appendCalls += 1;
               return successfulEventAppend(envelope);

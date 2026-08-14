@@ -23,8 +23,11 @@ import type {
   RuntimeToolSettlementDeclaration,
   RuntimeUsage,
   SessionEvent,
+  SessionEventWriterAppendEvent,
   SessionEventWriterAppendResult,
   SessionEventWriterError,
+  SessionEventWriterToolSettlementEnvelope,
+  SessionEventWriterToolSettlementAttempt,
 } from "../contracts/runtime.js";
 import {
   DurableRuntimeMessageSchema,
@@ -37,6 +40,7 @@ import {
   RuntimePartCreateSchema,
   RuntimeToolSettlementDeclarationSchema,
   SessionEventSchema,
+  SessionEventWriterAppendEventSchema,
   boundRuntimeText,
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
@@ -48,13 +52,17 @@ import {
   applyAssistantPartAppendReceipt,
   applyInternalToolRepairReceipt,
   applyInterruptInputReceipt,
-  applyToolSettlementReceipt,
   runtimeInternalToolRepairCreate,
 } from "./runtime-declaration.js";
 
 export type ProviderStreamAccumulatorResult =
   | { readonly ok: true; readonly events: readonly SessionEvent[]; readonly durableEventIds?: readonly string[] }
   | { readonly ok: false; readonly events: readonly SessionEvent[]; readonly error: RuntimeFailure; readonly messageId?: string };
+
+export type ToolSettlementApplicationResult =
+  | { readonly type: "settled" }
+  | { readonly type: "stale_custody" }
+  | { readonly type: "failed"; readonly error: RuntimeFailure };
 
 export type ToolUseCommitResult =
   | { readonly ok: true; readonly events: readonly SessionEvent[]; readonly toolUseEventId: string }
@@ -70,7 +78,7 @@ export type { RuntimeProcessorSource, RuntimeToolSettlement } from "../contracts
 export interface FrozenAssistantPartAppend {
   readonly source: RuntimeProcessorSource;
   readonly append: RuntimeAssistantPartAppend;
-  readonly event: Promise<SessionEvent>;
+  readonly event: Promise<SessionEventWriterAppendEvent>;
   readonly toolCallId?: string | undefined;
 }
 
@@ -104,14 +112,14 @@ export class RequestAssistantMemberSequencer implements AssistantMemberSequencer
 
 export interface ProviderStreamAccumulatorWriter {
   readonly appendEvent: (
-    event: SessionEvent,
-    source: RuntimeProcessorSource,
-    declaration?:
-      | { readonly assistantPartAppend: RuntimeAssistantPartAppend }
-      | { readonly toolSettlement: RuntimeToolSettlementDeclaration },
+    event: SessionEventWriterAppendEvent,
+    _source: RuntimeProcessorSource,
+    declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend },
     modelRequestId?: string,
-    serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
   ) => Promise<SessionEventWriterAppendResult>;
+  readonly settleToolResult: (
+    envelope: SessionEventWriterToolSettlementEnvelope,
+  ) => Promise<SessionEventWriterToolSettlementAttempt>;
   readonly commitInternalToolRepair: (
     repair: RuntimeInternalToolRepairCommit,
     source: RuntimeProcessorSource,
@@ -140,7 +148,6 @@ export interface ProviderStreamAccumulatorOptions {
     readonly toolName: string;
   }) => void;
   readonly onToolResultCommitted?: (fact: {
-    readonly eventId: string;
     readonly toolUseEventId: string;
     readonly outcome: "success" | "error" | "cancelled";
   }) => void;
@@ -167,7 +174,6 @@ export class ProviderStreamAccumulator {
   private readonly reasoningParts = new Map<string, ReasoningPartCreate>();
   private readonly toolParts = new Map<string, ToolPartCreate>();
   private readonly toolUseEventIds = new Map<string, string>();
-  private readonly toolEvents = new Map<string, PublicToolEvent>();
   private pendingPrefix: RuntimePartCreate[] = [];
   private durableProjection: DurableRuntimeMessage[];
   private assistantMessageId: string | undefined;
@@ -177,7 +183,7 @@ export class ProviderStreamAccumulator {
   private terminal = false;
   private readonly memberSequencer: RequestAssistantMemberSequencer;
   private readonly reservedToolMembers = new Map<string, {
-    readonly authorize: (event: SessionEvent) => void;
+    readonly authorize: (event: SessionEventWriterAppendEvent) => void;
     readonly committed: Promise<ProviderStreamAccumulatorResult>;
   }>();
 
@@ -287,33 +293,29 @@ export class ProviderStreamAccumulator {
       case "tool-input-delta": case "tool-input-end": case "attachment-rejections": return { ok: true, events: [] };
       case "tool-call": return this.startToolCall(envelope as LLMEventEnvelope & { readonly event: Extract<LLMEvent, { type: "tool-call" }> });
       case "finish": return this.finish(envelope as LLMEventEnvelope & { readonly event: Extract<LLMEvent, { type: "finish" }> });
-      case "provider-error": return await this.terminalFailure(envelope, envelope.event.error, false);
+      case "provider-error": return await this.terminalFailure(envelope, envelope.event.error);
     }
   }
 
   async cancel(source: RuntimeProcessorSource, failure: RuntimeFailure): Promise<ProviderStreamAccumulatorResult> {
     if (this.terminal) return this.failWithoutWrites(protocolSequenceFailure());
-    return await this.terminalFailure(source, failure, false);
+    return await this.terminalFailure(source, failure);
   }
 
   async cancelOpenTools(
     source: RuntimeProcessorSource,
     failure: RuntimeFailure,
     externallyOwnedToolUseEventIds: ReadonlySet<string> = new Set(),
-  ): Promise<ProviderStreamAccumulatorResult> {
-    const events: SessionEvent[] = [];
-    const durableEventIds: string[] = [];
+  ): Promise<ToolSettlementApplicationResult> {
     for (const [toolCallId, part] of this.toolParts) {
       if (
         part.state.status !== "running" || part.toolUseEventId === undefined ||
         externallyOwnedToolUseEventIds.has(part.toolUseEventId)
       ) continue;
       const result = await this.commitToolSettlement(source, toolCallId, { type: "cancelled", error: failure });
-      if (!result.ok) return result;
-      events.push(...result.events);
-      durableEventIds.push(...(result.durableEventIds ?? []));
+      if (result.type !== "settled") return result;
     }
-    return { ok: true, events, ...(durableEventIds.length === 0 ? {} : { durableEventIds }) };
+    return { type: "settled" };
   }
 
   /** Interrupt intent carries no Tool census; Bridge owns every outcome. */
@@ -347,7 +349,6 @@ export class ProviderStreamAccumulator {
         : { status: "cancelled" as const, ...(existing.state.status === "running" ? { input: existing.state.input } : {}), ...(projection.terminalState.error === undefined ? {} : { error: projection.terminalState.error }) };
       updated.set(existing.id, { ...existing, state } as RuntimePart);
       this.options.onToolResultCommitted?.({
-        eventId: projection.resultEvent.eventId,
         toolUseEventId: projection.toolUseEventId,
         outcome: projection.terminalState.type === "error" ? "error" : "cancelled",
       });
@@ -379,7 +380,6 @@ export class ProviderStreamAccumulator {
     const stamped = parseToolPart({ ...tool, toolUseEventId: eventId, toolEvent });
     this.toolParts.set(toolCallId, stamped);
     this.toolUseEventIds.set(toolCallId, eventId);
-    this.toolEvents.set(toolCallId, toolEvent);
     this.replaceDurableToolEventIdentity(toolCallId, eventId, toolEvent);
     return { ok: true, events: committed.events, toolUseEventId: eventId };
   }
@@ -389,8 +389,8 @@ export class ProviderStreamAccumulator {
     if (this.reservedToolMembers.has(toolCallId)) return true;
     const existing = this.toolParts.get(toolCallId);
     if (existing === undefined || existing.state.status !== "running") return false;
-    let authorize!: (event: SessionEvent) => void;
-    const event = new Promise<SessionEvent>((resolve) => { authorize = resolve; });
+    let authorize!: (event: SessionEventWriterAppendEvent) => void;
+    const event = new Promise<SessionEventWriterAppendEvent>((resolve) => { authorize = resolve; });
     const tool = parseToolPart({ ...existing, toolEvent });
     const append = RuntimeAssistantPartAppendSchema.parse({ parts: [...this.takePendingPrefix(), tool] });
     const handle = this.memberSequencer.enqueue({ source, append, event, toolCallId });
@@ -400,44 +400,37 @@ export class ProviderStreamAccumulator {
   }
 
   async commitToolSettlement(
-    source: RuntimeProcessorSource,
+    _source: RuntimeProcessorSource,
     toolCallId: string,
     settlement: RuntimeToolSettlement,
-  ): Promise<ProviderStreamAccumulatorResult> {
+  ): Promise<ToolSettlementApplicationResult> {
     const existing = this.toolParts.get(toolCallId);
     const toolUseEventId = existing?.toolUseEventId ?? this.toolUseEventIds.get(toolCallId);
     if (existing === undefined || existing.state.status !== "running" || toolUseEventId === undefined) {
-      return { ok: false, events: [], error: semanticSequenceFailure() };
+      return { type: "failed", error: semanticSequenceFailure() };
     }
-    const event = runtimeToolResultEvent(toolUseEventId, this.toolEvents.get(toolCallId) ?? existing.toolEvent ?? { kind: "tool" }, settlement);
     const declaration = RuntimeToolSettlementDeclarationSchema.parse({ toolUseEventId, outcome: settlement });
-    const result = await this.options.writer.appendEvent(
-      event,
-      source,
-      { toolSettlement: declaration },
-      this.options.modelRequestId,
-      settlement.type === "completed" || settlement.type === "error" ? settlement.serverToolUse : undefined,
-    );
-    if (!result.ok) return { ok: false, events: [], error: eventWriterFailure(result.error) };
-    if (result.declaration?.applicationDisposition !== "current_custody") return declarationApplicationFailure(result.writeId);
-    try {
-      applyToolSettlementReceipt({
-        sessionThreadId: this.options.sessionThreadId,
-        operationKind: "write_event",
-        sourceKind: event.type,
-        operationId: result.writeId,
-        eventId: result.eventId,
-        settlement: declaration,
-      }, result.declaration.receipt);
-    } catch {
-      return declarationApplicationFailure(result.writeId);
+    const settlementResult = await this.options.writer.settleToolResult({
+      workspaceId: this.options.workspaceId,
+      sessionId: this.options.sessionId,
+      sessionThreadId: this.options.sessionThreadId,
+      bindingId: this.options.bindingId,
+      bindingGeneration: this.options.bindingGeneration,
+      targetPodUid: this.options.targetPodUid,
+      settlement: declaration,
+    });
+    if (!settlementResult.ok) {
+      return { type: "failed", error: eventWriterFailure(settlementResult.error) };
     }
-    const terminalPart = terminalToolPart(existing, settlement, result.processedAt);
+    if (settlementResult.result.type === "stale") {
+      return { type: "stale_custody" };
+    }
+    const terminalPart = terminalToolPart(existing, settlement, this.options.now());
     this.toolParts.set(toolCallId, terminalPart);
     this.replaceDurableTool(toolUseEventId, terminalPart);
     const outcome = settlement.type === "completed" ? "success" : settlement.type;
-    this.options.onToolResultCommitted?.({ eventId: result.eventId, toolUseEventId, outcome });
-    return { ok: true, events: [event], durableEventIds: [result.eventId] };
+    this.options.onToolResultCommitted?.({ toolUseEventId, outcome });
+    return { type: "settled" };
   }
 
   async commitInternalToolRepair(
@@ -484,8 +477,8 @@ export class ProviderStreamAccumulator {
 
   sessionStatus(status: { readonly type: "idle"; readonly stopReason?: { readonly type: "end_turn" } | { readonly type: "requires_action"; readonly event_ids: string[] } | { readonly type: "retries_exhausted" } } | { readonly type: "busy" } | { readonly type: "retry" }): SessionEvent {
     return status.type === "idle"
-      ? SessionEventSchema.parse({ type: "session.status_idle", stop_reason: status.stopReason ?? { type: "end_turn" } })
-      : SessionEventSchema.parse({ type: "session.status_running" });
+      ? SessionEventWriterAppendEventSchema.parse({ type: "session.status_idle", stop_reason: status.stopReason ?? { type: "end_turn" } })
+      : SessionEventWriterAppendEventSchema.parse({ type: "session.status_running" });
   }
 
   private startStep(envelope: LLMEventEnvelope & { readonly event: Extract<LLMEvent, { type: "step-start" }> }): ProviderStreamAccumulatorResult {
@@ -521,7 +514,7 @@ export class ProviderStreamAccumulator {
     const completed = parseTextPart({ ...this.activeTextPart, status: "completed", completedAt: this.options.now() });
     this.activeTextPart = undefined;
     if (completed.text.length === 0) return { ok: true, events: [] };
-    const event = SessionEventSchema.parse({ type: "agent.message", content: [{ type: "text", text: completed.text }] });
+    const event = SessionEventWriterAppendEventSchema.parse({ type: "agent.message", content: [{ type: "text", text: completed.text }] });
     const append = RuntimeAssistantPartAppendSchema.parse({ parts: [...this.takePendingPrefix(), completed] });
     this.semanticMemberCount++;
     return await this.memberSequencer.enqueue({ event: Promise.resolve(event), source: envelope, append }).committed;
@@ -535,7 +528,7 @@ export class ProviderStreamAccumulator {
       text: "", truncated: false, status: "streaming", startedAt: this.options.now(),
     });
     if (!this.reasoningSetFits(part)) return this.failWithoutWrites(boundedSemanticFailure());
-    const event = SessionEventSchema.parse({ type: "agent.thinking" });
+    const event = SessionEventWriterAppendEventSchema.parse({ type: "agent.thinking" });
     const result = await this.options.writer.appendEvent(event, envelope);
     if (!result.ok) return { ok: false, events: [], error: eventWriterFailure(result.error) };
     this.reasoningParts.set(envelope.event.id, part);
@@ -586,16 +579,8 @@ export class ProviderStreamAccumulator {
     return { ok: true, events: [] };
   }
 
-  private async terminalFailure(source: RuntimeProcessorSource, failure: RuntimeFailure, settleTools: boolean): Promise<ProviderStreamAccumulatorResult> {
+  private async terminalFailure(_source: RuntimeProcessorSource, failure: RuntimeFailure): Promise<ProviderStreamAccumulatorResult> {
     this.discardUnreceiptedMembers();
-    if (settleTools) {
-      for (const [toolCallId, part] of this.toolParts) {
-        if (part.state.status === "running" && part.toolUseEventId !== undefined) {
-          const result = await this.commitToolSettlement(source, toolCallId, { type: "cancelled", error: failure });
-          if (!result.ok) return result;
-        }
-      }
-    }
     this.terminal = true;
     return { ok: true, events: [SessionEventSchema.parse({ type: "session.error", error: failure })] };
   }
@@ -635,7 +620,6 @@ export class ProviderStreamAccumulator {
       if (part.type !== "tool") continue;
       this.toolParts.set(part.toolCallId, parseToolPart(partCreateFromDurable(part)));
       if (part.toolUseEventId !== undefined) this.toolUseEventIds.set(part.toolCallId, part.toolUseEventId);
-      if (part.toolEvent !== undefined) this.toolEvents.set(part.toolCallId, part.toolEvent);
     }
   }
 
@@ -700,6 +684,7 @@ export class ProviderStreamAccumulator {
   private maxBytes(): number { return this.options.maxNormalizedTextPreviewBytes ?? 8_192; }
 }
 
+
 /** Deterministic idempotency key for one invalid internal Tool-call repair. */
 export function internalToolRepairKey(modelRequestId: string, modelToolCallId: string, toolName: string): string {
   const hash = createHash("sha256");
@@ -729,22 +714,13 @@ function runtimeJsonFromProvider(value: RuntimeJsonValue, preview: Extract<LLMEv
   return RuntimeBoundedJsonSchema.parse({ value, preview: bounded.text, truncated: preview.truncated || bounded.truncated });
 }
 
-function toolUseSessionEvent(part: ToolPartCreate, input: RuntimeJsonValue, permission: "allow" | "ask" | "deny", toolEvent: PublicToolEvent): SessionEvent {
+function toolUseSessionEvent(part: ToolPartCreate, input: RuntimeJsonValue, permission: "allow" | "ask" | "deny", toolEvent: PublicToolEvent): SessionEventWriterAppendEvent {
   if (!isRuntimeJsonObject(input)) throw new Error("public Tool input must be an object");
   return toolEvent.kind === "mcp"
-    ? SessionEventSchema.parse({ type: "agent.mcp_tool_use", name: part.toolName, input, mcp_server_name: toolEvent.mcpServerName, evaluated_permission: permission })
-    : SessionEventSchema.parse({ type: "agent.tool_use", name: part.toolName, input, evaluated_permission: permission });
+    ? SessionEventWriterAppendEventSchema.parse({ type: "agent.mcp_tool_use", name: part.toolName, input, mcp_server_name: toolEvent.mcpServerName, evaluated_permission: permission })
+    : SessionEventWriterAppendEventSchema.parse({ type: "agent.tool_use", name: part.toolName, input, evaluated_permission: permission });
 }
 
-export function runtimeToolResultEvent(toolUseEventId: string, toolEvent: PublicToolEvent, settlement: RuntimeToolSettlement): SessionEvent {
-  const content = settlement.type === "completed"
-    ? [{ type: "text" as const, text: settlement.output.text }]
-    : settlement.type === "error" ? [{ type: "text" as const, text: settlement.error.message }] : undefined;
-  const isError = settlement.type === "completed" ? undefined : true;
-  return toolEvent.kind === "mcp"
-    ? SessionEventSchema.parse({ type: "agent.mcp_tool_result", mcp_tool_use_id: toolUseEventId, ...(content === undefined ? {} : { content }), ...(isError === undefined ? {} : { is_error: isError }) })
-    : SessionEventSchema.parse({ type: "agent.tool_result", tool_use_id: toolUseEventId, ...(content === undefined ? {} : { content }), ...(isError === undefined ? {} : { is_error: isError }) });
-}
 
 function terminalToolPart(part: ToolPartCreate, settlement: RuntimeToolSettlement, completedAt: string): ToolPartCreate {
   if (part.state.status !== "running") throw new Error("terminal settlement requires a running Tool");

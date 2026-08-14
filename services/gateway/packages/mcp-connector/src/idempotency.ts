@@ -81,8 +81,9 @@ export class McpIdempotencyStaleCustodyError extends Error {
 /**
  * Defines the claim, commit, and failure lifecycle surrounding one external MCP side effect.
  *
- * Implementations reserve before execution, store a refs-only response on commit, and release
- * unresolved local work after failure. Durable implementations require the full context.
+ * Implementations reserve before execution, store a refs-only response on commit, and relinquish
+ * an exact claim after a deterministic failure. Durable implementations require the full context;
+ * ambiguous commit outcomes must converge through store replay instead of calling fail.
  */
 export interface McpIdempotencyStore {
   claim(key: IdempotencyKey, context?: McpIdempotencyContext): IdempotencyClaim | Promise<IdempotencyClaim>;

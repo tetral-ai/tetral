@@ -942,6 +942,18 @@ export const SessionEventSchema = z.discriminatedUnion("type", [
 ]);
 export type SessionEvent = z.infer<typeof SessionEventSchema>;
 
+export type SessionEventWriterAppendEvent = Exclude<
+  SessionEvent,
+  { readonly type: "agent.tool_result" | "agent.mcp_tool_result" }
+>;
+
+export const SessionEventWriterAppendEventSchema = SessionEventSchema
+  .refine(
+    (event) => event.type !== "agent.tool_result" && event.type !== "agent.mcp_tool_result",
+    "Tool Result events are created only by SettleToolResult",
+  )
+  .transform((event) => event as SessionEventWriterAppendEvent);
+
 export const SessionEventWriterStableReasoningPartSchema = z.strictObject({
   reasoningPartId: SanitizedIdentifierSchema,
   providerPartId: RuntimeIdentifierSchema.optional(),
@@ -951,11 +963,6 @@ export const SessionEventWriterStableReasoningPartSchema = z.strictObject({
   truncated: z.boolean(),
 });
 export type SessionEventWriterStableReasoningPart = z.infer<typeof SessionEventWriterStableReasoningPartSchema>;
-
-export const SessionEventWriterServerToolUseSchema = z.strictObject({
-  webSearchRequests: NonNegativeIntegerSchema,
-  webFetchRequests: NonNegativeIntegerSchema,
-});
 
 function validateStableReasoningSet(
   parts: readonly SessionEventWriterStableReasoningPart[],
@@ -980,7 +987,7 @@ function validateStableReasoningSet(
   }
 }
 
-/** WriteEvent payload with one operation-specific declaration shape. */
+/** WriteEvent payload for public events and optional Assistant-member append. */
 export const SessionEventEnvelopeSchema = z.strictObject({
   requestId: SanitizedIdentifierSchema,
   workspaceId: SanitizedIdentifierSchema,
@@ -990,37 +997,26 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   bindingGeneration: NonNegativeIntegerSchema,
   targetPodUid: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
-  event: SessionEventSchema,
+  event: SessionEventWriterAppendEventSchema,
   assistantPartAppend: RuntimeAssistantPartAppendSchema.optional(),
-  toolSettlement: RuntimeToolSettlementDeclarationSchema.optional(),
   modelRequestId: SanitizedIdentifierSchema.optional(),
-  serverToolUse: SessionEventWriterServerToolUseSchema.optional(),
   contextThroughMessageSequence: NonNegativeIntegerSchema.optional(),
   requestKind: z.enum(["agent_provider_request", "compaction_summary", "approval_reviewer"]).optional(),
 }).superRefine((envelope, context) => {
   const memberEvent = envelope.event.type === "agent.message" ||
     envelope.event.type === "agent.tool_use" ||
     envelope.event.type === "agent.mcp_tool_use";
-  const settlementEvent = envelope.event.type === "agent.tool_result" ||
-    envelope.event.type === "agent.mcp_tool_result";
-  if (memberEvent && (envelope.assistantPartAppend === undefined || envelope.toolSettlement !== undefined)) {
+  if (memberEvent && envelope.assistantPartAppend === undefined) {
     context.addIssue({ code: "custom", message: "Assistant member event requires one part append" });
   }
-  if (settlementEvent && (envelope.toolSettlement === undefined || envelope.assistantPartAppend !== undefined)) {
-    context.addIssue({ code: "custom", message: "Tool Result event requires one target settlement" });
-  }
-  if (!memberEvent && !settlementEvent &&
-    (envelope.assistantPartAppend !== undefined || envelope.toolSettlement !== undefined)) {
+  if (!memberEvent && envelope.assistantPartAppend !== undefined) {
     context.addIssue({ code: "custom", message: "event forbids a Runtime declaration shape" });
   }
-  if ((memberEvent || settlementEvent) && envelope.modelRequestId === undefined) {
+  if (memberEvent && envelope.modelRequestId === undefined) {
     context.addIssue({ code: "custom", message: "Assistant declaration requires a model request id" });
   }
   if ((envelope.event.type.startsWith("session.") || envelope.event.type.startsWith("span.")) && envelope.modelRequestId !== undefined) {
     context.addIssue({ code: "custom", message: "non-assistant event forbids a model request id" });
-  }
-  if (envelope.serverToolUse !== undefined && envelope.event.type !== "agent.tool_result") {
-    context.addIssue({ code: "custom", message: "server tool usage requires a tool-result event" });
   }
   if (envelope.event.type === "span.model_request_start") {
     if (envelope.contextThroughMessageSequence === undefined || envelope.requestKind === undefined) {
@@ -1031,6 +1027,18 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   }
 });
 export type SessionEventEnvelope = z.infer<typeof SessionEventEnvelopeSchema>;
+
+/** Dedicated Tool settlement request; its response never echoes payload or durable stamps. */
+export const SessionEventWriterToolSettlementEnvelopeSchema = z.strictObject({
+  workspaceId: SanitizedIdentifierSchema,
+  sessionId: SanitizedIdentifierSchema,
+  sessionThreadId: SanitizedIdentifierSchema,
+  bindingId: SanitizedIdentifierSchema,
+  bindingGeneration: NonNegativeIntegerSchema,
+  targetPodUid: SanitizedIdentifierSchema,
+  settlement: RuntimeToolSettlementDeclarationSchema,
+});
+export type SessionEventWriterToolSettlementEnvelope = z.infer<typeof SessionEventWriterToolSettlementEnvelopeSchema>;
 
 /** Request-end settlement payload and its disjoint append/checkpoint declarations. */
 export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
@@ -1151,17 +1159,6 @@ export const SessionEventWriterRuntimeTerminationEnvelopeSchema = z.strictObject
   targetPodUid: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
   failure: RuntimeFailureSchema,
-  toolSettlements: z.array(RuntimeToolSettlementDeclarationSchema),
-  completionMailCreate: RuntimeMessageCreateSchema.optional(),
-}).superRefine((envelope, context) => {
-  if (envelope.completionMailCreate !== undefined &&
-    envelope.completionMailCreate.messageKind !== "completion_mail") {
-    context.addIssue({ code: "custom", message: "runtime termination completion mail is invalid" });
-  }
-  const targets = new Set(envelope.toolSettlements.map((settlement) => settlement.toolUseEventId));
-  if (targets.size !== envelope.toolSettlements.length) {
-    context.addIssue({ code: "custom", message: "runtime termination Tool settlements are duplicated" });
-  }
 });
 export type SessionEventWriterRuntimeTerminationEnvelope = z.infer<typeof SessionEventWriterRuntimeTerminationEnvelopeSchema>;
 
@@ -1217,6 +1214,25 @@ export const SessionEventWriterAppendResultSchema = z.discriminatedUnion("ok", [
 ]);
 export type SessionEventWriterAppendResult = z.infer<typeof SessionEventWriterAppendResultSchema>;
 
+export type SessionEventWriterRuntimeTerminationResult =
+  | {
+    readonly ok: true;
+    readonly type: "committed" | "duplicate";
+    readonly failureEventId: string;
+    readonly closeoutEventId: string;
+  }
+  | { readonly ok: true; readonly type: "stale" }
+  | { readonly ok: false; readonly error: SessionEventWriterError };
+
+export type SessionEventWriterToolSettlementResult =
+  | { readonly type: "committed" }
+  | { readonly type: "duplicate" }
+  | { readonly type: "stale" };
+
+export type SessionEventWriterToolSettlementAttempt =
+  | { readonly ok: true; readonly result: SessionEventWriterToolSettlementResult }
+  | { readonly ok: false; readonly error: SessionEventWriterError };
+
 /** Durable event port whose acknowledgements gate the corresponding hot projection. */
 export interface SessionEventWriter {
   /**
@@ -1226,9 +1242,10 @@ export interface SessionEventWriter {
    * processedAt only after acknowledgement.
    */
   readonly append: (envelope: SessionEventEnvelope) => Promise<SessionEventWriterAppendResult>;
+  readonly settleToolResult: (envelope: SessionEventWriterToolSettlementEnvelope) => Promise<SessionEventWriterToolSettlementAttempt>;
   readonly writeRequestEnd: (envelope: SessionEventWriterRequestEndEnvelope) => Promise<SessionEventWriterAppendResult>;
   readonly finishIdle?: (envelope: SessionEventWriterFinishIdleEnvelope) => Promise<SessionEventWriterAppendResult>;
-  readonly commitRuntimeTermination?: (envelope: SessionEventWriterRuntimeTerminationEnvelope) => Promise<SessionEventWriterAppendResult>;
+  readonly commitRuntimeTermination?: (envelope: SessionEventWriterRuntimeTerminationEnvelope) => Promise<SessionEventWriterRuntimeTerminationResult>;
 }
 
 const AbortSignalLikeSchema = z.custom<AbortSignal>(

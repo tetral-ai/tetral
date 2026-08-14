@@ -315,9 +315,9 @@ func TestRuntimeDeclarationWritersLogCanonicalRejectionsOnceAndFailOpen(t *testi
 				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 					Scope: scope, RuntimeWriteId: "write_1", ModelRequestId: "request_1",
 					EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"ordinary"}]}`,
-					Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
+					AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
 						Parts: []*bridgev1.RuntimePartCreate{invalidPart},
-					}},
+					},
 				})
 				return err
 			},
@@ -387,7 +387,7 @@ func TestPostgreSQLRuntimeDeclarationWritersLogRelationalRejectionsSafely(t *tes
 				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 					Scope: scope, RuntimeWriteId: writeID, ModelRequestId: "mreq_missing_relational_log",
 					EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"` + canary + `"}]}`,
-					Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: appendValue},
+					AssistantPartAppend: appendValue,
 				})
 				return err
 			},

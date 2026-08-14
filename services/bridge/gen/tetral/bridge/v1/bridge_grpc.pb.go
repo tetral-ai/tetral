@@ -24,6 +24,7 @@ const (
 	AgentRuntimeBridgeService_CommitInputs_FullMethodName                  = "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInputs"
 	AgentRuntimeBridgeService_CommitTaskNotificationResult_FullMethodName  = "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitTaskNotificationResult"
 	AgentRuntimeBridgeService_WriteEvent_FullMethodName                    = "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteEvent"
+	AgentRuntimeBridgeService_SettleToolResult_FullMethodName              = "/tetral.bridge.v1.AgentRuntimeBridgeService/SettleToolResult"
 	AgentRuntimeBridgeService_WriteRequestEnd_FullMethodName               = "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteRequestEnd"
 	AgentRuntimeBridgeService_FinishIdle_FullMethodName                    = "/tetral.bridge.v1.AgentRuntimeBridgeService/FinishIdle"
 	AgentRuntimeBridgeService_CreateChildThread_FullMethodName             = "/tetral.bridge.v1.AgentRuntimeBridgeService/CreateChildThread"
@@ -46,6 +47,7 @@ const (
 	AgentRuntimeBridgeService_McpManifestChanged_FullMethodName            = "/tetral.bridge.v1.AgentRuntimeBridgeService/McpManifestChanged"
 	AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName            = "/tetral.bridge.v1.AgentRuntimeBridgeService/ClaimMcpToolResult"
 	AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName           = "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitMcpToolResult"
+	AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName       = "/tetral.bridge.v1.AgentRuntimeBridgeService/RelinquishMcpToolResult"
 	AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName      = "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInternalToolRepair"
 	AgentRuntimeBridgeService_CommitRuntimeTermination_FullMethodName      = "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitRuntimeTermination"
 )
@@ -59,6 +61,7 @@ type AgentRuntimeBridgeServiceClient interface {
 	CommitInputs(ctx context.Context, in *CommitInputsRequest, opts ...grpc.CallOption) (*CommitInputsResponse, error)
 	CommitTaskNotificationResult(ctx context.Context, in *CommitTaskNotificationResultRequest, opts ...grpc.CallOption) (*CommitTaskNotificationResultResponse, error)
 	WriteEvent(ctx context.Context, in *WriteEventRequest, opts ...grpc.CallOption) (*WriteEventResponse, error)
+	SettleToolResult(ctx context.Context, in *SettleToolResultRequest, opts ...grpc.CallOption) (*SettleToolResultResponse, error)
 	WriteRequestEnd(ctx context.Context, in *WriteRequestEndRequest, opts ...grpc.CallOption) (*WriteRequestEndResponse, error)
 	FinishIdle(ctx context.Context, in *FinishIdleRequest, opts ...grpc.CallOption) (*FinishIdleResponse, error)
 	CreateChildThread(ctx context.Context, in *CreateChildThreadRequest, opts ...grpc.CallOption) (*CreateChildThreadResponse, error)
@@ -81,6 +84,7 @@ type AgentRuntimeBridgeServiceClient interface {
 	McpManifestChanged(ctx context.Context, in *McpManifestChangedRequest, opts ...grpc.CallOption) (*McpManifestChangedResponse, error)
 	ClaimMcpToolResult(ctx context.Context, in *ClaimMcpToolResultRequest, opts ...grpc.CallOption) (*ClaimMcpToolResultResponse, error)
 	CommitMcpToolResult(ctx context.Context, in *CommitMcpToolResultRequest, opts ...grpc.CallOption) (*CommitMcpToolResultResponse, error)
+	RelinquishMcpToolResult(ctx context.Context, in *RelinquishMcpToolResultRequest, opts ...grpc.CallOption) (*RelinquishMcpToolResultResponse, error)
 	CommitInternalToolRepair(ctx context.Context, in *CommitInternalToolRepairRequest, opts ...grpc.CallOption) (*CommitInternalToolRepairResponse, error)
 	CommitRuntimeTermination(ctx context.Context, in *CommitRuntimeTerminationRequest, opts ...grpc.CallOption) (*CommitRuntimeTerminationResponse, error)
 }
@@ -137,6 +141,16 @@ func (c *agentRuntimeBridgeServiceClient) WriteEvent(ctx context.Context, in *Wr
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WriteEventResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_WriteEvent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) SettleToolResult(ctx context.Context, in *SettleToolResultRequest, opts ...grpc.CallOption) (*SettleToolResultResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SettleToolResultResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_SettleToolResult_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +377,16 @@ func (c *agentRuntimeBridgeServiceClient) CommitMcpToolResult(ctx context.Contex
 	return out, nil
 }
 
+func (c *agentRuntimeBridgeServiceClient) RelinquishMcpToolResult(ctx context.Context, in *RelinquishMcpToolResultRequest, opts ...grpc.CallOption) (*RelinquishMcpToolResultResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RelinquishMcpToolResultResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentRuntimeBridgeServiceClient) CommitInternalToolRepair(ctx context.Context, in *CommitInternalToolRepairRequest, opts ...grpc.CallOption) (*CommitInternalToolRepairResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CommitInternalToolRepairResponse)
@@ -392,6 +416,7 @@ type AgentRuntimeBridgeServiceServer interface {
 	CommitInputs(context.Context, *CommitInputsRequest) (*CommitInputsResponse, error)
 	CommitTaskNotificationResult(context.Context, *CommitTaskNotificationResultRequest) (*CommitTaskNotificationResultResponse, error)
 	WriteEvent(context.Context, *WriteEventRequest) (*WriteEventResponse, error)
+	SettleToolResult(context.Context, *SettleToolResultRequest) (*SettleToolResultResponse, error)
 	WriteRequestEnd(context.Context, *WriteRequestEndRequest) (*WriteRequestEndResponse, error)
 	FinishIdle(context.Context, *FinishIdleRequest) (*FinishIdleResponse, error)
 	CreateChildThread(context.Context, *CreateChildThreadRequest) (*CreateChildThreadResponse, error)
@@ -414,6 +439,7 @@ type AgentRuntimeBridgeServiceServer interface {
 	McpManifestChanged(context.Context, *McpManifestChangedRequest) (*McpManifestChangedResponse, error)
 	ClaimMcpToolResult(context.Context, *ClaimMcpToolResultRequest) (*ClaimMcpToolResultResponse, error)
 	CommitMcpToolResult(context.Context, *CommitMcpToolResultRequest) (*CommitMcpToolResultResponse, error)
+	RelinquishMcpToolResult(context.Context, *RelinquishMcpToolResultRequest) (*RelinquishMcpToolResultResponse, error)
 	CommitInternalToolRepair(context.Context, *CommitInternalToolRepairRequest) (*CommitInternalToolRepairResponse, error)
 	CommitRuntimeTermination(context.Context, *CommitRuntimeTerminationRequest) (*CommitRuntimeTerminationResponse, error)
 	mustEmbedUnimplementedAgentRuntimeBridgeServiceServer()
@@ -440,6 +466,9 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) CommitTaskNotificationResult
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) WriteEvent(context.Context, *WriteEventRequest) (*WriteEventResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method WriteEvent not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) SettleToolResult(context.Context, *SettleToolResultRequest) (*SettleToolResultResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SettleToolResult not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) WriteRequestEnd(context.Context, *WriteRequestEndRequest) (*WriteRequestEndResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method WriteRequestEnd not implemented")
@@ -506,6 +535,9 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) ClaimMcpToolResult(context.C
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) CommitMcpToolResult(context.Context, *CommitMcpToolResultRequest) (*CommitMcpToolResultResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CommitMcpToolResult not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) RelinquishMcpToolResult(context.Context, *RelinquishMcpToolResultRequest) (*RelinquishMcpToolResultResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RelinquishMcpToolResult not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) CommitInternalToolRepair(context.Context, *CommitInternalToolRepairRequest) (*CommitInternalToolRepairResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CommitInternalToolRepair not implemented")
@@ -621,6 +653,24 @@ func _AgentRuntimeBridgeService_WriteEvent_Handler(srv interface{}, ctx context.
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentRuntimeBridgeServiceServer).WriteEvent(ctx, req.(*WriteEventRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_SettleToolResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SettleToolResultRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).SettleToolResult(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_SettleToolResult_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).SettleToolResult(ctx, req.(*SettleToolResultRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1021,6 +1071,24 @@ func _AgentRuntimeBridgeService_CommitMcpToolResult_Handler(srv interface{}, ctx
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRuntimeBridgeService_RelinquishMcpToolResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RelinquishMcpToolResultRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).RelinquishMcpToolResult(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).RelinquishMcpToolResult(ctx, req.(*RelinquishMcpToolResultRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentRuntimeBridgeService_CommitInternalToolRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CommitInternalToolRepairRequest)
 	if err := dec(in); err != nil {
@@ -1083,6 +1151,10 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "WriteEvent",
 			Handler:    _AgentRuntimeBridgeService_WriteEvent_Handler,
+		},
+		{
+			MethodName: "SettleToolResult",
+			Handler:    _AgentRuntimeBridgeService_SettleToolResult_Handler,
 		},
 		{
 			MethodName: "WriteRequestEnd",
@@ -1171,6 +1243,10 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitMcpToolResult",
 			Handler:    _AgentRuntimeBridgeService_CommitMcpToolResult_Handler,
+		},
+		{
+			MethodName: "RelinquishMcpToolResult",
+			Handler:    _AgentRuntimeBridgeService_RelinquishMcpToolResult_Handler,
 		},
 		{
 			MethodName: "CommitInternalToolRepair",

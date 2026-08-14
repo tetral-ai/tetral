@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -173,39 +174,31 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 	return toolUses, rows.Err()
 }
 
-func commitRuntimeTerminationDeclarationsTx(
+func settleRuntimeTerminationDurableFactsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	threadScope threadMutationScope,
 	runtimeWriteID string,
-	settlements []*bridgev1.RuntimeToolSettlement,
-	completionMail *bridgev1.RuntimeMessageCreate,
+	failure runtimeTerminationFailure,
 	now time.Time,
-) (*bridgev1.DeclarationReceipt, error) {
+) error {
 	toolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, scope, false)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if len(toolUses) != len(settlements) {
-		return nil, status.Error(codes.FailedPrecondition, "runtime termination Tool settlement census is incomplete")
+	toolErrorJSON, err := marshalBridgeJSON(map[string]any{
+		"type": failure.Code, "message": failure.Message, "retryable": false,
+	})
+	if err != nil {
+		return err
 	}
-	receipt := &bridgev1.DeclarationReceipt{
-		SessionThreadId: scope.GetSessionThreadId(), OperationKind: bridgeOpCommitRuntimeTermination,
-		SourceKind: "runtime_termination", OperationId: runtimeWriteID,
-	}
-	seen := make(map[string]struct{}, len(settlements))
-	for index, toolUse := range toolUses {
-		settlement := settlements[index]
-		if settlement == nil || settlement.GetToolUseEventId() != toolUse.EventID {
-			return nil, status.Error(codes.InvalidArgument, "runtime termination Tool settlement order is invalid")
-		}
-		if _, duplicate := seen[toolUse.EventID]; duplicate {
-			return nil, status.Error(codes.InvalidArgument, "runtime termination Tool settlement is duplicated")
-		}
-		seen[toolUse.EventID] = struct{}{}
-		if err := validateRuntimeTerminationSettlement(settlement); err != nil {
-			return nil, err
+	for _, toolUse := range toolUses {
+		settlement := &bridgev1.RuntimeToolSettlement{
+			ToolUseEventId: toolUse.EventID,
+			Outcome: &bridgev1.RuntimeToolSettlement_Cancelled{
+				Cancelled: &bridgev1.RuntimeToolCancelled{ErrorJson: &toolErrorJSON},
+			},
 		}
 		resultEventType := "agent.tool_result"
 		identityField := "tool_use_event_id"
@@ -221,13 +214,13 @@ func commitRuntimeTerminationDeclarationsTx(
 			"is_error": true, "reason": "runtime_terminated",
 		})
 		if err != nil {
-			return nil, err
+			return err
 		}
 		visibility, sessionVisible := threadScope.publicProjection(resultEventType)
 		eventID := id.New("evt_")
 		sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
@@ -240,58 +233,104 @@ func commitRuntimeTerminationDeclarationsTx(
 			stableRuntimeID("runtime_termination_tool_result", runtimeWriteID, toolUse.EventID),
 			toolUse.ModelRequestID, now,
 		); err != nil {
-			return nil, err
+			return err
 		}
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-			return nil, err
+			return err
 		}
 		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, toolUse.ModelRequestID, settlement, now); err != nil {
-			return nil, err
+			return err
 		}
 		if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUse.EventID, eventID, "runtime_terminated", now); err != nil {
-			return nil, err
+			return err
 		}
 		if err := cancelPendingToolUseForTerminalResultTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
-			return nil, err
+			return err
 		}
-		receipt.Events = append(receipt.Events, &bridgev1.DurableEventStamp{
-			SessionThreadId: scope.GetSessionThreadId(), EventId: eventID, EventSequence: sequence,
-			Disposition: bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-		})
+	}
+	completionMail, err := runtimeTerminationCompletionMailCreateTx(ctx, tx, scope, threadScope, failure)
+	if err != nil {
+		return err
 	}
 	if completionMail != nil {
-		eventStamp, messageStamp, err := appendDeclaredCompletionMailForSourceTx(
+		if _, _, err := appendDeclaredCompletionMailForSourceTx(
 			ctx, tx, scope, threadScope, "runtime_termination", runtimeWriteID, completionMail, now,
-		)
-		if err != nil {
-			return nil, err
+		); err != nil {
+			return err
 		}
-		receipt.Events = append(receipt.Events, eventStamp)
-		receipt.Messages = append(receipt.Messages, messageStamp)
-	}
-	return receipt, nil
-}
-
-func validateRuntimeTerminationSettlement(settlement *bridgev1.RuntimeToolSettlement) error {
-	var raw string
-	switch outcome := settlement.GetOutcome().(type) {
-	case *bridgev1.RuntimeToolSettlement_Error:
-		raw = outcome.Error.GetErrorJson()
-	case *bridgev1.RuntimeToolSettlement_Cancelled:
-		if outcome.Cancelled.ErrorJson == nil {
-			return status.Error(codes.InvalidArgument, "runtime termination cancellation requires its fixed failure")
-		}
-		raw = outcome.Cancelled.GetErrorJson()
-	default:
-		return status.Error(codes.InvalidArgument, "runtime termination Tool settlement must be terminal failure")
-	}
-	var toolError struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal([]byte(raw), &toolError); err != nil || toolError.Type != "runtime_terminated" {
-		return status.Error(codes.InvalidArgument, "runtime termination Tool settlement failure is invalid")
 	}
 	return nil
+}
+
+const runtimeTerminationCompletionReasonMaxBytes = 3600
+
+const runtimeTerminationCompletionGuidance = "This agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."
+
+func runtimeTerminationCompletionMailCreateTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	threadScope threadMutationScope,
+	failure runtimeTerminationFailure,
+) (*bridgev1.RuntimeMessageCreate, error) {
+	if threadScope.role != "subagent" {
+		return nil, nil
+	}
+	if !threadScope.taskName.Valid || threadScope.taskName.String == "" {
+		return nil, status.Error(codes.FailedPrecondition, "runtime termination sub-agent task name is missing")
+	}
+	_, _, targetTaskName, err := completionLineageTx(ctx, tx, scope)
+	if err != nil {
+		return nil, err
+	}
+	targetTask := "main"
+	if targetTaskName.Valid && targetTaskName.String != "" {
+		targetTask = targetTaskName.String
+	}
+	payload := fmt.Sprintf(
+		"Agent errored: %s\n\n%s",
+		truncateRuntimeTerminationCompletionReason(failure.Message),
+		runtimeTerminationCompletionGuidance,
+	)
+	envelope := strings.Join([]string{
+		"Message Type: FINAL_ANSWER",
+		"Task name: " + targetTask,
+		"Sender: " + threadScope.taskName.String,
+		"Payload:",
+		payload,
+	}, "\n")
+	partJSON, err := marshalBridgeJSON(map[string]any{
+		"type": "text", "text": envelope, "truncated": false, "status": "completed",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.RuntimeMessageCreate{
+		MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL,
+		MessageInfoJson: `{"origin":"runtime","role":"user","status":"completed"}`,
+		Parts: []*bridgev1.RuntimePartCreate{{
+			PartKind: "text",
+			PartJson: partJSON,
+		}},
+	}, nil
+}
+
+func truncateRuntimeTerminationCompletionReason(reason string) string {
+	bytes := []byte(reason)
+	if len(bytes) <= runtimeTerminationCompletionReasonMaxBytes {
+		return reason
+	}
+	halfBudget := runtimeTerminationCompletionReasonMaxBytes / 2
+	headEnd := halfBudget
+	for headEnd > 0 && bytes[headEnd]&0xc0 == 0x80 {
+		headEnd--
+	}
+	tailStart := len(bytes) - halfBudget
+	for tailStart < len(bytes) && bytes[tailStart]&0xc0 == 0x80 {
+		tailStart++
+	}
+	removedTokens := (len(bytes) - runtimeTerminationCompletionReasonMaxBytes + 3) / 4
+	return string(bytes[:headEnd]) + fmt.Sprintf("…%d tokens truncated…", removedTokens) + string(bytes[tailStart:])
 }
 
 type runtimeTerminationSibling struct {

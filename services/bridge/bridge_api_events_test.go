@@ -37,8 +37,6 @@ func TestPostgreSQLBridgeAPIStoreRejectsClosedDeclarationCarrierMatrixBeforeMuta
 		bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"x","truncated":false,"status":"completed"}`})
 	unsafeIntegerAppend := bridgeRuntimeOutputAppendForTest(t, scope, "carrier_matrix_unsafe_integer", "agent.message", "streaming",
 		bridgeRuntimePartCreateForTest{kind: "step-start", json: `{"type":"step-start","stepIndex":9007199254740992}`})
-	settlement := bridgeCompletedToolSettlementForTest("tool_carrier_matrix", "done")
-
 	tests := []struct {
 		name string
 		call func() error
@@ -47,24 +45,16 @@ func TestPostgreSQLBridgeAPIStoreRejectsClosedDeclarationCarrierMatrixBeforeMuta
 			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_missing_append", ModelRequestId: modelRequestID, EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[]}`})
 			return err
 		}},
-		{name: "Assistant event carries Tool settlement", call: func() error {
-			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_wrong_assistant", ModelRequestId: modelRequestID, EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[]}`, Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: settlement}})
-			return err
-		}},
-		{name: "Tool Result missing settlement", call: func() error {
+		{name: "Tool Result is not writable through generic event", call: func() error {
 			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_missing_settlement", ModelRequestId: modelRequestID, EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"tool_carrier_matrix","content":[]}`})
 			return err
 		}},
-		{name: "Tool Result carries Assistant append", call: func() error {
-			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_wrong_result", ModelRequestId: modelRequestID, EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"tool_carrier_matrix","content":[]}`, Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: appendDeclaration}})
-			return err
-		}},
 		{name: "unrelated event carries declaration", call: func() error {
-			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_unrelated", ModelRequestId: modelRequestID, EventType: "agent.thinking", PayloadJson: `{"type":"agent.thinking"}`, Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: appendDeclaration}})
+			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_unrelated", ModelRequestId: modelRequestID, EventType: "agent.thinking", PayloadJson: `{"type":"agent.thinking"}`, AssistantPartAppend: appendDeclaration})
 			return err
 		}},
 		{name: "Assistant event carries unsafe integer", call: func() error {
-			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_unsafe_integer", ModelRequestId: modelRequestID, EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[]}`, Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: unsafeIntegerAppend}})
+			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_unsafe_integer", ModelRequestId: modelRequestID, EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[]}`, AssistantPartAppend: unsafeIntegerAppend})
 			return err
 		}},
 		{name: "ordinary Request End carries compaction create", call: func() error {
@@ -111,7 +101,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 		EventType:      "agent.message",
 		PayloadJson:    `{"type":"agent.message","provider_session_id":"sess_provider","content":[{"type":"text","text":"hello","provider_metadata":{"raw":"secret"}}],"byte_identity":{"raw":"&<>   \u0026"}}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_bridge_event",
@@ -121,7 +111,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 				kind: "text",
 				json: `{"type":"text","text":"hello","truncated":false,"status":"completed"}`,
 			},
-		)},
+		),
 	}
 	expectedPayloadJSON := `{"byte_identity":{"raw":"&<>   \u0026"},"content":[{"text":"hello","type":"text"}],"type":"agent.message"}`
 	response, err := store.WriteEvent(context.Background(), request)
@@ -163,14 +153,9 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 	if eventPayloadJSON != expectedPayloadJSON {
 		t.Fatalf("stored event payload = %q; want byte-identical %q", eventPayloadJSON, expectedPayloadJSON)
 	}
-	serverToolUse, err := normalizeServerToolUseUsage(request)
-	if err != nil {
-		t.Fatalf("normalize server tool use: %v", err)
-	}
 	storedPayloadDigest, err := writeEventDeclarationDigest(
 		request,
 		eventPayloadJSON,
-		serverToolUse.CanonicalJSON,
 	)
 	if err != nil {
 		t.Fatalf("digest stored event payload: %v", err)
@@ -254,10 +239,10 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 		request := &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: requestID,
 			EventType: "agent.tool_use", PayloadJson: fmt.Sprintf(`{"type":"agent.tool_use","name":"Read","input":{"path":%q},"evaluated_permission":"allow"}`, callID),
-			Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, writeID, "agent.tool_use", "streaming",
+			AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, writeID, "agent.tool_use", "streaming",
 				bridgeRuntimePartCreateForTest{kind: "reasoning", json: fmt.Sprintf(`{"type":"reasoning","providerPartId":%q,"text":%q,"providerMetadata":{},"truncated":false,"status":"completed"}`, reasoningID, reasoningText)},
 				bridgeRuntimePartCreateForTest{kind: "tool", json: fmt.Sprintf(`{"type":"tool","toolCallId":%q,"toolName":"Read","state":{"status":"running","input":{"value":{"path":%q},"preview":%q,"truncated":false}}}`, callID, callID, `{"path":"`+callID+`"}`)},
-			)},
+			),
 		}
 		response, err := store.WriteEvent(context.Background(), request)
 		if err != nil {
@@ -350,22 +335,28 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 	if len(before) != 4 {
 		t.Fatalf("Assistant parts before settlement = %d; want R1/A/R2/B", len(before))
 	}
-	settle := func(writeID string, target *bridgev1.WriteEventResponse, textValue string) *bridgev1.WriteEventResponse {
+	settle := func(target *bridgev1.WriteEventResponse, textValue string) {
 		t.Helper()
-		response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: requestID,
-			EventType: "agent.tool_result", PayloadJson: fmt.Sprintf(`{"type":"agent.tool_result","tool_use_id":%q,"content":[{"type":"text","text":%q}]}`, target.GetEventId(), textValue),
-			Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(target.GetEventId(), textValue)},
-		})
+		response, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+			scope,
+			bridgeCompletedToolSettlementForTest(target.GetEventId(), textValue),
+		))
 		if err != nil {
 			t.Fatalf("settle %s: %v", target.GetEventId(), err)
 		}
-		if got := readLedger(response.GetEventId()); got != nil {
+		bridgeRequireToolSettlementOutcomeForTest(t, response, "committed")
+		var resultEventID string
+		if err := admin.QueryRow(`SELECT event_id FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			  AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$3`,
+			sessionID, threadID, target.GetEventId()).Scan(&resultEventID); err != nil {
+			t.Fatalf("read durable Tool Result Event: %v", err)
+		}
+		if got := readLedger(resultEventID); got != nil {
 			t.Fatalf("Tool Result stable ledger = %+v; want absent", got)
 		}
-		return response
 	}
-	settle("rwrite_stable_result_b", toolB, "done B")
+	settle(toolB, "done B")
 	afterB := readParts()
 	for _, index := range []int{0, 1, 2} {
 		if string(afterB[index]) != string(before[index]) {
@@ -375,7 +366,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 	if string(afterB[3]) == string(before[3]) {
 		t.Fatal("settling B did not change target Tool part")
 	}
-	settle("rwrite_stable_result_a", toolA, "done A")
+	settle(toolA, "done A")
 	afterA := readParts()
 	for _, index := range []int{0, 2, 3} {
 		if string(afterA[index]) != string(afterB[index]) {
@@ -385,16 +376,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 	if string(afterA[1]) == string(afterB[1]) {
 		t.Fatal("settling A did not change target Tool part")
 	}
-	// A second settlement for an already-terminal Tool Use is a distinct
-	// declaration operation (new RuntimeWriteId, different settlement outcome),
-	// so it is not the idempotent replay path exercised above: it must be
-	// rejected and must leave the stored terminal result untouched.
-	duplicate := &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_stable_result_a_second", ModelRequestId: requestID,
-		EventType: "agent.tool_result", PayloadJson: fmt.Sprintf(`{"type":"agent.tool_result","tool_use_id":%q,"content":[{"type":"text","text":"second A"}]}`, toolA.GetEventId()),
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolA.GetEventId(), "second A")},
-	}
-	if _, err := store.WriteEvent(context.Background(), duplicate); status.Code(err) != codes.AlreadyExists {
+	conflict := bridgeToolSettlementRequestForTest(scope, bridgeErrorToolSettlementForTest(toolA.GetEventId(), "second A"))
+	if _, err := store.SettleToolResult(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("second settlement for %s = %v; want AlreadyExists", toolA.GetEventId(), err)
 	}
 	if afterDuplicate := readParts(); !reflect.DeepEqual(afterDuplicate, afterA) {
@@ -460,8 +443,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningEnforcesCumulativeBoundsAtomical
 			request := &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_reasoning_bound_member_" + suffix,
 				ModelRequestId: "mreq_reasoning_bound_" + suffix, EventType: "agent.message",
-				PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"anchor"}]}`,
-				Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, "", "", "", parts...)},
+				PayloadJson:         `{"type":"agent.message","content":[{"type":"text","text":"anchor"}]}`,
+				AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, "", "", "", parts...),
 			}
 			var beforeEvents, beforeMessages, beforeOperations int
 			if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1),(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&beforeEvents, &beforeMessages, &beforeOperations); err != nil {
@@ -510,10 +493,10 @@ func TestPostgreSQLBridgeAPIStoreFailedAndRescheduledEndsDoNotPublishStableReaso
 			member, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_reasoning_member_" + name, ModelRequestId: requestID,
 				EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-				Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, "", "", "",
+				AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, "", "", "",
 					bridgeRuntimePartCreateForTest{kind: "reasoning", json: `{"type":"reasoning","providerPartId":"provider-reasoning","text":"anchored","providerMetadata":{},"truncated":false,"status":"completed"}`},
 					bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call-reasoning-end","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-				)},
+				),
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent anchored prefix: %v", err)
@@ -577,22 +560,22 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsAssistantMembersOutsideOpenReq
 				switch eventType {
 				case "agent.message":
 					request.PayloadJson = `{"type":"agent.message","content":[{"type":"text","text":"late"}]}`
-					request.Declaration = &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+					request.AssistantPartAppend = bridgeRuntimeOutputAppendForTest(
 						t, scope, request.GetRuntimeWriteId(), eventType, "completed",
 						bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"late","truncated":false,"status":"completed"}`},
-					)}
+					)
 				case "agent.tool_use":
 					request.PayloadJson = `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`
-					request.Declaration = &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+					request.AssistantPartAppend = bridgeRuntimeOutputAppendForTest(
 						t, scope, request.GetRuntimeWriteId(), eventType, "streaming",
 						bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-					)}
+					)
 				case "agent.mcp_tool_use":
 					request.PayloadJson = `{"type":"agent.mcp_tool_use","name":"search","input":{},"mcp_server_name":"github","evaluated_permission":"allow"}`
-					request.Declaration = &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+					request.AssistantPartAppend = bridgeRuntimeOutputAppendForTest(
 						t, scope, request.GetRuntimeWriteId(), eventType, "streaming",
 						bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_mcp_membership","toolName":"search","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-					)}
+					)
 				}
 
 				var beforeEvents, beforeMessages, beforeOperations int
@@ -708,7 +691,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventStampsPrivateRequestStartBoundary(t *
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreSettleToolResultRejectsOrphanAndConflictingOutcome(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_tool_result_membership", "thr_tool_result_membership")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_tool_result_membership", "bind_tool_result_membership", 1, "pod_tool_result_membership")
@@ -716,39 +699,33 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(
 	scope := bridgeAPIScope("sesn_tool_result_membership", "thr_tool_result_membership", "bind_tool_result_membership", 1, "pod_tool_result_membership")
 
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_tool_result_membership_start", "mreq_tool_result_membership", "agent_provider_request", 0)
-	orphan := &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_orphan_tool_result", ModelRequestId: "mreq_tool_result_membership",
-		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"sevt_missing_tool_use","content":[{"type":"text","text":"done"}],"is_error":false}`,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest("sevt_missing_tool_use", "done")},
-	}
-	if _, err := store.WriteEvent(context.Background(), orphan); status.Code(err) != codes.FailedPrecondition {
+	orphan := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest("sevt_missing_tool_use", "done"))
+	if _, err := store.SettleToolResult(context.Background(), orphan); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("orphan Tool Result err = %v; want FailedPrecondition", err)
 	}
 
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_tool_result_membership_use", ModelRequestId: "mreq_tool_result_membership",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_tool_result_membership_use", "agent.tool_use", "streaming",
 			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent Tool Use: %v", err)
 	}
-	resultRequest := &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_tool_result_membership_first", ModelRequestId: "mreq_tool_result_membership",
-		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"failed"}],"is_error":true}`,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
-			ToolUseEventId: toolUse.GetEventId(),
-			Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
-				ErrorJson: `{"type":"sandbox_failure","message":"Sandbox command failed.","retryable":false}`,
-			}},
+	resultRequest := bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUse.GetEventId(),
+		Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
+			ErrorJson: `{"type":"sandbox_failure","message":"Sandbox command failed.","retryable":false}`,
 		}},
+	})
+	settled, err := store.SettleToolResult(context.Background(), resultRequest)
+	if err != nil {
+		t.Fatalf("SettleToolResult first Tool Result: %v", err)
 	}
-	if _, err := store.WriteEvent(context.Background(), resultRequest); err != nil {
-		t.Fatalf("WriteEvent first Tool Result: %v", err)
-	}
+	bridgeRequireToolSettlementOutcomeForTest(t, settled, "committed")
 	var durableMessage string
 	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
 		WHERE workspace_id='default' AND session_id='sesn_tool_result_membership'
@@ -771,10 +748,15 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(
 		genericProjection.Parts[0].State.Error.Message != "Sandbox command failed." || genericProjection.Parts[0].State.Error.Retryable {
 		t.Fatalf("durable Tool error changed: %s", durableMessage)
 	}
-	duplicateResult := proto.Clone(resultRequest).(*bridgev1.WriteEventRequest)
-	duplicateResult.RuntimeWriteId = "rwrite_tool_result_membership_second"
-	if _, err := store.WriteEvent(context.Background(), duplicateResult); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("second Tool Result err = %v; want AlreadyExists", err)
+	duplicateResult := proto.Clone(resultRequest).(*bridgev1.SettleToolResultRequest)
+	duplicate, err := store.SettleToolResult(context.Background(), duplicateResult)
+	if err != nil {
+		t.Fatalf("replay Tool Result err = %v", err)
+	}
+	bridgeRequireToolSettlementOutcomeForTest(t, duplicate, "duplicate")
+	conflictingResult := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "different"))
+	if _, err := store.SettleToolResult(context.Background(), conflictingResult); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("conflicting Tool Result err = %v; want AlreadyExists", err)
 	}
 }
 
@@ -809,17 +791,17 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsToolUseAfterRequestEnd(t *test
 		Scope: scope, RuntimeWriteId: "rwrite_tool_use_after_end", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_tool_use_after_end", "agent.tool_use", "streaming",
 			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_after_end","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-		)},
+		),
 	}
 	if _, err := store.WriteEvent(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("post-seal tool use err = %v; want FailedPrecondition", err)
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreSettleToolResultSettlesWebUsageExactlyOnce(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_web_usage", "thr_bridge_web_usage")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_web_usage", "bind_bridge_web_usage", 1, "pod_uid_web_usage")
@@ -838,7 +820,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing
 		ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"web","input":{"search_query":[{"q":"tetral"}]},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_bridge_web_tool_use",
@@ -848,34 +830,30 @@ func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_bridge_web","toolName":"web","state":{"status":"running","input":{"value":{"search_query":[{"q":"tetral"}]},"preview":"{\"search_query\":[{\"q\":\"tetral\"}]}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent web tool use: %v", err)
 	}
-	request := &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_web_tool_result",
-		ModelRequestId: modelRequestID,
-		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"web result"}]}`,
-		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "web result")},
-		ServerToolUse: &bridgev1.ServerToolUseUsage{
-			WebSearchRequests: 32,
-			WebFetchRequests:  8,
-		},
+	settlement := bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "web result")
+	settlement.GetCompleted().ServerToolUse = &bridgev1.ServerToolUseUsage{
+		WebSearchRequests: 32,
+		WebFetchRequests:  8,
 	}
-	response, err := store.WriteEvent(context.Background(), request)
+	request := &bridgev1.SettleToolResultRequest{
+		Scope:      scope,
+		Settlement: settlement,
+	}
+	response, err := store.SettleToolResult(context.Background(), request)
 	if err != nil {
-		t.Fatalf("WriteEvent web result: %v", err)
+		t.Fatalf("SettleToolResult web result: %v", err)
 	}
-	replay, err := store.WriteEvent(context.Background(), request)
+	bridgeRequireToolSettlementOutcomeForTest(t, response, "committed")
+	replay, err := store.SettleToolResult(context.Background(), request)
 	if err != nil {
-		t.Fatalf("WriteEvent web result replay: %v", err)
+		t.Fatalf("SettleToolResult web result replay: %v", err)
 	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetEventId() != response.GetEventId() {
-		t.Fatalf("replay = %+v; want duplicate same event", replay)
-	}
+	bridgeRequireToolSettlementOutcomeForTest(t, replay, "duplicate")
 
 	var usageJSON string
 	if err := admin.QueryRowContext(context.Background(),
@@ -896,10 +874,10 @@ func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing
 		t.Fatalf("request_count = %d; want unchanged 4", got)
 	}
 
-	conflict := proto.Clone(request).(*bridgev1.WriteEventRequest)
-	conflict.ServerToolUse.WebFetchRequests = 2
-	if _, err := store.WriteEvent(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("WriteEvent divergent web usage err = %v; want AlreadyExists", err)
+	conflict := proto.Clone(request).(*bridgev1.SettleToolResultRequest)
+	conflict.GetSettlement().GetCompleted().GetServerToolUse().WebFetchRequests = 2
+	if _, err := store.SettleToolResult(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("SettleToolResult divergent web usage err = %v; want AlreadyExists", err)
 	}
 	var unchanged string
 	if err := admin.QueryRowContext(context.Background(),
@@ -926,7 +904,7 @@ func TestPostgreSQLBridgeAPIStoreConcurrentWebUsageReplayReturnsOneCommitAndOneI
 		ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"web","input":{"search_query":[{"q":"tetral"}]},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_bridge_web_tool_use_concurrent",
@@ -936,30 +914,27 @@ func TestPostgreSQLBridgeAPIStoreConcurrentWebUsageReplayReturnsOneCommitAndOneI
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_bridge_web_concurrent","toolName":"web","state":{"status":"running","input":{"value":{"search_query":[{"q":"tetral"}]},"preview":"{\"search_query\":[{\"q\":\"tetral\"}]}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent web tool use: %v", err)
 	}
-	request := &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_web_tool_result_concurrent",
-		ModelRequestId: modelRequestID,
-		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"web result"}]}`,
-		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "web result")},
-		ServerToolUse:  &bridgev1.ServerToolUseUsage{WebSearchRequests: 1, WebFetchRequests: 1},
+	settlement := bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "web result")
+	settlement.GetCompleted().ServerToolUse = &bridgev1.ServerToolUseUsage{WebSearchRequests: 1, WebFetchRequests: 1}
+	request := &bridgev1.SettleToolResultRequest{
+		Scope:      scope,
+		Settlement: settlement,
 	}
 
 	const writers = 6
-	responses := make(chan *bridgev1.WriteEventResponse, writers)
+	responses := make(chan *bridgev1.SettleToolResultResponse, writers)
 	errors := make(chan error, writers)
 	var group sync.WaitGroup
 	group.Add(writers)
 	for range writers {
 		go func() {
 			defer group.Done()
-			response, err := store.WriteEvent(context.Background(), proto.Clone(request).(*bridgev1.WriteEventRequest))
+			response, err := store.SettleToolResult(context.Background(), proto.Clone(request).(*bridgev1.SettleToolResultRequest))
 			if err != nil {
 				errors <- err
 				return
@@ -971,15 +946,15 @@ func TestPostgreSQLBridgeAPIStoreConcurrentWebUsageReplayReturnsOneCommitAndOneI
 	close(responses)
 	close(errors)
 	for err := range errors {
-		t.Fatalf("concurrent WriteEvent: %v", err)
+		t.Fatalf("concurrent SettleToolResult: %v", err)
 	}
 	committed := 0
 	duplicates := 0
 	for response := range responses {
-		switch response.GetAck().GetStatus() {
-		case bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED:
+		switch response.GetOutcome().(type) {
+		case *bridgev1.SettleToolResultResponse_Committed:
 			committed++
-		case bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE:
+		case *bridgev1.SettleToolResultResponse_Duplicate:
 			duplicates++
 		default:
 			t.Fatalf("unexpected concurrent ack: %+v", response)
@@ -998,46 +973,30 @@ func TestPostgreSQLBridgeAPIStoreConcurrentWebUsageReplayReturnsOneCommitAndOneI
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrite(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreSettleToolResultRejectsInvalidWebUsageBeforeWrite(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_web_usage_reject", "thr_bridge_web_usage_reject")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_web_usage_reject", "bind_bridge_web_usage_reject", 1, "pod_uid_web_usage_reject")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_web_usage_reject", "thr_bridge_web_usage_reject", "bind_bridge_web_usage_reject", 1, "pod_uid_web_usage_reject")
-	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_web_usage_wrong_event",
-		EventType:      "agent.message",
-		PayloadJson:    `{"type":"agent.message","content":[{"type":"text","text":"hello"}]}`,
-		ServerToolUse:  &bridgev1.ServerToolUseUsage{WebSearchRequests: 1},
-	})
+	negative := bridgeCompletedToolSettlementForTest("evt_missing", "done")
+	negative.GetCompleted().ServerToolUse = &bridgev1.ServerToolUseUsage{WebFetchRequests: -1}
+	_, err := store.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{Scope: scope, Settlement: negative})
 	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteEvent usage on message err = %v; want InvalidArgument", err)
-	}
-	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_web_usage_negative",
-		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_missing"}`,
-		ServerToolUse:  &bridgev1.ServerToolUseUsage{WebFetchRequests: -1},
-	})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteEvent negative usage err = %v; want InvalidArgument", err)
+		t.Fatalf("SettleToolResult negative usage err = %v; want InvalidArgument", err)
 	}
 	for _, usage := range []*bridgev1.ServerToolUseUsage{
 		{WebSearchRequests: 33},
 		{WebFetchRequests: 9},
 	} {
-		_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-			Scope:          scope,
-			RuntimeWriteId: fmt.Sprintf("rwrite_bridge_web_usage_over_%d_%d", usage.GetWebSearchRequests(), usage.GetWebFetchRequests()),
-			EventType:      "agent.tool_result",
-			PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_missing"}`,
-			ServerToolUse:  usage,
+		settlement := bridgeCompletedToolSettlementForTest("evt_missing", "done")
+		settlement.GetCompleted().ServerToolUse = usage
+		_, err = store.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{
+			Scope: scope, Settlement: settlement,
 		})
 		if status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("WriteEvent over-limit usage %+v err = %v; want InvalidArgument", usage, err)
+			t.Fatalf("SettleToolResult over-limit usage %+v err = %v; want InvalidArgument", usage, err)
 		}
 	}
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_read_start", "mreq_bridge_read_tool", "agent_provider_request", 0)
@@ -1047,7 +1006,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 		ModelRequestId: "mreq_bridge_read_tool",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_bridge_read_tool_use",
@@ -1057,22 +1016,16 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_read","toolName":"Read","state":{"status":"running","input":{"value":{"file_path":"README.md"},"preview":"{\"file_path\":\"README.md\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent Read tool use: %v", err)
 	}
-	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_read_tool_result_with_web_usage",
-		ModelRequestId: "mreq_bridge_read_tool",
-		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"` + readUse.GetEventId() + `","content":[{"type":"text","text":"done"}]}`,
-		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(readUse.GetEventId(), "done")},
-		ServerToolUse:  &bridgev1.ServerToolUseUsage{WebSearchRequests: 1},
-	})
+	nonWeb := bridgeCompletedToolSettlementForTest(readUse.GetEventId(), "done")
+	nonWeb.GetCompleted().ServerToolUse = &bridgev1.ServerToolUseUsage{WebSearchRequests: 1}
+	_, err = store.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{Scope: scope, Settlement: nonWeb})
 	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("WriteEvent usage on non-Web result err = %v; want InvalidArgument", err)
+		t.Fatalf("SettleToolResult usage on non-Web result err = %v; want InvalidArgument", err)
 	}
 	var count int
 	if err := admin.QueryRowContext(context.Background(),
@@ -1215,7 +1168,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventOpensPendingApprovalFromToolUseAsk(t 
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"dangerous_tool","input":{"path":"README.md"},"evaluated_permission":"ask"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_bridge_tool_ask",
@@ -1225,7 +1178,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventOpensPendingApprovalFromToolUseAsk(t 
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"tool-call-ask","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{"path":"README.md"},"preview":"{\"path\":\"README.md\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	}
 	response, err := store.WriteEvent(context.Background(), request)
 	if err != nil {
@@ -1292,7 +1245,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventToolUseAllowDenyDoNotOpenPendingAppro
 				EventType:      "agent.tool_use",
 				PayloadJson:    `{"type":"agent.tool_use","name":"safe_tool","input":{"ok":true},"evaluated_permission":"` + permission + `"}`,
 				SessionVisible: true,
-				Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+				AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 					t,
 					scope,
 					runtimeWriteID,
@@ -1302,7 +1255,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventToolUseAllowDenyDoNotOpenPendingAppro
 						kind: "tool",
 						json: `{"type":"tool","toolCallId":"tool-call-` + permission + `","toolName":"safe_tool","state":{"status":"running","input":{"value":{"ok":true},"preview":"{\"ok\":true}","truncated":false}}}`,
 					},
-				)},
+				),
 			}); err != nil {
 				t.Fatalf("WriteEvent tool_use %s: %v", permission, err)
 			}
@@ -1319,7 +1272,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventToolUseAllowDenyDoNotOpenPendingAppro
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreSettleToolResultConsumesDurableSandboxExecution(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_sandbox_consume", "thr_bridge_sandbox_consume")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_sandbox_consume", "bind_bridge_sandbox_consume", 1, "pod_uid_bridge_sandbox_consume")
@@ -1331,10 +1284,10 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_consume_use", ModelRequestId: "mreq_bridge_sandbox_consume",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"file_path":"a.txt","content":"ok"},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_bridge_sandbox_consume_use", "agent.tool_use", "streaming",
 			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_sandbox_consume","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"a.txt","content":"ok"},"preview":"{}","truncated":false}}}`},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool use: %v", err)
@@ -1357,14 +1310,8 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 		t.Fatalf("seed terminal sandbox execution: %v", err)
 	}
 
-	resultRequest := func(runtimeWriteID string) *bridgev1.WriteEventRequest {
-		return &bridgev1.WriteEventRequest{
-			Scope: scope, RuntimeWriteId: runtimeWriteID, ModelRequestId: "mreq_bridge_sandbox_consume",
-			EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"created a.txt"}]}`,
-			Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "created a.txt")},
-		}
-	}
-	assertRejectedResultHasNoSideEffects := func(runtimeWriteID string) {
+	resultRequest := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "created a.txt"))
+	assertRejectedResultHasNoSideEffects := func() {
 		t.Helper()
 		var resultEvents, bridgeOperations, assistantMessages int
 		var messageDataJSON, executionState string
@@ -1377,7 +1324,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 				(SELECT count(*) FROM session_bridge_operations
 				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
 				    AND session_thread_id='thr_bridge_sandbox_consume'
-				    AND operation='write_event' AND idempotency_key=$1),
+				    AND operation='settle_tool_result' AND idempotency_key=$1),
 				(SELECT count(*) FROM session_messages
 				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
 				    AND session_thread_id='thr_bridge_sandbox_consume' AND kind='assistant'),
@@ -1386,26 +1333,25 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 				    AND session_thread_id='thr_bridge_sandbox_consume' AND kind='assistant'),
 				(SELECT execution_state FROM session_runtime_tool_results
 				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
-				    AND session_thread_id='thr_bridge_sandbox_consume' AND tool_use_event_id=$2),
+				    AND session_thread_id='thr_bridge_sandbox_consume' AND tool_use_event_id=$1),
 				(SELECT result_json FROM session_runtime_tool_results
 				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
-				    AND session_thread_id='thr_bridge_sandbox_consume' AND tool_use_event_id=$2)`,
-			runtimeWriteID, toolUse.GetEventId(),
+				    AND session_thread_id='thr_bridge_sandbox_consume' AND tool_use_event_id=$1)`,
+			toolUse.GetEventId(),
 		).Scan(&resultEvents, &bridgeOperations, &assistantMessages, &messageDataJSON, &executionState, &storedResult); err != nil {
-			t.Fatalf("read rejected sandbox result side effects for %s: %v", runtimeWriteID, err)
+			t.Fatalf("read rejected sandbox result side effects: %v", err)
 		}
 		if resultEvents != 0 || bridgeOperations != 0 || assistantMessages != 1 || executionState != "terminal_unconsumed" ||
 			!storedResult.Valid || storedResult.String != resultJSON || !strings.Contains(messageDataJSON, `"status":"streaming"`) ||
 			strings.Contains(messageDataJSON, "created a.txt") {
-			t.Fatalf("rejected sandbox result %s leaked events=%d operations=%d messages=%d state=%q result=%v projection=%s",
-				runtimeWriteID, resultEvents, bridgeOperations, assistantMessages, executionState, storedResult, messageDataJSON)
+			t.Fatalf("rejected sandbox result leaked events=%d operations=%d messages=%d state=%q result=%v projection=%s",
+				resultEvents, bridgeOperations, assistantMessages, executionState, storedResult, messageDataJSON)
 		}
 	}
-	missingAttachment := resultRequest("rwrite_bridge_sandbox_consume_missing_attachment")
-	if _, err := store.WriteEvent(context.Background(), missingAttachment); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("WriteEvent sandbox tool result with missing staged attachment err = %v; want FailedPrecondition", err)
+	if _, err := store.SettleToolResult(context.Background(), resultRequest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("SettleToolResult sandbox result with missing staged attachment err = %v; want FailedPrecondition", err)
 	}
-	assertRejectedResultHasNoSideEffects(missingAttachment.GetRuntimeWriteId())
+	assertRejectedResultHasNoSideEffects()
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_transient_attachments (
 			workspace_id, attachment_ref, session_id, session_thread_id, source_tool_use_event_id,
@@ -1419,11 +1365,10 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	); err != nil {
 		t.Fatalf("seed staged-first and non-staged-second sandbox attachments: %v", err)
 	}
-	activeAttachment := resultRequest("rwrite_bridge_sandbox_consume_active_attachment")
-	if _, err := store.WriteEvent(context.Background(), activeAttachment); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("WriteEvent sandbox tool result with staged-first and active-second attachments err = %v; want FailedPrecondition", err)
+	if _, err := store.SettleToolResult(context.Background(), resultRequest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("SettleToolResult sandbox result with staged-first and active-second attachments err = %v; want FailedPrecondition", err)
 	}
-	assertRejectedResultHasNoSideEffects(activeAttachment.GetRuntimeWriteId())
+	assertRejectedResultHasNoSideEffects()
 	var firstAttachmentStatus string
 	var firstAttachmentExpiry time.Time
 	if err := admin.QueryRowContext(context.Background(),
@@ -1444,16 +1389,22 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	); err != nil {
 		t.Fatalf("stage sandbox attachments: %v", err)
 	}
-	settled, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result"))
+	settled, err := store.SettleToolResult(context.Background(), resultRequest)
 	if err != nil {
-		t.Fatalf("WriteEvent sandbox tool result: %v", err)
+		t.Fatalf("SettleToolResult sandbox result: %v", err)
 	}
-	replayed, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result"))
+	bridgeRequireToolSettlementOutcomeForTest(t, settled, "committed")
+	replayed, err := store.SettleToolResult(context.Background(), resultRequest)
 	if err != nil {
-		t.Fatalf("replay WriteEvent sandbox tool result: %v", err)
+		t.Fatalf("replay SettleToolResult sandbox result: %v", err)
 	}
-	if replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("replay status = %s; want duplicate", replayed.GetAck().GetStatus())
+	bridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
+	var resultEventID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+		  AND session_thread_id='thr_bridge_sandbox_consume' AND type='agent.tool_result'
+		  AND payload_json::jsonb->>'tool_use_id'=$1`, toolUse.GetEventId()).Scan(&resultEventID); err != nil {
+		t.Fatalf("read durable sandbox Tool Result Event: %v", err)
 	}
 	var state string
 	var storedResult sql.NullString
@@ -1467,7 +1418,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	).Scan(&state, &storedResult, &storedDigest, &terminalEventID, &reason); err != nil {
 		t.Fatalf("read consumed sandbox execution: %v", err)
 	}
-	if state != "consumed" || storedResult.Valid || storedDigest != resultDigest || terminalEventID != settled.GetEventId() || reason != "conversation_tool_result" {
+	if state != "consumed" || storedResult.Valid || storedDigest != resultDigest || terminalEventID != resultEventID || reason != "conversation_tool_result" {
 		t.Fatalf("consumed execution = state %q result %+v digest %q event %q reason %q; want thin conversation receipt", state, storedResult, storedDigest, terminalEventID, reason)
 	}
 	var activatedAttachmentCount int
@@ -1495,7 +1446,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreSettleToolResultConsumesDurableBackgroundResult(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_background_consume", "thr_bridge_background_consume")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_background_consume", "bind_bridge_background_consume", 1, "pod_uid_bridge_background_consume")
@@ -1505,10 +1456,10 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *te
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_background_consume_use", ModelRequestId: "mreq_bridge_background_consume",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"write_stdin","input":{"task_id":"task_background","chars":"ok"},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_bridge_background_consume_use", "agent.tool_use", "streaming",
 			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_background_consume","toolName":"write_stdin","state":{"status":"running","input":{"value":{"task_id":"task_background","chars":"ok"},"preview":"{}","truncated":false}}}`},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent background tool use: %v", err)
@@ -1528,14 +1479,18 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *te
 		t.Fatalf("seed terminal background result: %v", err)
 	}
 
-	resultRequest := &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_bridge_background_consume_result", ModelRequestId: "mreq_bridge_background_consume",
-		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"accepted"}]}`,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "accepted")},
-	}
-	settled, err := store.WriteEvent(context.Background(), resultRequest)
+	resultRequest := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "accepted"))
+	settled, err := store.SettleToolResult(context.Background(), resultRequest)
 	if err != nil {
-		t.Fatalf("WriteEvent background tool result: %v", err)
+		t.Fatalf("SettleToolResult background Tool result: %v", err)
+	}
+	bridgeRequireToolSettlementOutcomeForTest(t, settled, "committed")
+	var resultEventID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id='sesn_bridge_background_consume'
+		  AND session_thread_id='thr_bridge_background_consume' AND type='agent.tool_result'
+		  AND payload_json::jsonb->>'tool_use_id'=$1`, toolUse.GetEventId()).Scan(&resultEventID); err != nil {
+		t.Fatalf("read durable background Tool Result Event: %v", err)
 	}
 	var storedResult sql.NullString
 	var digest, terminalEventID, reason string
@@ -1547,7 +1502,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *te
 	); err != nil {
 		t.Fatalf("read consumed background result: %v", err)
 	}
-	if storedResult.Valid || digest != sha256Hex(resultJSON) || terminalEventID != settled.GetEventId() || reason != "conversation_tool_result" {
+	if storedResult.Valid || digest != sha256Hex(resultJSON) || terminalEventID != resultEventID || reason != "conversation_tool_result" {
 		t.Fatalf("consumed background result = result %+v digest %q event %q reason %q", storedResult, digest, terminalEventID, reason)
 	}
 }

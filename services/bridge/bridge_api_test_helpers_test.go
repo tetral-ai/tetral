@@ -199,16 +199,6 @@ func bridgeRuntimeOutputAppendForTest(
 	return bridgeAssistantAppendForTest(t, parts...)
 }
 
-func bridgeCancelledToolSettlementForTest(toolUseEventID, message string) *bridgev1.RuntimeToolSettlement {
-	errorJSON := fmt.Sprintf(`{"type":"runtime_terminated","message":%q,"retryable":false}`, message)
-	return &bridgev1.RuntimeToolSettlement{
-		ToolUseEventId: toolUseEventID,
-		Outcome: &bridgev1.RuntimeToolSettlement_Cancelled{
-			Cancelled: &bridgev1.RuntimeToolCancelled{ErrorJson: &errorJSON},
-		},
-	}
-}
-
 func bridgeCompletedToolSettlementForTest(toolUseEventID, textValue string) *bridgev1.RuntimeToolSettlement {
 	return &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUseEventID,
@@ -228,6 +218,38 @@ func bridgeErrorToolSettlementForTest(toolUseEventID, message string) *bridgev1.
 				ErrorJson: fmt.Sprintf(`{"type":"tool_error","message":%q}`, message),
 			},
 		},
+	}
+}
+
+func bridgeToolSettlementRequestForTest(
+	scope *bridgev1.RuntimeScope,
+	settlement *bridgev1.RuntimeToolSettlement,
+) *bridgev1.SettleToolResultRequest {
+	return &bridgev1.SettleToolResultRequest{Scope: scope, Settlement: settlement}
+}
+
+func bridgeRequireToolSettlementOutcomeForTest(
+	t *testing.T,
+	response *bridgev1.SettleToolResultResponse,
+	want string,
+) {
+	t.Helper()
+	if response == nil {
+		t.Fatalf("Tool settlement response is nil; want %s", want)
+	}
+	got := ""
+	switch response.GetOutcome().(type) {
+	case *bridgev1.SettleToolResultResponse_Committed:
+		got = "committed"
+	case *bridgev1.SettleToolResultResponse_Duplicate:
+		got = "duplicate"
+	case *bridgev1.SettleToolResultResponse_Stale:
+		got = "stale"
+	default:
+		t.Fatalf("Tool settlement response has no closed outcome: %#v", response)
+	}
+	if got != want {
+		t.Fatalf("Tool settlement outcome = %s; want %s", got, want)
 	}
 }
 
@@ -520,7 +542,7 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	var rowCount int
 	var claimStatus, claimOwner, claimLease sql.NullString
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), max(mcp_claim_status), max(mcp_claim_owner_request_id), max(mcp_claim_lease_expires_at)
+		`SELECT count(*), max(mcp_claim_status), max(mcp_claim_id), max(mcp_claim_lease_expires_at)
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_tool_identity' AND tool_use_event_id = 'evt_tool_identity'`,
 	).Scan(&rowCount, &claimStatus, &claimOwner, &claimLease); err != nil {
@@ -1004,19 +1026,6 @@ func memoryReplaceInputJSON(t *testing.T, path string, oldText string, newText s
 	})
 	if err != nil {
 		t.Fatalf("marshal memory replace input: %v", err)
-	}
-	return string(raw)
-}
-
-func memoryDeleteInputJSON(t *testing.T, path string, expectedText string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"action":        "delete",
-		"path":          path,
-		"expected_text": expectedText,
-	})
-	if err != nil {
-		t.Fatalf("marshal memory delete input: %v", err)
 	}
 	return string(raw)
 }
@@ -1589,7 +1598,8 @@ func seedBridgeAPIPendingApproval(t *testing.T, db *sql.DB, workspaceID string, 
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_use', $6, 'public', true, 'mrq_pending_approval', $6, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_use', $6, 'public', true, 'mrq_pending_approval',
+			'{"model_tool_call_id":"toolu_cleanup_wait"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID,
 		sessionID,
 		threadID,

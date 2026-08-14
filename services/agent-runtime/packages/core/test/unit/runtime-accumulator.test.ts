@@ -1,20 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import type { RuntimeProcessorSource, SessionEvent } from "../../src/contracts/runtime.js";
+import type { RuntimeProcessorSource, SessionEventWriterAppendEvent } from "../../src/contracts/runtime.js";
 import { RequestAssistantMemberSequencer } from "../../src/runtime/accumulator.js";
 import type { FrozenAssistantPartAppend } from "../../src/runtime/accumulator.js";
 
 const source = { providerId: "openai" as RuntimeProcessorSource["providerId"], modelId: "model" };
 
 function deferredEvent(): {
-  readonly promise: Promise<SessionEvent>;
-  readonly resolve: (event: SessionEvent) => void;
+  readonly promise: Promise<SessionEventWriterAppendEvent>;
+  readonly resolve: (event: SessionEventWriterAppendEvent) => void;
 } {
-  let resolve!: (event: SessionEvent) => void;
-  const promise = new Promise<SessionEvent>((settle) => { resolve = settle; });
+  let resolve!: (event: SessionEventWriterAppendEvent) => void;
+  const promise = new Promise<SessionEventWriterAppendEvent>((settle) => { resolve = settle; });
   return { promise, resolve };
 }
 
-function member(toolCallId: string, event: Promise<SessionEvent>): FrozenAssistantPartAppend {
+function member(toolCallId: string, event: Promise<SessionEventWriterAppendEvent>): FrozenAssistantPartAppend {
   return {
     source,
     toolCallId,

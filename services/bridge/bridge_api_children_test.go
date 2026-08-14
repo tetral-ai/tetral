@@ -358,7 +358,9 @@ func TestPostgreSQLBridgeAPIStoreOrdinaryToolResultWinsInterruptCensusRace(t *te
 	if _, err := admin.Exec(`UPDATE session_events SET visibility='public' WHERE workspace_id='default' AND event_id='evt_interrupt_result_race_source'`); err != nil {
 		t.Fatalf("publish interrupt source: %v", err)
 	}
-	if _, err := admin.Exec(`UPDATE session_events SET model_request_id=$2 WHERE workspace_id='default' AND event_id=$1`, toolID, modelRequestID); err != nil {
+	if _, err := admin.Exec(`UPDATE session_events
+		SET model_request_id=$2, projection_json='{"model_tool_call_id":"call_interrupt_result_race"}'
+		WHERE workspace_id='default' AND event_id=$1`, toolID, modelRequestID); err != nil {
 		t.Fatalf("stamp Tool request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, childID, modelRequestID, toolID, "call_interrupt_result_race", "Read")
@@ -382,12 +384,10 @@ func TestPostgreSQLBridgeAPIStoreOrdinaryToolResultWinsInterruptCensusRace(t *te
 	defer func() { _ = locker.Rollback() }()
 	resultDone := make(chan error, 1)
 	go func() {
-		_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-			Scope: scopeForThread(scope, childID), RuntimeWriteId: "rwrite_interrupt_result_race",
-			ModelRequestId: modelRequestID, EventType: "agent.tool_result",
-			PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolID + `","content":[{"type":"text","text":"done"}]}`,
-			Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolID, "done")},
-		})
+		_, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+			scopeForThread(scope, childID),
+			bridgeCompletedToolSettlementForTest(toolID, "done"),
+		))
 		resultDone <- err
 	}()
 	waitForPostgreSQLLockWaiters(t, admin, lockerPID, 1)

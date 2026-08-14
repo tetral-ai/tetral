@@ -44,6 +44,7 @@ func isRuntimePodBridgeAPIMethod(method string) bool {
 		bridgev1.AgentRuntimeBridgeService_CommitInputs_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CommitTaskNotificationResult_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_WriteEvent_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_SettleToolResult_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_WriteRequestEnd_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_FinishIdle_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CreateChildThread_FullMethodName,
@@ -75,7 +76,8 @@ func isGatewayBridgeAPIMethod(method string) bool {
 		bridgev1.AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName,
-		bridgev1.AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName:
+		bridgev1.AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName:
 		return true
 	default:
 		return false

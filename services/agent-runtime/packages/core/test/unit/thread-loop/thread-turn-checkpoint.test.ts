@@ -389,14 +389,14 @@ describe("cold Thread checkpoint direct facts", () => {
         modelToolCallId: "call_a",
         toolUseEventId: "tool_a",
         toolName: "Read",
-        terminalResult: { resultEventId: "result_a", outcome: "success" },
+        terminalResult: { outcome: "success" },
       },
       {
         memberKind: "public_tool_use",
         modelToolCallId: "call_b",
         toolUseEventId: "tool_b",
         toolName: "Grep",
-        terminalResult: { resultEventId: "result_b", outcome: "error" },
+        terminalResult: { outcome: "error" },
       },
     ]);
   });

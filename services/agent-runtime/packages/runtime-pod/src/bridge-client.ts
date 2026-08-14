@@ -44,6 +44,8 @@ import type {
   ResolveInterAgentDeliveryRequest,
   ResolveInterAgentDeliveryResponse,
   RuntimeScope,
+  SettleToolResultRequest,
+  SettleToolResultResponse,
   WriteEventRequest,
   WriteEventResponse,
   WriteRequestEndRequest,
@@ -90,6 +92,9 @@ import type {
   SessionEventWriterFinishIdleEnvelope,
   SessionEventWriterRequestEndEnvelope,
   SessionEventWriterRuntimeTerminationEnvelope,
+  SessionEventWriterRuntimeTerminationResult,
+  SessionEventWriterToolSettlementEnvelope,
+  SessionEventWriterToolSettlementAttempt,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import {
   acceptedInputDeclarationKind,
@@ -123,7 +128,6 @@ import {
   commitInputsDeclarationDigest,
   finishIdleDeclarationDigest,
   internalToolRepairDeclarationDigest,
-  runtimeTerminationDeclarationDigest,
   taskNotificationDeclarationDigest,
   writeEventDeclarationDigest,
   writeRequestEndDeclarationDigest,
@@ -1136,6 +1140,7 @@ export interface BridgeAPIEventWriterOptions extends BridgeDeclarationEvidenceOp
   readonly tokenPath: string;
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   readonly client?: AgentRuntimeBridgeServiceClient;
+  readonly sleep?: ((durationMs: number) => Promise<void>) | undefined;
 }
 
 /**
@@ -1147,16 +1152,17 @@ export interface BridgeAPIEventWriterOptions extends BridgeDeclarationEvidenceOp
 export class BridgeAPIEventWriter implements SessionEventWriter {
   private readonly client: AgentRuntimeBridgeServiceClient;
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
+  private readonly sleep: (durationMs: number) => Promise<void>;
 
   constructor(private readonly options: BridgeAPIEventWriterOptions) {
     this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeDurableContextGrpcChannelOptions());
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
+    this.sleep = options.sleep ?? (async (durationMs) => await new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
   }
 
   /** Writes one semantic event and its operation-specific durable projection. */
   async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
-    const replayUnknownTransport = envelope.event.type === "approval_review.failure" ||
-      envelope.event.type === "agent.mcp_tool_result";
+    const replayUnknownTransport = envelope.event.type === "approval_review.failure";
     try {
       const event = sessionEventForDurableWrite(envelope.event);
       const request = {
@@ -1166,18 +1172,11 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         eventType: event.type,
         payloadJson: JSON.stringify(event),
         sessionVisible: false,
-        serverToolUse: envelope.serverToolUse,
         contextThroughMessageSequence: envelope.contextThroughMessageSequence,
         requestKind: envelope.requestKind ?? "",
         assistantPartAppend: envelope.assistantPartAppend === undefined
           ? undefined
           : { parts: envelope.assistantPartAppend.parts.map(runtimePartCreateForBridge) },
-        toolSettlement: envelope.toolSettlement === undefined
-          ? undefined
-          : runtimeToolSettlementForBridge(
-              envelope.toolSettlement.toolUseEventId,
-              envelope.toolSettlement.outcome,
-            ),
       };
       if (WriteEventRequestMessage.encode(request).finish().byteLength > MaxBridgeDurableContextGrpcMessageBytes) {
         return eventWriterSchemaFailure(envelope.sessionId, envelope.writeId);
@@ -1190,7 +1189,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           envelope.sessionId,
           envelope.writeId,
           response.ack?.errorCode,
-          event.type === "approval_review.failure" || event.type === "agent.mcp_tool_result",
+          event.type === "approval_review.failure",
         );
       }
       const declaration = response.declaration;
@@ -1308,6 +1307,38 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         error,
         replayUnknownTransport,
       );
+    }
+  }
+
+  /** Settles one durable Tool target without returning payload, Event, receipt, or time echoes. */
+  async settleToolResult(
+    envelope: SessionEventWriterToolSettlementEnvelope,
+  ): Promise<SessionEventWriterToolSettlementAttempt> {
+    const request: SettleToolResultRequest = {
+      scope: bridgeScope(envelope),
+      settlement: runtimeToolSettlementForBridge(
+        envelope.settlement.toolUseEventId,
+        envelope.settlement.outcome,
+      ),
+    };
+    let metadata: Metadata;
+    try {
+      metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
+    } catch (error) {
+      return toolSettlementTransportFailure(envelope, error);
+    }
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return parseToolSettlementResponse(
+          await settleToolResult(this.client, request, metadata),
+          envelope,
+        );
+      } catch (error) {
+        if (!bridgeDeclarationTransportUnknown(error) || attempt >= SessionEventWriterRetryPolicy.backoffMs.length) {
+          return toolSettlementTransportFailure(envelope, error);
+        }
+        await this.sleep(SessionEventWriterRetryPolicy.backoffMs[attempt]!);
+      }
     }
   }
 
@@ -1655,96 +1686,22 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
   }
 
   /** Commits atomic runtime termination closeout for the active thread scope. */
-  async commitRuntimeTermination(envelope: SessionEventWriterRuntimeTerminationEnvelope): Promise<SessionEventWriterAppendResult> {
+  async commitRuntimeTermination(envelope: SessionEventWriterRuntimeTerminationEnvelope): Promise<SessionEventWriterRuntimeTerminationResult> {
     try {
       const metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
       const request: CommitRuntimeTerminationRequest = {
         scope: bridgeScope(envelope),
         runtimeWriteId: envelope.writeId,
         failureJson: JSON.stringify(envelope.failure),
-        toolSettlements: envelope.toolSettlements.map((settlement) =>
-          runtimeToolSettlementForBridge(settlement.toolUseEventId, settlement.outcome)
-        ),
-        completionMailCreate: envelope.completionMailCreate === undefined
-          ? undefined
-          : runtimeMessageCreateForBridge(envelope.completionMailCreate),
       };
-      const declarationDigest = runtimeTerminationDeclarationDigest(request);
       const response = await commitRuntimeTermination(this.client, request, metadata);
-      if (!bridgeAckAccepted(response.ack?.status)) {
-        return eventWriterRejected(envelope.sessionId, envelope.writeId, response.ack?.errorCode);
-      }
-      const declaration = response.declaration;
-      const bridgeReceipt = declaration?.receipts[0];
-      const applicationDisposition = declaration === undefined
-        ? undefined
-        : runtimeReceiptApplicationDisposition(declaration.applicationDisposition);
-      if (
-        declaration === undefined ||
-        declaration.receipts.length !== 1 ||
-        bridgeReceipt === undefined ||
-        applicationDisposition === undefined ||
-        bridgeReceipt.declarationDigest !== declarationDigest ||
-        bridgeReceipt.compactedThroughMessageSequence !== undefined ||
-        (
-          applicationDisposition === "current_custody" &&
-          (
-            declaration.observedBindingId !== envelope.bindingId ||
-            declaration.observedBindingGeneration !== envelope.bindingGeneration
-          )
-        )
-      ) {
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: envelope.workspaceId,
-          sessionId: envelope.sessionId,
-          sessionThreadId: envelope.sessionThreadId,
-          operation: "commit_runtime_termination",
-          sourceKind: "runtime_termination",
-          operationId: envelope.writeId,
-          declarationDigest,
-          bindingId: declaration?.observedBindingId ?? envelope.bindingId,
-          bindingGeneration: declaration?.observedBindingGeneration ?? envelope.bindingGeneration,
-          ...(applicationDisposition === undefined ? {} : { applicationDisposition }),
-          outcome: bridgeReceipt !== undefined && bridgeReceipt.declarationDigest !== declarationDigest
-            ? "declaration_digest_mismatch"
-            : applicationDisposition === "current_custody" &&
-                (
-                  declaration?.observedBindingId !== envelope.bindingId ||
-                  declaration.observedBindingGeneration !== envelope.bindingGeneration
-                )
-              ? "binding_identity_mismatch"
-              : "receipt_shape_invalid",
-        });
-        return eventWriterSchemaFailure(envelope.sessionId, envelope.writeId);
-      }
-      const receipt = runtimeDeclarationReceipt(bridgeReceipt);
-      recordBridgeReceiptEvidence(this.options, {
-        workspaceId: envelope.workspaceId,
-        sessionId: envelope.sessionId,
-        sessionThreadId: envelope.sessionThreadId,
-        operation: "commit_runtime_termination",
-        sourceKind: "runtime_termination",
-        operationId: envelope.writeId,
-        declarationDigest,
-        bindingId: declaration.observedBindingId,
-        bindingGeneration: declaration.observedBindingGeneration,
-        applicationDisposition,
-        outcome: applicationDisposition === "current_custody" ? "applied" : "stale_custody",
-      });
-      return {
-        ok: true,
-        writeId: response.ack?.runtimeWriteId ?? "",
-        eventId: receipt.events[0]?.eventId ?? response.ack?.runtimeWriteId ?? envelope.writeId,
-        processedAt: new Date().toISOString(),
-        declaration: {
-          receipt,
-          applicationDisposition,
-          observedBindingId: declaration.observedBindingId,
-          observedBindingGeneration: declaration.observedBindingGeneration,
-        },
-      };
+      return parseRuntimeTerminationResult(response);
     } catch (error) {
-      return eventWriterTransportFailure(envelope.sessionId, envelope.writeId, error);
+      if (error instanceof RuntimeTerminationResultContractError) {
+        return { ok: false, error: normalizeSessionEventWriterError({ code: "schema_mismatch", sessionId: envelope.sessionId, writeId: envelope.writeId }) };
+      }
+      const failure = eventWriterTransportFailure(envelope.sessionId, envelope.writeId, error);
+      return failure.ok ? { ok: false, error: normalizeSessionEventWriterError({ code: "unknown", sessionId: envelope.sessionId, writeId: envelope.writeId }) } : failure;
     }
   }
 
@@ -2106,9 +2063,21 @@ function runtimeMessageCreateKindForBridge(kind: CoreRuntimeMessageCreate["messa
 function runtimeToolSettlementForBridge(toolUseEventId: string, settlement: RuntimeToolSettlementDeclaration["outcome"]) {
   switch (settlement.type) {
     case "completed":
-      return { toolUseEventId, completed: { outputJson: JSON.stringify(settlement.output) } };
+      return {
+        toolUseEventId,
+        completed: {
+          outputJson: JSON.stringify(settlement.output),
+          serverToolUse: settlement.serverToolUse,
+        },
+      };
     case "error":
-      return { toolUseEventId, error: { errorJson: JSON.stringify(runtimeToolErrorFromFailure(settlement.error)) } };
+      return {
+        toolUseEventId,
+        error: {
+          errorJson: JSON.stringify(runtimeToolErrorFromFailure(settlement.error)),
+          serverToolUse: settlement.serverToolUse,
+        },
+      };
     case "cancelled":
       return {
         toolUseEventId,
@@ -2421,6 +2390,25 @@ function writeEvent(
 ): Promise<WriteEventResponse> {
   return new Promise((resolve, reject) => {
     client.writeEvent(request, metadata, (error: ServiceError | null, response: WriteEventResponse) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function settleToolResult(
+  client: AgentRuntimeBridgeServiceClient,
+  request: SettleToolResultRequest,
+  metadata: Metadata,
+): Promise<SettleToolResultResponse> {
+  return new Promise((resolve, reject) => {
+    const options: CallOptions = {
+      deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+    };
+    client.settleToolResult(request, metadata, options, (error: ServiceError | null, response: SettleToolResultResponse) => {
       if (error !== null) {
         reject(error);
         return;
@@ -3245,6 +3233,65 @@ function eventWriterSchemaFailure(
       writeId,
     }),
   };
+}
+
+class RuntimeTerminationResultContractError extends Error {}
+
+function parseRuntimeTerminationResult(
+  response: CommitRuntimeTerminationResponse,
+): SessionEventWriterRuntimeTerminationResult {
+  const variants = [response.committed, response.duplicate, response.stale]
+    .filter((candidate) => candidate !== undefined).length;
+  if (variants !== 1) {
+    throw new RuntimeTerminationResultContractError("CommitRuntimeTermination returned an invalid result variant");
+  }
+  if (response.stale !== undefined) return { ok: true, type: "stale" };
+  const terminal = response.committed ?? response.duplicate;
+  if (terminal === undefined || terminal.failureEventId.length === 0 || terminal.closeoutEventId.length === 0) {
+    throw new RuntimeTerminationResultContractError("CommitRuntimeTermination returned incomplete durable facts");
+  }
+  return {
+    ok: true,
+    type: response.committed === undefined ? "duplicate" : "committed",
+    failureEventId: terminal.failureEventId,
+    closeoutEventId: terminal.closeoutEventId,
+  };
+}
+
+function parseToolSettlementResponse(
+  response: SettleToolResultResponse,
+  envelope: SessionEventWriterToolSettlementEnvelope,
+): SessionEventWriterToolSettlementAttempt {
+  const variants = [response.committed, response.duplicate, response.stale]
+    .filter((candidate) => candidate !== undefined).length;
+  if (variants !== 1) {
+    return {
+      ok: false,
+      error: normalizeSessionEventWriterError({
+        code: "schema_mismatch",
+        sessionId: envelope.sessionId,
+        writeId: envelope.settlement.toolUseEventId,
+      }),
+    };
+  }
+  if (response.committed !== undefined) return { ok: true, result: { type: "committed" } };
+  if (response.duplicate !== undefined) return { ok: true, result: { type: "duplicate" } };
+  return { ok: true, result: { type: "stale" } };
+}
+
+function toolSettlementTransportFailure(
+  envelope: SessionEventWriterToolSettlementEnvelope,
+  error: unknown,
+): SessionEventWriterToolSettlementAttempt {
+  const failure = eventWriterTransportFailure(
+    envelope.sessionId,
+    envelope.settlement.toolUseEventId,
+    error,
+    true,
+  );
+  return failure.ok
+    ? { ok: false, error: normalizeSessionEventWriterError({ code: "unknown", sessionId: envelope.sessionId }) }
+    : { ok: false, error: failure.error };
 }
 
 function eventWriterTransportFailure(

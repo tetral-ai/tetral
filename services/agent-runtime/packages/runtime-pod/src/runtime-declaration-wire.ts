@@ -9,12 +9,10 @@ import { RuntimeMessageCreateKind } from "@tetral/agent-runtime-protocol/src/gen
 import type {
   CommitInputsRequest,
   CommitInternalToolRepairRequest,
-  CommitRuntimeTerminationRequest,
   CommitTaskNotificationResultRequest,
   FinishIdleRequest,
   RuntimeAssistantPartAppend,
   RuntimeMessageCreate,
-  RuntimeToolSettlement,
   WriteEventRequest,
   WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -80,7 +78,7 @@ export function taskNotificationDeclarationDigest(request: Pick<CommitTaskNotifi
 
 export function writeEventDeclarationDigest(request: Pick<WriteEventRequest,
   "scope" | "runtimeWriteId" | "modelRequestId" | "eventType" | "payloadJson" |
-  "serverToolUse" | "assistantPartAppend" | "toolSettlement" |
+  "assistantPartAppend" |
   "contextThroughMessageSequence" | "requestKind"
 >): string {
   const payload = canonicalRunToolJSONWithoutObjectFields(request.payloadJson, internalProviderPayloadFields);
@@ -90,12 +88,7 @@ export function writeEventDeclarationDigest(request: Pick<WriteEventRequest,
     model_request_id: nullableString(request.modelRequestId),
     operation_kind: "write_event",
     runtime_write_id: request.runtimeWriteId,
-    server_tool_use: request.serverToolUse === undefined ? null : {
-      web_fetch_requests: request.serverToolUse.webFetchRequests,
-      web_search_requests: request.serverToolUse.webSearchRequests,
-    },
     session_thread_id: request.scope?.sessionThreadId ?? "",
-    tool_settlement: canonicalToolSettlement(request.toolSettlement),
   };
   if (request.eventType === "span.model_request_start") {
     declaration.context_through_message_sequence = request.contextThroughMessageSequence ?? null;
@@ -160,19 +153,6 @@ export function finishIdleDeclarationDigest(request: Pick<FinishIdleRequest,
   });
 }
 
-export function runtimeTerminationDeclarationDigest(request: Pick<CommitRuntimeTerminationRequest,
-  "scope" | "runtimeWriteId" | "failureJson" | "toolSettlements" | "completionMailCreate"
->): string {
-  return digest({
-    completion_mail_create: canonicalMessageCreate(request.completionMailCreate),
-    failure: JSON.parse(canonicalRunToolJSON(request.failureJson)) as unknown,
-    operation_kind: "commit_runtime_termination",
-    runtime_write_id: request.runtimeWriteId,
-    session_thread_id: request.scope?.sessionThreadId ?? "",
-    tool_settlements: request.toolSettlements.map(canonicalToolSettlement),
-  });
-}
-
 export function childLifecycleDeclarationDigest(input: {
   readonly operationKind: "mark_child_thread_closed" | "mark_child_thread_active";
   readonly action: "close" | "resume";
@@ -206,23 +186,6 @@ function canonicalAssistantAppend(append: RuntimeAssistantPartAppend | undefined
 
 function canonicalPart(part: { readonly partKind: string; readonly partJson: string }): unknown {
   return { part_json: JSON.parse(canonicalRunToolJSON(part.partJson)) as unknown, part_kind: part.partKind };
-}
-
-function canonicalToolSettlement(settlement: RuntimeToolSettlement | undefined): unknown {
-  if (settlement === undefined) return null;
-  if (settlement.completed !== undefined) {
-    return { tool_use_event_id: settlement.toolUseEventId, completed: JSON.parse(canonicalRunToolJSON(settlement.completed.outputJson)) as unknown };
-  }
-  if (settlement.error !== undefined) {
-    return { tool_use_event_id: settlement.toolUseEventId, error: JSON.parse(canonicalRunToolJSON(settlement.error.errorJson)) as unknown };
-  }
-  if (settlement.cancelled !== undefined) {
-    return {
-      tool_use_event_id: settlement.toolUseEventId,
-      cancelled: settlement.cancelled.errorJson === undefined ? null : JSON.parse(canonicalRunToolJSON(settlement.cancelled.errorJson)) as unknown,
-    };
-  }
-  throw new Error("Runtime Tool settlement has no outcome");
 }
 
 function digest(value: Readonly<Record<string, unknown>>): string {

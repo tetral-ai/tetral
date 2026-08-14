@@ -21,13 +21,18 @@ import type {
   ListChildThreadsRequest,
   MarkChildThreadActiveRequest,
   MarkChildThreadClosedRequest,
+  ReadCommandResultResponse,
   ReadCommandResultRequest,
   ResolveChildThreadRequest,
   ResolveInterAgentDeliveryRequest,
   RunMemoryRequest,
+  RunMemoryResponse,
   AcceptSandboxExecutionRequest,
+  AcceptSandboxExecutionResponse,
   AwaitSandboxExecutionRequest,
+  AwaitSandboxExecutionResponse,
   SendCommandInputRequest,
+  SendCommandInputResponse,
   WriteEventRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
@@ -62,7 +67,6 @@ import { toGatewayProviderContext } from "@tetral/agent-runtime-core/src/runtime
 import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
-import { runtimeToolResultEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
@@ -208,15 +212,13 @@ describe("RuntimePodToolRunner", () => {
       if (result.type !== "error") {
         throw new Error("activation exhaustion did not produce a Runtime error");
       }
-      expect(runtimeToolResultEvent(
-        "sevt_tool_1",
-        { kind: "tool" },
-        runtimeToolSettlement(result),
-      )).toEqual({
-        type: "agent.tool_result",
-        tool_use_id: "sevt_tool_1",
-        content: [{ type: "text", text: "The requested operation could not be completed." }],
-        is_error: true,
+      expect(runtimeToolSettlement(result)).toEqual({
+        type: "error",
+        error: expect.objectContaining({
+          type: "runtime",
+          code: "runtime_invalid_sequence",
+          message: "The requested operation could not be completed.",
+        }),
       });
     }
   });
@@ -314,6 +316,114 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
     expect(sleep.calls).toHaveLength(0);
     expect(result).toEqual({ type: "stale_custody" });
+  });
+
+  test("maps each typed stale executor result to stale custody before Tool settlement", async () => {
+    const acceptanceBridge = new RecordingBridgeClient();
+    acceptanceBridge.acceptSandboxExecutionResponses.push({ stale: {} });
+    expect(await makeRunner({ bridge: acceptanceBridge }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    )).toEqual({ type: "stale_custody" });
+    expect(acceptanceBridge.awaitSandboxExecutionRequests).toEqual([]);
+
+    const waitBridge = new RecordingBridgeClient();
+    waitBridge.awaitSandboxExecutionResponses.push({ stale: {} });
+    expect(await makeRunner({ bridge: waitBridge }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    )).toEqual({ type: "stale_custody" });
+
+    const readBridge = new RecordingBridgeClient();
+    readBridge.readCommandResultResponses.push({ stale: {} });
+    expect(await makeRunner({ bridge: readBridge }).runTool(
+      toolRequest("write_stdin", { session_id: "task_1", chars: "" }),
+    )).toEqual({ type: "stale_custody" });
+
+    const inputBridge = new RecordingBridgeClient();
+    inputBridge.sendCommandInputResponses.push({ stale: {} });
+    expect(await makeRunner({ bridge: inputBridge }).runTool(
+      toolRequest("write_stdin", { session_id: "task_1", chars: "hello" }),
+    )).toEqual({ type: "stale_custody" });
+
+    const memoryBridge = new RecordingBridgeClient();
+    memoryBridge.runMemoryResponses.push({ stale: {} });
+    expect(await makeRunner({ bridge: memoryBridge }).runTool(
+      toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }),
+    )).toEqual({ type: "stale_custody" });
+  });
+
+  test("accepts every legal duplicate executor result arm", async () => {
+    const sandboxBridge = new RecordingBridgeClient();
+    sandboxBridge.acceptSandboxExecutionResponses.push({ duplicate: {} });
+    expect((await makeRunner({ bridge: sandboxBridge }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    )).type).toBe("completed");
+
+    const inputBridge = new RecordingBridgeClient();
+    inputBridge.sendCommandInputResponses.push({ duplicate: { resultJson: '{"status":"accepted"}' } });
+    expect((await makeRunner({ bridge: inputBridge }).runTool(
+      toolRequest("write_stdin", { session_id: "task_1", chars: "hello" }),
+    )).type).toBe("completed");
+
+    const memoryBridge = new RecordingBridgeClient();
+    memoryBridge.runMemoryResponses.push({ duplicate: { resultJson: '{"status":"completed","summary":"created"}' } });
+    expect((await makeRunner({ bridge: memoryBridge }).runTool(
+      toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }),
+    )).type).toBe("completed");
+  });
+
+  test("rejects zero-arm and multi-arm executor responses instead of selecting by precedence", async () => {
+    const cases: Array<{
+      readonly name: string;
+      readonly run: () => Promise<unknown>;
+    }> = [];
+
+    for (const response of [{}, { committed: {}, duplicate: {} }]) {
+      const bridge = new RecordingBridgeClient();
+      bridge.acceptSandboxExecutionResponses.push(response);
+      cases.push({
+        name: "sandbox acceptance",
+        run: async () => await makeRunner({ bridge }).runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" })),
+      });
+    }
+    for (const response of [{}, { completed: { resultJson: '{"status":"success"}', taskId: "" }, stale: {} }]) {
+      const bridge = new RecordingBridgeClient();
+      bridge.awaitSandboxExecutionResponses.push(response);
+      cases.push({
+        name: "sandbox wait",
+        run: async () => await makeRunner({ bridge }).runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" })),
+      });
+    }
+    for (const response of [{}, { completed: { resultJson: '{"status":"running"}' }, stale: {} }]) {
+      const bridge = new RecordingBridgeClient();
+      bridge.readCommandResultResponses.push(response);
+      cases.push({
+        name: "command read",
+        run: async () => await makeRunner({ bridge }).runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "" })),
+      });
+    }
+    for (const response of [{}, { committed: { resultJson: '{"status":"accepted"}' }, stale: {} }]) {
+      const bridge = new RecordingBridgeClient();
+      bridge.sendCommandInputResponses.push(response);
+      cases.push({
+        name: "command input",
+        run: async () => await makeRunner({ bridge }).runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "hello" })),
+      });
+    }
+    for (const response of [{}, { committed: { resultJson: '{"status":"completed"}' }, duplicate: { resultJson: '{"status":"completed"}' } }]) {
+      const bridge = new RecordingBridgeClient();
+      bridge.runMemoryResponses.push(response);
+      cases.push({
+        name: "memory",
+        run: async () => await makeRunner({ bridge }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" })),
+      });
+    }
+
+    for (const testCase of cases) {
+      expect(await testCase.run(), testCase.name).toMatchObject({
+        type: "error",
+        error: { retryable: true },
+      });
+    }
   });
 
   test("numbers only the requested Read range with true file line numbers", async () => {
@@ -2756,6 +2866,7 @@ async function buildResumeTestHosts(
     threadLoop: {
       internalToolRepairStore: new ResumeTestRepairStore(),
       sessionEventWriter: {
+        settleToolResult: async () => ({ ok: true, result: { type: "committed" } }),
         append: async () => { throw new Error("resume checkpoint test does not append events"); },
         writeRequestEnd: async () => { throw new Error("resume checkpoint test does not end requests"); },
         finishIdle: async () => { throw new Error("resume checkpoint test does not finish turns"); },
@@ -2925,12 +3036,17 @@ class RecordingBridgeClient {
   readonly acceptSandboxExecutionRequests: AcceptSandboxExecutionRequest[] = [];
   readonly acceptSandboxExecutionOptions: CallOptions[] = [];
   readonly acceptSandboxExecutionErrors: Error[] = [];
+  readonly acceptSandboxExecutionResponses: AcceptSandboxExecutionResponse[] = [];
   readonly awaitSandboxExecutionRequests: AwaitSandboxExecutionRequest[] = [];
   readonly awaitSandboxExecutionErrors: Error[] = [];
+  readonly awaitSandboxExecutionResponses: AwaitSandboxExecutionResponse[] = [];
   readonly runMemoryRequests: RunMemoryRequest[] = [];
+  readonly runMemoryResponses: RunMemoryResponse[] = [];
   readonly runMemoryMetadata: Metadata[] = [];
   readonly sendCommandInputRequests: SendCommandInputRequest[] = [];
+  readonly sendCommandInputResponses: SendCommandInputResponse[] = [];
   readonly readCommandResultRequests: ReadCommandResultRequest[] = [];
+  readonly readCommandResultResponses: ReadCommandResultResponse[] = [];
   readonly cancelCommandRequests: CancelCommandRequest[] = [];
   readonly createChildThreadRequests: CreateChildThreadRequest[] = [];
   readonly resolveChildThreadRequests: ResolveChildThreadRequest[] = [];
@@ -3068,9 +3184,7 @@ class RecordingBridgeClient {
       callback(error, undefined);
       return grpcCall();
     }
-    callback(null, {
-      committed: {},
-    });
+    callback(null, this.acceptSandboxExecutionResponses.shift() ?? { committed: {} });
     return grpcCall();
   }
 
@@ -3081,7 +3195,7 @@ class RecordingBridgeClient {
       callback(error, undefined);
       return grpcCall();
     }
-    callback(null, {
+    callback(null, this.awaitSandboxExecutionResponses.shift() ?? {
       completed: {
         resultJson: this.awaitSandboxExecutionResultJson,
         taskId: this.awaitSandboxExecutionTaskId,
@@ -3100,7 +3214,7 @@ class RecordingBridgeClient {
     }
     const resultJson = this.runMemoryResultJsons.shift() ?? this.runMemoryResultJson;
     const respond = (): void => {
-      callback(null, {
+      callback(null, this.runMemoryResponses.shift() ?? {
         committed: { resultJson },
       });
       this.afterRunMemoryResponse?.(this.runMemoryRequests.length);
@@ -3129,7 +3243,7 @@ class RecordingBridgeClient {
       callback(error, undefined);
       return grpcCall();
     }
-    callback(null, {
+    callback(null, this.sendCommandInputResponses.shift() ?? {
       committed: { resultJson: this.sendCommandInputResultJson },
     });
     return grpcCall();
@@ -3145,7 +3259,7 @@ class RecordingBridgeClient {
     if (this.deferReadCommandResult) {
       return grpcCall();
     }
-    callback(null, {
+    callback(null, this.readCommandResultResponses.shift() ?? {
       completed: { resultJson: this.readCommandResultResultJson },
     });
     return grpcCall();

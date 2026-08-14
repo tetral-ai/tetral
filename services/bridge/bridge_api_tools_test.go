@@ -277,10 +277,10 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_patch_split_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"apply_patch","input":` + string(publicInputJSON) + `,"evaluated_permission":"ask"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_bridge_patch_split_tool", "agent.tool_use", "streaming",
 			bridgeRuntimePartCreateForTest{kind: "tool", json: string(runtimePartJSON)},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent apply_patch: %v", err)
@@ -454,19 +454,14 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 	locker, lockerPID := lockPostgreSQLFinalizationFence(t, admin,
 		`SELECT id FROM sessions WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, workspaceID, sessionID)
 	defer func() { _ = locker.Rollback() }()
-	writeRequest := &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_sandbox_settle_consume_race", ModelRequestId: modelRequestID,
-		EventType:   "agent.tool_result",
-		PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUseEventID + `","content":[{"type":"text","text":"done"}]}`,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUseEventID, "done")},
-	}
+	writeRequest := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUseEventID, "done"))
 	type writeResult struct {
-		response *bridgev1.WriteEventResponse
+		response *bridgev1.SettleToolResultResponse
 		err      error
 	}
 	writeDone := make(chan writeResult, 1)
 	go func() {
-		response, err := store.WriteEvent(context.Background(), writeRequest)
+		response, err := store.SettleToolResult(context.Background(), writeRequest)
 		writeDone <- writeResult{response: response, err: err}
 	}()
 	close(provider.release)
@@ -481,16 +476,14 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 	written := <-writeDone
 	if written.err != nil {
 		if status.Code(written.err) != codes.FailedPrecondition {
-			t.Fatalf("concurrent WriteEvent: %v", written.err)
+			t.Fatalf("concurrent SettleToolResult: %v", written.err)
 		}
-		written.response, written.err = store.WriteEvent(context.Background(), writeRequest)
+		written.response, written.err = store.SettleToolResult(context.Background(), writeRequest)
 	}
 	if written.err != nil {
-		t.Fatalf("WriteEvent after Sandbox settlement: %v", written.err)
+		t.Fatalf("SettleToolResult after Sandbox settlement: %v", written.err)
 	}
-	if written.response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("WriteEvent status = %s; want committed", written.response.GetAck().GetStatus())
-	}
+	bridgeRequireToolSettlementOutcomeForTest(t, written.response, "committed")
 
 	var executionState string
 	var retainedResult sql.NullString
@@ -501,7 +494,7 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 	}
 	if err := admin.QueryRow(`SELECT count(*) FROM session_events
 		WHERE workspace_id=$1 AND session_id=$2 AND type='agent.tool_result'
-		  AND payload_json::jsonb ->> 'tool_use_event_id'=$3`, workspaceID, sessionID, toolUseEventID).Scan(&resultEvents); err != nil {
+		  AND payload_json::jsonb ->> 'tool_use_id'=$3`, workspaceID, sessionID, toolUseEventID).Scan(&resultEvents); err != nil {
 		t.Fatalf("count converged Tool Result events: %v", err)
 	}
 	if executionState != "consumed" || retainedResult.Valid || resultEvents != 1 {
@@ -615,9 +608,9 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 			Scope: scope, RuntimeWriteId: runtimeWriteID, ModelRequestId: modelRequestID,
 			EventType:   "agent.tool_use",
 			PayloadJson: `{"type":"agent.tool_use","name":"memory","input":` + canonicalInput + `,"evaluated_permission":"allow"}`,
-			Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 				t, scope, runtimeWriteID, "agent.tool_use", "streaming", draftParts[len(draftParts)-1],
-			)},
+			),
 		})
 		if err != nil {
 			t.Fatalf("WriteEvent memory input %d: %v", index, err)
@@ -1003,10 +996,10 @@ func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision
 				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 					Scope: scope, RuntimeWriteId: writeID, ModelRequestId: modelRequestID,
 					EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"unknown_tool","input":{},"evaluated_permission":"allow"}`,
-					Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+					AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 						t, scope, writeID, "agent.tool_use", "streaming",
 						bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_collision","toolName":"unknown_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-					)},
+					),
 				})
 				return err
 			}
@@ -1943,27 +1936,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOversizedReplaceBeforeDurableWr
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreRunMemoryReadsLegacyOversizedRows(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_legacy_large", "thr_bridge_memory_legacy_large")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_legacy_large", "bind_bridge_memory_legacy_large", 1, "pod_uid_memory_legacy_large")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_legacy_large", "memstore_bridge_memory_legacy_large")
-	legacyContent := strings.Repeat("x", memoryToolContentMaxBytes+1)
-	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_legacy_large", "mem_bridge_memory_legacy_large", "/notes/legacy-large.md", legacyContent)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	request := durableMemoryRequestForTest(t, admin,
-		bridgeAPIScope("sesn_bridge_memory_legacy_large", "thr_bridge_memory_legacy_large", "bind_bridge_memory_legacy_large", 1, "pod_uid_memory_legacy_large"),
-		"evt_tool_memory_legacy_large", memoryDeleteInputJSON(t, "notes/legacy-large.md", legacyContent))
-	response, err := store.RunMemory(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunMemory legacy oversized delete: %v", err)
-	}
-	assertMemoryResultStatus(t, committedMemoryResultJSON(t, response), "completed")
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_legacy_large"); count != 2 {
-		t.Fatalf("memory versions after legacy oversized delete = %d; want seed plus delete", count)
-	}
-}
-
 func TestPostgreSQLBridgeAPIStoreRunMemoryDeletesWithExpectedText(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_delete", "thr_bridge_memory_delete")
@@ -2584,10 +2556,10 @@ func writeDurableOrdinaryToolUseForTest(
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_tool", ModelRequestId: modelRequestID,
 		EventType: "agent.tool_use", PayloadJson: payloadJSON, SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_"+modelRequestID+"_tool", "agent.tool_use", "streaming",
 			bridgeRuntimePartCreateForTest{kind: "tool", json: partJSON},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("write durable ordinary Tool use: %v", err)

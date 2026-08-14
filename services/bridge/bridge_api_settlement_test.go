@@ -55,14 +55,14 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsSpanUsageAndCumulativePr
 		EventType:      "agent.message",
 		PayloadJson:    `{"type":"agent.message","content":[{"type":"text","text":"done"}]}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			nil,
 			"rwrite_bridge_request_progress",
 			"agent.message",
 			"completed",
 			bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"done","truncated":false,"status":"completed"}`},
-		)},
+		),
 	}); err != nil {
 		t.Fatalf("WriteEvent assistant progress: %v", err)
 	}
@@ -1544,7 +1544,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Write","input":{"file_path":"sibling.txt"},"evaluated_permission":"ask"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			siblingScope,
 			"rwrite_terminate_sibling_tool",
@@ -1554,7 +1554,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_terminate_sibling","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"sibling.txt"},"preview":"{\"file_path\":\"sibling.txt\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent sibling tool use: %v", err)
@@ -1570,7 +1570,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"ask"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_terminate_tool",
@@ -1580,7 +1580,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_terminate","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent tool use: %v", err)
@@ -1589,49 +1589,29 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	request := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate", FailureJson: failureJSON,
-		ToolSettlements: []*bridgev1.RuntimeToolSettlement{
-			bridgeCancelledToolSettlementForTest(toolUse.GetEventId(), "Loop-authored terminal cancellation."),
-		},
 	}
 	response, err := store.CommitRuntimeTermination(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitRuntimeTermination: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("termination ack = %s; want committed", response.GetAck().GetStatus())
-	}
-	if response.GetAck().GetRuntimeWriteId() != request.GetRuntimeWriteId() {
-		t.Fatalf("termination committed ack write id = %q; want %q", response.GetAck().GetRuntimeWriteId(), request.GetRuntimeWriteId())
-	}
-	if len(response.GetDeclaration().GetReceipts()) != 1 {
-		t.Fatalf("termination declaration receipts = %d; want 1", len(response.GetDeclaration().GetReceipts()))
-	}
-	receipt := response.GetDeclaration().GetReceipts()[0]
-	if receipt.GetOperationKind() != bridgeOpCommitRuntimeTermination ||
-		receipt.GetSourceKind() != "runtime_termination" ||
-		receipt.GetOperationId() != request.GetRuntimeWriteId() ||
-		len(receipt.GetMessages()) != 0 || len(receipt.GetEvents()) != 3 {
-		t.Fatalf("termination declaration receipt = %+v; want terminal events without message creation", receipt)
+	committed := response.GetCommitted()
+	if committed == nil || committed.GetFailureEventId() == "" || committed.GetCloseoutEventId() == "" {
+		t.Fatalf("termination result = %+v; want committed durable event ids", response)
 	}
 	replay, err := store.CommitRuntimeTermination(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitRuntimeTermination replay: %v", err)
 	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("termination replay ack = %s; want duplicate", replay.GetAck().GetStatus())
-	}
-	if replay.GetAck().GetRuntimeWriteId() != request.GetRuntimeWriteId() {
-		t.Fatalf("termination duplicate ack write id = %q; want %q", replay.GetAck().GetRuntimeWriteId(), request.GetRuntimeWriteId())
-	}
-	if !proto.Equal(response.GetDeclaration(), replay.GetDeclaration()) {
-		t.Fatalf("termination replay declaration differs: first=%+v replay=%+v", response.GetDeclaration(), replay.GetDeclaration())
+	duplicate := replay.GetDuplicate()
+	if duplicate == nil || duplicate.GetFailureEventId() != committed.GetFailureEventId() || duplicate.GetCloseoutEventId() != committed.GetCloseoutEventId() {
+		t.Fatalf("termination replay = %+v; want duplicate with original durable event ids", replay)
 	}
 	wrongCaller := internalgrpcauth.ContextWithIdentity(context.Background(), internalgrpcauth.Identity{
 		ServiceAccount:   internalgrpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"},
 		KubernetesPodUID: "pod_uid_other",
 	})
-	if _, err := store.CommitRuntimeTermination(wrongCaller, request); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("termination replay from wrong pod err = %v; want PermissionDenied", err)
+	if wrongPod, err := store.CommitRuntimeTermination(wrongCaller, request); err != nil || wrongPod.GetStale() == nil {
+		t.Fatalf("termination replay from wrong pod = %+v, %v; want stale without mutation", wrongPod, err)
 	}
 
 	var sessionStatus, threadStatus, waitStatus string
@@ -1781,8 +1761,8 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 		t.Fatalf("decode loop-authored terminal tool result: %v", err)
 	}
 	if len(toolResultProjection.Parts) != 1 ||
-		toolResultProjection.Parts[0].State.Error.Message != "Loop-authored terminal cancellation." {
-		t.Fatalf("terminal tool result projection = %+v; want loop-authored content", toolResultProjection)
+		toolResultProjection.Parts[0].State.Error.Message != "Runtime operation failed." {
+		t.Fatalf("terminal tool result projection = %+v; want Bridge-derived termination failure", toolResultProjection)
 	}
 	var completionWakeJobs int
 	if err := admin.QueryRowContext(context.Background(),
@@ -1827,7 +1807,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"allow"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_terminate_direct_sandbox_tool",
@@ -1837,7 +1817,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_terminate_direct_sandbox","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool use: %v", err)
@@ -1861,9 +1841,6 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	request := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_direct_sandbox", FailureJson: failureJSON,
-		ToolSettlements: []*bridgev1.RuntimeToolSettlement{
-			bridgeCancelledToolSettlementForTest(toolUse.GetEventId(), "Runtime terminated."),
-		},
 	}
 	response, err := store.CommitRuntimeTermination(context.Background(), request)
 	if err != nil {
@@ -1891,14 +1868,14 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 	).Scan(&toolResultCount); err != nil {
 		t.Fatalf("count terminated sandbox Tool Results: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+	if response.GetCommitted() == nil ||
 		executionState != "consumed" || resultJSON.Valid || terminalEventID == "" ||
 		consumptionReason != "runtime_terminated" || toolResultCount != 1 {
-		t.Fatalf("termination ack=%s execution=%q result=%v terminal=%q reason=%q events=%d; want committed consumed thin receipt and one Tool Result",
-			response.GetAck().GetStatus(), executionState, resultJSON, terminalEventID, consumptionReason, toolResultCount)
+		t.Fatalf("termination result=%+v execution=%q result=%v terminal=%q reason=%q events=%d; want committed consumed execution and one Tool Result",
+			response, executionState, resultJSON, terminalEventID, consumptionReason, toolResultCount)
 	}
 	newReleaseJobID := assertBridgeSandboxReleaseWoken(t, admin, releaseOperationID, oldReleaseJobID, 2)
-	if replay, err := store.CommitRuntimeTermination(context.Background(), request); err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+	if replay, err := store.CommitRuntimeTermination(context.Background(), request); err != nil || replay.GetDuplicate() == nil {
 		t.Fatalf("CommitRuntimeTermination replay = %#v, %v; want duplicate", replay, err)
 	}
 	if got := assertBridgeSandboxReleaseWoken(t, admin, releaseOperationID, oldReleaseJobID, 2); got != newReleaseJobID {
@@ -1924,7 +1901,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"allow"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			siblingScope,
 			"rwrite_terminate_sandbox_tool",
@@ -1934,7 +1911,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_terminate_sandbox","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool use: %v", err)
@@ -1944,7 +1921,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 20"},"evaluated_permission":"allow"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			siblingScope,
 			"rwrite_terminate_sandbox_blocker",
@@ -1954,7 +1931,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_terminate_sandbox_blocker","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 20"},"preview":"{\"command\":\"sleep 20\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent sibling Sandbox release blocker: %v", err)
@@ -1964,7 +1941,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 		EventType:      "agent.mcp_tool_use",
 		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"search_code","mcp_server_name":"github","input":{"q":"x"},"evaluated_permission":"allow"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			mcpSiblingScope,
 			"rwrite_terminate_sandbox_mcp",
@@ -1974,7 +1951,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_terminate_sandbox_mcp","toolName":"search_code","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent sibling MCP tool use: %v", err)
@@ -2070,15 +2047,15 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 	).Scan(&mcpSiblingStatus); err != nil {
 		t.Fatalf("read terminated MCP sibling status: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+	if response.GetCommitted() == nil ||
 		siblingStatus != "terminated" || mcpSiblingStatus != "terminated" || executionState != "consumed" || resultJSON.Valid ||
 		resultDigest != stagedResultDigest || terminalEventID != toolResultEventID ||
 		consumptionReason != "runtime_terminated" ||
 		toolResultCount != 1 || mcpResultCount != 1 ||
 		testJSONPathString(t, toolResultPayload, "reason") != "runtime_terminated" ||
 		testJSONPathString(t, mcpResultPayload, "reason") != "runtime_terminated" {
-		t.Fatalf("termination ack=%s siblings=%q/%q execution=%q result=%v digest=%q terminal=%q event=%q reason=%q counts=%d/%d sandbox=%s mcp=%s; want sibling terminal settlement and consumed thin receipt",
-			response.GetAck().GetStatus(), siblingStatus, mcpSiblingStatus, executionState, resultJSON, resultDigest,
+		t.Fatalf("termination result=%+v siblings=%q/%q execution=%q result=%v digest=%q terminal=%q event=%q reason=%q counts=%d/%d sandbox=%s mcp=%s; want sibling terminal settlement and consumed execution",
+			response, siblingStatus, mcpSiblingStatus, executionState, resultJSON, resultDigest,
 			terminalEventID, toolResultEventID, consumptionReason, toolResultCount, mcpResultCount, toolResultPayload, mcpResultPayload)
 	}
 	assertBridgeSandboxReleaseWoken(t, admin, releaseOperationID, oldReleaseJobID, 2)
@@ -2201,7 +2178,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"ask"}`,
 		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_child_terminate_tool",
@@ -2211,7 +2188,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_child_terminate","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent child tool use: %v", err)
@@ -2260,13 +2237,9 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 		"Agent errored: Loop-authored child failure.\n\nThis agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task.",
 	)
 	_, err = store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
-		Scope:                scope,
-		RuntimeWriteId:       "rwrite_child_terminate",
-		FailureJson:          `{"type":"provider","code":"provider_invalid_request","message":"Provider request failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"}}`,
-		CompletionMailCreate: bridgeCompletionMailCreateForTest(scope, "rwrite_child_terminate", envelope),
-		ToolSettlements: []*bridgev1.RuntimeToolSettlement{
-			bridgeCancelledToolSettlementForTest(toolUse.GetEventId(), "Loop-authored child cancellation."),
-		},
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_child_terminate",
+		FailureJson:    `{"type":"provider","code":"provider_invalid_request","message":"Loop-authored child failure.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"}}`,
 	})
 	if err != nil {
 		t.Fatalf("CommitRuntimeTermination child: %v", err)

@@ -260,8 +260,9 @@ with separate anchors.
 Sandbox dispatch accepts one exact durable Tool Use before waiting for its
 result. A cold Runtime rejoins that accepted execution after refreshing its
 binding token; a transient refresh failure does not invent a Tool Result or
-consume durable custody. The terminal result digest stays internal and is
-returned to Bridge with the loop-authored tool-result declaration.
+consume durable custody. Bridge reads and verifies the terminal Sandbox result
+digest from its own durable execution row when Runtime settles the Tool target;
+the digest never crosses the Runtime boundary.
 Sandbox activation exhaustion is normalized at this shared rejoin boundary for
 command, file, media, and command-I/O routes: the private lifecycle settlement
 becomes one non-retryable Runtime error whose public Tool Result contains only

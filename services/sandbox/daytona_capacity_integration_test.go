@@ -221,7 +221,6 @@ type daytonaCapacityWaiter struct {
 	threadID        string
 	toolUseEventID  string
 	modelToolCallID string
-	resultWriteID   string
 	operationID     string
 }
 
@@ -293,12 +292,12 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 		Scope: bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_tool_use", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
+		AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
 			Parts: []*bridgev1.RuntimePartCreate{{
 				PartKind: "tool",
 				PartJson: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"exec_command","state":{"status":"running","input":{"value":{"cmd":"true"},"preview":"{\"cmd\":\"true\"}","truncated":false}}}`,
 			}},
-		}},
+		},
 	})
 	if err != nil {
 		t.Fatalf("commit capacity-chain Tool Use: %v", err)
@@ -393,7 +392,7 @@ func (h *daytonaActivationHarness) primaryWaiter() daytonaCapacityWaiter {
 	return daytonaCapacityWaiter{
 		sessionID: "sesn_execution_store", threadID: "thr_execution_store",
 		toolUseEventID: h.toolUseEventID, modelToolCallID: h.modelToolCallID,
-		resultWriteID: "rwrite_capacity_chain_result", operationID: h.operationID,
+		operationID: h.operationID,
 	}
 }
 
@@ -407,12 +406,12 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_shared_tool_use", ModelRequestId: h.modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"printf shared"},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
+		AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
 			Parts: []*bridgev1.RuntimePartCreate{{
 				PartKind: "tool",
 				PartJson: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"exec_command","state":{"status":"running","input":{"value":{"cmd":"printf shared"},"preview":"{\"cmd\":\"printf shared\"}","truncated":false}}}`,
 			}},
-		}},
+		},
 	})
 	if err != nil {
 		t.Fatalf("commit shared capacity Tool Use: %v", err)
@@ -448,7 +447,7 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 	return daytonaCapacityWaiter{
 		sessionID: "sesn_execution_store", threadID: "thr_execution_store",
 		toolUseEventID: written.GetEventId(), modelToolCallID: modelToolCallID,
-		resultWriteID: "rwrite_capacity_chain_shared_result", operationID: operationID,
+		operationID: operationID,
 	}
 }
 
@@ -550,47 +549,38 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testi
 			t.Fatalf("%s Runtime exhaustion result = %+v; want exact generic rejoin failure", name, result)
 		}
 	}
-	if runtimeResult.Event.Type != "agent.tool_result" || runtimeResult.Event.ToolUseID != waiter.toolUseEventID ||
-		!runtimeResult.Event.IsError || len(runtimeResult.Event.Content) != 1 ||
-		runtimeResult.Event.Content[0].Type != "text" || runtimeResult.Event.Content[0].Text != "The requested operation could not be completed." {
-		t.Fatalf("Runtime exhaustion event = %+v; want one exact error text block", runtimeResult.Event)
-	}
-	payloadJSON, err := json.Marshal(runtimeResult.Event)
-	if err != nil {
-		t.Fatalf("encode Runtime exhaustion event: %v", err)
-	}
 	errorJSON := string(runtimeResult.DeclaredError)
-	writeRequest := &bridgev1.WriteEventRequest{
-		Scope: h.bridgeScope, RuntimeWriteId: waiter.resultWriteID, ModelRequestId: h.modelRequestID,
-		EventType: "agent.tool_result", PayloadJson: string(payloadJSON),
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
+	writeRequest := &bridgev1.SettleToolResultRequest{
+		Scope: h.bridgeScope,
+		Settlement: &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: waiter.toolUseEventID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: errorJSON}},
-		}},
+		},
 	}
-	committed, err := h.bridgeStore.WriteEvent(context.Background(), writeRequest)
+	committed, err := h.bridgeStore.SettleToolResult(context.Background(), writeRequest)
 	if err != nil {
 		t.Fatalf("commit Runtime exhaustion Tool Result: %v", err)
 	}
-	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("Runtime exhaustion Tool Result ack = %s; want committed", committed.GetAck().GetStatus())
+	if committed.GetCommitted() == nil {
+		t.Fatalf("Runtime exhaustion Tool Result = %+v; want committed", committed)
 	}
-	replayed, err := h.bridgeStore.WriteEvent(context.Background(), writeRequest)
-	if err != nil || replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		replayed.GetEventId() != committed.GetEventId() {
-		t.Fatalf("Runtime exhaustion Tool Result replay = %+v, %v; want duplicate original", replayed, err)
+	replayed, err := h.bridgeStore.SettleToolResult(context.Background(), writeRequest)
+	if err != nil || replayed.GetDuplicate() == nil {
+		t.Fatalf("Runtime exhaustion Tool Result replay = %+v, %v; want duplicate", replayed, err)
 	}
+	var resultEventID string
 	var durablePayload, visibility string
 	var sessionVisible bool
-	if err := h.admin.QueryRow(`SELECT payload_json, visibility, session_visible FROM session_events
-		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND event_id=$1`,
-		committed.GetEventId()).Scan(&durablePayload, &visibility, &sessionVisible); err != nil {
+	if err := h.admin.QueryRow(`SELECT event_id, payload_json, visibility, session_visible FROM session_events
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND type='agent.tool_result' AND payload_json::jsonb ->> 'tool_use_id'=$1`,
+		waiter.toolUseEventID).Scan(&resultEventID, &durablePayload, &visibility, &sessionVisible); err != nil {
 		t.Fatalf("read durable exhaustion Tool Result: %v", err)
 	}
 	if visibility != "public" || !sessionVisible {
 		t.Fatalf("durable exhaustion Tool Result visibility = %q/%t; want public/session-visible", visibility, sessionVisible)
 	}
-	publicJSON, err := eventwire.MarshalPublicEvent(committed.GetEventId(), "agent.tool_result", json.RawMessage(durablePayload), nil)
+	publicJSON, err := eventwire.MarshalPublicEvent(resultEventID, "agent.tool_result", json.RawMessage(durablePayload), nil)
 	if err != nil {
 		t.Fatalf("project public exhaustion Tool Result: %v", err)
 	}
@@ -710,10 +700,9 @@ func daytonaCapacityForbiddenDetails() []string {
 }
 
 type runtimeActivationExhaustionFixtureResult struct {
-	CommandResult runtimeActivationErrorResult     `json:"commandResult"`
-	FileResult    runtimeActivationErrorResult     `json:"fileResult"`
-	Event         runtimeActivationToolResultEvent `json:"event"`
-	DeclaredError json.RawMessage                  `json:"declaredError"`
+	CommandResult runtimeActivationErrorResult `json:"commandResult"`
+	FileResult    runtimeActivationErrorResult `json:"fileResult"`
+	DeclaredError json.RawMessage              `json:"declaredError"`
 }
 
 type runtimeActivationErrorResult struct {

@@ -11,14 +11,12 @@ import {
   RuntimeMessageCreateSchema,
   RuntimeMessageSchema,
   RuntimePartCreateSchema,
-  RuntimeToolSettlementDeclarationSchema,
   runtimeToolErrorFromFailure,
 } from "../contracts/runtime.js";
 import type {
   DurableRuntimeMessage,
   RuntimeAssistantPartAppend,
   RuntimeDeclarationReceipt,
-  RuntimeFailure,
   RuntimeMessage,
   RuntimeMessageCreate,
   RuntimePart,
@@ -395,72 +393,6 @@ export function completionMailCreate(input: { readonly envelope: string }): Runt
   });
 }
 
-/** Builds the same completion envelope for abnormal runtime closeout. */
-export function runtimeTerminationCompletionMailCreate(input: { readonly envelope: string }): RuntimeMessageCreate {
-  return completionMailCreate(input);
-}
-
-/** Builds exhaustive deterministic terminal settlements for runtime termination. */
-export function runtimeTerminationToolSettlements(input: {
-  readonly pendingTools: readonly { readonly toolUseEventId: string }[];
-  readonly failure: RuntimeFailure;
-}): readonly RuntimeToolSettlementDeclaration[] {
-  const seen = new Set<string>();
-  return input.pendingTools.map((pending) => {
-    if (seen.has(pending.toolUseEventId)) throw new Error("runtime termination Tool census is duplicated");
-    seen.add(pending.toolUseEventId);
-    return RuntimeToolSettlementDeclarationSchema.parse({
-      toolUseEventId: pending.toolUseEventId,
-      outcome: { type: "cancelled", error: input.failure },
-    });
-  });
-}
-
-/** Validates the positional Tool-result and terminal event stamps for termination. */
-export function validateRuntimeTerminationReceipt(input: {
-  readonly sessionThreadId: string;
-  readonly operationId: string;
-  readonly toolSettlements: readonly RuntimeToolSettlementDeclaration[];
-  readonly completionMailCreate?: RuntimeMessageCreate | undefined;
-}, receipt: RuntimeDeclarationReceipt): { readonly failureEventId: string; readonly closeoutEventId: string } {
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_runtime_termination",
-    sourceKind: "runtime_termination",
-    operationId: input.operationId,
-  });
-  const completionCount = input.completionMailCreate === undefined ? 0 : 1;
-  if (
-    receipt.events.length !== input.toolSettlements.length + completionCount + 2 ||
-    receipt.messages.length !== completionCount ||
-    receipt.interruptToolProjections.length !== 0 ||
-    receipt.pendingAttachmentDelta.length !== 0 ||
-    receipt.prefixConsumptions.length !== 0 ||
-    receipt.requestReschedule !== undefined ||
-    receipt.idleCloseout !== undefined ||
-    receipt.compactedThroughMessageSequence !== undefined
-  ) {
-    throw new Error("runtime termination receipt carrier set is incomplete");
-  }
-  assertCreatedEvents(receipt.events, input.sessionThreadId);
-  if (input.completionMailCreate !== undefined) {
-    const completionEvent = receipt.events[input.toolSettlements.length];
-    applyMessageCreateStamps({
-      sessionId: "runtime-termination-validation",
-      sessionThreadId: input.sessionThreadId,
-      creates: [input.completionMailCreate],
-      eventStamps: completionEvent === undefined ? [] : [completionEvent],
-      messageStamps: receipt.messages,
-      skipSessionValidation: true,
-    });
-  }
-  const terminalStart = input.toolSettlements.length + completionCount;
-  return {
-    failureEventId: receipt.events[terminalStart]!.eventId,
-    closeoutEventId: receipt.events[terminalStart + 1]!.eventId,
-  };
-}
-
 /** Validates an idle closeout and its optional child completion create. */
 export function validateFinishIdleReceipt(input: {
   readonly sessionThreadId: string;
@@ -675,28 +607,6 @@ export function applyAssistantPartAppendReceipt(input: {
     ...(existing?.responseId === undefined ? {} : { responseId: existing.responseId }),
     parts: [...(existing?.parts ?? []), ...parts],
   });
-}
-
-/** Validates an ordinary target settlement ACK and returns its result event. */
-export function applyToolSettlementReceipt(input: {
-  readonly sessionThreadId: string;
-  readonly operationKind: "write_event" | "commit_runtime_termination";
-  readonly sourceKind: string;
-  readonly operationId: string;
-  readonly eventId: string;
-  readonly settlement: RuntimeToolSettlementDeclaration;
-}, receipt: RuntimeDeclarationReceipt): RuntimeDeclarationReceipt["events"][number] {
-  assertOrdinaryDeclarationReceipt(receipt);
-  RuntimeToolSettlementDeclarationSchema.parse(input.settlement);
-  assertReceiptIdentity(receipt, input);
-  if (receipt.messages.length !== 0 || receipt.events.length !== 1 || receipt.interruptToolProjections.length !== 0) {
-    throw new Error("Tool settlement receipt carrier set is invalid");
-  }
-  const stamp = receipt.events[0]!;
-  if (stamp.sessionThreadId !== input.sessionThreadId || stamp.eventId !== input.eventId || stamp.disposition !== "created") {
-    throw new Error("Tool settlement event stamp is invalid");
-  }
-  return stamp;
 }
 
 function applyMessageCreateStamps(input: {

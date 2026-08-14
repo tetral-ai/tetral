@@ -19,8 +19,10 @@ import {
   SessionEventEnvelopeSchema,
   SessionEventSchema,
   SessionEventWriterAppendResultSchema,
+  SessionEventWriterAppendEventSchema,
   SessionEventWriterErrorSchema,
   SessionEventWriterRequestEndEnvelopeSchema,
+  SessionEventWriterToolSettlementEnvelopeSchema,
   boundRuntimeJson,
   boundRuntimeText,
   boundRuntimeToolError,
@@ -430,30 +432,37 @@ describe("runtime boundary contracts", () => {
       writeId: "rwrite_projection",
       modelRequestId: "mreq_projection",
     };
-    for (const { event } of [
-      { event: { type: "agent.tool_result" as const, tool_use_id: "sevt_tool", content: [{ type: "text" as const, text: "done" }] } },
-      { event: { type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", content: [{ type: "text" as const, text: "done" }] } },
-      { event: { type: "agent.message" as const, content: [{ type: "text" as const, text: "answer" }] } },
-    ]) {
-      const envelope = {
-        ...projectionBase,
-        event,
-        ...(event.type === "agent.message" ? {
-          assistantPartAppend: { parts: [{ type: "text" as const, text: "answer", truncated: false, status: "completed" as const }] },
-        } : {
-          toolSettlement: {
-            toolUseEventId: event.type === "agent.tool_result" ? event.tool_use_id : event.mcp_tool_use_id,
-            outcome: { type: "completed" as const, output: { text: "done", truncated: false } },
-          },
-        }),
-      };
-      expect(SessionEventEnvelopeSchema.safeParse(envelope).success).toBe(true);
-      expect(SessionEventEnvelopeSchema.safeParse({ ...envelope, modelRequestId: undefined }).success).toBe(false);
-    }
-    expect(SessionEventEnvelopeSchema.safeParse({
+    const messageEnvelope = {
       ...projectionBase,
-      event: { type: "agent.mcp_tool_result", mcp_tool_use_id: "sevt_mcp_uncertain", content: [{ type: "text", text: "Result is uncertain." }], is_error: true },
-      toolSettlement: {
+      event: { type: "agent.message" as const, content: [{ type: "text" as const, text: "answer" }] },
+      assistantPartAppend: { parts: [{ type: "text" as const, text: "answer", truncated: false, status: "completed" as const }] },
+    };
+    expect(SessionEventEnvelopeSchema.safeParse(messageEnvelope).success).toBe(true);
+    expect(SessionEventEnvelopeSchema.safeParse({ ...messageEnvelope, modelRequestId: undefined }).success).toBe(false);
+    for (const event of [
+      { type: "agent.tool_result", tool_use_id: "sevt_tool", content: [{ type: "text", text: "done" }] },
+      { type: "agent.mcp_tool_result", mcp_tool_use_id: "sevt_mcp", content: [{ type: "text", text: "done" }] },
+    ]) {
+      expect(SessionEventEnvelopeSchema.safeParse({ ...projectionBase, event }).success).toBe(false);
+    }
+    const settlementBase = {
+      workspaceId: "workspace-1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_1",
+      bindingId: "binding-1",
+      bindingGeneration: 1,
+      targetPodUid: "pod-1",
+    };
+    expect(SessionEventWriterToolSettlementEnvelopeSchema.safeParse({
+      ...settlementBase,
+      settlement: {
+        toolUseEventId: "sevt_tool",
+        outcome: { type: "completed", output: { text: "done", truncated: false } },
+      },
+    }).success).toBe(true);
+    expect(SessionEventWriterToolSettlementEnvelopeSchema.safeParse({
+      ...settlementBase,
+      settlement: {
         toolUseEventId: "sevt_mcp_uncertain",
         outcome: {
           type: "error",
@@ -565,7 +574,7 @@ describe("runtime boundary contracts", () => {
       normalizeRuntimeFailure({ type: "provider", code: "provider_invalid_request", retryable: false, fatal: true, retryStatus: { type: "terminal" } }),
     ];
 
-    expect(failures.map((error) => sessionEventForDurableWrite(SessionEventSchema.parse({ type: "session.error", error })))).toEqual([
+    expect(failures.map((error) => sessionEventForDurableWrite(SessionEventWriterAppendEventSchema.parse({ type: "session.error", error })))).toEqual([
       { type: "session.error", error: { type: "model_rate_limited_error", message: "Runtime operation failed.", retry_status: { type: "retrying" } } },
       { type: "session.error", error: { type: "model_overloaded_error", message: "Runtime operation failed.", retry_status: { type: "exhausted" } } },
       { type: "session.error", error: { type: "model_request_failed_error", message: "Runtime operation failed.", retry_status: { type: "terminal" } } },

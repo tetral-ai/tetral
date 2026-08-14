@@ -615,10 +615,12 @@ export interface RuntimeToolSettlement {
 
 export interface RuntimeToolCompleted {
   outputJson: string;
+  serverToolUse: ServerToolUseUsage | undefined;
 }
 
 export interface RuntimeToolError {
   errorJson: string;
+  serverToolUse: ServerToolUseUsage | undefined;
 }
 
 export interface RuntimeToolCancelled {
@@ -865,6 +867,27 @@ export interface McpToolCommitDuplicate {
 export interface McpToolCommitStale {
 }
 
+export interface RelinquishMcpToolResultRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+  claimId: string;
+}
+
+export interface RelinquishMcpToolResultResponse {
+  relinquished?: McpToolRelinquishRelinquished | undefined;
+  duplicate?: McpToolRelinquishDuplicate | undefined;
+  stale?: McpToolRelinquishStale | undefined;
+}
+
+export interface McpToolRelinquishRelinquished {
+}
+
+export interface McpToolRelinquishDuplicate {
+}
+
+export interface McpToolRelinquishStale {
+}
+
 export interface CommitInternalToolRepairRequest {
   scope: RuntimeScope | undefined;
   modelRequestId: string;
@@ -882,13 +905,25 @@ export interface CommitRuntimeTerminationRequest {
   scope: RuntimeScope | undefined;
   runtimeWriteId: string;
   failureJson: string;
-  toolSettlements: RuntimeToolSettlement[];
-  completionMailCreate: RuntimeMessageCreate | undefined;
 }
 
 export interface CommitRuntimeTerminationResponse {
-  ack: BridgeWriteAck | undefined;
-  declaration: DeclarationResponse | undefined;
+  committed?: RuntimeTerminationCommitted | undefined;
+  duplicate?: RuntimeTerminationDuplicate | undefined;
+  stale?: RuntimeTerminationStale | undefined;
+}
+
+export interface RuntimeTerminationCommitted {
+  failureEventId: string;
+  closeoutEventId: string;
+}
+
+export interface RuntimeTerminationDuplicate {
+  failureEventId: string;
+  closeoutEventId: string;
+}
+
+export interface RuntimeTerminationStale {
 }
 
 export interface TransientAttachmentRef {
@@ -974,9 +1009,7 @@ export interface WriteEventRequest {
   eventType: string;
   payloadJson: string;
   sessionVisible: boolean;
-  serverToolUse: ServerToolUseUsage | undefined;
-  assistantPartAppend?: RuntimeAssistantPartAppend | undefined;
-  toolSettlement?: RuntimeToolSettlement | undefined;
+  assistantPartAppend: RuntimeAssistantPartAppend | undefined;
   contextThroughMessageSequence?: number | undefined;
   requestKind: string;
 }
@@ -991,6 +1024,26 @@ export interface WriteEventResponse {
   eventId: string;
   sequence: number;
   declaration: DeclarationResponse | undefined;
+}
+
+export interface SettleToolResultRequest {
+  scope: RuntimeScope | undefined;
+  settlement: RuntimeToolSettlement | undefined;
+}
+
+export interface SettleToolResultResponse {
+  committed?: ToolResultCommitted | undefined;
+  duplicate?: ToolResultDuplicate | undefined;
+  stale?: ToolResultStale | undefined;
+}
+
+export interface ToolResultCommitted {
+}
+
+export interface ToolResultDuplicate {
+}
+
+export interface ToolResultStale {
 }
 
 export interface WriteRequestEndRequest {
@@ -1672,13 +1725,16 @@ export const RuntimeToolSettlement: MessageFns<RuntimeToolSettlement> = {
 };
 
 function createBaseRuntimeToolCompleted(): RuntimeToolCompleted {
-  return { outputJson: "" };
+  return { outputJson: "", serverToolUse: undefined };
 }
 
 export const RuntimeToolCompleted: MessageFns<RuntimeToolCompleted> = {
   encode(message: RuntimeToolCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.outputJson !== "") {
       writer.uint32(10).string(message.outputJson);
+    }
+    if (message.serverToolUse !== undefined) {
+      ServerToolUseUsage.encode(message.serverToolUse, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -1698,6 +1754,14 @@ export const RuntimeToolCompleted: MessageFns<RuntimeToolCompleted> = {
           message.outputJson = reader.string();
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.serverToolUse = ServerToolUseUsage.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1714,6 +1778,11 @@ export const RuntimeToolCompleted: MessageFns<RuntimeToolCompleted> = {
         : isSet(object.output_json)
         ? globalThis.String(object.output_json)
         : "",
+      serverToolUse: isSet(object.serverToolUse)
+        ? ServerToolUseUsage.fromJSON(object.serverToolUse)
+        : isSet(object.server_tool_use)
+        ? ServerToolUseUsage.fromJSON(object.server_tool_use)
+        : undefined,
     };
   },
 
@@ -1721,6 +1790,9 @@ export const RuntimeToolCompleted: MessageFns<RuntimeToolCompleted> = {
     const obj: any = {};
     if (message.outputJson !== "") {
       obj.outputJson = message.outputJson;
+    }
+    if (message.serverToolUse !== undefined) {
+      obj.serverToolUse = ServerToolUseUsage.toJSON(message.serverToolUse);
     }
     return obj;
   },
@@ -1731,18 +1803,24 @@ export const RuntimeToolCompleted: MessageFns<RuntimeToolCompleted> = {
   fromPartial<I extends Exact<DeepPartial<RuntimeToolCompleted>, I>>(object: I): RuntimeToolCompleted {
     const message = createBaseRuntimeToolCompleted();
     message.outputJson = object.outputJson ?? "";
+    message.serverToolUse = (object.serverToolUse !== undefined && object.serverToolUse !== null)
+      ? ServerToolUseUsage.fromPartial(object.serverToolUse)
+      : undefined;
     return message;
   },
 };
 
 function createBaseRuntimeToolError(): RuntimeToolError {
-  return { errorJson: "" };
+  return { errorJson: "", serverToolUse: undefined };
 }
 
 export const RuntimeToolError: MessageFns<RuntimeToolError> = {
   encode(message: RuntimeToolError, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.errorJson !== "") {
       writer.uint32(10).string(message.errorJson);
+    }
+    if (message.serverToolUse !== undefined) {
+      ServerToolUseUsage.encode(message.serverToolUse, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -1762,6 +1840,14 @@ export const RuntimeToolError: MessageFns<RuntimeToolError> = {
           message.errorJson = reader.string();
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.serverToolUse = ServerToolUseUsage.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1778,6 +1864,11 @@ export const RuntimeToolError: MessageFns<RuntimeToolError> = {
         : isSet(object.error_json)
         ? globalThis.String(object.error_json)
         : "",
+      serverToolUse: isSet(object.serverToolUse)
+        ? ServerToolUseUsage.fromJSON(object.serverToolUse)
+        : isSet(object.server_tool_use)
+        ? ServerToolUseUsage.fromJSON(object.server_tool_use)
+        : undefined,
     };
   },
 
@@ -1785,6 +1876,9 @@ export const RuntimeToolError: MessageFns<RuntimeToolError> = {
     const obj: any = {};
     if (message.errorJson !== "") {
       obj.errorJson = message.errorJson;
+    }
+    if (message.serverToolUse !== undefined) {
+      obj.serverToolUse = ServerToolUseUsage.toJSON(message.serverToolUse);
     }
     return obj;
   },
@@ -1795,6 +1889,9 @@ export const RuntimeToolError: MessageFns<RuntimeToolError> = {
   fromPartial<I extends Exact<DeepPartial<RuntimeToolError>, I>>(object: I): RuntimeToolError {
     const message = createBaseRuntimeToolError();
     message.errorJson = object.errorJson ?? "";
+    message.serverToolUse = (object.serverToolUse !== undefined && object.serverToolUse !== null)
+      ? ServerToolUseUsage.fromPartial(object.serverToolUse)
+      : undefined;
     return message;
   },
 };
@@ -6003,6 +6100,341 @@ export const McpToolCommitStale: MessageFns<McpToolCommitStale> = {
   },
 };
 
+function createBaseRelinquishMcpToolResultRequest(): RelinquishMcpToolResultRequest {
+  return { scope: undefined, toolUseEventId: "", claimId: "" };
+}
+
+export const RelinquishMcpToolResultRequest: MessageFns<RelinquishMcpToolResultRequest> = {
+  encode(message: RelinquishMcpToolResultRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    if (message.claimId !== "") {
+      writer.uint32(26).string(message.claimId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RelinquishMcpToolResultRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRelinquishMcpToolResultRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.claimId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RelinquishMcpToolResultRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      claimId: isSet(object.claimId)
+        ? globalThis.String(object.claimId)
+        : isSet(object.claim_id)
+        ? globalThis.String(object.claim_id)
+        : "",
+    };
+  },
+
+  toJSON(message: RelinquishMcpToolResultRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.claimId !== "") {
+      obj.claimId = message.claimId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RelinquishMcpToolResultRequest>, I>>(base?: I): RelinquishMcpToolResultRequest {
+    return RelinquishMcpToolResultRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RelinquishMcpToolResultRequest>, I>>(
+    object: I,
+  ): RelinquishMcpToolResultRequest {
+    const message = createBaseRelinquishMcpToolResultRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.claimId = object.claimId ?? "";
+    return message;
+  },
+};
+
+function createBaseRelinquishMcpToolResultResponse(): RelinquishMcpToolResultResponse {
+  return { relinquished: undefined, duplicate: undefined, stale: undefined };
+}
+
+export const RelinquishMcpToolResultResponse: MessageFns<RelinquishMcpToolResultResponse> = {
+  encode(message: RelinquishMcpToolResultResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.relinquished !== undefined) {
+      McpToolRelinquishRelinquished.encode(message.relinquished, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      McpToolRelinquishDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      McpToolRelinquishStale.encode(message.stale, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RelinquishMcpToolResultResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRelinquishMcpToolResultResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.relinquished = McpToolRelinquishRelinquished.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = McpToolRelinquishDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = McpToolRelinquishStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RelinquishMcpToolResultResponse {
+    return {
+      relinquished: isSet(object.relinquished)
+        ? McpToolRelinquishRelinquished.fromJSON(object.relinquished)
+        : undefined,
+      duplicate: isSet(object.duplicate) ? McpToolRelinquishDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? McpToolRelinquishStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: RelinquishMcpToolResultResponse): unknown {
+    const obj: any = {};
+    if (message.relinquished !== undefined) {
+      obj.relinquished = McpToolRelinquishRelinquished.toJSON(message.relinquished);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = McpToolRelinquishDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = McpToolRelinquishStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RelinquishMcpToolResultResponse>, I>>(base?: I): RelinquishMcpToolResultResponse {
+    return RelinquishMcpToolResultResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RelinquishMcpToolResultResponse>, I>>(
+    object: I,
+  ): RelinquishMcpToolResultResponse {
+    const message = createBaseRelinquishMcpToolResultResponse();
+    message.relinquished = (object.relinquished !== undefined && object.relinquished !== null)
+      ? McpToolRelinquishRelinquished.fromPartial(object.relinquished)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? McpToolRelinquishDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? McpToolRelinquishStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMcpToolRelinquishRelinquished(): McpToolRelinquishRelinquished {
+  return {};
+}
+
+export const McpToolRelinquishRelinquished: MessageFns<McpToolRelinquishRelinquished> = {
+  encode(_: McpToolRelinquishRelinquished, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolRelinquishRelinquished {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolRelinquishRelinquished();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolRelinquishRelinquished {
+    return {};
+  },
+
+  toJSON(_: McpToolRelinquishRelinquished): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolRelinquishRelinquished>, I>>(base?: I): McpToolRelinquishRelinquished {
+    return McpToolRelinquishRelinquished.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolRelinquishRelinquished>, I>>(_: I): McpToolRelinquishRelinquished {
+    const message = createBaseMcpToolRelinquishRelinquished();
+    return message;
+  },
+};
+
+function createBaseMcpToolRelinquishDuplicate(): McpToolRelinquishDuplicate {
+  return {};
+}
+
+export const McpToolRelinquishDuplicate: MessageFns<McpToolRelinquishDuplicate> = {
+  encode(_: McpToolRelinquishDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolRelinquishDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolRelinquishDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolRelinquishDuplicate {
+    return {};
+  },
+
+  toJSON(_: McpToolRelinquishDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolRelinquishDuplicate>, I>>(base?: I): McpToolRelinquishDuplicate {
+    return McpToolRelinquishDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolRelinquishDuplicate>, I>>(_: I): McpToolRelinquishDuplicate {
+    const message = createBaseMcpToolRelinquishDuplicate();
+    return message;
+  },
+};
+
+function createBaseMcpToolRelinquishStale(): McpToolRelinquishStale {
+  return {};
+}
+
+export const McpToolRelinquishStale: MessageFns<McpToolRelinquishStale> = {
+  encode(_: McpToolRelinquishStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): McpToolRelinquishStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMcpToolRelinquishStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): McpToolRelinquishStale {
+    return {};
+  },
+
+  toJSON(_: McpToolRelinquishStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<McpToolRelinquishStale>, I>>(base?: I): McpToolRelinquishStale {
+    return McpToolRelinquishStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<McpToolRelinquishStale>, I>>(_: I): McpToolRelinquishStale {
+    const message = createBaseMcpToolRelinquishStale();
+    return message;
+  },
+};
+
 function createBaseCommitInternalToolRepairRequest(): CommitInternalToolRepairRequest {
   return { scope: undefined, modelRequestId: "", modelToolCallId: "", toolName: "", messageCreate: undefined };
 }
@@ -6234,13 +6666,7 @@ export const CommitInternalToolRepairResponse: MessageFns<CommitInternalToolRepa
 };
 
 function createBaseCommitRuntimeTerminationRequest(): CommitRuntimeTerminationRequest {
-  return {
-    scope: undefined,
-    runtimeWriteId: "",
-    failureJson: "",
-    toolSettlements: [],
-    completionMailCreate: undefined,
-  };
+  return { scope: undefined, runtimeWriteId: "", failureJson: "" };
 }
 
 export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminationRequest> = {
@@ -6253,12 +6679,6 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     }
     if (message.failureJson !== "") {
       writer.uint32(26).string(message.failureJson);
-    }
-    for (const v of message.toolSettlements) {
-      RuntimeToolSettlement.encode(v!, writer.uint32(34).fork()).join();
-    }
-    if (message.completionMailCreate !== undefined) {
-      RuntimeMessageCreate.encode(message.completionMailCreate, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -6294,22 +6714,6 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
           message.failureJson = reader.string();
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.toolSettlements.push(RuntimeToolSettlement.decode(reader, reader.uint32()));
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.completionMailCreate = RuntimeMessageCreate.decode(reader, reader.uint32());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6332,16 +6736,6 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
         : isSet(object.failure_json)
         ? globalThis.String(object.failure_json)
         : "",
-      toolSettlements: globalThis.Array.isArray(object?.toolSettlements)
-        ? object.toolSettlements.map((e: any) => RuntimeToolSettlement.fromJSON(e))
-        : globalThis.Array.isArray(object?.tool_settlements)
-        ? object.tool_settlements.map((e: any) => RuntimeToolSettlement.fromJSON(e))
-        : [],
-      completionMailCreate: isSet(object.completionMailCreate)
-        ? RuntimeMessageCreate.fromJSON(object.completionMailCreate)
-        : isSet(object.completion_mail_create)
-        ? RuntimeMessageCreate.fromJSON(object.completion_mail_create)
-        : undefined,
     };
   },
 
@@ -6355,12 +6749,6 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     }
     if (message.failureJson !== "") {
       obj.failureJson = message.failureJson;
-    }
-    if (message.toolSettlements?.length) {
-      obj.toolSettlements = message.toolSettlements.map((e) => RuntimeToolSettlement.toJSON(e));
-    }
-    if (message.completionMailCreate !== undefined) {
-      obj.completionMailCreate = RuntimeMessageCreate.toJSON(message.completionMailCreate);
     }
     return obj;
   },
@@ -6377,25 +6765,24 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
       : undefined;
     message.runtimeWriteId = object.runtimeWriteId ?? "";
     message.failureJson = object.failureJson ?? "";
-    message.toolSettlements = object.toolSettlements?.map((e) => RuntimeToolSettlement.fromPartial(e)) || [];
-    message.completionMailCreate = (object.completionMailCreate !== undefined && object.completionMailCreate !== null)
-      ? RuntimeMessageCreate.fromPartial(object.completionMailCreate)
-      : undefined;
     return message;
   },
 };
 
 function createBaseCommitRuntimeTerminationResponse(): CommitRuntimeTerminationResponse {
-  return { ack: undefined, declaration: undefined };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminationResponse> = {
   encode(message: CommitRuntimeTerminationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.ack !== undefined) {
-      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    if (message.committed !== undefined) {
+      RuntimeTerminationCommitted.encode(message.committed, writer.uint32(10).fork()).join();
     }
-    if (message.declaration !== undefined) {
-      DeclarationResponse.encode(message.declaration, writer.uint32(18).fork()).join();
+    if (message.duplicate !== undefined) {
+      RuntimeTerminationDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      RuntimeTerminationStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -6412,7 +6799,7 @@ export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminati
             break;
           }
 
-          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          message.committed = RuntimeTerminationCommitted.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
@@ -6420,7 +6807,15 @@ export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminati
             break;
           }
 
-          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          message.duplicate = RuntimeTerminationDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = RuntimeTerminationStale.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -6434,18 +6829,22 @@ export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminati
 
   fromJSON(object: any): CommitRuntimeTerminationResponse {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
-      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+      committed: isSet(object.committed) ? RuntimeTerminationCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? RuntimeTerminationDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? RuntimeTerminationStale.fromJSON(object.stale) : undefined,
     };
   },
 
   toJSON(message: CommitRuntimeTerminationResponse): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    if (message.committed !== undefined) {
+      obj.committed = RuntimeTerminationCommitted.toJSON(message.committed);
     }
-    if (message.declaration !== undefined) {
-      obj.declaration = DeclarationResponse.toJSON(message.declaration);
+    if (message.duplicate !== undefined) {
+      obj.duplicate = RuntimeTerminationDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = RuntimeTerminationStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -6459,12 +6858,226 @@ export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminati
     object: I,
   ): CommitRuntimeTerminationResponse {
     const message = createBaseCommitRuntimeTerminationResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? RuntimeTerminationCommitted.fromPartial(object.committed)
       : undefined;
-    message.declaration = (object.declaration !== undefined && object.declaration !== null)
-      ? DeclarationResponse.fromPartial(object.declaration)
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? RuntimeTerminationDuplicate.fromPartial(object.duplicate)
       : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? RuntimeTerminationStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeTerminationCommitted(): RuntimeTerminationCommitted {
+  return { failureEventId: "", closeoutEventId: "" };
+}
+
+export const RuntimeTerminationCommitted: MessageFns<RuntimeTerminationCommitted> = {
+  encode(message: RuntimeTerminationCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.failureEventId !== "") {
+      writer.uint32(10).string(message.failureEventId);
+    }
+    if (message.closeoutEventId !== "") {
+      writer.uint32(18).string(message.closeoutEventId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeTerminationCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeTerminationCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.failureEventId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.closeoutEventId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeTerminationCommitted {
+    return {
+      failureEventId: isSet(object.failureEventId)
+        ? globalThis.String(object.failureEventId)
+        : isSet(object.failure_event_id)
+        ? globalThis.String(object.failure_event_id)
+        : "",
+      closeoutEventId: isSet(object.closeoutEventId)
+        ? globalThis.String(object.closeoutEventId)
+        : isSet(object.closeout_event_id)
+        ? globalThis.String(object.closeout_event_id)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeTerminationCommitted): unknown {
+    const obj: any = {};
+    if (message.failureEventId !== "") {
+      obj.failureEventId = message.failureEventId;
+    }
+    if (message.closeoutEventId !== "") {
+      obj.closeoutEventId = message.closeoutEventId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeTerminationCommitted>, I>>(base?: I): RuntimeTerminationCommitted {
+    return RuntimeTerminationCommitted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeTerminationCommitted>, I>>(object: I): RuntimeTerminationCommitted {
+    const message = createBaseRuntimeTerminationCommitted();
+    message.failureEventId = object.failureEventId ?? "";
+    message.closeoutEventId = object.closeoutEventId ?? "";
+    return message;
+  },
+};
+
+function createBaseRuntimeTerminationDuplicate(): RuntimeTerminationDuplicate {
+  return { failureEventId: "", closeoutEventId: "" };
+}
+
+export const RuntimeTerminationDuplicate: MessageFns<RuntimeTerminationDuplicate> = {
+  encode(message: RuntimeTerminationDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.failureEventId !== "") {
+      writer.uint32(10).string(message.failureEventId);
+    }
+    if (message.closeoutEventId !== "") {
+      writer.uint32(18).string(message.closeoutEventId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeTerminationDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeTerminationDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.failureEventId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.closeoutEventId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeTerminationDuplicate {
+    return {
+      failureEventId: isSet(object.failureEventId)
+        ? globalThis.String(object.failureEventId)
+        : isSet(object.failure_event_id)
+        ? globalThis.String(object.failure_event_id)
+        : "",
+      closeoutEventId: isSet(object.closeoutEventId)
+        ? globalThis.String(object.closeoutEventId)
+        : isSet(object.closeout_event_id)
+        ? globalThis.String(object.closeout_event_id)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeTerminationDuplicate): unknown {
+    const obj: any = {};
+    if (message.failureEventId !== "") {
+      obj.failureEventId = message.failureEventId;
+    }
+    if (message.closeoutEventId !== "") {
+      obj.closeoutEventId = message.closeoutEventId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeTerminationDuplicate>, I>>(base?: I): RuntimeTerminationDuplicate {
+    return RuntimeTerminationDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeTerminationDuplicate>, I>>(object: I): RuntimeTerminationDuplicate {
+    const message = createBaseRuntimeTerminationDuplicate();
+    message.failureEventId = object.failureEventId ?? "";
+    message.closeoutEventId = object.closeoutEventId ?? "";
+    return message;
+  },
+};
+
+function createBaseRuntimeTerminationStale(): RuntimeTerminationStale {
+  return {};
+}
+
+export const RuntimeTerminationStale: MessageFns<RuntimeTerminationStale> = {
+  encode(_: RuntimeTerminationStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeTerminationStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeTerminationStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): RuntimeTerminationStale {
+    return {};
+  },
+
+  toJSON(_: RuntimeTerminationStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeTerminationStale>, I>>(base?: I): RuntimeTerminationStale {
+    return RuntimeTerminationStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeTerminationStale>, I>>(_: I): RuntimeTerminationStale {
+    const message = createBaseRuntimeTerminationStale();
     return message;
   },
 };
@@ -7746,9 +8359,7 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     eventType: "",
     payloadJson: "",
     sessionVisible: false,
-    serverToolUse: undefined,
     assistantPartAppend: undefined,
-    toolSettlement: undefined,
     contextThroughMessageSequence: undefined,
     requestKind: "",
   };
@@ -7774,14 +8385,8 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.sessionVisible !== false) {
       writer.uint32(56).bool(message.sessionVisible);
     }
-    if (message.serverToolUse !== undefined) {
-      ServerToolUseUsage.encode(message.serverToolUse, writer.uint32(74).fork()).join();
-    }
     if (message.assistantPartAppend !== undefined) {
       RuntimeAssistantPartAppend.encode(message.assistantPartAppend, writer.uint32(82).fork()).join();
-    }
-    if (message.toolSettlement !== undefined) {
-      RuntimeToolSettlement.encode(message.toolSettlement, writer.uint32(122).fork()).join();
     }
     if (message.contextThroughMessageSequence !== undefined) {
       writer.uint32(104).int64(message.contextThroughMessageSequence);
@@ -7847,28 +8452,12 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.sessionVisible = reader.bool();
           continue;
         }
-        case 9: {
-          if (tag !== 74) {
-            break;
-          }
-
-          message.serverToolUse = ServerToolUseUsage.decode(reader, reader.uint32());
-          continue;
-        }
         case 10: {
           if (tag !== 82) {
             break;
           }
 
           message.assistantPartAppend = RuntimeAssistantPartAppend.decode(reader, reader.uint32());
-          continue;
-        }
-        case 15: {
-          if (tag !== 122) {
-            break;
-          }
-
-          message.toolSettlement = RuntimeToolSettlement.decode(reader, reader.uint32());
           continue;
         }
         case 13: {
@@ -7924,20 +8513,10 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.session_visible)
         ? globalThis.Boolean(object.session_visible)
         : false,
-      serverToolUse: isSet(object.serverToolUse)
-        ? ServerToolUseUsage.fromJSON(object.serverToolUse)
-        : isSet(object.server_tool_use)
-        ? ServerToolUseUsage.fromJSON(object.server_tool_use)
-        : undefined,
       assistantPartAppend: isSet(object.assistantPartAppend)
         ? RuntimeAssistantPartAppend.fromJSON(object.assistantPartAppend)
         : isSet(object.assistant_part_append)
         ? RuntimeAssistantPartAppend.fromJSON(object.assistant_part_append)
-        : undefined,
-      toolSettlement: isSet(object.toolSettlement)
-        ? RuntimeToolSettlement.fromJSON(object.toolSettlement)
-        : isSet(object.tool_settlement)
-        ? RuntimeToolSettlement.fromJSON(object.tool_settlement)
         : undefined,
       contextThroughMessageSequence: isSet(object.contextThroughMessageSequence)
         ? globalThis.Number(object.contextThroughMessageSequence)
@@ -7972,14 +8551,8 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.sessionVisible !== false) {
       obj.sessionVisible = message.sessionVisible;
     }
-    if (message.serverToolUse !== undefined) {
-      obj.serverToolUse = ServerToolUseUsage.toJSON(message.serverToolUse);
-    }
     if (message.assistantPartAppend !== undefined) {
       obj.assistantPartAppend = RuntimeAssistantPartAppend.toJSON(message.assistantPartAppend);
-    }
-    if (message.toolSettlement !== undefined) {
-      obj.toolSettlement = RuntimeToolSettlement.toJSON(message.toolSettlement);
     }
     if (message.contextThroughMessageSequence !== undefined) {
       obj.contextThroughMessageSequence = Math.round(message.contextThroughMessageSequence);
@@ -8003,14 +8576,8 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.eventType = object.eventType ?? "";
     message.payloadJson = object.payloadJson ?? "";
     message.sessionVisible = object.sessionVisible ?? false;
-    message.serverToolUse = (object.serverToolUse !== undefined && object.serverToolUse !== null)
-      ? ServerToolUseUsage.fromPartial(object.serverToolUse)
-      : undefined;
     message.assistantPartAppend = (object.assistantPartAppend !== undefined && object.assistantPartAppend !== null)
       ? RuntimeAssistantPartAppend.fromPartial(object.assistantPartAppend)
-      : undefined;
-    message.toolSettlement = (object.toolSettlement !== undefined && object.toolSettlement !== null)
-      ? RuntimeToolSettlement.fromPartial(object.toolSettlement)
       : undefined;
     message.contextThroughMessageSequence = object.contextThroughMessageSequence ?? undefined;
     message.requestKind = object.requestKind ?? "";
@@ -8214,6 +8781,313 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
     message.declaration = (object.declaration !== undefined && object.declaration !== null)
       ? DeclarationResponse.fromPartial(object.declaration)
       : undefined;
+    return message;
+  },
+};
+
+function createBaseSettleToolResultRequest(): SettleToolResultRequest {
+  return { scope: undefined, settlement: undefined };
+}
+
+export const SettleToolResultRequest: MessageFns<SettleToolResultRequest> = {
+  encode(message: SettleToolResultRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.settlement !== undefined) {
+      RuntimeToolSettlement.encode(message.settlement, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SettleToolResultRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSettleToolResultRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.settlement = RuntimeToolSettlement.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SettleToolResultRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      settlement: isSet(object.settlement) ? RuntimeToolSettlement.fromJSON(object.settlement) : undefined,
+    };
+  },
+
+  toJSON(message: SettleToolResultRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.settlement !== undefined) {
+      obj.settlement = RuntimeToolSettlement.toJSON(message.settlement);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SettleToolResultRequest>, I>>(base?: I): SettleToolResultRequest {
+    return SettleToolResultRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SettleToolResultRequest>, I>>(object: I): SettleToolResultRequest {
+    const message = createBaseSettleToolResultRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.settlement = (object.settlement !== undefined && object.settlement !== null)
+      ? RuntimeToolSettlement.fromPartial(object.settlement)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseSettleToolResultResponse(): SettleToolResultResponse {
+  return { committed: undefined, duplicate: undefined, stale: undefined };
+}
+
+export const SettleToolResultResponse: MessageFns<SettleToolResultResponse> = {
+  encode(message: SettleToolResultResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.committed !== undefined) {
+      ToolResultCommitted.encode(message.committed, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      ToolResultDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      ToolResultStale.encode(message.stale, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SettleToolResultResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSettleToolResultResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.committed = ToolResultCommitted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = ToolResultDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = ToolResultStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SettleToolResultResponse {
+    return {
+      committed: isSet(object.committed) ? ToolResultCommitted.fromJSON(object.committed) : undefined,
+      duplicate: isSet(object.duplicate) ? ToolResultDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? ToolResultStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: SettleToolResultResponse): unknown {
+    const obj: any = {};
+    if (message.committed !== undefined) {
+      obj.committed = ToolResultCommitted.toJSON(message.committed);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = ToolResultDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = ToolResultStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SettleToolResultResponse>, I>>(base?: I): SettleToolResultResponse {
+    return SettleToolResultResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SettleToolResultResponse>, I>>(object: I): SettleToolResultResponse {
+    const message = createBaseSettleToolResultResponse();
+    message.committed = (object.committed !== undefined && object.committed !== null)
+      ? ToolResultCommitted.fromPartial(object.committed)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? ToolResultDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? ToolResultStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseToolResultCommitted(): ToolResultCommitted {
+  return {};
+}
+
+export const ToolResultCommitted: MessageFns<ToolResultCommitted> = {
+  encode(_: ToolResultCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolResultCommitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolResultCommitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ToolResultCommitted {
+    return {};
+  },
+
+  toJSON(_: ToolResultCommitted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolResultCommitted>, I>>(base?: I): ToolResultCommitted {
+    return ToolResultCommitted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolResultCommitted>, I>>(_: I): ToolResultCommitted {
+    const message = createBaseToolResultCommitted();
+    return message;
+  },
+};
+
+function createBaseToolResultDuplicate(): ToolResultDuplicate {
+  return {};
+}
+
+export const ToolResultDuplicate: MessageFns<ToolResultDuplicate> = {
+  encode(_: ToolResultDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolResultDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolResultDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ToolResultDuplicate {
+    return {};
+  },
+
+  toJSON(_: ToolResultDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolResultDuplicate>, I>>(base?: I): ToolResultDuplicate {
+    return ToolResultDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolResultDuplicate>, I>>(_: I): ToolResultDuplicate {
+    const message = createBaseToolResultDuplicate();
+    return message;
+  },
+};
+
+function createBaseToolResultStale(): ToolResultStale {
+  return {};
+}
+
+export const ToolResultStale: MessageFns<ToolResultStale> = {
+  encode(_: ToolResultStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolResultStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolResultStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ToolResultStale {
+    return {};
+  },
+
+  toJSON(_: ToolResultStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolResultStale>, I>>(base?: I): ToolResultStale {
+    return ToolResultStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolResultStale>, I>>(_: I): ToolResultStale {
+    const message = createBaseToolResultStale();
     return message;
   },
 };
@@ -13662,6 +14536,17 @@ export const AgentRuntimeBridgeServiceService = {
     responseSerialize: (value: WriteEventResponse): Buffer => Buffer.from(WriteEventResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): WriteEventResponse => WriteEventResponse.decode(value),
   },
+  settleToolResult: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/SettleToolResult" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: SettleToolResultRequest): Buffer =>
+      Buffer.from(SettleToolResultRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): SettleToolResultRequest => SettleToolResultRequest.decode(value),
+    responseSerialize: (value: SettleToolResultResponse): Buffer =>
+      Buffer.from(SettleToolResultResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): SettleToolResultResponse => SettleToolResultResponse.decode(value),
+  },
   writeRequestEnd: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteRequestEnd" as const,
     requestStream: false as const,
@@ -13907,6 +14792,18 @@ export const AgentRuntimeBridgeServiceService = {
       Buffer.from(CommitMcpToolResultResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): CommitMcpToolResultResponse => CommitMcpToolResultResponse.decode(value),
   },
+  relinquishMcpToolResult: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/RelinquishMcpToolResult" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RelinquishMcpToolResultRequest): Buffer =>
+      Buffer.from(RelinquishMcpToolResultRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RelinquishMcpToolResultRequest => RelinquishMcpToolResultRequest.decode(value),
+    responseSerialize: (value: RelinquishMcpToolResultResponse): Buffer =>
+      Buffer.from(RelinquishMcpToolResultResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RelinquishMcpToolResultResponse =>
+      RelinquishMcpToolResultResponse.decode(value),
+  },
   commitInternalToolRepair: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInternalToolRepair" as const,
     requestStream: false as const,
@@ -13944,6 +14841,7 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
     CommitTaskNotificationResultResponse
   >;
   writeEvent: handleUnaryCall<WriteEventRequest, WriteEventResponse>;
+  settleToolResult: handleUnaryCall<SettleToolResultRequest, SettleToolResultResponse>;
   writeRequestEnd: handleUnaryCall<WriteRequestEndRequest, WriteRequestEndResponse>;
   finishIdle: handleUnaryCall<FinishIdleRequest, FinishIdleResponse>;
   createChildThread: handleUnaryCall<CreateChildThreadRequest, CreateChildThreadResponse>;
@@ -13969,6 +14867,7 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   mcpManifestChanged: handleUnaryCall<McpManifestChangedRequest, McpManifestChangedResponse>;
   claimMcpToolResult: handleUnaryCall<ClaimMcpToolResultRequest, ClaimMcpToolResultResponse>;
   commitMcpToolResult: handleUnaryCall<CommitMcpToolResultRequest, CommitMcpToolResultResponse>;
+  relinquishMcpToolResult: handleUnaryCall<RelinquishMcpToolResultRequest, RelinquishMcpToolResultResponse>;
   commitInternalToolRepair: handleUnaryCall<CommitInternalToolRepairRequest, CommitInternalToolRepairResponse>;
   commitRuntimeTermination: handleUnaryCall<CommitRuntimeTerminationRequest, CommitRuntimeTerminationResponse>;
 }
@@ -14049,6 +14948,21 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: WriteEventResponse) => void,
   ): ClientUnaryCall;
+  settleToolResult(
+    request: SettleToolResultRequest,
+    callback: (error: ServiceError | null, response: SettleToolResultResponse) => void,
+  ): ClientUnaryCall;
+  settleToolResult(
+    request: SettleToolResultRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: SettleToolResultResponse) => void,
+  ): ClientUnaryCall;
+  settleToolResult(
+    request: SettleToolResultRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: SettleToolResultResponse) => void,
+  ): ClientUnaryCall;
   writeRequestEnd(
     request: WriteRequestEndRequest,
     callback: (error: ServiceError | null, response: WriteRequestEndResponse) => void,
@@ -14378,6 +15292,21 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ): ClientUnaryCall;
+  relinquishMcpToolResult(
+    request: RelinquishMcpToolResultRequest,
+    callback: (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => void,
+  ): ClientUnaryCall;
+  relinquishMcpToolResult(
+    request: RelinquishMcpToolResultRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => void,
+  ): ClientUnaryCall;
+  relinquishMcpToolResult(
+    request: RelinquishMcpToolResultRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => void,
   ): ClientUnaryCall;
   commitInternalToolRepair(
     request: CommitInternalToolRepairRequest,

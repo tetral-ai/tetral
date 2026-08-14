@@ -1,7 +1,7 @@
 import { describe, expect, jest, test } from "bun:test";
 import { Cause, Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect";
 import { ProviderRequestKind, SystemCacheHint, SystemSegmentKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterRequestEndEnvelope } from "../../../src/contracts/runtime.js";
+import type { SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterRequestEndEnvelope, SessionEventWriterToolSettlementEnvelope } from "../../../src/contracts/runtime.js";
 import { DurableRuntimeMessageSchema, SessionEventWriterRetryPolicy, normalizeSessionEventWriterError } from "../../../src/contracts/runtime.js";
 import { LLMEventSchema } from "../../../src/llm/llm-event.js";
 import type { LLMEvent } from "../../../src/llm/llm-event.js";
@@ -606,6 +606,7 @@ test("provider reschedule does not repeat committed RunTool effect", async () =>
         },
     };
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => {
         appended.push(envelope.event);
@@ -616,6 +617,10 @@ test("provider reschedule does not repeat committed RunTool effect", async () =>
     });
     const writer: SessionEventWriter = {
         ...baseWriter,
+        settleToolResult: async (envelope) => {
+            settlements.push(envelope);
+            return await baseWriter.settleToolResult(envelope);
+        },
         writeRequestEnd: async (envelope) => {
             requestEnds.push(envelope);
             if (envelope.reschedule !== undefined) {
@@ -647,18 +652,18 @@ test("provider reschedule does not repeat committed RunTool effect", async () =>
     const requestThreeContext = JSON.stringify(requests[2]?.context);
     const hotContext = JSON.stringify(session.state.contextManager.messages());
     const durableAppendEvents = JSON.stringify(appended);
-    const terminalToolResults = appended.filter((event) => event.type === "agent.tool_result");
     const occurrenceCount = (value: string, needle: string) => value.split(needle).length - 1;
     expect(result).toMatchObject({ type: "completed" });
     expect(requests).toHaveLength(3);
     expect(mutatingHelperExecutions).toBe(1);
-    expect(terminalToolResults).toEqual([
+    expect(settlements).toEqual([
         expect.objectContaining({
-            tool_use_id: "sevt_reschedule_mutation",
-            content: [{ type: "text", text: committedToolOutput }],
+            settlement: {
+                toolUseEventId: "sevt_reschedule_mutation",
+                outcome: { type: "completed", output: { text: committedToolOutput, truncated: false } },
+            },
         }),
     ]);
-    expect(terminalToolResults[0]).not.toHaveProperty("is_error");
     expect(occurrenceCount(requestTwoContext, committedToolOutput)).toBe(1);
     expect(occurrenceCount(requestThreeContext, committedToolOutput)).toBe(1);
     expect(requestThreeContext).not.toContain(failedReasoning);
@@ -732,12 +737,10 @@ test("same-request committed tool is repaired and rebased before provider resche
         },
     };
     const appended: SessionEventEnvelope[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const writer = writerFrom((envelope) => {
         appended.push(envelope);
-        if (envelope.event.type === "agent.tool_result") {
-            toolResultCommitted.resolve();
-        }
         return {
             ok: true,
             writeId: envelope.writeId,
@@ -755,6 +758,10 @@ test("same-request committed tool is repaired and rebased before provider resche
                 rescheduleDisposition: { status: "accepted" as const, attempt: envelope.reschedule.attempt, effectiveDeadline: createdAt },
             }),
         };
+    }, [], undefined, async (envelope) => {
+        settlements.push(envelope);
+        toolResultCommitted.resolve();
+        return { ok: true, result: { type: "committed" } };
     });
     let helperMutations = 0;
     const result = await Effect.runPromise(Effect.gen(function* () {
@@ -783,7 +790,7 @@ test("same-request committed tool is repaired and rebased before provider resche
     expect(toolAnchor?.assistantPartAppend?.parts.flatMap((part) => part.type === "reasoning" ? [part.text] : [])).toEqual(["reason before mutation"]);
     expect(toolAnchor?.modelRequestId).toBe(requestEnds[0]?.modelRequestId);
     expect(appended.filter((envelope) => (envelope.assistantPartAppend?.parts.some((part) => part.type === "reasoning") ?? false))).toHaveLength(1);
-    expect(appended.filter((envelope) => envelope.event.type === "agent.tool_result")).toHaveLength(1);
+    expect(settlements).toHaveLength(1);
     expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
     expect(requestEnds[0]?.trailingPartAppend).toBeUndefined();
 });
@@ -791,6 +798,7 @@ test("runtime layer discards hot state when a tool route observes stale custody"
     const session = new ThreadRuntime("sesn_1");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
         return yield* threadLoop.run(session, testRunCustody());
@@ -803,6 +811,9 @@ test("runtime layer discards hot state when a tool route observes stale custody"
                 eventId: envelope.event.type === "agent.tool_use" ? "bridge-tool" : `bridge-${envelope.writeId}`,
                 processedAt: createdAt,
             };
+        }, undefined, [], undefined, async (envelope) => {
+            settlements.push(envelope);
+            return { ok: true, result: { type: "committed" } };
         }),
         events: [
             {
@@ -821,7 +832,7 @@ test("runtime layer discards hot state when a tool route observes stale custody"
         runTool: () => ({ type: "stale_custody" }),
     }))));
     expect(result).toEqual({ type: "interrupted", discardHotState: true });
-    expect(appended.some((event) => event.type === "agent.tool_result")).toBe(false);
+    expect(settlements).toEqual([]);
 });
 test("runtime layer tracks background tool state until task notification settlement", async () => {
     const session = new ThreadRuntime("sesn_1");
@@ -1109,6 +1120,7 @@ test("request-end failure cancels and durably settles an acknowledged live tool"
     const session = new ThreadRuntime("sesn_1");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "write it")] });
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const toolStarted = deferred<void>();
     let toolSignal: AbortSignal | undefined;
     const baseWriter = writerFrom((envelope) => {
@@ -1122,6 +1134,10 @@ test("request-end failure cancels and durably settles an acknowledged live tool"
     });
     const writer: SessionEventWriter = {
         ...baseWriter,
+        settleToolResult: async (envelope) => {
+            settlements.push(envelope);
+            return await baseWriter.settleToolResult(envelope);
+        },
         writeRequestEnd: async (envelope) => ({
             ok: false,
             error: {
@@ -1177,8 +1193,8 @@ test("request-end failure cancels and durably settles an acknowledged live tool"
     });
     expect(toolSignal?.aborted).toBe(true);
     expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(1);
-    expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([
-        expect.objectContaining({ tool_use_id: "sevt_live_tool", is_error: true }),
+    expect(settlements).toEqual([
+        expect.objectContaining({ settlement: expect.objectContaining({ toolUseEventId: "sevt_live_tool", outcome: expect.objectContaining({ type: "cancelled" }) }) }),
     ]);
 });
 test("request end waits for an in-flight Tool Result declaration ACK", async () => {
@@ -1198,12 +1214,10 @@ test("request end waits for an in-flight Tool Result declaration ACK", async () 
     }));
     const writer: SessionEventWriter = {
         ...baseWriter,
-        append: async (envelope) => {
-            if (envelope.event.type === "agent.tool_result") {
-                resultAppendArrived.resolve(undefined);
-                await releaseResultAppend.promise;
-            }
-            return await baseWriter.append(envelope);
+        settleToolResult: async (envelope) => {
+            resultAppendArrived.resolve(undefined);
+            await releaseResultAppend.promise;
+            return await baseWriter.settleToolResult(envelope);
         },
         writeRequestEnd: async (envelope) => {
             requestEnds.push(envelope);
@@ -1392,13 +1406,18 @@ test("runtime layer commits valid tool errors to hot context after error result 
     const writer = writerFrom((envelope) => {
         const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
         const toolPart = assistant?.parts.find((part) => part.type === "tool");
-        order.push(`event:${envelope.event.type}:tool_${toolPart?.type === "tool" ? toolPart.state.status : "missing"}:${envelope.event.type === "agent.tool_result" ? String(envelope.event.is_error) : "progress"}`);
+        order.push(`event:${envelope.event.type}:tool_${toolPart?.type === "tool" ? toolPart.state.status : "missing"}:progress`);
         return {
             ok: true,
             writeId: envelope.writeId,
             eventId: envelope.event.type === "agent.tool_use" ? "bridge-tool" : `bridge-${envelope.writeId}`,
             processedAt: createdAt,
         };
+    }, undefined, [], undefined, async (envelope) => {
+        const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
+        const toolPart = assistant?.parts.find((part) => part.type === "tool");
+        order.push(`settlement:${envelope.settlement.outcome.type}:tool_${toolPart?.type === "tool" ? toolPart.state.status : "missing"}`);
+        return { ok: true, result: { type: "committed" } };
     });
     const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
@@ -1439,7 +1458,7 @@ test("runtime layer commits valid tool errors to hot context after error result 
         "event:span.model_request_start:tool_missing:progress",
         "event:agent.tool_use:tool_missing:progress",
         "event:span.model_request_end:tool_running:progress",
-        "event:agent.tool_result:tool_running:true",
+        "settlement:error:tool_running",
         "event:span.model_request_start:tool_error:progress",
         "event:agent.message:tool_error:progress",
         "event:span.model_request_end:tool_error:progress",
@@ -1643,7 +1662,7 @@ test("absent cross-family builtins take the durable internal invalid-tool repair
             messages: [userMessage("user-" + tc.family, 0, "hello")],
         });
         const writer = writerFrom((envelope) => {
-            if (envelope.event.type === "agent.tool_use" || envelope.event.type === "agent.tool_result") {
+            if (envelope.event.type === "agent.tool_use") {
                 publicToolEvents.push(envelope.event.type);
             }
             return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
@@ -1878,7 +1897,7 @@ test("serializes one shared-message declaration stream while four safe tools exe
     const releaseExecutions = deferred<void>();
     const allExecutionsStarted = deferred<void>();
     const declarations: SessionEventEnvelope[] = [];
-    const settlements: SessionEventEnvelope[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const executions: string[] = [];
     let activeExecutions = 0;
     let maxActiveExecutions = 0;
@@ -1898,10 +1917,11 @@ test("serializes one shared-message declaration stream while four safe tools exe
                     await releaseFirstDeclaration.promise;
                 }
             }
-            else if (envelope.event.type === "agent.tool_result") {
-                settlements.push(envelope);
-            }
             return await baseWriter.append(envelope);
+        },
+        settleToolResult: async (envelope) => {
+            settlements.push(envelope);
+            return await baseWriter.settleToolResult(envelope);
         },
     };
     const runPromise = Effect.runPromise(Effect.gen(function* () {
@@ -1990,7 +2010,7 @@ test("settles a Tool Result while a sibling Assistant declaration ACK is still i
     const secondDeclarationArrived = deferred<void>();
     const releaseSecondDeclaration = deferred<void>();
     const declarations: SessionEventEnvelope[] = [];
-    const settlements: SessionEventEnvelope[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     let secondDeclarationReleased = false;
     const baseWriter = writerFrom((envelope) => ({
         ok: true,
@@ -2009,10 +2029,11 @@ test("settles a Tool Result while a sibling Assistant declaration ACK is still i
                     secondDeclarationReleased = true;
                 }
             }
-            else if (envelope.event.type === "agent.tool_result") {
-                settlements.push(envelope);
-            }
             return await baseWriter.append(envelope);
+        },
+        settleToolResult: async (envelope) => {
+            settlements.push(envelope);
+            return await baseWriter.settleToolResult(envelope);
         },
     };
     const runPromise = Effect.runPromise(Effect.gen(function* () {
@@ -2051,8 +2072,7 @@ test("settles a Tool Result while a sibling Assistant declaration ACK is still i
     await secondDeclarationArrived.promise;
     await waitForCondition(() => settlements.length === 1, "Tool Result settlement during sibling declaration ACK");
     expect(secondDeclarationReleased).toBe(false);
-    expect(settlements[0]?.event).toMatchObject({ type: "agent.tool_result" });
-    expect(settlements[0]?.event).not.toHaveProperty("is_error");
+    expect(settlements[0]?.settlement.outcome).toMatchObject({ type: "completed" });
     releaseSecondDeclaration.resolve(undefined);
     expect(await runPromise).toMatchObject({ type: "completed" });
     expect(declarations).toHaveLength(2);
@@ -2065,7 +2085,7 @@ test("settles parallel Tool Results in completion order with target-only envelop
     const releaseFirstExecution = deferred<void>();
     const releaseSecondExecution = deferred<void>();
     const declarations: SessionEventEnvelope[] = [];
-    const settlements: SessionEventEnvelope[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => ({
         ok: true,
         writeId: envelope.writeId,
@@ -2078,10 +2098,11 @@ test("settles parallel Tool Results in completion order with target-only envelop
             if (envelope.event.type === "agent.tool_use") {
                 declarations.push(envelope);
             }
-            else if (envelope.event.type === "agent.tool_result") {
-                settlements.push(envelope);
-            }
             return await baseWriter.append(envelope);
+        },
+        settleToolResult: async (envelope) => {
+            settlements.push(envelope);
+            return await baseWriter.settleToolResult(envelope);
         },
     };
     const runPromise = Effect.runPromise(Effect.gen(function* () {
@@ -2126,19 +2147,18 @@ test("settles parallel Tool Results in completion order with target-only envelop
     expect(settlements).toHaveLength(1);
     const firstToolUseEventId = `bridge-${declarations[0]?.writeId}`;
     const secondToolUseEventId = `bridge-${declarations[1]?.writeId}`;
-    expect(settlements[0]?.toolSettlement).toEqual(expect.objectContaining({
+    expect(settlements[0]?.settlement).toEqual(expect.objectContaining({
         toolUseEventId: secondToolUseEventId,
         outcome: expect.objectContaining({ type: "completed" }),
     }));
-    expect(settlements[0]?.assistantPartAppend).toBeUndefined();
     releaseFirstExecution.resolve(undefined);
     expect(await runPromise).toMatchObject({ type: "completed" });
     expect(settlements).toHaveLength(2);
-    expect(settlements.map((envelope) => envelope.toolSettlement?.toolUseEventId)).toEqual([
+    expect(settlements.map((envelope) => envelope.settlement.toolUseEventId)).toEqual([
         secondToolUseEventId,
         firstToolUseEventId,
     ]);
-    expect(settlements.every((envelope) => envelope.assistantPartAppend === undefined && envelope.toolSettlement?.outcome.type === "completed")).toBe(true);
+    expect(settlements.every((envelope) => envelope.settlement.outcome.type === "completed")).toBe(true);
 });
 test("separate thread provider requests share session-wide tool admission", async () => {
     const coordinator = new SessionToolCoordinator({ maxConcurrentTools: 8 });
@@ -2207,6 +2227,7 @@ test("Memory projection replay stays in one ToolFiber until one final settlement
     const firstProjectionFailure = deferred<void>();
     const releaseProjectionSuccess = deferred<void>();
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     let toolRunnerCalls = 0;
     let bridgeAttempts = 0;
     let runSettlements = 0;
@@ -2218,6 +2239,9 @@ test("Memory projection replay stays in one ToolFiber until one final settlement
             eventId: envelope.event.type === "agent.tool_use" ? "sevt_memory_projection" : `bridge-${envelope.writeId}`,
             processedAt: createdAt,
         };
+    }, undefined, [], undefined, async (envelope) => {
+        settlements.push(envelope);
+        return { ok: true, result: { type: "committed" } };
     });
     const runPromise = Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
@@ -2262,7 +2286,7 @@ test("Memory projection replay stays in one ToolFiber until one final settlement
     });
     await firstProjectionFailure.promise;
     expect(runSettlements).toBe(0);
-    expect(appended.filter((event) => event.type === "agent.tool_result")).toHaveLength(0);
+    expect(settlements).toHaveLength(0);
     expect(appended.filter((event) => event.type === "session.status_idle")).toHaveLength(0);
     expect(JSON.stringify(appended)).not.toContain("projection_refresh_failed");
     const pendingToolPart = session.state.contextManager.messages().at(-1)?.parts.find((part) => part.type === "tool");
@@ -2273,8 +2297,8 @@ test("Memory projection replay stays in one ToolFiber until one final settlement
     expect(toolRunnerCalls).toBe(1);
     expect(bridgeAttempts).toBe(2);
     expect(runSettlements).toBe(1);
-    expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([
-        expect.objectContaining({ tool_use_id: "sevt_memory_projection" }),
+    expect(settlements).toEqual([
+        expect.objectContaining({ settlement: expect.objectContaining({ toolUseEventId: "sevt_memory_projection" }) }),
     ]);
     expect(appended.filter((event) => event.type === "session.status_idle")).toHaveLength(1);
     const completedToolPart = session.state.contextManager.messages()
@@ -2395,7 +2419,6 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
         expect(await interrupt).toMatchObject({ ok: true, interrupted: true });
         expect(toolRunnerCalls).toBe(0);
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(1);
-        expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
         expect(requestEnds).toHaveLength(1);
         expect(requestEnds[0]?.interruptSettlement).toEqual({
             runtimeInputId: command.runtimeInputId,
@@ -2563,17 +2586,6 @@ test("post-success cooperative repair failure settles the attachment ride alread
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     let interruptOwner: (() => void) | undefined;
     const baseWriter = writerFrom((envelope) => {
-        if (failRepairWrite && envelope.event.type === "agent.tool_result") {
-            repairAttempted = true;
-            return {
-                ok: false,
-                error: normalizeSessionEventWriterError({
-                    code: "unavailable",
-                    sessionId: envelope.sessionId,
-                    writeId: envelope.writeId,
-                }),
-            };
-        }
         return {
             ok: true,
             writeId: envelope.writeId,
@@ -2585,6 +2597,20 @@ test("post-success cooperative repair failure settles the attachment ride alread
     });
     const writer: SessionEventWriter = {
         ...baseWriter,
+        settleToolResult: async (envelope) => {
+            if (failRepairWrite) {
+                repairAttempted = true;
+                return {
+                    ok: false,
+                    error: normalizeSessionEventWriterError({
+                        code: "unavailable",
+                        sessionId: envelope.sessionId,
+                        writeId: envelope.settlement.toolUseEventId,
+                    }),
+                };
+            }
+            return await baseWriter.settleToolResult(envelope);
+        },
         writeRequestEnd: async (envelope) => {
             requestEnds.push(envelope);
             return await baseWriter.writeRequestEnd(envelope);
@@ -2727,6 +2753,7 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
     const projectionFailureSeen = deferred<void>();
     const toolAbortSettled = deferred<void>();
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const closeoutOrder: string[] = [];
     let observedToolSignal: AbortSignal | undefined;
@@ -2775,6 +2802,9 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
             eventId: `bridge-${envelope.writeId}`,
             processedAt: createdAt,
         };
+    }, [], undefined, async (envelope) => {
+        settlements.push(envelope);
+        return { ok: true, result: { type: "committed" } };
     });
     const runFiber = Effect.runFork(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
@@ -2810,7 +2840,7 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
         },
     }))));
     await projectionFailureSeen.promise;
-    expect(appended.filter((event) => event.type === "agent.tool_result")).toHaveLength(0);
+    expect(settlements).toHaveLength(0);
     expect(JSON.stringify(appended)).not.toContain("projection_refresh_failed");
     const pendingToolPart = session.state.contextManager.messages().at(-1)?.parts.find((part) => part.type === "tool");
     expect(pendingToolPart?.type === "tool" ? pendingToolPart.state.status : undefined).toBe("running");
@@ -2841,7 +2871,7 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
     expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
     expect(toolRunnerCalls).toBe(1);
     expect(bridgeAttempts).toBe(1);
-    expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
+    expect(settlements).toEqual([]);
     expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
     expect(requestEnds).toHaveLength(1);
     expect(requestEnds[0]?.interruptSettlement).toEqual({
@@ -2919,12 +2949,10 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         entries: [...terminalCatalog.entries, ...pendingCatalog.entries],
         configs: [...terminalCatalog.configs, ...pendingCatalog.configs],
     };
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const mixedWriterBase = writerFrom((envelope) => {
         appended.push(envelope.event);
-        if (envelope.event.type === "agent.tool_result") {
-            order.push(`event:agent.tool_result:${envelope.event.tool_use_id}`);
-        }
-        else if (envelope.event.type === "session.status_idle") {
+        if (envelope.event.type === "session.status_idle") {
             order.push(`event:session.status_idle:${envelope.event.stop_reason.type}`);
         }
         else {
@@ -2932,9 +2960,6 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         }
         if (envelope.event.type === "agent.tool_use") {
             toolUseWrites++;
-        }
-        if (envelope.event.type === "agent.tool_result" && envelope.event.tool_use_id === "sevt_mixed_tool_1") {
-            terminalResultAcked.resolve();
         }
         if (envelope.event.type === "span.model_request_end") {
             requestEndObserved = true;
@@ -2948,6 +2973,14 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
     }, undefined, [], durableSequence);
     const mixedWriter: SessionEventWriter = {
         ...mixedWriterBase,
+        settleToolResult: async (envelope) => {
+            settlements.push(envelope);
+            order.push(`settlement:${envelope.settlement.toolUseEventId}`);
+            if (envelope.settlement.toolUseEventId === "sevt_mixed_tool_1") {
+                terminalResultAcked.resolve();
+            }
+            return await mixedWriterBase.settleToolResult(envelope);
+        },
         append: async (envelope) => {
             const result = await mixedWriterBase.append(envelope);
             if (envelope.event.type === "agent.tool_use" && toolUseWrites === 2) {
@@ -3050,7 +3083,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
         releasePendingToolUseAppend.resolve();
         await uncommittedRepairStarted.promise;
-        expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_2")).toHaveLength(0);
+        expect(settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_mixed_tool_2")).toHaveLength(0);
         expect(store.repairs.filter((repair) => repair.modelToolCallId === "tool-uncommitted")).toHaveLength(0);
         const preFenceInput = { ...acceptedInput("rin_pre_fence_mixed"), sequenceFrom: 8, sequenceTo: 8 };
         await Effect.runPromise(manager.acceptInput(preFenceInput));
@@ -3064,8 +3097,8 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(providerCalls).toBe(1);
         expect(toolRunnerCalls).toBe(1);
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
-        expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_1")).toHaveLength(1);
-        expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_2")).toHaveLength(0);
+        expect(settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_mixed_tool_1")).toHaveLength(1);
+        expect(settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_mixed_tool_2")).toHaveLength(0);
         expect(JSON.stringify(appended)).not.toContain("tool-uncommitted");
         expect(JSON.stringify(appended)).not.toContain("must-not-commit");
         expect(store.repairs.filter((repair) => repair.modelToolCallId === "tool-uncommitted")).toHaveLength(1);
@@ -3089,7 +3122,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(postAccept).toMatchObject({ ok: true, started: true });
         await flushMicrotasks();
         expect(order).not.toContain("commit:rin_post_fence_mixed");
-        expect(order.filter((entry) => entry === "event:agent.tool_result:sevt_mixed_tool_2")).toHaveLength(0);
+        expect(order.filter((entry) => entry === "settlement:sevt_mixed_tool_2")).toHaveLength(0);
         releaseNextProviderTool.resolve();
         const interruptResult = await interrupt;
         expect({ interruptResult, order }).toMatchObject({
@@ -3105,8 +3138,8 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(toolRunnerCalls).toBe(1);
         expect(commitCalls).toEqual(["rin_initial_mixed", "rin_post_fence_mixed"]);
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
-        expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_1")).toHaveLength(1);
-        expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_2")).toEqual([]);
+        expect(settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_mixed_tool_1")).toHaveLength(1);
+        expect(settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_mixed_tool_2")).toEqual([]);
         expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(JSON.stringify(appended)).not.toContain("tool-uncommitted");
         expect(JSON.stringify(appended)).not.toContain("must-not-commit");
@@ -3155,6 +3188,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         },
     };
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const storeOrder: string[] = [];
     const store = new ThreadLoopRuntimeStore(storeOrder);
     let providerCalls = 0;
@@ -3166,10 +3200,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         store,
         writer: writerFrom((envelope) => {
             appended.push(envelope.event);
-            if (envelope.event.type === "agent.tool_result") {
-                order.push(`event:agent.tool_result:${envelope.event.tool_use_id}`);
-            }
-            else if (envelope.event.type === "session.status_idle") {
+            if (envelope.event.type === "session.status_idle") {
                 order.push(`event:session.status_idle:${envelope.event.stop_reason.type}`);
             }
             else {
@@ -3187,6 +3218,9 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
                 eventId: envelope.event.type === "agent.tool_use" ? `sevt_non_cooperative_route_${toolUseWrites}` : `bridge-${envelope.writeId}`,
                 processedAt: createdAt,
             };
+        }, undefined, [], undefined, async (envelope) => {
+            settlements.push(envelope);
+            return { ok: true, result: { type: "committed" } };
         }),
         llmService: {
             stream() {
@@ -3244,7 +3278,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         expect(toolRunnerCalls).toBe(1);
         expect(observedRouteSignal?.aborted).toBe(false);
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(1);
-        expect(appended.filter((event) => event.type === "agent.tool_result")).toHaveLength(0);
+        expect(settlements).toHaveLength(0);
         const interruptCommand = {
             ...acceptedInput("rin_non_cooperative_route_interrupt"),
             origin: "user" as const,
@@ -3275,7 +3309,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
         expect(interruptSettled).toBe(true);
         await Effect.runPromise(manager.waitThread(postFenceInput, 1000));
-        expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_non_cooperative_route_1")).toEqual([]);
+        expect(settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_non_cooperative_route_1")).toEqual([]);
         expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
         expect(order.indexOf("commit:interrupt")).toBeLessThan(order.indexOf("event:session.status_idle:end_turn"));
@@ -3407,6 +3441,7 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
     const settledResultAcked = deferred<void>();
     const abortObserved = deferred<void>();
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const order: string[] = [];
     const storeOrder: string[] = [];
     const durableSequence: TestDurableSequence = {
@@ -3420,17 +3455,19 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
         store,
         writer: writerFrom((envelope) => {
             appended.push(envelope.event);
-            order.push(envelope.event.type === "agent.tool_result"
-                ? `event:agent.tool_result:${envelope.event.tool_use_id}`
-                : `event:${envelope.event.type}`);
-            if (envelope.event.type === "agent.tool_result" && envelope.event.tool_use_id === "sevt_approved_settled") {
-                settledResultAcked.resolve();
-            }
+            order.push(`event:${envelope.event.type}`);
             return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
         }, undefined, [{
                 sessionThreadId: "thrd_1",
                 message: loadedMessage,
-            }], durableSequence),
+            }], durableSequence, async (envelope) => {
+                settlements.push(envelope);
+                order.push(`settlement:${envelope.settlement.toolUseEventId}`);
+                if (envelope.settlement.toolUseEventId === "sevt_approved_settled") {
+                    settledResultAcked.resolve();
+                }
+                return { ok: true, result: { type: "committed" } };
+            }),
         llmService: {
             stream() {
                 providerCalls++;
@@ -3525,10 +3562,10 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
         await abortObserved.promise;
         expect(await interrupt).toMatchObject({ ok: true, interrupted: true });
         expect(interruptSettled).toBe(true);
-        const settledResults = appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_approved_settled");
-        const repairedResults = appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_approved_late");
+        const settledResults = settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_approved_settled");
+        const repairedResults = settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_approved_late");
         expect(settledResults).toHaveLength(1);
-        expect(settledResults[0]).not.toMatchObject({ is_error: true });
+        expect(settledResults[0]?.settlement.outcome).toMatchObject({ type: "completed" });
         expect(repairedResults).toEqual([]);
         expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
@@ -3649,6 +3686,7 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
     const acceptanceStarted = deferred<void>();
     const releaseAcceptance = deferred<void>();
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     let awaitCalls = 0;
     let interruptCommitStarted = false;
     let interruptDeclaration: RuntimeControlInputDeclaration | undefined;
@@ -3662,6 +3700,9 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
                 eventId: envelope.event.type === "agent.tool_use" ? "sevt_interrupt_acceptance" : `bridge-${envelope.writeId}`,
                 processedAt: createdAt,
             };
+        }, undefined, [], undefined, async (envelope) => {
+            settlements.push(envelope);
+            return { ok: true, result: { type: "committed" } };
         }),
         events: [
             {
@@ -3732,7 +3773,7 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
         await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
         expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(awaitCalls).toBe(0);
-        expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
+        expect(settlements).toEqual([]);
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
     }
     finally {
@@ -3747,6 +3788,7 @@ test("provider closeout joins durable Sandbox acceptance before freezing executi
     const releaseAcceptance = deferred<void>();
     const requestEndStarted = deferred<void>();
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     let awaitCalls = 0;
     const catalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
     const baseWriter = writerFrom((envelope) => {
@@ -3760,6 +3802,10 @@ test("provider closeout joins durable Sandbox acceptance before freezing executi
     });
     const writer: SessionEventWriter = {
         ...baseWriter,
+        settleToolResult: async (envelope) => {
+            settlements.push(envelope);
+            return await baseWriter.settleToolResult(envelope);
+        },
         writeRequestEnd: async (envelope) => {
             requestEndStarted.resolve();
             return await baseWriter.writeRequestEnd(envelope);
@@ -3832,7 +3878,7 @@ test("provider closeout joins durable Sandbox acceptance before freezing executi
     await expect(runPromise).resolves.toMatchObject({ type: "failed" });
     expect(awaitCalls).toBe(0);
     expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(1);
-    expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
+    expect(settlements).toEqual([]);
 });
 test("runtime shutdown aborts active ToolFiber route execution", async () => {
     const session = new ThreadRuntime("sesn_1");
@@ -3874,6 +3920,9 @@ test("runtime shutdown aborts active ToolFiber route execution", async () => {
         writer: writerFrom((envelope) => {
             order.push(`event:${envelope.event.type}`);
             return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }, undefined, [], undefined, async (envelope) => {
+            order.push(`settlement:${envelope.settlement.toolUseEventId}`);
+            return { ok: true, result: { type: "committed" } };
         }),
         providerCallRuntime: {
             systemInstructions: "tool cancellation test system",
@@ -3909,7 +3958,7 @@ test("runtime shutdown aborts active ToolFiber route execution", async () => {
     expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
     expect(order.indexOf("tool-abort-signalled")).toBeGreaterThan(-1);
     expect(order).not.toContain("event:span.model_request_end");
-    expect(order).not.toContain("event:agent.tool_result");
+    expect(order.some((entry) => entry.startsWith("settlement:"))).toBe(false);
 });
 test("approve_for_me runs reviewer before public tool_use is written", async () => {
     const session = new ThreadRuntime("sesn_1", new AutoApprovalReviewerManager());
@@ -4249,6 +4298,7 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
         { type: "empty" },
     ]);
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const toolUseEventIds: string[] = [];
     let toolUseIndex = 0;
     const writer = writerFrom((envelope) => {
@@ -4258,6 +4308,9 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
             toolUseEventIds.push(eventId);
         }
         return { ok: true, writeId: envelope.writeId, eventId, processedAt: createdAt };
+    }, undefined, [], undefined, async (envelope) => {
+        settlements.push(envelope);
+        return { ok: true, result: { type: "committed" } };
     });
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
@@ -4358,6 +4411,9 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
     expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
     expect(processors).toHaveLength(2);
     expect(processors[1]).not.toBe(processors[0]);
+    expect(settlements).toEqual([
+        expect.objectContaining({ settlement: expect.objectContaining({ toolUseEventId: "sevt_tool_1" }) }),
+    ]);
     expect(appended.map((event) => event.type)).toEqual([
         "session.status_running",
         "span.model_request_start",
@@ -4365,7 +4421,6 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
         "span.model_request_end",
         "session.status_idle",
         "session.status_running",
-        "agent.tool_result",
         "span.model_request_start",
         "agent.message",
         "span.model_request_end",
@@ -4501,10 +4556,14 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
         }];
     const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const writer = writerFrom((envelope) => {
         appended.push(envelope.event);
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }]);
+    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }], undefined, async (envelope) => {
+        settlements.push(envelope);
+        return { ok: true, result: { type: "committed" } };
+    });
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
     const store = new ThreadLoopRuntimeStore([]);
@@ -4583,9 +4642,11 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
     expect(second).toMatchObject({ type: "completed" });
     expect(requests).toHaveLength(1);
     expect(runToolCalls).toEqual(["mrq_cold_restore:tool-1:sevt_tool_1"]);
+    expect(settlements).toEqual([
+        expect.objectContaining({ settlement: expect.objectContaining({ toolUseEventId: "sevt_tool_1" }) }),
+    ]);
     expect(appended.map((event) => event.type)).toEqual([
         "session.status_running",
-        "agent.mcp_tool_result",
         "span.model_request_start",
         "agent.message",
         "span.model_request_end",
@@ -4633,10 +4694,14 @@ test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use
         }];
     const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const writer = writerFrom((envelope) => {
         appended.push(envelope.event);
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: durableToolMessage }]);
+    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: durableToolMessage }], undefined, async (envelope) => {
+        settlements.push(envelope);
+        return { ok: true, result: { type: "committed" } };
+    });
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
     let refreshAttempts = 0;
@@ -4699,7 +4764,9 @@ test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use
     expect(refreshAttempts).toBe(3);
     expect(runToolCalls).toEqual(["mrq_cold_sandbox:tool-sandbox-1:sevt_sandbox_tool_1"]);
     expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(0);
-    expect(appended.some((event) => event.type === "agent.tool_result")).toBe(true);
+    expect(settlements).toEqual([
+        expect.objectContaining({ settlement: expect.objectContaining({ toolUseEventId: "sevt_sandbox_tool_1" }) }),
+    ]);
     expect(requests).toHaveLength(1);
 });
 test("cold accepted Sandbox execution releases stale Runtime custody without authoring a result", async () => {
@@ -4739,6 +4806,7 @@ test("cold accepted Sandbox execution releases stale Runtime custody without aut
             executionState: "running" as const,
         }];
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const requests: LLMRequest[] = [];
     let refreshAttempts = 0;
     const sandboxCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
@@ -4746,7 +4814,10 @@ test("cold accepted Sandbox execution releases stale Runtime custody without aut
         writer: writerFrom((envelope) => {
             appended.push(envelope.event);
             return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-        }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: durableToolMessage }]),
+        }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: durableToolMessage }], undefined, async (envelope) => {
+            settlements.push(envelope);
+            return { ok: true, result: { type: "committed" } };
+        }),
         llmService: queuedLLMService([[{ type: "finish", finishReason: "stop" }]], requests),
         providerCallRuntime: {
             systemInstructions: "cold sandbox stale custody test system",
@@ -4789,7 +4860,7 @@ test("cold accepted Sandbox execution releases stale Runtime custody without aut
     }).pipe(Effect.provide(layer)));
     expect(result).toEqual({ type: "interrupted", discardHotState: true });
     expect(refreshAttempts).toBe(1);
-    expect(appended.some((event) => event.type === "agent.tool_result")).toBe(false);
+    expect(settlements).toEqual([]);
     expect(requests).toEqual([]);
 });
 test("cold unresolved approval does not strand an accepted Sandbox execution", async () => {
@@ -4854,10 +4925,14 @@ test("cold unresolved approval does not strand an accepted Sandbox execution", a
             executionState: "running" as const,
         }];
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const writer = writerFrom((envelope) => {
         appended.push(envelope.event);
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }]);
+    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }], undefined, async (envelope) => {
+        settlements.push(envelope);
+        return { ok: true, result: { type: "committed" } };
+    });
     const coldCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" });
     const sandboxCatalog = {
         ...coldCatalog,
@@ -4900,7 +4975,9 @@ test("cold unresolved approval does not strand an accepted Sandbox execution", a
     expect(waits).toEqual(["sevt_sandbox"]);
     expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
     expect(session.state.pendingApprovalToolJobs()).toHaveLength(1);
-    expect(appended.some((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_sandbox")).toBe(true);
+    expect(settlements).toEqual([
+        expect.objectContaining({ settlement: expect.objectContaining({ toolUseEventId: "sevt_sandbox" }) }),
+    ]);
     expect(appended.at(-1)).toEqual({
         type: "session.status_idle",
         stop_reason: { type: "requires_action", event_ids: ["sevt_approval"] },
@@ -4958,10 +5035,14 @@ test("LoadContext pendingToolUses applies recorded deny decisions without re-wai
         }];
     const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
+    const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
     const writer = writerFrom((envelope) => {
         appended.push(envelope.event);
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }]);
+    }, undefined, [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }], undefined, async (envelope) => {
+        settlements.push(envelope);
+        return { ok: true, result: { type: "committed" } };
+    });
     const requests: LLMRequest[] = [];
     const store = new ThreadLoopRuntimeStore([]);
     const layer = runtimeThreadLoopLayer(loader, {
@@ -4999,7 +5080,9 @@ test("LoadContext pendingToolUses applies recorded deny decisions without re-wai
     }).pipe(Effect.provide(layer)));
     expect(result).toMatchObject({ type: "completed" });
     expect(requests).toHaveLength(1);
-    expect(appended.some((event) => event.type === "agent.tool_result")).toBe(true);
+    expect(settlements).toEqual([
+        expect.objectContaining({ settlement: expect.objectContaining({ toolUseEventId: "sevt_tool_1" }) }),
+    ]);
     expect(appended).not.toContainEqual({
         type: "session.status_idle",
         stop_reason: { type: "requires_action", event_ids: ["sevt_tool_1"] },
@@ -5195,7 +5278,7 @@ test("terminal provider failure retains an atomically committed internal tool re
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
         store,
         writer: writerFrom((envelope) => {
-            if (envelope.event.type === "agent.tool_use" || envelope.event.type === "agent.tool_result") {
+            if (envelope.event.type === "agent.tool_use") {
                 publicToolEvents.push(envelope.event);
             }
             return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };

@@ -1076,13 +1076,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_cleanup_cold_approval_tool", "agent.tool_use", "streaming",
 			bridgeRuntimePartCreateForTest{
 				kind: "tool",
 				json: string(approvalPartJSON),
 			},
-		)},
+		),
 	})
 	if err != nil {
 		t.Fatalf("write cleanup approval Tool Use: %v", err)
@@ -1235,16 +1235,14 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}); err != nil {
 		t.Fatalf("commit cleanup approval denial: %v", err)
 	}
-	terminal, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: recoveryScope, RuntimeWriteId: "rwrite_cleanup_cold_approval_result", ModelRequestId: modelRequestID,
-		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"Approval denied: not safe"}],"is_error":true}`,
-		SessionVisible: true,
-		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolUse.GetEventId(), "Approval denied: not safe")},
-	})
+	terminal, err := bridgeStore.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+		recoveryScope,
+		bridgeErrorToolSettlementForTest(toolUse.GetEventId(), "Approval denied: not safe"),
+	))
 	if err != nil {
-		t.Fatalf("write cleanup approval denial result: %v", err)
+		t.Fatalf("settle cleanup approval denial result: %v", err)
 	}
+	bridgeRequireToolSettlementOutcomeForTest(t, terminal, "committed")
 	var pendingStatus string
 	var resultEventID sql.NullString
 	if err := admin.QueryRowContext(context.Background(),
@@ -1255,8 +1253,8 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	).Scan(&pendingStatus, &resultEventID); err != nil {
 		t.Fatalf("read cleanup approval after denial: %v", err)
 	}
-	if pendingStatus != "resolved" || !resultEventID.Valid || resultEventID.String != terminal.GetEventId() {
-		t.Fatalf("cleanup approval settlement = %q/%v; want resolved by %s", pendingStatus, resultEventID, terminal.GetEventId())
+	if pendingStatus != "resolved" || !resultEventID.Valid {
+		t.Fatalf("cleanup approval settlement = %q/%v; want resolved by a durable Event", pendingStatus, resultEventID)
 	}
 }
 

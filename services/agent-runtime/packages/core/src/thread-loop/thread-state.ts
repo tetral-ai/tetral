@@ -983,7 +983,7 @@ export class ThreadState {
 
   clear(): void {
     // Generic failure cleanup cannot erase an accepted Runtime input. The
-    // Session owner must first land an exact stale/close/termination receipt;
+    // Session owner must first land an exact stale/close/termination result;
     // only that durable custody handoff may use clearAfterCustodyHandoff.
     if (this.acceptedInputCount() > 0) {
       return;

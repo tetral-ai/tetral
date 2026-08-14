@@ -14,7 +14,7 @@ import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-state.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopDurableRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, acceptedInput, activeCompactionRun, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, compactionHistory, compactionTransportHistory, createdAt, deferred, queuedLLMService, recordCompactionHint, runtimeThreadLoopLayer, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, withRuntimeTerminationReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, acceptedInput, activeCompactionRun, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, compactionHistory, compactionTransportHistory, createdAt, deferred, queuedLLMService, recordCompactionHint, runtimeTerminationResultForTest, runtimeThreadLoopLayer, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, writerFrom } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
 test("a reviewer finish arms proactive compaction on the reviewer model before its next review", async () => {
@@ -223,12 +223,7 @@ test("a first context overflow compacts and rebuilds while a repeated overflow t
         },
         commitRuntimeTermination: async (envelope) => {
             terminations.push(envelope);
-            return withRuntimeTerminationReceiptForTest(envelope, {
-                ok: true,
-                writeId: envelope.writeId,
-                eventId: `bridge-${envelope.writeId}`,
-                processedAt: createdAt,
-            });
+            return runtimeTerminationResultForTest(envelope);
         },
     };
     const overflow = {

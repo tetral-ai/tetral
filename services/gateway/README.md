@@ -363,11 +363,18 @@ per-thread runtime binding token.
 | --- | --- | --- |
 | Authenticate | TokenReview the Runtime workload token, then verify the binding token | gRPC `Unauthenticated` / `PermissionDenied` before any side effect |
 | Validate | `validateRunMcpToolRequest` (`bounds.ts`) | gRPC `INVALID_ARGUMENT` |
-| Claim | Create one execution-attempt `claimId`, then call `ClaimMcpToolResult` with `(scope, tool_use_event_id, claimId)`; Bridge loads the durable server, tool, and canonical input | same-claim replay renews the lease; an unexpired different claim remains in flight; an expired lease admits a new claim; a terminal result replays directly |
+| Claim | Create one execution-attempt `claimId`, then call `ClaimMcpToolResult` with `(scope, tool_use_event_id, claimId)`; Bridge loads the durable server, tool, and canonical input and compares its normalized hash internally | same-claim replay renews the lease; an unexpired different claim remains in flight; an expired lease admits a new claim; a terminal result replays directly |
 | Resolve credential | Match one session-vault credential (table below) | fail closed, no MCP call is made |
 | Establish + execute | Lazy-connect the MCP client, call the tool within `MCP_CALL_TIMEOUT_SECONDS` (120) | reconnect/auth policy below; timeout → `mcp_timeout` |
 | Format | `formatMcpToolResult` → `result_text` + at most one attachment, decoded bytes held in memory only | bounds rejection before commit |
 | Commit | `CommitMcpToolResult` with the same `claimId` plus result/media; Bridge fences the current claimant, creates transient-attachment rows, and persists the refs-only result in one transaction | stale claimant → custody lost; post-effect commit failure → retryable `runtime_error` |
+| Relinquish | `RelinquishMcpToolResult` with the same `claimId`, only after a deterministic post-acquisition failure has proved no result commit is uncertain | exact active claim is deleted and may be immediately reacquired; stored/different claims return stale; lost ACK replays duplicate |
+
+Local execution ownership is keyed by `(Tool target, claimId)`, never by the
+Tool target alone. Every post-acquisition validation and external execution is
+inside exact-claim cleanup: deterministic rejection terminally settles or
+relinquishes that claim, and an expired-lease takeover cannot be suppressed by
+an older uncertain attempt.
 
 `MCP isError: true` maps to `status = tool_error` with the formatted error as
 `result_text` so the model can self-repair; transport/auth failures after the
@@ -437,7 +444,7 @@ index performs the eviction; without it the dead client would stay cached.
 #### Durable idempotency and reservation lease
 
 The connector owns no replay store; records live in the Bridge-owned
-`session_runtime_tool_results` table (`tool_kind = mcp`) reached through two
+`session_runtime_tool_results` table (`tool_kind = mcp`) reached through three
 TokenReview-authenticated Bridge RPCs the gateway ServiceAccount may call
 (`BridgeAPIMcpToolResultIdempotencyStore`, `packages/mcp-connector/src/bridge-client.ts`).
 `CommitMcpToolResult` persists the refs-only result and, in the same Bridge
@@ -621,9 +628,10 @@ it preserves the stated invariants and passes the named suites.
   Commit persists refs-only and creates transient rows in one transaction;
   `McpManifestChanged` retries to a durable ACK on the 4-attempt schedule.
 - **Invariants.** Owner-fenced Commit persists at most one result per
-  `tool_use_event_id`; a stale-reservation Claim becomes `DEADLINE_EXCEEDED`
-  rather than executing; notify exhaustion never flips readiness; the connector
-  performs no attachment-store write.
+  `tool_use_event_id`; an active remote claim returns `in_flight`, stale Runtime
+  custody returns `stale`, and an expired lease admits a new `claimId` without
+  letting the older local attempt suppress it; notify exhaustion never flips
+  readiness; the connector performs no attachment-store write.
 - **Conformance.** `bridge-client.test.ts`, plus the reservation/lease paths in
   `service.test.ts`.
 

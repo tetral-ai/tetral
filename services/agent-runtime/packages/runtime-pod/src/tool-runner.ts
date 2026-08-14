@@ -128,6 +128,36 @@ class ToolResultContractError extends Error {
   }
 }
 
+class BridgeToolResultContractError extends Error {
+  constructor(operation: string) {
+    super(`${operation} returned an invalid result variant`);
+    this.name = "BridgeToolResultContractError";
+  }
+}
+
+type AcceptSandboxExecutionResult =
+  | { readonly type: "committed" }
+  | { readonly type: "duplicate" }
+  | { readonly type: "stale" };
+
+type AwaitSandboxExecutionResult =
+  | { readonly type: "completed"; readonly resultJson: string; readonly taskId: string }
+  | { readonly type: "stale" };
+
+type ReadCommandResult =
+  | { readonly type: "completed"; readonly resultJson: string }
+  | { readonly type: "stale" };
+
+type SendCommandInputResult =
+  | { readonly type: "committed"; readonly resultJson: string }
+  | { readonly type: "duplicate"; readonly resultJson: string }
+  | { readonly type: "stale" };
+
+type RunMemoryResult =
+  | { readonly type: "committed"; readonly resultJson: string }
+  | { readonly type: "duplicate"; readonly resultJson: string }
+  | { readonly type: "stale" };
+
 /**
  * Supplies the service endpoints, current accepted-input scope, and injectable
  * boundary adapters used by {@link RuntimePodToolRunner}.
@@ -272,11 +302,15 @@ export class RuntimePodToolRunner {
     for (;;) {
       try {
         const response = await acceptSandboxExecution(this.bridgeClient, durableRequest, await this.metadata());
-        if (response.committed === undefined && response.duplicate === undefined) {
-          return toolFailure(request, "Bridge rejected the sandbox tool call.", true);
+        const result = parseAcceptSandboxExecutionResult(response);
+        if (result.type === "stale") {
+          return { type: "stale_custody" };
         }
         return { type: "accepted" };
       } catch (error) {
+        if (error instanceof BridgeToolResultContractError) {
+          return toolFailure(request, "Bridge returned a malformed sandbox acceptance result.", true);
+        }
         if (isDurableBridgeRejection(error)) {
           return toolFailure(request, "Bridge rejected the sandbox tool call.", false);
         }
@@ -295,20 +329,23 @@ export class RuntimePodToolRunner {
     for (;;) {
       try {
         const response = await awaitSandboxExecution(this.bridgeClient, durableRequest, await this.metadata(), request.abortSignal);
-        const completed = response.completed;
-        if (completed === undefined) {
+        const result = parseAwaitSandboxExecutionResult(response);
+        if (result.type === "stale") {
           return { type: "stale_custody" };
         }
         if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
-          return await this.mediaResultToAttachment(request, completed.resultJson);
+          return await this.mediaResultToAttachment(request, result.resultJson);
         }
-        return resultJsonToExecutionResult(request, withBackgroundTask(completed.resultJson, completed.taskId));
+        return resultJsonToExecutionResult(request, withBackgroundTask(result.resultJson, result.taskId));
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Sandbox tool execution was cancelled.");
         }
         if (error instanceof ToolResultContractError) {
           return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+        }
+        if (error instanceof BridgeToolResultContractError) {
+          return toolFailure(request, "Bridge returned a malformed sandbox wait result.", true);
         }
         if (isDurableBridgeRejection(error)) {
           return { type: "stale_custody" };
@@ -391,10 +428,11 @@ export class RuntimePodToolRunner {
             maxOutputTokens,
             toolUseEventId: request.toolUseEventId,
           }, metadata, request.abortSignal);
-          if (response.completed === undefined) {
-            return toolFailure(request, "Bridge rejected the command poll.", true);
+          const result = parseReadCommandResult(response);
+          if (result.type === "stale") {
+            return { type: "stale_custody" };
           }
-          return resultJsonToExecutionResult(request, response.completed.resultJson);
+          return resultJsonToExecutionResult(request, result.resultJson);
         }
         const response = await sendCommandInput(this.bridgeClient, {
           scope,
@@ -404,17 +442,20 @@ export class RuntimePodToolRunner {
           inputJson: stableJsonStringify(request.input),
           toolUseEventId: request.toolUseEventId,
         }, metadata, request.abortSignal);
-        const applied = response.committed ?? response.duplicate;
-        if (applied === undefined) {
-          return toolFailure(request, "Bridge rejected the command input.", true);
+        const result = parseSendCommandInputResult(response);
+        if (result.type === "stale") {
+          return { type: "stale_custody" };
         }
-        return resultJsonToExecutionResult(request, applied.resultJson);
+        return resultJsonToExecutionResult(request, result.resultJson);
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Command task was cancelled.");
         }
         if (isDurableBridgeRejection(error)) {
           return toolFailure(request, "Bridge rejected the command operation.", false);
+        }
+        if (error instanceof BridgeToolResultContractError) {
+          return toolFailure(request, "Bridge returned a malformed command result.", true);
         }
         await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
@@ -436,17 +477,20 @@ export class RuntimePodToolRunner {
         const metadata = await this.metadata();
         throwIfToolRouteAborted(request.abortSignal);
         const response = await runMemory(this.bridgeClient, runMemoryRequest, metadata, request.abortSignal);
-        const applied = response.committed ?? response.duplicate;
-        if (applied === undefined) {
-          return toolFailure(request, "Bridge rejected the memory tool call.", true);
+        const result = parseRunMemoryResult(response);
+        if (result.type === "stale") {
+          return { type: "stale_custody" };
         }
-        return resultJsonToExecutionResult(request, applied.resultJson);
+        return resultJsonToExecutionResult(request, result.resultJson);
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Memory tool execution was cancelled.");
         }
         if (isDurableBridgeRejection(error)) {
           return toolFailure(request, "Bridge rejected the memory tool call.", false);
+        }
+        if (error instanceof BridgeToolResultContractError) {
+          return toolFailure(request, "Bridge returned a malformed memory result.", true);
         }
         await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
@@ -1409,7 +1453,7 @@ async function writeThreadMessageSent(
       message,
     }),
     sessionVisible: true,
-    serverToolUse: undefined,
+    assistantPartAppend: undefined,
     contextThroughMessageSequence: undefined,
     requestKind: "",
   }, metadata, abortSignal);
@@ -1551,6 +1595,80 @@ function threadControlFromRequest(
 
 function recordInput(input: RuntimeJsonValue): Record<string, RuntimeJsonValue> {
   return isRecord(input) ? input : {};
+}
+
+function parseAcceptSandboxExecutionResult(response: AcceptSandboxExecutionResponse): AcceptSandboxExecutionResult {
+  const variantCount = Number(response.committed !== undefined) +
+    Number(response.duplicate !== undefined) +
+    Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeToolResultContractError("AcceptSandboxExecution");
+  }
+  if (response.committed !== undefined) {
+    return { type: "committed" };
+  }
+  if (response.duplicate !== undefined) {
+    return { type: "duplicate" };
+  }
+  return { type: "stale" };
+}
+
+function parseAwaitSandboxExecutionResult(response: AwaitSandboxExecutionResponse): AwaitSandboxExecutionResult {
+  const variantCount = Number(response.completed !== undefined) + Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeToolResultContractError("AwaitSandboxExecution");
+  }
+  if (response.completed !== undefined) {
+    return {
+      type: "completed",
+      resultJson: response.completed.resultJson,
+      taskId: response.completed.taskId,
+    };
+  }
+  return { type: "stale" };
+}
+
+function parseReadCommandResult(response: ReadCommandResultResponse): ReadCommandResult {
+  const variantCount = Number(response.completed !== undefined) + Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeToolResultContractError("ReadCommandResult");
+  }
+  if (response.completed !== undefined) {
+    return { type: "completed", resultJson: response.completed.resultJson };
+  }
+  return { type: "stale" };
+}
+
+function parseSendCommandInputResult(response: SendCommandInputResponse): SendCommandInputResult {
+  const variantCount = Number(response.committed !== undefined) +
+    Number(response.duplicate !== undefined) +
+    Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeToolResultContractError("SendCommandInput");
+  }
+  if (response.committed !== undefined) {
+    return { type: "committed", resultJson: response.committed.resultJson };
+  }
+  if (response.duplicate !== undefined) {
+    return { type: "duplicate", resultJson: response.duplicate.resultJson };
+  }
+  return { type: "stale" };
+}
+
+function parseRunMemoryResult(response: RunMemoryResponse): RunMemoryResult {
+  const variantCount = Number(response.committed !== undefined) +
+    Number(response.duplicate !== undefined) +
+    Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeToolResultContractError("RunMemory");
+  }
+  if (response.committed !== undefined) {
+    return { type: "committed", resultJson: response.committed.resultJson };
+  }
+  if (response.duplicate !== undefined) {
+    return { type: "duplicate", resultJson: response.duplicate.resultJson };
+  }
+  return { type: "stale" };
 }
 
 function acceptSandboxExecution(

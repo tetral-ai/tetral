@@ -1,14 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
-import {
-  BridgeWriteStatus,
-} from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type { CallOptions } from "@grpc/grpc-js";
 import type {
   AgentRuntimeBridgeServiceClient,
-  WriteEventRequest,
+  SettleToolResultRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { RuntimeFailureSchema, runtimeToolErrorFromFailure } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import { runtimeToolResultEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
 
 const inputPath = process.argv[2];
@@ -33,22 +30,16 @@ const failure = RuntimeFailureSchema.parse({
   retryStatus: { type: "terminal" },
 });
 const outcome = { type: "error" as const, error: failure };
-const event = runtimeToolResultEvent(input.toolUseEventId, { kind: "tool" }, outcome);
-let captured: WriteEventRequest | undefined;
+let captured: SettleToolResultRequest | undefined;
 const client = {
-  writeEvent: (
-    request: WriteEventRequest,
+  settleToolResult: (
+    request: SettleToolResultRequest,
     _metadata: Metadata,
+    _options: CallOptions,
     callback: (error: Error | null, response: unknown) => void,
   ) => {
     captured = request;
-    callback(null, {
-      ack: {
-        status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
-        runtimeWriteId: request.runtimeWriteId,
-        errorCode: "fixture_capture_complete",
-      },
-    });
+    callback(null, { committed: {} });
     return { cancel() {} };
   },
 } as unknown as AgentRuntimeBridgeServiceClient;
@@ -58,28 +49,22 @@ const writer = new BridgeAPIEventWriter({
   client,
   metadataFactory: async () => new Metadata(),
 });
-await writer.append({
-  requestId: "req_durable_tool_error",
+const attempt = await writer.settleToolResult({
   workspaceId: input.workspaceId,
   sessionId: input.sessionId,
   sessionThreadId: input.sessionThreadId,
   bindingId: input.bindingId,
   bindingGeneration: input.bindingGeneration,
   targetPodUid: input.targetPodUid,
-  writeId: "rwrite_durable_tool_error_result",
-  modelRequestId: input.modelRequestId,
-  event,
-  toolSettlement: { toolUseEventId: input.toolUseEventId, outcome },
+  settlement: { toolUseEventId: input.toolUseEventId, outcome },
 });
-if (captured?.toolSettlement?.error === undefined) {
+if (!attempt.ok || attempt.result.type !== "committed" || captured?.settlement?.error === undefined) {
   throw new Error("Runtime Bridge adapter did not declare a Tool error settlement");
 }
 
 process.stdout.write(JSON.stringify({
-  eventType: captured.eventType,
-  payloadJson: captured.payloadJson,
-  toolUseEventId: captured.toolSettlement.toolUseEventId,
-  errorJson: captured.toolSettlement.error.errorJson,
+  toolUseEventId: captured.settlement.toolUseEventId,
+  errorJson: captured.settlement.error.errorJson,
   runtimeSettlement: outcome,
   expectedDurableError: runtimeToolErrorFromFailure(failure),
 }));

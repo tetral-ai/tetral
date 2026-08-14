@@ -25,6 +25,8 @@ import type {
   CommitMcpToolResultResponse,
   McpManifestChangedRequest,
   McpManifestChangedResponse,
+  RelinquishMcpToolResultRequest,
+  RelinquishMcpToolResultResponse,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
 import {
@@ -41,8 +43,6 @@ export { MCP_CLAIM_RPC_TIMEOUT_MS, MCP_COMMIT_RPC_TIMEOUT_MS } from "./phase-bud
 
 /** Bounds one Bridge manifest-change notification so retry scheduling cannot stall. */
 export const MCP_MANIFEST_CHANGE_RPC_TIMEOUT_MS = 5_000;
-
-const MCP_MANIFEST_TOO_LARGE_DETAILS = "mcp manifest tools exceed the accepted byte limit";
 
 const MCP_COMMIT_RETRY_BACKOFF_MS = [100, 300, 1_000] as const;
 
@@ -104,12 +104,45 @@ export interface BridgeMcpToolResultClient {
     options: CallOptions,
     callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
   ): unknown;
+  relinquishMcpToolResult(
+    request: RelinquishMcpToolResultRequest,
+    metadata: Metadata,
+    options: CallOptions,
+    callback: (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => void,
+  ): unknown;
 }
 
 /** Reports a durable manifest acknowledgement or a bounded retry classification. */
 export type BridgeAPIManifestChangeResult =
   | { readonly ok: true; readonly duplicate: boolean }
   | { readonly ok: false; readonly retryable: boolean; readonly code: string; readonly message: string };
+
+type McpManifestChangeResult =
+  | { readonly type: "committed" }
+  | { readonly type: "duplicate" };
+
+type McpToolClaimResult =
+  | { readonly type: "acquired"; readonly executor: { readonly mcpServerName: string; readonly toolName: string; readonly inputJson: string } }
+  | { readonly type: "already_completed"; readonly resultJson: string }
+  | { readonly type: "in_flight" }
+  | { readonly type: "stale" };
+
+type McpToolCommitResult =
+  | { readonly type: "committed" }
+  | { readonly type: "duplicate" }
+  | { readonly type: "stale" };
+
+type McpToolRelinquishResult =
+  | { readonly type: "relinquished" }
+  | { readonly type: "duplicate" }
+  | { readonly type: "stale" };
+
+class BridgeMcpResultContractError extends Error {
+  constructor(operation: string) {
+    super(`${operation} returned an invalid result variant`);
+    this.name = "BridgeMcpResultContractError";
+  }
+}
 
 /**
  * Sends one authenticated manifest-change notification to Bridge.
@@ -150,14 +183,6 @@ export class BridgeAPIManifestChangeNotifier {
       });
     } catch (error) {
       const serviceError = error as Partial<ServiceError>;
-      if (
-        serviceError.code === status.RESOURCE_EXHAUSTED
-        && serviceError.details === MCP_MANIFEST_TOO_LARGE_DETAILS
-      ) {
-        // Bridge uses ResourceExhausted only after durably settling an over-cap
-        // manifest as unready with Queue custody. The terminal status is its ACK.
-        return { ok: true, duplicate: false };
-      }
       return {
         ok: false,
         retryable: serviceError.code === undefined || serviceError.code === status.UNAVAILABLE || serviceError.code === status.DEADLINE_EXCEEDED,
@@ -165,11 +190,13 @@ export class BridgeAPIManifestChangeNotifier {
         message: "mcp manifest change notification failed",
       };
     }
-    if (response.committed !== undefined) {
-      return { ok: true, duplicate: false };
-    }
-    if (response.duplicate !== undefined) {
-      return { ok: true, duplicate: true };
+    try {
+      const result = parseMcpManifestChangeResult(response);
+      return { ok: true, duplicate: result.type === "duplicate" };
+    } catch (error) {
+      if (!(error instanceof BridgeMcpResultContractError)) {
+        throw error;
+      }
     }
     return {
       ok: false,
@@ -233,12 +260,13 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       }
       throw error;
     }
-    if (response.alreadyCompleted !== undefined) {
-      const stored = parseStoredRunMcpToolResponse(response.alreadyCompleted.resultJson);
+    const result = parseMcpToolClaimResult(response);
+    if (result.type === "already_completed") {
+      const stored = parseStoredRunMcpToolResponse(result.resultJson);
       this.releaseLocalClaim(key, context);
       return { status: "replay", stored };
     }
-    if (response.acquired !== undefined) {
+    if (result.type === "acquired") {
       const localKey = localMcpClaimKey(key, context);
       if (this.#localClaims.has(localKey)) {
         return { status: "in_flight" };
@@ -246,20 +274,13 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       this.#localClaims.add(localKey);
       return {
         status: "new",
-        executor: {
-          mcpServerName: response.acquired.mcpServerName,
-          toolName: response.acquired.toolName,
-          inputJson: response.acquired.inputJson,
-        },
+        executor: result.executor,
       };
     }
-    if (response.inFlight !== undefined) {
+    if (result.type === "in_flight") {
       return { status: "in_flight" };
     }
-    if (response.stale !== undefined) {
-      return { status: "stale_custody" };
-    }
-    throw new Error("mcp tool claim returned no result variant");
+    return { status: "stale_custody" };
   }
 
   async store(key: IdempotencyKey, stored: PendingStoredRunMcpToolResponse, context?: McpIdempotencyContext) {
@@ -279,7 +300,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     });
     let activeRequest = request;
     let committingPayloadRejection = false;
-    let response: CommitMcpToolResultResponse;
+    let result: McpToolCommitResult;
     let outcomeUnknown = false;
     for (let attempt = 0; ; attempt++) {
       let metadata: Metadata;
@@ -295,9 +316,21 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         continue;
       }
       try {
-        response = await commitMcpToolResult(this.client, activeRequest, metadata, {
+        const response = await commitMcpToolResult(this.client, activeRequest, metadata, {
           deadline: new Date(this.now() + this.commitTimeoutMs),
         });
+        try {
+          result = parseMcpToolCommitResult(response);
+        } catch {
+          // A malformed ACK is as ambiguous as a dropped ACK: Bridge may have
+          // committed before a proxy or incompatible peer corrupted the
+          // response. Keep the exact immutable request and converge through
+          // duplicate replay; relinquishing this claim would invent certainty.
+          outcomeUnknown = true;
+          const delayIndex = Math.min(attempt, MCP_COMMIT_RETRY_BACKOFF_MS.length - 1);
+          await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000);
+          continue;
+        }
         break;
       } catch (error) {
         const disposition = mcpCommitFailureDisposition(error);
@@ -320,7 +353,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000);
       }
     }
-    if (response.committed === undefined && response.duplicate === undefined) {
+    if (result.type === "stale") {
       this.releaseLocalClaim(key, context);
       throw new McpIdempotencyStaleCustodyError();
     }
@@ -333,7 +366,26 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
   }
 
   async fail(key: IdempotencyKey, context?: McpIdempotencyContext): Promise<void> {
-    if (context !== undefined) {
+    if (context === undefined) {
+      return;
+    }
+    const request = relinquishMcpToolResultRequest(key, context);
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const response = await relinquishMcpToolResult(this.client, request, await this.metadata(), {
+            deadline: new Date(this.now() + this.commitTimeoutMs),
+          });
+          parseMcpToolRelinquishResult(response);
+          return;
+        } catch (error) {
+          if (!mcpRelinquishTransportRetryable(error) || attempt >= MCP_COMMIT_RETRY_BACKOFF_MS.length) {
+            throw error;
+          }
+          await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[attempt]!);
+        }
+      }
+    } finally {
       this.releaseLocalClaim(key, context);
     }
   }
@@ -366,6 +418,15 @@ function mcpCommitFailureDisposition(error: unknown): McpCommitFailureDispositio
     default:
       return "outcome_unknown";
   }
+}
+
+function mcpRelinquishTransportRetryable(error: unknown): boolean {
+  if (error instanceof BridgeMcpResultContractError) {
+    return false;
+  }
+  const code = (error as Partial<ServiceError>).code;
+  return code === undefined || code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED ||
+    code === status.INTERNAL || code === status.UNKNOWN;
 }
 
 function mcpManifestChanged(
@@ -419,6 +480,23 @@ function commitMcpToolResult(
   });
 }
 
+function relinquishMcpToolResult(
+  client: BridgeMcpToolResultClient,
+  request: RelinquishMcpToolResultRequest,
+  metadata: Metadata,
+  options: CallOptions,
+): Promise<RelinquishMcpToolResultResponse> {
+  return new Promise((resolve, reject) => {
+    client.relinquishMcpToolResult(request, metadata, options, (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
 function claimMcpToolResultRequest(key: IdempotencyKey, context: McpIdempotencyContext): ClaimMcpToolResultRequest {
   return {
     scope: {
@@ -436,8 +514,83 @@ function claimMcpToolResultRequest(key: IdempotencyKey, context: McpIdempotencyC
   };
 }
 
+function relinquishMcpToolResultRequest(key: IdempotencyKey, context: McpIdempotencyContext): RelinquishMcpToolResultRequest {
+  return {
+    scope: claimMcpToolResultRequest(key, context).scope,
+    toolUseEventId: key.toolUseEventId,
+    claimId: context.claimId,
+  };
+}
+
 function localMcpClaimKey(key: IdempotencyKey, context: McpIdempotencyContext): string {
-  return `${context.workspaceId}\u0000${context.sessionId}\u0000${context.sessionThreadId}\u0000${key.toolUseEventId}`;
+  return `${context.workspaceId}\u0000${context.sessionId}\u0000${context.sessionThreadId}\u0000${key.toolUseEventId}\u0000${context.claimId}`;
+}
+
+function parseMcpManifestChangeResult(response: McpManifestChangedResponse): McpManifestChangeResult {
+  const variantCount = Number(response.committed !== undefined) + Number(response.duplicate !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeMcpResultContractError("McpManifestChanged");
+  }
+  return response.committed !== undefined ? { type: "committed" } : { type: "duplicate" };
+}
+
+function parseMcpToolClaimResult(response: ClaimMcpToolResultResponse): McpToolClaimResult {
+  const variantCount = Number(response.acquired !== undefined) +
+    Number(response.alreadyCompleted !== undefined) +
+    Number(response.inFlight !== undefined) +
+    Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeMcpResultContractError("ClaimMcpToolResult");
+  }
+  if (response.acquired !== undefined) {
+    return {
+      type: "acquired",
+      executor: {
+        mcpServerName: response.acquired.mcpServerName,
+        toolName: response.acquired.toolName,
+        inputJson: response.acquired.inputJson,
+      },
+    };
+  }
+  if (response.alreadyCompleted !== undefined) {
+    return { type: "already_completed", resultJson: response.alreadyCompleted.resultJson };
+  }
+  if (response.inFlight !== undefined) {
+    return { type: "in_flight" };
+  }
+  return { type: "stale" };
+}
+
+function parseMcpToolCommitResult(response: CommitMcpToolResultResponse): McpToolCommitResult {
+  const variantCount = Number(response.committed !== undefined) +
+    Number(response.duplicate !== undefined) +
+    Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeMcpResultContractError("CommitMcpToolResult");
+  }
+  if (response.committed !== undefined) {
+    return { type: "committed" };
+  }
+  if (response.duplicate !== undefined) {
+    return { type: "duplicate" };
+  }
+  return { type: "stale" };
+}
+
+function parseMcpToolRelinquishResult(response: RelinquishMcpToolResultResponse): McpToolRelinquishResult {
+  const variantCount = Number(response.relinquished !== undefined) +
+    Number(response.duplicate !== undefined) +
+    Number(response.stale !== undefined);
+  if (variantCount !== 1) {
+    throw new BridgeMcpResultContractError("RelinquishMcpToolResult");
+  }
+  if (response.relinquished !== undefined) {
+    return { type: "relinquished" };
+  }
+  if (response.duplicate !== undefined) {
+    return { type: "duplicate" };
+  }
+  return { type: "stale" };
 }
 
 function freezeCommitRequest(request: CommitMcpToolResultRequest): CommitMcpToolResultRequest {

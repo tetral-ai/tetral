@@ -40,10 +40,10 @@ func TestPostgreSQLDurableToolErrorDeclarationColdLoadsAndReducerContinues(t *te
 		toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: "rwrite_durable_tool_error_use", ModelRequestId: modelRequest,
 			EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/missing.txt"},"evaluated_permission":"allow"}`,
-			Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 				t, scope, "rwrite_durable_tool_error_use", "agent.tool_use", "streaming",
 				bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"` + modelCall + `","toolName":"Read","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":{"file_path":"/missing.txt"},"preview":"{\"file_path\":\"/missing.txt\"}","truncated":false}}}`},
-			)},
+			),
 		})
 		if err != nil {
 			t.Fatalf("write ordinary Read Tool Use: %v", err)
@@ -67,17 +67,17 @@ func TestPostgreSQLDurableToolErrorDeclarationColdLoadsAndReducerContinues(t *te
 			"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
 			"modelRequestId": modelRequest, "toolUseEventId": toolUse.GetEventId(),
 		})
-		committed, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-			Scope: scope, RuntimeWriteId: "rwrite_durable_tool_error_result", ModelRequestId: modelRequest,
-			EventType: declared.EventType, PayloadJson: declared.PayloadJSON, SessionVisible: true,
-			Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
+		committed, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+			scope,
+			&bridgev1.RuntimeToolSettlement{
 				ToolUseEventId: declared.ToolUseEventID,
 				Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: declared.ErrorJSON}},
-			}},
-		})
-		if err != nil || committed.GetEventId() == "" {
+			},
+		))
+		if err != nil {
 			t.Fatalf("commit ordinary Read Tool error: response=%#v err=%v", committed, err)
 		}
+		bridgeRequireToolSettlementOutcomeForTest(t, committed, "committed")
 		loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 			Scope: scope, RuntimeInputId: "rin_durable_tool_error_cold",
 		})
@@ -90,7 +90,6 @@ func TestPostgreSQLDurableToolErrorDeclarationColdLoadsAndReducerContinues(t *te
 				"kind": "tool_settlement", "baseContextJson": hotBase.GetContextJson(),
 				"sessionId": sessionID, "sessionThreadId": threadID,
 				"settlement": declared.RuntimeSettlement, "toolUseEventId": toolUse.GetEventId(),
-				"resultEventId": committed.GetEventId(), "completedAt": "2026-08-13T00:00:00Z",
 				"pendingToolUses": []map[string]any{{
 					"toolUseEventId": toolUse.GetEventId(), "modelRequestId": modelRequest,
 					"modelToolCallId": modelCall, "toolName": "Read", "input": map[string]any{"file_path": "/missing.txt"},
@@ -199,10 +198,10 @@ func TestPostgreSQLDurableToolErrorDeclarationColdLoadsAndReducerContinues(t *te
 		toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: "rwrite_durable_tool_completed_use", ModelRequestId: modelRequest,
 			EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/present.txt"},"evaluated_permission":"allow"}`,
-			Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 				t, scope, "rwrite_durable_tool_completed_use", "agent.tool_use", "streaming",
 				bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_durable_tool_completed","toolName":"Read","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":{"file_path":"/present.txt"},"preview":"{\"file_path\":\"/present.txt\"}","truncated":false}}}`},
-			)},
+			),
 		})
 		if err != nil {
 			t.Fatalf("write completed control Tool Use: %v", err)
@@ -214,12 +213,13 @@ func TestPostgreSQLDurableToolErrorDeclarationColdLoadsAndReducerContinues(t *te
 		}); err != nil {
 			t.Fatalf("write completed control request end: %v", err)
 		}
-		if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-			Scope: scope, RuntimeWriteId: "rwrite_durable_tool_completed_result", ModelRequestId: modelRequest,
-			EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"present"}]}`,
-			Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "present")},
-		}); err != nil {
+		if response, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+			scope,
+			bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "present"),
+		)); err != nil {
 			t.Fatalf("commit completed control Tool result: %v", err)
+		} else {
+			bridgeRequireToolSettlementOutcomeForTest(t, response, "committed")
 		}
 		loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope, RuntimeInputId: "rin_durable_tool_completed_cold"})
 		if err != nil {
@@ -267,10 +267,10 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorsBeforeMutation(t *testing.T)
 			toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_reject_nondurable_use", ModelRequestId: modelRequest,
 				EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/missing.txt"},"evaluated_permission":"allow"}`,
-				Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+				AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 					t, scope, "rwrite_reject_nondurable_use", "agent.tool_use", "streaming",
 					bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_reject_nondurable","toolName":"Read","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":{"file_path":"/missing.txt"},"preview":"missing","truncated":false}}}`},
-				)},
+				),
 			})
 			if err != nil {
 				t.Fatalf("seed Tool Use: %v", err)
@@ -285,11 +285,10 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorsBeforeMutation(t *testing.T)
 				Scan(&beforeEvents, &beforeMessages, &beforeOperations, &beforeMessageJSON); err != nil {
 				t.Fatalf("read pre-rejection durable state: %v", err)
 			}
-			_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope: scope, RuntimeWriteId: "rwrite_reject_nondurable_result", ModelRequestId: modelRequest,
-				EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","is_error":true}`,
-				Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: test.settlement(toolUse.GetEventId(), test.errorJSON)},
-			})
+			_, err = store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+				scope,
+				test.settlement(toolUse.GetEventId(), test.errorJSON),
+			))
 			if status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("non-durable Tool error write err=%v; want InvalidArgument", err)
 			}

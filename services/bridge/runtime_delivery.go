@@ -1487,7 +1487,6 @@ func captureInitialMCPManifestAcceptanceTx(
 	toolsJSON, canonicalErr := canonicalMCPManifestToolsJSON(filtered)
 	if strings.TrimSpace(manifest.ManifestETag) == "" || canonicalErr != nil || len([]byte(toolsJSON)) > MaxMcpManifestBytes {
 		acceptance, err := captureInitialMCPManifestUnreadyLockedTx(ctx, tx, workspaceID, sessionID, toolset, mcpManifestDiagnosticInvalid, now)
-		acceptance.ManifestTooLarge = len([]byte(toolsJSON)) > MaxMcpManifestBytes
 		return acceptance, err
 	}
 	acceptance, err := commitMCPManifestReadyTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName, manifest.ManifestETag, toolsJSON, 1, toolset, now)

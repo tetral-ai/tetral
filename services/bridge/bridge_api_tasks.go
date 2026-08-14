@@ -565,17 +565,11 @@ func logTaskNotificationDeclarationRejected(
 }
 
 func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, request *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {
-	if request.GetScope() == nil || request.GetTaskId() == "" || request.GetToolUseEventId() == "" || request.GetOperationId() == "" {
+	if request.GetScope() == nil || request.GetTaskId() == "" || request.GetToolUseEventId() == "" || request.GetOperationId() == "" || request.GetMaxOutputTokens() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "invalid read command result request")
 	}
 	maxOutputTokens := positiveInt32(request.GetMaxOutputTokens())
-	inputJSON, err := marshalBridgeJSON(map[string]any{
-		"task_id": request.GetTaskId(), "max_output_tokens": maxOutputTokens,
-	})
-	if err != nil {
-		return nil, err
-	}
-	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "poll", inputJSON, maxOutputTokens)
+	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "poll", "", maxOutputTokens)
 	if err != nil {
 		if isScopeSupersededError(err) {
 			return &bridgev1.ReadCommandResultResponse{Outcome: &bridgev1.ReadCommandResultResponse_Stale{Stale: &bridgev1.CommandReadStale{}}}, nil
@@ -586,7 +580,7 @@ func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, reques
 }
 
 func (s *PostgreSQLBridgeAPIStore) SendCommandInput(ctx context.Context, request *bridgev1.SendCommandInputRequest) (*bridgev1.SendCommandInputResponse, error) {
-	if request.GetOperationId() == "" || request.GetTaskId() == "" {
+	if request.GetOperationId() == "" || request.GetTaskId() == "" || request.GetMaxOutputTokens() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "invalid send command input request")
 	}
 	if strings.TrimSpace(request.GetInputJson()) == "" {
@@ -642,17 +636,13 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	if kind != "poll" && kind != "stdin" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background command kind is invalid")
 	}
-	canonicalInput, inputHash, err := canonicalBackgroundCommandInput(inputJSON)
-	if err != nil {
-		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background command input must be JSON")
-	}
 	requestID := operationID
 	if requestID == "" || toolUseEventID == "" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background command identity is incomplete")
 	}
 	result := commandOperationResult{}
 	now := s.now()
-	err = s.withScopeTx(ctx, scope, "agentruntimebridge.accept_background_command", func(tx *dbconnect.Tx) error {
+	err := s.withScopeTx(ctx, scope, "agentruntimebridge.accept_background_command", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
 			return err
 		}
@@ -662,7 +652,22 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID)
+		authority, err := loadBackgroundCommandAuthorityTx(ctx, tx, scope, toolUseEventID)
+		if err != nil {
+			return err
+		}
+		if authority.Kind != kind || authority.TaskID != taskID || authority.MaxOutputTokens != maxOutputTokens {
+			return status.Error(codes.FailedPrecondition, "background command does not match its durable Tool declaration")
+		}
+		if kind == "stdin" {
+			callerInput, _, err := canonicalBackgroundCommandInput(inputJSON)
+			if err != nil || callerInput != authority.InputJSON {
+				return status.Error(codes.FailedPrecondition, "background command input does not match its durable Tool declaration")
+			}
+		}
+		canonicalInput := authority.InputJSON
+		inputHash := authority.InputHash
+		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID, "")
 		if err != nil {
 			return err
 		}
@@ -697,9 +702,6 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 			return nil
 		}
 		if !dbconnect.IsNoRows(err) {
-			return err
-		}
-		if err := verifyBackgroundCommandToolUseTx(ctx, tx, scope, toolUseEventID); err != nil {
 			return err
 		}
 		var writeSequence int64
@@ -779,7 +781,10 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID)
+		if err := verifyBackgroundCancelAuthorityTx(ctx, tx, scope, toolUseEventID); err != nil {
+			return err
+		}
+		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID, toolUseEventID)
 		if err != nil {
 			return err
 		}
@@ -811,9 +816,6 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 			return nil
 		}
 		if !dbconnect.IsNoRows(err) {
-			return err
-		}
-		if err := verifyBackgroundCommandToolUseTx(ctx, tx, scope, toolUseEventID); err != nil {
 			return err
 		}
 		state := "pending"
@@ -849,18 +851,21 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	return waited, err
 }
 
-func loadBackgroundTaskForCommandAcceptanceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, taskID string) (string, error) {
-	var threadID, statusValue string
+func loadBackgroundTaskForCommandAcceptanceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, taskID string, expectedSourceToolUseEventID string) (string, error) {
+	var threadID, sourceToolUseEventID, statusValue string
 	var terminalResult sql.NullString
-	if err := tx.QueryRow(ctx, `SELECT session_thread_id, status, terminal_result_json
+	if err := tx.QueryRow(ctx, `SELECT session_thread_id, source_tool_use_event_id, status, terminal_result_json
 		FROM session_background_tasks WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3 FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), taskID).Scan(&threadID, &statusValue, &terminalResult); dbconnect.IsNoRows(err) {
+		scope.GetWorkspaceId(), scope.GetSessionId(), taskID).Scan(&threadID, &sourceToolUseEventID, &statusValue, &terminalResult); dbconnect.IsNoRows(err) {
 		return "", status.Error(codes.NotFound, "background task not found")
 	} else if err != nil {
 		return "", err
 	}
 	if threadID != scope.GetSessionThreadId() {
 		return "", status.Error(codes.FailedPrecondition, "background task thread is stale")
+	}
+	if expectedSourceToolUseEventID != "" && sourceToolUseEventID != expectedSourceToolUseEventID {
+		return "", status.Error(codes.FailedPrecondition, "background task does not belong to the selected Tool")
 	}
 	if statusValue != "running" {
 		if !terminalResult.Valid || terminalResult.String == "" {
@@ -884,17 +889,67 @@ func allocateBackgroundTaskWriteSequenceTx(ctx context.Context, tx *dbconnect.Tx
 	return writeSequence, nil
 }
 
-func verifyBackgroundCommandToolUseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) error {
-	var eventType string
-	if err := tx.QueryRow(ctx, `SELECT type FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4 FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID).Scan(&eventType); dbconnect.IsNoRows(err) {
-		return status.Error(codes.FailedPrecondition, "durable background command tool use is missing")
+type backgroundCommandAuthority struct {
+	Kind            string
+	TaskID          string
+	InputJSON       string
+	InputHash       string
+	MaxOutputTokens int
+}
+
+func loadBackgroundCommandAuthorityTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (backgroundCommandAuthority, error) {
+	var payloadJSON string
+	if err := tx.QueryRow(ctx, `SELECT payload_json FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND event_id=$4 AND type='agent.tool_use' FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
+		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command Tool is missing")
+	} else if err != nil {
+		return backgroundCommandAuthority{}, err
+	}
+	var event runtimeToolUseEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &event); err != nil || event.Name != "write_stdin" || event.MCPServerName != "" {
+		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command Tool is invalid")
+	}
+	canonicalInput, inputHash, err := canonicalRunToolInput(string(event.Input))
+	if err != nil {
+		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command input is invalid")
+	}
+	var input struct {
+		SessionID       string  `json:"session_id"`
+		Chars           *string `json:"chars"`
+		MaxOutputTokens *int32  `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal([]byte(canonicalInput), &input); err != nil || input.SessionID == "" || (input.MaxOutputTokens != nil && *input.MaxOutputTokens < 0) {
+		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command input is invalid")
+	}
+	kind := "poll"
+	if input.Chars != nil && *input.Chars != "" {
+		kind = "stdin"
+	}
+	maxOutputTokens := 0
+	if input.MaxOutputTokens != nil {
+		maxOutputTokens = int(*input.MaxOutputTokens)
+	}
+	return backgroundCommandAuthority{
+		Kind: kind, TaskID: input.SessionID, InputJSON: canonicalInput,
+		InputHash: inputHash, MaxOutputTokens: maxOutputTokens,
+	}, nil
+}
+
+func verifyBackgroundCancelAuthorityTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) error {
+	var payloadJSON string
+	if err := tx.QueryRow(ctx, `SELECT payload_json FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND event_id=$4 AND type='agent.tool_use' FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "durable background cancellation Tool is missing")
 	} else if err != nil {
 		return err
 	}
-	if eventType != "agent.tool_use" {
-		return status.Error(codes.FailedPrecondition, "durable background command identity is invalid")
+	var event runtimeToolUseEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &event); err != nil || event.Name != "exec_command" || event.MCPServerName != "" {
+		return status.Error(codes.FailedPrecondition, "durable background cancellation Tool is invalid")
 	}
 	return nil
 }

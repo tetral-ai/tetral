@@ -73,7 +73,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyApprovedSandboxExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+		if err := verifyApprovedToolExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
 			return err
 		}
 		now := s.now()
@@ -259,7 +259,7 @@ func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMes
 	return value
 }
 
-func verifyApprovedSandboxExecutionHandoffTx(
+func verifyApprovedToolExecutionHandoffTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,

@@ -430,12 +430,15 @@ export class McpConnectorServiceShell {
       return this.finishRunMcpTool(unresolved, mcpIdempotencyRuntimeError("mcp_claim_conflict", "MCP tool idempotency conflict."), { contentItems: 0, refreshTriggered: false }, started);
     }
     const executionRequest = resolvedMcpRequest(request, claimId, claim.executor);
-    if (!validateMcpExecutorPayload(claim.executor).ok || catalogEntryByName(executionRequest.mcpServerName) === undefined) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid durable MCP server");
-    }
     try {
-      const parsedInput = JSON.parse(executionRequest.inputJson) as Record<string, unknown>;
-      const execution = await this.executeTool(executionRequest, parsedInput);
+      const executorAccepted = validateMcpExecutorPayload(claim.executor).ok &&
+        catalogEntryByName(executionRequest.mcpServerName) !== undefined;
+      const execution = executorAccepted
+        ? await this.executeTool(
+          executionRequest,
+          JSON.parse(executionRequest.inputJson) as Record<string, unknown>,
+        )
+        : durableExecutorRejection();
       const response = execution.response;
       const responseValidation = validatePendingRunMcpToolResponse(response);
       if (!responseValidation.ok) {
@@ -780,6 +783,23 @@ function mcpIdempotencyContext(request: RunMcpToolRequest, runtimePodUid: string
     bindingId: request.bindingId,
     bindingGeneration: request.bindingGeneration,
     runtimePodUid,
+  };
+}
+
+function durableExecutorRejection(): {
+  readonly response: PendingRunMcpToolResponse;
+  readonly contentItems: 0;
+  readonly refreshTriggered: false;
+} {
+  return {
+    response: {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP tool execution metadata was rejected.",
+      attachments: [],
+      errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
+    },
+    contentItems: 0,
+    refreshTriggered: false,
   };
 }
 

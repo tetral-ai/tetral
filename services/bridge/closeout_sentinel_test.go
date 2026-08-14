@@ -159,11 +159,10 @@ func TestBridgeAPIServerWriteEventReturnsSupersededForEveryInitialCustodyEnd(t *
 				FailureJson:    `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
 			})
 			if err != nil {
-				t.Fatalf("CommitRuntimeTermination error = %v; want rejected ACK", err)
+				t.Fatalf("CommitRuntimeTermination error = %v; want stale result", err)
 			}
-			if terminationResponse.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-				terminationResponse.GetAck().GetErrorCode() != closeoutScopeSupersededCode {
-				t.Fatalf("CommitRuntimeTermination ack = %+v; want rejected %q", terminationResponse.GetAck(), closeoutScopeSupersededCode)
+			if terminationResponse.GetStale() == nil {
+				t.Fatalf("CommitRuntimeTermination result = %+v; want stale", terminationResponse)
 			}
 			assertNoCloseoutBridgeOperation(t, fixture, "session:rwrite_termination_"+fixture.sessionID)
 		})

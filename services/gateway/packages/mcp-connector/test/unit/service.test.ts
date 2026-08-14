@@ -9,11 +9,11 @@ import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.
 import { McpConnectorError } from "../../src/errors.js";
 import { McpConnectorMetricsRegistry } from "../../src/metrics.js";
 import { MCP_FAILURE_KIND_METADATA_KEY, MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
-import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse, RelinquishMcpToolResultRequest, RelinquishMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { McpAuthenticator, McpClient, McpClientTool, McpConnectorLogger } from "../../src/service.js";
 import { InMemoryMcpIdempotencyStore } from "../../src/idempotency.js";
 import { canonicalJson } from "../../src/idempotency.js";
-import type { McpIdempotencyStore } from "../../src/idempotency.js";
+import type { McpExecutorPayload, McpIdempotencyContext, McpIdempotencyStore, PendingStoredRunMcpToolResponse } from "../../src/idempotency.js";
 import type { RuntimeBindingRequestIdentity } from "@tetral/gateway-protocol/src/binding-token.js";
 
 const RuntimePodUid = "pod_uid_mcp_connector";
@@ -370,6 +370,34 @@ describe("McpConnectorServiceShell", () => {
     expect(bridge.commitCalls[0]?.resultJson).not.toContain(Buffer.from("image-bytes").toString("base64"));
   });
 
+  test("relinquishes a deterministic post-execution contract failure for immediate reacquisition", async () => {
+    const bridge = new RecordingMcpToolResultBridgeClient();
+    const client = new RecordingMcpClient();
+    client.callToolResult = {
+      content: [{ type: "image", data: "", mimeType: "image/png" }],
+    };
+    const service = createService(
+      client,
+      new RecordingManifestChangeNotifier(),
+      new MemoryLogger(),
+      undefined,
+      bridgeBackedStore(bridge),
+    );
+
+    await expect(service.runMcpTool(validRunRequest(), authorizationMetadata())).rejects.toMatchObject({
+      code: status.INTERNAL,
+    });
+    expect(bridge.relinquishCalls).toHaveLength(1);
+    expect(bridge.claims.size).toBe(0);
+
+    client.callToolResult = { content: [{ type: "text", text: "reacquired" }] };
+    await expect(service.runMcpTool(validRunRequest(), authorizationMetadata())).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "reacquired",
+    });
+    expect(client.calls).toEqual(["callTool", "callTool"]);
+  });
+
   test("maps a live Bridge MCP claim to retryable runtime_error without client I/O", async () => {
     const bridge = new RecordingMcpToolResultBridgeClient();
     bridge.inFlight = true;
@@ -409,6 +437,33 @@ describe("McpConnectorServiceShell", () => {
       retryStatus: undefined,
     });
     expect(client.calls).toEqual([]);
+  });
+
+  test("terminally settles post-acquisition executor and catalog rejection on the exact claim", async () => {
+    for (const executor of [
+      { ...durableExecutor(), inputJson: "[]" },
+      { ...durableExecutor(), mcpServerName: "not-catalogued" },
+    ]) {
+      const store = new RecordingExecutorRejectionStore(executor);
+      const client = new RecordingMcpClient();
+      const response = await createService(
+        client,
+        new RecordingManifestChangeNotifier(),
+        new MemoryLogger(),
+        undefined,
+        store,
+      ).runMcpTool(validRunRequest(), authorizationMetadata());
+
+      expect(response).toMatchObject({
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+        resultText: "MCP tool execution metadata was rejected.",
+        errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
+      });
+      expect(client.calls).toEqual([]);
+      expect(store.stores).toHaveLength(1);
+      expect(store.failures).toEqual([]);
+      expect(store.claimContext?.claimId).toBe(store.storeContext?.claimId);
+    }
   });
 
   test("fences same-replica concurrent Bridge-backed delivery before second MCP call", async () => {
@@ -1111,9 +1166,46 @@ class StaleCustodyIdempotencyStore implements McpIdempotencyStore {
   }
 }
 
+class RecordingExecutorRejectionStore implements McpIdempotencyStore {
+  claimContext: McpIdempotencyContext | undefined;
+  storeContext: McpIdempotencyContext | undefined;
+  readonly stores: PendingStoredRunMcpToolResponse[] = [];
+  readonly failures: McpIdempotencyContext[] = [];
+
+  constructor(private readonly executor: McpExecutorPayload) {}
+
+  claim(_key: unknown, context?: McpIdempotencyContext): ReturnType<McpIdempotencyStore["claim"]> {
+    this.claimContext = context;
+    return { status: "new", executor: this.executor };
+  }
+
+  store(
+    _key: unknown,
+    stored: PendingStoredRunMcpToolResponse,
+    context?: McpIdempotencyContext,
+  ): ReturnType<McpIdempotencyStore["store"]> {
+    this.stores.push(stored);
+    this.storeContext = context;
+    return {
+      status: stored.response.status,
+      resultText: stored.response.resultText,
+      attachments: [],
+      errorKind: stored.response.errorKind,
+      retryStatus: stored.response.retryStatus,
+    };
+  }
+
+  fail(_key: unknown, context?: McpIdempotencyContext): ReturnType<McpIdempotencyStore["fail"]> {
+    if (context !== undefined) {
+      this.failures.push(context);
+    }
+  }
+}
+
 class RecordingMcpToolResultBridgeClient {
   readonly claimCalls: ClaimMcpToolResultRequest[] = [];
   readonly commitCalls: CommitMcpToolResultRequest[] = [];
+  readonly relinquishCalls: RelinquishMcpToolResultRequest[] = [];
   readonly stored = new Map<string, string>();
   readonly claims = new Map<string, string>();
   inFlight = false;
@@ -1178,6 +1270,22 @@ class RecordingMcpToolResultBridgeClient {
     callback(null, { committed: {} });
   }
 
+  relinquishMcpToolResult(
+    request: RelinquishMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => void,
+  ) {
+    this.relinquishCalls.push(request);
+    const key = bridgeResultKey(request);
+    if (this.claims.get(key) !== request.claimId) {
+      callback(null, { stale: {} });
+      return;
+    }
+    this.claims.delete(key);
+    callback(null, { relinquished: {} });
+  }
+
   private persistCommit(request: CommitMcpToolResultRequest): void {
     const key = bridgeResultKey(request);
     this.stored.set(key, fakeBridgeCompleteMcpAttachmentRefs(request));
@@ -1201,6 +1309,10 @@ class DeadlineClaimBridgeClient {
   commitMcpToolResult() {
     throw new Error("commit must not run after a failed Claim");
   }
+
+  relinquishMcpToolResult() {
+    throw new Error("relinquish must not run after a failed Claim");
+  }
 }
 
 function fakeBridgeCompleteMcpAttachmentRefs(request: CommitMcpToolResultRequest): string {
@@ -1214,7 +1326,7 @@ function fakeBridgeCompleteMcpAttachmentRefs(request: CommitMcpToolResultRequest
   return JSON.stringify(body);
 }
 
-function bridgeResultKey(request: ClaimMcpToolResultRequest | CommitMcpToolResultRequest): string {
+function bridgeResultKey(request: ClaimMcpToolResultRequest | CommitMcpToolResultRequest | RelinquishMcpToolResultRequest): string {
   return `${request.scope?.workspaceId}/${request.scope?.sessionId}/${request.scope?.sessionThreadId}/${request.toolUseEventId}`;
 }
 

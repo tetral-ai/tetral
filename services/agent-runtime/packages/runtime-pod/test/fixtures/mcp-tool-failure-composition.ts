@@ -1,8 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
-import { BridgeWriteStatus } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import type { AgentRuntimeBridgeServiceClient, WriteEventRequest } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { runtimeToolResultEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import type { CallOptions } from "@grpc/grpc-js";
+import type { AgentRuntimeBridgeServiceClient, SettleToolResultRequest } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { McpErrorKind, McpRetryStatus, RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -80,22 +79,16 @@ const request: RuntimeToolExecutionRequest = {
 const result = await runner.runTool(request);
 if (result.type === "stale_custody") throw new Error("MCP failure lost result custody");
 const settlement = runtimeToolSettlement(result);
-const event = runtimeToolResultEvent(input.toolUseEventId, { kind: "mcp", mcpServerName: "github" }, settlement);
-let captured: WriteEventRequest | undefined;
+let captured: SettleToolResultRequest | undefined;
 const bridgeClient = {
-  writeEvent: (
-    request: WriteEventRequest,
+  settleToolResult: (
+    request: SettleToolResultRequest,
     _metadata: Metadata,
+    _options: CallOptions,
     callback: (error: Error | null, response: unknown) => void,
   ) => {
     captured = request;
-    callback(null, {
-      ack: {
-        status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
-        runtimeWriteId: request.runtimeWriteId,
-        errorCode: "fixture_capture_complete",
-      },
-    });
+    callback(null, { committed: {} });
     return { cancel() {} };
   },
 } as unknown as AgentRuntimeBridgeServiceClient;
@@ -105,26 +98,21 @@ const writer = new BridgeAPIEventWriter({
   client: bridgeClient,
   metadataFactory: async () => new Metadata(),
 });
-await writer.append({
-  requestId: "req_mcp_tool_failure",
+const attempt = await writer.settleToolResult({
   workspaceId: input.workspaceId,
   sessionId: input.sessionId,
   sessionThreadId: input.sessionThreadId,
   bindingId: input.bindingId,
   bindingGeneration: input.bindingGeneration,
   targetPodUid: input.targetPodUid,
-  writeId: "rwrite_mcp_tool_failure_result",
-  modelRequestId: input.modelRequestId,
-  event,
-  toolSettlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
+  settlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
 });
-if (captured?.toolSettlement?.error === undefined) {
+if (!attempt.ok || attempt.result.type !== "committed" || captured?.settlement?.error === undefined) {
   throw new Error("Runtime Bridge adapter did not declare the MCP Tool error");
 }
 process.stdout.write(JSON.stringify({
   result,
   settlement,
-  event,
   connectorCalls,
-  declaredError: JSON.parse(captured.toolSettlement.error.errorJson) as unknown,
+  declaredError: JSON.parse(captured.settlement.error.errorJson) as unknown,
 }));

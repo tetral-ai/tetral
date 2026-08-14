@@ -252,7 +252,7 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 			terminationOutcome = value
 		}
 	}
-	if terminationOutcome.err != nil || terminationOutcome.termination.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+	if terminationOutcome.err != nil || terminationOutcome.termination.GetCommitted() == nil {
 		t.Fatalf("termination outcome = %#v/%v", terminationOutcome.termination, terminationOutcome.err)
 	}
 	if notificationFirst {
@@ -427,7 +427,7 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 			terminationResult = value
 		}
 	}
-	if terminationResult.err != nil || terminationResult.termination.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+	if terminationResult.err != nil || terminationResult.termination.GetCommitted() == nil {
 		t.Fatalf("termination result = %#v/%v; want committed", terminationResult.termination, terminationResult.err)
 	}
 	if commitFirst {

@@ -552,10 +552,7 @@ test("cold recovery opens a run before continuing a sealed request with terminal
                 modelToolCallId: "call_cold_tool_continuation",
                 toolUseEventId: "event_tool_cold_tool_continuation",
                 toolName: "Read",
-                terminalResult: {
-                    resultEventId: "event_result_cold_tool_continuation",
-                    outcome: "success",
-                },
+                    terminalResult: { outcome: "success" },
             }],
         },
     }, { routes: [] });
@@ -1068,6 +1065,11 @@ test("runtime layer updates non-text hot context only after the matching ACK bou
             eventId: envelope.event.type === "agent.tool_use" ? "bridge-tool" : `bridge-${envelope.writeId}`,
             processedAt: createdAt,
         };
+    }, undefined, [], undefined, async (envelope) => {
+        const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
+        const toolPart = assistant?.parts.find((part) => part.type === "tool");
+        order.push(`settlement:${envelope.settlement.outcome.type}:tool_${toolPart?.type === "tool" ? toolPart.state.status : "missing"}`);
+        return { ok: true, result: { type: "committed" } };
     });
     const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
@@ -1103,7 +1105,7 @@ test("runtime layer updates non-text hot context only after the matching ACK bou
         "event:agent.thinking:tool_missing",
         "event:agent.tool_use:tool_missing",
         "event:span.model_request_end:tool_running",
-        "event:agent.tool_result:tool_running",
+        "settlement:completed:tool_running",
         "event:span.model_request_start:tool_completed",
         "event:agent.message:tool_completed",
         "event:span.model_request_end:tool_completed",

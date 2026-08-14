@@ -274,6 +274,10 @@ class RecordingWriter implements SessionEventWriter {
     return await this.writer.append(envelope);
   }
 
+  async settleToolResult(): Promise<{ readonly ok: true; readonly result: { readonly type: "committed" } }> {
+    return { ok: true, result: { type: "committed" } };
+  }
+
   async writeRequestEnd(envelope: SessionEventWriterRequestEndEnvelope): Promise<SessionEventWriterAppendResult> {
     return await this.writer.writeRequestEnd!(envelope);
   }

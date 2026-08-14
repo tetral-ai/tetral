@@ -733,16 +733,10 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 			apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-pod-loss-approval-key!!")
 			if testCase.raceConfirmation {
-				confirmationWriteID := "rwrite_pod_loss_approval_confirm_" + suffix
-				confirmationRequest := &bridgev1.WriteEventRequest{
-					Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
-					RuntimeWriteId: confirmationWriteID,
-					ModelRequestId: modelRequestID,
-					EventType:      "agent.tool_result",
-					PayloadJson:    `{"type":"agent.tool_result","tool_use_event_id":"` + toolUseEventID + `","content":[{"type":"text","text":"Approval denied: cancel"}],"is_error":true}`,
-					SessionVisible: true,
-					Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel")},
-				}
+				confirmationRequest := bridgeToolSettlementRequestForTest(
+					bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
+					bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel"),
+				)
 				start := make(chan struct{})
 				repairResult := make(chan error, 1)
 				confirmationResult := make(chan error, 1)
@@ -756,7 +750,7 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 				}()
 				go func() {
 					<-start
-					_, err := apiStore.WriteEvent(context.Background(), confirmationRequest)
+					_, err := apiStore.SettleToolResult(context.Background(), confirmationRequest)
 					confirmationResult <- err
 				}()
 				close(start)

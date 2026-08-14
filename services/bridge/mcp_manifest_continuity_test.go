@@ -13,9 +13,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestPostgreSQLBridgeAPIStoreManifestAcceptanceUsesMonotonicGenerationAcrossETagFlap(t *testing.T) {
@@ -150,17 +147,17 @@ func TestPostgreSQLBridgeAPIStoreManifestByteBoundAcceptsExactAndPreservesAccept
 	if len([]byte(beforeTools)) != MaxMcpManifestBytes {
 		t.Fatalf("exact accepted tools bytes = %d; want %d", len([]byte(beforeTools)), MaxMcpManifestBytes)
 	}
-	_, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	firstOver, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_bytes", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("one-byte-over error = %v; want ResourceExhausted", err)
+	if err != nil || firstOver.GetCommitted() == nil {
+		t.Fatalf("one-byte-over result = %+v err %v; want committed", firstOver, err)
 	}
-	_, err = store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	replayedOver, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_bytes", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("repeated one-byte-over error = %v; want ResourceExhausted", err)
+	if err != nil || replayedOver.GetDuplicate() == nil {
+		t.Fatalf("repeated one-byte-over result = %+v err %v; want duplicate", replayedOver, err)
 	}
 	var afterTools string
 	var afterETag string
@@ -263,17 +260,17 @@ func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndCold
 	}}}}
 	store.MCPManifestLister = lister
 
-	_, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	first, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_first_over", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("first over-cap error = %v; want ResourceExhausted", err)
+	if err != nil || first.GetCommitted() == nil {
+		t.Fatalf("first over-cap result = %+v err %v; want committed", first, err)
 	}
-	_, err = store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	replay, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_first_over", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("readiness-only replay error = %v; want ResourceExhausted", err)
+	if err != nil || replay.GetDuplicate() == nil {
+		t.Fatalf("readiness-only replay result = %+v err %v; want duplicate", replay, err)
 	}
 	if lister.calls != 2 {
 		t.Fatalf("readiness-only connector reads = %d; want 2", lister.calls)

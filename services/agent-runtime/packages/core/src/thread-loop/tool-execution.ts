@@ -28,7 +28,11 @@ import {
 } from "../contracts/runtime.js";
 import type { LLMEvent } from "../llm/llm-event.js";
 import { ProviderStreamAccumulator } from "../runtime/accumulator.js";
-import type { PublicToolEvent, RuntimeProcessorSource, ProviderStreamAccumulatorResult } from "../runtime/accumulator.js";
+import type {
+  PublicToolEvent,
+  RuntimeProcessorSource,
+  ToolSettlementApplicationResult,
+} from "../runtime/accumulator.js";
 import type { AutoApprovalReviewerManager, ParentTranscriptView } from "../session/approval-reviewer-manager.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
 import type { ToolCatalog, ToolEntry } from "../tools/tool-catalog.js";
@@ -92,13 +96,13 @@ export async function commitRuntimeToolSettlement(
   modelToolCallId: string,
   result: Exclude<RuntimeToolExecutionResult, { readonly type: "stale_custody" }>,
   applyProjection: () => void,
-): Promise<ProviderStreamAccumulatorResult> {
+): Promise<ToolSettlementApplicationResult> {
   const settlement = await processor.commitToolSettlement(
     source,
     modelToolCallId,
     runtimeToolSettlement(result),
   );
-  if (settlement.ok) {
+  if (settlement.type === "settled") {
     applyProjection();
   }
   return settlement;

@@ -127,14 +127,9 @@ func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputK
 func writeEventDeclarationDigest(
 	request *bridgev1.WriteEventRequest,
 	payloadJSON string,
-	serverToolUseJSON string,
 ) (string, error) {
 	payloadJSON = stripInternalProviderFields(payloadJSON)
 	assistantAppend, err := canonicalRuntimeAssistantPartAppend(request.GetAssistantPartAppend())
-	if err != nil {
-		return "", err
-	}
-	toolSettlement, err := canonicalRuntimeToolSettlement(request.GetToolSettlement())
 	if err != nil {
 		return "", err
 	}
@@ -144,9 +139,7 @@ func writeEventDeclarationDigest(
 		"model_request_id":      nullableDeclarationString(request.GetModelRequestId()),
 		"operation_kind":        bridgeOpWriteEvent,
 		"runtime_write_id":      request.GetRuntimeWriteId(),
-		"server_tool_use":       json.RawMessage(serverToolUseJSON),
 		"session_thread_id":     request.GetScope().GetSessionThreadId(),
-		"tool_settlement":       toolSettlement,
 	}
 	if request.GetEventType() == "span.model_request_start" {
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
@@ -267,29 +260,15 @@ func finishIdleDeclarationDigest(request *bridgev1.FinishIdleRequest, stopReason
 	return sha256Hex(canonical), nil
 }
 
-func runtimeTerminationDeclarationDigest(
+func runtimeTerminationRequestHash(
 	request *bridgev1.CommitRuntimeTerminationRequest,
 	failureJSON string,
 ) (string, error) {
-	settlements := make([]any, 0, len(request.GetToolSettlements()))
-	for _, settlement := range request.GetToolSettlements() {
-		canonical, err := canonicalRuntimeToolSettlement(settlement)
-		if err != nil {
-			return "", err
-		}
-		settlements = append(settlements, canonical)
-	}
-	completionMail, err := canonicalRuntimeMessageCreate(request.GetCompletionMailCreate())
-	if err != nil {
-		return "", err
-	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"completion_mail_create": completionMail,
-		"failure":                json.RawMessage(failureJSON),
-		"operation_kind":         bridgeOpCommitRuntimeTermination,
-		"runtime_write_id":       request.GetRuntimeWriteId(),
-		"session_thread_id":      request.GetScope().GetSessionThreadId(),
-		"tool_settlements":       settlements,
+		"failure":           json.RawMessage(failureJSON),
+		"operation_kind":    bridgeOpCommitRuntimeTermination,
+		"runtime_write_id":  request.GetRuntimeWriteId(),
+		"session_thread_id": request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
@@ -422,6 +401,23 @@ func mcpToolCommitDeclarationDigest(request *bridgev1.CommitMcpToolResultRequest
 	return sha256Hex(canonical), nil
 }
 
+func mcpToolRelinquishDeclarationDigest(request *bridgev1.RelinquishMcpToolResultRequest) (string, error) {
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+		"claim_id":          request.GetClaimId(),
+		"operation_kind":    bridgeOpRelinquishMcpToolResult,
+		"session_thread_id": request.GetScope().GetSessionThreadId(),
+		"tool_use_event_id": request.GetToolUseEventId(),
+	})
+	if err != nil {
+		return "", err
+	}
+	canonical, err := canonicalRunToolJSON(string(raw))
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(canonical), nil
+}
+
 func canonicalRuntimeMessageCreates(creates []*bridgev1.RuntimeMessageCreate) ([]any, error) {
 	result := make([]any, 0, len(creates))
 	for _, create := range creates {
@@ -492,17 +488,35 @@ func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) 
 	value := map[string]any{"tool_use_event_id": settlement.GetToolUseEventId()}
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
+		var output any
+		if err := json.Unmarshal([]byte(outcome.Completed.GetOutputJson()), &output); err != nil || validateRuntimeBoundedText(output) != nil {
+			return nil, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
+		}
 		canonical, err := canonicalRuntimeDeclarationJSON(outcome.Completed.GetOutputJson())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
 		}
-		value["completed"] = json.RawMessage(canonical)
+		usage, err := normalizeServerToolUseUsage(outcome.Completed.GetServerToolUse())
+		if err != nil {
+			return nil, err
+		}
+		value["completed"] = map[string]any{
+			"output":          json.RawMessage(canonical),
+			"server_tool_use": json.RawMessage(usage.CanonicalJSON),
+		}
 	case *bridgev1.RuntimeToolSettlement_Error:
 		toolError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool error is invalid")
 		}
-		value["error"] = toolError
+		usage, err := normalizeServerToolUseUsage(outcome.Error.GetServerToolUse())
+		if err != nil {
+			return nil, err
+		}
+		value["error"] = map[string]any{
+			"error":           toolError,
+			"server_tool_use": json.RawMessage(usage.CanonicalJSON),
+		}
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
 		var errorValue any
 		if outcome.Cancelled.ErrorJson != nil {
@@ -612,7 +626,6 @@ func commitWriteEventDeclarationTx(
 	eventSequence int64,
 	modelRequestID string,
 	appendValue *bridgev1.RuntimeAssistantPartAppend,
-	settlement *bridgev1.RuntimeToolSettlement,
 	now time.Time,
 ) (*bridgev1.DeclarationReceipt, error) {
 	var messageStamps []*bridgev1.DurableMessageStamp
@@ -631,11 +644,6 @@ func commitWriteEventDeclarationTx(
 			return nil, err
 		}
 		messageStamps = []*bridgev1.DurableMessageStamp{stamp}
-	}
-	if settlement != nil {
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, modelRequestID, settlement, now); err != nil {
-			return nil, err
-		}
 	}
 	return &bridgev1.DeclarationReceipt{
 		SessionThreadId: scope.GetSessionThreadId(),
@@ -1188,7 +1196,7 @@ func settleRuntimeToolPartTx(
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
 		var output any
-		if err := json.Unmarshal([]byte(outcome.Completed.GetOutputJson()), &output); err != nil || output == nil {
+		if err := json.Unmarshal([]byte(outcome.Completed.GetOutputJson()), &output); err != nil || validateRuntimeBoundedText(output) != nil {
 			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool completion output is invalid")
 		}
 		nextState["status"] = "completed"

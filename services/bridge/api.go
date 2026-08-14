@@ -16,6 +16,7 @@ type BridgeAPIStore interface {
 	CommitInputs(context.Context, *bridgev1.CommitInputsRequest) (*bridgev1.CommitInputsResponse, error)
 	CommitTaskNotificationResult(context.Context, *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error)
 	WriteEvent(context.Context, *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error)
+	SettleToolResult(context.Context, *bridgev1.SettleToolResultRequest) (*bridgev1.SettleToolResultResponse, error)
 	WriteRequestEnd(context.Context, *bridgev1.WriteRequestEndRequest) (*bridgev1.WriteRequestEndResponse, error)
 	FinishIdle(context.Context, *bridgev1.FinishIdleRequest) (*bridgev1.FinishIdleResponse, error)
 	CreateChildThread(context.Context, *bridgev1.CreateChildThreadRequest) (*bridgev1.CreateChildThreadResponse, error)
@@ -38,6 +39,7 @@ type BridgeAPIStore interface {
 	McpManifestChanged(context.Context, *bridgev1.McpManifestChangedRequest) (*bridgev1.McpManifestChangedResponse, error)
 	ClaimMcpToolResult(context.Context, *bridgev1.ClaimMcpToolResultRequest) (*bridgev1.ClaimMcpToolResultResponse, error)
 	CommitMcpToolResult(context.Context, *bridgev1.CommitMcpToolResultRequest) (*bridgev1.CommitMcpToolResultResponse, error)
+	RelinquishMcpToolResult(context.Context, *bridgev1.RelinquishMcpToolResultRequest) (*bridgev1.RelinquishMcpToolResultResponse, error)
 	CommitInternalToolRepair(context.Context, *bridgev1.CommitInternalToolRepairRequest) (*bridgev1.CommitInternalToolRepairResponse, error)
 	CommitRuntimeTermination(context.Context, *bridgev1.CommitRuntimeTerminationRequest) (*bridgev1.CommitRuntimeTerminationResponse, error)
 }
@@ -102,6 +104,14 @@ func (s BridgeAPIServer) WriteEvent(ctx context.Context, request *bridgev1.Write
 	return response, err
 }
 
+func (s BridgeAPIServer) SettleToolResult(ctx context.Context, request *bridgev1.SettleToolResultRequest) (*bridgev1.SettleToolResultResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.SettleToolResult(ctx, request)
+}
+
 func (s BridgeAPIServer) WriteRequestEnd(ctx context.Context, request *bridgev1.WriteRequestEndRequest) (*bridgev1.WriteRequestEndResponse, error) {
 	store, err := s.requireStore()
 	if err != nil {
@@ -147,11 +157,7 @@ func (s BridgeAPIServer) CommitRuntimeTermination(ctx context.Context, request *
 	if err != nil {
 		return nil, err
 	}
-	response, err := store.CommitRuntimeTermination(ctx, request)
-	if errorCode, ok := closeoutWriteRejectionCode(err); ok {
-		return &bridgev1.CommitRuntimeTerminationResponse{Ack: rejectedAck(errorCode)}, nil
-	}
-	return response, err
+	return store.CommitRuntimeTermination(ctx, request)
 }
 
 func (s BridgeAPIServer) CreateChildThread(ctx context.Context, request *bridgev1.CreateChildThreadRequest) (*bridgev1.CreateChildThreadResponse, error) {
@@ -296,6 +302,14 @@ func (s BridgeAPIServer) CommitMcpToolResult(ctx context.Context, request *bridg
 		return nil, err
 	}
 	return store.CommitMcpToolResult(ctx, request)
+}
+
+func (s BridgeAPIServer) RelinquishMcpToolResult(ctx context.Context, request *bridgev1.RelinquishMcpToolResultRequest) (*bridgev1.RelinquishMcpToolResultResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.RelinquishMcpToolResult(ctx, request)
 }
 
 func (s BridgeAPIServer) CommitInternalToolRepair(ctx context.Context, request *bridgev1.CommitInternalToolRepairRequest) (*bridgev1.CommitInternalToolRepairResponse, error) {

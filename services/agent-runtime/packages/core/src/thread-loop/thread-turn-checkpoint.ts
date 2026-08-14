@@ -4,7 +4,6 @@ import type { DurableRuntimeMessage } from "../contracts/runtime.js";
 const DurableIdentitySchema = z.string().min(1);
 
 const TerminalResultSchema = z.strictObject({
-  resultEventId: DurableIdentitySchema,
   outcome: z.enum(["success", "error", "cancelled", "unknown"]),
 });
 
@@ -46,7 +45,6 @@ const RequestSchema = z.strictObject({
 }).superRefine((request, context) => {
   const modelToolCallIds = new Set<string>();
   const toolUseEventIds = new Set<string>();
-  const terminalResultEventIds = new Set<string>();
 
   for (const member of request.toolMembers) {
     if (modelToolCallIds.has(member.modelToolCallId)) {
@@ -70,16 +68,6 @@ const RequestSchema = z.strictObject({
     }
     toolUseEventIds.add(member.toolUseEventId);
 
-    if (member.terminalResult !== undefined) {
-      if (terminalResultEventIds.has(member.terminalResult.resultEventId)) {
-        context.addIssue({
-          code: "custom",
-          message: "resultEventId must be unique within a request",
-          path: ["toolMembers"],
-        });
-      }
-      terminalResultEventIds.add(member.terminalResult.resultEventId);
-    }
   }
 });
 
@@ -170,7 +158,6 @@ export interface ThreadTurnCheckpoint {
           readonly toolUseEventId: string;
           readonly toolName: string;
           readonly terminalResult?: {
-            readonly resultEventId: string;
             readonly outcome: "success" | "error" | "cancelled" | "unknown";
           };
         }
@@ -736,7 +723,7 @@ function extractNewestRequest(
   internalRepairs: ThreadTurnLoadFacts["internalRepairs"],
 ): NonNullable<ThreadTurnCheckpoint["request"]> {
   const modelRequestId = start.modelRequestId!;
-  const terminalByToolUse = new Map<string, { readonly resultEventId: string; readonly outcome: "success" | "error" | "cancelled" | "unknown" }>();
+  const terminalByToolUse = new Map<string, { readonly outcome: "success" | "error" | "cancelled" | "unknown" }>();
   const members: NonNullable<ThreadTurnCheckpoint["request"]>["toolMembers"][number][] = [];
   const modelToolCallIds = new Set<string>();
   const messagesById = new Map(messages.map((message) => [message.id, message]));
@@ -767,7 +754,6 @@ function extractNewestRequest(
         throw new Error("Tool Result Message part is absent");
       }
       terminalByToolUse.set(event.toolResult.toolUseEventId, {
-        resultEventId: event.eventId,
         outcome: terminalOutcomeFromToolPart(part.state.status),
       });
     }

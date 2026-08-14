@@ -10,6 +10,7 @@ service AgentRuntimeBridgeService {
   rpc CommitInputs(CommitInputsRequest) returns (CommitInputsResponse);
   rpc CommitTaskNotificationResult(CommitTaskNotificationResultRequest) returns (CommitTaskNotificationResultResponse);
   rpc WriteEvent(WriteEventRequest) returns (WriteEventResponse);
+  rpc SettleToolResult(SettleToolResultRequest) returns (SettleToolResultResponse);
   rpc WriteRequestEnd(WriteRequestEndRequest) returns (WriteRequestEndResponse);
   rpc FinishIdle(FinishIdleRequest) returns (FinishIdleResponse);
   rpc CreateChildThread(CreateChildThreadRequest) returns (CreateChildThreadResponse);
@@ -32,6 +33,7 @@ service AgentRuntimeBridgeService {
   rpc McpManifestChanged(McpManifestChangedRequest) returns (McpManifestChangedResponse);
   rpc ClaimMcpToolResult(ClaimMcpToolResultRequest) returns (ClaimMcpToolResultResponse);
   rpc CommitMcpToolResult(CommitMcpToolResultRequest) returns (CommitMcpToolResultResponse);
+  rpc RelinquishMcpToolResult(RelinquishMcpToolResultRequest) returns (RelinquishMcpToolResultResponse);
   rpc CommitInternalToolRepair(CommitInternalToolRepairRequest) returns (CommitInternalToolRepairResponse);
   rpc CommitRuntimeTermination(CommitRuntimeTerminationRequest) returns (CommitRuntimeTerminationResponse);
 }
@@ -146,10 +148,12 @@ message RuntimeToolSettlement {
 
 message RuntimeToolCompleted {
   string output_json = 1;
+  ServerToolUseUsage server_tool_use = 2;
 }
 
 message RuntimeToolError {
   string error_json = 1;
+  ServerToolUseUsage server_tool_use = 2;
 }
 
 message RuntimeToolCancelled {
@@ -402,6 +406,24 @@ message McpToolCommitCommitted {}
 message McpToolCommitDuplicate {}
 message McpToolCommitStale {}
 
+message RelinquishMcpToolResultRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string claim_id = 3;
+}
+
+message RelinquishMcpToolResultResponse {
+  oneof outcome {
+    McpToolRelinquishRelinquished relinquished = 1;
+    McpToolRelinquishDuplicate duplicate = 2;
+    McpToolRelinquishStale stale = 3;
+  }
+}
+
+message McpToolRelinquishRelinquished {}
+message McpToolRelinquishDuplicate {}
+message McpToolRelinquishStale {}
+
 message CommitInternalToolRepairRequest {
   RuntimeScope scope = 1;
   string model_request_id = 2;
@@ -419,15 +441,29 @@ message CommitRuntimeTerminationRequest {
   RuntimeScope scope = 1;
   string runtime_write_id = 2;
   string failure_json = 3;
-  repeated RuntimeToolSettlement tool_settlements = 4;
-  RuntimeMessageCreate completion_mail_create = 5;
-  reserved 6;
+  reserved 4, 5, 6;
+  reserved "tool_settlements", "completion_mail_create";
 }
 
 message CommitRuntimeTerminationResponse {
-  BridgeWriteAck ack = 1;
-  DeclarationResponse declaration = 2;
+  oneof outcome {
+    RuntimeTerminationCommitted committed = 1;
+    RuntimeTerminationDuplicate duplicate = 2;
+    RuntimeTerminationStale stale = 3;
+  }
 }
+
+message RuntimeTerminationCommitted {
+  string failure_event_id = 1;
+  string closeout_event_id = 2;
+}
+
+message RuntimeTerminationDuplicate {
+  string failure_event_id = 1;
+  string closeout_event_id = 2;
+}
+
+message RuntimeTerminationStale {}
 
 message TransientAttachmentRef {
   string attachment_ref = 1;
@@ -525,16 +561,15 @@ message WriteEventRequest {
   string payload_json = 5;
   reserved 6;
   bool session_visible = 7;
-  reserved 8;
-  ServerToolUseUsage server_tool_use = 9;
-  oneof declaration {
-    RuntimeAssistantPartAppend assistant_part_append = 10;
-    RuntimeToolSettlement tool_settlement = 15;
-  }
+  reserved 8, 9;
+  reserved "server_tool_use";
+  RuntimeAssistantPartAppend assistant_part_append = 10;
   reserved 11, 12;
   reserved "mcp_materialization_handle", "sandbox_result_digest";
   optional int64 context_through_message_sequence = 13;
   string request_kind = 14;
+  reserved 15;
+  reserved "tool_settlement";
 }
 
 message ServerToolUseUsage {
@@ -548,6 +583,25 @@ message WriteEventResponse {
   int64 sequence = 3;
   DeclarationResponse declaration = 4;
 }
+
+message SettleToolResultRequest {
+  RuntimeScope scope = 1;
+  RuntimeToolSettlement settlement = 2;
+  reserved 3;
+  reserved "server_tool_use";
+}
+
+message SettleToolResultResponse {
+  oneof outcome {
+    ToolResultCommitted committed = 1;
+    ToolResultDuplicate duplicate = 2;
+    ToolResultStale stale = 3;
+  }
+}
+
+message ToolResultCommitted {}
+message ToolResultDuplicate {}
+message ToolResultStale {}
 
 message WriteRequestEndRequest {
   RuntimeScope scope = 1;

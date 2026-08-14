@@ -8,14 +8,14 @@
  */
 import type {
   RuntimeFailure,
-  SessionEvent,
+  SessionEventWriterAppendEvent,
   SessionEventEnvelope,
   SessionEventWriter,
   SessionEventWriterAppendResult,
 } from "../contracts/runtime.js";
 import {
   RuntimeFailureSchema,
-  SessionEventSchema,
+  SessionEventWriterAppendEventSchema,
   SessionEventEnvelopeSchema,
   SessionEventWriterAppendResultSchema,
   SessionEventWriterRetryPolicy,
@@ -83,7 +83,7 @@ export function createSessionEventWriter(options: SessionEventWriterOptions): Pi
 }
 
 /** Maps internal session.error payloads to their public durable event member. */
-export function sessionEventForDurableWrite(event: SessionEvent): SessionEvent {
+export function sessionEventForDurableWrite(event: SessionEventWriterAppendEvent): SessionEventWriterAppendEvent {
   if (event.type !== "session.error") {
     return event;
   }
@@ -91,7 +91,7 @@ export function sessionEventForDurableWrite(event: SessionEvent): SessionEvent {
   if (!failure.success) {
     return event;
   }
-  return SessionEventSchema.parse({
+  return SessionEventWriterAppendEventSchema.parse({
     type: "session.error",
     error: publicSessionError(failure.data),
   });

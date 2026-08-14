@@ -65,9 +65,6 @@ func (s *PostgreSQLBridgeAPIStore) McpManifestChanged(ctx context.Context, reque
 		return nil, err
 	}
 	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance, false)
-	if acceptance.ManifestTooLarge {
-		return nil, status.Error(codes.ResourceExhausted, "mcp manifest tools exceed the accepted byte limit")
-	}
 	if !acceptance.Duplicate {
 		logMCPManifestOmissions(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance.BuiltinFamily, acceptance.Omissions)
 	}
@@ -105,11 +102,119 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		if tool.MCPServerName == "" {
 			return status.Error(codes.FailedPrecondition, "durable tool is not an MCP operation")
 		}
+		if err := verifyApprovedToolExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+			return err
+		}
 		response, err = claimMCPToolResultTx(ctx, tx, request, tool, now)
 		return err
 	}); err != nil {
 		if isScopeSupersededError(err) {
 			return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolClaimStale{}}}, nil
+		}
+		return nil, err
+	}
+	return response, nil
+}
+
+// RelinquishMcpToolResult releases one exact, known-not-to-have-committed MCP
+// execution attempt. Ambiguous commit outcomes never use this operation: a
+// stored/consumed result or a different active claim is returned as stale and
+// remains authoritative.
+func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, request *bridgev1.RelinquishMcpToolResultRequest) (*bridgev1.RelinquishMcpToolResultResponse, error) {
+	if err := validateMCPClaimTarget(request.GetScope(), request.GetToolUseEventId(), request.GetClaimId()); err != nil {
+		return nil, err
+	}
+	declarationDigest, err := mcpToolRelinquishDeclarationDigest(request)
+	if err != nil {
+		return nil, err
+	}
+	var response *bridgev1.RelinquishMcpToolResultResponse
+	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.relinquish_mcp_tool_result", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+			return err
+		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		existingOperation, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpRelinquishMcpToolResult,
+			"mcp_tool_execution",
+			request.GetClaimId(),
+		)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if existingOperation.DeclarationDigest != declarationDigest {
+				return status.Error(codes.AlreadyExists, "mcp tool relinquish idempotency conflict")
+			}
+			response = duplicateMCPRelinquishResponse()
+			return nil
+		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
+		if err != nil {
+			return err
+		}
+		if tool.MCPServerName == "" {
+			return status.Error(codes.FailedPrecondition, "durable tool is not an MCP operation")
+		}
+		existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
+		if err != nil {
+			return err
+		}
+		if !ok || !sameMCPToolResult(existing, tool) ||
+			existing.MCPClaimStatus.String != mcpClaimStatusInFlight ||
+			!existing.MCPClaimID.Valid || existing.MCPClaimID.String != request.GetClaimId() {
+			response = staleMCPRelinquishResponse()
+			return nil
+		}
+		result, err := tx.Exec(ctx,
+			`DELETE FROM session_runtime_tool_results
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND tool_use_event_id = $4
+			    AND tool_kind = 'mcp'
+			    AND mcp_claim_status = 'in_flight'
+			    AND mcp_claim_id = $5`,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+			request.GetScope().GetSessionThreadId(),
+			request.GetToolUseEventId(),
+			request.GetClaimId(),
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(result) {
+			response = staleMCPRelinquishResponse()
+			return nil
+		}
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpRelinquishMcpToolResult,
+			"mcp_tool_execution",
+			request.GetClaimId(),
+			declarationDigest,
+			`{}`,
+			s.now(),
+		); err != nil {
+			return err
+		}
+		response = &bridgev1.RelinquishMcpToolResultResponse{Outcome: &bridgev1.RelinquishMcpToolResultResponse_Relinquished{Relinquished: &bridgev1.McpToolRelinquishRelinquished{}}}
+		return nil
+	})
+	if err != nil {
+		if isScopeSupersededError(err) {
+			return staleMCPRelinquishResponse(), nil
 		}
 		return nil, err
 	}
@@ -453,7 +558,7 @@ func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
-			mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at,
+			mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at,
 			created_at, updated_at
 		) VALUES ($1, $2, $3, $4, 'mcp', $5, $6, $7, 'committed', '{}', 'in_flight', $8, $9, $10, $10)
 		ON CONFLICT (workspace_id, session_id, session_thread_id, tool_use_event_id) DO NOTHING`,
@@ -477,7 +582,7 @@ func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *
 func renewMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, claimID string, now time.Time) error {
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
-		    SET mcp_claim_owner_request_id = $5,
+		    SET mcp_claim_id = $5,
 		        mcp_claim_lease_expires_at = $6,
 		        updated_at = $7
 		  WHERE workspace_id = $1
@@ -508,7 +613,7 @@ func storeMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 		`UPDATE session_runtime_tool_results
 		    SET result_json = $5,
 		        mcp_claim_status = 'stored',
-		        mcp_claim_owner_request_id = NULL,
+		        mcp_claim_id = NULL,
 		        mcp_claim_lease_expires_at = NULL,
 		        updated_at = $6
 		  WHERE workspace_id = $1
@@ -517,7 +622,7 @@ func storeMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 		    AND tool_use_event_id = $4
 		    AND tool_kind = 'mcp'
 		    AND mcp_claim_status = 'in_flight'
-		    AND mcp_claim_owner_request_id = $7`,
+		    AND mcp_claim_id = $7`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -565,6 +670,14 @@ func sameMCPToolResult(existing runtimeToolResult, tool durableToolExecution) bo
 
 func staleMCPCommitResponse() *bridgev1.CommitMcpToolResultResponse {
 	return &bridgev1.CommitMcpToolResultResponse{Outcome: &bridgev1.CommitMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolCommitStale{}}}
+}
+
+func duplicateMCPRelinquishResponse() *bridgev1.RelinquishMcpToolResultResponse {
+	return &bridgev1.RelinquishMcpToolResultResponse{Outcome: &bridgev1.RelinquishMcpToolResultResponse_Duplicate{Duplicate: &bridgev1.McpToolRelinquishDuplicate{}}}
+}
+
+func staleMCPRelinquishResponse() *bridgev1.RelinquishMcpToolResultResponse {
+	return &bridgev1.RelinquishMcpToolResultResponse{Outcome: &bridgev1.RelinquishMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolRelinquishStale{}}}
 }
 
 func mcpRuntimeToolName(mcpServerName string, toolName string) string {
@@ -797,7 +910,6 @@ type mcpManifestAcceptance struct {
 	Omissions          []mcpManifestOmission
 	Duplicate          bool
 	Transitioned       bool
-	ManifestTooLarge   bool
 }
 
 // session_mcp_manifests carries readiness and diagnostic ORTHOGONALLY to the
@@ -896,7 +1008,6 @@ func captureMCPManifestAcceptanceTx(
 			BuiltinFamily:      toolsetConfig.BuiltinFamily,
 			Duplicate:          !transitioned,
 			Transitioned:       transitioned,
-			ManifestTooLarge:   true,
 		}, err
 	}
 	if rowExists && current.ManifestETag.Valid && current.ManifestETag.String == manifestETag && current.Readiness == mcpManifestReadinessReady {

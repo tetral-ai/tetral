@@ -2,6 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -1016,6 +1017,11 @@ func logOutputCaptureScanRecords(logger *slog.Logger, workspaceID string, sessio
 	}
 }
 
+type runtimeTerminationResult struct {
+	FailureEventID  string `json:"failure_event_id"`
+	CloseoutEventID string `json:"closeout_event_id"`
+}
+
 func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context, request *bridgev1.CommitRuntimeTerminationRequest) (*bridgev1.CommitRuntimeTerminationResponse, error) {
 	if request.GetRuntimeWriteId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "runtime write id is required")
@@ -1024,50 +1030,33 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	const sourceKind = "runtime_termination"
-	declarationDigest, err := runtimeTerminationDeclarationDigest(request, failureJSON)
+	requestHash, err := runtimeTerminationRequestHash(request, failureJSON)
 	if err != nil {
 		return nil, err
 	}
 	now := s.now()
 	var (
-		ack                *bridgev1.BridgeWriteAck
-		receipt            *bridgev1.DeclarationReceipt
+		result             runtimeTerminationResult
+		duplicate          bool
 		custodyTransitions runtimeTerminationCustodyTransitions
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_runtime_termination", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(
-			ctx,
-			tx,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-		); err != nil {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if existing, ok, err := readBridgeDeclarationOperationTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			bridgeOpCommitRuntimeTermination,
-			sourceKind,
-			request.GetRuntimeWriteId(),
-		); err != nil {
+		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitRuntimeTermination, request.GetRuntimeWriteId()); err != nil {
 			return err
 		} else if ok {
-			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
-				return status.Error(codes.FailedPrecondition, "runtime termination receipt is invalid")
-			}
-			if existing.DeclarationDigest != declarationDigest {
+			if existing.RequestHash != requestHash {
 				return status.Error(codes.AlreadyExists, "runtime termination idempotency conflict")
 			}
-			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
-			if err != nil {
-				return status.Error(codes.FailedPrecondition, "runtime termination receipt is invalid")
+			if err := json.Unmarshal([]byte(existing.ResultJSON), &result); err != nil || result.FailureEventID == "" || result.CloseoutEventID == "" {
+				return status.Error(codes.FailedPrecondition, "runtime termination result is invalid")
 			}
-			ack = duplicateAck("", request.GetRuntimeWriteId())
+			duplicate = true
 			return nil
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -1087,17 +1076,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err := closeRuntimeTerminationSpansTx(ctx, tx, request.GetScope(), failure, now); err != nil {
 			return err
 		}
-		receipt, err = commitRuntimeTerminationDeclarationsTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			threadScope,
-			request.GetRuntimeWriteId(),
-			request.GetToolSettlements(),
-			request.GetCompletionMailCreate(),
-			now,
-		)
-		if err != nil {
+		if err := settleRuntimeTerminationDurableFactsTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, now); err != nil {
 			return err
 		}
 		orphanToolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, request.GetScope(), false)
@@ -1105,29 +1084,21 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			return err
 		}
 		if len(orphanToolUses) != 0 {
-			return status.Error(codes.FailedPrecondition, "runtime termination has an undeclared live tool use")
+			return status.Error(codes.FailedPrecondition, "runtime termination has a live Tool use after derived settlement")
 		}
 		if threadScope.role == "main" {
 			if err := closeRuntimeTerminatedSessionSiblingsTx(ctx, tx, request.GetScope(), request.GetRuntimeWriteId(), now); err != nil {
 				return err
 			}
 		}
-		custodyTransitions, err = cancelRuntimeTerminationInputsTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			threadScope.role == "main",
-			now,
-		)
+		custodyTransitions, err = cancelRuntimeTerminationInputsTx(ctx, tx, request.GetScope(), threadScope.role == "main", now)
 		if err != nil {
 			return err
 		}
 		// Runtime termination removes every current-thread and, for the main
 		// thread, sibling Sandbox blocker before release readiness is evaluated
 		// once for the Session. Queue custody is assigned in this transaction.
-		releaseJobs, err := sandboxrelease.ReadyRequestsTx(
-			ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), now, nil,
-		)
+		releaseJobs, err := sandboxrelease.ReadyRequestsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), now, nil)
 		if err != nil {
 			return err
 		}
@@ -1142,55 +1113,32 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		receipt.Events = append(receipt.Events, errorStamp, statusStamp)
-		receipt.DeclarationDigest = declarationDigest
-		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		result = runtimeTerminationResult{FailureEventID: errorStamp.GetEventId(), CloseoutEventID: statusStamp.GetEventId()}
+		resultJSON, err := marshalBridgeJSON(result)
 		if err != nil {
 			return err
 		}
-		if err := insertBridgeDeclarationOperationTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			bridgeOpCommitRuntimeTermination,
-			sourceKind,
-			request.GetRuntimeWriteId(),
-			declarationDigest,
-			receiptJSON,
-			now,
-		); err != nil {
-			return err
-		}
-		ack = committedAck("", request.GetRuntimeWriteId())
-		return nil
+		return insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
+			Operation: bridgeOpCommitRuntimeTermination, SourceKind: bridgeOpCommitRuntimeTermination,
+			IdempotencyKey: request.GetRuntimeWriteId(), RequestHash: requestHash, AckStatus: bridgeAckCommitted,
+			RuntimeWriteID: sql.NullString{String: request.GetRuntimeWriteId(), Valid: true}, ResultJSON: resultJSON, Now: now,
+		})
 	}); err != nil {
-		return nil, err
-	}
-	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
-	if err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Stale{Stale: &bridgev1.RuntimeTerminationStale{}}}, nil
+		}
 		return nil, err
 	}
 	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "accepted_to_cancelled", custodyTransitions.accepted)
 	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "parked_to_cancelled", custodyTransitions.parked)
-	logRuntimeDeclaration(
-		s.Logger,
-		request.GetScope(),
-		bridgeOpCommitRuntimeTermination,
-		sourceKind,
-		request.GetRuntimeWriteId(),
-		declarationDigest,
-		ack,
-		observation,
-	)
-	return &bridgev1.CommitRuntimeTerminationResponse{
-		Ack: ack,
-		Declaration: &bridgev1.DeclarationResponse{
-			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
-			ObservedBindingId:         observation.BindingID,
-			ObservedBindingGeneration: observation.BindingGeneration,
-			ApplicationDisposition:    observation.Disposition,
-		},
-	}, nil
+	if duplicate {
+		return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Duplicate{Duplicate: &bridgev1.RuntimeTerminationDuplicate{
+			FailureEventId: result.FailureEventID, CloseoutEventId: result.CloseoutEventID,
+		}}}, nil
+	}
+	return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Committed{Committed: &bridgev1.RuntimeTerminationCommitted{
+		FailureEventId: result.FailureEventID, CloseoutEventId: result.CloseoutEventID,
+	}}}, nil
 }
 
 type requestEndDispositionResult struct {

@@ -15,7 +15,7 @@ import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-
 import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { buildThreadLoopUserMessage as userMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, createdAt, deferred, emptyColdCoverage, expectNoProviderDiagnosticCanaries, failingEventWriter, flushMicrotasks, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, withFinishIdleReceiptForTest, withRuntimeTerminationReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, createdAt, deferred, emptyColdCoverage, expectNoProviderDiagnosticCanaries, failingEventWriter, flushMicrotasks, queuedLLMService, runtimeThreadLoopLayer, runtimeTerminationResultForTest, sleepUntilAborted, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, withFinishIdleReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -365,6 +365,7 @@ test("idle finalization fails closed when FinishIdle boundary is unavailable", a
     const loader = new RecordingContextLoader([], { type: "empty" });
     const appendedTypes: string[] = [];
     const writer: SessionEventWriter = {
+        settleToolResult: async () => ({ ok: true, result: { type: "committed" } }),
         append: async (envelope) => {
             appendedTypes.push(envelope.event.type);
             return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
@@ -395,6 +396,7 @@ test("idle finalization retries lost ACKs with the same runtime write id", async
     const finishIdleWriteIds: string[] = [];
     const statesBeforeFinishIdleReceipts: string[] = [];
     const writer: SessionEventWriter = {
+        settleToolResult: async () => ({ ok: true, result: { type: "committed" } }),
         append: async (envelope) => ({
             ok: true,
             writeId: envelope.writeId,
@@ -442,6 +444,7 @@ test("idle finalization drains the raw FinishIdle call after its local timeout",
     const rawFinish = deferred<SessionEventWriterAppendResult>();
     let finishCalls = 0;
     const writer: SessionEventWriter = {
+        settleToolResult: async () => ({ ok: true, result: { type: "committed" } }),
         append: async (envelope) => ({
             ok: true,
             writeId: envelope.writeId,
@@ -1840,12 +1843,7 @@ test("runtime layer routes a proven terminal provider failure through atomic ter
         commitRuntimeTermination: async (envelope) => {
             closeoutOrder.push("commit_runtime_termination");
             terminations.push(envelope);
-            return withRuntimeTerminationReceiptForTest(envelope, {
-                ok: true,
-                writeId: envelope.writeId,
-                eventId: `sevt_termination_${envelope.writeId}`,
-                processedAt: createdAt,
-            });
+            return runtimeTerminationResultForTest(envelope);
         },
     };
     const failure = {
@@ -1882,7 +1880,6 @@ test("runtime layer routes a proven terminal provider failure through atomic ter
         sessionId: "sesn_1",
         sessionThreadId: "thread-test",
         failure,
-        toolSettlements: [],
     });
     expect(closeoutOrder).toEqual(["write_request_end", "commit_runtime_termination"]);
     expect(requestEnds).toEqual([
@@ -2002,12 +1999,7 @@ test("runtime layer seals a terminal stream failure before atomic termination", 
         },
         commitRuntimeTermination: async (envelope) => {
             closeoutOrder.push("commit_runtime_termination");
-            return withRuntimeTerminationReceiptForTest(envelope, {
-                ok: true,
-                writeId: envelope.writeId,
-                eventId: `sevt_termination_${envelope.writeId}`,
-                processedAt: createdAt,
-            });
+            return runtimeTerminationResultForTest(envelope);
         },
     };
     const service: LLMServiceInterface = {

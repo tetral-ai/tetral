@@ -52,12 +52,11 @@ const bridgeOptions = {
 };
 const productionWriter = new BridgeAPIEventWriter(bridgeOptions);
 const writer: SessionEventWriter = {
+  settleToolResult: async (envelope) => await productionWriter.settleToolResult(envelope),
   append: async (envelope) => {
     if (
       envelope.event.type === "agent.tool_use" ||
-      envelope.event.type === "agent.tool_result" ||
-      envelope.event.type === "agent.mcp_tool_use" ||
-      envelope.event.type === "agent.mcp_tool_result"
+      envelope.event.type === "agent.mcp_tool_use"
     ) {
       publicToolEvents.push(envelope.event.type);
     }

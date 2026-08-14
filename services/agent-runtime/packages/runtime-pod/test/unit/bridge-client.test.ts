@@ -13,12 +13,15 @@ import type {
   CommitInputsRequest,
   CommitInternalToolRepairRequest,
   CommitRuntimeTerminationRequest,
+  CommitRuntimeTerminationResponse,
   CommitTaskNotificationResultRequest,
   FinishIdleRequest,
   LoadContextRequest,
   RuntimeMessageCreate,
   RuntimePartCreate,
   RuntimeScope,
+  SettleToolResultRequest,
+  SettleToolResultResponse,
   WriteEventRequest,
   WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -31,13 +34,13 @@ import {
   runtimeInternalToolRepairCreate,
   taskNotificationOperationId,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
-import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import type {
   RuntimeInternalToolRepairCommit,
   SessionEventEnvelope,
   SessionEventWriterFinishIdleEnvelope,
   SessionEventWriterRequestEndEnvelope,
   SessionEventWriterRuntimeTerminationEnvelope,
+  SessionEventWriterToolSettlementEnvelope,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import {
   BridgeAPIContextLoader,
@@ -49,7 +52,6 @@ import {
   commitInputsDeclarationDigest,
   finishIdleDeclarationDigest,
   internalToolRepairDeclarationDigest,
-  runtimeTerminationDeclarationDigest,
   taskNotificationDeclarationDigest,
   writeEventDeclarationDigest,
   writeRequestEndDeclarationDigest,
@@ -486,7 +488,7 @@ describe("Bridge runtime declaration adapters", () => {
     });
   });
 
-  test("projects Assistant append and Tool settlement as disjoint WriteEvent shapes", async () => {
+  test("projects Assistant append and Tool settlement through disjoint RPCs", async () => {
     const bridge = new DeclarationBridge();
     const writer = new BridgeAPIEventWriter(options(bridge));
     const appendEnvelope: SessionEventEnvelope = {
@@ -499,22 +501,19 @@ describe("Bridge runtime declaration adapters", () => {
     };
 
     const append = await writer.append(appendEnvelope);
-    const settlement = await writer.append({
-      ...eventScope("write_result"),
-      modelRequestId: "mrq_1",
-      event: { type: "agent.tool_result", tool_use_id: "sevt_tool_1", content: [{ type: "text", text: "done" }] },
-      toolSettlement: {
+    const settlement = await writer.settleToolResult({
+      ...settlementScope(),
+      settlement: {
         toolUseEventId: "sevt_tool_1",
         outcome: { type: "completed", output: { text: "done", truncated: false } },
       },
     });
 
     expect(append).toMatchObject({ ok: true, declaration: { receipt: { messages: [{ disposition: "created" }] } } });
-    expect(settlement).toMatchObject({ ok: true, declaration: { receipt: { messages: [] } } });
+    expect(settlement).toEqual({ ok: true, result: { type: "committed" } });
     expect(bridge.writeEventRequests[0]?.assistantPartAppend?.parts).toHaveLength(1);
-    expect(bridge.writeEventRequests[0]?.toolSettlement).toBeUndefined();
-    expect(bridge.writeEventRequests[1]?.assistantPartAppend).toBeUndefined();
-    expect(bridge.writeEventRequests[1]?.toolSettlement?.toolUseEventId).toBe("sevt_tool_1");
+    expect(bridge.writeEventRequests).toHaveLength(1);
+    expect(bridge.settleToolResultRequests[0]?.settlement?.toolUseEventId).toBe("sevt_tool_1");
   });
 
   test("projects every error-bearing Tool family through one durable error contract", async () => {
@@ -523,7 +522,7 @@ describe("Bridge runtime declaration adapters", () => {
     const cases = [
       {
         name: "ordinary",
-        event: { type: "agent.tool_result" as const, tool_use_id: "sevt_ordinary", is_error: true },
+        toolUseEventId: "sevt_ordinary",
         outcome: {
           type: "error" as const,
           error: { type: "runtime" as const, code: "provider_tool_protocol_error" as const, message: "ordinary failed", retryable: false, fatal: true, retryStatus: { type: "terminal" as const } },
@@ -531,7 +530,7 @@ describe("Bridge runtime declaration adapters", () => {
       },
       {
         name: "MCP",
-        event: { type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", is_error: true },
+        toolUseEventId: "sevt_mcp",
         outcome: {
           type: "error" as const,
           error: { type: "runtime" as const, code: "provider_tool_protocol_error" as const, message: "MCP failed", retryable: true, fatal: false, reason: "runtime_contract_validation" as const },
@@ -539,7 +538,7 @@ describe("Bridge runtime declaration adapters", () => {
       },
       {
         name: "Sandbox-backed",
-        event: { type: "agent.tool_result" as const, tool_use_id: "sevt_sandbox", is_error: true },
+        toolUseEventId: "sevt_sandbox",
         outcome: {
           type: "error" as const,
           error: { type: "runtime" as const, code: "provider_unavailable" as const, message: "Sandbox failed", retryable: true, fatal: false, retryStatus: { type: "retrying" as const, attempt: 1 } },
@@ -547,7 +546,7 @@ describe("Bridge runtime declaration adapters", () => {
       },
       {
         name: "error-bearing cancellation",
-        event: { type: "agent.tool_result" as const, tool_use_id: "sevt_cancelled", is_error: true },
+        toolUseEventId: "sevt_cancelled",
         outcome: {
           type: "cancelled" as const,
           error: { type: "runtime" as const, code: "provider_cancelled" as const, message: "Tool cancelled", retryable: false, fatal: false, reason: "runtime_shutdown" as const },
@@ -556,16 +555,11 @@ describe("Bridge runtime declaration adapters", () => {
     ];
 
     for (const [index, candidate] of cases.entries()) {
-      const toolUseEventId = "tool_use_id" in candidate.event
-        ? candidate.event.tool_use_id
-        : candidate.event.mcp_tool_use_id;
-      await writer.append({
-        ...eventScope(`write_error_family_${index}`),
-        modelRequestId: "mrq_error_family",
-        event: candidate.event,
-        toolSettlement: { toolUseEventId, outcome: candidate.outcome },
+      await writer.settleToolResult({
+        ...settlementScope(),
+        settlement: { toolUseEventId: candidate.toolUseEventId, outcome: candidate.outcome },
       });
-      const settlement = bridge.writeEventRequests[index]?.toolSettlement;
+      const settlement = bridge.settleToolResultRequests[index]?.settlement;
       const rawError = settlement?.error?.errorJson ?? settlement?.cancelled?.errorJson;
       expect(rawError, candidate.name).toBeDefined();
       expect(JSON.parse(rawError ?? "null"), candidate.name).toEqual({
@@ -576,16 +570,14 @@ describe("Bridge runtime declaration adapters", () => {
       expect(Object.keys(JSON.parse(rawError ?? "null")).sort(), candidate.name).toEqual(["message", "retryable", "type"]);
     }
 
-    await writer.append({
-      ...eventScope("write_completed_control"),
-      modelRequestId: "mrq_error_family",
-      event: { type: "agent.tool_result", tool_use_id: "sevt_completed", content: [{ type: "text", text: "done" }] },
-      toolSettlement: {
+    await writer.settleToolResult({
+      ...settlementScope(),
+      settlement: {
         toolUseEventId: "sevt_completed",
         outcome: { type: "completed", output: { text: "done", truncated: false } },
       },
     });
-    expect(JSON.parse(bridge.writeEventRequests.at(-1)?.toolSettlement?.completed?.outputJson ?? "null")).toEqual({
+    expect(JSON.parse(bridge.settleToolResultRequests.at(-1)?.settlement?.completed?.outputJson ?? "null")).toEqual({
       text: "done",
       truncated: false,
     });
@@ -649,41 +641,60 @@ describe("Bridge runtime declaration adapters", () => {
     ]);
   });
 
-  test("does not retry a definitive MCP settlement rejection", async () => {
+  test("rejects zero-arm and contradictory Tool settlement responses", async () => {
     const bridge = new DeclarationBridge();
-    bridge.writeEventRejections.push("mcp_result_commit_invalid");
+    bridge.settleToolResultResponses.push({}, { committed: {}, stale: {} });
     const transport = new BridgeAPIEventWriter(options(bridge));
-    const writer = createSessionEventWriter({
-      append: async (envelope) => await transport.append(envelope),
-      sleep: async (durationMs) => durationMs < 3_000
-        ? true
-        : await new Promise<boolean>(() => undefined),
-    });
-    const envelope = mcpSettlementEnvelope("rwrite_mcp_rejected");
+    const envelope = mcpSettlementEnvelope();
 
-    await expect(writer.append(envelope)).resolves.toMatchObject({
-      ok: false,
-      error: { code: "ack_mismatch", retryable: false },
+    await expect(transport.settleToolResult(envelope)).resolves.toMatchObject({
+      ok: false, error: { code: "schema_mismatch" },
     });
-    expect(bridge.writeEventRequests).toHaveLength(1);
+    await expect(transport.settleToolResult(envelope)).resolves.toMatchObject({
+      ok: false, error: { code: "schema_mismatch" },
+    });
   });
 
-  test("replays an ambiguous MCP settlement with immutable identity", async () => {
+  test("parses each legal Tool settlement response arm into its closed result", async () => {
     const bridge = new DeclarationBridge();
-    bridge.writeEventPostCommitErrors.push(status.UNKNOWN);
+    bridge.settleToolResultResponses.push({ committed: {} }, { duplicate: {} }, { stale: {} });
     const transport = new BridgeAPIEventWriter(options(bridge));
-    const envelope = mcpSettlementEnvelope("rwrite_mcp_replay");
+    const envelope = mcpSettlementEnvelope();
 
-    await expect(transport.append(envelope)).resolves.toMatchObject({
-      ok: false,
-      error: { code: "unavailable", retryable: true },
+    await expect(transport.settleToolResult(envelope)).resolves.toEqual({ ok: true, result: { type: "committed" } });
+    await expect(transport.settleToolResult(envelope)).resolves.toEqual({ ok: true, result: { type: "duplicate" } });
+    await expect(transport.settleToolResult(envelope)).resolves.toEqual({ ok: true, result: { type: "stale" } });
+  });
+
+  test("replays an ambiguous Tool settlement from immutable request identity", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.settleToolResultPostCommitErrors.push(status.UNKNOWN);
+    const transport = new BridgeAPIEventWriter({ ...options(bridge), sleep: async () => {} });
+    const envelope = mcpSettlementEnvelope();
+
+    await expect(transport.settleToolResult(envelope)).resolves.toEqual({ ok: true, result: { type: "duplicate" } });
+    expect(bridge.settleToolResultRequests).toHaveLength(2);
+    expect(bridge.settleToolResultRequests[1]).toEqual(bridge.settleToolResultRequests[0]);
+  });
+
+  test("bounds persistent Tool settlement acknowledgement loss without changing request bytes", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.settleToolResultPostCommitErrors.push(status.UNKNOWN, status.UNAVAILABLE, status.DEADLINE_EXCEEDED);
+    const delays: number[] = [];
+    const transport = new BridgeAPIEventWriter({
+      ...options(bridge),
+      sleep: async (delayMs) => { delays.push(delayMs); },
     });
-    await expect(transport.append(envelope)).resolves.toMatchObject({ ok: true, writeId: envelope.writeId });
-    expect(bridge.writeEventRequests).toHaveLength(2);
-    expect(bridge.writeEventRequests.map((request) => writeEventDeclarationDigest(request))).toEqual([
-      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
-      writeEventDeclarationDigest(bridge.writeEventRequests[0]!),
-    ]);
+    const envelope = mcpSettlementEnvelope();
+
+    await expect(transport.settleToolResult(envelope)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "timeout", retryable: true },
+    });
+    expect(delays).toEqual([100, 300]);
+    expect(bridge.settleToolResultRequests).toHaveLength(3);
+    expect(bridge.settleToolResultRequests[1]).toEqual(bridge.settleToolResultRequests[0]);
+    expect(bridge.settleToolResultRequests[2]).toEqual(bridge.settleToolResultRequests[0]);
   });
 
   test("matches RequestEnd and joined interrupt receipts by operation identity", async () => {
@@ -749,7 +760,7 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.writeRequestEndRequests[0]).not.toHaveProperty("stableReasoningParts");
   });
 
-  test("serializes idle completion create and atomic termination settlements", async () => {
+  test("serializes idle completion create and consumes the closed termination result", async () => {
     const bridge = new DeclarationBridge();
     const writer = new BridgeAPIEventWriter(options(bridge));
     const completionCreate = {
@@ -780,21 +791,57 @@ describe("Bridge runtime declaration adapters", () => {
         fatal: true,
         reason: "runtime_shutdown",
       },
-      toolSettlements: [{
-        toolUseEventId: "sevt_tool_open",
-        outcome: { type: "cancelled" },
-      }],
-      completionMailCreate: completionCreate,
     };
 
     const idle = await writer.finishIdle(idleEnvelope);
     const terminated = await writer.commitRuntimeTermination(terminationEnvelope);
 
     expect(idle).toMatchObject({ ok: true, declaration: { receipt: { idleCloseout: { durableTurnId: "turn_1" } } } });
-    expect(terminated).toMatchObject({ ok: true, declaration: { receipt: { operationId: "terminate_1" } } });
+    expect(terminated).toEqual({
+      ok: true,
+      type: "committed",
+      failureEventId: "sevt_termination_failure",
+      closeoutEventId: "sevt_termination_closeout",
+    });
     expect(bridge.finishIdleRequests[0]?.completionMailCreate).toBeDefined();
-    expect(bridge.terminationRequests[0]?.toolSettlements).toHaveLength(1);
-    expect(bridge.terminationRequests[0]?.completionMailCreate).toBeDefined();
+    expect(bridge.terminationRequests[0]).toEqual({
+      scope: {
+        workspaceId: "wksp_1",
+        sessionId: "sesn_1",
+        sessionThreadId: "thrd_1",
+        binding: {
+          bindingId: "bind_1",
+          bindingGeneration: 3,
+          targetPodUid: "pod_1",
+        },
+      },
+      runtimeWriteId: "terminate_1",
+      failureJson: JSON.stringify(terminationEnvelope.failure),
+    });
+  });
+
+  test("rejects zero, multiple, and incomplete termination result variants", async () => {
+    const envelope: SessionEventWriterRuntimeTerminationEnvelope = {
+      ...eventScope("terminate_contract"),
+      failure: {
+        type: "runtime",
+        code: "runtime_invalid_sequence",
+        message: "terminated",
+        retryable: false,
+        fatal: true,
+        reason: "runtime_shutdown",
+      },
+    };
+    for (const responseValue of [
+      {},
+      { committed: { failureEventId: "failure", closeoutEventId: "closeout" }, stale: {} },
+      { duplicate: { failureEventId: "", closeoutEventId: "closeout" } },
+    ] satisfies CommitRuntimeTerminationResponse[]) {
+      const bridge = new DeclarationBridge();
+      bridge.terminationResponses.push(responseValue);
+      const writer = new BridgeAPIEventWriter(options(bridge));
+      expect(await writer.commitRuntimeTermination(envelope)).toMatchObject({ ok: false, error: { code: "schema_mismatch" } });
+    }
   });
 
   test("commits one identity-free internal repair create", async () => {
@@ -889,16 +936,17 @@ function eventScope(writeId: string) {
   };
 }
 
-function mcpSettlementEnvelope(writeId: string): SessionEventEnvelope {
+function settlementScope() {
   return {
-    ...eventScope(writeId),
-    modelRequestId: "mrq_mcp",
-    event: {
-      type: "agent.mcp_tool_result",
-      mcp_tool_use_id: "sevt_mcp_use",
-      content: [{ type: "text", text: "done" }],
-    },
-    toolSettlement: {
+    workspaceId: "wksp_1", sessionId: "sesn_1", sessionThreadId: "thrd_1",
+    bindingId: "bind_1", bindingGeneration: 3, targetPodUid: "pod_1",
+  };
+}
+
+function mcpSettlementEnvelope(): SessionEventWriterToolSettlementEnvelope {
+  return {
+    ...settlementScope(),
+    settlement: {
       toolUseEventId: "sevt_mcp_use",
       outcome: {
         type: "completed",
@@ -912,11 +960,15 @@ class DeclarationBridge {
   readonly loadContextRequests: LoadContextRequest[] = [];
   readonly commitInputsRequests: CommitInputsRequest[] = [];
   readonly writeEventRequests: WriteEventRequest[] = [];
+  readonly settleToolResultRequests: SettleToolResultRequest[] = [];
+  readonly settleToolResultResponses: SettleToolResultResponse[] = [];
+  readonly settleToolResultPostCommitErrors: number[] = [];
   readonly writeEventRejections: string[] = [];
   readonly writeEventPostCommitErrors: number[] = [];
   readonly writeRequestEndRequests: WriteRequestEndRequest[] = [];
   readonly finishIdleRequests: FinishIdleRequest[] = [];
   readonly terminationRequests: CommitRuntimeTerminationRequest[] = [];
+  readonly terminationResponses: CommitRuntimeTerminationResponse[] = [];
   readonly commitTaskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
   readonly repairRequests: CommitInternalToolRepairRequest[] = [];
   readonly taskNotificationErrors: number[] = [];
@@ -927,12 +979,14 @@ class DeclarationBridge {
   private eventSequence = 0;
   private messageSequence = 0;
   private readonly committedWriteEvents = new Map<string, Record<string, unknown>>();
+  private readonly committedToolSettlements = new Set<string>();
 
   client(): AgentRuntimeBridgeServiceClient {
     return {
       loadContext: this.loadContext.bind(this),
       commitInputs: this.commitInputs.bind(this),
       writeEvent: this.writeEvent.bind(this),
+      settleToolResult: this.settleToolResult.bind(this),
       writeRequestEnd: this.writeRequestEnd.bind(this),
       finishIdle: this.finishIdle.bind(this),
       commitRuntimeTermination: this.commitRuntimeTermination.bind(this),
@@ -1072,6 +1126,32 @@ class DeclarationBridge {
     return grpcCall();
   }
 
+  private settleToolResult(
+    request: SettleToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: Error | null, responseValue: SettleToolResultResponse) => void,
+  ): unknown {
+    this.settleToolResultRequests.push(request);
+    const forced = this.settleToolResultResponses.shift();
+    if (forced !== undefined) {
+      callback(null, forced);
+      return grpcCall();
+    }
+    const target = request.settlement?.toolUseEventId ?? "";
+    const response = this.committedToolSettlements.has(target)
+      ? { duplicate: {} }
+      : { committed: {} };
+    this.committedToolSettlements.add(target);
+    const postCommitError = this.settleToolResultPostCommitErrors.shift();
+    if (postCommitError !== undefined) {
+      callback(Object.assign(new Error("settlement response lost"), { code: postCommitError }), {});
+      return grpcCall();
+    }
+    callback(null, response);
+    return grpcCall();
+  }
+
   private writeRequestEnd(request: WriteRequestEndRequest, _metadata: Metadata, callback: (error: Error | null, responseValue: unknown) => void): unknown {
     this.writeRequestEndRequests.push(request);
     const event = this.event(request, `sevt_${request.runtimeWriteId}`);
@@ -1139,21 +1219,12 @@ class DeclarationBridge {
 
   private commitRuntimeTermination(request: CommitRuntimeTerminationRequest, _metadata: Metadata, callback: (error: Error | null, responseValue: unknown) => void): unknown {
     this.terminationRequests.push(request);
-    const toolEvents = request.toolSettlements.map((_settlement, index) => this.event(request, `sevt_termination_tool_${index}`));
-    const completionEvent = request.completionMailCreate === undefined ? undefined : this.event(request, "sevt_termination_completion");
-    const failureEvent = this.event(request, "sevt_termination_failure");
-    const closeoutEvent = this.event(request, "sevt_termination_closeout");
-    callback(null, response(request, request.runtimeWriteId, [receipt({
-      request,
-      operationKind: "commit_runtime_termination",
-      sourceKind: "runtime_termination",
-      operationId: request.runtimeWriteId,
-      digest: runtimeTerminationDeclarationDigest(request),
-      events: [...toolEvents, ...(completionEvent === undefined ? [] : [completionEvent]), failureEvent, closeoutEvent],
-      messages: request.completionMailCreate === undefined || completionEvent === undefined
-        ? []
-        : [this.message(request, request.completionMailCreate, completionEvent.eventId)],
-    })]));
+    callback(null, this.terminationResponses.shift() ?? {
+      committed: {
+        failureEventId: "sevt_termination_failure",
+        closeoutEventId: "sevt_termination_closeout",
+      },
+    });
     return grpcCall();
   }
 

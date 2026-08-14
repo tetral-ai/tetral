@@ -2,7 +2,7 @@ import { expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { Cause, Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect";
 import { ProviderRequestKind, ProviderContextRole, SystemCacheHint, SystemSegmentKind, } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { DurableRuntimeMessage, PendingInputResult, RuntimeDeclarationReceipt, RuntimeDependencies, RuntimeInternalToolRepairCommit, RuntimeMessage, RuntimeMessageInfo, RuntimeDeclarationOperationControls, RuntimePart, RuntimePartCreate, RuntimeProviderAttachment, SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterAppendResult, SessionEventWriterFinishIdleEnvelope, SessionEventWriterRequestEndEnvelope, SessionEventWriterRuntimeTerminationEnvelope, } from "../../../src/contracts/runtime.js";
+import type { DurableRuntimeMessage, PendingInputResult, RuntimeDeclarationReceipt, RuntimeDependencies, RuntimeInternalToolRepairCommit, RuntimeMessage, RuntimeMessageInfo, RuntimeDeclarationOperationControls, RuntimePart, RuntimePartCreate, RuntimeProviderAttachment, SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterAppendResult, SessionEventWriterFinishIdleEnvelope, SessionEventWriterRequestEndEnvelope, SessionEventWriterRuntimeTerminationEnvelope, SessionEventWriterRuntimeTerminationResult, SessionEventWriterToolSettlementAttempt, SessionEventWriterToolSettlementEnvelope, } from "../../../src/contracts/runtime.js";
 import { DurableRuntimeMessageSchema, RuntimeMessageSchema, RuntimeInternalToolRepairStore, SessionEventWriterRetryPolicy, normalizeContextLoaderError, normalizeRuntimeMessageStoreError, normalizeSessionEventWriterError, } from "../../../src/contracts/runtime.js";
 import { LLMEventSchema } from "../../../src/llm/llm-event.js";
 import type { LLMEvent, RuntimeUsage } from "../../../src/llm/llm-event.js";
@@ -511,9 +511,6 @@ class TestRuntimeDeclarationReceipts {
         if (envelope.assistantPartAppend !== undefined) {
             messages = [this.appendStamp(envelope.sessionThreadId, event, envelope.assistantPartAppend.parts)];
         }
-        if (envelope.toolSettlement !== undefined) {
-            this.settleTool(envelope.sessionThreadId, envelope.toolSettlement.toolUseEventId);
-        }
         const receipt = this.receipt({
             sessionThreadId: envelope.sessionThreadId,
             operationKind: "write_event",
@@ -529,6 +526,15 @@ class TestRuntimeDeclarationReceipts {
             } : {}),
         });
         return this.withDeclaration(envelope, result, receipt);
+    }
+
+    settle(
+        envelope: SessionEventWriterToolSettlementEnvelope,
+        result: SessionEventWriterToolSettlementAttempt = { ok: true, result: { type: "committed" } },
+    ): SessionEventWriterToolSettlementAttempt {
+        if (!result.ok || result.result.type === "stale") return result;
+        this.settleTool(envelope.sessionThreadId, envelope.settlement.toolUseEventId);
+        return result;
     }
 
     applyRequestEnd(envelope: SessionEventWriterRequestEndEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
@@ -610,30 +616,15 @@ class TestRuntimeDeclarationReceipts {
         return this.withDeclaration(envelope, result, receipt);
     }
 
-    applyRuntimeTermination(envelope: SessionEventWriterRuntimeTerminationEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
-        if (!result.ok) return result;
-        const events: RuntimeDeclarationReceipt["events"][number][] = [];
-        for (const settlement of envelope.toolSettlements) {
-            events.push(this.eventStamp(envelope.sessionThreadId, `sevt_tool_result_${this.sequence.eventSequence + 1}`));
-            this.settleTool(envelope.sessionThreadId, settlement.toolUseEventId);
+    applyRuntimeTermination(envelope: SessionEventWriterRuntimeTerminationEnvelope): SessionEventWriterRuntimeTerminationResult {
+        const active = this.assistants.get(envelope.sessionThreadId);
+        for (const pending of active?.unfinishedTools ?? []) {
+            this.eventStamp(envelope.sessionThreadId, `sevt_tool_result_${this.sequence.eventSequence + 1}`);
+            this.settleTool(envelope.sessionThreadId, pending.toolUseEventId);
         }
-        let messages: RuntimeDeclarationReceipt["messages"] = [];
-        if (envelope.completionMailCreate !== undefined) {
-            const mailEvent = this.eventStamp(envelope.sessionThreadId, `sevt_completion_${this.sequence.eventSequence + 1}`);
-            events.push(mailEvent);
-            messages = [this.createStamp(envelope.sessionThreadId, mailEvent, envelope.completionMailCreate.parts)];
-        }
-        events.push(this.eventStamp(envelope.sessionThreadId, `sevt_failure_${this.sequence.eventSequence + 1}`));
-        events.push(this.eventStamp(envelope.sessionThreadId, result.eventId));
-        const receipt = this.receipt({
-            sessionThreadId: envelope.sessionThreadId,
-            operationKind: "commit_runtime_termination",
-            sourceKind: "runtime_termination",
-            operationId: envelope.writeId,
-            events,
-            messages,
-        });
-        return this.withDeclaration(envelope, result, receipt);
+        const failure = this.eventStamp(envelope.sessionThreadId, `sevt_failure_${this.sequence.eventSequence + 1}`);
+        const closeout = this.eventStamp(envelope.sessionThreadId, `sevt_termination_${envelope.writeId}`);
+        return { ok: true, type: "committed", failureEventId: failure.eventId, closeoutEventId: closeout.eventId };
     }
 
     private interruptReceipt(
@@ -823,14 +814,14 @@ function withFinishIdleReceiptForTest(envelope: SessionEventWriterFinishIdleEnve
     return new TestRuntimeDeclarationReceipts().applyFinishIdle(envelope, result);
 }
 
-function withRuntimeTerminationReceiptForTest(envelope: SessionEventWriterRuntimeTerminationEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
-    return new TestRuntimeDeclarationReceipts().applyRuntimeTermination(envelope, result);
+function runtimeTerminationResultForTest(envelope: SessionEventWriterRuntimeTerminationEnvelope): SessionEventWriterRuntimeTerminationResult {
+    return new TestRuntimeDeclarationReceipts().applyRuntimeTermination(envelope);
 }
 
 function writerFrom(append: (envelope: SessionEventEnvelope) => SessionEventWriterAppendResult, writeRequestEnd?: SessionEventWriter["writeRequestEnd"], existingMessages: readonly {
     readonly sessionThreadId: string;
     readonly message: DurableRuntimeMessage;
-}[] = [], durableSequence?: TestDurableSequence): SessionEventWriter {
+}[] = [], durableSequence?: TestDurableSequence, settleToolResult?: SessionEventWriter["settleToolResult"]): SessionEventWriter {
     const receipts = new TestRuntimeDeclarationReceipts(durableSequence);
     for (const existing of existingMessages) {
         receipts.seedMessage(existing.sessionThreadId, existing.message);
@@ -866,6 +857,12 @@ function writerFrom(append: (envelope: SessionEventEnvelope) => SessionEventWrit
     };
     return {
         append: appendWithReceipt,
+        settleToolResult: async (envelope) => receipts.settle(
+            envelope,
+            settleToolResult === undefined
+                ? { ok: true, result: { type: "committed" } }
+                : await settleToolResult(envelope),
+        ),
         writeRequestEnd: writeRequestEndWithReceipt,
         finishIdle: async (envelope) => receipts.applyFinishIdle(envelope, append({
             requestId: envelope.durableTurnId,
@@ -878,12 +875,7 @@ function writerFrom(append: (envelope: SessionEventEnvelope) => SessionEventWrit
             writeId: envelope.durableTurnId,
             event: { type: "session.status_idle", stop_reason: envelope.stopReason },
         })),
-        commitRuntimeTermination: async (envelope) => receipts.applyRuntimeTermination(envelope, {
-            ok: true,
-            writeId: envelope.writeId,
-            eventId: `sevt_termination_${envelope.writeId}`,
-            processedAt: createdAt,
-        }),
+        commitRuntimeTermination: async (envelope) => receipts.applyRuntimeTermination(envelope),
     };
 }
 
@@ -1265,7 +1257,7 @@ export {
   waitForCondition,
   waitForReleaseOrAbort,
   withFinishIdleReceiptForTest,
-  withRuntimeTerminationReceiptForTest,
+  runtimeTerminationResultForTest,
   writerFrom,
 };
 

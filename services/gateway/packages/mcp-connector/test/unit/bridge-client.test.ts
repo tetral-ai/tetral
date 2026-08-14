@@ -12,6 +12,8 @@ import type {
   CommitMcpToolResultResponse,
   McpManifestChangedRequest,
   McpManifestChangedResponse,
+  RelinquishMcpToolResultRequest,
+  RelinquishMcpToolResultResponse,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
   McpErrorKind,
@@ -128,15 +130,10 @@ describe("BridgeAPIManifestChangeNotifier", () => {
     }
   });
 
-  test("accepts only the durable over-cap ResourceExhausted settlement", async () => {
+  test("does not infer durable manifest settlement from ResourceExhausted details", async () => {
     await expect(manifestNotifier(new FailingManifestClient(
       status.RESOURCE_EXHAUSTED,
       "mcp manifest tools exceed the accepted byte limit",
-    )).notify(manifestRequest())).resolves.toEqual({ ok: true, duplicate: false });
-
-    await expect(manifestNotifier(new FailingManifestClient(
-      status.RESOURCE_EXHAUSTED,
-      "upstream response exceeded transport capacity",
     )).notify(manifestRequest())).resolves.toMatchObject({
       ok: false,
       retryable: false,
@@ -144,14 +141,16 @@ describe("BridgeAPIManifestChangeNotifier", () => {
     });
   });
 
-  test("rejects a response without a closed result variant", async () => {
-    await expect(manifestNotifier(new RecordingManifestClient({})).notify(manifestRequest()))
-      .resolves.toEqual({
-        ok: false,
-        retryable: false,
-        code: "bridge_manifest_change_rejected",
-        message: "mcp manifest change notification rejected",
-      });
+  test("rejects zero-arm and multi-arm manifest results", async () => {
+    for (const response of [{}, { committed: {}, duplicate: {} }]) {
+      await expect(manifestNotifier(new RecordingManifestClient(response)).notify(manifestRequest()))
+        .resolves.toEqual({
+          ok: false,
+          retryable: false,
+          code: "bridge_manifest_change_rejected",
+          message: "mcp manifest change notification rejected",
+        });
+    }
   });
 });
 
@@ -178,6 +177,53 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     expect(client.claimRequests).toEqual([claimRequest()]);
   });
 
+  test("keys local execution ownership by the exact active claim attempt", async () => {
+    const client = new ScriptedMcpClient([
+      { response: { acquired: executor } },
+      { response: { acquired: executor } },
+      { response: { acquired: executor } },
+    ]);
+    const store = durableStore(client);
+    const first = mcpContext();
+    const takeover = { ...first, claimId: "mcpclaim_takeover" };
+
+    await expect(store.claim(key, first)).resolves.toEqual({ status: "new", executor });
+    await expect(store.claim(key, first)).resolves.toEqual({ status: "in_flight" });
+    await expect(store.claim(key, takeover)).resolves.toEqual({ status: "new", executor });
+  });
+
+  test("durably relinquishes the exact active claim and replays a lost acknowledgement", async () => {
+    const client = new ScriptedMcpClient(
+      [{ response: { acquired: executor } }],
+      [],
+      [
+        { error: serviceError(status.UNAVAILABLE) },
+        { response: { duplicate: {} } },
+      ],
+    );
+    const delays: number[] = [];
+    const store = durableStore(client, async (delayMs) => { delays.push(delayMs); });
+
+    await store.claim(key, mcpContext());
+    await expect(store.fail(key, mcpContext())).resolves.toBeUndefined();
+
+    expect(delays).toEqual([100]);
+    expect(client.relinquishRequests).toEqual([
+      relinquishRequest(),
+      relinquishRequest(),
+    ]);
+  });
+
+  test("requires exactly one typed MCP relinquish result", async () => {
+    for (const response of [{}, { relinquished: {}, stale: {} }]) {
+      const store = durableStore(new ScriptedMcpClient([], [], [{ response }]));
+      await expect(store.fail(key, mcpContext()))
+        .rejects.toThrow("RelinquishMcpToolResult returned an invalid result variant");
+    }
+    await expect(durableStore(new ScriptedMcpClient([], [], [{ response: { stale: {} } }])).fail(key, mcpContext()))
+      .resolves.toBeUndefined();
+  });
+
   test("reads already-completed direct durable facts without a receipt", async () => {
     const client = new ScriptedMcpClient([{
       response: { alreadyCompleted: { resultJson: storedResultJSON("durable") } },
@@ -188,15 +234,20 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     });
   });
 
-  test("maps in-flight, stale, conflict, and missing result variants", async () => {
+  test("maps in-flight, stale, and conflict claim results", async () => {
     await expect(durableStore(new ScriptedMcpClient([{ response: { inFlight: {} } }])).claim(key, mcpContext()))
       .resolves.toEqual({ status: "in_flight" });
     await expect(durableStore(new ScriptedMcpClient([{ response: { stale: {} } }])).claim(key, mcpContext()))
       .resolves.toEqual({ status: "stale_custody" });
     await expect(durableStore(new ScriptedMcpClient([{ error: serviceError(status.ALREADY_EXISTS) }])).claim(key, mcpContext()))
       .resolves.toEqual({ status: "conflict" });
-    await expect(durableStore(new ScriptedMcpClient([{ response: {} }])).claim(key, mcpContext()))
-      .rejects.toThrow("mcp tool claim returned no result variant");
+  });
+
+  test("rejects zero-arm and multi-arm claim results", async () => {
+    for (const response of [{}, { acquired: executor, inFlight: {} }]) {
+      await expect(durableStore(new ScriptedMcpClient([{ response }])).claim(key, mcpContext()))
+        .rejects.toThrow("ClaimMcpToolResult returned an invalid result variant");
+    }
   });
 
   test("requires authenticated claim context", async () => {
@@ -308,6 +359,30 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     expect(client.commitRequests).toHaveLength(1);
   });
 
+  test("maps a typed stale commit and replays zero-arm or multi-arm commit ACK uncertainty", async () => {
+    const staleStore = durableStore(new ScriptedMcpClient(
+      [{ response: { acquired: executor } }],
+      [{ response: { stale: {} } }],
+    ));
+    await staleStore.claim(key, mcpContext());
+    await expect(staleStore.store(key, pendingResult("stale"), mcpContext()))
+      .rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
+
+    for (const response of [{}, { committed: {}, duplicate: {} }]) {
+      const terminal = storedResultJSON("converged");
+      const store = durableStore(new ScriptedMcpClient(
+        [
+          { response: { acquired: executor } },
+          { response: { alreadyCompleted: { resultJson: terminal } } },
+        ],
+        [{ response }, { response: { duplicate: {} } }],
+      ));
+      await store.claim(key, mcpContext());
+      await expect(store.store(key, pendingResult("converged"), mcpContext()))
+        .resolves.toMatchObject({ resultText: "converged" });
+    }
+  });
+
   test("keeps unknown commit bytes frozen through capped backoff and refreshed metadata", async () => {
     const attachmentBytes = Uint8Array.from([1, 2, 3]);
     const client = new ScriptedMcpClient([
@@ -408,10 +483,13 @@ class ScriptedMcpClient implements BridgeMcpToolResultClient {
   readonly commitOptions: CallOptions[] = [];
   readonly commitAttachmentSnapshots: number[][] = [];
   readonly commitAuthorizations: unknown[] = [];
+  readonly relinquishRequests: RelinquishMcpToolResultRequest[] = [];
+  readonly relinquishOptions: CallOptions[] = [];
 
   constructor(
     private readonly claims: Scripted<ClaimMcpToolResultResponse>[],
     private readonly commits: Scripted<CommitMcpToolResultResponse>[] = [],
+    private readonly relinquishes: Scripted<RelinquishMcpToolResultResponse>[] = [],
   ) {}
 
   claimMcpToolResult(
@@ -441,6 +519,20 @@ class ScriptedMcpClient implements BridgeMcpToolResultClient {
     this.commitAuthorizations.push(metadata.get("authorization"));
     const scripted = this.commits.shift();
     if (scripted === undefined) throw new Error("missing scripted commit response");
+    if ("error" in scripted) callback(scripted.error, {});
+    else callback(null, scripted.response);
+    return undefined;
+  }
+
+  relinquishMcpToolResult(
+    request: RelinquishMcpToolResultRequest,
+    _metadata: Metadata,
+    options: CallOptions,
+    callback: (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => void,
+  ): unknown {
+    this.relinquishRequests.push(request);
+    this.relinquishOptions.push(options);
+    const scripted = this.relinquishes.shift() ?? { response: { relinquished: {} } };
     if ("error" in scripted) callback(scripted.error, {});
     else callback(null, scripted.response);
     return undefined;
@@ -490,6 +582,24 @@ function mcpContext(): McpIdempotencyContext {
     bindingId: "bind_1",
     bindingGeneration: 1,
     runtimePodUid: "pod_1",
+  };
+}
+
+function relinquishRequest(): RelinquishMcpToolResultRequest {
+  const context = mcpContext();
+  return {
+    scope: {
+      workspaceId: context.workspaceId,
+      sessionId: context.sessionId,
+      sessionThreadId: context.sessionThreadId,
+      binding: {
+        bindingId: context.bindingId,
+        bindingGeneration: context.bindingGeneration,
+        targetPodUid: context.runtimePodUid,
+      },
+    },
+    toolUseEventId: key.toolUseEventId,
+    claimId: context.claimId,
   };
 }
 

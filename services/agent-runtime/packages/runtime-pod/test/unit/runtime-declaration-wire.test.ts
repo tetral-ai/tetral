@@ -23,13 +23,10 @@ describe("Runtime declaration wire digests", () => {
     expect(commitInputsDeclarationDigest({ ...request, messageCreates: [{ ...messageCreate, parts: [{ ...messageCreate.parts[0]!, partJson: '{"type":"text","text":"other","truncated":false,"status":"completed"}' }] }] })).not.toBe(first);
   });
 
-  test("Assistant append and target settlement are distinct digest carriers", () => {
-		const common = { scope, runtimeWriteId: "write", modelRequestId: "model_request", payloadJson: "{}", serverToolUse: undefined, contextThroughMessageSequence: undefined, requestKind: "" };
-		const appendRequest: Parameters<typeof writeEventDeclarationDigest>[0] = { ...common, eventType: "agent.message", assistantPartAppend: { parts: messageCreate.parts }, toolSettlement: undefined };
-		const settlementRequest: Parameters<typeof writeEventDeclarationDigest>[0] = { ...common, eventType: "agent.tool_result", assistantPartAppend: undefined, toolSettlement: { toolUseEventId: "tool_event", completed: { outputJson: '{"text":"done","truncated":false}' }, error: undefined, cancelled: undefined } };
-		const append = writeEventDeclarationDigest(appendRequest);
-		const settlement = writeEventDeclarationDigest(settlementRequest);
-    expect(settlement).not.toBe(append);
+  test("Assistant append content participates in WriteEvent identity", () => {
+		const request: Parameters<typeof writeEventDeclarationDigest>[0] = { scope, runtimeWriteId: "write", modelRequestId: "model_request", payloadJson: "{}", contextThroughMessageSequence: undefined, requestKind: "", eventType: "agent.message", assistantPartAppend: { parts: messageCreate.parts } };
+    const first = writeEventDeclarationDigest(request);
+    expect(writeEventDeclarationDigest({ ...request, payloadJson: '{"type":"agent.message","content":[{"type":"text","text":"other"}]}' })).not.toBe(first);
   });
 
   test("child lifecycle digest excludes caller timestamps", () => {

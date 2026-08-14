@@ -49,8 +49,6 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
     readonly toolName?: string;
     readonly settlement?: unknown;
     readonly toolUseEventId?: string;
-    readonly resultEventId?: string;
-    readonly completedAt?: string;
   };
 };
 const rawContext = JSON.parse(input.contextJson) as { readonly messages?: readonly { readonly sessionId?: string }[] };
@@ -118,8 +116,7 @@ if (input.hotScenario !== undefined) {
   let reduction = initializeThreadTurnReduction(baseCheckpoint, hotRouteView);
   if (scenario.kind === "tool_settlement") {
     if (
-      scenario.toolUseEventId === undefined || scenario.resultEventId === undefined ||
-      scenario.completedAt === undefined || scenario.settlement === undefined
+      scenario.toolUseEventId === undefined || scenario.settlement === undefined
     ) {
       throw new Error("Tool settlement hot composition identity is incomplete");
     }
@@ -131,11 +128,10 @@ if (input.hotScenario !== undefined) {
       base.messages,
       scenario.toolUseEventId,
       declaration.outcome,
-      scenario.completedAt,
+      "2026-08-14T00:00:00.000Z",
     );
     reduction = reduceThreadTurn(reduction, {
       fact: "tool_result_committed",
-      eventId: scenario.resultEventId,
       toolUseEventId: scenario.toolUseEventId,
       outcome: declaration.outcome.type === "completed" ? "success" : declaration.outcome.type,
     }, hotRouteView);

@@ -1,7 +1,7 @@
 /**
  * Builds sub-agent completion declarations and validates durable FinishIdle
  * acknowledgements. ThreadLoop selects the typed closeout action; this module owns
- * failed-run, FinishIdle, runtime-termination payload, and receipt execution.
+ * failed-run, FinishIdle, the narrow runtime-termination request, and typed-result execution.
  *
  * @packageDocumentation
  */
@@ -14,6 +14,7 @@ import type {
   SessionEventWriterError,
   SessionEventWriterFinishIdleEnvelope,
   SessionEventWriterRuntimeTerminationEnvelope,
+  SessionEventWriterRuntimeTerminationResult,
 } from "../contracts/runtime.js";
 import {
   SessionEventWriterRetryPolicy,
@@ -24,10 +25,7 @@ import {
 import { runtimeFailureFromProviderError } from "../llm/llm-event.js";
 import {
   completionMailCreate,
-  runtimeTerminationToolSettlements,
-  runtimeTerminationCompletionMailCreate,
   validateFinishIdleReceipt,
-  validateRuntimeTerminationReceipt,
 } from "../runtime/runtime-declaration.js";
 import type { ThreadRuntime } from "./thread-runtime.js";
 import type { ThreadLoopRunCustody, ThreadLoopRunResult, ThreadLoopRuntimeOptions } from "./thread-loop.js";
@@ -130,14 +128,6 @@ export async function closeFailedThreadRun(
 
   const pendingTools = unfinishedToolUseEventIds(session.state.contextManager.messages())
     .map((toolUseEventId) => ({ toolUseEventId }));
-  const toolSettlements = runtimeTerminationToolSettlements({
-    pendingTools,
-    failure,
-  });
-  const completionMailCreate = runtimeTerminationCompletionCreate(
-    session,
-    failure,
-  );
   const termination = await commitRuntimeTerminationWithRetry(options, {
     requestId: durableTurnId,
     workspaceId: session.identity.workspaceId,
@@ -148,8 +138,6 @@ export async function closeFailedThreadRun(
     targetPodUid: session.identity.targetPodUid,
     writeId: durableTurnId,
     failure,
-    toolSettlements: [...toolSettlements],
-    ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
   });
   if (!termination.ok) {
     return {
@@ -158,47 +146,16 @@ export async function closeFailedThreadRun(
       releaseSession: { reason: "event_write_failed" },
     };
   }
-  const declaration = termination.declaration;
-  if (declaration === undefined) {
-    return {
-      type: "failed",
-      error: runtimeFailureFromEventWriter(normalizeSessionEventWriterError({
-        code: "schema_mismatch",
-        sessionId: session.sessionId,
-        writeId: durableTurnId,
-      })),
-      releaseSession: { reason: "event_write_failed" },
-    };
-  }
-  if (declaration.applicationDisposition === "stale_custody") {
+  if (termination.type === "stale") {
     session.state.clearAfterCustodyHandoff();
     return { type: "interrupted", discardHotState: true };
   }
-  try {
-    const terminalReceipt = validateRuntimeTerminationReceipt({
-      sessionThreadId: session.identity.sessionThreadId,
-      operationId: durableTurnId,
-      toolSettlements,
-      ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
-    }, declaration.receipt);
-    session.state.applyThreadTurnFact({
-      fact: "terminal_closeout_committed",
-      eventId: terminalReceipt.closeoutEventId,
-      failureEventId: terminalReceipt.failureEventId,
-      disposition: "terminated",
-    });
-  } catch (error) {
-    return {
-      type: "failed",
-      error: runtimeFailureFromEventWriter(normalizeSessionEventWriterError({
-        code: "schema_mismatch",
-        rawError: error,
-        sessionId: session.sessionId,
-        writeId: durableTurnId,
-      })),
-      releaseSession: { reason: "event_write_failed" },
-    };
-  }
+  session.state.applyThreadTurnFact({
+    fact: "terminal_closeout_committed",
+    eventId: termination.closeoutEventId,
+    failureEventId: termination.failureEventId,
+    disposition: "terminated",
+  });
   for (const pending of pendingTools) {
     session.state.removePendingApprovalToolJob(pending.toolUseEventId);
   }
@@ -343,7 +300,7 @@ export async function closeFailedRunDurably(
     // An unresolved accepted input makes atomic Runtime termination the only
     // legal same-Pod release boundary. FinishIdle cannot disposition Inbox or
     // Queue custody, so failed-run recovery reuses the open durable turn and
-    // the existing termination transaction until its receipt lands.
+    // the existing termination transaction until its typed result lands.
     if (session.state.acceptedInputCount() > 0) {
       const durableTurnId = closeout.durableTurnId;
       if (durableTurnId === undefined) {
@@ -354,8 +311,6 @@ export async function closeFailedRunDurably(
       }
       const pendingTools = unfinishedToolUseEventIds(session.state.contextManager.messages())
         .map((toolUseEventId) => ({ toolUseEventId }));
-      const toolSettlements = runtimeTerminationToolSettlements({ pendingTools, failure });
-      const completionMailCreate = runtimeTerminationCompletionCreate(session, failure);
       const termination = await commitRuntimeTerminationWithRetry(options, {
         requestId: durableTurnId,
         workspaceId: session.identity.workspaceId,
@@ -366,21 +321,11 @@ export async function closeFailedRunDurably(
         targetPodUid: session.identity.targetPodUid,
         writeId: durableTurnId,
         failure,
-        toolSettlements: [...toolSettlements],
-        ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
       });
       if (!termination.ok) {
         return failedRunCloseoutFailure(termination.error);
       }
-      const declaration = termination.declaration;
-      if (declaration === undefined) {
-        return failedRunCloseoutFailure(normalizeSessionEventWriterError({
-          code: "schema_mismatch",
-          sessionId: session.sessionId,
-          writeId: durableTurnId,
-        }));
-      }
-      if (declaration.applicationDisposition === "stale_custody") {
+      if (termination.type === "stale") {
         return {
           type: "superseded",
           error: normalizeSessionEventWriterError({
@@ -390,27 +335,12 @@ export async function closeFailedRunDurably(
           }),
         };
       }
-      try {
-        const terminalReceipt = validateRuntimeTerminationReceipt({
-          sessionThreadId: session.identity.sessionThreadId,
-          operationId: durableTurnId,
-          toolSettlements,
-          ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
-        }, declaration.receipt);
-        session.state.applyThreadTurnFact({
-          fact: "terminal_closeout_committed",
-          eventId: terminalReceipt.closeoutEventId,
-          failureEventId: terminalReceipt.failureEventId,
-          disposition: "terminated",
-        });
-      } catch (error) {
-        return failedRunCloseoutFailure(normalizeSessionEventWriterError({
-          code: "schema_mismatch",
-          rawError: error,
-          sessionId: session.sessionId,
-          writeId: durableTurnId,
-        }));
-      }
+      session.state.applyThreadTurnFact({
+        fact: "terminal_closeout_committed",
+        eventId: termination.closeoutEventId,
+        failureEventId: termination.failureEventId,
+        disposition: "terminated",
+      });
       for (const pending of pendingTools) {
         session.state.removePendingApprovalToolJob(pending.toolUseEventId);
       }
@@ -559,16 +489,16 @@ export async function finishIdleWithRetry(
 export async function commitRuntimeTerminationWithRetry(
   options: ThreadLoopRuntimeOptions,
   envelope: SessionEventWriterRuntimeTerminationEnvelope,
-): Promise<SessionEventWriterAppendResult> {
+): Promise<SessionEventWriterRuntimeTerminationResult> {
   if (options.sessionEventWriter.commitRuntimeTermination === undefined) {
-    return writerUnavailable(envelope.sessionId, envelope.writeId);
+    return { ok: false, error: normalizeSessionEventWriterError({ code: "unavailable", sessionId: envelope.sessionId, writeId: envelope.writeId }) };
   }
-  let lastFailure: SessionEventWriterAppendResult | undefined;
+  let lastFailure: SessionEventWriterRuntimeTerminationResult | undefined;
   for (let attempt = 1; attempt <= SessionEventWriterRetryPolicy.attempts; attempt += 1) {
     const result = await Promise.race([
       commitRuntimeTerminationOnce(options, envelope),
       options.runtime.sleep(SessionEventWriterRetryPolicy.timeoutPerAttemptMs, new AbortController().signal)
-        .then((): SessionEventWriterAppendResult => ({
+        .then((): SessionEventWriterRuntimeTerminationResult => ({
           ok: false,
           error: normalizeSessionEventWriterError({
             code: "timeout",
@@ -578,9 +508,6 @@ export async function commitRuntimeTerminationWithRetry(
         })),
     ]);
     if (result.ok) {
-      if (result.writeId !== envelope.writeId) {
-        return writerAckMismatch(envelope.sessionId, envelope.writeId);
-      }
       return result;
     }
     lastFailure = result;
@@ -589,13 +516,13 @@ export async function commitRuntimeTerminationWithRetry(
     }
     await retryBackoff(options, attempt);
   }
-  return lastFailure ?? writerUnknown(envelope.sessionId, envelope.writeId);
+  return lastFailure ?? { ok: false, error: normalizeSessionEventWriterError({ code: "unknown", sessionId: envelope.sessionId, writeId: envelope.writeId }) };
 }
 
 async function commitRuntimeTerminationOnce(
   options: ThreadLoopRuntimeOptions,
   envelope: SessionEventWriterRuntimeTerminationEnvelope,
-): Promise<SessionEventWriterAppendResult> {
+): Promise<SessionEventWriterRuntimeTerminationResult> {
   const startedAt = options.runtime.monotonicMs();
   try {
     const result = await options.sessionEventWriter.commitRuntimeTermination!(envelope);
@@ -687,28 +614,6 @@ function writerAckMismatch(sessionId: string, writeId: string): SessionEventWrit
 
 function writerUnknown(sessionId: string, writeId: string): SessionEventWriterAppendResult {
   return { ok: false, error: normalizeSessionEventWriterError({ code: "unknown", sessionId, writeId }) };
-}
-
-export function runtimeTerminationCompletionCreate(
-  runtimeThread: ThreadRuntime,
-  failure: RuntimeFailure,
-): RuntimeMessageCreate | undefined {
-  if (runtimeThread.identity.threadRole !== "subagent") {
-    return undefined;
-  }
-  const sender = runtimeThread.identity.taskName;
-  if (sender === undefined || sender.length === 0) {
-    throw new Error("sub-agent runtime termination sender has no task name");
-  }
-  return runtimeTerminationCompletionMailCreate({
-    envelope: [
-      "Message Type: FINAL_ANSWER",
-      `Task name: ${runtimeThread.identity.parentTaskName ?? "main"}`,
-      `Sender: ${sender}`,
-      "Payload:",
-      completionMailErrorPayload(failure.message),
-    ].join("\n"),
-  });
 }
 
 export function finishIdleCompletionCreate(

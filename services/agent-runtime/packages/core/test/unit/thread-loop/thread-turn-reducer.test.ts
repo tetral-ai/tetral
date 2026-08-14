@@ -296,7 +296,7 @@ describe("Thread-turn reducer", () => {
       modelToolCallId: "call_completed",
       toolUseEventId: "event_tool_completed",
       toolName: "Read",
-      terminalResult: { resultEventId: "event_result_completed", outcome: "success" },
+      terminalResult: { outcome: "success" },
     }]);
     const ready = initializeThreadTurnReduction(recoveredCheckpoint, noRoutes);
     expect(ready).toMatchObject({
@@ -370,19 +370,30 @@ describe("Thread-turn reducer", () => {
 
     const result = reduceThreadTurn(toolUse, {
       fact: "tool_result_committed",
-      eventId: "event_result_1",
       toolUseEventId: "event_tool_1",
       outcome: "success",
     }, noRoutes);
     expect(result).toMatchObject({
       checkpoint: {
         request: {
-          toolMembers: [{ terminalResult: { resultEventId: "event_result_1" } }],
+          toolMembers: [{ terminalResult: { outcome: "success" } }],
         },
       },
       state: { state: "request_open", modelRequestId: "request_1" },
       action: { action: "await_request_end", modelRequestId: "request_1" },
     });
+
+    const replayedResult = reduceThreadTurn(result, {
+      fact: "tool_result_committed",
+      toolUseEventId: "event_tool_1",
+      outcome: "success",
+    }, noRoutes);
+    expect(replayedResult).toEqual({ ...result, action: { action: "none" } });
+    expect(() => reduceThreadTurn(result, {
+      fact: "tool_result_committed",
+      toolUseEventId: "event_tool_1",
+      outcome: "error",
+    }, noRoutes)).toThrow("conflicting terminal Tool Result");
 
     expect(reduceThreadTurn(toolUse, {
       fact: "tool_use_committed",
@@ -443,7 +454,6 @@ describe("Thread-turn reducer", () => {
     for (const [index, toolUseEventId] of ["event_tool_1", "event_tool_2", "event_tool_3"].entries()) {
       reduction = reduceThreadTurn(reduction, {
         fact: "tool_result_committed",
-        eventId: `event_result_${index + 1}`,
         toolUseEventId,
         outcome: "success",
       }, routesForOutstanding(routes, toolUseEventId));
@@ -453,7 +463,6 @@ describe("Thread-turn reducer", () => {
 
     reduction = reduceThreadTurn(reduction, {
       fact: "tool_result_committed",
-      eventId: "event_result_4",
       toolUseEventId: "event_tool_4",
       outcome: "error",
     }, noRoutes);
@@ -564,7 +573,7 @@ describe("Thread-turn reducer", () => {
       modelToolCallId: "call_completed",
       toolUseEventId: "event_tool_completed",
       toolName: "Read",
-      terminalResult: { resultEventId: "event_result_completed", outcome: "success" },
+      terminalResult: { outcome: "success" },
     }]), noRoutes);
     expect(ready).toMatchObject({
       state: { state: "ready_to_request" },
@@ -842,7 +851,7 @@ describe("Thread-turn reducer", () => {
       modelToolCallId: "call_public",
       toolUseEventId: "event_tool_public",
       toolName: "Read",
-      terminalResult: { resultEventId: "event_result_public", outcome: "success" },
+      terminalResult: { outcome: "success" },
     };
     const terminalInternalRepair: NonNullable<ThreadTurnCheckpoint["request"]>["toolMembers"][number] = {
       memberKind: "internal_tool_repair",
@@ -873,7 +882,6 @@ describe("Thread-turn reducer", () => {
   test("fails closed for orphan results, post-seal Tool Uses, and missing sealed routes", () => {
     expect(() => reduceThreadTurn(openRequest(), {
       fact: "tool_result_committed",
-      eventId: "event_result",
       toolUseEventId: "event_missing",
       outcome: "success",
     }, noRoutes)).toThrow(ThreadTurnContractError);
@@ -922,7 +930,6 @@ function terminalToolRequest() {
   }, noRoutes);
   return reduceThreadTurn(withTool, {
     fact: "tool_result_committed",
-    eventId: "event_result_1",
     toolUseEventId: "event_tool_1",
     outcome: "success",
   }, noRoutes);

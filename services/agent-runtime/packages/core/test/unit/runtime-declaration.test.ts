@@ -10,7 +10,6 @@ import {
   applyAssistantPartAppendReceipt,
   applyInterruptInputReceipt,
   applyInterruptToolProjections,
-  applyToolSettlementReceipt,
 } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeAcceptedInputState } from "../../src/thread-loop/thread-state.js";
 
@@ -89,19 +88,6 @@ describe("incremental Runtime declarations", () => {
         parts: [{ partId: "part", messageId: "message", partSequence: 1, createdAt: timestamp, updatedAt: timestamp, disposition: "created" }],
       }],
     }))).toThrow();
-  });
-
-  test("Tool settlement ACK cannot smuggle a message projection", () => {
-    const settlement = { toolUseEventId: "tool_event", outcome: { type: "completed" as const, output: { text: "done", truncated: false } } };
-    const receipt = baseReceipt({
-      sourceKind: "agent.tool_result",
-      events: [{ sessionThreadId: "thread", eventId: "result_event", eventSequence: 2, disposition: "created" }],
-      messages: [{ sessionThreadId: "thread", messageId: "message", messageSequence: 1, createdAt: timestamp, updatedAt: timestamp, disposition: "updated", parts: [] }],
-    });
-    expect(() => applyToolSettlementReceipt({
-      sessionThreadId: "thread", operationKind: "write_event", sourceKind: "agent.tool_result",
-      operationId: "write", eventId: "result_event", settlement,
-    }, receipt)).toThrow();
   });
 
   test("interrupt projections reject the closed malformed census before hot mutation", () => {

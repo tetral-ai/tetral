@@ -62,11 +62,16 @@ describe("MCP connector durable executor boundary", () => {
     expect(staleClient.calls).toEqual([]);
   });
 
-  test("rejects malformed Bridge executor payload before provider execution", async () => {
+  test("terminally settles malformed Bridge executor payload before provider execution", async () => {
     const client = new RecordingMcpClient();
     const store = new RecordingStore({ status: "new", executor: { ...executor, inputJson: "[]" } });
-    await expect(createService(client, store).runMcpTool(validRunRequest(), authorizationMetadata())).rejects.toMatchObject({ code: 3 });
+    await expect(createService(client, store).runMcpTool(validRunRequest(), authorizationMetadata())).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
+      resultText: "MCP tool execution metadata was rejected.",
+    });
     expect(client.calls).toEqual([]);
+    expect(store.storeContexts[0]?.claimId).toBe("mcpclaim_test");
   });
 
   test("rejects a mismatched Runtime binding token before claiming", async () => {

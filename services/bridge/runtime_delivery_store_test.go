@@ -31,7 +31,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // This file owns PostgreSQL runtime delivery-store behavior tests.
@@ -595,8 +594,9 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 		WorkspaceId: "default", SessionId: sessionID, McpServerName: "github", ManifestEtag: "etag_over",
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := bridge.McpManifestChanged(context.Background(), request); status.Code(err) != codes.ResourceExhausted {
-			t.Fatalf("over-cap manifest attempt %d = %v; want ResourceExhausted", attempt+1, err)
+		response, err := bridge.McpManifestChanged(context.Background(), request)
+		if err != nil || (attempt == 0 && response.GetCommitted() == nil) || (attempt == 1 && response.GetDuplicate() == nil) {
+			t.Fatalf("over-cap manifest attempt %d = %+v err %v; want committed then duplicate", attempt+1, response, err)
 		}
 	}
 	var manifestRows, queueJobs int

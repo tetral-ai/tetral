@@ -466,7 +466,7 @@ func bridgeTurnToolResultFact(
 			RepairKey: runtimeWriteID.String,
 		}, nil
 	}
-	toolUseEventID, err := runtimeToolResultUseEventID(eventType, runtimeToolResultEventPayload{
+	toolUseEventID, err := durableToolResultUseEventID(eventType, durableToolResultEventPayload{
 		ToolUseEventID: payload.ToolUseEventID,
 		ToolUseID:      payload.ToolUseID,
 		MCPToolUseID:   payload.MCPToolUseID,

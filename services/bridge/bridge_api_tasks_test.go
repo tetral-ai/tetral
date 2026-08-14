@@ -53,7 +53,7 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_stdin_replay")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_stdin_replay","chars":"hello\n"},"evaluated_permission":"allow"}`)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, "evt_source_stdin_replay")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -61,7 +61,7 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_stdin_replay")
 	request := &bridgev1.SendCommandInputRequest{
 		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID,
-		OperationId: "cmdop_bridge_stdin_replay", InputJson: `{"chars":"hello\n"}`,
+		OperationId: "cmdop_bridge_stdin_replay", InputJson: `{"chars":"hello\n","session_id":"task_bridge_stdin_replay"}`,
 	}
 
 	type callResult struct {
@@ -128,14 +128,12 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_consumed")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_poll_consumed","chars":""},"evaluated_permission":"allow"}`)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", terminalJSON)
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, terminalEventID, 2, "agent.tool_result", `{"tool_use_id":"`+toolUseEventID+`"}`)
 	requestID := "cmdop_bridge_poll_consumed"
-	inputJSON, err := marshalBridgeJSON(map[string]any{
-		"task_id": taskID, "max_output_tokens": 0,
-	})
+	inputJSON, err := marshalBridgeJSON(map[string]any{"session_id": taskID, "chars": ""})
 	if err != nil {
 		t.Fatalf("marshal poll input: %v", err)
 	}
@@ -181,7 +179,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_wait_consumed")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_poll_wait_consumed","chars":""},"evaluated_permission":"allow"}`)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	type callResult struct {
@@ -296,8 +294,8 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_cancel_receipt")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
-	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, "evt_source_cancel_receipt")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"sleep 60"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
 		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 		normalized_input_hash, tool_name, input_json, ack_status,
@@ -375,6 +373,55 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 	}
 	if receipts != 2 {
 		t.Fatalf("background receipts = %d; want poll and cancel", receipts)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreBackgroundCommandsRejectUnrelatedSameThreadAuthority(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_command_authority"
+		threadID    = "thr_bridge_command_authority"
+		bindingID   = "bind_bridge_command_authority"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_command_authority")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_poll", 1, "agent.tool_use",
+		`{"name":"write_stdin","input":{"session_id":"task_command_expected","chars":""},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_send", 2, "agent.tool_use",
+		`{"name":"write_stdin","input":{"session_id":"task_command_expected","chars":"hello"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_exec", 3, "agent.tool_use",
+		`{"name":"exec_command","input":{"cmd":"sleep 60"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_other_exec", 4, "agent.tool_use",
+		`{"name":"exec_command","input":{"cmd":"sleep 30"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_expected", "evt_command_exec")
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_other", "evt_command_other_exec")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_command_authority")
+	if _, err := store.ReadCommandResult(context.Background(), &bridgev1.ReadCommandResultRequest{
+		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_poll", OperationId: "cmdop_wrong_task",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("read with unrelated task error = %v; want FailedPrecondition", err)
+	}
+	if _, err := store.SendCommandInput(context.Background(), &bridgev1.SendCommandInputRequest{
+		Scope: scope, TaskId: "task_command_expected", ToolUseEventId: "evt_command_send", OperationId: "cmdop_wrong_input",
+		InputJson: `{"session_id":"task_command_expected","chars":"different"}`,
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("send with divergent durable input error = %v; want FailedPrecondition", err)
+	}
+	if _, err := store.CancelCommand(context.Background(), &bridgev1.CancelCommandRequest{
+		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_exec", OperationId: "cmdop_wrong_cancel",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("cancel with unrelated source Tool error = %v; want FailedPrecondition", err)
+	}
+	var count int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND background_request_id LIKE 'cmdop_wrong_%'`, workspaceID, sessionID).Scan(&count); err != nil {
+		t.Fatalf("count rejected background receipts: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected background receipts = %d; want none", count)
 	}
 }
 
