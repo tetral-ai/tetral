@@ -23,12 +23,12 @@ type childInterruptTransportStore struct {
 
 func (s *childInterruptTransportStore) AdmitChildInterrupt(context.Context, *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error) {
 	s.admitted = true
-	return &bridgev1.AdmitChildInterruptResponse{Ack: committedAck("", "source")}, nil
+	return &bridgev1.AdmitChildInterruptResponse{Outcome: &bridgev1.AdmitChildInterruptResponse_Committed{Committed: &bridgev1.AdmitChildInterruptCommitted{ControlOperationId: "source"}}}, nil
 }
 
 func (s *childInterruptTransportStore) AwaitChildInterrupt(context.Context, *bridgev1.AwaitChildInterruptRequest) (*bridgev1.AwaitChildInterruptResponse, error) {
 	s.awaited = true
-	return &bridgev1.AwaitChildInterruptResponse{Ack: committedAck("", "source")}, nil
+	return &bridgev1.AwaitChildInterruptResponse{Outcome: &bridgev1.AwaitChildInterruptResponse_Completed{Completed: &bridgev1.AwaitChildInterruptCompleted{}}}, nil
 }
 
 func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {

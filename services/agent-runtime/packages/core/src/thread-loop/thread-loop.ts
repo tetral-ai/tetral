@@ -487,7 +487,6 @@ export interface RuntimeAcceptedInputCommitObservation {
   readonly workspaceId: string;
   readonly sessionId: string;
   readonly sessionThreadId: string;
-  readonly requestId: string;
   readonly runtimeInputId: string;
   readonly inputKind: RuntimeAcceptedInputState["kind"];
   readonly attempt: number;
@@ -1510,7 +1509,6 @@ function recordAcceptedInputCommit(
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       sessionThreadId: input.sessionThreadId,
-      requestId: input.requestId,
       runtimeInputId: input.runtimeInputId,
       inputKind: input.kind,
       attempt,
@@ -4577,7 +4575,6 @@ function settleUserInterruptFenceEffect(
         const projections = applyInterruptInputReceipt({
           sessionThreadId: session.identity.sessionThreadId,
           runtimeInputId: command.runtimeInputId,
-          eventIds: command.eventIds,
           expectedToolUseEventIds,
         }, committed.receipt);
         const messages = applyInterruptToolProjections(
@@ -4901,9 +4898,6 @@ async function appendModelRequestEndEvent(
       : {
           interruptSettlement: {
             runtimeInputId: interrupt.command.runtimeInputId,
-            eventIds: [...interrupt.command.eventIds],
-            sequenceFrom: interrupt.command.sequenceFrom,
-            sequenceTo: interrupt.command.sequenceTo,
           },
         }),
   };
@@ -5337,7 +5331,6 @@ function acknowledgeJoinedInterruptRequestEnd(
     const projections = applyInterruptInputReceipt({
       sessionThreadId: session.identity.sessionThreadId,
       runtimeInputId: command.runtimeInputId,
-      eventIds: command.eventIds,
       expectedToolUseEventIds: unfinishedToolUseEventIds(
         session.state.contextManager.messages(),
       ),

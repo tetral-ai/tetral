@@ -2,7 +2,7 @@ import { Metadata } from "@grpc/grpc-js";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import { createJsonLogger } from "../../src/logger.js";
 import { RuntimeControlService } from "../../src/runtime-service.js";
-import type { RuntimeAuthenticator, RuntimeCleanupController, RuntimeCommandScope, RuntimeSessionRunHost } from "../../src/runtime-service.js";
+import type { RuntimeAuthenticator, RuntimeCleanupController, RuntimeCleanupCommand, RuntimeSessionRunHost } from "../../src/runtime-service.js";
 
 class HarnessAuthenticator implements RuntimeAuthenticator {
   async authenticate(input: { readonly metadata: Metadata }) {
@@ -41,7 +41,7 @@ class HarnessRunHost implements RuntimeSessionRunHost {
 }
 
 class HarnessCleanupController implements RuntimeCleanupController {
-  async startCleanup(scope: RuntimeCommandScope) {
+  async startCleanup(scope: RuntimeCleanupCommand) {
     return {
       ok: true as const,
       sessionId: scope.sessionId,

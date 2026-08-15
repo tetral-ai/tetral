@@ -20,7 +20,7 @@ import { RuntimeInternalToolRepairStore } from "../../src/contracts/runtime.js";
 import type { AcceptedInputCommitResult, ContextLoader } from "../../src/context/context-loader.js";
 import type { LLMEvent } from "../../src/llm/llm-event.js";
 import type { Interface as LLMServiceInterface, LLMRequest } from "../../src/llm/llm-service.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "../../src/thread-loop/thread-state.js";
+import type { RuntimeAcceptedInputState } from "../../src/thread-loop/thread-state.js";
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import * as SessionManager from "../../src/session/session-manager.js";
 import * as SessionRunHost from "../../src/session-run-host/session-run-host.js";
@@ -40,32 +40,18 @@ const emptyColdCoverage = {
   undeliveredMailDeliveryIds: [],
 } as const;
 
-function acceptedInput(sessionId: string, runtimeInputId = `rin_${sessionId}`): RuntimeAcceptedInputState {
+function acceptedInput(sessionId: string, runtimeInputId = `rin_${sessionId}`): Extract<RuntimeAcceptedInputState, { readonly kind: "messages" }> {
   return {
-    requestId: `req_${runtimeInputId}`,
-    workspaceId: "wksp_test",
-    sessionId,
-    sessionThreadId: `thrd_${sessionId}`,
-    bindingId: `bind_${sessionId}`,
-    bindingGeneration: 1,
-    targetPodUid: `pod_${sessionId}`,
-    runtimeInputId,
-    eventIds: [`sevt_${runtimeInputId}`],
-    sequenceFrom: 1,
-    sequenceTo: 1,
+    ...acceptedInputScope(sessionId, runtimeInputId),
     kind: "messages",
-    payloadJson: JSON.stringify({
+    contentJson: JSON.stringify({
       messages: [userMessage(`msg_${runtimeInputId}`, 1, "test input")],
     }),
   };
 }
 
-function threadControl(
-  sessionId: string,
-  runtimeInputId = `rin_control_${sessionId}`,
-): RuntimeThreadControlState & { readonly origin: "user" } {
+function controlInputScope(sessionId: string, runtimeInputId: string) {
   return {
-    requestId: `req_${runtimeInputId}`,
     workspaceId: "wksp_test",
     sessionId,
     sessionThreadId: `thrd_${sessionId}`,
@@ -73,10 +59,44 @@ function threadControl(
     bindingGeneration: 1,
     targetPodUid: `pod_${sessionId}`,
     runtimeInputId,
-    eventIds: [`sevt_${runtimeInputId}`],
-    sequenceFrom: 1,
-    sequenceTo: 1,
+  };
+}
+
+function acceptedInputScope(sessionId: string, runtimeInputId: string) {
+  return { ...controlInputScope(sessionId, runtimeInputId), inputOrder: 1 };
+}
+
+function threadControl(
+  sessionId: string,
+  runtimeInputId = `rin_control_${sessionId}`,
+): SessionManager.RuntimeInterruptControlCommand {
+  return {
+		...acceptedInputScope(sessionId, runtimeInputId),
 		origin: "user",
+  };
+}
+
+function runtimeConfigCommand(sessionId: string, generation: number): Parameters<SessionManager.Interface["applyRuntimeConfigPatch"]>[1] {
+  return {
+    workspaceId: "wksp_test",
+    sessionId,
+    bindingId: `bind_${sessionId}`,
+    bindingGeneration: 1,
+    targetPodUid: `pod_${sessionId}`,
+    configIdentity: `session:${generation}`,
+    generation,
+    contentJson: JSON.stringify({ config_generation: generation }),
+  };
+}
+
+function cleanupCommand(sessionId: string): SessionManager.RuntimeCleanupSessionCommand {
+  return {
+    workspaceId: "wksp_test",
+    sessionId,
+    bindingId: `bind_${sessionId}`,
+    bindingGeneration: 1,
+    targetPodUid: `pod_${sessionId}`,
+    cleanupOperationId: `cleanup_${sessionId}`,
   };
 }
 
@@ -411,7 +431,7 @@ describe("SessionRunHost", () => {
       Effect.gen(function* () {
         const host = yield* SessionRunHost.Service;
         const accepted = yield* host.handleAcceptInput(acceptedInput("sesn_2"));
-        const interruptCommand = { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 };
+        const interruptCommand = { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", inputOrder: 3 };
         const interrupt = yield* host.handleInterruptControl(
           "sesn_3",
           interruptCommand,
@@ -422,9 +442,7 @@ describe("SessionRunHost", () => {
           ),
         );
         const confirmationCommand = {
-          ...threadControl("sesn_4"),
-          runtimeInputId: "rin_confirm",
-          sourceEventId: "sevt_confirm_1",
+          ...controlInputScope("sesn_4", "rin_confirm"),
           toolUseEventId: "sevt_tool_1",
           decision: "allow",
         } as const;
@@ -438,20 +456,14 @@ describe("SessionRunHost", () => {
           ),
         );
         const task = yield* host.handleTaskNotification("sesn_5", {
-          ...threadControl("sesn_5"),
-          runtimeInputId: "rin_task",
+          ...acceptedInputScope("sesn_5", "rin_task"),
           taskId: "task_1",
           sourceToolUseEventId: "sevt_tool_1",
           status: "completed",
-          payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
+          notificationJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
         });
-        const config = yield* host.handleRuntimeConfigPatch("sesn_6", {
-          ...threadControl("sesn_6"),
-          runtimeInputId: "rin_config",
-          generation: 3,
-          payloadJson: "{\"config_generation\":3}",
-        });
-        const cleanup = yield* host.handleCleanupSession("sesn_7", threadControl("sesn_7"));
+        const config = yield* host.handleRuntimeConfigPatch("sesn_6", runtimeConfigCommand("sesn_6", 3));
+        const cleanup = yield* host.handleCleanupSession("sesn_7", cleanupCommand("sesn_7"));
         return { accepted, interrupt, confirmation, task, config, cleanup };
       }).pipe(Effect.provide(SessionRunHost.layer.pipe(Layer.provide(fakeManagerLayer(calls))))),
     );
@@ -473,19 +485,17 @@ describe("SessionRunHost", () => {
       "cleanupSession",
     ]);
     expect(calls[0]?.args[0]).toMatchObject({ sessionId: "sesn_2", runtimeInputId: "rin_sesn_2" });
-    expect(calls[1]?.args.slice(0, 2)).toEqual(["sesn_3", { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 }]);
+    expect(calls[1]?.args.slice(0, 2)).toEqual(["sesn_3", { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", inputOrder: 3 }]);
     expect(typeof calls[1]?.args[2]).toBe("function");
     expect(calls[2]?.args.slice(0, 2)).toEqual(["sesn_4", {
-      ...threadControl("sesn_4"),
-      runtimeInputId: "rin_confirm",
-      sourceEventId: "sevt_confirm_1",
+      ...controlInputScope("sesn_4", "rin_confirm"),
       toolUseEventId: "sevt_tool_1",
       decision: "allow",
     }]);
     expect(typeof calls[2]?.args[2]).toBe("function");
     expect(calls[3]?.args).toEqual(["sesn_5", expect.objectContaining({ runtimeInputId: "rin_task", taskId: "task_1" })]);
-    expect(calls[4]?.args).toEqual(["sesn_6", expect.objectContaining({ runtimeInputId: "rin_config", generation: 3 })]);
-    expect(calls[5]?.args).toEqual(["sesn_7", threadControl("sesn_7")]);
+    expect(calls[4]?.args).toEqual(["sesn_6", runtimeConfigCommand("sesn_6", 3)]);
+    expect(calls[5]?.args).toEqual(["sesn_7", cleanupCommand("sesn_7")]);
   });
 
   test("payload-like extra input is ignored before it can reach SessionManager", async () => {
@@ -496,16 +506,16 @@ describe("SessionRunHost", () => {
         const host = yield* SessionRunHost.Service;
         const unsafeHost = host as unknown as {
           readonly handleAcceptInput: (command: ReturnType<typeof acceptedInput>, payload: unknown) => ReturnType<typeof host.handleAcceptInput>;
-          readonly handleCleanupSession: (sessionId: string, command: ReturnType<typeof threadControl>, payload: unknown) => ReturnType<typeof host.handleCleanupSession>;
+          readonly handleCleanupSession: (sessionId: string, command: ReturnType<typeof cleanupCommand>, payload: unknown) => ReturnType<typeof host.handleCleanupSession>;
         };
         yield* unsafeHost.handleAcceptInput(acceptedInput("sesn_2"), { modelId: "gpt-5", body: "must-not-cross" });
-        yield* unsafeHost.handleCleanupSession("sesn_3", threadControl("sesn_3"), { event: { type: "user.message" } });
+        yield* unsafeHost.handleCleanupSession("sesn_3", cleanupCommand("sesn_3"), { event: { type: "user.message" } });
       }).pipe(Effect.provide(SessionRunHost.layer.pipe(Layer.provide(fakeManagerLayer(calls))))),
     );
 
     expect(calls).toEqual([
       { method: "acceptInput", args: [expect.objectContaining({ sessionId: "sesn_2", runtimeInputId: "rin_sesn_2" })] },
-      { method: "cleanupSession", args: ["sesn_3", threadControl("sesn_3")] },
+      { method: "cleanupSession", args: ["sesn_3", cleanupCommand("sesn_3")] },
     ]);
   });
 

@@ -14,7 +14,7 @@ import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-state.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopDurableRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, acceptedInput, activeCompactionRun, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, compactionHistory, compactionTransportHistory, createdAt, deferred, queuedLLMService, recordCompactionHint, runtimeTerminationResultForTest, runtimeThreadLoopLayer, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, acceptedInput, activeCompactionRun, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, compactionHistory, compactionTransportHistory, createdAt, deferred, interruptInput, queuedLLMService, recordCompactionHint, runtimeTerminationResultForTest, runtimeThreadLoopLayer, taskNotificationInput, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, writerFrom } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
 test("a reviewer finish arms proactive compaction on the reviewer model before its next review", async () => {
@@ -376,22 +376,17 @@ test("direct Effect interruption closes an ACKed compaction request before inter
 test("task notification survives interrupted compaction and commits on the next run", async () => {
     const active = await activeCompactionRun(new ThreadRuntime("sesn_task_interrupted_compaction"));
     const commitsBeforeNotification = active.loader.commitCalls.length;
-    expect(active.session.state.enqueueAcceptedInput({
-        requestId: "req_task_interrupted_compaction",
-        ...active.session.identity,
-        runtimeInputId: "rin_task_interrupted_compaction",
-        eventIds: [],
-        sequenceFrom: 0,
-        sequenceTo: 0,
-        kind: "task_notification",
-        taskId: "task_interrupted_compaction",
-        sourceToolUseEventId: "sevt_task_interrupted_compaction",
-        status: "completed",
-        payloadJson: "{\"status\":\"completed\",\"text\":\"task completed during interrupted compaction\"}",
-    })).toBe("applied");
-    const interruptCommand = acceptedInput("rin_task_compaction_interrupt");
+    expect(active.session.state.enqueueAcceptedInput(taskNotificationInput(
+        "rin_task_interrupted_compaction",
+        "task_interrupted_compaction",
+        "sevt_task_interrupted_compaction",
+        "completed",
+        "{\"status\":\"completed\",\"text\":\"task completed during interrupted compaction\"}",
+        active.session.sessionId,
+    ))).toBe("applied");
+    const interruptCommand = interruptInput("rin_task_compaction_interrupt");
     active.session.state.beginUserInterrupt(interruptCommand, testControlCommit(interruptCommand));
-		active.session.state.discardQueuedAcceptedInputsBeforeFence(interruptCommand.sequenceTo, true);
+		active.session.state.discardQueuedAcceptedInputsBeforeFence(interruptCommand.inputOrder, true);
     const interrupt = Effect.runPromise(Fiber.interrupt(active.runFiber));
     try {
         await active.requestEndStarted.promise;
@@ -738,19 +733,14 @@ test("task notification arriving during reactive compaction joins the preserved 
         stream(request) {
             requests.push(request);
             if (request.requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY) {
-                expect(session.state.enqueueAcceptedInput({
-                    requestId: "req_task_during_compaction",
-                    ...session.identity,
-                    runtimeInputId: "rin_task_during_compaction",
-                    eventIds: [],
-                    sequenceFrom: 0,
-                    sequenceTo: 0,
-                    kind: "task_notification",
-                    taskId: "task_during_compaction",
-                    sourceToolUseEventId: "sevt_task_during_compaction",
-                    status: "completed",
-                    payloadJson: "{\"status\":\"completed\",\"text\":\"task completed while compaction was open\"}",
-                })).toBe("applied");
+                expect(session.state.enqueueAcceptedInput(taskNotificationInput(
+                    "rin_task_during_compaction",
+                    "task_during_compaction",
+                    "sevt_task_during_compaction",
+                    "completed",
+                    "{\"status\":\"completed\",\"text\":\"task completed while compaction was open\"}",
+                    session.sessionId,
+                ))).toBe("applied");
             }
             else {
                 order.push(`provider-${requests.length}`);

@@ -21,326 +21,869 @@ import {
 
 export const protobufPackage = "tetral.agent_runtime.v1";
 
-export enum RuntimeCommandKind {
-  RUNTIME_COMMAND_KIND_UNSPECIFIED = 0,
-  RUNTIME_COMMAND_KIND_MESSAGES = 1,
-  RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL = 2,
-  RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION = 3,
-  RUNTIME_COMMAND_KIND_TASK_NOTIFICATION = 4,
-  RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH = 5,
-  RUNTIME_COMMAND_KIND_CLEANUP_SESSION = 6,
-  RUNTIME_COMMAND_KIND_AGENT_MAIL = 7,
+export enum AcceptInputRejectionReason {
+  ACCEPT_INPUT_REJECTION_REASON_UNSPECIFIED = 0,
+  ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE = 1,
+  ACCEPT_INPUT_REJECTION_REASON_RUNTIME_REJECTED = 2,
   UNRECOGNIZED = -1,
 }
 
-export function runtimeCommandKindFromJSON(object: any): RuntimeCommandKind {
+export function acceptInputRejectionReasonFromJSON(object: any): AcceptInputRejectionReason {
   switch (object) {
     case 0:
-    case "RUNTIME_COMMAND_KIND_UNSPECIFIED":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_UNSPECIFIED;
+    case "ACCEPT_INPUT_REJECTION_REASON_UNSPECIFIED":
+      return AcceptInputRejectionReason.ACCEPT_INPUT_REJECTION_REASON_UNSPECIFIED;
     case 1:
-    case "RUNTIME_COMMAND_KIND_MESSAGES":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_MESSAGES;
+    case "ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE":
+      return AcceptInputRejectionReason.ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE;
     case 2:
-    case "RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL;
+    case "ACCEPT_INPUT_REJECTION_REASON_RUNTIME_REJECTED":
+      return AcceptInputRejectionReason.ACCEPT_INPUT_REJECTION_REASON_RUNTIME_REJECTED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return AcceptInputRejectionReason.UNRECOGNIZED;
+  }
+}
+
+export function acceptInputRejectionReasonToJSON(object: AcceptInputRejectionReason): string {
+  switch (object) {
+    case AcceptInputRejectionReason.ACCEPT_INPUT_REJECTION_REASON_UNSPECIFIED:
+      return "ACCEPT_INPUT_REJECTION_REASON_UNSPECIFIED";
+    case AcceptInputRejectionReason.ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE:
+      return "ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE";
+    case AcceptInputRejectionReason.ACCEPT_INPUT_REJECTION_REASON_RUNTIME_REJECTED:
+      return "ACCEPT_INPUT_REJECTION_REASON_RUNTIME_REJECTED";
+    case AcceptInputRejectionReason.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum AcceptInputFailure {
+  ACCEPT_INPUT_FAILURE_UNSPECIFIED = 0,
+  ACCEPT_INPUT_FAILURE_SELECTED_POD_MISMATCH = 1,
+  ACCEPT_INPUT_FAILURE_BINDING_MISMATCH = 2,
+  ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT = 3,
+  ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED = 4,
+  ACCEPT_INPUT_FAILURE_REJECTED_INPUT = 5,
+  UNRECOGNIZED = -1,
+}
+
+export function acceptInputFailureFromJSON(object: any): AcceptInputFailure {
+  switch (object) {
+    case 0:
+    case "ACCEPT_INPUT_FAILURE_UNSPECIFIED":
+      return AcceptInputFailure.ACCEPT_INPUT_FAILURE_UNSPECIFIED;
+    case 1:
+    case "ACCEPT_INPUT_FAILURE_SELECTED_POD_MISMATCH":
+      return AcceptInputFailure.ACCEPT_INPUT_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "ACCEPT_INPUT_FAILURE_BINDING_MISMATCH":
+      return AcceptInputFailure.ACCEPT_INPUT_FAILURE_BINDING_MISMATCH;
     case 3:
-    case "RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION;
+    case "ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT":
+      return AcceptInputFailure.ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT;
     case 4:
-    case "RUNTIME_COMMAND_KIND_TASK_NOTIFICATION":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION;
+    case "ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED":
+      return AcceptInputFailure.ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED;
     case 5:
-    case "RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH;
-    case 6:
-    case "RUNTIME_COMMAND_KIND_CLEANUP_SESSION":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_CLEANUP_SESSION;
-    case 7:
-    case "RUNTIME_COMMAND_KIND_AGENT_MAIL":
-      return RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL;
+    case "ACCEPT_INPUT_FAILURE_REJECTED_INPUT":
+      return AcceptInputFailure.ACCEPT_INPUT_FAILURE_REJECTED_INPUT;
     case -1:
     case "UNRECOGNIZED":
     default:
-      return RuntimeCommandKind.UNRECOGNIZED;
+      return AcceptInputFailure.UNRECOGNIZED;
   }
 }
 
-export function runtimeCommandKindToJSON(object: RuntimeCommandKind): string {
+export function acceptInputFailureToJSON(object: AcceptInputFailure): string {
   switch (object) {
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_UNSPECIFIED:
-      return "RUNTIME_COMMAND_KIND_UNSPECIFIED";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_MESSAGES:
-      return "RUNTIME_COMMAND_KIND_MESSAGES";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL:
-      return "RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION:
-      return "RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION:
-      return "RUNTIME_COMMAND_KIND_TASK_NOTIFICATION";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH:
-      return "RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_CLEANUP_SESSION:
-      return "RUNTIME_COMMAND_KIND_CLEANUP_SESSION";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL:
-      return "RUNTIME_COMMAND_KIND_AGENT_MAIL";
-    case RuntimeCommandKind.UNRECOGNIZED:
+    case AcceptInputFailure.ACCEPT_INPUT_FAILURE_UNSPECIFIED:
+      return "ACCEPT_INPUT_FAILURE_UNSPECIFIED";
+    case AcceptInputFailure.ACCEPT_INPUT_FAILURE_SELECTED_POD_MISMATCH:
+      return "ACCEPT_INPUT_FAILURE_SELECTED_POD_MISMATCH";
+    case AcceptInputFailure.ACCEPT_INPUT_FAILURE_BINDING_MISMATCH:
+      return "ACCEPT_INPUT_FAILURE_BINDING_MISMATCH";
+    case AcceptInputFailure.ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT:
+      return "ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT";
+    case AcceptInputFailure.ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED:
+      return "ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED";
+    case AcceptInputFailure.ACCEPT_INPUT_FAILURE_REJECTED_INPUT:
+      return "ACCEPT_INPUT_FAILURE_REJECTED_INPUT";
+    case AcceptInputFailure.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
 }
 
-export enum RuntimeCommandStatus {
-  RUNTIME_COMMAND_STATUS_UNSPECIFIED = 0,
-  RUNTIME_COMMAND_STATUS_ACCEPTED = 1,
-  RUNTIME_COMMAND_STATUS_DUPLICATE = 2,
-  RUNTIME_COMMAND_STATUS_REJECTED = 3,
+export enum AcceptAgentMailFailure {
+  ACCEPT_AGENT_MAIL_FAILURE_UNSPECIFIED = 0,
+  ACCEPT_AGENT_MAIL_FAILURE_SELECTED_POD_MISMATCH = 1,
+  ACCEPT_AGENT_MAIL_FAILURE_BINDING_MISMATCH = 2,
+  ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT = 3,
+  ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE = 4,
+  ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED = 5,
   UNRECOGNIZED = -1,
 }
 
-export function runtimeCommandStatusFromJSON(object: any): RuntimeCommandStatus {
+export function acceptAgentMailFailureFromJSON(object: any): AcceptAgentMailFailure {
   switch (object) {
     case 0:
-    case "RUNTIME_COMMAND_STATUS_UNSPECIFIED":
-      return RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_UNSPECIFIED;
+    case "ACCEPT_AGENT_MAIL_FAILURE_UNSPECIFIED":
+      return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_UNSPECIFIED;
     case 1:
-    case "RUNTIME_COMMAND_STATUS_ACCEPTED":
-      return RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED;
+    case "ACCEPT_AGENT_MAIL_FAILURE_SELECTED_POD_MISMATCH":
+      return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_SELECTED_POD_MISMATCH;
     case 2:
-    case "RUNTIME_COMMAND_STATUS_DUPLICATE":
-      return RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE;
+    case "ACCEPT_AGENT_MAIL_FAILURE_BINDING_MISMATCH":
+      return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_BINDING_MISMATCH;
     case 3:
-    case "RUNTIME_COMMAND_STATUS_REJECTED":
-      return RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED;
-    case -1:
-    case "UNRECOGNIZED":
-    default:
-      return RuntimeCommandStatus.UNRECOGNIZED;
-  }
-}
-
-export function runtimeCommandStatusToJSON(object: RuntimeCommandStatus): string {
-  switch (object) {
-    case RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_UNSPECIFIED:
-      return "RUNTIME_COMMAND_STATUS_UNSPECIFIED";
-    case RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED:
-      return "RUNTIME_COMMAND_STATUS_ACCEPTED";
-    case RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE:
-      return "RUNTIME_COMMAND_STATUS_DUPLICATE";
-    case RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED:
-      return "RUNTIME_COMMAND_STATUS_REJECTED";
-    case RuntimeCommandStatus.UNRECOGNIZED:
-    default:
-      return "UNRECOGNIZED";
-  }
-}
-
-export enum RuntimeInputErrorCode {
-  RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED = 0,
-  RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH = 1,
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT = 2,
-  RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH = 3,
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE = 4,
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED = 5,
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE = 6,
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID = 7,
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT = 8,
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED = 9,
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED = 10,
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT = 11,
-  RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY = 12,
-  UNRECOGNIZED = -1,
-}
-
-export function runtimeInputErrorCodeFromJSON(object: any): RuntimeInputErrorCode {
-  switch (object) {
-    case 0:
-    case "RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED;
-    case 1:
-    case "RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH;
-    case 2:
-    case "RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT;
-    case 3:
-    case "RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH;
+    case "ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT":
+      return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT;
     case 4:
-    case "RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE;
+    case "ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE":
+      return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE;
     case 5:
-    case "RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED;
-    case 6:
-    case "RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE;
-    case 7:
-    case "RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID;
-    case 8:
-    case "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT;
-    case 9:
-    case "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED;
-    case 10:
-    case "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED;
-    case 11:
-    case "RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT;
-    case 12:
-    case "RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY":
-      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY;
+    case "ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED":
+      return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED;
     case -1:
     case "UNRECOGNIZED":
     default:
-      return RuntimeInputErrorCode.UNRECOGNIZED;
+      return AcceptAgentMailFailure.UNRECOGNIZED;
   }
 }
 
-export function runtimeInputErrorCodeToJSON(object: RuntimeInputErrorCode): string {
+export function acceptAgentMailFailureToJSON(object: AcceptAgentMailFailure): string {
   switch (object) {
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED:
-      return "RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH:
-      return "RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT:
-      return "RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH:
-      return "RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE:
-      return "RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED:
-      return "RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE:
-      return "RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID:
-      return "RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT:
-      return "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED:
-      return "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED:
-      return "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT:
-      return "RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT";
-    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY:
-      return "RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY";
-    case RuntimeInputErrorCode.UNRECOGNIZED:
+    case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_UNSPECIFIED:
+      return "ACCEPT_AGENT_MAIL_FAILURE_UNSPECIFIED";
+    case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_SELECTED_POD_MISMATCH:
+      return "ACCEPT_AGENT_MAIL_FAILURE_SELECTED_POD_MISMATCH";
+    case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_BINDING_MISMATCH:
+      return "ACCEPT_AGENT_MAIL_FAILURE_BINDING_MISMATCH";
+    case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT:
+      return "ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT";
+    case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE:
+      return "ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE";
+    case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED:
+      return "ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED";
+    case AcceptAgentMailFailure.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
 }
 
-export interface RuntimeInputCommandRequest {
-  requestId: string;
+export enum AcceptTaskNotificationFailure {
+  ACCEPT_TASK_NOTIFICATION_FAILURE_UNSPECIFIED = 0,
+  ACCEPT_TASK_NOTIFICATION_FAILURE_SELECTED_POD_MISMATCH = 1,
+  ACCEPT_TASK_NOTIFICATION_FAILURE_BINDING_MISMATCH = 2,
+  ACCEPT_TASK_NOTIFICATION_FAILURE_IDENTITY_CONFLICT = 3,
+  ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY = 4,
+  ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT = 5,
+  ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED = 6,
+  UNRECOGNIZED = -1,
+}
+
+export function acceptTaskNotificationFailureFromJSON(object: any): AcceptTaskNotificationFailure {
+  switch (object) {
+    case 0:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_UNSPECIFIED":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_UNSPECIFIED;
+    case 1:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_SELECTED_POD_MISMATCH":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_BINDING_MISMATCH":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_BINDING_MISMATCH;
+    case 3:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_IDENTITY_CONFLICT":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_IDENTITY_CONFLICT;
+    case 4:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY;
+    case 5:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT;
+    case 6:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return AcceptTaskNotificationFailure.UNRECOGNIZED;
+  }
+}
+
+export function acceptTaskNotificationFailureToJSON(object: AcceptTaskNotificationFailure): string {
+  switch (object) {
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_UNSPECIFIED:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_UNSPECIFIED";
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_SELECTED_POD_MISMATCH:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_SELECTED_POD_MISMATCH";
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_BINDING_MISMATCH:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_BINDING_MISMATCH";
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_IDENTITY_CONFLICT:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_IDENTITY_CONFLICT";
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY";
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT";
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED";
+    case AcceptTaskNotificationFailure.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum InterruptOrigin {
+  INTERRUPT_ORIGIN_UNSPECIFIED = 0,
+  INTERRUPT_ORIGIN_USER = 1,
+  INTERRUPT_ORIGIN_AGENT = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function interruptOriginFromJSON(object: any): InterruptOrigin {
+  switch (object) {
+    case 0:
+    case "INTERRUPT_ORIGIN_UNSPECIFIED":
+      return InterruptOrigin.INTERRUPT_ORIGIN_UNSPECIFIED;
+    case 1:
+    case "INTERRUPT_ORIGIN_USER":
+      return InterruptOrigin.INTERRUPT_ORIGIN_USER;
+    case 2:
+    case "INTERRUPT_ORIGIN_AGENT":
+      return InterruptOrigin.INTERRUPT_ORIGIN_AGENT;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return InterruptOrigin.UNRECOGNIZED;
+  }
+}
+
+export function interruptOriginToJSON(object: InterruptOrigin): string {
+  switch (object) {
+    case InterruptOrigin.INTERRUPT_ORIGIN_UNSPECIFIED:
+      return "INTERRUPT_ORIGIN_UNSPECIFIED";
+    case InterruptOrigin.INTERRUPT_ORIGIN_USER:
+      return "INTERRUPT_ORIGIN_USER";
+    case InterruptOrigin.INTERRUPT_ORIGIN_AGENT:
+      return "INTERRUPT_ORIGIN_AGENT";
+    case InterruptOrigin.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum InterruptFailure {
+  INTERRUPT_FAILURE_UNSPECIFIED = 0,
+  INTERRUPT_FAILURE_SELECTED_POD_MISMATCH = 1,
+  INTERRUPT_FAILURE_BINDING_MISMATCH = 2,
+  INTERRUPT_FAILURE_IDENTITY_CONFLICT = 3,
+  INTERRUPT_FAILURE_CONTROL_BUSY = 4,
+  INTERRUPT_FAILURE_CONTEXT_LOAD_FAILED = 5,
+  INTERRUPT_FAILURE_DURABLE_COMMIT_UNAVAILABLE = 6,
+  INTERRUPT_FAILURE_DURABLE_COMMIT_REJECTED = 7,
+  UNRECOGNIZED = -1,
+}
+
+export function interruptFailureFromJSON(object: any): InterruptFailure {
+  switch (object) {
+    case 0:
+    case "INTERRUPT_FAILURE_UNSPECIFIED":
+      return InterruptFailure.INTERRUPT_FAILURE_UNSPECIFIED;
+    case 1:
+    case "INTERRUPT_FAILURE_SELECTED_POD_MISMATCH":
+      return InterruptFailure.INTERRUPT_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "INTERRUPT_FAILURE_BINDING_MISMATCH":
+      return InterruptFailure.INTERRUPT_FAILURE_BINDING_MISMATCH;
+    case 3:
+    case "INTERRUPT_FAILURE_IDENTITY_CONFLICT":
+      return InterruptFailure.INTERRUPT_FAILURE_IDENTITY_CONFLICT;
+    case 4:
+    case "INTERRUPT_FAILURE_CONTROL_BUSY":
+      return InterruptFailure.INTERRUPT_FAILURE_CONTROL_BUSY;
+    case 5:
+    case "INTERRUPT_FAILURE_CONTEXT_LOAD_FAILED":
+      return InterruptFailure.INTERRUPT_FAILURE_CONTEXT_LOAD_FAILED;
+    case 6:
+    case "INTERRUPT_FAILURE_DURABLE_COMMIT_UNAVAILABLE":
+      return InterruptFailure.INTERRUPT_FAILURE_DURABLE_COMMIT_UNAVAILABLE;
+    case 7:
+    case "INTERRUPT_FAILURE_DURABLE_COMMIT_REJECTED":
+      return InterruptFailure.INTERRUPT_FAILURE_DURABLE_COMMIT_REJECTED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return InterruptFailure.UNRECOGNIZED;
+  }
+}
+
+export function interruptFailureToJSON(object: InterruptFailure): string {
+  switch (object) {
+    case InterruptFailure.INTERRUPT_FAILURE_UNSPECIFIED:
+      return "INTERRUPT_FAILURE_UNSPECIFIED";
+    case InterruptFailure.INTERRUPT_FAILURE_SELECTED_POD_MISMATCH:
+      return "INTERRUPT_FAILURE_SELECTED_POD_MISMATCH";
+    case InterruptFailure.INTERRUPT_FAILURE_BINDING_MISMATCH:
+      return "INTERRUPT_FAILURE_BINDING_MISMATCH";
+    case InterruptFailure.INTERRUPT_FAILURE_IDENTITY_CONFLICT:
+      return "INTERRUPT_FAILURE_IDENTITY_CONFLICT";
+    case InterruptFailure.INTERRUPT_FAILURE_CONTROL_BUSY:
+      return "INTERRUPT_FAILURE_CONTROL_BUSY";
+    case InterruptFailure.INTERRUPT_FAILURE_CONTEXT_LOAD_FAILED:
+      return "INTERRUPT_FAILURE_CONTEXT_LOAD_FAILED";
+    case InterruptFailure.INTERRUPT_FAILURE_DURABLE_COMMIT_UNAVAILABLE:
+      return "INTERRUPT_FAILURE_DURABLE_COMMIT_UNAVAILABLE";
+    case InterruptFailure.INTERRUPT_FAILURE_DURABLE_COMMIT_REJECTED:
+      return "INTERRUPT_FAILURE_DURABLE_COMMIT_REJECTED";
+    case InterruptFailure.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ToolConfirmationDecision {
+  TOOL_CONFIRMATION_DECISION_UNSPECIFIED = 0,
+  TOOL_CONFIRMATION_DECISION_ALLOW = 1,
+  TOOL_CONFIRMATION_DECISION_DENY = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function toolConfirmationDecisionFromJSON(object: any): ToolConfirmationDecision {
+  switch (object) {
+    case 0:
+    case "TOOL_CONFIRMATION_DECISION_UNSPECIFIED":
+      return ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_UNSPECIFIED;
+    case 1:
+    case "TOOL_CONFIRMATION_DECISION_ALLOW":
+      return ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_ALLOW;
+    case 2:
+    case "TOOL_CONFIRMATION_DECISION_DENY":
+      return ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_DENY;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ToolConfirmationDecision.UNRECOGNIZED;
+  }
+}
+
+export function toolConfirmationDecisionToJSON(object: ToolConfirmationDecision): string {
+  switch (object) {
+    case ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_UNSPECIFIED:
+      return "TOOL_CONFIRMATION_DECISION_UNSPECIFIED";
+    case ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_ALLOW:
+      return "TOOL_CONFIRMATION_DECISION_ALLOW";
+    case ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_DENY:
+      return "TOOL_CONFIRMATION_DECISION_DENY";
+    case ToolConfirmationDecision.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ResolveToolConfirmationFailure {
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_UNSPECIFIED = 0,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_SELECTED_POD_MISMATCH = 1,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_BINDING_MISMATCH = 2,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_IDENTITY_CONFLICT = 3,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTROL_CONFLICT = 4,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED = 5,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE = 6,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED = 7,
+  UNRECOGNIZED = -1,
+}
+
+export function resolveToolConfirmationFailureFromJSON(object: any): ResolveToolConfirmationFailure {
+  switch (object) {
+    case 0:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_UNSPECIFIED":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_UNSPECIFIED;
+    case 1:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_SELECTED_POD_MISMATCH":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_BINDING_MISMATCH":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_BINDING_MISMATCH;
+    case 3:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_IDENTITY_CONFLICT":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_IDENTITY_CONFLICT;
+    case 4:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTROL_CONFLICT":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTROL_CONFLICT;
+    case 5:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED;
+    case 6:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE;
+    case 7:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ResolveToolConfirmationFailure.UNRECOGNIZED;
+  }
+}
+
+export function resolveToolConfirmationFailureToJSON(object: ResolveToolConfirmationFailure): string {
+  switch (object) {
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_UNSPECIFIED:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_UNSPECIFIED";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SELECTED_POD_MISMATCH:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_SELECTED_POD_MISMATCH";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_BINDING_MISMATCH:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_BINDING_MISMATCH";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_IDENTITY_CONFLICT:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_IDENTITY_CONFLICT";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTROL_CONFLICT:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTROL_CONFLICT";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED";
+    case ResolveToolConfirmationFailure.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ApplyRuntimeConfigFailure {
+  APPLY_RUNTIME_CONFIG_FAILURE_UNSPECIFIED = 0,
+  APPLY_RUNTIME_CONFIG_FAILURE_SELECTED_POD_MISMATCH = 1,
+  APPLY_RUNTIME_CONFIG_FAILURE_BINDING_MISMATCH = 2,
+  APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT = 3,
+  APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY = 4,
+  APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_CONFLICT = 5,
+  APPLY_RUNTIME_CONFIG_FAILURE_CONTEXT_LOAD_FAILED = 6,
+  UNRECOGNIZED = -1,
+}
+
+export function applyRuntimeConfigFailureFromJSON(object: any): ApplyRuntimeConfigFailure {
+  switch (object) {
+    case 0:
+    case "APPLY_RUNTIME_CONFIG_FAILURE_UNSPECIFIED":
+      return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_UNSPECIFIED;
+    case 1:
+    case "APPLY_RUNTIME_CONFIG_FAILURE_SELECTED_POD_MISMATCH":
+      return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "APPLY_RUNTIME_CONFIG_FAILURE_BINDING_MISMATCH":
+      return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_BINDING_MISMATCH;
+    case 3:
+    case "APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT":
+      return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT;
+    case 4:
+    case "APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY":
+      return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY;
+    case 5:
+    case "APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_CONFLICT":
+      return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_CONFLICT;
+    case 6:
+    case "APPLY_RUNTIME_CONFIG_FAILURE_CONTEXT_LOAD_FAILED":
+      return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTEXT_LOAD_FAILED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ApplyRuntimeConfigFailure.UNRECOGNIZED;
+  }
+}
+
+export function applyRuntimeConfigFailureToJSON(object: ApplyRuntimeConfigFailure): string {
+  switch (object) {
+    case ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_UNSPECIFIED:
+      return "APPLY_RUNTIME_CONFIG_FAILURE_UNSPECIFIED";
+    case ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_SELECTED_POD_MISMATCH:
+      return "APPLY_RUNTIME_CONFIG_FAILURE_SELECTED_POD_MISMATCH";
+    case ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_BINDING_MISMATCH:
+      return "APPLY_RUNTIME_CONFIG_FAILURE_BINDING_MISMATCH";
+    case ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT:
+      return "APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT";
+    case ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY:
+      return "APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY";
+    case ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_CONFLICT:
+      return "APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_CONFLICT";
+    case ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTEXT_LOAD_FAILED:
+      return "APPLY_RUNTIME_CONFIG_FAILURE_CONTEXT_LOAD_FAILED";
+    case ApplyRuntimeConfigFailure.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum CleanupSessionReason {
+  CLEANUP_SESSION_REASON_UNSPECIFIED = 0,
+  CLEANUP_SESSION_REASON_EXPIRED = 1,
+  CLEANUP_SESSION_REASON_OPERATOR_REQUESTED = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function cleanupSessionReasonFromJSON(object: any): CleanupSessionReason {
+  switch (object) {
+    case 0:
+    case "CLEANUP_SESSION_REASON_UNSPECIFIED":
+      return CleanupSessionReason.CLEANUP_SESSION_REASON_UNSPECIFIED;
+    case 1:
+    case "CLEANUP_SESSION_REASON_EXPIRED":
+      return CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED;
+    case 2:
+    case "CLEANUP_SESSION_REASON_OPERATOR_REQUESTED":
+      return CleanupSessionReason.CLEANUP_SESSION_REASON_OPERATOR_REQUESTED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return CleanupSessionReason.UNRECOGNIZED;
+  }
+}
+
+export function cleanupSessionReasonToJSON(object: CleanupSessionReason): string {
+  switch (object) {
+    case CleanupSessionReason.CLEANUP_SESSION_REASON_UNSPECIFIED:
+      return "CLEANUP_SESSION_REASON_UNSPECIFIED";
+    case CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED:
+      return "CLEANUP_SESSION_REASON_EXPIRED";
+    case CleanupSessionReason.CLEANUP_SESSION_REASON_OPERATOR_REQUESTED:
+      return "CLEANUP_SESSION_REASON_OPERATOR_REQUESTED";
+    case CleanupSessionReason.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum CleanupSessionFailure {
+  CLEANUP_SESSION_FAILURE_UNSPECIFIED = 0,
+  CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH = 1,
+  CLEANUP_SESSION_FAILURE_BINDING_MISMATCH = 2,
+  CLEANUP_SESSION_FAILURE_SESSION_BUSY = 3,
+  CLEANUP_SESSION_FAILURE_CLEANUP_FAILED = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function cleanupSessionFailureFromJSON(object: any): CleanupSessionFailure {
+  switch (object) {
+    case 0:
+    case "CLEANUP_SESSION_FAILURE_UNSPECIFIED":
+      return CleanupSessionFailure.CLEANUP_SESSION_FAILURE_UNSPECIFIED;
+    case 1:
+    case "CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH":
+      return CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "CLEANUP_SESSION_FAILURE_BINDING_MISMATCH":
+      return CleanupSessionFailure.CLEANUP_SESSION_FAILURE_BINDING_MISMATCH;
+    case 3:
+    case "CLEANUP_SESSION_FAILURE_SESSION_BUSY":
+      return CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SESSION_BUSY;
+    case 4:
+    case "CLEANUP_SESSION_FAILURE_CLEANUP_FAILED":
+      return CleanupSessionFailure.CLEANUP_SESSION_FAILURE_CLEANUP_FAILED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return CleanupSessionFailure.UNRECOGNIZED;
+  }
+}
+
+export function cleanupSessionFailureToJSON(object: CleanupSessionFailure): string {
+  switch (object) {
+    case CleanupSessionFailure.CLEANUP_SESSION_FAILURE_UNSPECIFIED:
+      return "CLEANUP_SESSION_FAILURE_UNSPECIFIED";
+    case CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH:
+      return "CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH";
+    case CleanupSessionFailure.CLEANUP_SESSION_FAILURE_BINDING_MISMATCH:
+      return "CLEANUP_SESSION_FAILURE_BINDING_MISMATCH";
+    case CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SESSION_BUSY:
+      return "CLEANUP_SESSION_FAILURE_SESSION_BUSY";
+    case CleanupSessionFailure.CLEANUP_SESSION_FAILURE_CLEANUP_FAILED:
+      return "CLEANUP_SESSION_FAILURE_CLEANUP_FAILED";
+    case CleanupSessionFailure.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export interface AcceptInputRequest {
   workspaceId: string;
   sessionId: string;
   sessionThreadId: string;
   bindingId: string;
   bindingGeneration: number;
-  targetPodNamespace: string;
-  targetPodName: string;
   targetPodUid: string;
-  targetPodIp: string;
   runtimeInputId: string;
-  eventIds: string[];
-  sequenceFrom: number;
-  sequenceTo: number;
-  commandKind: RuntimeCommandKind;
-  payloadJson: string;
+  inputOrder: number;
+  messagesJson?: string | undefined;
+  rejection?: AcceptInputRejection | undefined;
 }
 
-export interface RuntimeInputCommandResponse {
-  status: RuntimeCommandStatus;
+export interface AcceptInputRejection {
+  reason: AcceptInputRejectionReason;
+}
+
+export interface AcceptInputResponse {
+  accepted?: AcceptInputAccepted | undefined;
+  duplicate?: AcceptInputDuplicate | undefined;
+  rejected?: AcceptInputRejected | undefined;
+}
+
+export interface AcceptInputAccepted {
+}
+
+export interface AcceptInputDuplicate {
+}
+
+export interface AcceptInputRejected {
+  reason: AcceptInputFailure;
   retryable: boolean;
-  errorCode: RuntimeInputErrorCode;
+}
+
+export interface AcceptAgentMailRequest {
+  workspaceId: string;
   sessionId: string;
-  runtimeInputId: string;
+  sessionThreadId: string;
   bindingId: string;
   bindingGeneration: number;
+  targetPodUid: string;
+  runtimeInputId: string;
+  deliveryId: string;
+  content: string;
 }
 
-function createBaseRuntimeInputCommandRequest(): RuntimeInputCommandRequest {
+export interface AcceptAgentMailResponse {
+  accepted?: AcceptAgentMailAccepted | undefined;
+  duplicate?: AcceptAgentMailDuplicate | undefined;
+  rejected?: AcceptAgentMailRejected | undefined;
+}
+
+export interface AcceptAgentMailAccepted {
+}
+
+export interface AcceptAgentMailDuplicate {
+}
+
+export interface AcceptAgentMailRejected {
+  reason: AcceptAgentMailFailure;
+  retryable: boolean;
+}
+
+export interface AcceptTaskNotificationRequest {
+  workspaceId: string;
+  sessionId: string;
+  sessionThreadId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  targetPodUid: string;
+  runtimeInputId: string;
+  inputOrder: number;
+  notificationJson: string;
+}
+
+export interface AcceptTaskNotificationResponse {
+  accepted?: AcceptTaskNotificationAccepted | undefined;
+  duplicate?: AcceptTaskNotificationDuplicate | undefined;
+  rejected?: AcceptTaskNotificationRejected | undefined;
+}
+
+export interface AcceptTaskNotificationAccepted {
+}
+
+export interface AcceptTaskNotificationDuplicate {
+}
+
+export interface AcceptTaskNotificationRejected {
+  reason: AcceptTaskNotificationFailure;
+  retryable: boolean;
+}
+
+export interface InterruptRequest {
+  workspaceId: string;
+  sessionId: string;
+  sessionThreadId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  targetPodUid: string;
+  runtimeInputId: string;
+  inputOrder: number;
+  origin: InterruptOrigin;
+}
+
+export interface InterruptResponse {
+  accepted?: InterruptAccepted | undefined;
+  duplicate?: InterruptDuplicate | undefined;
+  rejected?: InterruptRejected | undefined;
+}
+
+export interface InterruptAccepted {
+}
+
+export interface InterruptDuplicate {
+}
+
+export interface InterruptRejected {
+  reason: InterruptFailure;
+  retryable: boolean;
+}
+
+export interface ResolveToolConfirmationRequest {
+  workspaceId: string;
+  sessionId: string;
+  sessionThreadId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  targetPodUid: string;
+  runtimeInputId: string;
+  toolUseEventId: string;
+  decision: ToolConfirmationDecision;
+  denyMessage?: string | undefined;
+}
+
+export interface ResolveToolConfirmationResponse {
+  accepted?: ResolveToolConfirmationAccepted | undefined;
+  duplicate?: ResolveToolConfirmationDuplicate | undefined;
+  stale?: ResolveToolConfirmationStale | undefined;
+  rejected?: ResolveToolConfirmationRejected | undefined;
+}
+
+export interface ResolveToolConfirmationAccepted {
+}
+
+export interface ResolveToolConfirmationDuplicate {
+}
+
+export interface ResolveToolConfirmationStale {
+}
+
+export interface ResolveToolConfirmationRejected {
+  reason: ResolveToolConfirmationFailure;
+  retryable: boolean;
+}
+
+export interface ApplyRuntimeConfigRequest {
+  workspaceId: string;
+  sessionId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  targetPodUid: string;
+  sessionConfig?: RuntimeSessionConfig | undefined;
+  mcpManifest?: RuntimeMcpManifestConfig | undefined;
+}
+
+export interface RuntimeSessionConfig {
+  generation: number;
+  contentJson: string;
+}
+
+export interface RuntimeMcpManifestConfig {
+  mcpServerName: string;
+  generation: number;
+  contentJson: string;
+}
+
+export interface ApplyRuntimeConfigResponse {
+  applied?: ApplyRuntimeConfigApplied | undefined;
+  duplicate?: ApplyRuntimeConfigDuplicate | undefined;
+  noResidency?: ApplyRuntimeConfigNoResidency | undefined;
+  rejected?: ApplyRuntimeConfigRejected | undefined;
+}
+
+export interface ApplyRuntimeConfigApplied {
+}
+
+export interface ApplyRuntimeConfigDuplicate {
+}
+
+export interface ApplyRuntimeConfigNoResidency {
+}
+
+export interface ApplyRuntimeConfigRejected {
+  reason: ApplyRuntimeConfigFailure;
+  retryable: boolean;
+}
+
+export interface CleanupSessionRequest {
+  workspaceId: string;
+  sessionId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  targetPodUid: string;
+  cleanupOperationId: string;
+  reason: CleanupSessionReason;
+}
+
+export interface CleanupSessionResponse {
+  completed?: CleanupSessionCompleted | undefined;
+  duplicate?: CleanupSessionDuplicate | undefined;
+  rejected?: CleanupSessionRejected | undefined;
+}
+
+export interface CleanupSessionCompleted {
+}
+
+export interface CleanupSessionDuplicate {
+}
+
+export interface CleanupSessionRejected {
+  reason: CleanupSessionFailure;
+  retryable: boolean;
+}
+
+function createBaseAcceptInputRequest(): AcceptInputRequest {
   return {
-    requestId: "",
     workspaceId: "",
     sessionId: "",
     sessionThreadId: "",
     bindingId: "",
     bindingGeneration: 0,
-    targetPodNamespace: "",
-    targetPodName: "",
     targetPodUid: "",
-    targetPodIp: "",
     runtimeInputId: "",
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
-    commandKind: 0,
-    payloadJson: "",
+    inputOrder: 0,
+    messagesJson: undefined,
+    rejection: undefined,
   };
 }
 
-export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> = {
-  encode(message: RuntimeInputCommandRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.requestId !== "") {
-      writer.uint32(10).string(message.requestId);
-    }
+export const AcceptInputRequest: MessageFns<AcceptInputRequest> = {
+  encode(message: AcceptInputRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.workspaceId !== "") {
-      writer.uint32(18).string(message.workspaceId);
+      writer.uint32(10).string(message.workspaceId);
     }
     if (message.sessionId !== "") {
-      writer.uint32(26).string(message.sessionId);
+      writer.uint32(18).string(message.sessionId);
     }
     if (message.sessionThreadId !== "") {
-      writer.uint32(34).string(message.sessionThreadId);
+      writer.uint32(26).string(message.sessionThreadId);
     }
     if (message.bindingId !== "") {
-      writer.uint32(42).string(message.bindingId);
+      writer.uint32(34).string(message.bindingId);
     }
     if (message.bindingGeneration !== 0) {
-      writer.uint32(48).int64(message.bindingGeneration);
-    }
-    if (message.targetPodNamespace !== "") {
-      writer.uint32(58).string(message.targetPodNamespace);
-    }
-    if (message.targetPodName !== "") {
-      writer.uint32(66).string(message.targetPodName);
+      writer.uint32(40).int64(message.bindingGeneration);
     }
     if (message.targetPodUid !== "") {
-      writer.uint32(74).string(message.targetPodUid);
-    }
-    if (message.targetPodIp !== "") {
-      writer.uint32(82).string(message.targetPodIp);
+      writer.uint32(50).string(message.targetPodUid);
     }
     if (message.runtimeInputId !== "") {
-      writer.uint32(90).string(message.runtimeInputId);
+      writer.uint32(58).string(message.runtimeInputId);
     }
-    for (const v of message.eventIds) {
-      writer.uint32(98).string(v!);
+    if (message.inputOrder !== 0) {
+      writer.uint32(64).int64(message.inputOrder);
     }
-    if (message.sequenceFrom !== 0) {
-      writer.uint32(104).int64(message.sequenceFrom);
+    if (message.messagesJson !== undefined) {
+      writer.uint32(74).string(message.messagesJson);
     }
-    if (message.sequenceTo !== 0) {
-      writer.uint32(112).int64(message.sequenceTo);
-    }
-    if (message.commandKind !== 0) {
-      writer.uint32(120).int32(message.commandKind);
-    }
-    if (message.payloadJson !== "") {
-      writer.uint32(130).string(message.payloadJson);
+    if (message.rejection !== undefined) {
+      AcceptInputRejection.encode(message.rejection, writer.uint32(82).fork()).join();
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeInputCommandRequest {
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptInputRequest {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeInputCommandRequest();
+    const message = createBaseAcceptInputRequest();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -349,7 +892,7 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
             break;
           }
 
-          message.requestId = reader.string();
+          message.workspaceId = reader.string();
           continue;
         }
         case 2: {
@@ -357,7 +900,7 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
             break;
           }
 
-          message.workspaceId = reader.string();
+          message.sessionId = reader.string();
           continue;
         }
         case 3: {
@@ -365,7 +908,7 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
             break;
           }
 
-          message.sessionId = reader.string();
+          message.sessionThreadId = reader.string();
           continue;
         }
         case 4: {
@@ -373,23 +916,23 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
             break;
           }
 
-          message.sessionThreadId = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
           message.bindingId = reader.string();
           continue;
         }
-        case 6: {
-          if (tag !== 48) {
+        case 5: {
+          if (tag !== 40) {
             break;
           }
 
           message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
           continue;
         }
         case 7: {
@@ -397,15 +940,15 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
             break;
           }
 
-          message.targetPodNamespace = reader.string();
+          message.runtimeInputId = reader.string();
           continue;
         }
         case 8: {
-          if (tag !== 66) {
+          if (tag !== 64) {
             break;
           }
 
-          message.targetPodName = reader.string();
+          message.inputOrder = longToNumber(reader.int64());
           continue;
         }
         case 9: {
@@ -413,7 +956,7 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
             break;
           }
 
-          message.targetPodUid = reader.string();
+          message.messagesJson = reader.string();
           continue;
         }
         case 10: {
@@ -421,55 +964,7 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
             break;
           }
 
-          message.targetPodIp = reader.string();
-          continue;
-        }
-        case 11: {
-          if (tag !== 90) {
-            break;
-          }
-
-          message.runtimeInputId = reader.string();
-          continue;
-        }
-        case 12: {
-          if (tag !== 98) {
-            break;
-          }
-
-          message.eventIds.push(reader.string());
-          continue;
-        }
-        case 13: {
-          if (tag !== 104) {
-            break;
-          }
-
-          message.sequenceFrom = longToNumber(reader.int64());
-          continue;
-        }
-        case 14: {
-          if (tag !== 112) {
-            break;
-          }
-
-          message.sequenceTo = longToNumber(reader.int64());
-          continue;
-        }
-        case 15: {
-          if (tag !== 120) {
-            break;
-          }
-
-          message.commandKind = reader.int32() as any;
-          continue;
-        }
-        case 16: {
-          if (tag !== 130) {
-            break;
-          }
-
-          message.payloadJson = reader.string();
+          message.rejection = AcceptInputRejection.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -481,13 +976,8 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
     return message;
   },
 
-  fromJSON(object: any): RuntimeInputCommandRequest {
+  fromJSON(object: any): AcceptInputRequest {
     return {
-      requestId: isSet(object.requestId)
-        ? globalThis.String(object.requestId)
-        : isSet(object.request_id)
-        ? globalThis.String(object.request_id)
-        : "",
       workspaceId: isSet(object.workspaceId)
         ? globalThis.String(object.workspaceId)
         : isSet(object.workspace_id)
@@ -513,64 +1003,32 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
         : isSet(object.binding_generation)
         ? globalThis.Number(object.binding_generation)
         : 0,
-      targetPodNamespace: isSet(object.targetPodNamespace)
-        ? globalThis.String(object.targetPodNamespace)
-        : isSet(object.target_pod_namespace)
-        ? globalThis.String(object.target_pod_namespace)
-        : "",
-      targetPodName: isSet(object.targetPodName)
-        ? globalThis.String(object.targetPodName)
-        : isSet(object.target_pod_name)
-        ? globalThis.String(object.target_pod_name)
-        : "",
       targetPodUid: isSet(object.targetPodUid)
         ? globalThis.String(object.targetPodUid)
         : isSet(object.target_pod_uid)
         ? globalThis.String(object.target_pod_uid)
-        : "",
-      targetPodIp: isSet(object.targetPodIp)
-        ? globalThis.String(object.targetPodIp)
-        : isSet(object.target_pod_ip)
-        ? globalThis.String(object.target_pod_ip)
         : "",
       runtimeInputId: isSet(object.runtimeInputId)
         ? globalThis.String(object.runtimeInputId)
         : isSet(object.runtime_input_id)
         ? globalThis.String(object.runtime_input_id)
         : "",
-      eventIds: globalThis.Array.isArray(object?.eventIds)
-        ? object.eventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.event_ids)
-        ? object.event_ids.map((e: any) => globalThis.String(e))
-        : [],
-      sequenceFrom: isSet(object.sequenceFrom)
-        ? globalThis.Number(object.sequenceFrom)
-        : isSet(object.sequence_from)
-        ? globalThis.Number(object.sequence_from)
+      inputOrder: isSet(object.inputOrder)
+        ? globalThis.Number(object.inputOrder)
+        : isSet(object.input_order)
+        ? globalThis.Number(object.input_order)
         : 0,
-      sequenceTo: isSet(object.sequenceTo)
-        ? globalThis.Number(object.sequenceTo)
-        : isSet(object.sequence_to)
-        ? globalThis.Number(object.sequence_to)
-        : 0,
-      commandKind: isSet(object.commandKind)
-        ? runtimeCommandKindFromJSON(object.commandKind)
-        : isSet(object.command_kind)
-        ? runtimeCommandKindFromJSON(object.command_kind)
-        : 0,
-      payloadJson: isSet(object.payloadJson)
-        ? globalThis.String(object.payloadJson)
-        : isSet(object.payload_json)
-        ? globalThis.String(object.payload_json)
-        : "",
+      messagesJson: isSet(object.messagesJson)
+        ? globalThis.String(object.messagesJson)
+        : isSet(object.messages_json)
+        ? globalThis.String(object.messages_json)
+        : undefined,
+      rejection: isSet(object.rejection) ? AcceptInputRejection.fromJSON(object.rejection) : undefined,
     };
   },
 
-  toJSON(message: RuntimeInputCommandRequest): unknown {
+  toJSON(message: AcceptInputRequest): unknown {
     const obj: any = {};
-    if (message.requestId !== "") {
-      obj.requestId = message.requestId;
-    }
     if (message.workspaceId !== "") {
       obj.workspaceId = message.workspaceId;
     }
@@ -586,106 +1044,61 @@ export const RuntimeInputCommandRequest: MessageFns<RuntimeInputCommandRequest> 
     if (message.bindingGeneration !== 0) {
       obj.bindingGeneration = Math.round(message.bindingGeneration);
     }
-    if (message.targetPodNamespace !== "") {
-      obj.targetPodNamespace = message.targetPodNamespace;
-    }
-    if (message.targetPodName !== "") {
-      obj.targetPodName = message.targetPodName;
-    }
     if (message.targetPodUid !== "") {
       obj.targetPodUid = message.targetPodUid;
-    }
-    if (message.targetPodIp !== "") {
-      obj.targetPodIp = message.targetPodIp;
     }
     if (message.runtimeInputId !== "") {
       obj.runtimeInputId = message.runtimeInputId;
     }
-    if (message.eventIds?.length) {
-      obj.eventIds = message.eventIds;
+    if (message.inputOrder !== 0) {
+      obj.inputOrder = Math.round(message.inputOrder);
     }
-    if (message.sequenceFrom !== 0) {
-      obj.sequenceFrom = Math.round(message.sequenceFrom);
+    if (message.messagesJson !== undefined) {
+      obj.messagesJson = message.messagesJson;
     }
-    if (message.sequenceTo !== 0) {
-      obj.sequenceTo = Math.round(message.sequenceTo);
-    }
-    if (message.commandKind !== 0) {
-      obj.commandKind = runtimeCommandKindToJSON(message.commandKind);
-    }
-    if (message.payloadJson !== "") {
-      obj.payloadJson = message.payloadJson;
+    if (message.rejection !== undefined) {
+      obj.rejection = AcceptInputRejection.toJSON(message.rejection);
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeInputCommandRequest>, I>>(base?: I): RuntimeInputCommandRequest {
-    return RuntimeInputCommandRequest.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<AcceptInputRequest>, I>>(base?: I): AcceptInputRequest {
+    return AcceptInputRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeInputCommandRequest>, I>>(object: I): RuntimeInputCommandRequest {
-    const message = createBaseRuntimeInputCommandRequest();
-    message.requestId = object.requestId ?? "";
+  fromPartial<I extends Exact<DeepPartial<AcceptInputRequest>, I>>(object: I): AcceptInputRequest {
+    const message = createBaseAcceptInputRequest();
     message.workspaceId = object.workspaceId ?? "";
     message.sessionId = object.sessionId ?? "";
     message.sessionThreadId = object.sessionThreadId ?? "";
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
-    message.targetPodNamespace = object.targetPodNamespace ?? "";
-    message.targetPodName = object.targetPodName ?? "";
     message.targetPodUid = object.targetPodUid ?? "";
-    message.targetPodIp = object.targetPodIp ?? "";
     message.runtimeInputId = object.runtimeInputId ?? "";
-    message.eventIds = object.eventIds?.map((e) => e) || [];
-    message.sequenceFrom = object.sequenceFrom ?? 0;
-    message.sequenceTo = object.sequenceTo ?? 0;
-    message.commandKind = object.commandKind ?? 0;
-    message.payloadJson = object.payloadJson ?? "";
+    message.inputOrder = object.inputOrder ?? 0;
+    message.messagesJson = object.messagesJson ?? undefined;
+    message.rejection = (object.rejection !== undefined && object.rejection !== null)
+      ? AcceptInputRejection.fromPartial(object.rejection)
+      : undefined;
     return message;
   },
 };
 
-function createBaseRuntimeInputCommandResponse(): RuntimeInputCommandResponse {
-  return {
-    status: 0,
-    retryable: false,
-    errorCode: 0,
-    sessionId: "",
-    runtimeInputId: "",
-    bindingId: "",
-    bindingGeneration: 0,
-  };
+function createBaseAcceptInputRejection(): AcceptInputRejection {
+  return { reason: 0 };
 }
 
-export const RuntimeInputCommandResponse: MessageFns<RuntimeInputCommandResponse> = {
-  encode(message: RuntimeInputCommandResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.status !== 0) {
-      writer.uint32(8).int32(message.status);
-    }
-    if (message.retryable !== false) {
-      writer.uint32(16).bool(message.retryable);
-    }
-    if (message.errorCode !== 0) {
-      writer.uint32(24).int32(message.errorCode);
-    }
-    if (message.sessionId !== "") {
-      writer.uint32(34).string(message.sessionId);
-    }
-    if (message.runtimeInputId !== "") {
-      writer.uint32(42).string(message.runtimeInputId);
-    }
-    if (message.bindingId !== "") {
-      writer.uint32(50).string(message.bindingId);
-    }
-    if (message.bindingGeneration !== 0) {
-      writer.uint32(56).int64(message.bindingGeneration);
+export const AcceptInputRejection: MessageFns<AcceptInputRejection> = {
+  encode(message: AcceptInputRejection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeInputCommandResponse {
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptInputRejection {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeInputCommandResponse();
+    const message = createBaseAcceptInputRejection();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -694,55 +1107,7 @@ export const RuntimeInputCommandResponse: MessageFns<RuntimeInputCommandResponse
             break;
           }
 
-          message.status = reader.int32() as any;
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
-            break;
-          }
-
-          message.retryable = reader.bool();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.errorCode = reader.int32() as any;
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.sessionId = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.runtimeInputId = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.bindingId = reader.string();
-          continue;
-        }
-        case 7: {
-          if (tag !== 56) {
-            break;
-          }
-
-          message.bindingGeneration = longToNumber(reader.int64());
+          message.reason = reader.int32() as any;
           continue;
         }
       }
@@ -754,24 +1119,438 @@ export const RuntimeInputCommandResponse: MessageFns<RuntimeInputCommandResponse
     return message;
   },
 
-  fromJSON(object: any): RuntimeInputCommandResponse {
+  fromJSON(object: any): AcceptInputRejection {
+    return { reason: isSet(object.reason) ? acceptInputRejectionReasonFromJSON(object.reason) : 0 };
+  },
+
+  toJSON(message: AcceptInputRejection): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = acceptInputRejectionReasonToJSON(message.reason);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptInputRejection>, I>>(base?: I): AcceptInputRejection {
+    return AcceptInputRejection.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptInputRejection>, I>>(object: I): AcceptInputRejection {
+    const message = createBaseAcceptInputRejection();
+    message.reason = object.reason ?? 0;
+    return message;
+  },
+};
+
+function createBaseAcceptInputResponse(): AcceptInputResponse {
+  return { accepted: undefined, duplicate: undefined, rejected: undefined };
+}
+
+export const AcceptInputResponse: MessageFns<AcceptInputResponse> = {
+  encode(message: AcceptInputResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== undefined) {
+      AcceptInputAccepted.encode(message.accepted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      AcceptInputDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      AcceptInputRejected.encode(message.rejected, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptInputResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptInputResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.accepted = AcceptInputAccepted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = AcceptInputDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.rejected = AcceptInputRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptInputResponse {
     return {
-      status: isSet(object.status) ? runtimeCommandStatusFromJSON(object.status) : 0,
+      accepted: isSet(object.accepted) ? AcceptInputAccepted.fromJSON(object.accepted) : undefined,
+      duplicate: isSet(object.duplicate) ? AcceptInputDuplicate.fromJSON(object.duplicate) : undefined,
+      rejected: isSet(object.rejected) ? AcceptInputRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: AcceptInputResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== undefined) {
+      obj.accepted = AcceptInputAccepted.toJSON(message.accepted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = AcceptInputDuplicate.toJSON(message.duplicate);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = AcceptInputRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptInputResponse>, I>>(base?: I): AcceptInputResponse {
+    return AcceptInputResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptInputResponse>, I>>(object: I): AcceptInputResponse {
+    const message = createBaseAcceptInputResponse();
+    message.accepted = (object.accepted !== undefined && object.accepted !== null)
+      ? AcceptInputAccepted.fromPartial(object.accepted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? AcceptInputDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? AcceptInputRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseAcceptInputAccepted(): AcceptInputAccepted {
+  return {};
+}
+
+export const AcceptInputAccepted: MessageFns<AcceptInputAccepted> = {
+  encode(_: AcceptInputAccepted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptInputAccepted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptInputAccepted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptInputAccepted {
+    return {};
+  },
+
+  toJSON(_: AcceptInputAccepted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptInputAccepted>, I>>(base?: I): AcceptInputAccepted {
+    return AcceptInputAccepted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptInputAccepted>, I>>(_: I): AcceptInputAccepted {
+    const message = createBaseAcceptInputAccepted();
+    return message;
+  },
+};
+
+function createBaseAcceptInputDuplicate(): AcceptInputDuplicate {
+  return {};
+}
+
+export const AcceptInputDuplicate: MessageFns<AcceptInputDuplicate> = {
+  encode(_: AcceptInputDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptInputDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptInputDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptInputDuplicate {
+    return {};
+  },
+
+  toJSON(_: AcceptInputDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptInputDuplicate>, I>>(base?: I): AcceptInputDuplicate {
+    return AcceptInputDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptInputDuplicate>, I>>(_: I): AcceptInputDuplicate {
+    const message = createBaseAcceptInputDuplicate();
+    return message;
+  },
+};
+
+function createBaseAcceptInputRejected(): AcceptInputRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const AcceptInputRejected: MessageFns<AcceptInputRejected> = {
+  encode(message: AcceptInputRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptInputRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptInputRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptInputRejected {
+    return {
+      reason: isSet(object.reason) ? acceptInputFailureFromJSON(object.reason) : 0,
       retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
-      errorCode: isSet(object.errorCode)
-        ? runtimeInputErrorCodeFromJSON(object.errorCode)
-        : isSet(object.error_code)
-        ? runtimeInputErrorCodeFromJSON(object.error_code)
-        : 0,
+    };
+  },
+
+  toJSON(message: AcceptInputRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = acceptInputFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptInputRejected>, I>>(base?: I): AcceptInputRejected {
+    return AcceptInputRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptInputRejected>, I>>(object: I): AcceptInputRejected {
+    const message = createBaseAcceptInputRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
+
+function createBaseAcceptAgentMailRequest(): AcceptAgentMailRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    sessionThreadId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    runtimeInputId: "",
+    deliveryId: "",
+    content: "",
+  };
+}
+
+export const AcceptAgentMailRequest: MessageFns<AcceptAgentMailRequest> = {
+  encode(message: AcceptAgentMailRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.sessionThreadId !== "") {
+      writer.uint32(26).string(message.sessionThreadId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(34).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(40).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(50).string(message.targetPodUid);
+    }
+    if (message.runtimeInputId !== "") {
+      writer.uint32(58).string(message.runtimeInputId);
+    }
+    if (message.deliveryId !== "") {
+      writer.uint32(66).string(message.deliveryId);
+    }
+    if (message.content !== "") {
+      writer.uint32(74).string(message.content);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptAgentMailRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptAgentMailRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.deliveryId = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.content = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptAgentMailRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
       sessionId: isSet(object.sessionId)
         ? globalThis.String(object.sessionId)
         : isSet(object.session_id)
         ? globalThis.String(object.session_id)
         : "",
-      runtimeInputId: isSet(object.runtimeInputId)
-        ? globalThis.String(object.runtimeInputId)
-        : isSet(object.runtime_input_id)
-        ? globalThis.String(object.runtime_input_id)
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
         : "",
       bindingId: isSet(object.bindingId)
         ? globalThis.String(object.bindingId)
@@ -783,25 +1562,35 @@ export const RuntimeInputCommandResponse: MessageFns<RuntimeInputCommandResponse
         : isSet(object.binding_generation)
         ? globalThis.Number(object.binding_generation)
         : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : "",
+      deliveryId: isSet(object.deliveryId)
+        ? globalThis.String(object.deliveryId)
+        : isSet(object.delivery_id)
+        ? globalThis.String(object.delivery_id)
+        : "",
+      content: isSet(object.content) ? globalThis.String(object.content) : "",
     };
   },
 
-  toJSON(message: RuntimeInputCommandResponse): unknown {
+  toJSON(message: AcceptAgentMailRequest): unknown {
     const obj: any = {};
-    if (message.status !== 0) {
-      obj.status = runtimeCommandStatusToJSON(message.status);
-    }
-    if (message.retryable !== false) {
-      obj.retryable = message.retryable;
-    }
-    if (message.errorCode !== 0) {
-      obj.errorCode = runtimeInputErrorCodeToJSON(message.errorCode);
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
     }
     if (message.sessionId !== "") {
       obj.sessionId = message.sessionId;
     }
-    if (message.runtimeInputId !== "") {
-      obj.runtimeInputId = message.runtimeInputId;
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
     }
     if (message.bindingId !== "") {
       obj.bindingId = message.bindingId;
@@ -809,21 +1598,3016 @@ export const RuntimeInputCommandResponse: MessageFns<RuntimeInputCommandResponse
     if (message.bindingGeneration !== 0) {
       obj.bindingGeneration = Math.round(message.bindingGeneration);
     }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.runtimeInputId !== "") {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.deliveryId !== "") {
+      obj.deliveryId = message.deliveryId;
+    }
+    if (message.content !== "") {
+      obj.content = message.content;
+    }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeInputCommandResponse>, I>>(base?: I): RuntimeInputCommandResponse {
-    return RuntimeInputCommandResponse.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<AcceptAgentMailRequest>, I>>(base?: I): AcceptAgentMailRequest {
+    return AcceptAgentMailRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeInputCommandResponse>, I>>(object: I): RuntimeInputCommandResponse {
-    const message = createBaseRuntimeInputCommandResponse();
-    message.status = object.status ?? 0;
-    message.retryable = object.retryable ?? false;
-    message.errorCode = object.errorCode ?? 0;
+  fromPartial<I extends Exact<DeepPartial<AcceptAgentMailRequest>, I>>(object: I): AcceptAgentMailRequest {
+    const message = createBaseAcceptAgentMailRequest();
+    message.workspaceId = object.workspaceId ?? "";
     message.sessionId = object.sessionId ?? "";
-    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.sessionThreadId = object.sessionThreadId ?? "";
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.deliveryId = object.deliveryId ?? "";
+    message.content = object.content ?? "";
+    return message;
+  },
+};
+
+function createBaseAcceptAgentMailResponse(): AcceptAgentMailResponse {
+  return { accepted: undefined, duplicate: undefined, rejected: undefined };
+}
+
+export const AcceptAgentMailResponse: MessageFns<AcceptAgentMailResponse> = {
+  encode(message: AcceptAgentMailResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== undefined) {
+      AcceptAgentMailAccepted.encode(message.accepted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      AcceptAgentMailDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      AcceptAgentMailRejected.encode(message.rejected, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptAgentMailResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptAgentMailResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.accepted = AcceptAgentMailAccepted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = AcceptAgentMailDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.rejected = AcceptAgentMailRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptAgentMailResponse {
+    return {
+      accepted: isSet(object.accepted) ? AcceptAgentMailAccepted.fromJSON(object.accepted) : undefined,
+      duplicate: isSet(object.duplicate) ? AcceptAgentMailDuplicate.fromJSON(object.duplicate) : undefined,
+      rejected: isSet(object.rejected) ? AcceptAgentMailRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: AcceptAgentMailResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== undefined) {
+      obj.accepted = AcceptAgentMailAccepted.toJSON(message.accepted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = AcceptAgentMailDuplicate.toJSON(message.duplicate);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = AcceptAgentMailRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptAgentMailResponse>, I>>(base?: I): AcceptAgentMailResponse {
+    return AcceptAgentMailResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptAgentMailResponse>, I>>(object: I): AcceptAgentMailResponse {
+    const message = createBaseAcceptAgentMailResponse();
+    message.accepted = (object.accepted !== undefined && object.accepted !== null)
+      ? AcceptAgentMailAccepted.fromPartial(object.accepted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? AcceptAgentMailDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? AcceptAgentMailRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseAcceptAgentMailAccepted(): AcceptAgentMailAccepted {
+  return {};
+}
+
+export const AcceptAgentMailAccepted: MessageFns<AcceptAgentMailAccepted> = {
+  encode(_: AcceptAgentMailAccepted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptAgentMailAccepted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptAgentMailAccepted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptAgentMailAccepted {
+    return {};
+  },
+
+  toJSON(_: AcceptAgentMailAccepted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptAgentMailAccepted>, I>>(base?: I): AcceptAgentMailAccepted {
+    return AcceptAgentMailAccepted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptAgentMailAccepted>, I>>(_: I): AcceptAgentMailAccepted {
+    const message = createBaseAcceptAgentMailAccepted();
+    return message;
+  },
+};
+
+function createBaseAcceptAgentMailDuplicate(): AcceptAgentMailDuplicate {
+  return {};
+}
+
+export const AcceptAgentMailDuplicate: MessageFns<AcceptAgentMailDuplicate> = {
+  encode(_: AcceptAgentMailDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptAgentMailDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptAgentMailDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptAgentMailDuplicate {
+    return {};
+  },
+
+  toJSON(_: AcceptAgentMailDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptAgentMailDuplicate>, I>>(base?: I): AcceptAgentMailDuplicate {
+    return AcceptAgentMailDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptAgentMailDuplicate>, I>>(_: I): AcceptAgentMailDuplicate {
+    const message = createBaseAcceptAgentMailDuplicate();
+    return message;
+  },
+};
+
+function createBaseAcceptAgentMailRejected(): AcceptAgentMailRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const AcceptAgentMailRejected: MessageFns<AcceptAgentMailRejected> = {
+  encode(message: AcceptAgentMailRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptAgentMailRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptAgentMailRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptAgentMailRejected {
+    return {
+      reason: isSet(object.reason) ? acceptAgentMailFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: AcceptAgentMailRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = acceptAgentMailFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptAgentMailRejected>, I>>(base?: I): AcceptAgentMailRejected {
+    return AcceptAgentMailRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptAgentMailRejected>, I>>(object: I): AcceptAgentMailRejected {
+    const message = createBaseAcceptAgentMailRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
+
+function createBaseAcceptTaskNotificationRequest(): AcceptTaskNotificationRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    sessionThreadId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    runtimeInputId: "",
+    inputOrder: 0,
+    notificationJson: "",
+  };
+}
+
+export const AcceptTaskNotificationRequest: MessageFns<AcceptTaskNotificationRequest> = {
+  encode(message: AcceptTaskNotificationRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.sessionThreadId !== "") {
+      writer.uint32(26).string(message.sessionThreadId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(34).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(40).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(50).string(message.targetPodUid);
+    }
+    if (message.runtimeInputId !== "") {
+      writer.uint32(58).string(message.runtimeInputId);
+    }
+    if (message.inputOrder !== 0) {
+      writer.uint32(64).int64(message.inputOrder);
+    }
+    if (message.notificationJson !== "") {
+      writer.uint32(74).string(message.notificationJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptTaskNotificationRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptTaskNotificationRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.inputOrder = longToNumber(reader.int64());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.notificationJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptTaskNotificationRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : "",
+      inputOrder: isSet(object.inputOrder)
+        ? globalThis.Number(object.inputOrder)
+        : isSet(object.input_order)
+        ? globalThis.Number(object.input_order)
+        : 0,
+      notificationJson: isSet(object.notificationJson)
+        ? globalThis.String(object.notificationJson)
+        : isSet(object.notification_json)
+        ? globalThis.String(object.notification_json)
+        : "",
+    };
+  },
+
+  toJSON(message: AcceptTaskNotificationRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.runtimeInputId !== "") {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.inputOrder !== 0) {
+      obj.inputOrder = Math.round(message.inputOrder);
+    }
+    if (message.notificationJson !== "") {
+      obj.notificationJson = message.notificationJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptTaskNotificationRequest>, I>>(base?: I): AcceptTaskNotificationRequest {
+    return AcceptTaskNotificationRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptTaskNotificationRequest>, I>>(
+    object: I,
+  ): AcceptTaskNotificationRequest {
+    const message = createBaseAcceptTaskNotificationRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.inputOrder = object.inputOrder ?? 0;
+    message.notificationJson = object.notificationJson ?? "";
+    return message;
+  },
+};
+
+function createBaseAcceptTaskNotificationResponse(): AcceptTaskNotificationResponse {
+  return { accepted: undefined, duplicate: undefined, rejected: undefined };
+}
+
+export const AcceptTaskNotificationResponse: MessageFns<AcceptTaskNotificationResponse> = {
+  encode(message: AcceptTaskNotificationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== undefined) {
+      AcceptTaskNotificationAccepted.encode(message.accepted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      AcceptTaskNotificationDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      AcceptTaskNotificationRejected.encode(message.rejected, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptTaskNotificationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptTaskNotificationResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.accepted = AcceptTaskNotificationAccepted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = AcceptTaskNotificationDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.rejected = AcceptTaskNotificationRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptTaskNotificationResponse {
+    return {
+      accepted: isSet(object.accepted) ? AcceptTaskNotificationAccepted.fromJSON(object.accepted) : undefined,
+      duplicate: isSet(object.duplicate) ? AcceptTaskNotificationDuplicate.fromJSON(object.duplicate) : undefined,
+      rejected: isSet(object.rejected) ? AcceptTaskNotificationRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: AcceptTaskNotificationResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== undefined) {
+      obj.accepted = AcceptTaskNotificationAccepted.toJSON(message.accepted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = AcceptTaskNotificationDuplicate.toJSON(message.duplicate);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = AcceptTaskNotificationRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptTaskNotificationResponse>, I>>(base?: I): AcceptTaskNotificationResponse {
+    return AcceptTaskNotificationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptTaskNotificationResponse>, I>>(
+    object: I,
+  ): AcceptTaskNotificationResponse {
+    const message = createBaseAcceptTaskNotificationResponse();
+    message.accepted = (object.accepted !== undefined && object.accepted !== null)
+      ? AcceptTaskNotificationAccepted.fromPartial(object.accepted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? AcceptTaskNotificationDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? AcceptTaskNotificationRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseAcceptTaskNotificationAccepted(): AcceptTaskNotificationAccepted {
+  return {};
+}
+
+export const AcceptTaskNotificationAccepted: MessageFns<AcceptTaskNotificationAccepted> = {
+  encode(_: AcceptTaskNotificationAccepted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptTaskNotificationAccepted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptTaskNotificationAccepted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptTaskNotificationAccepted {
+    return {};
+  },
+
+  toJSON(_: AcceptTaskNotificationAccepted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptTaskNotificationAccepted>, I>>(base?: I): AcceptTaskNotificationAccepted {
+    return AcceptTaskNotificationAccepted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptTaskNotificationAccepted>, I>>(_: I): AcceptTaskNotificationAccepted {
+    const message = createBaseAcceptTaskNotificationAccepted();
+    return message;
+  },
+};
+
+function createBaseAcceptTaskNotificationDuplicate(): AcceptTaskNotificationDuplicate {
+  return {};
+}
+
+export const AcceptTaskNotificationDuplicate: MessageFns<AcceptTaskNotificationDuplicate> = {
+  encode(_: AcceptTaskNotificationDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptTaskNotificationDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptTaskNotificationDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptTaskNotificationDuplicate {
+    return {};
+  },
+
+  toJSON(_: AcceptTaskNotificationDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptTaskNotificationDuplicate>, I>>(base?: I): AcceptTaskNotificationDuplicate {
+    return AcceptTaskNotificationDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptTaskNotificationDuplicate>, I>>(_: I): AcceptTaskNotificationDuplicate {
+    const message = createBaseAcceptTaskNotificationDuplicate();
+    return message;
+  },
+};
+
+function createBaseAcceptTaskNotificationRejected(): AcceptTaskNotificationRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const AcceptTaskNotificationRejected: MessageFns<AcceptTaskNotificationRejected> = {
+  encode(message: AcceptTaskNotificationRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptTaskNotificationRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptTaskNotificationRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptTaskNotificationRejected {
+    return {
+      reason: isSet(object.reason) ? acceptTaskNotificationFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: AcceptTaskNotificationRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = acceptTaskNotificationFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptTaskNotificationRejected>, I>>(base?: I): AcceptTaskNotificationRejected {
+    return AcceptTaskNotificationRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptTaskNotificationRejected>, I>>(
+    object: I,
+  ): AcceptTaskNotificationRejected {
+    const message = createBaseAcceptTaskNotificationRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
+
+function createBaseInterruptRequest(): InterruptRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    sessionThreadId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    runtimeInputId: "",
+    inputOrder: 0,
+    origin: 0,
+  };
+}
+
+export const InterruptRequest: MessageFns<InterruptRequest> = {
+  encode(message: InterruptRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.sessionThreadId !== "") {
+      writer.uint32(26).string(message.sessionThreadId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(34).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(40).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(50).string(message.targetPodUid);
+    }
+    if (message.runtimeInputId !== "") {
+      writer.uint32(58).string(message.runtimeInputId);
+    }
+    if (message.inputOrder !== 0) {
+      writer.uint32(64).int64(message.inputOrder);
+    }
+    if (message.origin !== 0) {
+      writer.uint32(72).int32(message.origin);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.inputOrder = longToNumber(reader.int64());
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.origin = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InterruptRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : "",
+      inputOrder: isSet(object.inputOrder)
+        ? globalThis.Number(object.inputOrder)
+        : isSet(object.input_order)
+        ? globalThis.Number(object.input_order)
+        : 0,
+      origin: isSet(object.origin) ? interruptOriginFromJSON(object.origin) : 0,
+    };
+  },
+
+  toJSON(message: InterruptRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.runtimeInputId !== "") {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.inputOrder !== 0) {
+      obj.inputOrder = Math.round(message.inputOrder);
+    }
+    if (message.origin !== 0) {
+      obj.origin = interruptOriginToJSON(message.origin);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptRequest>, I>>(base?: I): InterruptRequest {
+    return InterruptRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptRequest>, I>>(object: I): InterruptRequest {
+    const message = createBaseInterruptRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.inputOrder = object.inputOrder ?? 0;
+    message.origin = object.origin ?? 0;
+    return message;
+  },
+};
+
+function createBaseInterruptResponse(): InterruptResponse {
+  return { accepted: undefined, duplicate: undefined, rejected: undefined };
+}
+
+export const InterruptResponse: MessageFns<InterruptResponse> = {
+  encode(message: InterruptResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== undefined) {
+      InterruptAccepted.encode(message.accepted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      InterruptDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      InterruptRejected.encode(message.rejected, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.accepted = InterruptAccepted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = InterruptDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.rejected = InterruptRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InterruptResponse {
+    return {
+      accepted: isSet(object.accepted) ? InterruptAccepted.fromJSON(object.accepted) : undefined,
+      duplicate: isSet(object.duplicate) ? InterruptDuplicate.fromJSON(object.duplicate) : undefined,
+      rejected: isSet(object.rejected) ? InterruptRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: InterruptResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== undefined) {
+      obj.accepted = InterruptAccepted.toJSON(message.accepted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = InterruptDuplicate.toJSON(message.duplicate);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = InterruptRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptResponse>, I>>(base?: I): InterruptResponse {
+    return InterruptResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptResponse>, I>>(object: I): InterruptResponse {
+    const message = createBaseInterruptResponse();
+    message.accepted = (object.accepted !== undefined && object.accepted !== null)
+      ? InterruptAccepted.fromPartial(object.accepted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? InterruptDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? InterruptRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseInterruptAccepted(): InterruptAccepted {
+  return {};
+}
+
+export const InterruptAccepted: MessageFns<InterruptAccepted> = {
+  encode(_: InterruptAccepted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptAccepted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptAccepted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): InterruptAccepted {
+    return {};
+  },
+
+  toJSON(_: InterruptAccepted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptAccepted>, I>>(base?: I): InterruptAccepted {
+    return InterruptAccepted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptAccepted>, I>>(_: I): InterruptAccepted {
+    const message = createBaseInterruptAccepted();
+    return message;
+  },
+};
+
+function createBaseInterruptDuplicate(): InterruptDuplicate {
+  return {};
+}
+
+export const InterruptDuplicate: MessageFns<InterruptDuplicate> = {
+  encode(_: InterruptDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): InterruptDuplicate {
+    return {};
+  },
+
+  toJSON(_: InterruptDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptDuplicate>, I>>(base?: I): InterruptDuplicate {
+    return InterruptDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptDuplicate>, I>>(_: I): InterruptDuplicate {
+    const message = createBaseInterruptDuplicate();
+    return message;
+  },
+};
+
+function createBaseInterruptRejected(): InterruptRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const InterruptRejected: MessageFns<InterruptRejected> = {
+  encode(message: InterruptRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InterruptRejected {
+    return {
+      reason: isSet(object.reason) ? interruptFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: InterruptRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = interruptFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptRejected>, I>>(base?: I): InterruptRejected {
+    return InterruptRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptRejected>, I>>(object: I): InterruptRejected {
+    const message = createBaseInterruptRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
+
+function createBaseResolveToolConfirmationRequest(): ResolveToolConfirmationRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    sessionThreadId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    runtimeInputId: "",
+    toolUseEventId: "",
+    decision: 0,
+    denyMessage: undefined,
+  };
+}
+
+export const ResolveToolConfirmationRequest: MessageFns<ResolveToolConfirmationRequest> = {
+  encode(message: ResolveToolConfirmationRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.sessionThreadId !== "") {
+      writer.uint32(26).string(message.sessionThreadId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(34).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(40).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(50).string(message.targetPodUid);
+    }
+    if (message.runtimeInputId !== "") {
+      writer.uint32(58).string(message.runtimeInputId);
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(66).string(message.toolUseEventId);
+    }
+    if (message.decision !== 0) {
+      writer.uint32(72).int32(message.decision);
+    }
+    if (message.denyMessage !== undefined) {
+      writer.uint32(82).string(message.denyMessage);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveToolConfirmationRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveToolConfirmationRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.decision = reader.int32() as any;
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.denyMessage = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolveToolConfirmationRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : "",
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      decision: isSet(object.decision) ? toolConfirmationDecisionFromJSON(object.decision) : 0,
+      denyMessage: isSet(object.denyMessage)
+        ? globalThis.String(object.denyMessage)
+        : isSet(object.deny_message)
+        ? globalThis.String(object.deny_message)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ResolveToolConfirmationRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.runtimeInputId !== "") {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.decision !== 0) {
+      obj.decision = toolConfirmationDecisionToJSON(message.decision);
+    }
+    if (message.denyMessage !== undefined) {
+      obj.denyMessage = message.denyMessage;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveToolConfirmationRequest>, I>>(base?: I): ResolveToolConfirmationRequest {
+    return ResolveToolConfirmationRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveToolConfirmationRequest>, I>>(
+    object: I,
+  ): ResolveToolConfirmationRequest {
+    const message = createBaseResolveToolConfirmationRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.decision = object.decision ?? 0;
+    message.denyMessage = object.denyMessage ?? undefined;
+    return message;
+  },
+};
+
+function createBaseResolveToolConfirmationResponse(): ResolveToolConfirmationResponse {
+  return { accepted: undefined, duplicate: undefined, stale: undefined, rejected: undefined };
+}
+
+export const ResolveToolConfirmationResponse: MessageFns<ResolveToolConfirmationResponse> = {
+  encode(message: ResolveToolConfirmationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== undefined) {
+      ResolveToolConfirmationAccepted.encode(message.accepted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      ResolveToolConfirmationDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      ResolveToolConfirmationStale.encode(message.stale, writer.uint32(26).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      ResolveToolConfirmationRejected.encode(message.rejected, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveToolConfirmationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveToolConfirmationResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.accepted = ResolveToolConfirmationAccepted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = ResolveToolConfirmationDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = ResolveToolConfirmationStale.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.rejected = ResolveToolConfirmationRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolveToolConfirmationResponse {
+    return {
+      accepted: isSet(object.accepted) ? ResolveToolConfirmationAccepted.fromJSON(object.accepted) : undefined,
+      duplicate: isSet(object.duplicate) ? ResolveToolConfirmationDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? ResolveToolConfirmationStale.fromJSON(object.stale) : undefined,
+      rejected: isSet(object.rejected) ? ResolveToolConfirmationRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: ResolveToolConfirmationResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== undefined) {
+      obj.accepted = ResolveToolConfirmationAccepted.toJSON(message.accepted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = ResolveToolConfirmationDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = ResolveToolConfirmationStale.toJSON(message.stale);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = ResolveToolConfirmationRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveToolConfirmationResponse>, I>>(base?: I): ResolveToolConfirmationResponse {
+    return ResolveToolConfirmationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveToolConfirmationResponse>, I>>(
+    object: I,
+  ): ResolveToolConfirmationResponse {
+    const message = createBaseResolveToolConfirmationResponse();
+    message.accepted = (object.accepted !== undefined && object.accepted !== null)
+      ? ResolveToolConfirmationAccepted.fromPartial(object.accepted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? ResolveToolConfirmationDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? ResolveToolConfirmationStale.fromPartial(object.stale)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? ResolveToolConfirmationRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseResolveToolConfirmationAccepted(): ResolveToolConfirmationAccepted {
+  return {};
+}
+
+export const ResolveToolConfirmationAccepted: MessageFns<ResolveToolConfirmationAccepted> = {
+  encode(_: ResolveToolConfirmationAccepted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveToolConfirmationAccepted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveToolConfirmationAccepted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ResolveToolConfirmationAccepted {
+    return {};
+  },
+
+  toJSON(_: ResolveToolConfirmationAccepted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveToolConfirmationAccepted>, I>>(base?: I): ResolveToolConfirmationAccepted {
+    return ResolveToolConfirmationAccepted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveToolConfirmationAccepted>, I>>(_: I): ResolveToolConfirmationAccepted {
+    const message = createBaseResolveToolConfirmationAccepted();
+    return message;
+  },
+};
+
+function createBaseResolveToolConfirmationDuplicate(): ResolveToolConfirmationDuplicate {
+  return {};
+}
+
+export const ResolveToolConfirmationDuplicate: MessageFns<ResolveToolConfirmationDuplicate> = {
+  encode(_: ResolveToolConfirmationDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveToolConfirmationDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveToolConfirmationDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ResolveToolConfirmationDuplicate {
+    return {};
+  },
+
+  toJSON(_: ResolveToolConfirmationDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveToolConfirmationDuplicate>, I>>(
+    base?: I,
+  ): ResolveToolConfirmationDuplicate {
+    return ResolveToolConfirmationDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveToolConfirmationDuplicate>, I>>(
+    _: I,
+  ): ResolveToolConfirmationDuplicate {
+    const message = createBaseResolveToolConfirmationDuplicate();
+    return message;
+  },
+};
+
+function createBaseResolveToolConfirmationStale(): ResolveToolConfirmationStale {
+  return {};
+}
+
+export const ResolveToolConfirmationStale: MessageFns<ResolveToolConfirmationStale> = {
+  encode(_: ResolveToolConfirmationStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveToolConfirmationStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveToolConfirmationStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ResolveToolConfirmationStale {
+    return {};
+  },
+
+  toJSON(_: ResolveToolConfirmationStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveToolConfirmationStale>, I>>(base?: I): ResolveToolConfirmationStale {
+    return ResolveToolConfirmationStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveToolConfirmationStale>, I>>(_: I): ResolveToolConfirmationStale {
+    const message = createBaseResolveToolConfirmationStale();
+    return message;
+  },
+};
+
+function createBaseResolveToolConfirmationRejected(): ResolveToolConfirmationRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const ResolveToolConfirmationRejected: MessageFns<ResolveToolConfirmationRejected> = {
+  encode(message: ResolveToolConfirmationRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveToolConfirmationRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveToolConfirmationRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolveToolConfirmationRejected {
+    return {
+      reason: isSet(object.reason) ? resolveToolConfirmationFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: ResolveToolConfirmationRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = resolveToolConfirmationFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveToolConfirmationRejected>, I>>(base?: I): ResolveToolConfirmationRejected {
+    return ResolveToolConfirmationRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveToolConfirmationRejected>, I>>(
+    object: I,
+  ): ResolveToolConfirmationRejected {
+    const message = createBaseResolveToolConfirmationRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
+
+function createBaseApplyRuntimeConfigRequest(): ApplyRuntimeConfigRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    sessionConfig: undefined,
+    mcpManifest: undefined,
+  };
+}
+
+export const ApplyRuntimeConfigRequest: MessageFns<ApplyRuntimeConfigRequest> = {
+  encode(message: ApplyRuntimeConfigRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(26).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(32).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(42).string(message.targetPodUid);
+    }
+    if (message.sessionConfig !== undefined) {
+      RuntimeSessionConfig.encode(message.sessionConfig, writer.uint32(50).fork()).join();
+    }
+    if (message.mcpManifest !== undefined) {
+      RuntimeMcpManifestConfig.encode(message.mcpManifest, writer.uint32(58).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyRuntimeConfigRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyRuntimeConfigRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.sessionConfig = RuntimeSessionConfig.decode(reader, reader.uint32());
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.mcpManifest = RuntimeMcpManifestConfig.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ApplyRuntimeConfigRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      sessionConfig: isSet(object.sessionConfig)
+        ? RuntimeSessionConfig.fromJSON(object.sessionConfig)
+        : isSet(object.session_config)
+        ? RuntimeSessionConfig.fromJSON(object.session_config)
+        : undefined,
+      mcpManifest: isSet(object.mcpManifest)
+        ? RuntimeMcpManifestConfig.fromJSON(object.mcpManifest)
+        : isSet(object.mcp_manifest)
+        ? RuntimeMcpManifestConfig.fromJSON(object.mcp_manifest)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ApplyRuntimeConfigRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.sessionConfig !== undefined) {
+      obj.sessionConfig = RuntimeSessionConfig.toJSON(message.sessionConfig);
+    }
+    if (message.mcpManifest !== undefined) {
+      obj.mcpManifest = RuntimeMcpManifestConfig.toJSON(message.mcpManifest);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyRuntimeConfigRequest>, I>>(base?: I): ApplyRuntimeConfigRequest {
+    return ApplyRuntimeConfigRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyRuntimeConfigRequest>, I>>(object: I): ApplyRuntimeConfigRequest {
+    const message = createBaseApplyRuntimeConfigRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.sessionConfig = (object.sessionConfig !== undefined && object.sessionConfig !== null)
+      ? RuntimeSessionConfig.fromPartial(object.sessionConfig)
+      : undefined;
+    message.mcpManifest = (object.mcpManifest !== undefined && object.mcpManifest !== null)
+      ? RuntimeMcpManifestConfig.fromPartial(object.mcpManifest)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeSessionConfig(): RuntimeSessionConfig {
+  return { generation: 0, contentJson: "" };
+}
+
+export const RuntimeSessionConfig: MessageFns<RuntimeSessionConfig> = {
+  encode(message: RuntimeSessionConfig, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.generation !== 0) {
+      writer.uint32(8).int64(message.generation);
+    }
+    if (message.contentJson !== "") {
+      writer.uint32(18).string(message.contentJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeSessionConfig {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeSessionConfig();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.generation = longToNumber(reader.int64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.contentJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeSessionConfig {
+    return {
+      generation: isSet(object.generation) ? globalThis.Number(object.generation) : 0,
+      contentJson: isSet(object.contentJson)
+        ? globalThis.String(object.contentJson)
+        : isSet(object.content_json)
+        ? globalThis.String(object.content_json)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeSessionConfig): unknown {
+    const obj: any = {};
+    if (message.generation !== 0) {
+      obj.generation = Math.round(message.generation);
+    }
+    if (message.contentJson !== "") {
+      obj.contentJson = message.contentJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeSessionConfig>, I>>(base?: I): RuntimeSessionConfig {
+    return RuntimeSessionConfig.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeSessionConfig>, I>>(object: I): RuntimeSessionConfig {
+    const message = createBaseRuntimeSessionConfig();
+    message.generation = object.generation ?? 0;
+    message.contentJson = object.contentJson ?? "";
+    return message;
+  },
+};
+
+function createBaseRuntimeMcpManifestConfig(): RuntimeMcpManifestConfig {
+  return { mcpServerName: "", generation: 0, contentJson: "" };
+}
+
+export const RuntimeMcpManifestConfig: MessageFns<RuntimeMcpManifestConfig> = {
+  encode(message: RuntimeMcpManifestConfig, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.mcpServerName !== "") {
+      writer.uint32(10).string(message.mcpServerName);
+    }
+    if (message.generation !== 0) {
+      writer.uint32(16).int64(message.generation);
+    }
+    if (message.contentJson !== "") {
+      writer.uint32(26).string(message.contentJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeMcpManifestConfig {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeMcpManifestConfig();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.mcpServerName = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.generation = longToNumber(reader.int64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.contentJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeMcpManifestConfig {
+    return {
+      mcpServerName: isSet(object.mcpServerName)
+        ? globalThis.String(object.mcpServerName)
+        : isSet(object.mcp_server_name)
+        ? globalThis.String(object.mcp_server_name)
+        : "",
+      generation: isSet(object.generation) ? globalThis.Number(object.generation) : 0,
+      contentJson: isSet(object.contentJson)
+        ? globalThis.String(object.contentJson)
+        : isSet(object.content_json)
+        ? globalThis.String(object.content_json)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeMcpManifestConfig): unknown {
+    const obj: any = {};
+    if (message.mcpServerName !== "") {
+      obj.mcpServerName = message.mcpServerName;
+    }
+    if (message.generation !== 0) {
+      obj.generation = Math.round(message.generation);
+    }
+    if (message.contentJson !== "") {
+      obj.contentJson = message.contentJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeMcpManifestConfig>, I>>(base?: I): RuntimeMcpManifestConfig {
+    return RuntimeMcpManifestConfig.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeMcpManifestConfig>, I>>(object: I): RuntimeMcpManifestConfig {
+    const message = createBaseRuntimeMcpManifestConfig();
+    message.mcpServerName = object.mcpServerName ?? "";
+    message.generation = object.generation ?? 0;
+    message.contentJson = object.contentJson ?? "";
+    return message;
+  },
+};
+
+function createBaseApplyRuntimeConfigResponse(): ApplyRuntimeConfigResponse {
+  return { applied: undefined, duplicate: undefined, noResidency: undefined, rejected: undefined };
+}
+
+export const ApplyRuntimeConfigResponse: MessageFns<ApplyRuntimeConfigResponse> = {
+  encode(message: ApplyRuntimeConfigResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.applied !== undefined) {
+      ApplyRuntimeConfigApplied.encode(message.applied, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      ApplyRuntimeConfigDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.noResidency !== undefined) {
+      ApplyRuntimeConfigNoResidency.encode(message.noResidency, writer.uint32(26).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      ApplyRuntimeConfigRejected.encode(message.rejected, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyRuntimeConfigResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyRuntimeConfigResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.applied = ApplyRuntimeConfigApplied.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = ApplyRuntimeConfigDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.noResidency = ApplyRuntimeConfigNoResidency.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.rejected = ApplyRuntimeConfigRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ApplyRuntimeConfigResponse {
+    return {
+      applied: isSet(object.applied) ? ApplyRuntimeConfigApplied.fromJSON(object.applied) : undefined,
+      duplicate: isSet(object.duplicate) ? ApplyRuntimeConfigDuplicate.fromJSON(object.duplicate) : undefined,
+      noResidency: isSet(object.noResidency)
+        ? ApplyRuntimeConfigNoResidency.fromJSON(object.noResidency)
+        : isSet(object.no_residency)
+        ? ApplyRuntimeConfigNoResidency.fromJSON(object.no_residency)
+        : undefined,
+      rejected: isSet(object.rejected) ? ApplyRuntimeConfigRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: ApplyRuntimeConfigResponse): unknown {
+    const obj: any = {};
+    if (message.applied !== undefined) {
+      obj.applied = ApplyRuntimeConfigApplied.toJSON(message.applied);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = ApplyRuntimeConfigDuplicate.toJSON(message.duplicate);
+    }
+    if (message.noResidency !== undefined) {
+      obj.noResidency = ApplyRuntimeConfigNoResidency.toJSON(message.noResidency);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = ApplyRuntimeConfigRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyRuntimeConfigResponse>, I>>(base?: I): ApplyRuntimeConfigResponse {
+    return ApplyRuntimeConfigResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyRuntimeConfigResponse>, I>>(object: I): ApplyRuntimeConfigResponse {
+    const message = createBaseApplyRuntimeConfigResponse();
+    message.applied = (object.applied !== undefined && object.applied !== null)
+      ? ApplyRuntimeConfigApplied.fromPartial(object.applied)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? ApplyRuntimeConfigDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.noResidency = (object.noResidency !== undefined && object.noResidency !== null)
+      ? ApplyRuntimeConfigNoResidency.fromPartial(object.noResidency)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? ApplyRuntimeConfigRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseApplyRuntimeConfigApplied(): ApplyRuntimeConfigApplied {
+  return {};
+}
+
+export const ApplyRuntimeConfigApplied: MessageFns<ApplyRuntimeConfigApplied> = {
+  encode(_: ApplyRuntimeConfigApplied, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyRuntimeConfigApplied {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyRuntimeConfigApplied();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ApplyRuntimeConfigApplied {
+    return {};
+  },
+
+  toJSON(_: ApplyRuntimeConfigApplied): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyRuntimeConfigApplied>, I>>(base?: I): ApplyRuntimeConfigApplied {
+    return ApplyRuntimeConfigApplied.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyRuntimeConfigApplied>, I>>(_: I): ApplyRuntimeConfigApplied {
+    const message = createBaseApplyRuntimeConfigApplied();
+    return message;
+  },
+};
+
+function createBaseApplyRuntimeConfigDuplicate(): ApplyRuntimeConfigDuplicate {
+  return {};
+}
+
+export const ApplyRuntimeConfigDuplicate: MessageFns<ApplyRuntimeConfigDuplicate> = {
+  encode(_: ApplyRuntimeConfigDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyRuntimeConfigDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyRuntimeConfigDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ApplyRuntimeConfigDuplicate {
+    return {};
+  },
+
+  toJSON(_: ApplyRuntimeConfigDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyRuntimeConfigDuplicate>, I>>(base?: I): ApplyRuntimeConfigDuplicate {
+    return ApplyRuntimeConfigDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyRuntimeConfigDuplicate>, I>>(_: I): ApplyRuntimeConfigDuplicate {
+    const message = createBaseApplyRuntimeConfigDuplicate();
+    return message;
+  },
+};
+
+function createBaseApplyRuntimeConfigNoResidency(): ApplyRuntimeConfigNoResidency {
+  return {};
+}
+
+export const ApplyRuntimeConfigNoResidency: MessageFns<ApplyRuntimeConfigNoResidency> = {
+  encode(_: ApplyRuntimeConfigNoResidency, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyRuntimeConfigNoResidency {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyRuntimeConfigNoResidency();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ApplyRuntimeConfigNoResidency {
+    return {};
+  },
+
+  toJSON(_: ApplyRuntimeConfigNoResidency): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyRuntimeConfigNoResidency>, I>>(base?: I): ApplyRuntimeConfigNoResidency {
+    return ApplyRuntimeConfigNoResidency.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyRuntimeConfigNoResidency>, I>>(_: I): ApplyRuntimeConfigNoResidency {
+    const message = createBaseApplyRuntimeConfigNoResidency();
+    return message;
+  },
+};
+
+function createBaseApplyRuntimeConfigRejected(): ApplyRuntimeConfigRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const ApplyRuntimeConfigRejected: MessageFns<ApplyRuntimeConfigRejected> = {
+  encode(message: ApplyRuntimeConfigRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApplyRuntimeConfigRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseApplyRuntimeConfigRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ApplyRuntimeConfigRejected {
+    return {
+      reason: isSet(object.reason) ? applyRuntimeConfigFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: ApplyRuntimeConfigRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = applyRuntimeConfigFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApplyRuntimeConfigRejected>, I>>(base?: I): ApplyRuntimeConfigRejected {
+    return ApplyRuntimeConfigRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApplyRuntimeConfigRejected>, I>>(object: I): ApplyRuntimeConfigRejected {
+    const message = createBaseApplyRuntimeConfigRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
+
+function createBaseCleanupSessionRequest(): CleanupSessionRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    cleanupOperationId: "",
+    reason: 0,
+  };
+}
+
+export const CleanupSessionRequest: MessageFns<CleanupSessionRequest> = {
+  encode(message: CleanupSessionRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(26).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(32).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(42).string(message.targetPodUid);
+    }
+    if (message.cleanupOperationId !== "") {
+      writer.uint32(50).string(message.cleanupOperationId);
+    }
+    if (message.reason !== 0) {
+      writer.uint32(56).int32(message.reason);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CleanupSessionRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCleanupSessionRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.cleanupOperationId = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CleanupSessionRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      cleanupOperationId: isSet(object.cleanupOperationId)
+        ? globalThis.String(object.cleanupOperationId)
+        : isSet(object.cleanup_operation_id)
+        ? globalThis.String(object.cleanup_operation_id)
+        : "",
+      reason: isSet(object.reason) ? cleanupSessionReasonFromJSON(object.reason) : 0,
+    };
+  },
+
+  toJSON(message: CleanupSessionRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.cleanupOperationId !== "") {
+      obj.cleanupOperationId = message.cleanupOperationId;
+    }
+    if (message.reason !== 0) {
+      obj.reason = cleanupSessionReasonToJSON(message.reason);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CleanupSessionRequest>, I>>(base?: I): CleanupSessionRequest {
+    return CleanupSessionRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CleanupSessionRequest>, I>>(object: I): CleanupSessionRequest {
+    const message = createBaseCleanupSessionRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.cleanupOperationId = object.cleanupOperationId ?? "";
+    message.reason = object.reason ?? 0;
+    return message;
+  },
+};
+
+function createBaseCleanupSessionResponse(): CleanupSessionResponse {
+  return { completed: undefined, duplicate: undefined, rejected: undefined };
+}
+
+export const CleanupSessionResponse: MessageFns<CleanupSessionResponse> = {
+  encode(message: CleanupSessionResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.completed !== undefined) {
+      CleanupSessionCompleted.encode(message.completed, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      CleanupSessionDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      CleanupSessionRejected.encode(message.rejected, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CleanupSessionResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCleanupSessionResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.completed = CleanupSessionCompleted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = CleanupSessionDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.rejected = CleanupSessionRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CleanupSessionResponse {
+    return {
+      completed: isSet(object.completed) ? CleanupSessionCompleted.fromJSON(object.completed) : undefined,
+      duplicate: isSet(object.duplicate) ? CleanupSessionDuplicate.fromJSON(object.duplicate) : undefined,
+      rejected: isSet(object.rejected) ? CleanupSessionRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: CleanupSessionResponse): unknown {
+    const obj: any = {};
+    if (message.completed !== undefined) {
+      obj.completed = CleanupSessionCompleted.toJSON(message.completed);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = CleanupSessionDuplicate.toJSON(message.duplicate);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = CleanupSessionRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CleanupSessionResponse>, I>>(base?: I): CleanupSessionResponse {
+    return CleanupSessionResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CleanupSessionResponse>, I>>(object: I): CleanupSessionResponse {
+    const message = createBaseCleanupSessionResponse();
+    message.completed = (object.completed !== undefined && object.completed !== null)
+      ? CleanupSessionCompleted.fromPartial(object.completed)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? CleanupSessionDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? CleanupSessionRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseCleanupSessionCompleted(): CleanupSessionCompleted {
+  return {};
+}
+
+export const CleanupSessionCompleted: MessageFns<CleanupSessionCompleted> = {
+  encode(_: CleanupSessionCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CleanupSessionCompleted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCleanupSessionCompleted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CleanupSessionCompleted {
+    return {};
+  },
+
+  toJSON(_: CleanupSessionCompleted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CleanupSessionCompleted>, I>>(base?: I): CleanupSessionCompleted {
+    return CleanupSessionCompleted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CleanupSessionCompleted>, I>>(_: I): CleanupSessionCompleted {
+    const message = createBaseCleanupSessionCompleted();
+    return message;
+  },
+};
+
+function createBaseCleanupSessionDuplicate(): CleanupSessionDuplicate {
+  return {};
+}
+
+export const CleanupSessionDuplicate: MessageFns<CleanupSessionDuplicate> = {
+  encode(_: CleanupSessionDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CleanupSessionDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCleanupSessionDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CleanupSessionDuplicate {
+    return {};
+  },
+
+  toJSON(_: CleanupSessionDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CleanupSessionDuplicate>, I>>(base?: I): CleanupSessionDuplicate {
+    return CleanupSessionDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CleanupSessionDuplicate>, I>>(_: I): CleanupSessionDuplicate {
+    const message = createBaseCleanupSessionDuplicate();
+    return message;
+  },
+};
+
+function createBaseCleanupSessionRejected(): CleanupSessionRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const CleanupSessionRejected: MessageFns<CleanupSessionRejected> = {
+  encode(message: CleanupSessionRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CleanupSessionRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCleanupSessionRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CleanupSessionRejected {
+    return {
+      reason: isSet(object.reason) ? cleanupSessionFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: CleanupSessionRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = cleanupSessionFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CleanupSessionRejected>, I>>(base?: I): CleanupSessionRejected {
+    return CleanupSessionRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CleanupSessionRejected>, I>>(object: I): CleanupSessionRejected {
+    const message = createBaseCleanupSessionRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
     return message;
   },
 };
@@ -834,196 +4618,194 @@ export const AgentRuntimePodServiceService = {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RuntimeInputCommandRequest): Buffer =>
-      Buffer.from(RuntimeInputCommandRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RuntimeInputCommandRequest => RuntimeInputCommandRequest.decode(value),
-    responseSerialize: (value: RuntimeInputCommandResponse): Buffer =>
-      Buffer.from(RuntimeInputCommandResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RuntimeInputCommandResponse => RuntimeInputCommandResponse.decode(value),
+    requestSerialize: (value: AcceptInputRequest): Buffer => Buffer.from(AcceptInputRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AcceptInputRequest => AcceptInputRequest.decode(value),
+    responseSerialize: (value: AcceptInputResponse): Buffer => Buffer.from(AcceptInputResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AcceptInputResponse => AcceptInputResponse.decode(value),
   },
   acceptAgentMail: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RuntimeInputCommandRequest): Buffer =>
-      Buffer.from(RuntimeInputCommandRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RuntimeInputCommandRequest => RuntimeInputCommandRequest.decode(value),
-    responseSerialize: (value: RuntimeInputCommandResponse): Buffer =>
-      Buffer.from(RuntimeInputCommandResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RuntimeInputCommandResponse => RuntimeInputCommandResponse.decode(value),
+    requestSerialize: (value: AcceptAgentMailRequest): Buffer =>
+      Buffer.from(AcceptAgentMailRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AcceptAgentMailRequest => AcceptAgentMailRequest.decode(value),
+    responseSerialize: (value: AcceptAgentMailResponse): Buffer =>
+      Buffer.from(AcceptAgentMailResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AcceptAgentMailResponse => AcceptAgentMailResponse.decode(value),
   },
   acceptTaskNotification: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptTaskNotification" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RuntimeInputCommandRequest): Buffer =>
-      Buffer.from(RuntimeInputCommandRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RuntimeInputCommandRequest => RuntimeInputCommandRequest.decode(value),
-    responseSerialize: (value: RuntimeInputCommandResponse): Buffer =>
-      Buffer.from(RuntimeInputCommandResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RuntimeInputCommandResponse => RuntimeInputCommandResponse.decode(value),
+    requestSerialize: (value: AcceptTaskNotificationRequest): Buffer =>
+      Buffer.from(AcceptTaskNotificationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AcceptTaskNotificationRequest => AcceptTaskNotificationRequest.decode(value),
+    responseSerialize: (value: AcceptTaskNotificationResponse): Buffer =>
+      Buffer.from(AcceptTaskNotificationResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AcceptTaskNotificationResponse =>
+      AcceptTaskNotificationResponse.decode(value),
   },
   interrupt: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/Interrupt" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RuntimeInputCommandRequest): Buffer =>
-      Buffer.from(RuntimeInputCommandRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RuntimeInputCommandRequest => RuntimeInputCommandRequest.decode(value),
-    responseSerialize: (value: RuntimeInputCommandResponse): Buffer =>
-      Buffer.from(RuntimeInputCommandResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RuntimeInputCommandResponse => RuntimeInputCommandResponse.decode(value),
+    requestSerialize: (value: InterruptRequest): Buffer => Buffer.from(InterruptRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): InterruptRequest => InterruptRequest.decode(value),
+    responseSerialize: (value: InterruptResponse): Buffer => Buffer.from(InterruptResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): InterruptResponse => InterruptResponse.decode(value),
   },
   resolveToolConfirmation: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/ResolveToolConfirmation" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RuntimeInputCommandRequest): Buffer =>
-      Buffer.from(RuntimeInputCommandRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RuntimeInputCommandRequest => RuntimeInputCommandRequest.decode(value),
-    responseSerialize: (value: RuntimeInputCommandResponse): Buffer =>
-      Buffer.from(RuntimeInputCommandResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RuntimeInputCommandResponse => RuntimeInputCommandResponse.decode(value),
+    requestSerialize: (value: ResolveToolConfirmationRequest): Buffer =>
+      Buffer.from(ResolveToolConfirmationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ResolveToolConfirmationRequest => ResolveToolConfirmationRequest.decode(value),
+    responseSerialize: (value: ResolveToolConfirmationResponse): Buffer =>
+      Buffer.from(ResolveToolConfirmationResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ResolveToolConfirmationResponse =>
+      ResolveToolConfirmationResponse.decode(value),
   },
   applyRuntimeConfig: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/ApplyRuntimeConfig" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RuntimeInputCommandRequest): Buffer =>
-      Buffer.from(RuntimeInputCommandRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RuntimeInputCommandRequest => RuntimeInputCommandRequest.decode(value),
-    responseSerialize: (value: RuntimeInputCommandResponse): Buffer =>
-      Buffer.from(RuntimeInputCommandResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RuntimeInputCommandResponse => RuntimeInputCommandResponse.decode(value),
+    requestSerialize: (value: ApplyRuntimeConfigRequest): Buffer =>
+      Buffer.from(ApplyRuntimeConfigRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ApplyRuntimeConfigRequest => ApplyRuntimeConfigRequest.decode(value),
+    responseSerialize: (value: ApplyRuntimeConfigResponse): Buffer =>
+      Buffer.from(ApplyRuntimeConfigResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ApplyRuntimeConfigResponse => ApplyRuntimeConfigResponse.decode(value),
   },
   cleanupSession: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/CleanupSession" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RuntimeInputCommandRequest): Buffer =>
-      Buffer.from(RuntimeInputCommandRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RuntimeInputCommandRequest => RuntimeInputCommandRequest.decode(value),
-    responseSerialize: (value: RuntimeInputCommandResponse): Buffer =>
-      Buffer.from(RuntimeInputCommandResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RuntimeInputCommandResponse => RuntimeInputCommandResponse.decode(value),
+    requestSerialize: (value: CleanupSessionRequest): Buffer =>
+      Buffer.from(CleanupSessionRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): CleanupSessionRequest => CleanupSessionRequest.decode(value),
+    responseSerialize: (value: CleanupSessionResponse): Buffer =>
+      Buffer.from(CleanupSessionResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): CleanupSessionResponse => CleanupSessionResponse.decode(value),
   },
 } as const;
 
 export interface AgentRuntimePodServiceServer extends UntypedServiceImplementation {
-  acceptInput: handleUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>;
-  acceptAgentMail: handleUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>;
-  acceptTaskNotification: handleUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>;
-  interrupt: handleUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>;
-  resolveToolConfirmation: handleUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>;
-  applyRuntimeConfig: handleUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>;
-  cleanupSession: handleUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>;
+  acceptInput: handleUnaryCall<AcceptInputRequest, AcceptInputResponse>;
+  acceptAgentMail: handleUnaryCall<AcceptAgentMailRequest, AcceptAgentMailResponse>;
+  acceptTaskNotification: handleUnaryCall<AcceptTaskNotificationRequest, AcceptTaskNotificationResponse>;
+  interrupt: handleUnaryCall<InterruptRequest, InterruptResponse>;
+  resolveToolConfirmation: handleUnaryCall<ResolveToolConfirmationRequest, ResolveToolConfirmationResponse>;
+  applyRuntimeConfig: handleUnaryCall<ApplyRuntimeConfigRequest, ApplyRuntimeConfigResponse>;
+  cleanupSession: handleUnaryCall<CleanupSessionRequest, CleanupSessionResponse>;
 }
 
 export interface AgentRuntimePodServiceClient extends Client {
   acceptInput(
-    request: RuntimeInputCommandRequest,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    request: AcceptInputRequest,
+    callback: (error: ServiceError | null, response: AcceptInputResponse) => void,
   ): ClientUnaryCall;
   acceptInput(
-    request: RuntimeInputCommandRequest,
+    request: AcceptInputRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptInputResponse) => void,
   ): ClientUnaryCall;
   acceptInput(
-    request: RuntimeInputCommandRequest,
+    request: AcceptInputRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptInputResponse) => void,
   ): ClientUnaryCall;
   acceptAgentMail(
-    request: RuntimeInputCommandRequest,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    request: AcceptAgentMailRequest,
+    callback: (error: ServiceError | null, response: AcceptAgentMailResponse) => void,
   ): ClientUnaryCall;
   acceptAgentMail(
-    request: RuntimeInputCommandRequest,
+    request: AcceptAgentMailRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptAgentMailResponse) => void,
   ): ClientUnaryCall;
   acceptAgentMail(
-    request: RuntimeInputCommandRequest,
+    request: AcceptAgentMailRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptAgentMailResponse) => void,
   ): ClientUnaryCall;
   acceptTaskNotification(
-    request: RuntimeInputCommandRequest,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    request: AcceptTaskNotificationRequest,
+    callback: (error: ServiceError | null, response: AcceptTaskNotificationResponse) => void,
   ): ClientUnaryCall;
   acceptTaskNotification(
-    request: RuntimeInputCommandRequest,
+    request: AcceptTaskNotificationRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptTaskNotificationResponse) => void,
   ): ClientUnaryCall;
   acceptTaskNotification(
-    request: RuntimeInputCommandRequest,
+    request: AcceptTaskNotificationRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptTaskNotificationResponse) => void,
   ): ClientUnaryCall;
   interrupt(
-    request: RuntimeInputCommandRequest,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    request: InterruptRequest,
+    callback: (error: ServiceError | null, response: InterruptResponse) => void,
   ): ClientUnaryCall;
   interrupt(
-    request: RuntimeInputCommandRequest,
+    request: InterruptRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: InterruptResponse) => void,
   ): ClientUnaryCall;
   interrupt(
-    request: RuntimeInputCommandRequest,
+    request: InterruptRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: InterruptResponse) => void,
   ): ClientUnaryCall;
   resolveToolConfirmation(
-    request: RuntimeInputCommandRequest,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    request: ResolveToolConfirmationRequest,
+    callback: (error: ServiceError | null, response: ResolveToolConfirmationResponse) => void,
   ): ClientUnaryCall;
   resolveToolConfirmation(
-    request: RuntimeInputCommandRequest,
+    request: ResolveToolConfirmationRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: ResolveToolConfirmationResponse) => void,
   ): ClientUnaryCall;
   resolveToolConfirmation(
-    request: RuntimeInputCommandRequest,
+    request: ResolveToolConfirmationRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: ResolveToolConfirmationResponse) => void,
   ): ClientUnaryCall;
   applyRuntimeConfig(
-    request: RuntimeInputCommandRequest,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    request: ApplyRuntimeConfigRequest,
+    callback: (error: ServiceError | null, response: ApplyRuntimeConfigResponse) => void,
   ): ClientUnaryCall;
   applyRuntimeConfig(
-    request: RuntimeInputCommandRequest,
+    request: ApplyRuntimeConfigRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: ApplyRuntimeConfigResponse) => void,
   ): ClientUnaryCall;
   applyRuntimeConfig(
-    request: RuntimeInputCommandRequest,
+    request: ApplyRuntimeConfigRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: ApplyRuntimeConfigResponse) => void,
   ): ClientUnaryCall;
   cleanupSession(
-    request: RuntimeInputCommandRequest,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    request: CleanupSessionRequest,
+    callback: (error: ServiceError | null, response: CleanupSessionResponse) => void,
   ): ClientUnaryCall;
   cleanupSession(
-    request: RuntimeInputCommandRequest,
+    request: CleanupSessionRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: CleanupSessionResponse) => void,
   ): ClientUnaryCall;
   cleanupSession(
-    request: RuntimeInputCommandRequest,
+    request: CleanupSessionRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RuntimeInputCommandResponse) => void,
+    callback: (error: ServiceError | null, response: CleanupSessionResponse) => void,
   ): ClientUnaryCall;
 }
 

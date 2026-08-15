@@ -318,7 +318,6 @@ export function installLoadedPendingToolUses(
           throw new Error("pending tool use context contains allow decision with deny message");
         }
         const confirmationResult = session.state.resolveToolConfirmation({
-          requestId: `load_context:${pending.toolUseEventId}`,
           workspaceId: session.identity.workspaceId,
           sessionId: session.identity.sessionId,
           sessionThreadId: session.identity.sessionThreadId,
@@ -326,10 +325,6 @@ export function installLoadedPendingToolUses(
           bindingGeneration: session.identity.bindingGeneration,
           targetPodUid: session.identity.targetPodUid,
           runtimeInputId: `load_context:${pending.toolUseEventId}`,
-          eventIds: [],
-          sequenceFrom: 0,
-          sequenceTo: 0,
-          sourceEventId: `load_context:${pending.toolUseEventId}`,
           toolUseEventId: pending.toolUseEventId,
           decision: pending.decision,
           ...(pending.denyMessage === undefined ? {} : { denyMessage: pending.denyMessage }),

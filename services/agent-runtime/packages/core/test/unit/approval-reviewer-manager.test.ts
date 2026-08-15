@@ -7,15 +7,15 @@ import { ContextManager } from "../../src/session/context-manager.js";
 const createdAt = "2026-07-10T00:00:00.000Z";
 
 describe("AutoApprovalReviewerManager", () => {
-  test("mints one reviewer trunk id per manager lifetime", () => {
+  test("mints one reviewer trunk ensure operation per manager lifetime", () => {
     let nextId = 0;
     const createId = (prefix: string): string => `${prefix}_${++nextId}`;
     const first = new AutoApprovalReviewerManager();
     const second = new AutoApprovalReviewerManager();
 
-    expect(first.trunkThreadId(createId)).toBe("thrd_aprv_1");
-    expect(first.trunkThreadId(createId)).toBe("thrd_aprv_1");
-    expect(second.trunkThreadId(createId)).toBe("thrd_aprv_2");
+    expect(first.trunkEnsureOperationId(createId)).toBe("aprv_ensure_1");
+    expect(first.trunkEnsureOperationId(createId)).toBe("aprv_ensure_1");
+    expect(second.trunkEnsureOperationId(createId)).toBe("aprv_ensure_2");
     expect(nextId).toBe(2);
   });
 
@@ -75,11 +75,7 @@ describe("AutoApprovalReviewerManager", () => {
       reanchored: true,
       messages: [first],
     });
-    manager.completeTrunkReview(
-      { generation: 1, messages: [first] },
-      [userMessage("reviewer_snapshot", 1, "snapshot")],
-      "evt_parent_boundary",
-    );
+    manager.completeTrunkReview({ generation: 1, messages: [first] });
     expect(manager.parentTranscriptFeed({ generation: 1, messages: [first, second] })).toEqual({
       reanchored: false,
       messages: [second],
@@ -90,7 +86,7 @@ describe("AutoApprovalReviewerManager", () => {
     const manager = new AutoApprovalReviewerManager();
     const first = userMessage("msg_1", 1, "first");
     const second = userMessage("msg_2", 2, "second");
-    manager.completeTrunkReview({ generation: 4, messages: [first] }, [], "evt_parent_boundary");
+    manager.completeTrunkReview({ generation: 4, messages: [first] });
 
     const delta = manager.parentTranscriptFeed({ generation: 4, messages: [first, second] });
     expect(delta.messages).toEqual([second]);
@@ -101,9 +97,8 @@ describe("AutoApprovalReviewerManager", () => {
     });
   });
 
-  test("owns the trunk snapshot and target-specific memo until disposal", async () => {
+  test("owns target-specific memo until disposal", async () => {
     const manager = new AutoApprovalReviewerManager();
-    const snapshot = [userMessage("reviewer_snapshot", 1, "snapshot")];
     const decision = {
       type: "decision" as const,
       riskLevel: "low" as const,
@@ -111,17 +106,12 @@ describe("AutoApprovalReviewerManager", () => {
       outcome: "allow" as const,
     };
 
-    manager.completeTrunkReview({ generation: 1, messages: [] }, snapshot, "evt_parent_boundary");
+    manager.completeTrunkReview({ generation: 1, messages: [] });
     manager.rememberDecision("target-specific-key", decision);
-    expect(manager.trunkSnapshot()).toEqual({
-      messages: snapshot,
-      parentBoundaryEventId: "evt_parent_boundary",
-    });
     expect(manager.decisionFor("target-specific-key")).toEqual(decision);
 
     await Effect.runPromise(manager.dispose());
     expect(manager.isDisposed()).toBe(true);
-    expect(manager.trunkSnapshot()).toBeUndefined();
     expect(manager.decisionFor("target-specific-key")).toBeUndefined();
   });
 

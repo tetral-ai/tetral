@@ -148,12 +148,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		}
 		eventType := operationSourceKind
 		eventPayloadJSON := payloadJSON
-		if eventType == "agent.thread_message_sent" {
-			eventPayloadJSON, err = publicSentInterAgentEventPayloadTx(ctx, tx, request.GetScope(), eventPayloadJSON)
-			if err != nil {
-				return err
-			}
-		}
 		if operationSourceKind != request.GetEventType() {
 			eventPayloadJSON, err = threadStatusPayloadJSON(eventType, request.GetScope(), threadScope, "")
 			if err != nil {
@@ -204,21 +198,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		}
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
 			return err
-		}
-		if eventType == "agent.thread_message_sent" {
-			var mail struct {
-				DeliveryID     string `json:"delivery_id"`
-				TargetThreadID string `json:"target_thread_id"`
-			}
-			if err := json.Unmarshal([]byte(eventPayloadJSON), &mail); err != nil || mail.DeliveryID == "" || mail.TargetThreadID == "" {
-				return status.Error(codes.InvalidArgument, "agent mail wake identity is invalid")
-			}
-			if err := birthCompletionMailCustodyTx(
-				ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
-				mail.TargetThreadID, mail.DeliveryID, now,
-			); err != nil {
-				return err
-			}
 		}
 		receipt, err = commitWriteEventDeclarationTx(
 			ctx,
@@ -776,7 +755,6 @@ func writeEventTypeAllowed(eventType string) bool {
 		"agent.thinking",
 		"agent.tool_use",
 		"agent.mcp_tool_use",
-		"agent.thread_message_sent",
 		"approval_review.decision",
 		"approval_review.failure",
 		"session.status_running",

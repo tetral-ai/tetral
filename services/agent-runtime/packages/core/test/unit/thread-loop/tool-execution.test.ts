@@ -16,17 +16,17 @@ import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeApprovalReviewRequest, RuntimeToolExecutionResult } from "../../../src/thread-loop/tool-execution.js";
 import { AutoApprovalReviewerManager } from "../../../src/session/approval-reviewer-manager.js";
-import type { RuntimeAcceptedInputState, RuntimeControlInputDeclaration, RuntimeThreadControlState } from "../../../src/thread-loop/thread-state.js";
+import type { RuntimeAcceptedInputState, RuntimeControlInputDeclaration } from "../../../src/thread-loop/thread-state.js";
 import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { SessionToolCoordinator } from "../../../src/tools/tool-scheduler.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage, buildThreadLoopDurableRuntimeNotificationMessage as durableRuntimeNotificationMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, approvalReviewerOutputSchemaJson, approvalReviewerPolicy, catalogForTest, createdAt, deferred, emptyColdCoverage, flushMicrotasks, installRecoveredToolTurn, memoryCatalogForTest, providerAttachmentsForTest, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, approvalReviewerOutputSchemaJson, approvalReviewerPolicy, catalogForTest, createdAt, deferred, emptyColdCoverage, flushMicrotasks, installRecoveredToolTurn, interruptInput, memoryCatalogForTest, providerAttachmentsForTest, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, taskNotificationInput, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, writerFrom } from "./thread-loop-test-support.js";
 import type { TestContextLoader, TestDurableSequence } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
 function interruptCommitResult(
-    command: RuntimeThreadControlState,
+    command: SessionManager.RuntimeInterruptControlCommand,
     declaration: RuntimeControlInputDeclaration,
     unfinishedToolUseEventIds: readonly string[],
 ) {
@@ -43,7 +43,7 @@ function interruptCommitResult(
                 resultEvent: {
                     sessionThreadId: command.sessionThreadId,
                     eventId: `sevt_interrupt_${command.runtimeInputId}_${index}`,
-                    eventSequence: command.sequenceTo + index + 1,
+                    eventSequence: command.inputOrder + index + 1,
                     disposition: "created" as const,
                 },
                 terminalState: { type: "cancelled" as const },
@@ -185,7 +185,7 @@ test("first accepted turn rides the file attachments returned by CommitInputs", 
     const attachment = {
         transient: undefined,
         fileBacked: {
-            sourceEventId: input.eventIds[0]!,
+            sourceEventId: "sevt_first_turn_media",
             fileId: "file_first_turn_media",
         },
         mime: "image/png",
@@ -877,22 +877,16 @@ test("runtime layer tracks background tool state until task notification settlem
         status: "running",
     });
     const projection = durableRuntimeNotificationMessage("msg_task_1", "task done");
+    const { kind: _taskKind, ...taskCommand } = taskNotificationInput(
+        "rin_task_1",
+        "task_1",
+        "bridge-tool",
+        "completed",
+        "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"bridge-tool\",\"status\":\"completed\"}",
+        session.sessionId,
+    );
     expect(session.state.commitTaskNotification({
-        requestId: "req_task_1",
-        workspaceId: session.identity.workspaceId,
-        sessionId: session.identity.sessionId,
-        sessionThreadId: session.identity.sessionThreadId,
-        bindingId: session.identity.bindingId,
-        bindingGeneration: session.identity.bindingGeneration,
-        targetPodUid: session.identity.targetPodUid,
-        runtimeInputId: "rin_task_1",
-        eventIds: ["rin_task_1"],
-        sequenceFrom: 0,
-        sequenceTo: 0,
-        taskId: "task_1",
-        sourceToolUseEventId: "bridge-tool",
-        status: "completed",
-        payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"bridge-tool\",\"status\":\"completed\"}",
+        ...taskCommand,
         committedMessage: projection,
     })).toBe("applied");
     expect(session.state.backgroundTool("task_1")).toMatchObject({
@@ -1573,7 +1567,6 @@ test("the continuation request combines terminal Tool Results with user input an
         "Message Type: FINAL_ANSWER\nTask name: main\nSender: worker\nPayload:\nmail result",
     );
     const agentMail = {
-        requestId: "req_mixed_agent_mail",
         workspaceId: session.identity.workspaceId,
         sessionId: session.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
@@ -1581,13 +1574,8 @@ test("the continuation request combines terminal Tool Results with user input an
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
         runtimeInputId: "agent_mail:delivery_mixed_agent_mail",
-        eventIds: ["sevt_mixed_agent_mail"],
-        sequenceFrom: 3,
-        sequenceTo: 3,
         kind: "inter_agent_message",
         deliveryId: "delivery_mixed_agent_mail",
-        sourceThreadId: "thrd_mixed_child",
-        sourceToolUseEventId: "sevt_mixed_spawn",
         message: mailMessage,
     } satisfies RuntimeAcceptedInputState;
     const loader = new QueuedContextLoader([], []);
@@ -2387,7 +2375,7 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
     try {
         const input = {
             ...acceptedInput("rin_gated_tool_use"),
-            payloadJson: JSON.stringify({ messages: [userMessage("user-1", 1, "run the gated tool")] }),
+            contentJson: JSON.stringify({ messages: [userMessage("user-1", 1, "run the gated tool")] }),
         };
         await Effect.runPromise(manager.preloadThread({
             ...input,
@@ -2398,7 +2386,7 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
         }));
         await Effect.runPromise(manager.acceptInput(input));
         await toolUseAppendStarted.promise;
-        const command = { ...acceptedInput("rin_gated_tool_use_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
+        const command = interruptInput("rin_gated_tool_use_interrupt", 9);
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async (declaration) => {
             interruptCommitStarted = true;
             order.push("commit:interrupt");
@@ -2422,9 +2410,6 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
         expect(requestEnds).toHaveLength(1);
         expect(requestEnds[0]?.interruptSettlement).toEqual({
             runtimeInputId: command.runtimeInputId,
-            eventIds: [...command.eventIds],
-            sequenceFrom: command.sequenceFrom,
-            sequenceTo: command.sequenceTo,
         });
         expect(await Effect.runPromise(manager.inspectThread(command))).toMatchObject({
             ok: true,
@@ -2520,7 +2505,7 @@ test("interrupt joins a raw CommitInternalToolRepair ACK before snapshot and per
     try {
         const input = {
             ...acceptedInput("rin_gated_internal_repair"),
-            payloadJson: JSON.stringify({ messages: [userMessage("user-1", 1, "trigger an internal repair")] }),
+            contentJson: JSON.stringify({ messages: [userMessage("user-1", 1, "trigger an internal repair")] }),
         };
         await Effect.runPromise(manager.preloadThread({
             ...input,
@@ -2531,7 +2516,7 @@ test("interrupt joins a raw CommitInternalToolRepair ACK before snapshot and per
         }));
         await Effect.runPromise(manager.acceptInput(input));
         await repairStarted.promise;
-        const command = { ...acceptedInput("rin_gated_internal_repair_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
+        const command = interruptInput("rin_gated_internal_repair_interrupt", 9);
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async (declaration) => {
             interruptCommitStarted = true;
             order.push("commit:interrupt");
@@ -2695,12 +2680,7 @@ test("post-success interrupt-fence failure settles the attachment ride already c
         ...baseWriter,
         writeRequestEnd: async (envelope) => {
             requestEnds.push(envelope);
-            session.state.beginUserInterrupt({
-                ...acceptedInput("rin_post_success_interrupt_failure"),
-                eventIds: ["sevt_post_success_interrupt_failure"],
-                sequenceFrom: 9,
-                sequenceTo: 9,
-            }, async () => ({
+            session.state.beginUserInterrupt(interruptInput("rin_post_success_interrupt_failure", 9), async () => ({
                 ok: false,
                 retryable: false,
                 errorCode: "interrupt_conflict",
@@ -2844,20 +2824,7 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
     expect(JSON.stringify(appended)).not.toContain("projection_refresh_failed");
     const pendingToolPart = session.state.contextManager.messages().at(-1)?.parts.find((part) => part.type === "tool");
     expect(pendingToolPart?.type === "tool" ? pendingToolPart.state.status : undefined).toBe("running");
-    const interruptCommand = {
-        requestId: "req_interrupt",
-        workspaceId: "wksp_test",
-        sessionId: "sesn_1",
-        sessionThreadId: "thrd_sesn_1",
-        bindingId: "bind_sesn_1",
-        bindingGeneration: 1,
-        targetPodUid: "pod_sesn_1",
-        runtimeInputId: "rin_interrupt",
-        eventIds: ["sevt_interrupt"],
-        sequenceFrom: 9,
-        sequenceTo: 9,
-        origin: "user",
-    } as const;
+    const interruptCommand = interruptInput("rin_interrupt", 9);
     session.state.beginUserInterrupt(interruptCommand, async (declaration) => {
         closeoutOrder.push("commit:interrupt");
         return interruptCommitResult(interruptCommand, declaration, ["sevt_memory_projection_cancel"]);
@@ -2876,9 +2843,6 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
     expect(requestEnds).toHaveLength(1);
     expect(requestEnds[0]?.interruptSettlement).toEqual({
         runtimeInputId: "rin_interrupt",
-        eventIds: ["sevt_interrupt"],
-        sequenceFrom: 9,
-        sequenceTo: 9,
     });
     expect(closeoutOrder).not.toContain("commit:interrupt");
     expect(closeoutOrder.indexOf("event:span.model_request_end")).toBeLessThan(closeoutOrder.indexOf("event:session.status_idle"));
@@ -3085,7 +3049,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         await uncommittedRepairStarted.promise;
         expect(settlements.filter((envelope) => envelope.settlement.toolUseEventId === "sevt_mixed_tool_2")).toHaveLength(0);
         expect(store.repairs.filter((repair) => repair.modelToolCallId === "tool-uncommitted")).toHaveLength(0);
-        const preFenceInput = { ...acceptedInput("rin_pre_fence_mixed"), sequenceFrom: 8, sequenceTo: 8 };
+        const preFenceInput = { ...acceptedInput("rin_pre_fence_mixed"), inputOrder: 8 };
         await Effect.runPromise(manager.acceptInput(preFenceInput));
         expect(commitCalls).toEqual(["rin_initial_mixed"]);
         releaseUncommittedRepair.resolve();
@@ -3103,13 +3067,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(JSON.stringify(appended)).not.toContain("must-not-commit");
         expect(store.repairs.filter((repair) => repair.modelToolCallId === "tool-uncommitted")).toHaveLength(1);
         expect(order).toContain("event:session.status_idle:requires_action");
-        const interruptCommand = {
-            ...acceptedInput("rin_mixed_interrupt"),
-            origin: "user" as const,
-            eventIds: ["sevt_mixed_interrupt"],
-            sequenceFrom: 9,
-            sequenceTo: 9,
-        };
+        const interruptCommand = interruptInput("rin_mixed_interrupt", 9);
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             interruptDeclaration = declaration;
             order.push("commit:interrupt");
@@ -3117,7 +3075,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         }));
         await new Promise<void>((resolve) => setImmediate(resolve));
         await flushMicrotasks();
-        const postFenceInput = { ...acceptedInput("rin_post_fence_mixed"), sequenceFrom: 10, sequenceTo: 10 };
+        const postFenceInput = { ...acceptedInput("rin_post_fence_mixed"), inputOrder: 10 };
         const postAccept = await Effect.runPromise(manager.acceptInput(postFenceInput));
         expect(postAccept).toMatchObject({ ok: true, started: true });
         await flushMicrotasks();
@@ -3279,13 +3237,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         expect(observedRouteSignal?.aborted).toBe(false);
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(1);
         expect(settlements).toHaveLength(0);
-        const interruptCommand = {
-            ...acceptedInput("rin_non_cooperative_route_interrupt"),
-            origin: "user" as const,
-            eventIds: ["sevt_non_cooperative_route_interrupt"],
-            sequenceFrom: 9,
-            sequenceTo: 9,
-        };
+        const interruptCommand = interruptInput("rin_non_cooperative_route_interrupt", 9);
         let interruptSettled = false;
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             interruptDeclaration = declaration;
@@ -3296,7 +3248,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
             return result;
         });
         await new Promise<void>((resolve) => setImmediate(resolve));
-        const postFenceInput = { ...acceptedInput("rin_after_non_cooperative_route"), sequenceFrom: 10, sequenceTo: 10 };
+        const postFenceInput = { ...acceptedInput("rin_after_non_cooperative_route"), inputOrder: 10 };
         await Effect.runPromise(manager.acceptInput(postFenceInput));
         await flushMicrotasks(50);
         expect(observedRouteSignal?.aborted).toBe(true);
@@ -3499,7 +3451,7 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
     try {
         const input = {
             ...acceptedInput("rin_rehydrated_approved"),
-            payloadJson: JSON.stringify({ messages: [userMessage("user-rehydrated-input", 3, "continue after tools")] }),
+            contentJson: JSON.stringify({ messages: [userMessage("user-rehydrated-input", 3, "continue after tools")] }),
         };
         await Effect.runPromise(manager.preloadThread({
             ...input,
@@ -3540,13 +3492,7 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
         }));
         await Effect.runPromise(manager.acceptInput(input));
         await Promise.all([lateRouteStarted.promise, settledResultAcked.promise]);
-        const interruptCommand = {
-            ...acceptedInput("rin_rehydrated_approved_interrupt"),
-            origin: "user" as const,
-            eventIds: ["sevt_rehydrated_approved_interrupt"],
-            sequenceFrom: 9,
-            sequenceTo: 9,
-        };
+        const interruptCommand = interruptInput("rin_rehydrated_approved_interrupt", 9);
         let interruptSettled = false;
         interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             interruptDeclaration = declaration;
@@ -3743,7 +3689,7 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
     try {
         const input = {
             ...acceptedInput("rin_interrupt_acceptance"),
-            payloadJson: JSON.stringify({ messages: [userMessage("user-1", 1, "hello")] }),
+            contentJson: JSON.stringify({ messages: [userMessage("user-1", 1, "hello")] }),
         };
         await Effect.runPromise(manager.preloadThread({
             ...input,
@@ -3754,13 +3700,7 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
         }));
         await Effect.runPromise(manager.acceptInput(input));
         await acceptanceStarted.promise;
-        const command = {
-            ...acceptedInput("rin_interrupt_acceptance_control"),
-            origin: "user" as const,
-            eventIds: ["sevt_interrupt_acceptance_control"],
-            sequenceFrom: 9,
-            sequenceTo: 9,
-        };
+        const command = interruptInput("rin_interrupt_acceptance_control", 9);
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async (declaration) => {
             interruptCommitStarted = true;
             interruptDeclaration = declaration;
@@ -4384,7 +4324,6 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
         stop_reason: { type: "requires_action", event_ids: ["sevt_tool_1"] },
     });
     expect(session.state.resolveToolConfirmation({
-        requestId: "req_confirm",
         workspaceId: session.identity.workspaceId,
         sessionId: session.identity.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
@@ -4392,10 +4331,6 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
         runtimeInputId: "rin_confirm",
-        eventIds: ["sevt_confirm"],
-        sequenceFrom: 2,
-        sequenceTo: 2,
-        sourceEventId: "sevt_confirm",
         toolUseEventId: "sevt_tool_1",
         decision: "allow",
     })).toBe("applied");
@@ -4484,7 +4419,6 @@ test("one approval decision settles its named member while sibling approvals rem
         expect(await run()).toMatchObject({ type: "completed" });
         expect(toolUseEventIds).toHaveLength(2);
         expect(session.state.resolveToolConfirmation({
-            requestId: `req_partial_${decision}`,
             workspaceId: session.identity.workspaceId,
             sessionId: session.identity.sessionId,
             sessionThreadId: session.identity.sessionThreadId,
@@ -4492,10 +4426,6 @@ test("one approval decision settles its named member while sibling approvals rem
             bindingGeneration: session.identity.bindingGeneration,
             targetPodUid: session.identity.targetPodUid,
             runtimeInputId: `rin_partial_${decision}`,
-            eventIds: [`sevt_confirmation_${decision}`],
-            sequenceFrom: 2,
-            sequenceTo: 2,
-            sourceEventId: `sevt_confirmation_${decision}`,
             toolUseEventId: toolUseEventIds[0]!,
             decision,
         })).toBe("applied");
@@ -4620,7 +4550,6 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
         state: { status: "running" },
     });
     expect(session.state.resolveToolConfirmation({
-        requestId: "req_confirm_cold",
         workspaceId: session.identity.workspaceId,
         sessionId: session.identity.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
@@ -4628,10 +4557,6 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
         runtimeInputId: "rin_confirm_cold",
-        eventIds: ["sevt_confirm_cold"],
-        sequenceFrom: 2,
-        sequenceTo: 2,
-        sourceEventId: "sevt_confirm_cold",
         toolUseEventId: "sevt_tool_1",
         decision: "allow",
     })).toBe("applied");
@@ -5151,7 +5076,6 @@ test("partial approval settles confirmed members and keeps the provider request 
     expect(await run()).toMatchObject({ type: "completed" });
     expect(toolUseEventIds).toEqual(["sevt_tool_1", "sevt_tool_2"]);
     expect(session.state.resolveToolConfirmation({
-        requestId: "req_confirm_1",
         workspaceId: session.identity.workspaceId,
         sessionId: session.identity.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
@@ -5159,10 +5083,6 @@ test("partial approval settles confirmed members and keeps the provider request 
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
         runtimeInputId: "rin_confirm_1",
-        eventIds: ["sevt_confirm_1"],
-        sequenceFrom: 2,
-        sequenceTo: 2,
-        sourceEventId: "sevt_confirm_1",
         toolUseEventId: "sevt_tool_1",
         decision: "allow",
     })).toBe("applied");
@@ -5171,7 +5091,6 @@ test("partial approval settles confirmed members and keeps the provider request 
     expect(runToolCalls).toEqual(["tool-1"]);
     expect(session.state.pendingApprovalToolJobs().map((pending) => pending.job.modelToolCallId)).toEqual(["tool-2"]);
     expect(session.state.resolveToolConfirmation({
-        requestId: "req_confirm_2",
         workspaceId: session.identity.workspaceId,
         sessionId: session.identity.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
@@ -5179,10 +5098,6 @@ test("partial approval settles confirmed members and keeps the provider request 
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
         runtimeInputId: "rin_confirm_2",
-        eventIds: ["sevt_confirm_2"],
-        sequenceFrom: 3,
-        sequenceTo: 3,
-        sourceEventId: "sevt_confirm_2",
         toolUseEventId: "sevt_tool_2",
         decision: "allow",
     })).toBe("applied");

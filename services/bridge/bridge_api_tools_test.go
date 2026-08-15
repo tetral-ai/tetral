@@ -347,11 +347,8 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_patch_split_allow", "tool_confirmation",
 		`["evt_bridge_patch_split_allow"]`, "accepted", bindingID, podUID, 3, 3)
 	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_bridge_patch_split_allow", InputKind: "tool_confirmation",
-		EventIds: []string{"evt_bridge_patch_split_allow"}, SequenceFrom: 3, SequenceTo: 3,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{
-			bridgeApprovalInputCreateForTest("default", sessionID, threadID, "rin_bridge_patch_split_allow", "evt_bridge_patch_split_allow", "Approval allowed"),
-		},
+		Scope: scope, RuntimeInputId: "rin_bridge_patch_split_allow",
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("CommitInputs allow approval: %v", err)
 	}
@@ -1047,11 +1044,8 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneRequ
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: runtimeInputID, InputKind: "messages",
-		EventIds: []string{userEventID}, SequenceFrom: 1, SequenceTo: 1,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
-			"default", sessionID, threadID, runtimeInputID, userEventID, "continue",
-		)},
+		Scope: scope, RuntimeInputId: runtimeInputID,
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("commit fixture user input: %v", err)
 	}

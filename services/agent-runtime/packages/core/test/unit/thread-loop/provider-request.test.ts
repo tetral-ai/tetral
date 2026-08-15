@@ -30,7 +30,7 @@ import { createToolCatalog, lookupToolEntry } from "../../../src/tools/tool-cata
 import type { ToolCatalog } from "../../../src/tools/tool-catalog.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopDurableRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewerPolicy, catalogForTest, compactionTransportHistory, createdAt, failingEventWriter, llmService, queuedLLMService, runtimeThreadLoopLayer, testRunCustody, utf8RoundTrip, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewerPolicy, catalogForTest, compactionTransportHistory, createdAt, failingEventWriter, llmService, queuedLLMService, rejectionInput, runtimeThreadLoopLayer, taskNotificationInput, testRunCustody, utf8RoundTrip, writerFrom } from "./thread-loop-test-support.js";
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -278,7 +278,7 @@ test("Bridge-shaped create-time config installs agent and memory system segments
 });
 test("provider snapshot injects apply-patch instructions from the cold pinned GPT family", async () => {
     const session = new ThreadRuntime("sesn_gpt_patch_prompt");
-    const payloadJson = JSON.stringify({
+    const contentJson = JSON.stringify({
         config_generation: 1,
         runtime_config: {
             installedTools: [{ type: "tetral_agent_toolset", family: "gpt" }],
@@ -288,7 +288,7 @@ test("provider snapshot injects apply-patch instructions from the cold pinned GP
     });
     expect(session.configuration.apply({
         generation: 1,
-        payloadJson,
+        contentJson,
         coldLoad: true,
         installedBuiltinFamily: "gpt",
     })).toBe("applied");
@@ -302,7 +302,7 @@ test("provider snapshot injects apply-patch instructions from the cold pinned GP
         return yield* threadLoop.run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
         onStream: (request) => requests.push(request),
-        runtimePolicy: () => runtimeToolPolicyFromPatchPayloads([payloadJson]),
+        runtimePolicy: () => runtimeToolPolicyFromPatchPayloads([contentJson]),
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(requests[0]?.system[0]?.text).toContain("## `apply_patch`");
@@ -312,21 +312,16 @@ test("first accepted turn resolves its provider model from the cold runtime conf
     const session = new ThreadRuntime("sesn_first_config_model");
     session.state.enqueueAcceptedInput(acceptedInput("rin_first_config_model", session.sessionId));
     const runtimeConfigPatch: RuntimeConfigPatchState = {
-        requestId: "req_first_config_patch",
         workspaceId: "wksp_test",
         sessionId: session.sessionId,
-        sessionThreadId: "thrd_1",
         bindingId: "bind_1",
         bindingGeneration: 1,
         targetPodUid: "pod_1",
-        runtimeInputId: "rin_first_config_patch",
-        eventIds: [],
-        sequenceFrom: 0,
-        sequenceTo: 0,
+        configIdentity: "runtime_config",
         generation: 1,
         coldLoad: true,
         installedBuiltinFamily: "claude" as const,
-        payloadJson: JSON.stringify({
+        contentJson: JSON.stringify({
             runtime_config: {
                 agent: { config: { model: "openai/gpt-5.5" } },
                 installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
@@ -339,7 +334,7 @@ test("first accepted turn resolves its provider model from the cold runtime conf
     const result = await Effect.runPromise(Effect.gen(function* () {
         return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
-        runtimeModel: (activeSession) => runtimeModelForThread(activeSession.identity.threadRole, activeSession.configuration.patches().map((patch) => patch.payloadJson), { providerId: "anthropic", modelId: "claude-opus-4-8" }),
+        runtimeModel: (activeSession) => runtimeModelForThread(activeSession.identity.threadRole, activeSession.configuration.patches().map((patch) => patch.contentJson), { providerId: "anthropic", modelId: "claude-opus-4-8" }),
         onStream: (request) => requests.push(request),
     }))));
     expect(result).toMatchObject({ type: "completed" });
@@ -348,16 +343,8 @@ test("first accepted turn resolves its provider model from the cold runtime conf
 });
 test("a bounded live rejection is authored by the loop and committed before provider work", async () => {
     const session = new ThreadRuntime("sesn_live_rejection");
-    const firstInput = {
-        ...acceptedInput("rin_live_rejection", session.sessionId),
-        kind: "rejection" as const,
-        reasonCode: "runtime_command_payload_too_large" as const,
-    };
-    const secondInput = {
-        ...acceptedInput("rin_live_rejection_second", session.sessionId),
-        kind: "rejection" as const,
-        reasonCode: "runtime_command_payload_too_large" as const,
-    };
+    const firstInput = rejectionInput("rin_live_rejection", "runtime_command_payload_too_large", session.sessionId);
+    const secondInput = rejectionInput("rin_live_rejection_second", "runtime_command_payload_too_large", session.sessionId);
     session.state.enqueueAcceptedInput(firstInput);
     session.state.enqueueAcceptedInput(secondInput);
     const submittedCreates: Array<readonly unknown[]> = [];
@@ -1546,19 +1533,14 @@ test("task notification commits after the running receipt and reaches the provid
         taskId: "task_notification_turn",
         sourceToolUseEventId: "sevt_task_notification_tool",
     });
-    expect(session.state.enqueueAcceptedInput({
-        requestId: "req_task_notification_turn",
-        ...session.identity,
-        runtimeInputId: "rin_task_notification_turn",
-        eventIds: [],
-        sequenceFrom: 0,
-        sequenceTo: 0,
-        kind: "task_notification",
-        taskId: "task_notification_turn",
-        sourceToolUseEventId: "sevt_task_notification_tool",
-        status: "completed",
-        payloadJson: "{\"status\":\"completed\",\"text\":\"task result for next turn\"}",
-    })).toBe("applied");
+    expect(session.state.enqueueAcceptedInput(taskNotificationInput(
+        "rin_task_notification_turn",
+        "task_notification_turn",
+        "sevt_task_notification_tool",
+        "completed",
+        "{\"status\":\"completed\",\"text\":\"task result for next turn\"}",
+        session.sessionId,
+    ))).toBe("applied");
     const writer = writerFrom((envelope) => {
         if (envelope.event.type === "session.status_running") {
             order.push("running-receipt");
@@ -1604,7 +1586,7 @@ test("task notification commits after the running receipt and reaches the provid
     const committedNotification = session.state.contextManager.messages().find((message) =>
         JSON.stringify(message).includes("task result for next turn"));
     expect(committedNotification).toBeDefined();
-    expect(session.state.threadTurnReduction().appliedEventIds).toContain("sevt_rin_task_notification_turn");
+    expect(session.state.threadTurnReduction().appliedEventIds).toContain("sevt_commit_rin_task_notification_turn_0");
     expect(session.state.threadTurnReduction().appliedEventIds).not.toContain(committedNotification?.id);
 });
 
@@ -1647,19 +1629,14 @@ test("prefix-only child Request Start stores durable message boundary zero", asy
 test("task notification retries an unknown commit outcome before provider work", async () => {
     const session = new ThreadRuntime("sesn_task_notification_retryable_commit");
     let providerCalls = 0;
-    expect(session.state.enqueueAcceptedInput({
-        requestId: "req_task_notification_retryable_commit",
-        ...session.identity,
-        runtimeInputId: "rin_task_notification_retryable_commit",
-        eventIds: [],
-        sequenceFrom: 0,
-        sequenceTo: 0,
-        kind: "task_notification",
-        taskId: "task_notification_retryable_commit",
-        sourceToolUseEventId: "sevt_task_notification_retryable_commit",
-        status: "completed",
-        payloadJson: "{\"status\":\"completed\",\"text\":\"task result recovered from the replayed receipt\"}",
-    })).toBe("applied");
+    expect(session.state.enqueueAcceptedInput(taskNotificationInput(
+        "rin_task_notification_retryable_commit",
+        "task_notification_retryable_commit",
+        "sevt_task_notification_retryable_commit",
+        "completed",
+        "{\"status\":\"completed\",\"text\":\"task result recovered from the replayed receipt\"}",
+        session.sessionId,
+    ))).toBe("applied");
     const custody = testRunCustody();
     const loader = new QueuedContextLoader([], [], [
         (input: RuntimeAcceptedInputState) => {
@@ -1690,19 +1667,14 @@ test("task notification validation failure retains accepted custody without prov
     const session = new ThreadRuntime("sesn_task_notification_invalid_commit");
     let providerCalls = 0;
     const runtimeInputId = "rin_task_notification_invalid_commit";
-    expect(session.state.enqueueAcceptedInput({
-        requestId: "req_task_notification_invalid_commit",
-        ...session.identity,
+    expect(session.state.enqueueAcceptedInput(taskNotificationInput(
         runtimeInputId,
-        eventIds: [],
-        sequenceFrom: 0,
-        sequenceTo: 0,
-        kind: "task_notification",
-        taskId: "task_notification_invalid_commit",
-        sourceToolUseEventId: "sevt_task_notification_invalid_commit",
-        status: "completed",
-        payloadJson: '{"status":"completed"}',
-    })).toBe("applied");
+        "task_notification_invalid_commit",
+        "sevt_task_notification_invalid_commit",
+        "completed",
+        '{"status":"completed"}',
+        session.sessionId,
+    ))).toBe("applied");
     const loader = new QueuedContextLoader([], [], [
         (input: RuntimeAcceptedInputState) => {
             throw normalizeContextLoaderError({
@@ -1728,29 +1700,18 @@ test("terminal task notification rejection drops only that input and continues t
     const observations: RuntimeAcceptedInputCommitObservation[] = [];
     const appended: SessionEvent[] = [];
     let providerCalls = 0;
-    expect(session.state.enqueueAcceptedInput({
-        requestId: "req_task_notification_rejected",
-        ...session.identity,
-        runtimeInputId: "rin_task_notification_rejected",
-        eventIds: [],
-        sequenceFrom: 0,
-        sequenceTo: 0,
-        kind: "task_notification",
-        taskId: "task_notification_rejected",
-        sourceToolUseEventId: "sevt_task_notification_rejected",
-        status: "completed",
-        payloadJson: '{"status":"completed"}',
-    })).toBe("applied");
+    expect(session.state.enqueueAcceptedInput(taskNotificationInput(
+        "rin_task_notification_rejected",
+        "task_notification_rejected",
+        "sevt_task_notification_rejected",
+        "completed",
+        '{"status":"completed"}',
+        session.sessionId,
+    ))).toBe("applied");
     const followUp = userMessage("msg_after_task_rejection", 1, "continue after rejected notification");
     expect(session.state.enqueueAcceptedInput({
-        requestId: "req_after_task_rejection",
-        ...session.identity,
-        runtimeInputId: "rin_after_task_rejection",
-        eventIds: ["sevt_after_task_rejection"],
-        sequenceFrom: 1,
-        sequenceTo: 1,
-        kind: "messages",
-        payloadJson: JSON.stringify({ messages: [followUp] }),
+        ...acceptedInput("rin_after_task_rejection", session.sessionId),
+        contentJson: JSON.stringify({ messages: [followUp] }),
     })).toBe("applied");
     const loader = new QueuedContextLoader([], [], [
         () => ({ type: "task_notification_rejected" as const, errorCode: "task_notification_payload_mismatch" as const }),
@@ -1811,19 +1772,14 @@ test("task notification arriving during provider reschedule joins the next safe 
         stream(request) {
             requests.push(request);
             if (streamIndex === 0) {
-                expect(session.state.enqueueAcceptedInput({
-                    requestId: "req_task_notification_reschedule",
-                    ...session.identity,
-                    runtimeInputId: "rin_task_notification_reschedule",
-                    eventIds: [],
-                    sequenceFrom: 0,
-                    sequenceTo: 0,
-                    kind: "task_notification",
-                    taskId: "task_notification_reschedule",
-                    sourceToolUseEventId: "sevt_task_notification_reschedule",
-                    status: "completed",
-                    payloadJson: "{\"status\":\"completed\",\"text\":\"task result after the retried request\"}",
-                })).toBe("applied");
+                expect(session.state.enqueueAcceptedInput(taskNotificationInput(
+                    "rin_task_notification_reschedule",
+                    "task_notification_reschedule",
+                    "sevt_task_notification_reschedule",
+                    "completed",
+                    "{\"status\":\"completed\",\"text\":\"task result after the retried request\"}",
+                    session.sessionId,
+                ))).toBe("applied");
             }
             return Stream.fromIterable(streams[streamIndex++] ?? []);
         },
@@ -1856,19 +1812,14 @@ test("task notification arriving during provider reschedule joins the next safe 
 test("stale task notification custody discards the resident thread before provider work", async () => {
     const session = new ThreadRuntime("sesn_stale_task_notification");
     let providerCalls = 0;
-    expect(session.state.enqueueAcceptedInput({
-        requestId: "req_stale_task_notification",
-        ...session.identity,
-        runtimeInputId: "rin_stale_task_notification",
-        eventIds: [],
-        sequenceFrom: 0,
-        sequenceTo: 0,
-        kind: "task_notification",
-        taskId: "task_stale_task_notification",
-        sourceToolUseEventId: "sevt_stale_task_notification",
-        status: "completed",
-        payloadJson: "{\"status\":\"completed\"}",
-    })).toBe("applied");
+    expect(session.state.enqueueAcceptedInput(taskNotificationInput(
+        "rin_stale_task_notification",
+        "task_stale_task_notification",
+        "sevt_stale_task_notification",
+        "completed",
+        "{\"status\":\"completed\"}",
+        session.sessionId,
+    ))).toBe("applied");
     const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
         return yield* threadLoop.run(session, testRunCustody());

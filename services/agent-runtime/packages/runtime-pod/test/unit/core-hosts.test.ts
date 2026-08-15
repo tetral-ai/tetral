@@ -13,7 +13,7 @@ import type {
   SessionEventWriterToolSettlementEnvelope,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import type { RuntimeControlInputDeclaration, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeControlInputDeclaration, RuntimeThreadAddressState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
@@ -163,7 +163,7 @@ describe("Runtime core host production assembly", () => {
       }),
     });
     const threadCreator = {
-      createApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+      createApprovalReviewerThread: async (input: ApprovalReviewerThreadCreation) => ({ ok: true as const, reviewerThreadId: input.isTrunk ? "thr_reviewer_trunk" : `thr_reviewer_sidecar_${input.reviewId}`, runtimeInputId: `rin_${input.reviewId}` }),
       closeApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
     };
     try {
@@ -202,7 +202,7 @@ describe("Runtime core host production assembly", () => {
     const firstProviderRelease = deferred<void>();
     const lifecycle: string[] = [];
     const reviewerTokens = new Map<string, SessionManager.ReviewerExecutionToken>();
-    const reviewerControls = new Map<string, RuntimeThreadControlState>();
+    const reviewerControls = new Map<string, RuntimeThreadAddressState>();
     let providerCalls = 0;
     let nextEventSequence = 2;
     let nextMessageSequence = 2;
@@ -285,10 +285,14 @@ describe("Runtime core host production assembly", () => {
       },
     };
     const threadCreator = {
-      createApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+      createApprovalReviewerThread: async (input: ApprovalReviewerThreadCreation) => ({ ok: true as const, reviewerThreadId: input.isTrunk ? "thr_reviewer_trunk" : `thr_reviewer_sidecar_${input.reviewId}`, runtimeInputId: `rin_${input.reviewId}` }),
       closeApprovalReviewerThread: async (creation: ApprovalReviewerThreadCreation) => {
-        const control = reviewerControls.get(creation.reviewerThreadId);
-        const token = reviewerTokens.get(creation.reviewerThreadId);
+        const reviewerThreadId = creation.reviewerThreadId;
+        if (reviewerThreadId === undefined) {
+          throw new Error("sidecar close has no reviewer thread identity");
+        }
+        const control = reviewerControls.get(reviewerThreadId);
+        const token = reviewerTokens.get(reviewerThreadId);
         if (control === undefined || token === undefined) {
           throw new Error("sidecar close has no retained execution identity");
         }
@@ -421,7 +425,7 @@ describe("Runtime core host production assembly", () => {
       }),
     });
     const threadCreator = {
-      createApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+      createApprovalReviewerThread: async (input: ApprovalReviewerThreadCreation) => ({ ok: true as const, reviewerThreadId: input.isTrunk ? "thr_reviewer_trunk" : `thr_reviewer_sidecar_${input.reviewId}`, runtimeInputId: `rin_${input.reviewId}` }),
       closeApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
     };
     try {
@@ -472,7 +476,6 @@ describe("Runtime core host production assembly", () => {
       }
       expect(await hosts.subAgentRunHost.inspectThread({
         ...commandScope(request.sessionId),
-        requestId: request.modelRequestId,
         workspaceId: request.workspaceId,
         sessionThreadId: reviewerThreadId,
         bindingId: request.bindingId,
@@ -556,7 +559,7 @@ describe("Runtime core host production assembly", () => {
       const reviewer = createRuntimeApprovalReviewer(() => hosts.subAgentRunHost, {
         model: { providerId: "anthropic", modelId: "claude-opus-4-8" },
         threadCreator: {
-          createApprovalReviewerThread: async () => ({ ok: true as const }),
+          createApprovalReviewerThread: async (input) => ({ ok: true as const, reviewerThreadId: input.isTrunk ? "thr_reviewer_trunk" : `thr_reviewer_sidecar_${input.reviewId}`, runtimeInputId: `rin_${input.reviewId}` }),
           closeApprovalReviewerThread: async () => ({ ok: true as const }),
         },
         now: () => "2026-08-12T00:00:00.000Z",
@@ -592,12 +595,8 @@ describe("Runtime core host production assembly", () => {
       const mailOperation = hosts.commandRunHost.handleAgentMail?.({
         ...commandScope("sesn_1"),
         runtimeInputId: "agent_mail:delivery_warm_push",
-        eventIds: ["sevt_received_warm_push"],
-        sequenceFrom: 2,
-        sequenceTo: 2,
         deliveryId: "delivery_warm_push",
-        sourceThreadId: "thrd_child",
-        sourceToolUseEventId: "sevt_child_spawn",
+        kind: "inter_agent_message",
         message: bridgeRuntimeMessage("sesn_1", "child result"),
       });
       const mail = mailOperation === undefined ? undefined : await bounded("resident agent mail", mailOperation);
@@ -610,12 +609,12 @@ describe("Runtime core host production assembly", () => {
     }
   });
 
-  test("cold installation resolves pending mail in sent order before the triggering input", async () => {
+  test("cold installation accepts target-owned pending mail in sent order before the triggering input", async () => {
     const observations: string[] = [];
-    const descriptors = [
-      { deliveryId: "delivery_cold_1", sourceThreadId: "thrd_child_1", sourceToolUseEventId: "sevt_child_1" },
-      { deliveryId: "delivery_cold_2", sourceThreadId: "thrd_child_2", sourceToolUseEventId: "sevt_child_2" },
-    ] as const;
+    const descriptors = ["delivery_cold_1", "delivery_cold_2"].map((deliveryId, index) => {
+      const message = bridgeRuntimeMessage("sesn_cold_mail", `child result ${index + 1}`);
+      return { deliveryId, message, content: runtimeMessageText(message) };
+    });
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
       now: () => "2026-06-16T00:00:00.000Z",
@@ -640,26 +639,6 @@ describe("Runtime core host production assembly", () => {
               },
             };
           },
-          resolveAgentMail: async (command, childThreadId, deliveryId) => {
-            observations.push(`resolve:${deliveryId}`);
-            const index = descriptors.findIndex((mail) =>
-              mail.deliveryId === deliveryId && mail.sourceThreadId === childThreadId
-            );
-            if (index < 0) {
-              throw new Error("unexpected cold agent-mail descriptor");
-            }
-            const descriptor = descriptors[index]!;
-            return {
-              ...descriptor,
-              targetThreadId: command.sessionThreadId,
-              receivedEventId: `sevt_received_${index + 1}`,
-              receivedSequence: index + 10,
-              message: bridgeRuntimeMessage(command.sessionId, `child result ${index + 1}`),
-              publicMessageJson: publicAgentMailJSON(
-                bridgeRuntimeMessage(command.sessionId, `child result ${index + 1}`),
-              ),
-            };
-          },
           commitAcceptedInput: async (input) => {
             observations.push(`commit:${input.runtimeInputId}`);
             return acceptedInputReceipt(input);
@@ -672,21 +651,16 @@ describe("Runtime core host production assembly", () => {
         ok: true,
         sessionId: "sesn_cold_mail",
       });
-      expect(observations.slice(0, 3)).toEqual([
-        "load",
-        "resolve:delivery_cold_1",
-        "resolve:delivery_cold_2",
-      ]);
+      expect(observations).toEqual(["load"]);
     } finally {
       await hosts.close();
     }
   });
 
-  test("cold child installation resolves a direct instruction under its parent scope", async () => {
+  test("cold child installation accepts its target-owned direct instruction", async () => {
     const observations: string[] = [];
     const deliveryId = "delivery_cold_direct";
     const parentThreadId = "thrd_cold_direct_parent";
-    const childThreadId = "thrd_1";
     const message = bridgeRuntimeMessage("sesn_cold_direct", "parent instruction");
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
@@ -707,34 +681,14 @@ describe("Runtime core host production assembly", () => {
             runtimeBindingToken: "runtime-binding-token-cold-direct",
             pendingAgentMail: [{
               deliveryId,
-              sourceThreadId: parentThreadId,
-              sourceToolUseEventId: "sevt_cold_direct_source",
+              message,
+              content: runtimeMessageText(message),
             }],
             coldCoverage: {
               ...emptyColdCoverage,
               undeliveredMailDeliveryIds: [deliveryId],
             },
           }),
-          resolveAgentMail: async (command, peerThreadId, requestedDeliveryId) => {
-            observations.push(`resolve:${command.sessionThreadId}:${peerThreadId}:${requestedDeliveryId}`);
-            if (
-              command.sessionThreadId !== parentThreadId ||
-              peerThreadId !== childThreadId ||
-              requestedDeliveryId !== deliveryId
-            ) {
-              throw new Error("cold direct resolver orientation is invalid");
-            }
-            return {
-              deliveryId,
-              sourceThreadId: parentThreadId,
-              sourceToolUseEventId: "sevt_cold_direct_source",
-              targetThreadId: childThreadId,
-              receivedEventId: "sevt_cold_direct_received",
-              receivedSequence: 7,
-              message,
-              publicMessageJson: publicAgentMailJSON(message),
-            };
-          },
           commitAcceptedInput: async (input) => acceptedInputReceipt(input),
         },
       }),
@@ -744,16 +698,13 @@ describe("Runtime core host production assembly", () => {
         ok: true,
         sessionId: "sesn_cold_direct",
       });
-      expect(observations).toEqual([
-        `resolve:${parentThreadId}:${childThreadId}:${deliveryId}`,
-      ]);
+      expect(observations).toEqual([]);
     } finally {
       await hosts.close();
     }
   });
 
-  test("cold mail fails before resolution when durable thread lineage is absent", async () => {
-    let resolveCalls = 0;
+  test("cold mail fails before installation when durable thread lineage is absent", async () => {
     const message = bridgeRuntimeMessage("sesn_cold_mail_no_lineage", "parent instruction");
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
@@ -766,27 +717,14 @@ describe("Runtime core host production assembly", () => {
             runtimeBindingToken: "runtime-binding-token-cold-no-lineage",
             pendingAgentMail: [{
               deliveryId: "delivery_cold_no_lineage",
-              sourceThreadId: "thrd_parent",
-              sourceToolUseEventId: "sevt_cold_no_lineage_source",
+              message,
+              content: runtimeMessageText(message),
             }],
             coldCoverage: {
               ...emptyColdCoverage,
               undeliveredMailDeliveryIds: ["delivery_cold_no_lineage"],
             },
           }),
-          resolveAgentMail: async (command) => {
-            resolveCalls += 1;
-            return {
-              deliveryId: "delivery_cold_no_lineage",
-              sourceThreadId: "thrd_parent",
-              sourceToolUseEventId: "sevt_cold_no_lineage_source",
-              targetThreadId: command.sessionThreadId,
-              receivedEventId: "sevt_cold_no_lineage_received",
-              receivedSequence: 7,
-              message,
-              publicMessageJson: publicAgentMailJSON(message),
-            };
-          },
         },
       }),
     });
@@ -794,15 +732,13 @@ describe("Runtime core host production assembly", () => {
       await expect(
         hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold_mail_no_lineage")),
       ).resolves.toMatchObject({ ok: false });
-      expect(resolveCalls).toBe(0);
     } finally {
       await hosts.close();
     }
   });
 
-  test("cold agent-mail trigger starts the resolver-seeded input instead of ACKing it idle", async () => {
+  test("cold agent-mail trigger starts the loaded input instead of ACKing it idle", async () => {
     const deliveryId = "delivery_cold_trigger";
-    const sourceThreadId = "thrd_cold_trigger_child";
     const message = bridgeRuntimeMessage("sesn_cold_trigger", "stored completion");
     const committed = deferred<void>();
     const commits: string[] = [];
@@ -823,23 +759,13 @@ describe("Runtime core host production assembly", () => {
             runtimeBindingToken: "runtime-binding-token-cold-trigger",
             pendingAgentMail: [{
               deliveryId,
-              sourceThreadId,
-              sourceToolUseEventId: "sevt_cold_trigger_source",
+              message,
+              content: runtimeMessageText(message),
             }],
             coldCoverage: {
               ...emptyColdCoverage,
               undeliveredMailDeliveryIds: [deliveryId],
             },
-          }),
-          resolveAgentMail: async (command) => ({
-            deliveryId,
-            sourceThreadId,
-            sourceToolUseEventId: "sevt_cold_trigger_source",
-            targetThreadId: command.sessionThreadId,
-            receivedEventId: "sevt_cold_trigger_received",
-            receivedSequence: 9,
-            message,
-            publicMessageJson: publicAgentMailJSON(message),
           }),
           commitAcceptedInput: async (input) => {
             commits.push(input.runtimeInputId);
@@ -853,12 +779,8 @@ describe("Runtime core host production assembly", () => {
       const result = await hosts.commandRunHost.handleAgentMail?.({
         ...commandScope("sesn_cold_trigger"),
         runtimeInputId: `agent_mail:${deliveryId}`,
-        eventIds: ["sevt_cold_trigger_received"],
-        sequenceFrom: 9,
-        sequenceTo: 9,
         deliveryId,
-        sourceThreadId,
-        sourceToolUseEventId: "sevt_cold_trigger_source",
+        kind: "inter_agent_message",
         message,
       });
       const snapshot = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold_trigger"));
@@ -870,7 +792,7 @@ describe("Runtime core host production assembly", () => {
     }
   });
 
-  test("completion pull resolves the stored envelope without loading context", async () => {
+  test("completion pull reads the target-owned stored envelope without loading context", async () => {
     const observations: string[] = [];
     const message = bridgeRuntimeMessage("sesn_pull", "stored completion");
     const hosts = await buildRuntimeCoreHosts({
@@ -887,17 +809,12 @@ describe("Runtime core host production assembly", () => {
               coldCoverage: emptyColdCoverage,
             };
           },
-          resolveAgentMail: async (command, childThreadId, deliveryId) => {
-            observations.push(`resolve:${childThreadId}:${deliveryId ?? "oldest"}`);
+          readAgentMail: async (_command, childThreadId) => {
+            observations.push(`read:${childThreadId}`);
             return {
               deliveryId: "delivery_pull",
-              sourceThreadId: childThreadId,
-              sourceToolUseEventId: "sevt_pull",
-              targetThreadId: command.sessionThreadId,
-              receivedEventId: "sevt_received_pull",
-              receivedSequence: 12,
               message,
-              publicMessageJson: publicAgentMailJSON(message),
+              content: runtimeMessageText(message),
             };
           },
         },
@@ -908,21 +825,19 @@ describe("Runtime core host production assembly", () => {
         deliveryId: "delivery_pull",
         finalMessage: "stored completion",
       });
-      expect(observations).toEqual(["resolve:thrd_child:oldest"]);
+      expect(observations).toEqual(["read:thrd_child"]);
     } finally {
       await hosts.close();
     }
   });
 
-  test("completion pull returns no message when the durable resolver has no uncommitted mail", async () => {
+  test("completion pull returns no message when the durable reader is empty", async () => {
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
       now: () => "2026-06-16T00:00:00.000Z",
       ...testCoreDependencies({
         contextLoader: {
-          resolveAgentMail: async () => {
-            throw Object.assign(new Error("not found"), { code: status.NOT_FOUND });
-          },
+          readAgentMail: async () => undefined,
         },
       }),
     });
@@ -947,7 +862,7 @@ describe("Runtime core host production assembly", () => {
           loadThreadContext: async (command) => {
             loadCount += 1;
             observations.push("loadThreadContext");
-            const inspected = await hosts?.subAgentRunHost.inspectThread(command);
+            const inspected = await hosts?.subAgentRunHost.inspectThread(commandScope(command.sessionId));
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
               messages: [],
@@ -969,9 +884,7 @@ describe("Runtime core host production assembly", () => {
       expect(await hosts.commandRunHost.handleAcceptInput({
         ...acceptedInput("sesn_cold"),
         runtimeInputId: "rin_warm",
-        eventIds: ["sevt_warm"],
-        sequenceFrom: 2,
-        sequenceTo: 2,
+        inputOrder: 2,
       })).toMatchObject({ ok: true, sessionId: "sesn_cold" });
       expect(loadCount).toBe(1);
     } finally {
@@ -1019,9 +932,8 @@ describe("Runtime core host production assembly", () => {
       const interruptCommand = {
         ...scope,
         runtimeInputId: "rin_interrupt_singleflight",
-        eventIds: ["sevt_interrupt_singleflight"],
-        sequenceFrom: 1,
-        sequenceTo: 1,
+        inputOrder: 1,
+        origin: "user" as const,
       };
       const interrupt = hosts.commandRunHost.handleInterruptControl(
         "sesn_singleflight",
@@ -1037,17 +949,19 @@ describe("Runtime core host production assembly", () => {
         ...scope,
         bindingId: "bind_singleflight_replacement",
         bindingGeneration: 2,
-        runtimeInputId: "rin_config_singleflight",
+        configIdentity: "session:2",
         generation: 2,
-        payloadJson: "{\"config_generation\":2}",
+        contentJson: "{\"config_generation\":2}",
       });
       const task = hosts.commandRunHost.handleTaskNotification("sesn_singleflight", {
         ...scope,
+        kind: "task_notification",
         runtimeInputId: "rin_task_singleflight",
+        inputOrder: 0,
         taskId: "task_singleflight",
         sourceToolUseEventId: "sevt_tool_singleflight",
         status: "completed",
-        payloadJson: "{\"task_id\":\"task_singleflight\",\"source_tool_use_event_id\":\"sevt_tool_singleflight\",\"status\":\"completed\"}",
+        notificationJson: "{\"task_id\":\"task_singleflight\",\"source_tool_use_event_id\":\"sevt_tool_singleflight\",\"status\":\"completed\"}",
       });
       await Promise.resolve();
       expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: true });
@@ -1126,10 +1040,11 @@ describe("Runtime core host production assembly", () => {
               runtimeBindingToken: "runtime-binding-token-cold-confirm",
               runtimeConfigPatch: {
                 ...command,
+                configIdentity: "session:5",
                 generation: 5,
                 coldLoad: true,
                 installedBuiltinFamily: "claude",
-                payloadJson: JSON.stringify({
+                contentJson: JSON.stringify({
                   config_generation: 5,
                   runtime_config: {
                     agent: { config: { model: "openai/gpt-5.5" } },
@@ -1140,10 +1055,11 @@ describe("Runtime core host production assembly", () => {
               },
               mcpManifests: [{
                 ...command,
+                configIdentity: "mcp:github:7",
                 generation: 7,
                 mcpServerName: "github",
                 manifestETag: "etag_7",
-                payloadJson: JSON.stringify({
+                contentJson: JSON.stringify({
                   mcp_manifest: {
                     mcp_server_name: "github",
                     manifest_etag: "etag_7",
@@ -1176,13 +1092,13 @@ describe("Runtime core host production assembly", () => {
           },
           runtimeModel: (session) => runtimeModelForThread(
             session.identity.threadRole,
-            session.configuration.patches().map((patch) => patch.payloadJson),
+            session.configuration.patches().map((patch) => patch.contentJson),
             { providerId: "anthropic", modelId: "claude-opus-4-8" },
           ),
           runtimePolicy: (session) => {
             const policy = runtimeToolPolicyForThread(
               session.identity.threadRole,
-              session.configuration.patches().map((patch) => patch.payloadJson),
+              session.configuration.patches().map((patch) => patch.contentJson),
               session.configuration.installedBuiltinFamily(),
             );
             if (lookupToolEntry(policy.toolCatalog, "github_search") !== undefined) {
@@ -1224,12 +1140,7 @@ describe("Runtime core host production assembly", () => {
     try {
       const confirmationCommand = {
         ...replacementScope,
-        requestId: "req_confirm_cold",
         runtimeInputId: "rin_confirm_cold",
-        eventIds: ["sevt_confirm_cold"],
-        sequenceFrom: 2,
-        sequenceTo: 2,
-        sourceEventId: "sevt_confirm_cold",
         toolUseEventId: "sevt_tool_1",
         decision: "allow",
       } as const;
@@ -1277,7 +1188,7 @@ describe("Runtime core host production assembly", () => {
       ...testCoreDependencies({
         contextLoader: {
           loadThreadContext: async (command) => {
-            observations.push(`load:${command.runtimeInputId}`);
+            observations.push(`load:${command.sessionThreadId}`);
             return {
               messages: loadedMessages,
               turnFacts: turnFactsForPendingTool({
@@ -1291,10 +1202,11 @@ describe("Runtime core host production assembly", () => {
               runtimeBindingToken: "runtime-binding-token-interrupt-confirm",
               runtimeConfigPatch: {
                 ...command,
+                configIdentity: "session:3",
                 generation: 3,
                 coldLoad: true,
                 installedBuiltinFamily: "claude",
-                payloadJson: JSON.stringify({
+                contentJson: JSON.stringify({
                   config_generation: 3,
                   runtime_config: {
                     agent: { config: { model: "fake/fake-chat" } },
@@ -1325,11 +1237,9 @@ describe("Runtime core host production assembly", () => {
     try {
       const interruptCommand = {
         ...commandScope("sesn_interrupt_confirm"),
-        requestId: "req_interrupt_before_confirm",
         runtimeInputId: "rin_interrupt_before_confirm",
-        eventIds: ["sevt_interrupt_before_confirm"],
-        sequenceFrom: 2,
-        sequenceTo: 2,
+        inputOrder: 2,
+        origin: "user" as const,
       };
       let committedDeclaration: RuntimeControlInputDeclaration | undefined;
       const interrupt = await hosts.commandRunHost.handleInterruptControl(
@@ -1360,7 +1270,7 @@ describe("Runtime core host production assembly", () => {
       const shell = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_interrupt_confirm"));
 
       expect(interrupt).toEqual({ ok: true, sessionId: "sesn_interrupt_confirm", created: false, interrupted: false, idleInterrupt: true });
-      expect(observations).toEqual(["load:rin_interrupt_before_confirm"]);
+      expect(observations).toEqual(["load:thrd_1"]);
 		expect(committedDeclaration).toMatchObject({
 			messageCreates: [],
       });
@@ -1391,8 +1301,8 @@ describe("Runtime core host production assembly", () => {
       ...testCoreDependencies({
         contextLoader: {
           loadThreadContext: async (command) => {
-            observations.push(`load:${command.runtimeInputId}`);
-            const inspected = await hosts?.subAgentRunHost.inspectThread(command);
+            observations.push(`load:${command.sessionThreadId}`);
+            const inspected = await hosts?.subAgentRunHost.inspectThread(commandScope(command.sessionId));
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
               messages: [],
@@ -1407,10 +1317,9 @@ describe("Runtime core host production assembly", () => {
     try {
       const result = await hosts.commandRunHost.handleRuntimeConfigPatch("sesn_cold_config", {
         ...commandScope("sesn_cold_config"),
-        requestId: "req_config_cold",
-        runtimeInputId: "rin_config_cold",
+        configIdentity: "session:6",
         generation: 6,
-        payloadJson: "{\"config_generation\":6}",
+        contentJson: "{\"config_generation\":6}",
       });
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold_config"));
 
@@ -1605,8 +1514,8 @@ describe("Runtime core host production assembly", () => {
       ...testCoreDependencies({
         contextLoader: {
           loadThreadContext: async (command) => {
-            observations.push(`load:${command.runtimeInputId}`);
-            const inspected = await hosts?.subAgentRunHost.inspectThread(command);
+            observations.push(`load:${command.sessionThreadId}`);
+            const inspected = await hosts?.subAgentRunHost.inspectThread(commandScope(command.sessionId));
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
               messages: [committedMessage],
@@ -1621,17 +1530,18 @@ describe("Runtime core host production assembly", () => {
     try {
       const result = await hosts.commandRunHost.handleTaskNotification("sesn_cold_task", {
         ...commandScope("sesn_cold_task"),
-        requestId: "req_task_cold",
+        kind: "task_notification",
         runtimeInputId: "rin_task_cold",
+        inputOrder: 0,
         taskId: "task_1",
         sourceToolUseEventId: "sevt_tool_1",
         status: "completed",
-        payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
+        notificationJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
       });
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold_task"));
 
       expect(result).toEqual({ ok: true, sessionId: "sesn_cold_task", created: true, applied: true });
-      expect(observations).toEqual(["load:rin_task_cold", "observed:true"]);
+      expect(observations).toEqual(["load:thrd_1", "observed:true"]);
       expect(inspected).toMatchObject({ ok: true, observed: true, messages: [committedMessage] });
     } finally {
       await hosts?.close();
@@ -1644,7 +1554,7 @@ async function waitForCleanup(
   sessionId: string,
 ) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const result = await cleanupRunHost.handleCleanupSession(commandScope(sessionId));
+    const result = await cleanupRunHost.handleCleanupSession(cleanupScope(sessionId));
     if (result.ok) {
       return result;
     }
@@ -1652,7 +1562,19 @@ async function waitForCleanup(
       setTimeout(resolve, 5);
     });
   }
-  return await cleanupRunHost.handleCleanupSession(commandScope(sessionId));
+  return await cleanupRunHost.handleCleanupSession(cleanupScope(sessionId));
+}
+
+function cleanupScope(sessionId: string) {
+  const scope = commandScope(sessionId);
+  return {
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    bindingId: scope.bindingId,
+    bindingGeneration: scope.bindingGeneration,
+    targetPodUid: scope.targetPodUid,
+    cleanupOperationId: "cleanup_test",
+  };
 }
 
 function commandScope(sessionId: string) {
@@ -1675,7 +1597,6 @@ function commandScope(sessionId: string) {
 function acceptedInput(sessionId: string) {
   return {
     kind: "messages" as const,
-    requestId: "req_1",
     workspaceId: "wksp_1",
     sessionId,
     sessionThreadId: "thrd_1",
@@ -1683,10 +1604,8 @@ function acceptedInput(sessionId: string) {
     bindingGeneration: 1,
     targetPodUid: "pod_1",
     runtimeInputId: "rin_1",
-    eventIds: ["sevt_1"],
-    sequenceFrom: 1,
-    sequenceTo: 1,
-    payloadJson: JSON.stringify({
+    inputOrder: 1,
+    contentJson: JSON.stringify({
       messages: [userMessage(sessionId, "msg_rin_1", 1, "test input")],
     }),
   };
@@ -1739,16 +1658,13 @@ async function waitUntil(predicate: () => boolean, label: string): Promise<void>
   })());
 }
 
-function publicAgentMailJSON(message: ReturnType<typeof bridgeRuntimeMessage>): string {
-  return JSON.stringify({
-    ...message,
-    content: message.parts.map((part) => {
-      if (part.type !== "text") {
-        throw new Error("agent-mail fixture requires text parts");
-      }
-      return { type: "text", text: part.text };
-    }),
-  });
+function runtimeMessageText(message: ReturnType<typeof bridgeRuntimeMessage>): string {
+  return message.parts.map((part) => {
+    if (part.type !== "text") {
+      throw new Error("agent-mail fixture requires text parts");
+    }
+    return part.text;
+  }).join("\n");
 }
 
 function testCoreDependencies(

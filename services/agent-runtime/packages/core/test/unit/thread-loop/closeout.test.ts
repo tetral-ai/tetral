@@ -15,7 +15,7 @@ import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-
 import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { buildThreadLoopUserMessage as userMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, createdAt, deferred, emptyColdCoverage, expectNoProviderDiagnosticCanaries, failingEventWriter, flushMicrotasks, queuedLLMService, runtimeThreadLoopLayer, runtimeTerminationResultForTest, sleepUntilAborted, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, withFinishIdleReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, approvalReviewAcceptedInput, beginTestUserInterrupt, catalogForTest, createdAt, deferred, emptyColdCoverage, expectNoProviderDiagnosticCanaries, failingEventWriter, flushMicrotasks, interruptInput, queuedLLMService, runtimeThreadLoopLayer, runtimeTerminationResultForTest, sleepUntilAborted, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, withFinishIdleReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -1336,9 +1336,8 @@ test("SessionManager joins the original interrupt FinishIdle ACK before releasin
     try {
         const firstInput = {
             ...acceptedInput("rin_finish_idle_owner"),
-            sequenceFrom: 1,
-            sequenceTo: 1,
-            payloadJson: JSON.stringify({ messages: [userMessage("user-finish-idle-owner", 1, "hold the first run")] }),
+            inputOrder: 1,
+            contentJson: JSON.stringify({ messages: [userMessage("user-finish-idle-owner", 1, "hold the first run")] }),
         };
         await Effect.runPromise(manager.preloadThread({
             ...firstInput,
@@ -1349,14 +1348,14 @@ test("SessionManager joins the original interrupt FinishIdle ACK before releasin
         }));
         await Effect.runPromise(manager.acceptInput(firstInput));
         await firstProviderStarted.promise;
-        const interruptCommand = { ...acceptedInput("rin_finish_idle_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
+        const interruptCommand = interruptInput("rin_finish_idle_interrupt", 9);
         let interruptSettled = false;
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, testControlCommit(interruptCommand))).then((result) => {
             interruptSettled = true;
             return result;
         });
         await finishIdleStarted.promise;
-        const postFenceInput = { ...acceptedInput("rin_after_finish_idle"), sequenceFrom: 10, sequenceTo: 10 };
+        const postFenceInput = { ...acceptedInput("rin_after_finish_idle"), inputOrder: 10 };
         expect(await Effect.runPromise(manager.acceptInput(postFenceInput))).toMatchObject({
             ok: true,
         });
@@ -1448,7 +1447,7 @@ test("interrupt accepted during ordinary FinishIdle completes after that idle AC
     }).pipe(Effect.provide(agentLayer)));
     try {
         await finishIdleStarted.promise;
-        const command = { ...acceptedInput("rin_interrupt_ordinary_finish_idle"), sequenceFrom: 9, sequenceTo: 9 };
+        const command = interruptInput("rin_interrupt_ordinary_finish_idle", 9);
         let commits = 0;
         expect(session.state.beginUserInterrupt(command, async (declaration) => {
             commits += 1;
@@ -1512,7 +1511,7 @@ test("interrupt snapshot joins an in-flight pre-fence CommitInputs and remains t
         return { manager: Context.get(context, SessionManager.Service), scope: layerScope };
     }));
     try {
-        const preFenceInput = { ...acceptedInput("rin_pre_fence"), sequenceFrom: 5, sequenceTo: 5 };
+        const preFenceInput = { ...acceptedInput("rin_pre_fence"), inputOrder: 5 };
         await Effect.runPromise(manager.preloadThread({
             ...preFenceInput,
             runtimeBindingToken: "runtime-binding-token",
@@ -1522,13 +1521,13 @@ test("interrupt snapshot joins an in-flight pre-fence CommitInputs and remains t
         }));
         await Effect.runPromise(manager.acceptInput(preFenceInput));
         await preCommitStarted.promise;
-        const interruptCommand = { ...acceptedInput("rin_commit_fence_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
+        const interruptCommand = interruptInput("rin_commit_fence_interrupt", 9);
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             order.push("commit:interrupt");
             return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
         }));
         await flushMicrotasks(50);
-        await Effect.runPromise(manager.acceptInput({ ...acceptedInput("rin_post_fence"), sequenceFrom: 10, sequenceTo: 10 }));
+        await Effect.runPromise(manager.acceptInput({ ...acceptedInput("rin_post_fence"), inputOrder: 10 }));
         expect(order).toEqual(["event:session.status_running", "commit:pre:start"]);
         releasePreCommit.resolve();
         await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });

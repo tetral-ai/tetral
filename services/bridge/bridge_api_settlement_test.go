@@ -273,10 +273,10 @@ func TestPostgreSQLInterruptAdmissionAndProviderDeadlineProduceOneDurableRequest
 			start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_race_start", modelRequestID, "agent_provider_request", 0)
 			interruptAdmission := func() {
 				response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-					Scope: scope, RuntimeInputId: interruptID, InputKind: "interrupt_control",
-					EventIds: []string{interruptEvent}, SequenceFrom: 1, SequenceTo: 1,
+					Scope: scope, RuntimeInputId: interruptID,
+					Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 				})
-				if err != nil || response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+				if err != nil || response.GetCommitted() == nil {
 					t.Fatalf("CommitInputs interrupt = %+v, %v; want committed", response, err)
 				}
 			}

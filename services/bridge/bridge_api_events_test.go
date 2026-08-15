@@ -614,15 +614,15 @@ func TestPostgreSQLBridgeAPIStoreWriteEventStampsPrivateRequestStartBoundary(t *
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_request_start_stamp", "thr_request_start_stamp", "bind_request_start_stamp", 1, "pod_request_start_stamp")
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_request_input", InputKind: "messages",
-		EventIds: []string{"evt_request_input"}, SequenceFrom: 1, SequenceTo: 1,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
-			"default", "sesn_request_start_stamp", "thr_request_start_stamp",
-			"rin_request_input", "evt_request_input", "hello",
-		)},
-	}); err != nil {
+	committedInput, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: "rin_request_input",
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
+	})
+	if err != nil {
 		t.Fatalf("CommitInputs: %v", err)
+	}
+	if committedInput.GetCommitted() == nil || len(committedInput.GetCommitted().GetContext().GetAssignedContextSequences()) != 1 {
+		t.Fatalf("CommitInputs result = %#v; want one assigned context sequence", committedInput)
 	}
 	request := &bridgev1.WriteEventRequest{
 		Scope:                         scope,

@@ -14,7 +14,6 @@ export function acceptedInputReceipt(
   messageSequenceStart = 1,
 ): AcceptedInputReceiptResult {
 	const creates = acceptedInputCreates(input);
-  const taskEventId = `sevt_${input.runtimeInputId}`;
   const receipt: RuntimeDeclarationReceipt = {
     sessionThreadId: input.sessionThreadId,
     operationKind: input.kind === "task_notification" ? "commit_task_notification_result" : "commit_inputs",
@@ -28,12 +27,10 @@ export function acceptedInputReceipt(
     prefixConsumptions: [],
 
     childLifecycle: [],
-    events: (input.kind === "task_notification" ? [taskEventId] : input.eventIds).map((eventId, index) => ({
+    events: creates.map((_create, index) => ({
       sessionThreadId: input.sessionThreadId,
-      eventId,
-      eventSequence: input.kind === "approval_review" || input.kind === "task_notification"
-        ? messageSequenceStart + index
-        : input.sequenceFrom + index,
+      eventId: `sevt_commit_${input.runtimeInputId}_${index}`,
+      eventSequence: ("inputOrder" in input ? input.inputOrder : messageSequenceStart) + index,
       disposition: input.kind === "approval_review" || input.kind === "task_notification"
         ? "created"
         : "existing",

@@ -13,7 +13,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -67,16 +66,16 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 	apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-exhaustion-boundary-key!")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_exhaustion_message", InputKind: "messages",
-		EventIds: []string{"evt_exhaustion_message"}, SequenceFrom: 1, SequenceTo: 1,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
-			"default", sessionID, threadID, "rin_exhaustion_message", "evt_exhaustion_message", "hello",
-		)},
+		Scope: scope, RuntimeInputId: "rin_exhaustion_message",
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	})
 	if err != nil {
 		t.Fatalf("commit exhaustion boundary input: %v", err)
 	}
-	messageSequence := committed.GetDeclaration().GetReceipts()[0].GetMessages()[0].GetMessageSequence()
+	if len(committed.GetCommitted().GetContext().GetAssignedContextSequences()) != 1 {
+		t.Fatalf("commit exhaustion boundary assigned context sequences = %#v; want one entry", committed)
+	}
+	messageSequence := committed.GetCommitted().GetContext().GetAssignedContextSequences()[0]
 
 	seedBridgeAPIEvent(
 		t, admin, "default", sessionID, threadID,
@@ -508,7 +507,7 @@ func TestPostgreSQLCompletionMailProducerAndJobRunnerTerminalizeQueuedInbox(t *t
 		t.Fatalf("read completion-mail source before exhaustion: %v", err)
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},

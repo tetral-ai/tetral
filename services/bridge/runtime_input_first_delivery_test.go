@@ -84,9 +84,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
 		},
 	)
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	runner := &JobRunner{
 		Queue:      tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
 		Workspaces: staticWorkspaceLister{workspace.DefaultID},
@@ -101,8 +99,12 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("run first queued delivery: %v", err)
 	}
-	if len(sender.requests) != 1 || sender.requests[0].GetRuntimeInputId() != runtimeInputID {
+	if len(sender.requests) != 1 {
 		t.Fatalf("Runtime requests = %#v; want one request for %s", sender.requests, runtimeInputID)
+	}
+	accepted, ok := sender.requests[0].(*agentruntimev1.AcceptInputRequest)
+	if !ok || accepted.GetRuntimeInputId() != runtimeInputID {
+		t.Fatalf("Runtime request = %#v; want AcceptInput for %s", sender.requests[0], runtimeInputID)
 	}
 
 	var finalInboxStatus string
@@ -162,7 +164,7 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 		AND payload_json::jsonb ->> 'runtime_input_id'=$1`, runtimeInputID); err != nil {
 		t.Fatalf("configure final producer input attempt: %v", err)
 	}
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	var attemptLog bytes.Buffer
 	runner := &JobRunner{

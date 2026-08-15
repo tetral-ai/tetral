@@ -10,7 +10,6 @@ import type {
   RuntimeAcceptedThreadMetadataState,
   RuntimeConfigPatchState,
   RuntimeControlInputDeclaration,
-  RuntimeThreadControlState,
 } from "../../src/thread-loop/thread-state.js";
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
@@ -26,7 +25,7 @@ import {
 const timestamp = "2026-06-14T00:00:00.000Z";
 
 function testControlCommit(
-  scope: RuntimeThreadControlState,
+  scope: Parameters<typeof buildRuntimeControlCommitResult>[0],
   inputKind: "interrupt_control" | "tool_confirmation" = "interrupt_control",
 ) {
   return async (declaration: RuntimeControlInputDeclaration) =>
@@ -80,9 +79,8 @@ function acceptedInput(
   sessionId: string,
   runtimeInputId = `rin_${sessionId}`,
   sessionThreadId = `thrd_${sessionId}`,
-): RuntimeAcceptedInputState {
+): Extract<RuntimeAcceptedInputState, { readonly kind: "messages" }> {
   return {
-    requestId: `req_${runtimeInputId}`,
     workspaceId: "wksp_test",
     sessionId,
     sessionThreadId,
@@ -90,11 +88,9 @@ function acceptedInput(
     bindingGeneration: 1,
     targetPodUid: `pod_${sessionId}`,
     runtimeInputId,
-    eventIds: [`sevt_${runtimeInputId}`],
-    sequenceFrom: 1,
-    sequenceTo: 1,
+    inputOrder: 1,
     kind: "messages",
-    payloadJson: "{}",
+    contentJson: JSON.stringify({ messages: [coldUserMessage(sessionId)] }),
   };
 }
 
@@ -105,7 +101,14 @@ function approvalReviewInput(
   parentThreadId: string,
 ): RuntimeAcceptedInputState {
   return {
-    ...acceptedInput(sessionId, runtimeInputId, sessionThreadId),
+    workspaceId: "wksp_test",
+    sessionId,
+    sessionThreadId,
+    bindingId: `bind_${sessionId}`,
+    bindingGeneration: 1,
+    targetPodUid: `pod_${sessionId}`,
+    runtimeInputId,
+    inputOrder: 1,
     kind: "approval_review",
     reviewId: `arvw_${runtimeInputId}`,
     parentThreadId,
@@ -131,11 +134,15 @@ function agentMailInput(
   thread: RuntimeAcceptedThreadMetadataState,
 ): Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }> {
   return {
-    ...threadControl(sessionId, runtimeInputId, sessionThreadId),
+    workspaceId: "wksp_test",
+    sessionId,
+    sessionThreadId,
+    bindingId: `bind_${sessionId}`,
+    bindingGeneration: 1,
+    targetPodUid: `pod_${sessionId}`,
+    runtimeInputId,
     kind: "inter_agent_message",
     deliveryId: runtimeInputId.replace("agent_mail:", ""),
-    sourceThreadId,
-    sourceToolUseEventId: `sevt_${sourceThreadId}`,
     message: bridgeRuntimeMessage(sessionId, `completion from ${sourceThreadId}`),
     thread,
   };
@@ -145,9 +152,8 @@ function threadControl(
   sessionId: string,
   runtimeInputId = `rin_control_${sessionId}`,
   sessionThreadId = `thrd_${sessionId}`,
-): RuntimeThreadControlState & { readonly origin: "user" } {
+): SessionManager.RuntimeInterruptControlCommand {
   return {
-    requestId: `req_${runtimeInputId}`,
     workspaceId: "wksp_test",
     sessionId,
     sessionThreadId,
@@ -155,10 +161,30 @@ function threadControl(
     bindingGeneration: 1,
     targetPodUid: `pod_${sessionId}`,
     runtimeInputId,
-    eventIds: [`sevt_${runtimeInputId}`],
-    sequenceFrom: 1,
-    sequenceTo: 1,
+    inputOrder: 1,
 		origin: "user",
+  };
+}
+
+function runtimeConfigScope(sessionId: string, configIdentity: string) {
+  return {
+    workspaceId: "wksp_test",
+    sessionId,
+    bindingId: `bind_${sessionId}`,
+    bindingGeneration: 1,
+    targetPodUid: `pod_${sessionId}`,
+    configIdentity,
+  };
+}
+
+function cleanupControl(sessionId: string, cleanupOperationId = `cleanup_${sessionId}`): SessionManager.RuntimeCleanupSessionCommand {
+  return {
+    workspaceId: "wksp_test",
+    sessionId,
+    bindingId: `bind_${sessionId}`,
+    bindingGeneration: 1,
+    targetPodUid: `pod_${sessionId}`,
+    cleanupOperationId,
   };
 }
 
@@ -757,7 +783,7 @@ async function waitForInterruptRecordingRuns(threadLoop: InterruptRecordingThrea
 
 async function waitForIdleCleanup(manager: SessionManager.Interface, sessionId: string): Promise<SessionManager.CleanupSessionResult> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const result = await Effect.runPromise(manager.cleanupSession(sessionId, threadControl(sessionId)));
+    const result = await Effect.runPromise(manager.cleanupSession(sessionId, cleanupControl(sessionId)));
     if (result.ok) {
       return result;
     }
@@ -1213,7 +1239,7 @@ describe("SessionManager", () => {
         throw new Error("expected active session");
       }
 
-      const activeInterrupt = { ...threadControl("sesn_1"), runtimeInputId: "rin_interrupt", sequenceTo: 9 };
+      const activeInterrupt = { ...threadControl("sesn_1"), runtimeInputId: "rin_interrupt", inputOrder: 9 };
       expect(await Effect.runPromise(manager.interruptControl(
         "sesn_1",
         activeInterrupt,
@@ -1314,7 +1340,7 @@ describe("SessionManager", () => {
         }],
       });
       let idleInterruptCommits = 0;
-      const idleInterrupt = { ...threadControl("sesn_1"), runtimeInputId: "rin_idle_interrupt", sequenceTo: 10 };
+      const idleInterrupt = { ...threadControl("sesn_1"), runtimeInputId: "rin_idle_interrupt", inputOrder: 10 };
       expect(await Effect.runPromise(manager.interruptControl("sesn_1", idleInterrupt, async (declaration) => {
         idleInterruptCommits += 1;
         const result = buildRuntimeControlCommitResult(idleInterrupt, "interrupt_control", declaration);
@@ -1421,7 +1447,7 @@ describe("SessionManager", () => {
       let commitCount = 0;
       const interrupt = {
         ...threadControl(sessionId, "rin_concurrent_idle_interrupt", threadId),
-        sequenceTo: 11,
+        inputOrder: 11,
       };
       const commit = async (declaration: RuntimeControlInputDeclaration) => {
         commitCount += 1;
@@ -1478,12 +1504,12 @@ describe("SessionManager", () => {
       const session = threadLoop.runs[0]?.session;
       if (session === undefined) throw new Error("expected resident session");
 
-      const stop = { ...threadControl(sessionId, "rin_invalid_projection_stop", threadId), sequenceTo: 2 };
+      const stop = { ...threadControl(sessionId, "rin_invalid_projection_stop", threadId), inputOrder: 2 };
       expect(await Effect.runPromise(manager.interruptControl(sessionId, stop, testControlCommit(stop))))
         .toMatchObject({ ok: true, interrupted: true });
 
       session.state.contextManager.appendMessage(pendingApprovalAssistantMessage(sessionId, "tool_invalid_projection"));
-      const interrupt = { ...threadControl(sessionId, "rin_invalid_projection", threadId), sequenceTo: 3 };
+      const interrupt = { ...threadControl(sessionId, "rin_invalid_projection", threadId), inputOrder: 3 };
       const loadsBeforeInvalidReceipt = loads;
       const invalid = await Effect.runPromise(manager.interruptControl(sessionId, interrupt, async (declaration) => {
         const committed = buildRuntimeControlCommitResult(interrupt, "interrupt_control", declaration);
@@ -1533,13 +1559,11 @@ describe("SessionManager", () => {
       });
       const first = {
         ...threadControl(sessionId, "rin_interrupt_first", threadId),
-        sequenceFrom: 9,
-        sequenceTo: 9,
+        inputOrder: 9,
       };
       const second = {
         ...threadControl(sessionId, "rin_interrupt_second", threadId),
-        sequenceFrom: 10,
-        sequenceTo: 10,
+        inputOrder: 10,
       };
       const committed: string[] = [];
       const firstResult = Effect.runPromise(manager.interruptControl(sessionId, first, async (declaration) => {
@@ -1584,7 +1608,7 @@ describe("SessionManager", () => {
 
       const interrupt = {
         ...threadControl(sessionId, "rin_retryable_idle_interrupt", threadId),
-        sequenceTo: 11,
+        inputOrder: 11,
       };
       const declarations: RuntimeControlInputDeclaration[] = [];
       const commit = async (declaration: RuntimeControlInputDeclaration) => {
@@ -1628,10 +1652,9 @@ describe("SessionManager", () => {
       }))).toMatchObject({ ok: true, applied: true });
       expect(
         await Effect.runPromise(
-          manager.applyRuntimeConfigPatch("sesn_1", { ...threadControl("sesn_1"),
-            runtimeInputId: "rin_config",
+          manager.applyRuntimeConfigPatch("sesn_1", { ...runtimeConfigScope("sesn_1", "session:5"),
             generation: 5,
-            payloadJson: "{\"config_generation\":5}",
+            contentJson: "{\"config_generation\":5}",
           }),
         ),
       ).toEqual({ ok: true, sessionId: "sesn_1", created: false, applied: true });
@@ -1647,7 +1670,7 @@ describe("SessionManager", () => {
       const session = threadLoop.runs[0]?.session;
       expect(session?.configuration.runtimeConfigPatch()).toEqual({
         generation: 5,
-        payloadJson: "{\"config_generation\":5}",
+        contentJson: "{\"config_generation\":5}",
       });
       threadLoop.runs[0]?.release();
     });
@@ -1667,7 +1690,7 @@ describe("SessionManager", () => {
         taskId: "task_notification_wake",
         sourceToolUseEventId: "sevt_task_notification_wake",
         status: "completed",
-        payloadJson: "{\"status\":\"completed\"}",
+        notificationJson: "{\"status\":\"completed\"}",
       }))).toMatchObject({ ok: true, applied: true });
       expect(threadLoop.runs[0]!.session.state.contextManager.messages()).not.toContainEqual(
         bridgeRuntimeMessage(sessionId, "task completed"),
@@ -1713,7 +1736,7 @@ describe("SessionManager", () => {
         taskId: "task_notification_resume",
         sourceToolUseEventId: "sevt_task_notification_resume",
         status: "completed",
-        payloadJson: "{\"status\":\"completed\"}",
+        notificationJson: "{\"status\":\"completed\"}",
       }))).toMatchObject({ ok: true, applied: true });
       await waitForRuns(threadLoop, 1);
       expect(threadLoop.runs[0]?.session.state.peekAcceptedInput()).toMatchObject({
@@ -1907,7 +1930,7 @@ describe("SessionManager", () => {
             taskId: "task_cold_background",
             sourceToolUseEventId: "sevt_tool_background",
             status: "completed",
-            payloadJson: "{\"task_id\":\"task_cold_background\",\"source_tool_use_event_id\":\"sevt_tool_background\",\"status\":\"completed\"}",
+            notificationJson: "{\"task_id\":\"task_cold_background\",\"source_tool_use_event_id\":\"sevt_tool_background\",\"status\":\"completed\"}",
           }),
         ),
       ).toEqual({ ok: true, sessionId: "sesn_cold_background", created: false, applied: true });
@@ -2138,10 +2161,11 @@ describe("SessionManager", () => {
         messages: [coldUserMessage("sesn_mcp_cold_pending")],
         runtimeConfigPatch: {
           ...control,
+          configIdentity: "runtime_config",
           generation: 5,
           coldLoad: true,
           installedBuiltinFamily: "claude",
-          payloadJson: JSON.stringify({
+          contentJson: JSON.stringify({
             config_generation: 5,
             runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
             tool_policy: { mcpToolsets: [{ mcpServerName: "github" }] },
@@ -2149,11 +2173,11 @@ describe("SessionManager", () => {
         },
         mcpManifests: [{
           ...control,
-          runtimeInputId: "runtime_config_update:mcp_manifest:sesn_mcp_cold_pending:github:7",
+          configIdentity: "mcp_manifest:github",
           generation: 7,
           mcpServerName: "github",
           manifestETag: "etag_7",
-          payloadJson: JSON.stringify({
+          contentJson: JSON.stringify({
             mcp_manifest: {
               mcp_server_name: "github",
               manifest_etag: "etag_7",
@@ -2211,18 +2235,18 @@ describe("SessionManager", () => {
       };
       expect(await Effect.runPromise(manager.preloadThread(cold))).toMatchObject({ ok: true, applied: true });
       const patch = {
-        ...threadControl("sesn_manifest_observation", "rin_manifest_update"),
+        ...runtimeConfigScope("sesn_manifest_observation", "mcp:github:9"),
         generation: 9, mcpServerName: "github", manifestETag: "etag_9",
-        payloadJson: JSON.stringify({ mcp_manifest: {
+        contentJson: JSON.stringify({ mcp_manifest: {
           mcp_server_name: "github", manifest_etag: "etag_9", manifest_generation: 9, tools: [],
         } }),
       };
       expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_manifest_observation", patch))).toMatchObject({ ok: true, applied: true });
       expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_manifest_observation", {
-        ...patch, runtimeInputId: "rin_manifest_stale", generation: 8,
+        ...patch, configIdentity: "mcp:github:8", generation: 8,
       }))).toMatchObject({ ok: true, applied: false });
       expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_manifest_absent", {
-        ...patch, sessionId: "sesn_manifest_absent",
+        ...patch, ...runtimeConfigScope("sesn_manifest_absent", "mcp:github:9"),
       }))).toMatchObject({ ok: true, noResidency: true });
       expect(manifestUpdates.map(({ disposition, receivedGeneration, currentGeneration, source }) => ({
         disposition, receivedGeneration, currentGeneration, source,
@@ -2253,10 +2277,11 @@ describe("SessionManager", () => {
         messages: [coldUserMessage("sesn_seed_before_install")],
         runtimeConfigPatch: {
           ...control,
+          configIdentity: "runtime_config",
           generation: 3,
           coldLoad: true,
           installedBuiltinFamily: "claude",
-          payloadJson: JSON.stringify({
+          contentJson: JSON.stringify({
             config_generation: 3,
             runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
           }),
@@ -2388,8 +2413,6 @@ describe("SessionManager", () => {
       const confirmationCommand = {
         ...threadControl("sesn_1"),
         runtimeInputId: "rin_confirm",
-        sourceEventId: "sevt_confirm_1",
-        eventIds: ["sevt_confirm_1"],
         toolUseEventId: "sevt_tool_1",
         decision: "allow" as const,
       };
@@ -2471,7 +2494,6 @@ describe("SessionManager", () => {
 
       expect(await Effect.runPromise(manager.resolveToolConfirmation(sessionId, {
         ...scope,
-        sourceEventId: scope.eventIds[0]!,
         toolUseEventId: "sevt_stale_control_tool",
         decision: "allow",
       }, async () => ({ ok: true, stale: true })))).toEqual({
@@ -2495,9 +2517,9 @@ describe("SessionManager", () => {
       expect(
         await Effect.runPromise(
           manager.applyRuntimeConfigPatch("sesn_cold", {
-            ...threadControl("sesn_cold", "rin_config_cold"),
+            ...runtimeConfigScope("sesn_cold", "session:6"),
             generation: 6,
-            payloadJson: "{\"config_generation\":6}",
+            contentJson: "{\"config_generation\":6}",
           }),
         ),
       ).toEqual({ ok: true, sessionId: "sesn_cold", created: false, applied: false, noResidency: true });
@@ -2514,9 +2536,9 @@ describe("SessionManager", () => {
       expect(
         await Effect.runPromise(
           manager.applyRuntimeConfigPatch("sesn_1", {
-            ...threadControl("sesn_1", "rin_config_busy"),
+            ...runtimeConfigScope("sesn_1", "session:6"),
             generation: 6,
-            payloadJson: "{\"config_generation\":6}",
+            contentJson: "{\"config_generation\":6}",
           }),
         ),
       ).toEqual({ ok: false, sessionId: "sesn_1", reason: "control_busy" });
@@ -2526,9 +2548,9 @@ describe("SessionManager", () => {
       for (let attempt = 0; attempt < 100 && idlePatch === undefined; attempt += 1) {
         const result = await Effect.runPromise(
           manager.applyRuntimeConfigPatch("sesn_1", {
-            ...threadControl("sesn_1", "rin_config_idle"),
+            ...runtimeConfigScope("sesn_1", "session:6"),
             generation: 6,
-            payloadJson: "{\"config_generation\":6}",
+            contentJson: "{\"config_generation\":6}",
           }),
         );
         if (result.ok) {
@@ -2553,13 +2575,13 @@ describe("SessionManager", () => {
         }))).toMatchObject({ ok: true, applied: true });
       }
       const patch = {
-        ...threadControl("sesn_config_all", "rin_config_all", "thrd_main"),
+        ...runtimeConfigScope("sesn_config_all", "session:7"),
         generation: 7,
-        payloadJson: "{\"config_generation\":7}",
+        contentJson: "{\"config_generation\":7}",
       };
       const expectedPatch = {
         generation: 7,
-        payloadJson: "{\"config_generation\":7}",
+        contentJson: "{\"config_generation\":7}",
       };
 
       expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_config_all", patch))).toEqual({
@@ -2600,9 +2622,9 @@ describe("SessionManager", () => {
       await waitForRuns(threadLoop, 1);
 
       expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_config_busy", {
-        ...threadControl("sesn_config_busy", "rin_config_rejected", "thrd_main"),
+        ...runtimeConfigScope("sesn_config_busy", "session:8"),
         generation: 8,
-        payloadJson: "{\"config_generation\":8}",
+        contentJson: "{\"config_generation\":8}",
       }))).toEqual({ ok: false, sessionId: "sesn_config_busy", reason: "control_busy" });
 
       threadLoop.runs[0]?.release();
@@ -2643,54 +2665,54 @@ describe("SessionManager", () => {
 
       expect(
         await applyWhenIdle({
-          ...threadControl("sesn_1", "rin_config_5"),
+          ...runtimeConfigScope("sesn_1", "session:5"),
           generation: 5,
-          payloadJson: "{\"config_generation\":5}",
+          contentJson: "{\"config_generation\":5}",
         }),
       ).toEqual({ ok: true, sessionId: "sesn_1", created: false, applied: true });
       expect(
         await applyWhenIdle({
-          ...threadControl("sesn_1", "rin_mcp_github_1"),
+          ...runtimeConfigScope("sesn_1", "mcp:github:1"),
           generation: 1,
           mcpServerName: "github",
           manifestETag: "etag_1",
-          payloadJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_1\",\"manifest_generation\":1,\"tools\":[]}}",
+          contentJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_1\",\"manifest_generation\":1,\"tools\":[]}}",
         }),
       ).toEqual({ ok: true, sessionId: "sesn_1", created: false, applied: true });
       expect(
         await applyWhenIdle({
-          ...threadControl("sesn_1", "rin_mcp_github_1_dup"),
+          ...runtimeConfigScope("sesn_1", "mcp:github:1"),
           generation: 1,
           mcpServerName: "github",
           manifestETag: "etag_1",
-          payloadJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_1\",\"manifest_generation\":1,\"tools\":[]}}",
+          contentJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_1\",\"manifest_generation\":1,\"tools\":[]}}",
         }),
       ).toEqual({ ok: true, sessionId: "sesn_1", created: false, applied: false });
       expect(
         await applyWhenIdle({
-          ...threadControl("sesn_1", "rin_config_4"),
+          ...runtimeConfigScope("sesn_1", "session:4"),
           generation: 4,
-          payloadJson: "{\"config_generation\":4}",
+          contentJson: "{\"config_generation\":4}",
         }),
       ).toEqual({ ok: true, sessionId: "sesn_1", created: false, applied: false });
       expect(
         await applyWhenIdle({
-          ...threadControl("sesn_1", "rin_config_6"),
+          ...runtimeConfigScope("sesn_1", "session:6"),
           generation: 6,
-          payloadJson: "{\"config_generation\":6}",
+          contentJson: "{\"config_generation\":6}",
         }),
       ).toEqual({ ok: true, sessionId: "sesn_1", created: false, applied: true });
 
       expect(session?.configuration.patches()).toEqual([
         {
           generation: 6,
-          payloadJson: "{\"config_generation\":6}",
+          contentJson: "{\"config_generation\":6}",
         },
         {
           generation: 1,
           mcpServerName: "github",
           manifestETag: "etag_1",
-          payloadJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_1\",\"manifest_generation\":1,\"tools\":[]}}",
+          contentJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_1\",\"manifest_generation\":1,\"tools\":[]}}",
         },
       ]);
     });
@@ -2708,7 +2730,7 @@ describe("SessionManager", () => {
       await waitForRuns(threadLoop, 1);
       const firstSession = threadLoop.runs[0]?.session;
 
-      const interruptCommand = { ...threadControl("sesn_1", "rin_interrupt"), sequenceTo: 9 };
+      const interruptCommand = { ...threadControl("sesn_1", "rin_interrupt"), inputOrder: 9 };
       const interrupt = Effect.runPromise(manager.interruptControl(
         "sesn_1",
         interruptCommand,
@@ -2734,7 +2756,7 @@ describe("SessionManager", () => {
   test("interrupt discards pre-fence queued input and preserves input accepted during closeout", async () => {
     const threadLoop = makeInterruptCleanupThreadLoop();
     await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
-      expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_active"), sequenceTo: 1 }))).toMatchObject({
+      expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_active"), inputOrder: 1 }))).toMatchObject({
         ok: true,
         started: true,
       });
@@ -2742,12 +2764,12 @@ describe("SessionManager", () => {
       const session = threadLoop.runs[0]?.session;
       session?.state.acknowledgeAcceptedInput("rin_active");
 
-      expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_before_fence"), sequenceTo: 5 }))).toMatchObject({
+      expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_before_fence"), inputOrder: 5 }))).toMatchObject({
         ok: true,
       });
       const interruptCommand = {
         ...threadControl("sesn_fence", "rin_interrupt_fence"),
-        sequenceTo: 9,
+        inputOrder: 9,
       };
       const interrupt = Effect.runPromise(manager.interruptControl(
         "sesn_fence",
@@ -2756,7 +2778,7 @@ describe("SessionManager", () => {
       ));
       await threadLoop.cleanupStarted;
 
-      expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_after_fence"), sequenceFrom: 10, sequenceTo: 10 }))).toMatchObject({
+      expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_after_fence"), inputOrder: 10 }))).toMatchObject({
         ok: true,
       });
       threadLoop.releaseCleanup();
@@ -2789,7 +2811,7 @@ describe("SessionManager", () => {
     await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput({
         ...acceptedInput(sessionID, "rin_interrupt_agent_mail_active", threadID),
-        sequenceTo: 1,
+        inputOrder: 1,
       }))).toMatchObject({ ok: true, started: true });
       await waitForRuns(threadLoop, 1);
       threadLoop.runs[0]!.session.state.acknowledgeAcceptedInput("rin_interrupt_agent_mail_active");
@@ -2800,7 +2822,7 @@ describe("SessionManager", () => {
 
       const interruptCommand = {
         ...threadControl(sessionID, "rin_interrupt_agent_mail_fence", threadID),
-        sequenceTo: 9,
+        inputOrder: 9,
       };
       const interrupt = Effect.runPromise(manager.interruptControl(
         sessionID,
@@ -2847,7 +2869,7 @@ describe("SessionManager", () => {
         },
       ]);
       expect(session.state.runtimeShutdownRequested()).toBe(false);
-      expect(await Effect.runPromise(manager.cleanupSession("sesn_shutdown", threadControl("sesn_shutdown")))).toEqual({
+      expect(await Effect.runPromise(manager.cleanupSession("sesn_shutdown", cleanupControl("sesn_shutdown")))).toEqual({
         ok: true,
         sessionId: "sesn_shutdown",
         cleaned: false,
@@ -2876,7 +2898,7 @@ describe("SessionManager", () => {
 
       expect(session.state.runtimeShutdownRequested()).toBe(false);
       expect(threadLoop.runs[0]?.args).toHaveLength(2);
-      expect(await Effect.runPromise(manager.cleanupSession("sesn_shutdown", threadControl("sesn_shutdown")))).toEqual({
+      expect(await Effect.runPromise(manager.cleanupSession("sesn_shutdown", cleanupControl("sesn_shutdown")))).toEqual({
         ok: true,
         sessionId: "sesn_shutdown",
         cleaned: false,
@@ -3297,7 +3319,7 @@ describe("SessionManager", () => {
       for (let attempt = 0; attempt < 100 && !cleanupB.ok; attempt += 1) {
         cleanupB = await Effect.runPromise(
           manager.cleanupSession("sesn_shared", {
-            ...threadControl("sesn_shared", "rin_cleanup_workspace_b", "thrd_workspace_b"),
+            ...cleanupControl("sesn_shared", "cleanup_workspace_b"),
             workspaceId: "wksp_other",
             bindingId: "bind_workspace_b",
             targetPodUid: "pod_workspace_b",
@@ -3354,14 +3376,14 @@ describe("SessionManager", () => {
     await withSessionManager(layer, async (manager) => {
       await Effect.runPromise(
         Effect.gen(function* () {
-        expect(yield* manager.cleanupSession("missing", threadControl("missing"))).toEqual({ ok: true, sessionId: "missing", cleaned: false });
+        expect(yield* manager.cleanupSession("missing", cleanupControl("missing"))).toEqual({ ok: true, sessionId: "missing", cleaned: false });
         expect(yield* manager.startTestRunThroughAcceptedInput("sesn_1")).toEqual({ ok: true, sessionId: "sesn_1", created: true, started: true });
         expect(yield* manager.startTestRunThroughAcceptedInput("sesn_2")).toEqual({
           ok: false,
           sessionId: "sesn_2",
           reason: "local_session_capacity_exceeded",
         });
-        expect(yield* manager.cleanupSession("sesn_1", threadControl("sesn_1"))).toEqual({ ok: false, sessionId: "sesn_1", reason: "session_busy" });
+        expect(yield* manager.cleanupSession("sesn_1", cleanupControl("sesn_1"))).toEqual({ ok: false, sessionId: "sesn_1", reason: "session_busy" });
         }),
       );
 
@@ -3397,13 +3419,13 @@ describe("SessionManager", () => {
       expect(session.state.enqueueAcceptedInput(queued)).toBe("applied");
       expect(await Effect.runPromise(manager.cleanupSession(
         sessionID,
-        threadControl(sessionID, "rin_cleanup_inter_turn_busy", threadID),
+        cleanupControl(sessionID, "cleanup_inter_turn_busy"),
       ))).toEqual({ ok: false, sessionId: sessionID, reason: "session_busy" });
 
       session.state.acknowledgeAcceptedInput(queued.runtimeInputId);
       expect(await Effect.runPromise(manager.cleanupSession(
         sessionID,
-        threadControl(sessionID, "rin_cleanup_inter_turn_drained", threadID),
+        cleanupControl(sessionID, "cleanup_inter_turn_drained"),
       ))).toEqual({ ok: true, sessionId: sessionID, cleaned: true });
     });
   });
@@ -3429,13 +3451,13 @@ describe("SessionManager", () => {
         taskId: "task_cleanup_receipt",
         sourceToolUseEventId: "sevt_cleanup_receipt",
         status: "completed",
-        payloadJson: "{\"status\":\"completed\"}",
+        notificationJson: "{\"status\":\"completed\"}",
       }))).toMatchObject({ ok: true, applied: true });
       await waitForRuns(threadLoop, 1);
 
       expect(await Effect.runPromise(manager.cleanupSession(
         sessionId,
-        threadControl(sessionId, "rin_cleanup_receipt_attempt", threadId),
+        cleanupControl(sessionId, "cleanup_receipt_attempt"),
       ))).toEqual({ ok: false, sessionId, reason: "session_busy" });
 
       threadLoop.runs[0]!.release();
@@ -3472,7 +3494,7 @@ describe("SessionManager", () => {
 
       await waitForRuns(threadLoop, 2);
       expect(threadLoop.runs[1]?.sessionId).toBe("sesn_2");
-      expect(await Effect.runPromise(manager.cleanupSession("sesn_1", threadControl("sesn_1")))).toEqual({ ok: true, sessionId: "sesn_1", cleaned: false });
+      expect(await Effect.runPromise(manager.cleanupSession("sesn_1", cleanupControl("sesn_1")))).toEqual({ ok: true, sessionId: "sesn_1", cleaned: false });
       threadLoop.runs[1]?.release();
     });
   });
@@ -3652,7 +3674,7 @@ describe("SessionManager", () => {
 
       await waitForRuns(threadLoop, 2);
       expect(threadLoop.runs[0]?.session.state.contextManager.messages()).toEqual([]);
-      expect(await Effect.runPromise(manager.cleanupSession("sesn_1", threadControl("sesn_1")))).toEqual({ ok: true, sessionId: "sesn_1", cleaned: false });
+      expect(await Effect.runPromise(manager.cleanupSession("sesn_1", cleanupControl("sesn_1")))).toEqual({ ok: true, sessionId: "sesn_1", cleaned: false });
       threadLoop.runs[1]?.release();
     });
   });
@@ -3705,7 +3727,7 @@ describe("SessionManager", () => {
       await waitForCrashRuns(threadLoop, 2);
       expect(threadLoop.runs[1]?.sessionId).toBe("replacement_fail");
       expect(threadLoop.runs[0]?.session.state.contextManager.messages()).toEqual([]);
-      expect(await Effect.runPromise(manager.cleanupSession("sesn_fail", threadControl("sesn_fail")))).toEqual({ ok: true, sessionId: "sesn_fail", cleaned: false });
+      expect(await Effect.runPromise(manager.cleanupSession("sesn_fail", cleanupControl("sesn_fail")))).toEqual({ ok: true, sessionId: "sesn_fail", cleaned: false });
     });
   });
 
@@ -3790,7 +3812,7 @@ describe("SessionManager", () => {
         reason: "local_session_capacity_exceeded",
       });
       expect(await Effect.runPromise(
-        manager.cleanupSession("sesn_closeout_fence", threadControl("sesn_closeout_fence")),
+        manager.cleanupSession("sesn_closeout_fence", cleanupControl("sesn_closeout_fence")),
       )).toEqual({
         ok: false,
         sessionId: "sesn_closeout_fence",
@@ -4126,7 +4148,7 @@ describe("SessionManager", () => {
       let interruptSettled = false;
       const interruptCommand = {
         ...threadControl("sesn_closeout_interrupt", "rin_closeout_interrupt"),
-        sequenceTo: 1,
+        inputOrder: 1,
       };
       const interrupt = Effect.runPromise(manager.interruptControl(
         "sesn_closeout_interrupt",
@@ -4267,7 +4289,7 @@ describe("SessionManager", () => {
       });
       expectNoHostileFragments(first);
       expectNoHostileFragments(replacement);
-      expectNoHostileFragments(await Effect.runPromise(manager.cleanupSession("sesn_reject", threadControl("sesn_reject"))));
+      expectNoHostileFragments(await Effect.runPromise(manager.cleanupSession("sesn_reject", cleanupControl("sesn_reject"))));
       await waitForCrashRuns(threadLoop, 2);
     });
   });
@@ -4335,7 +4357,7 @@ describe("SessionManager", () => {
         const joined = Effect.runPromise(manager.startTestRunThroughAcceptedInput(`replacement_${reason}`));
         await new Promise((resolve) => setTimeout(resolve, 5));
         expect(threadLoop.runs).toHaveLength(2);
-        expect(await Effect.runPromise(manager.cleanupSession(`old_${reason}`, threadControl(`old_${reason}`)))).toEqual({
+        expect(await Effect.runPromise(manager.cleanupSession(`old_${reason}`, cleanupControl(`old_${reason}`)))).toEqual({
           ok: true,
           sessionId: `old_${reason}`,
           cleaned: false,

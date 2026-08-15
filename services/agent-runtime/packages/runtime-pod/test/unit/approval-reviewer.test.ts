@@ -4,7 +4,7 @@ import type { RuntimeMessage, SessionEvent, SessionEventWriterAppendResult } fro
 import type { RuntimeApprovalReviewRequest, RuntimeApprovalReviewResult } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
 import { acceptedInputCreates } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadAddressState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { createRuntimeApprovalReviewer as createEffectRuntimeApprovalReviewer } from "../../src/approval-reviewer.js";
@@ -142,7 +142,7 @@ describe("Runtime approval reviewer", () => {
     expect(threadCreator.creations[0]).toMatchObject({
       reviewerThreadId: input.sessionThreadId,
       isTrunk: true,
-      threadContextPrefixJson: "",
+      ensureOperationId: expect.stringContaining("aprv_ensure"),
     });
     const promptPart = input.promptItems[0]?.parts[0];
     expect(input.thread).toMatchObject({
@@ -464,12 +464,9 @@ describe("Runtime approval reviewer", () => {
     if (sidecarCreation === undefined) {
       throw new Error("expected a sidecar creation");
     }
-    expect(JSON.parse(sidecarCreation.threadContextPrefixJson)).toMatchObject({
-      review_id: sidecarCreation.reviewId,
-      source_parent_thread_id: "thrd_parent",
-      parent_boundary_event_id: "sevt_request_start_1",
-      runtime_messages_snapshot: [assistantDecision("sesn_1", "allow", "safe")],
-    });
+    if (sidecarCreation.reviewerThreadId === undefined) {
+      throw new Error("expected a Bridge-owned sidecar thread identity");
+    }
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation.reviewerThreadId);
     expect(promptJSON(sidecarInput).parent_transcript_feed).toEqual([expect.objectContaining({ text: "second" })]);
     expect(promptJSON(sidecarInput).parent_transcript_feed_note).toBe(
@@ -660,12 +657,6 @@ describe("Runtime approval reviewer", () => {
     await reviewer(validReviewRequest({ approvalReviewerManager, targetModelToolCallId: "tool_call_sidecar", parentTranscript: { generation: 1, messages: [parent] } }));
 
     const sidecarCreation = threadCreator.creations.find((creation) => !creation.isTrunk);
-    expect(JSON.parse(sidecarCreation?.threadContextPrefixJson ?? "{}")).toMatchObject({
-      review_id: sidecarCreation?.reviewId,
-      source_parent_thread_id: "thrd_parent",
-      parent_boundary_event_id: "sevt_request_start_1",
-      runtime_messages_snapshot: [],
-    });
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation?.reviewerThreadId);
     expect(promptJSON(sidecarInput).parent_transcript_feed).toEqual([expect.objectContaining({ text: "full parent" })]);
     expect(promptJSON(sidecarInput).parent_transcript_feed_note).toBe(
@@ -1144,7 +1135,8 @@ describe("Runtime approval reviewer", () => {
     expect(second.reviewId).toBe(first.reviewId);
     expect(second.runtimeInputId).toBe(first.runtimeInputId);
     expect(second.sessionThreadId).not.toBe(first.sessionThreadId);
-    expect(second.eventIds).not.toEqual(first.eventIds);
+    expect(first.inputOrder).toBe(0);
+    expect(second.inputOrder).toBe(0);
     expect(second.promptItems).toEqual(first.promptItems);
     expect(host.decisions).toHaveLength(2);
   });
@@ -1750,8 +1742,8 @@ describe("Runtime approval reviewer", () => {
 
 class RecordingReviewerHost {
   readonly inputs: RuntimeAcceptedInputState[] = [];
-  readonly waits: RuntimeThreadControlState[] = [];
-  readonly inspections: RuntimeThreadControlState[] = [];
+  readonly waits: RuntimeThreadAddressState[] = [];
+  readonly inspections: RuntimeThreadAddressState[] = [];
   readonly decisions: Array<Extract<SessionEvent, { readonly type: "approval_review.decision" }>> = [];
   readonly failures: Array<Extract<SessionEvent, { readonly type: "approval_review.failure" }>> = [];
   readonly decisionCommands: RuntimeAcceptedInputState[] = [];
@@ -1775,11 +1767,11 @@ class RecordingReviewerHost {
       readonly failureGate?: (() => Promise<void>) | undefined;
       readonly steps?: string[];
       readonly waitOk?: boolean;
-      readonly waitTimedOut?: boolean | ((command: RuntimeThreadControlState, timeoutMs: number | undefined) => boolean);
+      readonly waitTimedOut?: boolean | ((command: RuntimeThreadAddressState, timeoutMs: number | undefined) => boolean);
       readonly inspectObserved?: boolean;
       readonly throwAt?: "preload" | "wait" | "inspect";
-      readonly waitGate?: ((command: RuntimeThreadControlState) => Promise<void>) | undefined;
-      readonly interruptGate?: ((command: RuntimeThreadControlState) => Promise<void>) | undefined;
+      readonly waitGate?: ((command: RuntimeThreadAddressState) => Promise<void>) | undefined;
+      readonly interruptGate?: ((command: RuntimeThreadAddressState) => Promise<void>) | undefined;
       readonly interruptOk?: boolean;
       readonly markThreadClosedOk?: boolean;
     } = {},
@@ -1823,7 +1815,7 @@ class RecordingReviewerHost {
   readonly reviewerReleases: SessionManager.ReviewerExecutionToken[] = [];
 
   async evictReviewerExecution(
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
     token: SessionManager.ReviewerExecutionToken,
   ): Promise<SessionManager.ReviewerExecutionControlResult> {
     this.reviewerEvictions.push(token);
@@ -1837,7 +1829,7 @@ class RecordingReviewerHost {
   }
 
   async interruptReviewerExecution(
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
     token: SessionManager.ReviewerExecutionToken,
   ): Promise<SessionManager.ReviewerExecutionControlResult> {
     this.reviewerInterruptions.push(token);
@@ -1861,7 +1853,7 @@ class RecordingReviewerHost {
   }
 
   async releaseReviewerExecution(
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
     token: SessionManager.ReviewerExecutionToken,
   ): Promise<SessionManager.ReviewerExecutionControlResult> {
     this.reviewerReleases.push(token);
@@ -1876,7 +1868,7 @@ class RecordingReviewerHost {
   }
 
   async waitReviewerExecution(
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
     token: SessionManager.ReviewerExecutionToken,
     timeoutMs: number | undefined,
     abortSignal?: AbortSignal,
@@ -1913,7 +1905,7 @@ class RecordingReviewerHost {
   }
 
   async inspectReviewerExecution(
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
     _token: SessionManager.ReviewerExecutionToken,
   ): Promise<SessionManager.ReviewerExecutionSnapshotResult> {
     const result = await this.inspectThread(command);
@@ -1935,7 +1927,7 @@ class RecordingReviewerHost {
     };
   }
 
-  async markThreadClosed(command: RuntimeThreadControlState): Promise<SessionManager.ThreadLifecycleResult> {
+  async markThreadClosed(command: RuntimeThreadAddressState): Promise<SessionManager.ThreadLifecycleResult> {
     this.closedThreads.push(command.sessionThreadId);
     if (this.options.markThreadClosedOk === false) {
       return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "thread_busy" };
@@ -1947,7 +1939,7 @@ class RecordingReviewerHost {
     throw new Error("markThreadActive must not be used by approval reviewer");
   }
 
-  async waitThread(command: RuntimeThreadControlState, timeoutMs?: number): Promise<SessionManager.ThreadWaitResult> {
+  async waitThread(command: RuntimeThreadAddressState, timeoutMs?: number): Promise<SessionManager.ThreadWaitResult> {
     this.waits.push(command);
     if (this.options.throwAt === "wait") {
       throw new Error("secret wait failure");
@@ -1962,7 +1954,7 @@ class RecordingReviewerHost {
     return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, observed: true, status: "idle", timedOut };
   }
 
-  async inspectThread(command: RuntimeThreadControlState): Promise<SessionManager.ThreadSnapshotResult> {
+  async inspectThread(command: RuntimeThreadAddressState): Promise<SessionManager.ThreadSnapshotResult> {
     this.inspections.push(command);
     if (this.options.throwAt === "inspect") {
       throw new Error("secret inspect failure");
@@ -2063,8 +2055,11 @@ class RecordingReviewerThreadCreator {
 
   async createApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
     this.steps.push("create-thread");
-    this.creations.push(input);
-    return { ok: true as const };
+    const reviewerThreadId = input.isTrunk
+      ? (input.ensureOperationId ?? "aprv_ensure_unknown").replace("aprv_ensure", "thrd_aprv")
+      : `thrd_aprv_sidecar_${input.reviewId}`;
+    this.creations.push({ ...input, reviewerThreadId });
+    return { ok: true as const, reviewerThreadId, runtimeInputId: `rin_${input.reviewId}` };
   }
 
   async closeApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {

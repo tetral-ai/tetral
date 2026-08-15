@@ -12,11 +12,11 @@ import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "../../src/con
 import type {
   RuntimeControlInputCommitResult,
   RuntimeControlInputDeclaration,
-  RuntimeThreadControlState,
+  RuntimeControlInputState,
 } from "../../src/thread-loop/thread-state.js";
 
 export function buildRuntimeControlCommitResult(
-  scope: RuntimeThreadControlState,
+  scope: RuntimeControlInputState & { readonly inputOrder?: number },
   inputKind: "interrupt_control" | "tool_confirmation",
   declaration: RuntimeControlInputDeclaration,
 ): RuntimeControlInputCommitResult {
@@ -29,12 +29,12 @@ export function buildRuntimeControlCommitResult(
       sourceKind: inputKind,
       operationId: scope.runtimeInputId,
       declarationDigest: "digest_test",
-      events: scope.eventIds.map((eventId, index) => ({
+      events: [{
         sessionThreadId: scope.sessionThreadId,
-        eventId,
-        eventSequence: scope.sequenceFrom + index,
+        eventId: `sevt_commit_${scope.runtimeInputId}`,
+        eventSequence: scope.inputOrder ?? 1,
         disposition: "existing" as const,
-      })),
+      }],
       messages: declaration.messageCreates.map((create, index) =>
         runtimeControlMessageStamp(scope, create, index, createdAt)
       ),
@@ -47,7 +47,7 @@ export function buildRuntimeControlCommitResult(
 }
 
 function runtimeControlMessageStamp(
-  scope: RuntimeThreadControlState,
+  scope: RuntimeControlInputState & { readonly inputOrder?: number },
   create: RuntimeMessageCreate,
   index: number,
   createdAt: string,
@@ -56,7 +56,7 @@ function runtimeControlMessageStamp(
   return {
     sessionThreadId: scope.sessionThreadId,
     messageId,
-    messageSequence: scope.sequenceTo + index + 1,
+    messageSequence: (scope.inputOrder ?? 1) + index + 1,
     createdAt,
     updatedAt: "",
     disposition: "created" as const,

@@ -22,7 +22,7 @@ import type { RuntimeModelRef } from "@tetral/agent-runtime-core/src/thread-loop
 import type { RuntimeApprovalReviewer, RuntimeApprovalReviewRequest, RuntimeApprovalReviewResult } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { RuntimeMessageSchema, normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeJsonValue, RuntimeMessage, SessionEvent, SessionEventWriterAppendResult, SessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadAddressState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { ReviewerExecutionToken } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { ApprovalReviewRiskLevel, ApprovalReviewUserAuthorization, ApprovalReviewerOutcome } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { Effect, Fiber } from "effect";
@@ -60,7 +60,7 @@ export interface RuntimeApprovalReviewerThreadCreator {
   readonly createApprovalReviewerThread: (
     input: ApprovalReviewerThreadCreation,
   ) => Promise<
-    | { readonly ok: true }
+    | { readonly ok: true; readonly reviewerThreadId?: string; readonly runtimeInputId?: string }
     | { readonly ok: false; readonly message: string }
   >;
   /** Durably closes a sidecar before the corresponding hot thread is released. */
@@ -76,14 +76,18 @@ export interface RuntimeApprovalReviewerThreadCreator {
  * Describes one durable reviewer thread operation with the parent request scope
  * and reviewer identity needed by the Bridge adapter. A trunk uses the manager's
  * fresh hot-lifetime id and starts without a context prefix; a sidecar uses its
- * deterministic review id and carries a serialized parent transcript snapshot.
+ * deterministic review id while Bridge selects the durable parent context.
  */
 export interface ApprovalReviewerThreadCreation {
   readonly request: RuntimeApprovalReviewRequest;
   readonly reviewId: string;
-  readonly reviewerThreadId: string;
   readonly isTrunk: boolean;
-  readonly threadContextPrefixJson: string;
+  readonly ensureOperationId?: string;
+  readonly reviewerThreadId?: string;
+}
+
+export interface ApprovalReviewerThreadClose extends ApprovalReviewerThreadCreation {
+  readonly reviewerThreadId: string;
 }
 
 /**
@@ -136,15 +140,14 @@ export function createRuntimeApprovalReviewer(
     if (host === undefined) {
       return persistenceUncertainFailure("approval reviewer is unavailable");
     }
-    const trunkThreadId = manager.trunkThreadId(createId);
+    const trunkEnsureOperationId = manager.trunkEnsureOperationId(createId);
     const trunkCreation: ApprovalReviewerThreadCreation = {
       request,
       reviewId,
-      reviewerThreadId: trunkThreadId,
       isTrunk: true,
-      threadContextPrefixJson: "",
+      ensureOperationId: trunkEnsureOperationId,
     };
-    let ensured: { readonly ok: true } | { readonly ok: false; readonly message: string };
+    let ensured: { readonly ok: true; readonly reviewerThreadId?: string; readonly runtimeInputId?: string } | { readonly ok: false; readonly message: string };
     ensured = yield* Effect.promise(() => options.threadCreator.createApprovalReviewerThread(trunkCreation)).pipe(
       Effect.catchCause(() => Effect.succeed({ ok: false as const, message: "approval reviewer trunk creation failed" })),
     );
@@ -152,46 +155,63 @@ export function createRuntimeApprovalReviewer(
       return persistenceUncertainFailure(ensured.message);
     }
 
+    if (
+      ensured.reviewerThreadId === undefined ||
+      ensured.runtimeInputId === undefined ||
+      !manager.installTrunkThreadId(ensured.reviewerThreadId)
+    ) {
+      return persistenceUncertainFailure("approval reviewer trunk identity conflicts");
+    }
+    const trunkThreadId = ensured.reviewerThreadId;
+
     const lease = manager.beginReview(reviewId);
-    const trunkSnapshot = manager.trunkSnapshot();
     const currentParentBoundaryEventId = request.parentBoundaryEventId;
     if (currentParentBoundaryEventId.length === 0) {
       lease.release();
       return persistenceUncertainFailure("approval reviewer parent transcript has no durable boundary");
     }
-    const executionThreadId = lease.kind === "trunk"
-      ? trunkThreadId
-      : stableId("thrd_aprv_sidecar", request.workspaceId, request.sessionId, request.sessionThreadId, reviewId);
-    const executionCreation: ApprovalReviewerThreadCreation = lease.kind === "trunk"
-      ? trunkCreation
-      : {
-          request,
-          reviewId,
-          reviewerThreadId: executionThreadId,
-          isTrunk: false,
-          threadContextPrefixJson: JSON.stringify({
-            source_parent_thread_id: request.sessionThreadId,
-            parent_boundary_event_id: trunkSnapshot?.parentBoundaryEventId ?? currentParentBoundaryEventId,
-            review_id: reviewId,
-            fork_turns: "all",
-            runtime_messages_snapshot: trunkSnapshot?.messages ?? [],
-          }),
-        };
-    const feed = lease.kind === "sidecar" && trunkSnapshot === undefined
-      ? { reanchored: true, messages: [...request.parentTranscript.messages] }
-      : manager.parentTranscriptFeed(request.parentTranscript);
-    const control = reviewThreadControl(request, executionThreadId, reviewId);
+    let executionThreadId = trunkThreadId;
+    let runtimeInputId = ensured.runtimeInputId;
+    let executionCreation: ApprovalReviewerThreadCreation = {
+      ...trunkCreation,
+      reviewerThreadId: trunkThreadId,
+    };
+    let sidecarCreated = false;
+    if (lease.kind === "sidecar") {
+      const sidecarRequest: ApprovalReviewerThreadCreation = { request, reviewId, isTrunk: false };
+      const created = yield* Effect.promise(() => options.threadCreator.createApprovalReviewerThread(sidecarRequest)).pipe(
+        Effect.catchCause(() => Effect.succeed(undefined)),
+      );
+      if (
+        created === undefined ||
+        !created.ok ||
+        created.reviewerThreadId === undefined ||
+        created.runtimeInputId === undefined
+      ) {
+        lease.release();
+        return persistenceUncertainFailure(created !== undefined && !created.ok
+          ? created.message
+          : "approval reviewer sidecar creation failed");
+      }
+      executionThreadId = created.reviewerThreadId;
+      runtimeInputId = created.runtimeInputId;
+      executionCreation = { ...sidecarRequest, reviewerThreadId: executionThreadId };
+      sidecarCreated = true;
+    }
+    const feed = manager.parentTranscriptFeed(request.parentTranscript);
+    let control = reviewThreadControl(request, executionThreadId);
     const input = approvalReviewInput(
       request,
       control,
+      0,
       reviewId,
+      runtimeInputId,
       reviewerModel,
       assets,
       approvalReviewCreatedAt(request, now),
       feed.messages,
       feed.reanchored,
     );
-    let sidecarCreated = false;
     let requestQuiescent = false;
     let releaseInFinally = true;
     let resourcesReleased = false;
@@ -328,15 +348,6 @@ export function createRuntimeApprovalReviewer(
     });
 
     const owner = Effect.gen(function* () {
-      if (lease.kind === "sidecar") {
-        const created = yield* Effect.promise(() => options.threadCreator.createApprovalReviewerThread(executionCreation)).pipe(
-          Effect.catchCause(() => Effect.succeed(undefined)),
-        );
-        if (created === undefined || !created.ok) {
-          return persistenceUncertainFailure(created?.message ?? "approval reviewer sidecar creation failed");
-        }
-        sidecarCreated = true;
-      }
       if (lease.raceState() === "cancellation_won") {
         yield* settleCancellation();
         return { type: "failed" as const, message: "approval reviewer was cancelled" };
@@ -440,11 +451,7 @@ export function createRuntimeApprovalReviewer(
         return { type: "settlement_failed" as const, error: committed.error };
       }
       if (lease.kind === "trunk") {
-        manager.completeTrunkReview(
-          request.parentTranscript,
-          snapshot.messages,
-          currentParentBoundaryEventId,
-        );
+        manager.completeTrunkReview(request.parentTranscript);
         const released = yield* releaseReviewerExecutionEffect(host, control, executionToken);
         if (!released) {
           manager.discardTrunk(executionThreadId);
@@ -499,26 +506,23 @@ function approvalReviewCreatedAt(request: RuntimeApprovalReviewRequest, now: () 
     ?? now();
 }
 
-function reviewThreadControl(request: RuntimeApprovalReviewRequest, reviewerThreadId: string, reviewId: string): RuntimeThreadControlState {
+function reviewThreadControl(request: RuntimeApprovalReviewRequest, reviewerThreadId: string): RuntimeThreadAddressState {
   return {
-    requestId: stableId("req", "approval-review", reviewId),
     workspaceId: request.workspaceId,
     sessionId: request.sessionId,
     sessionThreadId: reviewerThreadId,
     bindingId: request.bindingId,
     bindingGeneration: request.bindingGeneration,
     targetPodUid: request.targetPodUid,
-    runtimeInputId: stableId("rin", "approval-review", reviewId),
-    eventIds: [stableId("sevt", "approval-review", reviewId, reviewerThreadId)],
-    sequenceFrom: 0,
-    sequenceTo: 0,
   };
 }
 
 function approvalReviewInput(
   request: RuntimeApprovalReviewRequest,
-  control: RuntimeThreadControlState,
+  control: RuntimeThreadAddressState,
+  inputOrder: number,
   reviewId: string,
+  runtimeInputId: string,
   reviewerModel: RuntimeModelRef,
   assets: ApprovalReviewerAssets,
   createdAt: string,
@@ -526,7 +530,14 @@ function approvalReviewInput(
   parentTranscriptReanchored: boolean,
 ): Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }> {
   return {
-    ...control,
+    workspaceId: control.workspaceId,
+    sessionId: control.sessionId,
+    sessionThreadId: control.sessionThreadId,
+    bindingId: control.bindingId,
+    bindingGeneration: control.bindingGeneration,
+    targetPodUid: control.targetPodUid,
+    runtimeInputId,
+    inputOrder,
     kind: "approval_review",
     reviewId,
     parentThreadId: request.sessionThreadId,
@@ -752,7 +763,7 @@ function commitReviewerOutcomeEffect(
 
 function quiesceReviewerRequestEffect(
   host: RuntimeSubAgentRunHost,
-  control: RuntimeThreadControlState,
+  control: RuntimeThreadAddressState,
   token: ReviewerExecutionToken,
 ): Effect.Effect<boolean> {
   return Effect.promise(async () => {
@@ -767,7 +778,7 @@ function quiesceReviewerRequestEffect(
 
 function evictReviewerExecutionEffect(
   host: RuntimeSubAgentRunHost,
-  control: RuntimeThreadControlState,
+  control: RuntimeThreadAddressState,
   token: ReviewerExecutionToken,
 ): Effect.Effect<boolean> {
   return Effect.promise(async () => {
@@ -778,7 +789,7 @@ function evictReviewerExecutionEffect(
 
 function releaseReviewerExecutionEffect(
   host: RuntimeSubAgentRunHost,
-  control: RuntimeThreadControlState,
+  control: RuntimeThreadAddressState,
   token: ReviewerExecutionToken,
 ): Effect.Effect<boolean> {
   return Effect.promise(async () => {
@@ -791,7 +802,7 @@ function closeApprovalReviewerSidecarEffect(
   host: RuntimeSubAgentRunHost,
   threadCreator: RuntimeApprovalReviewerThreadCreator,
   creation: ApprovalReviewerThreadCreation,
-  control: RuntimeThreadControlState,
+  control: RuntimeThreadAddressState,
   token: ReviewerExecutionToken | undefined,
   logger: RuntimePodLogger | undefined,
   request: RuntimeApprovalReviewRequest,

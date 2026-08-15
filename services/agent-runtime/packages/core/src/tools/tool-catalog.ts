@@ -586,7 +586,7 @@ function subAgentTool(name: Extract<ToolRoute, { readonly kind: "subagent" }>["o
 
 function subAgentInputSchema(name: Extract<ToolRoute, { readonly kind: "subagent" }>["operation"]): unknown {
   const parameter = (field: string): string => builtinToolParameterDescription(name, field);
-  const taskName = (): unknown => ({ type: "string", minLength: 1, description: parameter("task_name") });
+  const taskName = (): unknown => ({ type: "string", minLength: 1, maxLength: 128, description: parameter("task_name") });
   switch (name) {
     case "spawn_agent":
       return {
@@ -597,7 +597,7 @@ function subAgentInputSchema(name: Extract<ToolRoute, { readonly kind: "subagent
           prompt: { type: "string", minLength: 1, description: parameter("prompt") },
           agent_type: { enum: ["general", "research", "worker"], description: parameter("agent_type") },
           fork_turns: {
-            anyOf: [{ enum: ["none", "all"] }, { type: "string", pattern: "^[1-9][0-9]*$" }],
+            anyOf: [{ enum: ["none", "all"] }, { type: "string", pattern: "^(?:[1-9][0-9]{0,2}|1000)$" }],
             description: parameter("fork_turns"),
           },
         },

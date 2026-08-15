@@ -27,13 +27,18 @@ const (
 	AgentRuntimeBridgeService_SettleToolResult_FullMethodName              = "/tetral.bridge.v1.AgentRuntimeBridgeService/SettleToolResult"
 	AgentRuntimeBridgeService_WriteRequestEnd_FullMethodName               = "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteRequestEnd"
 	AgentRuntimeBridgeService_FinishIdle_FullMethodName                    = "/tetral.bridge.v1.AgentRuntimeBridgeService/FinishIdle"
-	AgentRuntimeBridgeService_CreateChildThread_FullMethodName             = "/tetral.bridge.v1.AgentRuntimeBridgeService/CreateChildThread"
+	AgentRuntimeBridgeService_CreateSubagentThread_FullMethodName          = "/tetral.bridge.v1.AgentRuntimeBridgeService/CreateSubagentThread"
+	AgentRuntimeBridgeService_EnsureApprovalReviewerTrunk_FullMethodName   = "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerTrunk"
+	AgentRuntimeBridgeService_EnsureApprovalReviewerSidecar_FullMethodName = "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerSidecar"
+	AgentRuntimeBridgeService_AdmitApprovalReviewInput_FullMethodName      = "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitApprovalReviewInput"
 	AgentRuntimeBridgeService_ResolveChildThread_FullMethodName            = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveChildThread"
 	AgentRuntimeBridgeService_ListChildThreads_FullMethodName              = "/tetral.bridge.v1.AgentRuntimeBridgeService/ListChildThreads"
-	AgentRuntimeBridgeService_ResolveInterAgentDelivery_FullMethodName     = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveInterAgentDelivery"
+	AgentRuntimeBridgeService_DeliverInterAgentMail_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/DeliverInterAgentMail"
+	AgentRuntimeBridgeService_ReadAgentMail_FullMethodName                 = "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadAgentMail"
 	AgentRuntimeBridgeService_AdmitChildInterrupt_FullMethodName           = "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitChildInterrupt"
 	AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName           = "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitChildInterrupt"
-	AgentRuntimeBridgeService_MarkChildThreadClosed_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadClosed"
+	AgentRuntimeBridgeService_CloseChildControl_FullMethodName             = "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseChildControl"
+	AgentRuntimeBridgeService_CloseApprovalReviewer_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseApprovalReviewer"
 	AgentRuntimeBridgeService_MarkChildThreadActive_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadActive"
 	AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName        = "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution"
 	AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution"
@@ -64,13 +69,18 @@ type AgentRuntimeBridgeServiceClient interface {
 	SettleToolResult(ctx context.Context, in *SettleToolResultRequest, opts ...grpc.CallOption) (*SettleToolResultResponse, error)
 	WriteRequestEnd(ctx context.Context, in *WriteRequestEndRequest, opts ...grpc.CallOption) (*WriteRequestEndResponse, error)
 	FinishIdle(ctx context.Context, in *FinishIdleRequest, opts ...grpc.CallOption) (*FinishIdleResponse, error)
-	CreateChildThread(ctx context.Context, in *CreateChildThreadRequest, opts ...grpc.CallOption) (*CreateChildThreadResponse, error)
+	CreateSubagentThread(ctx context.Context, in *CreateSubagentThreadRequest, opts ...grpc.CallOption) (*CreateSubagentThreadResponse, error)
+	EnsureApprovalReviewerTrunk(ctx context.Context, in *EnsureApprovalReviewerTrunkRequest, opts ...grpc.CallOption) (*EnsureApprovalReviewerTrunkResponse, error)
+	EnsureApprovalReviewerSidecar(ctx context.Context, in *EnsureApprovalReviewerSidecarRequest, opts ...grpc.CallOption) (*EnsureApprovalReviewerSidecarResponse, error)
+	AdmitApprovalReviewInput(ctx context.Context, in *AdmitApprovalReviewInputRequest, opts ...grpc.CallOption) (*AdmitApprovalReviewInputResponse, error)
 	ResolveChildThread(ctx context.Context, in *ResolveChildThreadRequest, opts ...grpc.CallOption) (*ResolveChildThreadResponse, error)
 	ListChildThreads(ctx context.Context, in *ListChildThreadsRequest, opts ...grpc.CallOption) (*ListChildThreadsResponse, error)
-	ResolveInterAgentDelivery(ctx context.Context, in *ResolveInterAgentDeliveryRequest, opts ...grpc.CallOption) (*ResolveInterAgentDeliveryResponse, error)
+	DeliverInterAgentMail(ctx context.Context, in *DeliverInterAgentMailRequest, opts ...grpc.CallOption) (*DeliverInterAgentMailResponse, error)
+	ReadAgentMail(ctx context.Context, in *ReadAgentMailRequest, opts ...grpc.CallOption) (*ReadAgentMailResponse, error)
 	AdmitChildInterrupt(ctx context.Context, in *AdmitChildInterruptRequest, opts ...grpc.CallOption) (*AdmitChildInterruptResponse, error)
 	AwaitChildInterrupt(ctx context.Context, in *AwaitChildInterruptRequest, opts ...grpc.CallOption) (*AwaitChildInterruptResponse, error)
-	MarkChildThreadClosed(ctx context.Context, in *MarkChildThreadClosedRequest, opts ...grpc.CallOption) (*MarkChildThreadClosedResponse, error)
+	CloseChildControl(ctx context.Context, in *CloseChildControlRequest, opts ...grpc.CallOption) (*CloseChildControlResponse, error)
+	CloseApprovalReviewer(ctx context.Context, in *CloseApprovalReviewerRequest, opts ...grpc.CallOption) (*CloseApprovalReviewerResponse, error)
 	MarkChildThreadActive(ctx context.Context, in *MarkChildThreadActiveRequest, opts ...grpc.CallOption) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(ctx context.Context, in *AcceptSandboxExecutionRequest, opts ...grpc.CallOption) (*AcceptSandboxExecutionResponse, error)
 	AwaitSandboxExecution(ctx context.Context, in *AwaitSandboxExecutionRequest, opts ...grpc.CallOption) (*AwaitSandboxExecutionResponse, error)
@@ -177,10 +187,40 @@ func (c *agentRuntimeBridgeServiceClient) FinishIdle(ctx context.Context, in *Fi
 	return out, nil
 }
 
-func (c *agentRuntimeBridgeServiceClient) CreateChildThread(ctx context.Context, in *CreateChildThreadRequest, opts ...grpc.CallOption) (*CreateChildThreadResponse, error) {
+func (c *agentRuntimeBridgeServiceClient) CreateSubagentThread(ctx context.Context, in *CreateSubagentThreadRequest, opts ...grpc.CallOption) (*CreateSubagentThreadResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CreateChildThreadResponse)
-	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_CreateChildThread_FullMethodName, in, out, cOpts...)
+	out := new(CreateSubagentThreadResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_CreateSubagentThread_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) EnsureApprovalReviewerTrunk(ctx context.Context, in *EnsureApprovalReviewerTrunkRequest, opts ...grpc.CallOption) (*EnsureApprovalReviewerTrunkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EnsureApprovalReviewerTrunkResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_EnsureApprovalReviewerTrunk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) EnsureApprovalReviewerSidecar(ctx context.Context, in *EnsureApprovalReviewerSidecarRequest, opts ...grpc.CallOption) (*EnsureApprovalReviewerSidecarResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EnsureApprovalReviewerSidecarResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_EnsureApprovalReviewerSidecar_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) AdmitApprovalReviewInput(ctx context.Context, in *AdmitApprovalReviewInputRequest, opts ...grpc.CallOption) (*AdmitApprovalReviewInputResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdmitApprovalReviewInputResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AdmitApprovalReviewInput_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -207,10 +247,20 @@ func (c *agentRuntimeBridgeServiceClient) ListChildThreads(ctx context.Context, 
 	return out, nil
 }
 
-func (c *agentRuntimeBridgeServiceClient) ResolveInterAgentDelivery(ctx context.Context, in *ResolveInterAgentDeliveryRequest, opts ...grpc.CallOption) (*ResolveInterAgentDeliveryResponse, error) {
+func (c *agentRuntimeBridgeServiceClient) DeliverInterAgentMail(ctx context.Context, in *DeliverInterAgentMailRequest, opts ...grpc.CallOption) (*DeliverInterAgentMailResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ResolveInterAgentDeliveryResponse)
-	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_ResolveInterAgentDelivery_FullMethodName, in, out, cOpts...)
+	out := new(DeliverInterAgentMailResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_DeliverInterAgentMail_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) ReadAgentMail(ctx context.Context, in *ReadAgentMailRequest, opts ...grpc.CallOption) (*ReadAgentMailResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadAgentMailResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_ReadAgentMail_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -237,10 +287,20 @@ func (c *agentRuntimeBridgeServiceClient) AwaitChildInterrupt(ctx context.Contex
 	return out, nil
 }
 
-func (c *agentRuntimeBridgeServiceClient) MarkChildThreadClosed(ctx context.Context, in *MarkChildThreadClosedRequest, opts ...grpc.CallOption) (*MarkChildThreadClosedResponse, error) {
+func (c *agentRuntimeBridgeServiceClient) CloseChildControl(ctx context.Context, in *CloseChildControlRequest, opts ...grpc.CallOption) (*CloseChildControlResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(MarkChildThreadClosedResponse)
-	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_MarkChildThreadClosed_FullMethodName, in, out, cOpts...)
+	out := new(CloseChildControlResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_CloseChildControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) CloseApprovalReviewer(ctx context.Context, in *CloseApprovalReviewerRequest, opts ...grpc.CallOption) (*CloseApprovalReviewerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseApprovalReviewerResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_CloseApprovalReviewer_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -419,13 +479,18 @@ type AgentRuntimeBridgeServiceServer interface {
 	SettleToolResult(context.Context, *SettleToolResultRequest) (*SettleToolResultResponse, error)
 	WriteRequestEnd(context.Context, *WriteRequestEndRequest) (*WriteRequestEndResponse, error)
 	FinishIdle(context.Context, *FinishIdleRequest) (*FinishIdleResponse, error)
-	CreateChildThread(context.Context, *CreateChildThreadRequest) (*CreateChildThreadResponse, error)
+	CreateSubagentThread(context.Context, *CreateSubagentThreadRequest) (*CreateSubagentThreadResponse, error)
+	EnsureApprovalReviewerTrunk(context.Context, *EnsureApprovalReviewerTrunkRequest) (*EnsureApprovalReviewerTrunkResponse, error)
+	EnsureApprovalReviewerSidecar(context.Context, *EnsureApprovalReviewerSidecarRequest) (*EnsureApprovalReviewerSidecarResponse, error)
+	AdmitApprovalReviewInput(context.Context, *AdmitApprovalReviewInputRequest) (*AdmitApprovalReviewInputResponse, error)
 	ResolveChildThread(context.Context, *ResolveChildThreadRequest) (*ResolveChildThreadResponse, error)
 	ListChildThreads(context.Context, *ListChildThreadsRequest) (*ListChildThreadsResponse, error)
-	ResolveInterAgentDelivery(context.Context, *ResolveInterAgentDeliveryRequest) (*ResolveInterAgentDeliveryResponse, error)
+	DeliverInterAgentMail(context.Context, *DeliverInterAgentMailRequest) (*DeliverInterAgentMailResponse, error)
+	ReadAgentMail(context.Context, *ReadAgentMailRequest) (*ReadAgentMailResponse, error)
 	AdmitChildInterrupt(context.Context, *AdmitChildInterruptRequest) (*AdmitChildInterruptResponse, error)
 	AwaitChildInterrupt(context.Context, *AwaitChildInterruptRequest) (*AwaitChildInterruptResponse, error)
-	MarkChildThreadClosed(context.Context, *MarkChildThreadClosedRequest) (*MarkChildThreadClosedResponse, error)
+	CloseChildControl(context.Context, *CloseChildControlRequest) (*CloseChildControlResponse, error)
+	CloseApprovalReviewer(context.Context, *CloseApprovalReviewerRequest) (*CloseApprovalReviewerResponse, error)
 	MarkChildThreadActive(context.Context, *MarkChildThreadActiveRequest) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *AcceptSandboxExecutionRequest) (*AcceptSandboxExecutionResponse, error)
 	AwaitSandboxExecution(context.Context, *AwaitSandboxExecutionRequest) (*AwaitSandboxExecutionResponse, error)
@@ -476,8 +541,17 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) WriteRequestEnd(context.Cont
 func (UnimplementedAgentRuntimeBridgeServiceServer) FinishIdle(context.Context, *FinishIdleRequest) (*FinishIdleResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FinishIdle not implemented")
 }
-func (UnimplementedAgentRuntimeBridgeServiceServer) CreateChildThread(context.Context, *CreateChildThreadRequest) (*CreateChildThreadResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method CreateChildThread not implemented")
+func (UnimplementedAgentRuntimeBridgeServiceServer) CreateSubagentThread(context.Context, *CreateSubagentThreadRequest) (*CreateSubagentThreadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateSubagentThread not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) EnsureApprovalReviewerTrunk(context.Context, *EnsureApprovalReviewerTrunkRequest) (*EnsureApprovalReviewerTrunkResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EnsureApprovalReviewerTrunk not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) EnsureApprovalReviewerSidecar(context.Context, *EnsureApprovalReviewerSidecarRequest) (*EnsureApprovalReviewerSidecarResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EnsureApprovalReviewerSidecar not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) AdmitApprovalReviewInput(context.Context, *AdmitApprovalReviewInputRequest) (*AdmitApprovalReviewInputResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AdmitApprovalReviewInput not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) ResolveChildThread(context.Context, *ResolveChildThreadRequest) (*ResolveChildThreadResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveChildThread not implemented")
@@ -485,8 +559,11 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) ResolveChildThread(context.C
 func (UnimplementedAgentRuntimeBridgeServiceServer) ListChildThreads(context.Context, *ListChildThreadsRequest) (*ListChildThreadsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListChildThreads not implemented")
 }
-func (UnimplementedAgentRuntimeBridgeServiceServer) ResolveInterAgentDelivery(context.Context, *ResolveInterAgentDeliveryRequest) (*ResolveInterAgentDeliveryResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ResolveInterAgentDelivery not implemented")
+func (UnimplementedAgentRuntimeBridgeServiceServer) DeliverInterAgentMail(context.Context, *DeliverInterAgentMailRequest) (*DeliverInterAgentMailResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeliverInterAgentMail not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) ReadAgentMail(context.Context, *ReadAgentMailRequest) (*ReadAgentMailResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadAgentMail not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) AdmitChildInterrupt(context.Context, *AdmitChildInterruptRequest) (*AdmitChildInterruptResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AdmitChildInterrupt not implemented")
@@ -494,8 +571,11 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) AdmitChildInterrupt(context.
 func (UnimplementedAgentRuntimeBridgeServiceServer) AwaitChildInterrupt(context.Context, *AwaitChildInterruptRequest) (*AwaitChildInterruptResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AwaitChildInterrupt not implemented")
 }
-func (UnimplementedAgentRuntimeBridgeServiceServer) MarkChildThreadClosed(context.Context, *MarkChildThreadClosedRequest) (*MarkChildThreadClosedResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method MarkChildThreadClosed not implemented")
+func (UnimplementedAgentRuntimeBridgeServiceServer) CloseChildControl(context.Context, *CloseChildControlRequest) (*CloseChildControlResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CloseChildControl not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) CloseApprovalReviewer(context.Context, *CloseApprovalReviewerRequest) (*CloseApprovalReviewerResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CloseApprovalReviewer not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) MarkChildThreadActive(context.Context, *MarkChildThreadActiveRequest) (*MarkChildThreadActiveResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MarkChildThreadActive not implemented")
@@ -711,20 +791,74 @@ func _AgentRuntimeBridgeService_FinishIdle_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
-func _AgentRuntimeBridgeService_CreateChildThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateChildThreadRequest)
+func _AgentRuntimeBridgeService_CreateSubagentThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSubagentThreadRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AgentRuntimeBridgeServiceServer).CreateChildThread(ctx, in)
+		return srv.(AgentRuntimeBridgeServiceServer).CreateSubagentThread(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AgentRuntimeBridgeService_CreateChildThread_FullMethodName,
+		FullMethod: AgentRuntimeBridgeService_CreateSubagentThread_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimeBridgeServiceServer).CreateChildThread(ctx, req.(*CreateChildThreadRequest))
+		return srv.(AgentRuntimeBridgeServiceServer).CreateSubagentThread(ctx, req.(*CreateSubagentThreadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_EnsureApprovalReviewerTrunk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EnsureApprovalReviewerTrunkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).EnsureApprovalReviewerTrunk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_EnsureApprovalReviewerTrunk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).EnsureApprovalReviewerTrunk(ctx, req.(*EnsureApprovalReviewerTrunkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_EnsureApprovalReviewerSidecar_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EnsureApprovalReviewerSidecarRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).EnsureApprovalReviewerSidecar(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_EnsureApprovalReviewerSidecar_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).EnsureApprovalReviewerSidecar(ctx, req.(*EnsureApprovalReviewerSidecarRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_AdmitApprovalReviewInput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdmitApprovalReviewInputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitApprovalReviewInput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_AdmitApprovalReviewInput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitApprovalReviewInput(ctx, req.(*AdmitApprovalReviewInputRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -765,20 +899,38 @@ func _AgentRuntimeBridgeService_ListChildThreads_Handler(srv interface{}, ctx co
 	return interceptor(ctx, in, info, handler)
 }
 
-func _AgentRuntimeBridgeService_ResolveInterAgentDelivery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ResolveInterAgentDeliveryRequest)
+func _AgentRuntimeBridgeService_DeliverInterAgentMail_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeliverInterAgentMailRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AgentRuntimeBridgeServiceServer).ResolveInterAgentDelivery(ctx, in)
+		return srv.(AgentRuntimeBridgeServiceServer).DeliverInterAgentMail(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AgentRuntimeBridgeService_ResolveInterAgentDelivery_FullMethodName,
+		FullMethod: AgentRuntimeBridgeService_DeliverInterAgentMail_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimeBridgeServiceServer).ResolveInterAgentDelivery(ctx, req.(*ResolveInterAgentDeliveryRequest))
+		return srv.(AgentRuntimeBridgeServiceServer).DeliverInterAgentMail(ctx, req.(*DeliverInterAgentMailRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_ReadAgentMail_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadAgentMailRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).ReadAgentMail(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_ReadAgentMail_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).ReadAgentMail(ctx, req.(*ReadAgentMailRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -819,20 +971,38 @@ func _AgentRuntimeBridgeService_AwaitChildInterrupt_Handler(srv interface{}, ctx
 	return interceptor(ctx, in, info, handler)
 }
 
-func _AgentRuntimeBridgeService_MarkChildThreadClosed_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MarkChildThreadClosedRequest)
+func _AgentRuntimeBridgeService_CloseChildControl_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseChildControlRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AgentRuntimeBridgeServiceServer).MarkChildThreadClosed(ctx, in)
+		return srv.(AgentRuntimeBridgeServiceServer).CloseChildControl(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AgentRuntimeBridgeService_MarkChildThreadClosed_FullMethodName,
+		FullMethod: AgentRuntimeBridgeService_CloseChildControl_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimeBridgeServiceServer).MarkChildThreadClosed(ctx, req.(*MarkChildThreadClosedRequest))
+		return srv.(AgentRuntimeBridgeServiceServer).CloseChildControl(ctx, req.(*CloseChildControlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_CloseApprovalReviewer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseApprovalReviewerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).CloseApprovalReviewer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_CloseApprovalReviewer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).CloseApprovalReviewer(ctx, req.(*CloseApprovalReviewerRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1165,8 +1335,20 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AgentRuntimeBridgeService_FinishIdle_Handler,
 		},
 		{
-			MethodName: "CreateChildThread",
-			Handler:    _AgentRuntimeBridgeService_CreateChildThread_Handler,
+			MethodName: "CreateSubagentThread",
+			Handler:    _AgentRuntimeBridgeService_CreateSubagentThread_Handler,
+		},
+		{
+			MethodName: "EnsureApprovalReviewerTrunk",
+			Handler:    _AgentRuntimeBridgeService_EnsureApprovalReviewerTrunk_Handler,
+		},
+		{
+			MethodName: "EnsureApprovalReviewerSidecar",
+			Handler:    _AgentRuntimeBridgeService_EnsureApprovalReviewerSidecar_Handler,
+		},
+		{
+			MethodName: "AdmitApprovalReviewInput",
+			Handler:    _AgentRuntimeBridgeService_AdmitApprovalReviewInput_Handler,
 		},
 		{
 			MethodName: "ResolveChildThread",
@@ -1177,8 +1359,12 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AgentRuntimeBridgeService_ListChildThreads_Handler,
 		},
 		{
-			MethodName: "ResolveInterAgentDelivery",
-			Handler:    _AgentRuntimeBridgeService_ResolveInterAgentDelivery_Handler,
+			MethodName: "DeliverInterAgentMail",
+			Handler:    _AgentRuntimeBridgeService_DeliverInterAgentMail_Handler,
+		},
+		{
+			MethodName: "ReadAgentMail",
+			Handler:    _AgentRuntimeBridgeService_ReadAgentMail_Handler,
 		},
 		{
 			MethodName: "AdmitChildInterrupt",
@@ -1189,8 +1375,12 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AgentRuntimeBridgeService_AwaitChildInterrupt_Handler,
 		},
 		{
-			MethodName: "MarkChildThreadClosed",
-			Handler:    _AgentRuntimeBridgeService_MarkChildThreadClosed_Handler,
+			MethodName: "CloseChildControl",
+			Handler:    _AgentRuntimeBridgeService_CloseChildControl_Handler,
+		},
+		{
+			MethodName: "CloseApprovalReviewer",
+			Handler:    _AgentRuntimeBridgeService_CloseApprovalReviewer_Handler,
 		},
 		{
 			MethodName: "MarkChildThreadActive",

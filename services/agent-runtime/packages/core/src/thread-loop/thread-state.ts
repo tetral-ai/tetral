@@ -77,8 +77,7 @@ export interface SessionCurrentModel {
 }
 
 /** Identity and binding fence shared by every command that addresses hot thread state. */
-export interface RuntimeCommandScopeState {
-  readonly requestId: string;
+export interface RuntimeThreadAddressState {
   readonly workspaceId: string;
   readonly sessionId: string;
   readonly sessionThreadId: string;
@@ -87,12 +86,15 @@ export interface RuntimeCommandScopeState {
   readonly targetPodUid: string;
 }
 
-/** Input identity, event range, and payload identity for one addressed thread command. */
-export interface RuntimeThreadControlState extends RuntimeCommandScopeState {
+/** Method-specific Runtime Pod input identity with its sole interrupt-order fact. */
+export interface RuntimeAcceptedInputScopeState extends RuntimeThreadAddressState {
   readonly runtimeInputId: string;
-  readonly eventIds: readonly string[];
-  readonly sequenceFrom: number;
-  readonly sequenceTo: number;
+  readonly inputOrder: number;
+}
+
+/** Method-specific control input identity; control commands are not queued accepted inputs. */
+export interface RuntimeControlInputState extends RuntimeThreadAddressState {
+  readonly runtimeInputId: string;
 }
 
 export interface RuntimeControlInputDeclaration {
@@ -115,7 +117,7 @@ export interface RuntimeControlInputCommitApplication {
 }
 
 interface RuntimeUserInterruptState {
-  readonly command: RuntimeThreadControlState;
+  readonly command: RuntimeAcceptedInputScopeState;
   readonly commitInput: RuntimeControlInputCommit;
   readonly completeCloseout: () => void;
   closeoutEligible: boolean;
@@ -163,23 +165,21 @@ export interface RuntimeAcceptedThreadMetadataState {
 }
 
 /** User-message input delivered as an opaque Bridge-classified payload. */
-export interface RuntimeMessagesAcceptedInputState extends RuntimeThreadControlState {
+export interface RuntimeMessagesAcceptedInputState extends RuntimeAcceptedInputScopeState {
   readonly kind: "messages";
-  readonly payloadJson: string;
+  readonly contentJson: string;
 }
 
 /** Fenced inter-agent delivery carrying its durably sourced user-message draft. */
-export interface RuntimeInterAgentAcceptedInputState extends RuntimeThreadControlState {
+export interface RuntimeInterAgentAcceptedInputState extends RuntimeControlInputState {
   readonly kind: "inter_agent_message";
   readonly deliveryId: string;
-  readonly sourceThreadId: string;
-  readonly sourceToolUseEventId: string;
   readonly message: RuntimeMessage;
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
 }
 
 /** Internal reviewer input carrying the target case, transcript feed, and output schema. */
-export interface RuntimeApprovalReviewAcceptedInputState extends RuntimeThreadControlState {
+export interface RuntimeApprovalReviewAcceptedInputState extends RuntimeAcceptedInputScopeState {
   readonly kind: "approval_review";
   readonly reviewId: string;
   readonly parentThreadId: string;
@@ -191,7 +191,7 @@ export interface RuntimeApprovalReviewAcceptedInputState extends RuntimeThreadCo
 }
 
 /** Bounded fact authorizing the loop to replace an undeliverable input with one rejection projection. */
-export interface RuntimeRejectionAcceptedInputState extends RuntimeThreadControlState {
+export interface RuntimeRejectionAcceptedInputState extends RuntimeAcceptedInputScopeState {
   readonly kind: "rejection";
   readonly reasonCode: "runtime_command_payload_too_large" | "runtime_command_rejected";
 }
@@ -213,7 +213,7 @@ export interface RuntimeColdCoverage {
 }
 
 /** Cold thread state loaded before a resident thread is allowed to serve commands. */
-export interface RuntimeThreadPreloadState extends RuntimeThreadControlState {
+export interface RuntimeThreadPreloadState extends RuntimeThreadAddressState {
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
   readonly messages: readonly RuntimeMessage[];
   readonly turnCheckpoint?: ThreadTurnCheckpoint | undefined;
@@ -259,8 +259,7 @@ export interface RuntimePreloadedBackgroundToolState {
 }
 
 /** Recorded user decision applied to one durable pending tool use. */
-export interface RuntimeToolConfirmationState extends RuntimeThreadControlState {
-  readonly sourceEventId: string;
+export interface RuntimeToolConfirmationState extends RuntimeControlInputState {
   readonly toolUseEventId: string;
   readonly decision: "allow" | "deny";
   readonly denyMessage?: string | undefined;
@@ -293,11 +292,11 @@ export interface RuntimePendingSandboxExecutionJobState {
 }
 
 /** Terminal background-task command before its durable declaration has returned a message stamp. */
-export interface RuntimeTaskNotificationCommandState extends RuntimeThreadControlState {
+export interface RuntimeTaskNotificationCommandState extends RuntimeAcceptedInputScopeState {
   readonly taskId: string;
   readonly sourceToolUseEventId: string;
   readonly status: "completed" | "failed" | "cancelled" | "expired";
-  readonly payloadJson: string;
+  readonly notificationJson: string;
 }
 
 /** Terminal task fact waiting for the next serialized semantic turn. */
@@ -318,7 +317,14 @@ export interface RuntimeBackgroundToolState {
 }
 
 /** Generation-fenced runtime or per-server MCP configuration patch. */
-export interface RuntimeConfigPatchState extends RuntimeThreadControlState, RuntimeConfigurationPatch {}
+export interface RuntimeConfigPatchState extends RuntimeConfigurationPatch {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly bindingId: string;
+  readonly bindingGeneration: number;
+  readonly targetPodUid: string;
+  readonly configIdentity: string;
+}
 
 /** Sole resident owner of one Thread's derived current-Turn checkpoint and Tool routes. */
 export class ThreadProcessor {
@@ -449,7 +455,7 @@ export class ThreadProcessor {
       input.kind === "inter_agent_message" ||
       (preserveTaskNotifications && input.kind === "task_notification") ||
       input.runtimeInputId === this.#committingAcceptedInputId ||
-      input.sequenceTo >= interruptFenceSequence
+      input.inputOrder >= interruptFenceSequence
     );
     this.refreshDecision();
   }
@@ -864,7 +870,7 @@ export class ThreadState {
   }
 
   beginUserInterrupt(
-    command: RuntimeThreadControlState,
+    command: RuntimeAcceptedInputScopeState,
     commitInput: RuntimeControlInputCommit,
     completeCloseout: () => void = () => {},
   ): "applied" | "duplicate" | "conflict" {
@@ -890,7 +896,7 @@ export class ThreadState {
     return this.#userInterrupt !== undefined;
   }
 
-  userInterruptCommand(): RuntimeThreadControlState | undefined {
+  userInterruptCommand(): RuntimeAcceptedInputScopeState | undefined {
     return this.#userInterrupt?.command;
   }
 
@@ -1033,15 +1039,14 @@ function providerRequestAttachmentIdentity(attachment: RuntimeProviderAttachment
 }
 
 function sameAcceptedInput(left: RuntimeAcceptedInputState, right: RuntimeAcceptedInputState): boolean {
-  // Transport-attempt request ids do not change a durable input's identity.
   if (left.kind === "inter_agent_message" && right.kind === "inter_agent_message") {
     // Cold preload carries durable Thread lineage needed to construct the
     // resident aggregate; a later delivery retry does not carry that local
     // installation projection. Every mail custody and payload field must still
     // match before the delivery is considered duplicate.
-    const { requestId: _leftRequestId, thread: _leftThread, ...leftIdentity } = left;
-    const { requestId: _rightRequestId, thread: _rightThread, ...rightIdentity } = right;
+    const { thread: _leftThread, ...leftIdentity } = left;
+    const { thread: _rightThread, ...rightIdentity } = right;
     return JSON.stringify(leftIdentity) === JSON.stringify(rightIdentity);
   }
-  return JSON.stringify({ ...left, requestId: "" }) === JSON.stringify({ ...right, requestId: "" });
+  return JSON.stringify(left) === JSON.stringify(right);
 }

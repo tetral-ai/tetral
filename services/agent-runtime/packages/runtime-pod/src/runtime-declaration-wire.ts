@@ -5,7 +5,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { RuntimeMessageCreateKind } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import {
+  RuntimeMessageCreateKind,
+  runtimeInputDispositionToJSON,
+} from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   CommitInputsRequest,
   CommitInternalToolRepairRequest,
@@ -28,16 +31,14 @@ const internalProviderPayloadFields = new Set([
 ]);
 
 export function commitInputsDeclarationDigest(request: Pick<CommitInputsRequest,
-  "scope" | "runtimeInputId" | "eventIds" | "sequenceFrom" | "sequenceTo" | "inputKind" | "messageCreates"
->): string {
+  "scope" | "runtimeInputId" | "disposition" | "approvalReviewText"
+>, inputKind: string): string {
   return digest({
-    event_ids: request.eventIds,
-    input_kind: request.inputKind,
-    message_creates: request.messageCreates.map(canonicalMessageCreate),
+    approval_review_text: request.approvalReviewText,
+    disposition: runtimeInputDispositionToJSON(request.disposition),
+    input_kind: inputKind,
     operation_kind: "commit_inputs",
     runtime_input_id: request.runtimeInputId,
-    sequence_from: request.sequenceFrom,
-    sequence_to: request.sequenceTo,
     session_thread_id: request.scope?.sessionThreadId ?? "",
   });
 }
@@ -57,22 +58,13 @@ export function internalToolRepairDeclarationDigest(request: Pick<CommitInternal
 }
 
 export function taskNotificationDeclarationDigest(request: Pick<CommitTaskNotificationResultRequest,
-  "scope" | "runtimeInputId" | "taskId" | "resultJson" | "messageCreate"
+  "scope" | "runtimeInputId" | "disposition"
 >): string {
   return digest({
-    message_create: {
-      message_info_json: request.messageCreate?.messageInfoJson ?? "",
-      message_kind: request.messageCreate?.messageKind ?? RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED,
-      parts: (request.messageCreate?.parts ?? []).map((part) => ({
-        part_json: part.partJson,
-        part_kind: part.partKind,
-      })),
-    },
+    disposition: runtimeInputDispositionToJSON(request.disposition),
     operation_kind: "commit_task_notification_result",
-    result_json: request.resultJson,
     runtime_input_id: request.runtimeInputId,
     session_thread_id: request.scope?.sessionThreadId ?? "",
-    task_id: request.taskId,
   });
 }
 
@@ -116,10 +108,7 @@ export function writeRequestEndDeclarationDigest(request: Pick<WriteRequestEndRe
     error_kind: nullableString(request.errorKind),
     finish_reason: request.finishReason,
     interrupt_settlement: request.interruptSettlement === undefined ? null : {
-      event_ids: request.interruptSettlement.eventIds,
       runtime_input_id: request.interruptSettlement.runtimeInputId,
-      sequence_from: request.interruptSettlement.sequenceFrom,
-      sequence_to: request.interruptSettlement.sequenceTo,
     },
     is_error: request.isError,
     model_request_id: request.modelRequestId,
@@ -150,24 +139,6 @@ export function finishIdleDeclarationDigest(request: Pick<FinishIdleRequest,
     operation_kind: "finish_idle",
     session_thread_id: request.scope?.sessionThreadId ?? "",
     stop_reason: JSON.parse(canonicalRunToolJSON(request.stopReasonJson)) as unknown,
-  });
-}
-
-export function childLifecycleDeclarationDigest(input: {
-  readonly operationKind: "mark_child_thread_closed" | "mark_child_thread_active";
-  readonly action: "close" | "resume";
-  readonly sessionThreadId: string;
-  readonly childThreadId: string;
-  readonly sourceKind: "tool_use" | "approval_review";
-  readonly sourceCommandId: string;
-}): string {
-  return digest({
-    action: input.action,
-    child_thread_id: input.childThreadId,
-    operation_kind: input.operationKind,
-    session_thread_id: input.sessionThreadId,
-    source_command_id: input.sourceCommandId,
-    source_kind: input.sourceKind,
   });
 }
 

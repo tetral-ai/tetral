@@ -90,16 +90,10 @@ func requestEndInterruptCommitRequest(
 	interruptRequest := &bridgev1.CommitInputsRequest{
 		Scope:          request.GetScope(),
 		RuntimeInputId: settlement.GetRuntimeInputId(),
-		EventIds:       settlement.GetEventIds(),
-		SequenceFrom:   settlement.GetSequenceFrom(),
-		SequenceTo:     settlement.GetSequenceTo(),
-		InputKind:      "interrupt_control",
+		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	if interruptRequest.GetRuntimeInputId() == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement is missing its runtime input")
-	}
-	if err := validateCommitInputsRequest("interrupt_control", interruptRequest); err != nil {
-		return nil, "", err
 	}
 	digest, err := commitInputsDeclarationDigest(interruptRequest, "interrupt_control")
 	if err != nil {

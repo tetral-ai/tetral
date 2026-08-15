@@ -35,7 +35,6 @@ function baseReceipt(overrides: Partial<RuntimeDeclarationReceipt>): RuntimeDecl
 describe("incremental Runtime declarations", () => {
   test("accepted input creates receive identity only from positional stamps", () => {
     const input: RuntimeAcceptedInputState = {
-      requestId: "request",
       workspaceId: "workspace",
       sessionId: "session",
       sessionThreadId: "thread",
@@ -43,11 +42,9 @@ describe("incremental Runtime declarations", () => {
       bindingGeneration: 1,
       targetPodUid: "pod",
       runtimeInputId: "input",
-      eventIds: ["event"],
-      sequenceFrom: 4,
-      sequenceTo: 4,
+      inputOrder: 4,
       kind: "messages",
-      payloadJson: JSON.stringify({ messages: [{
+      contentJson: JSON.stringify({ messages: [{
         id: "provider_message",
         sessionId: "session",
         role: "user",

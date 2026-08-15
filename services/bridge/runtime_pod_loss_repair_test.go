@@ -24,7 +24,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 )
 
 func TestPostgreSQLRuntimePodLossSweepClosesActiveTurnWithoutInputAndIsIdempotent(t *testing.T) {
@@ -196,7 +195,6 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"` + candidate.sessionID + `","session_thread_id":"` + candidate.threadID + `","runtime_input_id":"rin_idle_rebind","event_ids":["evt_idle_rebind_input"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -204,8 +202,8 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 	if err != nil {
 		t.Fatalf("idle input-triggered rebind: %v", err)
 	}
-	if plan.Request == nil || plan.Request.GetTargetPodUid() != replacement.PodUID || plan.Request.GetBindingId() == candidate.binding.BindingID || plan.Request.GetBindingGeneration() <= candidate.binding.BindingGeneration {
-		t.Fatalf("idle rebind request = %#v; want a new replacement binding after generation %d", plan.Request, candidate.binding.BindingGeneration)
+	if plan.AcceptInput == nil || plan.AcceptInput.GetTargetPodUid() != replacement.PodUID || plan.AttemptedBinding.BindingID == candidate.binding.BindingID || plan.AttemptedBinding.Generation <= candidate.binding.BindingGeneration {
+		t.Fatalf("idle rebind request = %#v; want a new replacement binding after generation %d", plan.AcceptInput, candidate.binding.BindingGeneration)
 	}
 	var errorEvents int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'`, candidate.sessionID).Scan(&errorEvents); err != nil {
@@ -555,7 +553,6 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 		SequenceFrom:    3,
 		SequenceTo:      3,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -577,7 +574,7 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 		if !errors.As(input.err, &stale) || stale.kind != "runtime_pod_lost_claim_stale" {
 			t.Fatalf("racing input error = %v; want successful replacement or stale fence", input.err)
 		}
-	} else if input.plan.Request == nil || input.plan.Request.GetTargetPodUid() != replacement.PodUID {
+	} else if input.plan.AcceptInput == nil || input.plan.AcceptInput.GetTargetPodUid() != replacement.PodUID {
 		t.Fatalf("racing input plan = %#v; want replacement target", input.plan)
 	}
 	var requestEnds, toolResults int

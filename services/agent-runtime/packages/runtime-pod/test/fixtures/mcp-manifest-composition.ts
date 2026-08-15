@@ -9,8 +9,7 @@ import { lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catal
 import type { ToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { BridgeWriteStatus } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { RuntimeCommandStatus } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
-import type { RuntimeInputCommandRequest, RuntimeInputCommandResponse } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
+import type { ApplyRuntimeConfigRequest, ApplyRuntimeConfigResponse } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
 import { runtimeMCPManifestEligibilityFromPatchPayloads, runtimeToolPolicyForThread } from "../../src/command.js";
 import { RuntimeControlService } from "../../src/runtime-service.js";
@@ -24,7 +23,7 @@ interface CompositionInput {
   readonly sessionId: string;
   readonly runtimeConfigPayloadJson: string;
   readonly readyManifestPayloadJson: string;
-  readonly runtimeCommandRequest: RuntimeInputCommandRequest;
+  readonly runtimeCommandRequest: ApplyRuntimeConfigRequest;
   readonly coldContextJson: string;
   readonly coldRuntimeBindingToken: string;
   readonly readyGeneration: number;
@@ -43,7 +42,7 @@ assertCatalogState(input, warm.events[0], warm.catalogs[0], true);
 assertCatalogState(input, warm.events[1], warm.catalogs[1], false);
 assertCatalogState(input, warm.events[2], warm.catalogs[2], false);
 if (
-  warm.commandResponse.status !== RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED ||
+  warm.commandResponse.applied === undefined ||
   warm.events[1]?.source !== "runtime_config_update" ||
   warm.events[1].disposition !== "applied" ||
   warm.events[2]?.disposition !== "stale" ||
@@ -150,7 +149,7 @@ async function applyWarmTransition(
 ): Promise<{
   readonly events: SessionManager.RuntimeMCPManifestUpdateEvent[];
   readonly catalogs: ToolCatalog[];
-  readonly commandResponse: RuntimeInputCommandResponse;
+  readonly commandResponse: ApplyRuntimeConfigResponse;
 }> {
   const { manager, scope, events, catalogs } = await buildManager();
   try {
@@ -171,16 +170,19 @@ async function applyWarmTransition(
     }
     const service = runtimeControlService(input.runtimeCommandRequest, manager);
     const commandResponse = await service.applyRuntimeConfig(input.runtimeCommandRequest, new Metadata());
-    if (commandResponse.status !== RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED) {
+    if (commandResponse.applied === undefined) {
       throw new Error("warm runtime command host rejected the manifest update");
     }
     const staleResponse = await service.applyRuntimeConfig({
       ...input.runtimeCommandRequest,
-      requestId: "req_manifest_stale_ready",
-      runtimeInputId: "rin_manifest_stale_ready",
-      payloadJson: input.readyManifestPayloadJson,
+      sessionConfig: undefined,
+      mcpManifest: {
+        mcpServerName: input.runtimeCommandRequest.mcpManifest?.mcpServerName ?? "github",
+        generation: input.readyGeneration,
+        contentJson: input.readyManifestPayloadJson,
+      },
     }, new Metadata());
-    if (staleResponse.status !== RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE) {
+    if (staleResponse.duplicate === undefined) {
       throw new Error("warm runtime command host rejected the stale replay envelope");
     }
     return { events, catalogs, commandResponse };
@@ -254,7 +256,7 @@ async function buildManager(): Promise<{
     now: () => "2026-08-10T12:00:00.000Z",
     recordMCPManifestUpdate: (event) => events.push(event),
     resolveMCPManifestEligibility: (patches, serverName) => {
-      const payloads = patches.map((patch) => patch.payloadJson);
+      const payloads = patches.map((patch) => patch.contentJson);
       catalogs.push(runtimeToolPolicyForThread(undefined, payloads, "claude").toolCatalog);
       return runtimeMCPManifestEligibilityFromPatchPayloads(payloads, serverName);
     },
@@ -274,7 +276,7 @@ async function buildManager(): Promise<{
 }
 
 function runtimeControlService(
-  request: RuntimeInputCommandRequest,
+  request: ApplyRuntimeConfigRequest,
   manager: SessionManager.Interface,
 ): RuntimeControlService {
   const runHost = {
@@ -283,10 +285,10 @@ function runtimeControlService(
   } as unknown as RuntimeSessionRunHost;
   return new RuntimeControlService({
     ownPod: {
-      namespace: request.targetPodNamespace,
-      name: request.targetPodName,
+      namespace: "engine",
+      name: "runtime-pod-composition",
       uid: request.targetPodUid,
-      ip: request.targetPodIp,
+      ip: "127.0.0.1",
     },
     allowedBridge: { namespace: "tetral-system", name: "bridge" },
     authenticator: {
@@ -317,11 +319,12 @@ function preloadState(
     runtimeBindingToken: "runtime-binding-token",
     messages: [],
     runtimeConfigPatch: {
-      ...controlState(input, "rin_runtime_config"),
+      ...addressState(input),
+      configIdentity: "session:1",
       generation: 1,
       coldLoad: true,
       installedBuiltinFamily: "claude",
-      payloadJson: input.runtimeConfigPayloadJson,
+      contentJson: input.runtimeConfigPayloadJson,
     },
     mcpManifests: manifests,
     coldCoverage: {
@@ -340,23 +343,30 @@ function manifestPatch(
   manifestETag?: string,
 ) {
   return {
-    ...controlState(input, `rin_manifest_${generation}`),
+    ...addressState(input),
+    configIdentity: `mcp:github:${generation}`,
     generation,
     mcpServerName: "github",
     ...(manifestETag !== undefined ? { manifestETag } : {}),
-    payloadJson,
+    contentJson: payloadJson,
   };
 }
 
-function controlState(input: CompositionInput, runtimeInputId: string) {
+function addressState(input: CompositionInput) {
   return {
-    requestId: `req_${runtimeInputId}`,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     sessionThreadId: `thrd_${input.sessionId}`,
     bindingId: "bind_manifest_composition",
     bindingGeneration: 1,
     targetPodUid: "pod_manifest_composition",
+  };
+}
+
+function controlState(input: CompositionInput, runtimeInputId: string) {
+  return {
+    ...addressState(input),
+    requestId: `req_${runtimeInputId}`,
     runtimeInputId,
     eventIds: [],
     sequenceFrom: 0,

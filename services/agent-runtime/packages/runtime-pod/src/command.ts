@@ -212,7 +212,7 @@ export async function buildRuntimePodCommandDependencies(input: {
     },
     resolveMCPManifestEligibility: (effectivePatches, mcpServerName) =>
       runtimeMCPManifestEligibilityFromPatchPayloads(
-        effectivePatches.map((patch) => patch.payloadJson), mcpServerName,
+        effectivePatches.map((patch) => patch.contentJson), mcpServerName,
       ),
     threadLoop: {
       internalToolRepairStore: new BridgeInternalToolRepairStore(internalToolRepairCommitter),
@@ -262,13 +262,13 @@ export async function buildRuntimePodCommandDependencies(input: {
       runtimeModel: (session) =>
         runtimeModelForThread(
           session.identity.threadRole,
-          session.configuration.patches().map((patch) => patch.payloadJson),
+          session.configuration.patches().map((patch) => patch.contentJson),
           input.config.platformModels.approvalReviewer,
         ),
       runtimePolicy: (session) =>
         runtimeToolPolicyForThread(
           session.identity.threadRole,
-          session.configuration.patches().map((patch) => patch.payloadJson),
+          session.configuration.patches().map((patch) => patch.contentJson),
           session.configuration.installedBuiltinFamily(),
           approvalReviewerToolCatalog,
         ),

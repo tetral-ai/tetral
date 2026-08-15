@@ -7,24 +7,22 @@ import type { CallOptions } from "@grpc/grpc-js";
 import { Stream } from "effect";
 import {
   BridgeWriteStatus,
-	ChildInterruptDisposition,
 	ChildInterruptOutcome,
   ChildLifecycleDisposition,
-  ReceiptApplicationDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   AgentRuntimeBridgeServiceClient,
 	AdmitChildInterruptRequest,
 	AwaitChildInterruptRequest,
   CancelCommandRequest,
-  CreateChildThreadRequest,
+  CreateSubagentThreadRequest,
+  DeliverInterAgentMailRequest,
   ListChildThreadsRequest,
   MarkChildThreadActiveRequest,
-  MarkChildThreadClosedRequest,
+  CloseChildControlRequest,
   ReadCommandResultResponse,
   ReadCommandResultRequest,
   ResolveChildThreadRequest,
-  ResolveInterAgentDeliveryRequest,
   RunMemoryRequest,
   RunMemoryResponse,
   AcceptSandboxExecutionRequest,
@@ -33,7 +31,6 @@ import type {
   AwaitSandboxExecutionResponse,
   SendCommandInputRequest,
   SendCommandInputResponse,
-  WriteEventRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
   McpErrorKind,
@@ -70,7 +67,6 @@ import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loo
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
-import { childLifecycleDeclarationDigest } from "../../src/runtime-declaration-wire.js";
 import { buildRuntimeCoreHosts, validateClosedThreadResumeCheckpoint } from "../../src/core-hosts.js";
 import type { RuntimeCoreHostsOptions, RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
 import {
@@ -1650,31 +1646,26 @@ describe("RuntimePodToolRunner", () => {
     }));
 
     expect(result.type).toBe("completed");
-    expect(bridge.createChildThreadRequests).toEqual([
+    expect(bridge.createSubagentThreadRequests).toEqual([
       expect.objectContaining({
-        parentThreadId: "thrd_1",
-        role: "subagent",
         taskName: "researcher",
         agentType: "research",
         sourceToolUseEventId: "sevt_tool_1",
         forkTurns: "none",
       }),
     ]);
-    expect(bridge.writeEventRequests).toEqual([
+    expect(bridge.deliverInterAgentMailRequests).toEqual([
       expect.objectContaining({
-        eventType: "agent.thread_message_sent",
-        sessionVisible: true,
-      }),
-    ]);
-    expect(bridge.resolveInterAgentDeliveryRequests).toEqual([
-      expect.objectContaining({
-        childThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
+        deliveryId: expect.any(String),
+        targetThreadId: "thr_child_1",
+        sourceToolUseEventId: "sevt_tool_1",
+        content: "work on this",
       }),
     ]);
     expect(subAgentHost.actions).toEqual(["preload"]);
     expect(subAgentHost.preloaded).toEqual([
       expect.objectContaining({
-        sessionThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
+        sessionThreadId: "thr_child_1",
         thread: expect.objectContaining({
           parentThreadId: "thrd_1",
           role: "subagent",
@@ -1698,8 +1689,8 @@ describe("RuntimePodToolRunner", () => {
     }));
     const wait = await runner.runTool(toolRequest("wait_agent", { taskName: "researcher", timeoutMs: 25 }));
 
-    expect(spawn).toMatchObject({ type: "error", error: { retryable: false, message: "spawn_agent requires task_name and prompt." } });
-    expect(wait).toMatchObject({ type: "error", error: { retryable: false, message: "wait_agent requires task_name." } });
+    expect(spawn).toMatchObject({ type: "error", error: { retryable: false, message: expect.stringContaining("task_name") } });
+    expect(wait).toMatchObject({ type: "error", error: { retryable: false, message: expect.stringContaining("task_name") } });
   });
 
   test("spawn_agent and send_message ignore undeclared text aliases", async () => {
@@ -1708,8 +1699,84 @@ describe("RuntimePodToolRunner", () => {
     const spawn = await runner.runTool(toolRequest("spawn_agent", { task_name: "worker", message: "legacy" }));
     const send = await runner.runTool(toolRequest("send_message", { task_name: "worker", prompt: "legacy" }));
 
-    expect(spawn).toMatchObject({ type: "error", error: { retryable: false, message: "spawn_agent requires task_name and prompt." } });
-    expect(send).toMatchObject({ type: "error", error: { retryable: false, message: "send_message requires task_name and message." } });
+    expect(spawn).toMatchObject({ type: "error", error: { retryable: false, message: expect.stringContaining("prompt") } });
+    expect(send).toMatchObject({ type: "error", error: { retryable: false, message: expect.stringContaining("message") } });
+  });
+
+  test("rejects oversized task names and fork counts before any durable actor mutation", async () => {
+    const bridge = new RecordingBridgeClient();
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const oversizedName = await runner.runTool(toolRequest("spawn_agent", {
+      task_name: "é".repeat(65),
+      prompt: "work",
+    }));
+    const oversizedFork = await runner.runTool(toolRequest("spawn_agent", {
+      task_name: "worker",
+      prompt: "work",
+      fork_turns: "1001",
+    }));
+
+    expect(oversizedName).toMatchObject({ type: "error", error: { retryable: false } });
+    expect(oversizedFork).toMatchObject({ type: "error", error: { retryable: false } });
+    expect(bridge.createSubagentThreadRequests).toEqual([]);
+    expect(bridge.deliverInterAgentMailRequests).toEqual([]);
+  });
+
+  test("rejects zero-arm and contradictory actor responses at every consumed oneof", async () => {
+    const createBridge = new RecordingBridgeClient();
+    createBridge.createSubagentThreadResponse = {
+      committed: { childThreadId: "thr_child_1" },
+      duplicate: { childThreadId: "thr_child_1" },
+    };
+    expect(await makeRunner({ bridge: createBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("spawn_agent", { task_name: "worker", prompt: "work" }),
+    )).toMatchObject({ type: "error", error: { retryable: true } });
+
+    const deliveryBridge = new RecordingBridgeClient();
+    deliveryBridge.deliverInterAgentMailResponse = { committed: {}, duplicate: {} };
+    expect(await makeRunner({ bridge: deliveryBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("send_message", { task_name: "worker", message: "work" }),
+    )).toMatchObject({ type: "error" });
+
+    const listBridge = new RecordingBridgeClient();
+    listBridge.listChildThreadsResponse = {};
+    expect(await makeRunner({ bridge: listBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("wait_agent", { task_name: "worker" }),
+    )).toMatchObject({ type: "error", error: { retryable: true, message: "Bridge returned malformed child-thread facts." } });
+
+    const resolveBridge = new RecordingBridgeClient();
+    resolveBridge.resolveChildThreadResponse = {};
+    expect(await makeRunner({ bridge: resolveBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("wait_agent", { task_name: "worker" }),
+    )).toMatchObject({ type: "error", error: { retryable: true, message: "Bridge returned malformed child-thread facts." } });
+
+    const interruptBridge = new RecordingBridgeClient();
+    interruptBridge.admitChildInterruptResponse = { committed: { controlOperationId: "ctrl_1" }, duplicate: { controlOperationId: "ctrl_1" } };
+    expect(await makeRunner({ bridge: interruptBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("interrupt_agent", { task_name: "worker" }),
+    )).toMatchObject({ type: "error" });
+
+    const awaitBridge = new RecordingBridgeClient();
+    awaitBridge.awaitChildInterruptResponse = {};
+    expect(await makeRunner({ bridge: awaitBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("interrupt_agent", { task_name: "worker" }),
+    )).toMatchObject({ type: "error" });
+
+    const closeBridge = new RecordingBridgeClient();
+    closeBridge.closeChildControlResponse = {
+      committed: { children: [] },
+      duplicate: { children: [] },
+    };
+    expect(await makeRunner({ bridge: closeBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("close_agent", { task_name: "worker" }),
+    )).toMatchObject({ type: "error" });
+
+    const resumeBridge = new RecordingBridgeClient();
+    resumeBridge.markChildThreadActiveResponse = { committed: {}, duplicate: {} };
+    expect(await makeRunner({ bridge: resumeBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("resume_agent", { task_name: "worker" }),
+    )).toMatchObject({ type: "error" });
   });
 
   test("durable sub-agent delivery returns delivered without enqueueing child input", async () => {
@@ -1730,15 +1797,69 @@ describe("RuntimePodToolRunner", () => {
         text: expect.stringContaining("status: delivered"),
       }),
     });
-    expect(bridge.writeEventRequests).toHaveLength(1);
-    expect(bridge.resolveInterAgentDeliveryRequests).toHaveLength(1);
+    expect(bridge.deliverInterAgentMailRequests).toHaveLength(1);
     expect(subAgentHost.enqueued).toEqual([]);
   });
 
-  test("send_message finishes durable admission after its sent event commits despite caller cancellation", async () => {
+  test("replays ambiguous child creation and mail delivery with identical durable identities", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.createSubagentThreadErrors.push(grpcError(GrpcStatus.UNAVAILABLE));
+    bridge.deliverInterAgentMailErrors.push(grpcError(GrpcStatus.DEADLINE_EXCEEDED));
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const result = await runner.runTool(toolRequest("spawn_agent", {
+      task_name: "researcher",
+      prompt: "work on this",
+      fork_turns: "none",
+    }));
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(bridge.createSubagentThreadRequests).toHaveLength(2);
+    expect(bridge.createSubagentThreadRequests[1]).toEqual(bridge.createSubagentThreadRequests[0]);
+    expect(bridge.deliverInterAgentMailRequests).toHaveLength(2);
+    expect(bridge.deliverInterAgentMailRequests[1]).toEqual(bridge.deliverInterAgentMailRequests[0]);
+  });
+
+  test("replays ambiguous child interrupt admission and await with identical operation identities", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.admitChildInterruptErrors.push(grpcError(GrpcStatus.UNKNOWN));
+    bridge.awaitChildInterruptErrors.push(grpcError(GrpcStatus.UNAVAILABLE));
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const result = await runner.runTool(toolRequest("interrupt_agent", { task_name: "worker" }));
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(bridge.admitChildInterruptRequests).toHaveLength(2);
+    expect(bridge.admitChildInterruptRequests[1]).toEqual(bridge.admitChildInterruptRequests[0]);
+    expect(bridge.awaitChildInterruptRequests).toHaveLength(2);
+    expect(bridge.awaitChildInterruptRequests[1]).toEqual(bridge.awaitChildInterruptRequests[0]);
+  });
+
+  test("replays ambiguous child close and resume without changing their immutable source identity", async () => {
+    const closeBridge = new RecordingBridgeClient();
+    closeBridge.closeChildControlErrors.push(grpcError(GrpcStatus.INTERNAL));
+    const close = await makeRunner({ bridge: closeBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("close_agent", { task_name: "worker" }, "sevt_close"),
+    );
+    expect(close).toMatchObject({ type: "completed" });
+    expect(closeBridge.closeChildControlRequests).toHaveLength(2);
+    expect(closeBridge.closeChildControlRequests[1]).toEqual(closeBridge.closeChildControlRequests[0]);
+
+    const resumeBridge = new RecordingBridgeClient();
+    resumeBridge.childStatus = "closed_for_runtime";
+    resumeBridge.markChildThreadActiveErrors.push(grpcError(GrpcStatus.ABORTED));
+    const resume = await makeRunner({ bridge: resumeBridge, subAgentHost: new RecordingSubAgentHost() }).runTool(
+      toolRequest("resume_agent", { task_name: "worker" }, "sevt_resume"),
+    );
+    expect(resume).toMatchObject({ type: "completed" });
+    expect(resumeBridge.markChildThreadActiveRequests).toHaveLength(2);
+    expect(resumeBridge.markChildThreadActiveRequests[1]).toEqual(resumeBridge.markChildThreadActiveRequests[0]);
+  });
+
+  test("send_message keeps atomic durable admission authoritative after caller cancellation", async () => {
     const bridge = new RecordingBridgeClient();
     const abort = new AbortController();
-    bridge.afterWriteEventResponse = () => abort.abort();
+    bridge.afterDeliverInterAgentMailResponse = () => abort.abort();
     const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
 
     const result = await runner.runTool(toolRequest(
@@ -1754,13 +1875,18 @@ describe("RuntimePodToolRunner", () => {
         text: expect.stringContaining("status: delivered"),
       }),
     });
-    expect(bridge.writeEventRequests).toHaveLength(1);
-    expect(bridge.resolveInterAgentDeliveryRequests).toHaveLength(1);
+    expect(bridge.deliverInterAgentMailRequests).toEqual([
+      expect.objectContaining({
+        targetThreadId: "thr_child_1",
+        sourceToolUseEventId: "sevt_tool_send_cancel_after_sent",
+        content: "keep going",
+      }),
+    ]);
   });
 
   test("duplicate spawn_agent task names return a non-retryable tool error", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.createChildThreadErrorCode = GrpcStatus.ALREADY_EXISTS;
+    bridge.createSubagentThreadErrorCode = GrpcStatus.ALREADY_EXISTS;
     const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
 
     const result = await runner.runTool(toolRequest("spawn_agent", {
@@ -1781,7 +1907,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("send_message serializes delivery resolution before a concurrent close releases hot state", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.deferResolveInterAgentDelivery = true;
+    bridge.deferDeliverInterAgentMail = true;
     const subAgentHost = new RecordingSubAgentHost();
     const runner = makeRunner({ bridge, subAgentHost });
 
@@ -1789,14 +1915,14 @@ describe("RuntimePodToolRunner", () => {
       task_name: "worker",
       message: "keep going",
     }, "sevt_tool_send"));
-    await waitForCondition(() => bridge.resolveInterAgentDeliveryRequests.length === 1, "send delivery resolution");
+    await waitForCondition(() => bridge.deliverInterAgentMailRequests.length === 1, "send delivery resolution");
 
     const close = runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(bridge.listChildThreadsRequests).toHaveLength(1);
-    expect(bridge.markChildThreadClosedRequests).toEqual([]);
+    expect(bridge.closeChildControlRequests).toEqual([]);
 
-    bridge.completeDeferredResolveInterAgentDelivery();
+    bridge.completeDeferredDeliverInterAgentMail();
     expect(await send).toEqual({
       type: "completed",
       output: expect.objectContaining({
@@ -1817,7 +1943,7 @@ describe("RuntimePodToolRunner", () => {
     bridge.closeReceiptTargetIds = ["thr_child_1", "thr_grandchild_1"];
     const subAgentHost = new RecordingSubAgentHost();
     subAgentHost.onClose = () => {
-      expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+      expect(bridge.closeChildControlRequests).toHaveLength(1);
     };
     const runner = makeRunner({ bridge, subAgentHost });
 
@@ -1831,7 +1957,7 @@ describe("RuntimePodToolRunner", () => {
     });
     expect(subAgentHost.actions).toEqual(["close", "close"]);
     expect(subAgentHost.closedThreadIds).toEqual(["thr_child_1", "thr_grandchild_1"]);
-    expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+    expect(bridge.closeChildControlRequests).toHaveLength(1);
   });
 
   test("close_agent preserves the root terminal status while releasing every stamped hot subtree target", async () => {
@@ -1875,32 +2001,25 @@ describe("RuntimePodToolRunner", () => {
 
     expect(result).toEqual({ type: "stale_custody" });
     expect(replay).toEqual({ type: "stale_custody" });
-		const firstCloseRequest = bridge.markChildThreadClosedRequests[0];
+		const firstCloseRequest = bridge.closeChildControlRequests[0];
 		expect(firstCloseRequest).toBeDefined();
-		expect(bridge.markChildThreadClosedRequests.map((request) => request)).toEqual([
+		expect(bridge.closeChildControlRequests.map((request) => request)).toEqual([
 			firstCloseRequest!,
 			firstCloseRequest!,
     ]);
     expect(subAgentHost.actions).toEqual([]);
   });
 
-  test("close_agent does not release hot child state when durable close is rejected", async () => {
+  test("close_agent returns stale custody without releasing hot child state", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED;
-    bridge.markChildThreadClosedErrorCode = "stale_child";
+    bridge.closeChildControlStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED;
     const subAgentHost = new RecordingSubAgentHost();
     const runner = makeRunner({ bridge, subAgentHost });
 
     const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
 
-    expect(result).toEqual({
-      type: "error",
-      error: expect.objectContaining({
-        message: expect.stringContaining("stale_child"),
-        retryable: true,
-      }),
-    });
-    expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+    expect(result).toEqual({ type: "stale_custody" });
+    expect(bridge.closeChildControlRequests).toHaveLength(1);
     expect(subAgentHost.actions).toEqual([]);
   });
 
@@ -1928,10 +2047,10 @@ describe("RuntimePodToolRunner", () => {
     });
     expect(second).toMatchObject({ type: "completed" });
     expect(subAgentHost.actions).toEqual(["close", "close"]);
-    expect(bridge.markChildThreadClosedRequests).toHaveLength(2);
-		expect(bridge.markChildThreadClosedRequests[1]?.source).toEqual(
-			bridge.markChildThreadClosedRequests[0]?.source,
-		);
+    expect(bridge.closeChildControlRequests).toHaveLength(2);
+    expect(bridge.closeChildControlRequests[1]?.controlOperationId).toEqual(
+      bridge.closeChildControlRequests[0]?.controlOperationId,
+    );
   });
 
   test("send_message keeps same-child inputs in model order when the first child lookup is slow", async () => {
@@ -1958,7 +2077,7 @@ describe("RuntimePodToolRunner", () => {
     await Promise.all([first, second]);
 
     expect(subAgentHost.enqueued).toEqual([]);
-    expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
+    expect(bridge.deliverInterAgentMailRequests.map((request) => request.sourceToolUseEventId)).toEqual([
       "sevt_tool_send_1",
       "sevt_tool_send_2",
     ]);
@@ -1997,7 +2116,7 @@ describe("RuntimePodToolRunner", () => {
     await first;
 
     expect(subAgentHost.enqueued).toHaveLength(0);
-    expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
+    expect(bridge.deliverInterAgentMailRequests.map((request) => request.sourceToolUseEventId)).toEqual([
       "sevt_tool_send_1",
     ]);
   });
@@ -2022,12 +2141,10 @@ describe("RuntimePodToolRunner", () => {
     const result = await runner.runTool(request);
 
     expect(result.type).toBe("completed");
-    const seed = JSON.parse(bridge.createChildThreadRequests[0]?.threadContextPrefixJson ?? "{}") as {
-      readonly parent_boundary_event_id?: string;
-      readonly runtime_messages_snapshot?: readonly RuntimeMessage[];
-    };
-    expect(seed.parent_boundary_event_id).toBe(request.toolUseEventId);
-    expect(seed.runtime_messages_snapshot?.map((message) => message.id)).toEqual(["user-latest", "assistant-latest"]);
+    expect(bridge.createSubagentThreadRequests[0]).toEqual(expect.objectContaining({
+      sourceToolUseEventId: request.toolUseEventId,
+      forkTurns: "1",
+    }));
   });
 
   test("wait_agent uses the hot child wait signal instead of treating timeout_ms as an automatic timeout", async () => {
@@ -2268,19 +2385,19 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.awaitChildInterruptRequests).toHaveLength(1);
   });
 
-  test("withResolvedChild settles an oversized route result as a non-retryable tool failure", async () => {
+  test("rejects an oversized child task name as a retryable Bridge boundary contract failure", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.childStatus = "running";
     bridge.childTaskName = "\u0001".repeat(90_000);
     const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
 
-    const result = await runner.runTool(toolRequest("interrupt_agent", { task_name: bridge.childTaskName }));
+    const result = await runner.runTool(toolRequest("interrupt_agent", { task_name: "worker" }));
 
     expect(result).toMatchObject({
       type: "error",
       error: {
-        message: "Tool result exceeds the 512 KiB model-visible output limit.",
-        retryable: false,
+        message: "Bridge returned malformed child-thread facts.",
+        retryable: true,
       },
     });
   });
@@ -2581,7 +2698,7 @@ describe("RuntimePodToolRunner", () => {
 
     expect(result.type).toBe("completed");
     expect(bridge.markChildThreadActiveRequests).toEqual([
-      expect.objectContaining({ childThreadId: "thr_child_1" }),
+      expect.objectContaining({ sourceToolUseEventId: "sevt_tool_1" }),
     ]);
     expect(subAgentHost.preloaded).toEqual([
       expect.objectContaining({
@@ -2593,6 +2710,26 @@ describe("RuntimePodToolRunner", () => {
       }),
     ]);
     expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("resume_agent consumes a preserved-terminal Bridge disposition without marking stale hot state active", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "closed_for_runtime";
+    bridge.markChildThreadActiveResponse = {
+      committed: { disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED },
+    };
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({ text: expect.stringContaining("status: failed") }),
+    });
+    expect(subAgentHost.actions).toEqual(["preload", "close"]);
+    expect(subAgentHost.actions).not.toContain("resume");
+    expect(subAgentHost.actions).not.toContain("inspect");
   });
 
   test("resume_agent records an already-active declaration without reloading the observed child", async () => {
@@ -2611,7 +2748,7 @@ describe("RuntimePodToolRunner", () => {
       }),
     });
     expect(bridge.markChildThreadActiveRequests).toEqual([
-      expect.objectContaining({ childThreadId: "thr_child_1" }),
+      expect.objectContaining({ sourceToolUseEventId: "sevt_tool_1" }),
     ]);
     expect(subAgentHost.actions).toEqual(["inspect"]);
     expect(subAgentHost.preloaded).toEqual([]);
@@ -3027,11 +3164,6 @@ function stableTestId(prefix: string, seed: string): string {
   return `${prefix}_${sha256(seed).slice(0, 32)}`;
 }
 
-function sourceToolUseEventIdFromPayload(payloadJson: string): string | undefined {
-  const parsed = JSON.parse(payloadJson) as { readonly source_tool_use_event_id?: string };
-  return parsed.source_tool_use_event_id;
-}
-
 class RecordingBridgeClient {
   readonly acceptSandboxExecutionRequests: AcceptSandboxExecutionRequest[] = [];
   readonly acceptSandboxExecutionOptions: CallOptions[] = [];
@@ -3048,23 +3180,36 @@ class RecordingBridgeClient {
   readonly readCommandResultRequests: ReadCommandResultRequest[] = [];
   readonly readCommandResultResponses: ReadCommandResultResponse[] = [];
   readonly cancelCommandRequests: CancelCommandRequest[] = [];
-  readonly createChildThreadRequests: CreateChildThreadRequest[] = [];
+  readonly createSubagentThreadRequests: CreateSubagentThreadRequest[] = [];
   readonly resolveChildThreadRequests: ResolveChildThreadRequest[] = [];
   readonly listChildThreadsRequests: ListChildThreadsRequest[] = [];
-  readonly resolveInterAgentDeliveryRequests: ResolveInterAgentDeliveryRequest[] = [];
+  readonly deliverInterAgentMailRequests: DeliverInterAgentMailRequest[] = [];
 	readonly admitChildInterruptRequests: AdmitChildInterruptRequest[] = [];
 	readonly awaitChildInterruptRequests: AwaitChildInterruptRequest[] = [];
-  readonly markChildThreadClosedRequests: MarkChildThreadClosedRequest[] = [];
+  readonly closeChildControlRequests: CloseChildControlRequest[] = [];
   readonly markChildThreadActiveRequests: MarkChildThreadActiveRequest[] = [];
-  readonly writeEventRequests: WriteEventRequest[] = [];
   private deferredListChildThreads: ((response: unknown) => void) | undefined;
-  private deferredResolveInterAgentDelivery: ((response: unknown) => void) | undefined;
+  private deferredDeliverInterAgentMail: ((response: unknown) => void) | undefined;
   private deferredRunMemory: (() => void) | undefined;
   private deferredMarkChildThreadActive: (() => void) | undefined;
   deferReadCommandResult = false;
   deferFirstListChildThreads = false;
-  deferResolveInterAgentDelivery = false;
-  createChildThreadErrorCode: GrpcStatus | undefined;
+  deferDeliverInterAgentMail = false;
+  createSubagentThreadErrorCode: GrpcStatus | undefined;
+  readonly createSubagentThreadErrors: Error[] = [];
+  createSubagentThreadResponse: unknown = { committed: { childThreadId: "thr_child_1" } };
+  resolveChildThreadResponse: unknown | undefined;
+  listChildThreadsResponse: unknown | undefined;
+  deliverInterAgentMailResponse: unknown = { committed: {} };
+  readonly deliverInterAgentMailErrors: Error[] = [];
+  admitChildInterruptResponse: unknown | undefined;
+  readonly admitChildInterruptErrors: Error[] = [];
+  awaitChildInterruptResponse: unknown | undefined;
+  readonly awaitChildInterruptErrors: Error[] = [];
+  closeChildControlResponse: unknown | undefined;
+  readonly closeChildControlErrors: Error[] = [];
+  markChildThreadActiveResponse: unknown | undefined;
+  readonly markChildThreadActiveErrors: Error[] = [];
   childTaskName = "worker";
   childStatus = "idle";
   childInterruptOutcome = ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_COMPLETED;
@@ -3080,8 +3225,7 @@ class RecordingBridgeClient {
   readonly readCommandResultErrors: Error[] = [];
   deferRunMemoryCall = 0;
   afterRunMemoryResponse: ((callNumber: number) => void) | undefined;
-  markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
-  markChildThreadClosedErrorCode = "";
+  closeChildControlStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
   closeReceiptTargetIds: string[] = [];
   readonly closeReceiptDispositions = new Map<string, ChildLifecycleDisposition>();
   activeReceiptDisposition: ChildLifecycleDisposition | undefined;
@@ -3089,7 +3233,7 @@ class RecordingBridgeClient {
   deferMarkChildThreadActive = false;
   private readonly activeReceiptDispositionByOperationId = new Map<string, ChildLifecycleDisposition>();
   childLifecycleObservedBindingId: string | undefined;
-  afterWriteEventResponse: (() => void) | undefined;
+  afterDeliverInterAgentMailResponse: (() => void) | undefined;
 
   client(): Pick<AgentRuntimeBridgeServiceClient,
     | "acceptSandboxExecution"
@@ -3098,15 +3242,14 @@ class RecordingBridgeClient {
     | "sendCommandInput"
     | "readCommandResult"
     | "cancelCommand"
-    | "createChildThread"
+    | "createSubagentThread"
     | "resolveChildThread"
     | "listChildThreads"
-    | "resolveInterAgentDelivery"
+    | "deliverInterAgentMail"
 		| "admitChildInterrupt"
 		| "awaitChildInterrupt"
-    | "markChildThreadClosed"
+    | "closeChildControl"
     | "markChildThreadActive"
-    | "writeEvent"
   > {
     return {
       acceptSandboxExecution: this.acceptSandboxExecution.bind(this),
@@ -3115,15 +3258,14 @@ class RecordingBridgeClient {
       sendCommandInput: this.sendCommandInput.bind(this),
       readCommandResult: this.readCommandResult.bind(this),
       cancelCommand: this.cancelCommand.bind(this),
-      createChildThread: this.createChildThread.bind(this),
+      createSubagentThread: this.createSubagentThread.bind(this),
       resolveChildThread: this.resolveChildThread.bind(this),
       listChildThreads: this.listChildThreads.bind(this),
-      resolveInterAgentDelivery: this.resolveInterAgentDelivery.bind(this),
+      deliverInterAgentMail: this.deliverInterAgentMail.bind(this),
 		admitChildInterrupt: this.admitChildInterrupt.bind(this),
 		awaitChildInterrupt: this.awaitChildInterrupt.bind(this),
-      markChildThreadClosed: this.markChildThreadClosed.bind(this),
+      closeChildControl: this.closeChildControl.bind(this),
       markChildThreadActive: this.markChildThreadActive.bind(this),
-      writeEvent: this.writeEvent.bind(this),
     } as unknown as Pick<AgentRuntimeBridgeServiceClient,
       | "acceptSandboxExecution"
       | "awaitSandboxExecution"
@@ -3131,45 +3273,16 @@ class RecordingBridgeClient {
       | "sendCommandInput"
       | "readCommandResult"
       | "cancelCommand"
-      | "createChildThread"
+      | "createSubagentThread"
       | "resolveChildThread"
       | "listChildThreads"
-      | "resolveInterAgentDelivery"
+      | "deliverInterAgentMail"
 		| "admitChildInterrupt"
 		| "awaitChildInterrupt"
-      | "markChildThreadClosed"
+      | "closeChildControl"
       | "markChildThreadActive"
-      | "writeEvent"
     >;
   }
-
-	private admitChildInterrupt(request: AdmitChildInterruptRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-		this.admitChildInterruptRequests.push(request);
-		callback(null, {
-			ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-			targets: [{
-				childThreadId: request.rootChildThreadId,
-				disposition: ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL,
-				runtimeInputId: `rin_interrupt_${request.rootChildThreadId}`,
-				interruptEventId: `evt_interrupt_${request.rootChildThreadId}`,
-				interruptEventSequence: 1,
-			}],
-		});
-		return grpcCall();
-	}
-
-	private awaitChildInterrupt(request: AwaitChildInterruptRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-		this.awaitChildInterruptRequests.push(request);
-		callback(null, {
-			ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-			outcomes: request.targets.map((target) => ({
-				target,
-				outcome: this.childInterruptOutcome,
-				...(this.childInterruptErrorCode === undefined ? {} : { errorCode: this.childInterruptErrorCode }),
-			})),
-		});
-		return grpcCall();
-	}
 
   private acceptSandboxExecution(
     request: AcceptSandboxExecutionRequest,
@@ -3273,34 +3386,30 @@ class RecordingBridgeClient {
     return grpcCall();
   }
 
-  private createChildThread(request: CreateChildThreadRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-    this.createChildThreadRequests.push(request);
-    if (this.createChildThreadErrorCode !== undefined) {
-      callback(Object.assign(new Error("create child failed"), { code: this.createChildThreadErrorCode }), undefined);
+  private createSubagentThread(request: CreateSubagentThreadRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.createSubagentThreadRequests.push(request);
+    const transportError = this.createSubagentThreadErrors.shift();
+    if (transportError !== undefined) {
+      callback(transportError, undefined);
       return grpcCall();
     }
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      childThreadId: request.childThreadId,
-    });
+    if (this.createSubagentThreadErrorCode !== undefined) {
+      callback(Object.assign(new Error("create child failed"), { code: this.createSubagentThreadErrorCode }), undefined);
+      return grpcCall();
+    }
+    callback(null, this.createSubagentThreadResponse);
     return grpcCall();
   }
 
   private resolveChildThread(request: ResolveChildThreadRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.resolveChildThreadRequests.push(request);
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      threadJson: childThreadJson(this.childTaskName, this.childStatus),
-    });
+    callback(null, this.resolveChildThreadResponse ?? { resolved: { child: childThreadFact(this.childTaskName, this.childStatus) } });
     return grpcCall();
   }
 
   private listChildThreads(request: ListChildThreadsRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.listChildThreadsRequests.push(request);
-    const response = {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      threadJson: [childThreadJson(this.childTaskName, this.childStatus)],
-    };
+    const response = this.listChildThreadsResponse ?? { completed: { children: [childThreadFact(this.childTaskName, this.childStatus)] } };
     if (this.deferFirstListChildThreads && this.listChildThreadsRequests.length === 1) {
       this.deferredListChildThreads = (deferredResponse) => callback(null, deferredResponse);
       return grpcCall();
@@ -3311,134 +3420,102 @@ class RecordingBridgeClient {
 
   completeDeferredListChildThreads(): void {
     const complete = this.deferredListChildThreads;
-    if (complete === undefined) {
-      throw new Error("no deferred listChildThreads call");
-    }
+    if (complete === undefined) throw new Error("no deferred listChildThreads call");
     this.deferFirstListChildThreads = false;
     this.deferredListChildThreads = undefined;
-    complete({
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      threadJson: [childThreadJson(this.childTaskName, this.childStatus)],
-    });
+    complete({ completed: { children: [childThreadFact(this.childTaskName, this.childStatus)] } });
   }
 
-  private resolveInterAgentDelivery(request: ResolveInterAgentDeliveryRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-    this.resolveInterAgentDeliveryRequests.push(request);
-    const response = this.resolvedInterAgentDelivery(request);
-    if (this.deferResolveInterAgentDelivery) {
-      this.deferredResolveInterAgentDelivery = (deferredResponse) => callback(null, deferredResponse);
+  private deliverInterAgentMail(request: DeliverInterAgentMailRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.deliverInterAgentMailRequests.push(request);
+    const transportError = this.deliverInterAgentMailErrors.shift();
+    if (transportError !== undefined) {
+      callback(transportError, undefined);
+      return grpcCall();
+    }
+    const response = this.deliverInterAgentMailResponse;
+    if (this.deferDeliverInterAgentMail) {
+      this.deferredDeliverInterAgentMail = (deferredResponse) => callback(null, deferredResponse);
       return grpcCall();
     }
     callback(null, response);
+    this.afterDeliverInterAgentMailResponse?.();
     return grpcCall();
   }
 
-  completeDeferredResolveInterAgentDelivery(): void {
-    const complete = this.deferredResolveInterAgentDelivery;
-    if (complete === undefined) {
-      throw new Error("no deferred resolveInterAgentDelivery call");
-    }
-    this.deferResolveInterAgentDelivery = false;
-    this.deferredResolveInterAgentDelivery = undefined;
-    const request = this.resolveInterAgentDeliveryRequests.at(-1);
-    if (request === undefined) {
-      throw new Error("no deferred resolveInterAgentDelivery request");
-    }
-    complete(this.resolvedInterAgentDelivery(request));
+  completeDeferredDeliverInterAgentMail(): void {
+    const complete = this.deferredDeliverInterAgentMail;
+    if (complete === undefined) throw new Error("no deferred deliverInterAgentMail call");
+    this.deferDeliverInterAgentMail = false;
+    this.deferredDeliverInterAgentMail = undefined;
+    complete({ committed: {} });
   }
 
-  private resolvedInterAgentDelivery(request: ResolveInterAgentDeliveryRequest): unknown {
-    const sent = this.writeEventRequests.find((event) => {
-      if (event.eventType !== "agent.thread_message_sent") {
-        return false;
-      }
-      const payload = JSON.parse(event.payloadJson) as { readonly delivery_id?: string };
-      return payload.delivery_id === request.deliveryId;
-    });
-    const payload = sent === undefined
-      ? undefined
-      : JSON.parse(sent.payloadJson) as {
-          readonly delivery_id: string;
-          readonly source_thread_id: string;
-          readonly target_thread_id: string;
-          readonly source_tool_use_event_id: string;
-          readonly message: RuntimeMessage;
-        };
-    const message = payload?.message;
-    const publicMessage = message === undefined
-      ? ""
-      : JSON.stringify({
-          ...message,
-          content: message.parts.map((part) => {
-            if (part.type !== "text") {
-              throw new Error("agent mail fixture requires text parts");
-            }
-            return { type: "text", text: part.text };
-          }),
-        });
-    return {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      deliveryId: payload?.delivery_id ?? "",
-      sourceThreadId: payload?.source_thread_id ?? "",
-      targetThreadId: payload?.target_thread_id ?? "",
-      sourceToolUseEventId: payload?.source_tool_use_event_id ?? "",
-      receivedEventId: payload === undefined ? "" : `evt_received_${payload.delivery_id}`,
-      receivedSequence: payload === undefined ? 0 : 1,
-      messageJson: publicMessage,
-    };
+  private readonly interruptTargetByOperationId = new Map<string, string>();
+
+  private admitChildInterrupt(request: AdmitChildInterruptRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.admitChildInterruptRequests.push(request);
+    const transportError = this.admitChildInterruptErrors.shift();
+    if (transportError !== undefined) {
+      callback(transportError, undefined);
+      return grpcCall();
+    }
+    const controlOperationId = `ctrl_${request.sourceToolUseEventId}`;
+    this.interruptTargetByOperationId.set(controlOperationId, "thr_child_1");
+    callback(null, this.admitChildInterruptResponse ?? { committed: { controlOperationId } });
+    return grpcCall();
   }
 
-  private markChildThreadClosed(request: MarkChildThreadClosedRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-    this.markChildThreadClosedRequests.push(request);
-    const sourceCommandId = request.source?.sourceToolUseEventId ?? "";
-    const operationId = stableRuntimeID("child_tree_close", sourceCommandId, request.childThreadId);
+  private awaitChildInterrupt(request: AwaitChildInterruptRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.awaitChildInterruptRequests.push(request);
+    const transportError = this.awaitChildInterruptErrors.shift();
+    if (transportError !== undefined) {
+      callback(transportError, undefined);
+      return grpcCall();
+    }
+    const childThreadId = this.interruptTargetByOperationId.get(request.controlOperationId) ?? "thr_child_1";
+	callback(null, this.awaitChildInterruptResponse ?? { completed: { targets: [{
+      childThreadId,
+      outcome: this.childInterruptOutcome,
+      ...(this.childInterruptErrorCode === undefined ? {} : { errorCode: this.childInterruptErrorCode }),
+	}] } });
+    return grpcCall();
+  }
+
+  private closeChildControl(request: CloseChildControlRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.closeChildControlRequests.push(request);
+    const transportError = this.closeChildControlErrors.shift();
+    if (transportError !== undefined) {
+      callback(transportError, undefined);
+      return grpcCall();
+    }
+    if (this.closeChildControlStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED ||
+      (this.childLifecycleObservedBindingId !== undefined && this.childLifecycleObservedBindingId !== request.scope?.binding?.bindingId)) {
+      callback(null, { stale: {} });
+      return grpcCall();
+    }
+    const rootThreadId = this.interruptTargetByOperationId.get(request.controlOperationId ?? "") ?? "thr_child_1";
     const targetIds = this.closeReceiptTargetIds.length > 0
       ? this.closeReceiptTargetIds
-      : [request.childThreadId];
-    callback(null, {
-      ack: { status: this.markChildThreadClosedStatus, runtimeInputId: "", runtimeWriteId: operationId, errorCode: this.markChildThreadClosedErrorCode },
-      ...(this.markChildThreadClosedStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED
-        ? {}
-        : {
-            declaration: {
-              receipts: targetIds.map((targetId) => ({
-                sessionThreadId: targetId,
-                operationKind: "mark_child_thread_closed",
-                sourceKind: "child_close_command",
-					operationId,
-                events: [],
-                messages: [],
-                pendingAttachmentDeltaJson: [],
-					interruptToolProjections: [],
-                prefixConsumptions: [],
-                declarationDigest: childLifecycleDeclarationDigest({
-                  operationKind: "mark_child_thread_closed",
-                  action: "close",
-                  sessionThreadId: request.scope?.sessionThreadId ?? "",
-                  childThreadId: request.childThreadId,
-                  sourceKind: "tool_use",
-						sourceCommandId,
-                }),
-                childLifecycle: [{
-                  childThreadId: targetId,
-                  disposition: this.closeReceiptDispositions.get(targetId)
-                    ?? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED,
-						effectiveAt: "2026-01-01T00:00:00.000Z",
-                }],
-              })),
-              applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
-              observedBindingId: this.childLifecycleObservedBindingId ?? request.scope?.binding?.bindingId ?? "",
-              observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
-            },
-          }),
+      : [rootThreadId];
+    callback(null, this.closeChildControlResponse ?? {
+      committed: { children: targetIds.map((targetId) => ({
+        childThreadId: targetId,
+        disposition: this.closeReceiptDispositions.get(targetId)
+          ?? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED,
+      })) },
     });
     return grpcCall();
   }
 
   private markChildThreadActive(request: MarkChildThreadActiveRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.markChildThreadActiveRequests.push(request);
-    const sourceCommandId = request.source?.sourceToolUseEventId ?? "";
-    const operationId = stableRuntimeID("child_resume", sourceCommandId, request.childThreadId);
+    const transportError = this.markChildThreadActiveErrors.shift();
+    if (transportError !== undefined) {
+      callback(transportError, undefined);
+      return grpcCall();
+    }
+    const operationId = request.sourceToolUseEventId;
     const disposition = this.activeReceiptDispositionByOperationId.get(operationId)
       ?? this.activeReceiptDisposition
       ?? (this.childStatus === "closed_for_runtime"
@@ -3446,38 +3523,7 @@ class RecordingBridgeClient {
         : ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE);
     this.activeReceiptDispositionByOperationId.set(operationId, disposition);
     this.activeReceiptDispositions.push(disposition);
-    const respond = (): void => callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: operationId, errorCode: "" },
-      declaration: {
-        receipts: [{
-          sessionThreadId: request.childThreadId,
-          operationKind: "mark_child_thread_active",
-          sourceKind: "child_resume_command",
-			operationId,
-          events: [],
-          messages: [],
-          pendingAttachmentDeltaJson: [],
-			interruptToolProjections: [],
-          prefixConsumptions: [],
-          declarationDigest: childLifecycleDeclarationDigest({
-            operationKind: "mark_child_thread_active",
-            action: "resume",
-            sessionThreadId: request.scope?.sessionThreadId ?? "",
-            childThreadId: request.childThreadId,
-            sourceKind: "tool_use",
-				sourceCommandId,
-          }),
-          childLifecycle: [{
-            childThreadId: request.childThreadId,
-            disposition,
-				effectiveAt: "2026-01-01T00:00:00.000Z",
-          }],
-        }],
-        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
-        observedBindingId: request.scope?.binding?.bindingId ?? "",
-        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
-      },
-    });
+    const respond = (): void => callback(null, this.markChildThreadActiveResponse ?? { committed: { disposition } });
     if (this.deferMarkChildThreadActive) {
       this.deferredMarkChildThreadActive = respond;
       return grpcCall();
@@ -3494,17 +3540,6 @@ class RecordingBridgeClient {
     this.deferMarkChildThreadActive = false;
     this.deferredMarkChildThreadActive = undefined;
     complete();
-  }
-
-  private writeEvent(request: WriteEventRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-    this.writeEventRequests.push(request);
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: request.runtimeWriteId, errorCode: "" },
-      eventId: "evt_thread_message_sent",
-      sequence: 1,
-    });
-    this.afterWriteEventResponse?.();
-    return grpcCall();
   }
 }
 
@@ -3652,15 +3687,16 @@ class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
   }
 }
 
-function childThreadJson(taskName: string, status = "idle"): string {
-  return JSON.stringify({
-    session_thread_id: "thr_child_1",
-    parent_thread_id: "thrd_1",
+function childThreadFact(taskName: string, status = "idle") {
+  return {
+    childThreadId: "thr_child_1",
+    parentThreadId: "thrd_1",
     role: "subagent",
+    visibility: "public",
     status,
-    task_name: taskName,
-    agent_type: "worker",
-  });
+    taskName,
+    agentType: "worker",
+  };
 }
 
 class RecordingGatewayClient {
@@ -3720,6 +3756,10 @@ class RecordingMcpConnectorClient {
 
 function grpcCall(): { readonly cancel: () => void } {
   return { cancel: () => undefined };
+}
+
+function grpcError(code: GrpcStatus): Error {
+  return Object.assign(new Error("transport unavailable"), { code });
 }
 
 async function waitForCondition(condition: () => boolean, description: string): Promise<void> {

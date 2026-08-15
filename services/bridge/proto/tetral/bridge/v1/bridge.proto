@@ -13,13 +13,18 @@ service AgentRuntimeBridgeService {
   rpc SettleToolResult(SettleToolResultRequest) returns (SettleToolResultResponse);
   rpc WriteRequestEnd(WriteRequestEndRequest) returns (WriteRequestEndResponse);
   rpc FinishIdle(FinishIdleRequest) returns (FinishIdleResponse);
-  rpc CreateChildThread(CreateChildThreadRequest) returns (CreateChildThreadResponse);
+  rpc CreateSubagentThread(CreateSubagentThreadRequest) returns (CreateSubagentThreadResponse);
+  rpc EnsureApprovalReviewerTrunk(EnsureApprovalReviewerTrunkRequest) returns (EnsureApprovalReviewerTrunkResponse);
+  rpc EnsureApprovalReviewerSidecar(EnsureApprovalReviewerSidecarRequest) returns (EnsureApprovalReviewerSidecarResponse);
+  rpc AdmitApprovalReviewInput(AdmitApprovalReviewInputRequest) returns (AdmitApprovalReviewInputResponse);
   rpc ResolveChildThread(ResolveChildThreadRequest) returns (ResolveChildThreadResponse);
   rpc ListChildThreads(ListChildThreadsRequest) returns (ListChildThreadsResponse);
-  rpc ResolveInterAgentDelivery(ResolveInterAgentDeliveryRequest) returns (ResolveInterAgentDeliveryResponse);
+  rpc DeliverInterAgentMail(DeliverInterAgentMailRequest) returns (DeliverInterAgentMailResponse);
+  rpc ReadAgentMail(ReadAgentMailRequest) returns (ReadAgentMailResponse);
   rpc AdmitChildInterrupt(AdmitChildInterruptRequest) returns (AdmitChildInterruptResponse);
   rpc AwaitChildInterrupt(AwaitChildInterruptRequest) returns (AwaitChildInterruptResponse);
-  rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);
+  rpc CloseChildControl(CloseChildControlRequest) returns (CloseChildControlResponse);
+  rpc CloseApprovalReviewer(CloseApprovalReviewerRequest) returns (CloseApprovalReviewerResponse);
   rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);
   rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);
   rpc AwaitSandboxExecution(AwaitSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);
@@ -304,34 +309,99 @@ message RefreshRuntimeBindingTokenResponse {
 }
 
 message CommitInputsRequest {
-  reserved 6, 8, 9;
-  reserved "hot_context_patch_json", "inter_agent_message_json", "approval_review_json";
   RuntimeScope scope = 1;
   string runtime_input_id = 2;
-  repeated string event_ids = 3;
-  int64 sequence_from = 4;
-  int64 sequence_to = 5;
-  string input_kind = 7;
-  repeated RuntimeMessageCreate message_creates = 10;
-  reserved 11, 12;
+  RuntimeInputDisposition disposition = 3;
+  repeated string approval_review_text = 4;
 }
 
 message CommitInputsResponse {
-  BridgeWriteAck ack = 1;
-  DeclarationResponse declaration = 2;
+  oneof outcome {
+    CommitInputsCommitted committed = 1;
+    CommitInputsDuplicate duplicate = 2;
+    CommitInputsStale stale = 3;
+  }
 }
+
+enum RuntimeInputDisposition {
+  RUNTIME_INPUT_DISPOSITION_UNSPECIFIED = 0;
+  RUNTIME_INPUT_DISPOSITION_COMMIT = 1;
+  RUNTIME_INPUT_DISPOSITION_DEFER = 2;
+  RUNTIME_INPUT_DISPOSITION_REJECT = 3;
+}
+
+message RuntimeContextToolFailed { string error_json = 1; }
+message RuntimeContextToolCancelled { optional string error_json = 1; }
+
+message RuntimeInterruptToolResult {
+  string tool_use_event_id = 1;
+  oneof outcome {
+    RuntimeContextToolFailed error = 2;
+    RuntimeContextToolCancelled cancelled = 3;
+  }
+}
+
+message CommitInputsContextApplication {
+  repeated int64 assigned_context_sequences = 1;
+  repeated string pending_attachment_json = 2;
+}
+
+message CommitInputsInterruptApplication {
+  repeated RuntimeInterruptToolResult interrupt_tool_results = 1;
+}
+
+message CommitInputsCommitted {
+  reserved 1, 2, 3;
+  reserved "context_delta", "interrupt_tool_results", "pending_attachment_json";
+  oneof application {
+    CommitInputsContextApplication context = 4;
+    CommitInputsInterruptApplication interrupt = 5;
+  }
+}
+message CommitInputsDuplicate {
+  reserved 1, 2, 3;
+  reserved "context_delta", "interrupt_tool_results", "pending_attachment_json";
+  oneof application {
+    CommitInputsContextApplication context = 4;
+    CommitInputsInterruptApplication interrupt = 5;
+  }
+}
+message CommitInputsStale {}
 
 message CommitTaskNotificationResultRequest {
   RuntimeScope scope = 1;
   string runtime_input_id = 2;
-  string task_id = 3;
-  string result_json = 4;
-  RuntimeMessageCreate message_create = 5;
+  RuntimeInputDisposition disposition = 3;
 }
 
 message CommitTaskNotificationResultResponse {
-  BridgeWriteAck ack = 1;
-  DeclarationResponse declaration = 3;
+  oneof outcome {
+    CommitTaskNotificationResultCommitted committed = 1;
+    CommitTaskNotificationResultDuplicate duplicate = 2;
+    CommitTaskNotificationResultStale stale = 3;
+    CommitTaskNotificationResultDeferred deferred = 4;
+    CommitTaskNotificationResultRejected rejected = 5;
+  }
+}
+
+message CommitTaskNotificationResultCommitted {
+  reserved 1;
+  reserved "context_delta";
+  repeated int64 assigned_context_sequences = 2;
+}
+message CommitTaskNotificationResultDuplicate {
+  reserved 1;
+  reserved "context_delta";
+  repeated int64 assigned_context_sequences = 2;
+}
+message CommitTaskNotificationResultStale {}
+message CommitTaskNotificationResultDeferred {}
+message CommitTaskNotificationResultRejected { TaskNotificationRejectionReason reason = 1; }
+
+enum TaskNotificationRejectionReason {
+  TASK_NOTIFICATION_REJECTION_REASON_UNSPECIFIED = 0;
+  TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID = 1;
+  TASK_NOTIFICATION_REJECTION_REASON_TARGET_INVALID = 2;
 }
 
 message McpManifestChangedRequest {
@@ -627,10 +697,6 @@ message WriteRequestEndRequest {
 
 message RequestEndInterruptSettlement {
   string runtime_input_id = 1;
-  repeated string event_ids = 2;
-  int64 sequence_from = 3;
-  int64 sequence_to = 4;
-  reserved 5, 6;
 }
 
 message WriteRequestEndResponse {
@@ -665,25 +731,62 @@ message FinishIdleResponse {
   DeclarationResponse declaration = 2;
 }
 
-message CreateChildThreadRequest {
+message CreateSubagentThreadRequest {
   RuntimeScope scope = 1;
-  string parent_thread_id = 2;
-  string child_thread_id = 3;
-  string role = 4;
-  string task_name = 5;
-  string metadata_json = 6;
-  string agent_type = 7;
-  string source_tool_use_event_id = 8;
-  string fork_turns = 9;
-  string thread_context_prefix_json = 10;
-  bool is_trunk = 11;
-  string reviewer_review_id = 12;
+  string source_tool_use_event_id = 2;
+  string task_name = 3;
+  string agent_type = 4;
+  string fork_turns = 5;
 }
 
-message CreateChildThreadResponse {
-  BridgeWriteAck ack = 1;
-  string child_thread_id = 2;
+message CreateSubagentThreadResponse {
+  oneof outcome {
+    CreateSubagentThreadCommitted committed = 1;
+    CreateSubagentThreadDuplicate duplicate = 2;
+  }
 }
+message CreateSubagentThreadCommitted { string child_thread_id = 1; }
+message CreateSubagentThreadDuplicate { string child_thread_id = 1; }
+
+message EnsureApprovalReviewerTrunkRequest {
+  RuntimeScope scope = 1;
+  string ensure_operation_id = 2;
+}
+message EnsureApprovalReviewerTrunkResponse {
+  oneof outcome {
+    EnsureApprovalReviewerTrunkCommitted committed = 1;
+    EnsureApprovalReviewerTrunkDuplicate duplicate = 2;
+  }
+}
+message EnsureApprovalReviewerTrunkCommitted { string reviewer_thread_id = 1; }
+message EnsureApprovalReviewerTrunkDuplicate { string reviewer_thread_id = 1; }
+
+message EnsureApprovalReviewerSidecarRequest {
+  RuntimeScope scope = 1;
+  string review_id = 2;
+}
+message EnsureApprovalReviewerSidecarResponse {
+  oneof outcome {
+    EnsureApprovalReviewerSidecarCommitted committed = 1;
+    EnsureApprovalReviewerSidecarDuplicate duplicate = 2;
+  }
+}
+message EnsureApprovalReviewerSidecarCommitted { string reviewer_thread_id = 1; }
+message EnsureApprovalReviewerSidecarDuplicate { string reviewer_thread_id = 1; }
+
+message AdmitApprovalReviewInputRequest {
+  RuntimeScope scope = 1;
+  string reviewer_thread_id = 2;
+  string review_id = 3;
+}
+message AdmitApprovalReviewInputResponse {
+  oneof outcome {
+    AdmitApprovalReviewInputCommitted committed = 1;
+    AdmitApprovalReviewInputDuplicate duplicate = 2;
+  }
+}
+message AdmitApprovalReviewInputCommitted { string runtime_input_id = 1; }
+message AdmitApprovalReviewInputDuplicate { string runtime_input_id = 1; }
 
 message ResolveChildThreadRequest {
   RuntimeScope scope = 1;
@@ -691,9 +794,9 @@ message ResolveChildThreadRequest {
 }
 
 message ResolveChildThreadResponse {
-  BridgeWriteAck ack = 1;
-  string thread_json = 2;
+  oneof outcome { ResolveChildThreadResolved resolved = 1; }
 }
+message ResolveChildThreadResolved { ChildThreadFact child = 1; }
 
 message ListChildThreadsRequest {
   RuntimeScope scope = 1;
@@ -701,28 +804,51 @@ message ListChildThreadsRequest {
 }
 
 message ListChildThreadsResponse {
-  BridgeWriteAck ack = 1;
-  repeated string thread_json = 2;
+  oneof outcome { ListChildThreadsCompleted completed = 1; }
+}
+message ListChildThreadsCompleted { repeated ChildThreadFact children = 1; }
+message ChildThreadFact {
+  string child_thread_id = 1;
+  string parent_thread_id = 2;
+  string role = 3;
+  string visibility = 4;
+  string task_name = 5;
+  string agent_type = 6;
+  string status = 7;
 }
 
-message ResolveInterAgentDeliveryRequest {
+message DeliverInterAgentMailRequest {
   RuntimeScope scope = 1;
-  string child_thread_id = 2;
-  string delivery_id = 3;
+  string delivery_id = 2;
+  string target_thread_id = 3;
+  string source_tool_use_event_id = 4;
+  string content = 5;
 }
 
-message ResolveInterAgentDeliveryResponse {
-  BridgeWriteAck ack = 1;
-  reserved 2 to 5;
-  reserved "sent_exists", "received_exists", "child_receivable", "child_thread_json";
-  string delivery_id = 6;
-  string source_thread_id = 7;
-  string target_thread_id = 8;
-  string source_tool_use_event_id = 9;
-  string received_event_id = 10;
-  int64 received_sequence = 11;
-  string message_json = 12;
+message DeliverInterAgentMailResponse {
+  oneof outcome {
+    DeliverInterAgentMailCommitted committed = 1;
+    DeliverInterAgentMailDuplicate duplicate = 2;
+  }
 }
+message DeliverInterAgentMailCommitted {}
+message DeliverInterAgentMailDuplicate {}
+
+message ReadAgentMailRequest {
+  RuntimeScope scope = 1;
+  string source_thread_id = 2;
+}
+message ReadAgentMailResponse {
+  oneof outcome {
+    ReadAgentMailFound found = 1;
+    ReadAgentMailEmpty empty = 2;
+  }
+}
+message ReadAgentMailFound {
+  string delivery_id = 1;
+  string content = 2;
+}
+message ReadAgentMailEmpty {}
 
 message ChildInterruptTarget {
   string child_thread_id = 1;
@@ -734,69 +860,87 @@ message ChildInterruptTarget {
 
 message AdmitChildInterruptRequest {
   RuntimeScope scope = 1;
-  string root_child_thread_id = 2;
-  string source_tool_use_event_id = 3;
-  ChildControlAction action = 4;
-  bool include_descendants = 5;
+  string source_tool_use_event_id = 2;
 }
 
 message AdmitChildInterruptResponse {
-  BridgeWriteAck ack = 1;
-  repeated ChildInterruptTarget targets = 2;
+  oneof outcome {
+    AdmitChildInterruptCommitted committed = 1;
+    AdmitChildInterruptDuplicate duplicate = 2;
+  }
 }
+message AdmitChildInterruptCommitted { string control_operation_id = 1; }
+message AdmitChildInterruptDuplicate { string control_operation_id = 1; }
 
 message AwaitChildInterruptRequest {
   RuntimeScope scope = 1;
-  string root_child_thread_id = 2;
-  string source_tool_use_event_id = 3;
-  ChildControlAction action = 4;
-  bool include_descendants = 5;
-  repeated ChildInterruptTarget targets = 6;
+  string control_operation_id = 2;
 }
 
 message ChildInterruptTargetOutcome {
-  ChildInterruptTarget target = 1;
+  string child_thread_id = 1;
   ChildInterruptOutcome outcome = 2;
   optional string error_code = 3;
 }
 
 message AwaitChildInterruptResponse {
-  BridgeWriteAck ack = 1;
-  repeated ChildInterruptTargetOutcome outcomes = 2;
+  oneof outcome {
+    AwaitChildInterruptCompleted completed = 1;
+  }
 }
+message AwaitChildInterruptCompleted { repeated ChildInterruptTargetOutcome targets = 1; }
 
-message MarkChildThreadClosedRequest {
+message CloseChildControlRequest {
   RuntimeScope scope = 1;
-  string child_thread_id = 2;
-  reserved 3;
-  ChildLifecycleSource source = 4;
-  optional string source_tool_use_event_id = 5;
-  repeated ChildInterruptTarget targets = 6;
+  string control_operation_id = 2;
 }
+message CloseChildControlResponse {
+  oneof outcome {
+    CloseChildControlCommitted committed = 1;
+    CloseChildControlDuplicate duplicate = 2;
+    CloseChildControlStale stale = 3;
+  }
+}
+message CloseChildControlCommitted { repeated ChildLifecycleResult children = 1; }
+message CloseChildControlDuplicate { repeated ChildLifecycleResult children = 1; }
+message CloseChildControlStale {}
 
-message MarkChildThreadClosedResponse {
-  BridgeWriteAck ack = 1;
-  DeclarationResponse declaration = 2;
+message CloseApprovalReviewerRequest {
+  RuntimeScope scope = 1;
+  string reviewer_thread_id = 2;
+  string review_id = 3;
+}
+message CloseApprovalReviewerResponse {
+  oneof outcome {
+    CloseApprovalReviewerCommitted committed = 1;
+    CloseApprovalReviewerDuplicate duplicate = 2;
+    CloseApprovalReviewerStale stale = 3;
+  }
+}
+message CloseApprovalReviewerCommitted {}
+message CloseApprovalReviewerDuplicate {}
+message CloseApprovalReviewerStale {}
+
+message ChildLifecycleResult {
+  string child_thread_id = 1;
+  ChildLifecycleDisposition disposition = 2;
 }
 
 message MarkChildThreadActiveRequest {
   RuntimeScope scope = 1;
-  string child_thread_id = 2;
-  reserved 3;
-  ChildLifecycleSource source = 4;
+  string source_tool_use_event_id = 2;
 }
 
 message MarkChildThreadActiveResponse {
-  BridgeWriteAck ack = 1;
-  DeclarationResponse declaration = 2;
-}
-
-message ChildLifecycleSource {
-  oneof identity {
-    string source_tool_use_event_id = 1;
-    string reviewer_review_id = 2;
+  oneof outcome {
+    MarkChildThreadActiveCommitted committed = 1;
+    MarkChildThreadActiveDuplicate duplicate = 2;
+    MarkChildThreadActiveStale stale = 3;
   }
 }
+message MarkChildThreadActiveCommitted { ChildLifecycleDisposition disposition = 1; }
+message MarkChildThreadActiveDuplicate { ChildLifecycleDisposition disposition = 1; }
+message MarkChildThreadActiveStale {}
 
 message AcceptSandboxExecutionRequest {
   RuntimeScope scope = 1;

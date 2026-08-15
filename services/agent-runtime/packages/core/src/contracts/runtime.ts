@@ -1086,9 +1086,6 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
   }).optional(),
   interruptSettlement: z.strictObject({
     runtimeInputId: SanitizedIdentifierSchema,
-    eventIds: z.array(SanitizedIdentifierSchema).length(1),
-    sequenceFrom: NonNegativeIntegerSchema,
-    sequenceTo: NonNegativeIntegerSchema,
   }).optional(),
 }).superRefine((envelope, context) => {
   const consumedAttachmentCount =
@@ -1102,8 +1099,7 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
   }
   if (envelope.interruptSettlement !== undefined &&
     (!envelope.isError || envelope.errorKind !== "runtime_interrupted" ||
-      envelope.reschedule !== undefined ||
-      envelope.interruptSettlement.sequenceTo < envelope.interruptSettlement.sequenceFrom)) {
+      envelope.reschedule !== undefined)) {
     context.addIssue({ code: "custom", message: "request-end interrupt settlement requires an interrupted terminal end" });
   }
   const successful = !envelope.isError && envelope.reschedule === undefined;

@@ -85,13 +85,10 @@ export function acceptedInputDeclarationKind(input: RuntimeAcceptedInputState): 
 /** Converts one accepted command's semantic messages into ordered creates. */
 export function acceptedInputCreates(input: RuntimeAcceptedInputState): readonly RuntimeMessageCreate[] {
   if (input.kind === "task_notification") {
-    return [taskNotificationCreate({ payloadJson: input.payloadJson })];
+    return [taskNotificationCreate({ payloadJson: input.notificationJson })];
   }
   if (input.kind === "rejection") {
-    if (input.eventIds.length === 0) {
-      throw new Error("rejection input must name at least one source event");
-    }
-    return input.eventIds.map(() => RuntimeMessageCreateSchema.parse({
+    return [RuntimeMessageCreateSchema.parse({
       messageKind: "rejection",
       role: "assistant",
       origin: "agent",
@@ -102,13 +99,10 @@ export function acceptedInputCreates(input: RuntimeAcceptedInputState): readonly
         truncated: false,
         status: "completed",
       }],
-    }));
+    })];
   }
   const messages = acceptedInputMessages(input);
   const messageKind = acceptedInputMessageKind(input);
-  if (messages.length !== input.eventIds.length) {
-    throw new Error("accepted input message and source event counts differ");
-  }
   return messages.map((message) => RuntimeMessageCreateSchema.parse({
     ...messageCreateInfo(message),
     messageKind,
@@ -141,19 +135,9 @@ export function applyAcceptedInputReceipt(
     sourceKind: acceptedInputDeclarationKind(input),
     operationId: input.runtimeInputId,
   });
-  if (receipt.events.length !== input.eventIds.length) {
-    throw new Error("accepted input event stamp count does not match");
+  if (receipt.events.some((stamp) => stamp.sessionThreadId !== input.sessionThreadId)) {
+    throw new Error("accepted input event target is invalid");
   }
-  const expectedDisposition = input.kind === "approval_review" ? "created" : "existing";
-  receipt.events.forEach((stamp, index) => {
-    if (
-      stamp.sessionThreadId !== input.sessionThreadId ||
-      stamp.eventId !== input.eventIds[index] ||
-      stamp.disposition !== expectedDisposition
-    ) {
-      throw new Error("accepted input event stamp is invalid");
-    }
-  });
   return applyMessageCreateStamps({
     sessionId: input.sessionId,
     sessionThreadId: input.sessionThreadId,
@@ -168,7 +152,6 @@ export function applyInterruptInputReceipt(
   input: {
     readonly sessionThreadId: string;
     readonly runtimeInputId: string;
-    readonly eventIds: readonly string[];
     readonly expectedToolUseEventIds: readonly string[];
   },
   receipt: RuntimeDeclarationReceipt,
@@ -180,13 +163,12 @@ export function applyInterruptInputReceipt(
     sourceKind: "interrupt_control",
     operationId: input.runtimeInputId,
   });
-  if (input.eventIds.length !== 1 || receipt.events.length !== 1 || receipt.messages.length !== 0) {
+  if (receipt.events.length !== 1 || receipt.messages.length !== 0) {
     throw new Error("interrupt receipt carrier set is invalid");
   }
   const interruptEvent = receipt.events[0]!;
   if (
     interruptEvent.sessionThreadId !== input.sessionThreadId ||
-    interruptEvent.eventId !== input.eventIds[0] ||
     interruptEvent.disposition !== "existing"
   ) {
     throw new Error("interrupt event stamp is invalid");
@@ -287,7 +269,6 @@ export function applyToolSettlementProjection(
 
 /** Builds the sole user message created for an approval decision. */
 export function toolConfirmationCreate(input: {
-  readonly sourceEventId: string;
   readonly toolUseEventId: string;
   readonly pendingTool: RuntimePendingApprovalToolJobState;
   readonly decision: "allow" | "deny";
@@ -318,7 +299,6 @@ export function applyToolConfirmationReceipt(input: {
   readonly sessionId: string;
   readonly sessionThreadId: string;
   readonly runtimeInputId: string;
-  readonly sourceEventId: string;
   readonly create: RuntimeMessageCreate;
 }, receipt: RuntimeDeclarationReceipt): DurableRuntimeMessage {
   assertOrdinaryDeclarationReceipt(receipt);
@@ -328,7 +308,7 @@ export function applyToolConfirmationReceipt(input: {
     sourceKind: "tool_confirmation",
     operationId: input.runtimeInputId,
   });
-  if (receipt.events.length !== 1 || receipt.events[0]?.eventId !== input.sourceEventId || receipt.events[0].disposition !== "existing") {
+  if (receipt.events.length !== 1 || receipt.events[0]?.disposition !== "existing") {
     throw new Error("tool confirmation event stamp is invalid");
   }
   return applyMessageCreateStamps({
@@ -708,7 +688,7 @@ function acceptedInputMessages(input: RuntimeAcceptedInputState): readonly Runti
   if (input.kind === "inter_agent_message") return [RuntimeMessageSchema.parse(input.message)];
   if (input.kind === "approval_review") return input.promptItems.map((message) => RuntimeMessageSchema.parse(message));
   if (input.kind !== "messages") return [];
-  const parsed = JSON.parse(input.payloadJson) as { readonly messages?: unknown };
+  const parsed = JSON.parse(input.contentJson) as { readonly messages?: unknown };
   if (!Array.isArray(parsed.messages)) throw new Error("accepted input payload has no messages");
   return parsed.messages.map((message) => RuntimeMessageSchema.parse(message));
 }

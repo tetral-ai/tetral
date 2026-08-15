@@ -85,9 +85,8 @@ function expectNoProviderDiagnosticCanaries(value: unknown): void {
     expect(serialized).not.toContain("stack");
 }
 
-function acceptedInput(runtimeInputId = "rin_follow_up", sessionId = "sesn_1"): RuntimeAcceptedInputState {
+function acceptedInput(runtimeInputId = "rin_follow_up", sessionId = "sesn_1"): Extract<RuntimeAcceptedInputState, { readonly kind: "messages" }> {
     return {
-        requestId: `req_${runtimeInputId}`,
         workspaceId: "wksp_test",
         sessionId,
         sessionThreadId: "thrd_1",
@@ -95,14 +94,50 @@ function acceptedInput(runtimeInputId = "rin_follow_up", sessionId = "sesn_1"): 
         bindingGeneration: 1,
         targetPodUid: "pod_1",
         runtimeInputId,
-        eventIds: [`sevt_${runtimeInputId}`],
-        sequenceFrom: 1,
-        sequenceTo: 1,
+        inputOrder: 1,
         kind: "messages",
-        payloadJson: JSON.stringify({
+        contentJson: JSON.stringify({
             messages: [userMessage(`msg_${runtimeInputId}`, 1, "test input")],
         }),
     };
+}
+
+function taskNotificationInput(
+    runtimeInputId: string,
+    taskId: string,
+    sourceToolUseEventId: string,
+    status: "completed" | "failed" | "cancelled" | "expired",
+    notificationJson: string,
+    sessionId = "sesn_1",
+): Extract<RuntimeAcceptedInputState, { readonly kind: "task_notification" }> {
+    const { kind: _kind, contentJson: _contentJson, ...scope } = acceptedInput(runtimeInputId, sessionId);
+    return {
+        ...scope,
+        kind: "task_notification",
+        taskId,
+        sourceToolUseEventId,
+        status,
+        notificationJson,
+    };
+}
+
+function rejectionInput(
+    runtimeInputId: string,
+    reasonCode: "runtime_command_payload_too_large" | "runtime_command_rejected",
+    sessionId = "sesn_1",
+): Extract<RuntimeAcceptedInputState, { readonly kind: "rejection" }> {
+    const { kind: _kind, contentJson: _contentJson, ...scope } = acceptedInput(runtimeInputId, sessionId);
+    return { ...scope, kind: "rejection", reasonCode };
+}
+
+function interruptInput(
+    runtimeInputId: string,
+    inputOrder = 9,
+    sessionId = "sesn_1",
+    origin: "user" | "agent" = "user",
+): SessionManager.RuntimeInterruptControlCommand {
+    const { kind: _kind, contentJson: _contentJson, ...scope } = acceptedInput(runtimeInputId, sessionId);
+    return { ...scope, inputOrder, origin };
 }
 
 function installRecoveredToolTurn(session: ThreadRuntime, modelRequestId: string, members: ReadonlyArray<{
@@ -136,7 +171,7 @@ function installRecoveredToolTurn(session: ThreadRuntime, modelRequestId: string
     });
 }
 
-function testControlCommit(scope: RuntimeAcceptedInputState, inputKind: "interrupt_control" | "tool_confirmation" = "interrupt_control") {
+function testControlCommit(scope: Parameters<typeof buildRuntimeControlCommitResult>[0], inputKind: "interrupt_control" | "tool_confirmation" = "interrupt_control") {
     return async (declaration: RuntimeControlInputDeclaration) => buildRuntimeControlCommitResult(scope, inputKind, declaration);
 }
 
@@ -148,9 +183,7 @@ function beginTestUserInterrupt(session: ThreadRuntime, runtimeInputId: string, 
         bindingId: session.identity.bindingId,
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
-        eventIds: [`sevt_${runtimeInputId}`],
-        sequenceFrom: 9,
-        sequenceTo: 9,
+        inputOrder: 9,
     };
     session.state.beginUserInterrupt(scope, async (declaration) => {
         onCommit();
@@ -162,7 +195,6 @@ function approvalReviewAcceptedInput(runtimeInputId = "rin_approval_review"): Ex
     readonly kind: "approval_review";
 }> {
     return {
-        requestId: `req_${runtimeInputId}`,
         workspaceId: "wksp_reviewer",
         sessionId: "sesn_1",
         sessionThreadId: "thrd_reviewer",
@@ -170,9 +202,7 @@ function approvalReviewAcceptedInput(runtimeInputId = "rin_approval_review"): Ex
         bindingGeneration: 1,
         targetPodUid: "pod_reviewer",
         runtimeInputId,
-        eventIds: [`sevt_${runtimeInputId}`],
-        sequenceFrom: 1,
-        sequenceTo: 1,
+        inputOrder: 1,
         kind: "approval_review",
         reviewId: `arvw_${runtimeInputId}`,
         parentThreadId: "thrd_main",
@@ -256,16 +286,12 @@ function installPendingInputForTest(session: ThreadRuntime, pending: PendingInpu
     }
     testAcceptedInputSequence += 1;
     const runtimeInputId = `rin_test_harness_${testAcceptedInputSequence}`;
-    const eventIds = pending.messages.map((_, index) => `sevt_${runtimeInputId}_${index}`);
     session.state.enqueueAcceptedInput({
-        requestId: `req_${runtimeInputId}`,
         ...session.identity,
         runtimeInputId,
-        eventIds,
-        sequenceFrom: testAcceptedInputSequence,
-        sequenceTo: testAcceptedInputSequence + eventIds.length - 1,
+        inputOrder: testAcceptedInputSequence,
         kind: "messages",
-        payloadJson: JSON.stringify({ messages: pending.messages }),
+        contentJson: JSON.stringify({ messages: pending.messages }),
     });
 }
 
@@ -632,6 +658,10 @@ class TestRuntimeDeclarationReceipts {
         interrupt: NonNullable<SessionEventWriterRequestEndEnvelope["interruptSettlement"]>,
     ): RuntimeDeclarationReceipt {
         const active = this.assistants.get(envelope.sessionThreadId);
+        const inputEvent = {
+            ...this.eventStamp(envelope.sessionThreadId, `sevt_commit_${interrupt.runtimeInputId}`),
+            disposition: "existing" as const,
+        };
         const unfinished = [...(active?.unfinishedTools ?? [])].sort((left, right) => left.partSequence - right.partSequence);
         const projections = unfinished.map(({ toolUseEventId }) => ({
             toolUseEventId,
@@ -644,12 +674,7 @@ class TestRuntimeDeclarationReceipts {
             operationKind: "commit_inputs",
             sourceKind: "interrupt_control",
             operationId: interrupt.runtimeInputId,
-            events: [{
-                sessionThreadId: envelope.sessionThreadId,
-                eventId: interrupt.eventIds[0]!,
-                eventSequence: interrupt.sequenceFrom,
-                disposition: "existing",
-            }],
+            events: [inputEvent],
             messages: [],
             interruptToolProjections: projections,
         });
@@ -1242,15 +1267,18 @@ export {
   installLoaderStateForTest,
   installPendingInputForTest,
   installRecoveredToolTurn,
+  interruptInput,
   llmService,
   memoryCatalogForTest,
   queuedLLMService,
+  rejectionInput,
   providerAttachmentsForTest,
   recordCompactionHint,
   runtimeThreadLoopLayer,
   sleepUntilAborted,
   testAcceptedInputSequence,
   testControlCommit,
+  taskNotificationInput,
   testRunCustody,
   threadLoopRuntime,
   utf8RoundTrip,

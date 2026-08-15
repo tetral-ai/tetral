@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { SessionConfiguration } from "../../src/session/session-configuration.js";
 import type { RuntimeConfigurationPatch } from "../../src/session/session-configuration.js";
 
-function config(generation: number, payloadJson = `{"generation":${generation}}`): RuntimeConfigurationPatch {
+function config(generation: number, contentJson = `{"generation":${generation}}`): RuntimeConfigurationPatch {
   return {
     generation,
-    payloadJson,
+    contentJson,
     installedBuiltinFamily: "gpt",
   };
 }
@@ -20,7 +20,7 @@ function manifest(
     mcpServerName,
     manifestETag,
     manifestReadiness: "ready",
-    payloadJson: JSON.stringify({ mcpServerName, generation }),
+    contentJson: JSON.stringify({ mcpServerName, generation }),
   };
 }
 

@@ -233,11 +233,12 @@ describe("session run static boundaries", () => {
     expect(normalizedManager).toContain("constawaitRunSlot=(runSlot:ThreadRunSlot,):Effect.Effect<Exit.Exit<ThreadLoop.ThreadLoopRunResult,unknown>>=>Deferred.await(runSlot.doneDeferred).pipe(Effect.exit)");
     expect(normalizedManager).toContain("construnScope=yield*Scope.make();");
     expect(normalizedManager).toContain("constfiber=yield*Effect.forkIn(run,runScope);");
-    expect(normalizedManager).toContain("constcontrolIdentity=(command:RuntimeThreadControlState):ThreadRuntime.RuntimeThreadIdentity=>({workspaceId:command.workspaceId,sessionId:command.sessionId,sessionThreadId:command.sessionThreadId,bindingId:command.bindingId,bindingGeneration:command.bindingGeneration");
+    expect(normalizedManager).toContain("constcontrolIdentity=(command:RuntimeThreadAddressState):ThreadRuntime.RuntimeThreadIdentity=>({workspaceId:command.workspaceId,sessionId:command.sessionId,sessionThreadId:command.sessionThreadId,bindingId:command.bindingId,bindingGeneration:command.bindingGeneration");
     expect(normalizedManager).toContain("constsessionEntry=sessions.get(commandSessionKey(command));if(sessionEntry===undefined){return{ok:true,sessionId,created:false,applied:false,noResidency:true};}");
     expect(normalizedManager).toContain("sessionEntry.sharedStateStatus!==\"ready\"||[...sessionEntry.threads.values()].some((threadEntry)=>threadEntry.installationState!==\"ready\"||threadEntry.runSlot!==undefined,)");
     expect(normalizedManager).toContain("for(constthreadEntryofsessionEntry.threads.values()){");
-    expect(normalizedState).toContain("interfaceRuntimeThreadControlStateextendsRuntimeCommandScopeState{readonlyruntimeInputId:string;readonlyeventIds:readonlystring[];readonlysequenceFrom:number;readonlysequenceTo:number;}");
+    expect(normalizedState).toContain("interfaceRuntimeAcceptedInputScopeStateextendsRuntimeThreadAddressState{readonlyruntimeInputId:string;readonlyinputOrder:number;}");
+    expect(normalizedState).toContain("interfaceRuntimeControlInputStateextendsRuntimeThreadAddressState{readonlyruntimeInputId:string;}");
     expect(normalizedManager).not.toContain("runInFlight");
     expect(normalizedManager).not.toContain("SessionRunMarker");
     expect(normalizedManager).not.toContain("constthreadResult=getOrCreateThreadEntry(controlIdentity(command));if(threadResult===undefined){return{ok:false,sessionId,reason:\"local_session_capacity_exceeded\"};}if(threadResult.threadEntry.runSlot!==undefined)");

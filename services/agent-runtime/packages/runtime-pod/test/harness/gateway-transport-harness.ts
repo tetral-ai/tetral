@@ -829,17 +829,12 @@ async function loadCapacityContext(messages: readonly RuntimeMessage[]) {
     metadataFactory: async () => new Metadata(),
   });
   const loaded = await loader.loadThreadContext({
-    requestId: "req_capacity_context",
     workspaceId: "wksp_capacity",
     sessionId: "sesn_capacity",
     sessionThreadId: "thr_capacity",
     bindingId: "bind_capacity",
     bindingGeneration: 1,
     targetPodUid: "pod_capacity",
-    runtimeInputId: "rin_capacity_context",
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
   });
   return { messages: loaded.messages, contextBytes: Buffer.byteLength(contextJson, "utf8") };
 }

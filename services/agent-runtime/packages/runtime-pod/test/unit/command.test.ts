@@ -4,10 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
 import {
-  RuntimeCommandKind,
-  RuntimeCommandStatus,
+  InterruptOrigin,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
-import type { RuntimeInputCommandRequest } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
+import type { InterruptRequest } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { effectivePermissionPolicy, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { loadRuntimePodConfig, loadRuntimePodConfigFromEnv } from "../../src/config.js";
@@ -156,11 +155,11 @@ describe("Runtime Pod command entrypoint", () => {
       } },
     });
     const effectivePatches = [
-      { generation: 4, payloadJson: JSON.stringify({
+      { generation: 4, contentJson: JSON.stringify({
         runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
         tool_policy: { mcpToolsets: [{ mcpServerName: "github" }] },
       }) },
-      { generation: 7, mcpServerName: "github", manifestETag: "etag_7", payloadJson: JSON.stringify({
+      { generation: 7, mcpServerName: "github", manifestETag: "etag_7", contentJson: JSON.stringify({
         mcp_manifest: { mcp_server_name: "github", manifest_etag: "etag_7", manifest_generation: 7,
           tools: [{ name: "search", description: "CANARY_MANIFEST_SECRET", input_schema: { type: "object" } }] },
       }) },
@@ -168,14 +167,14 @@ describe("Runtime Pod command entrypoint", () => {
     try {
       const eligible = capturedOptions?.resolveMCPManifestEligibility?.(effectivePatches, "github") ?? false;
       const activeServerWithoutToolset = capturedOptions?.resolveMCPManifestEligibility?.([
-        { generation: 4, payloadJson: JSON.stringify({
+        { generation: 4, contentJson: JSON.stringify({
           runtime_config: {
             installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
             mcpServers: [{ type: "url", name: "github", url: "https://api.githubcopilot.com/mcp/" }],
           },
           tool_policy: { mcpToolsets: [] },
         }) },
-        { generation: 7, mcpServerName: "github", manifestETag: "etag_7", payloadJson: JSON.stringify({
+        { generation: 7, mcpServerName: "github", manifestETag: "etag_7", contentJson: JSON.stringify({
           mcp_manifest: { mcp_server_name: "github", manifest_etag: "etag_7", manifest_generation: 7,
             tools: [{ name: "search", description: "Search", input_schema: { type: "object" } }] },
         }) },
@@ -738,22 +737,14 @@ describe("Runtime Pod command entrypoint", () => {
     try {
       await dependencies.app.start();
       const accepted = await dependencies.app.service.interrupt(
-        validCommand({
-          commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
+        validInterrupt({
           runtimeInputId: "rin_interrupt",
-          payloadJson: JSON.stringify({ origin: "user" }),
         }),
         authMetadata(),
       );
       const tokenReviewRequest = requireTokenReviewRequest(tokenReviewRequests[0]);
 
-      expect(accepted).toMatchObject({
-        status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED,
-        sessionId: "sesn_1",
-        runtimeInputId: "rin_interrupt",
-        bindingId: "bind_1",
-        bindingGeneration: 42,
-      });
+      expect(accepted).toEqual({ accepted: {} });
       expect(controlCommits).toEqual([
         expect.objectContaining({
           inputKind: "interrupt_control",
@@ -929,24 +920,17 @@ async function materialPath(
   return path;
 }
 
-function validCommand(overrides: Partial<RuntimeInputCommandRequest> = {}): RuntimeInputCommandRequest {
+function validInterrupt(overrides: Partial<InterruptRequest> = {}): InterruptRequest {
   return {
-    requestId: "req_1",
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
-    targetPodNamespace: "engine",
-    targetPodName: "runtime-pod-a",
     targetPodUid: "uid-a",
-    targetPodIp: "10.0.0.1",
     runtimeInputId: "rin_1",
-    eventIds: ["sevt_1"],
-    sequenceFrom: 1,
-    sequenceTo: 1,
-    commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_MESSAGES,
-    payloadJson: "",
+    inputOrder: 1,
+    origin: InterruptOrigin.INTERRUPT_ORIGIN_USER,
     ...overrides,
   };
 }

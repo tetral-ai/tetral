@@ -156,14 +156,13 @@ if (input.hotScenario !== undefined) {
     if (receipt === undefined) throw new Error("hot composition receipt is missing");
     let hotProviderMessages: readonly RuntimeMessage[] | undefined;
     if (scenario.kind === "tool_confirmation") {
-    if (scenario.runtimeInputId === undefined || scenario.sourceEventId === undefined || scenario.confirmedToolUseEventId === undefined) {
+    if (scenario.runtimeInputId === undefined || scenario.confirmedToolUseEventId === undefined) {
       throw new Error("tool confirmation hot composition identity is incomplete");
     }
     const message = applyToolConfirmationReceipt({
       sessionId: scenario.sessionId,
       sessionThreadId: scenario.sessionThreadId,
       runtimeInputId: scenario.runtimeInputId,
-      sourceEventId: scenario.sourceEventId,
       create,
     }, receipt);
     hotRouteView = {

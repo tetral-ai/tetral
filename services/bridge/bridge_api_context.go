@@ -132,9 +132,8 @@ type bridgeLoadContextThread struct {
 }
 
 type bridgeLoadContextAgentMail struct {
-	DeliveryID           string `json:"deliveryId"`
-	SourceThreadID       string `json:"sourceThreadId"`
-	SourceToolUseEventID string `json:"sourceToolUseEventId"`
+	DeliveryID string `json:"deliveryId"`
+	Content    string `json:"content"`
 }
 
 type bridgeLoadContextPendingAttachment struct {
@@ -634,8 +633,7 @@ func loadThreadPendingAgentMailTx(
 ) ([]bridgeLoadContextAgentMail, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT sent.payload_json::jsonb ->> 'delivery_id',
-		        sent.payload_json::jsonb ->> 'source_thread_id',
-		        sent.payload_json::jsonb ->> 'source_tool_use_event_id'
+		        (sent.payload_json::jsonb -> 'message')::text
 		   FROM session_events sent
 			   JOIN session_threads source
 			     ON source.workspace_id = sent.workspace_id
@@ -686,11 +684,20 @@ func loadThreadPendingAgentMailTx(
 	pending := make([]bridgeLoadContextAgentMail, 0)
 	for rows.Next() {
 		var mail bridgeLoadContextAgentMail
-		if err := rows.Scan(&mail.DeliveryID, &mail.SourceThreadID, &mail.SourceToolUseEventID); err != nil {
+		var storedMessageJSON string
+		if err := rows.Scan(&mail.DeliveryID, &storedMessageJSON); err != nil {
 			return nil, err
 		}
-		if mail.DeliveryID == "" || mail.SourceThreadID == "" || mail.SourceToolUseEventID == "" {
+		if mail.DeliveryID == "" || storedMessageJSON == "" {
 			return nil, status.Error(codes.FailedPrecondition, "pending agent mail is malformed")
+		}
+		publicMessage, err := publicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		if err != nil {
+			return nil, err
+		}
+		mail.Content, err = agentMailContentFromPublicMessage(publicMessage)
+		if err != nil {
+			return nil, err
 		}
 		pending = append(pending, mail)
 	}

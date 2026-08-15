@@ -16,7 +16,7 @@ import { MaxProviderAttachments, ThreadState } from "../../../src/thread-loop/th
 import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
-import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, catalogForTest, createdAt, failingEventWriter, installLoaderStateForTest, llmService, providerAttachmentsForTest, runtimeThreadLoopLayer, testRunCustody, threadLoopRuntime, writerFrom } from "./thread-loop-test-support.js";
+import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, catalogForTest, createdAt, failingEventWriter, installLoaderStateForTest, llmService, providerAttachmentsForTest, runtimeThreadLoopLayer, taskNotificationInput, testRunCustody, threadLoopRuntime, writerFrom } from "./thread-loop-test-support.js";
 import type { PackageJson, TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
@@ -1300,7 +1300,6 @@ describe("ThreadState", () => {
       }],
     });
     const mail = {
-      requestId: "req_agent_mail",
       workspaceId: "wksp_agent_mail",
       sessionId: "sesn_agent_mail_dedup",
       sessionThreadId: "thrd_agent_mail_main",
@@ -1308,13 +1307,8 @@ describe("ThreadState", () => {
       bindingGeneration: 1,
       targetPodUid: "pod_agent_mail",
       runtimeInputId: "agent_mail:delivery_agent_mail",
-      eventIds: ["sevt_agent_mail_received"],
-      sequenceFrom: 2,
-      sequenceTo: 2,
       kind: "inter_agent_message",
       deliveryId: "delivery_agent_mail",
-      sourceThreadId: "thrd_agent_mail_child",
-      sourceToolUseEventId: "sevt_agent_mail_spawn",
       message,
     } satisfies RuntimeAcceptedInputState;
 
@@ -1324,7 +1318,7 @@ describe("ThreadState", () => {
     state.acknowledgeAcceptedInput(mail.runtimeInputId);
     expect(state.peekAcceptedInput()).toBeUndefined();
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
-    expect(state.enqueueAcceptedInput({ ...mail, sourceToolUseEventId: "sevt_conflicting_spawn" })).toBe("conflict");
+    expect(state.enqueueAcceptedInput({ ...mail, deliveryId: "delivery_new" })).toBe("applied");
   });
 
   test("interrupt fence preserves queued stamped completion mail", () => {
@@ -1353,7 +1347,6 @@ describe("ThreadState", () => {
       }],
     });
     const mail = {
-      requestId: "req_agent_mail_interrupt_fence",
       workspaceId: "wksp_agent_mail_interrupt_fence",
       sessionId: "sesn_agent_mail_interrupt_fence",
       sessionThreadId: "thrd_agent_mail_main",
@@ -1361,13 +1354,8 @@ describe("ThreadState", () => {
       bindingGeneration: 1,
       targetPodUid: "pod_agent_mail_interrupt_fence",
       runtimeInputId: "agent_mail:delivery_interrupt_fence",
-      eventIds: ["sevt_agent_mail_interrupt_received"],
-      sequenceFrom: 2,
-      sequenceTo: 2,
       kind: "inter_agent_message",
       deliveryId: "delivery_interrupt_fence",
-      sourceThreadId: "thrd_agent_mail_child",
-      sourceToolUseEventId: "sevt_agent_mail_spawn",
       message,
     } satisfies RuntimeAcceptedInputState;
 
@@ -1380,24 +1368,14 @@ describe("ThreadState", () => {
 
   test("task-notification identity deduplicates while the accepted fact remains queued", () => {
     const state = new ThreadState("sesn_task_notification_queued");
-    const notification = {
-      requestId: "req_task_notification_queued",
-      workspaceId: "wksp_task_notification_queued",
-      sessionId: "sesn_task_notification_queued",
-      sessionThreadId: "thrd_task_notification_queued",
-      bindingId: "bind_task_notification_queued",
-      bindingGeneration: 1,
-      targetPodUid: "pod_task_notification_queued",
-      runtimeInputId: "rin_task_notification_queued",
-      eventIds: ["sevt_task_notification_queued"],
-      sequenceFrom: 3,
-      sequenceTo: 3,
-      kind: "task_notification",
-      taskId: "task_notification_queued",
-      sourceToolUseEventId: "sevt_task_notification_source",
-      status: "completed",
-      payloadJson: "{\"status\":\"completed\"}",
-    } satisfies RuntimeAcceptedInputState;
+    const notification = taskNotificationInput(
+      "rin_task_notification_queued",
+      "task_notification_queued",
+      "sevt_task_notification_source",
+      "completed",
+      "{\"status\":\"completed\"}",
+      "sesn_task_notification_queued",
+    );
 
     expect(state.enqueueAcceptedInput(notification)).toBe("applied");
     expect(state.enqueueAcceptedInput(notification)).toBe("duplicate");
@@ -1429,22 +1407,16 @@ describe("ThreadState", () => {
         completedAt: timestamp,
       }],
     });
+    const { kind: _kind, ...notificationCommand } = taskNotificationInput(
+      "rin_task_notification_committed",
+      "task_notification_committed",
+      "sevt_task_notification_source",
+      "completed",
+      "{\"status\":\"completed\"}",
+      "sesn_task_notification_committed",
+    );
     const notification = {
-      requestId: "req_task_notification_committed",
-      workspaceId: "wksp_task_notification_committed",
-      sessionId: "sesn_task_notification_committed",
-      sessionThreadId: "thrd_task_notification_committed",
-      bindingId: "bind_task_notification_committed",
-      bindingGeneration: 1,
-      targetPodUid: "pod_task_notification_committed",
-      runtimeInputId: "rin_task_notification_committed",
-      eventIds: ["sevt_task_notification_committed"],
-      sequenceFrom: 4,
-      sequenceTo: 4,
-      taskId: "task_notification_committed",
-      sourceToolUseEventId: "sevt_task_notification_source",
-      status: "completed",
-      payloadJson: "{\"status\":\"completed\"}",
+      ...notificationCommand,
       committedMessage,
     } satisfies RuntimeTaskNotificationState;
 

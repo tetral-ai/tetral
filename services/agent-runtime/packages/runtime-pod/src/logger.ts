@@ -52,6 +52,31 @@ export type RuntimeContextLoadParseReason =
   | "invalid_pending_agent_mail_shape"
   | "invalid_cold_coverage_shape";
 
+/** Closed diagnostic phases for the authenticated Bridge-to-Runtime ingress. */
+export type RuntimeIngressRejectionPhase =
+  | "authentication"
+  | "lifecycle"
+  | "request_validation"
+  | "selected_pod"
+  | "binding"
+  | "identity"
+  | "content_parse"
+  | "application";
+
+/** Payload-free reasons emitted when one Runtime ingress request is rejected. */
+export type RuntimeIngressRejectionReason =
+  | "authentication_rejected"
+  | "runtime_not_accepting"
+  | "invalid_request"
+  | "selected_pod_mismatch"
+  | "binding_mismatch"
+  | "identity_conflict"
+  | "invalid_content"
+  | "operation_rejected"
+  | "resource_exhausted"
+  | "operation_unavailable"
+  | "internal_failure";
+
 /** Enumerates Runtime Pod-specific fields layered on the shared structured log record. */
 export type RuntimePodLogRecord = TetralLogRecord & {
   readonly event: string;
@@ -78,8 +103,8 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "mcp.tool_catalog.eligible"?: boolean;
   readonly "reconstruction.phase"?: "cold_checkpoint";
   readonly "failure.kind"?: "invalid_durable_facts";
-  readonly phase?: RuntimeContextLoadParsePhase;
-  readonly reason?: RuntimeContextLoadParseReason;
+  readonly phase?: RuntimeContextLoadParsePhase | RuntimeIngressRejectionPhase;
+  readonly reason?: RuntimeContextLoadParseReason | RuntimeIngressRejectionReason;
 };
 
 /** Closed, non-sensitive Runtime Pod startup stages. */
@@ -304,7 +329,6 @@ export function acceptedInputCommitLogRecord(
     "workspace.id": event.workspaceId,
     "session.id": event.sessionId,
     "thread.id": event.sessionThreadId,
-    "request.id": event.requestId,
     "runtime_input.id": event.runtimeInputId,
     "runtime_input.kind": event.inputKind,
     "retry.attempt": event.attempt,

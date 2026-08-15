@@ -37,7 +37,8 @@ import type {
   RuntimeThreadPreloadState,
   RuntimeThreadStatusState,
   RuntimeTaskNotificationCommandState,
-  RuntimeThreadControlState,
+  RuntimeControlInputState,
+  RuntimeThreadAddressState,
   RuntimeThreadVisibilityState,
   RuntimeToolConfirmationState,
   RuntimeControlInputCommit,
@@ -71,12 +72,20 @@ type ThreadVisibility = RuntimeThreadVisibilityState;
 type ThreadStatus = RuntimeThreadStatusState;
 
 /** Fenced interrupt command; active runs close in-run, while idle ingress commits directly. */
-export interface RuntimeInterruptControlCommand extends RuntimeThreadControlState {
+export interface RuntimeInterruptControlCommand extends RuntimeControlInputState {
+  readonly inputOrder: number;
   readonly origin: "user" | "agent";
 }
 
 /** Fenced command that releases one session's disposable hot state. */
-export interface RuntimeCleanupSessionCommand extends RuntimeThreadControlState {}
+export interface RuntimeCleanupSessionCommand {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly bindingId: string;
+  readonly bindingGeneration: number;
+  readonly targetPodUid: string;
+  readonly cleanupOperationId: string;
+}
 
 function unfinishedToolUseEventIds(messages: readonly RuntimeMessage[]): string[] {
   return messages.flatMap((message) => message.parts
@@ -277,18 +286,18 @@ export interface Interface {
   readonly cleanupSession: (sessionId: string, command: RuntimeCleanupSessionCommand) => Effect.Effect<CleanupSessionResult>;
   readonly preloadThread: (command: RuntimeThreadPreloadState) => Effect.Effect<ThreadLifecycleResult>;
   readonly ensureThreadInstalled: (
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
     options?: { readonly requirePendingApprovalToolJobs?: boolean | undefined },
   ) => Effect.Effect<ThreadLifecycleResult>;
-  readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
-  readonly releaseReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
-  readonly evictReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
-  readonly markThreadClosed: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
-  readonly markThreadActive: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
-  readonly waitThread: (command: RuntimeThreadControlState, timeoutMs: number | undefined) => Effect.Effect<ThreadWaitResult>;
-  readonly waitReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken, timeoutMs: number | undefined) => Effect.Effect<ReviewerExecutionWaitResult>;
-  readonly inspectThread: (command: RuntimeThreadControlState) => Effect.Effect<ThreadSnapshotResult>;
-  readonly inspectReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionSnapshotResult>;
+  readonly interruptReviewerExecution: (command: RuntimeThreadAddressState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
+  readonly releaseReviewerExecution: (command: RuntimeThreadAddressState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
+  readonly evictReviewerExecution: (command: RuntimeThreadAddressState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
+  readonly markThreadClosed: (command: RuntimeThreadAddressState) => Effect.Effect<ThreadLifecycleResult>;
+  readonly markThreadActive: (command: RuntimeThreadAddressState) => Effect.Effect<ThreadLifecycleResult>;
+  readonly waitThread: (command: RuntimeThreadAddressState, timeoutMs: number | undefined) => Effect.Effect<ThreadWaitResult>;
+  readonly waitReviewerExecution: (command: RuntimeThreadAddressState, token: ReviewerExecutionToken, timeoutMs: number | undefined) => Effect.Effect<ReviewerExecutionWaitResult>;
+  readonly inspectThread: (command: RuntimeThreadAddressState) => Effect.Effect<ThreadSnapshotResult>;
+  readonly inspectReviewerExecution: (command: RuntimeThreadAddressState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionSnapshotResult>;
   readonly shutdownActiveRuns: () => Effect.Effect<void>;
 }
 
@@ -303,7 +312,7 @@ export interface LayerOptions {
     options?: { readonly force?: boolean | undefined },
   ) => Promise<string>;
   readonly loadThreadContext?: (
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
   ) => Promise<RuntimeThreadPreloadState>;
   readonly closeoutMonotonicMs?: (() => number) | undefined;
   readonly closeoutSleep?: ((durationMs: number, signal: AbortSignal) => Promise<boolean>) | undefined;
@@ -392,7 +401,7 @@ interface ThreadEntry {
   readonly statusSignal: ThreadRuntime.ThreadRuntime["state"];
   readonly commandChannel: ThreadCommandChannel;
   runSlot: ThreadRunSlot | undefined;
-  bridgeScope: RuntimeThreadControlState | undefined;
+  bridgeScope: RuntimeThreadAddressState | undefined;
   durableTurnId: string | undefined;
   lastCompletedReviewerExecutionToken: ReviewerExecutionToken | undefined;
   readonly approvalReviewer: AutoApprovalReviewerManager | undefined;
@@ -699,14 +708,14 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         };
       };
 
-      const commandRuntimeBindingToken = (command: RuntimeThreadControlState): string =>
+      const commandRuntimeBindingToken = (command: RuntimeThreadAddressState): string =>
         sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId)?.runtimeThread.identity.runtimeBindingToken ?? "";
 
       const acceptedInputIdentity = (command: RuntimeAcceptedInputState): ThreadRuntime.RuntimeThreadIdentity => ({
         ...acceptedInputIdentityFromMetadata(command, acceptedInputThreadMetadata(command), commandRuntimeBindingToken(command)),
       });
 
-      const controlIdentity = (command: RuntimeThreadControlState): ThreadRuntime.RuntimeThreadIdentity => ({
+      const controlIdentity = (command: RuntimeThreadAddressState): ThreadRuntime.RuntimeThreadIdentity => ({
         workspaceId: command.workspaceId,
         sessionId: command.sessionId,
         sessionThreadId: command.sessionThreadId,
@@ -1059,7 +1068,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
       type ResidentThreadResult = Exclude<ReturnType<typeof getOrCreateThreadEntry>, undefined>;
 
       const submitInstalledThreadCommand = <CommandResult>(
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         metadata: RuntimeAcceptedThreadMetadataState,
         run: (threadResult: ResidentThreadResult) => Effect.Effect<CommandResult>,
         unavailable: (
@@ -1215,12 +1224,9 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           }
           if (admitted === "applied") {
             threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
-              command.sequenceTo,
+              command.inputOrder,
               command.origin === "user",
             );
-          }
-          if (command.eventIds.length !== 1) {
-            return { ok: false, sessionId, reason: "context_load_failed" } as const;
           }
           const declaration = { messageCreates: [] };
           const application = yield* Effect.promise(() =>
@@ -1237,7 +1243,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               const projections = ThreadLoop.applyInterruptInputReceipt({
                 sessionThreadId: command.sessionThreadId,
                 runtimeInputId: command.runtimeInputId,
-                eventIds: command.eventIds,
                 expectedToolUseEventIds,
               }, committed.receipt);
               const messages = ThreadLoop.applyInterruptToolProjections(existingMessages, projections);
@@ -1355,7 +1360,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 });
                 if (result === "applied") {
                   runSlot.stopping = true;
-				  threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(command.sequenceTo, command.origin === "user");
+				  threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(command.inputOrder, command.origin === "user");
                 }
                 return result;
               }),
@@ -1444,15 +1449,10 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               }
               const pendingTool = threadResult.threadEntry.runtimeThread.state.pendingApprovalToolJobs()
                 .find((pending) => pending.toolUseEventId === command.toolUseEventId);
-              if (
-                pendingTool === undefined ||
-                command.eventIds.length !== 1 ||
-                command.eventIds[0] !== command.sourceEventId
-              ) {
+              if (pendingTool === undefined) {
                 return { ok: false, sessionId, reason: "control_conflict" } as const;
               }
               const create = ThreadLoop.toolConfirmationCreate({
-                sourceEventId: command.sourceEventId,
                 toolUseEventId: command.toolUseEventId,
                 pendingTool,
                 decision: command.decision,
@@ -1481,7 +1481,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 sessionId,
                 sessionThreadId: command.sessionThreadId,
                 runtimeInputId: command.runtimeInputId,
-                sourceEventId: command.sourceEventId,
                 create,
               }, committed.receipt);
               threadResult.threadEntry.runtimeThread.state.contextManager.replaceMessages([
@@ -1615,7 +1614,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               }
             }
             for (const threadEntry of sessionEntry.threads.values()) {
-              threadEntry.bridgeScope = command;
               threadEntry.runtimeThread.updateIdentity({
                 ...threadEntry.runtimeThread.identity,
                 bindingId: command.bindingId,
@@ -1805,7 +1803,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         });
 
       const prepareThreadInstallation = (
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         metadata: RuntimeAcceptedThreadMetadataState = {},
       ) =>
         Effect.gen(function* () {
@@ -1944,7 +1942,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         });
 
       const ensureThreadInstalled = (
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         installOptions: { readonly requirePendingApprovalToolJobs?: boolean | undefined } = {},
       ): Effect.Effect<ThreadLifecycleResult> =>
         Effect.gen(function* () {
@@ -1984,7 +1982,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         });
 
       const interruptReviewerExecution = (
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         token: ReviewerExecutionToken,
       ): Effect.Effect<ReviewerExecutionControlResult> =>
         Effect.gen(function* () {
@@ -2038,7 +2036,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         });
 
       const evictReviewerExecution = (
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         token: ReviewerExecutionToken,
       ): Effect.Effect<ReviewerExecutionControlResult> =>
         Effect.gen(function* () {
@@ -2078,7 +2076,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         });
 
       const releaseReviewerExecution = (
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         token: ReviewerExecutionToken,
       ): Effect.Effect<ReviewerExecutionControlResult> =>
         Effect.gen(function* () {
@@ -2106,7 +2104,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           };
         });
 
-      const markThreadClosed = (command: RuntimeThreadControlState): Effect.Effect<ThreadLifecycleResult> =>
+      const markThreadClosed = (command: RuntimeThreadAddressState): Effect.Effect<ThreadLifecycleResult> =>
         Effect.gen(function* () {
           const sessionEntry = sessions.get(commandSessionKey(command));
           const threadEntry = sessionEntry?.threads.get(command.sessionThreadId);
@@ -2145,7 +2143,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           };
         });
 
-      const markThreadActive = (command: RuntimeThreadControlState): Effect.Effect<ThreadLifecycleResult> =>
+      const markThreadActive = (command: RuntimeThreadAddressState): Effect.Effect<ThreadLifecycleResult> =>
         Effect.gen(function* () {
           const sessionEntry = sessions.get(commandSessionKey(command));
           const threadEntry = sessionEntry?.threads.get(command.sessionThreadId);
@@ -2167,7 +2165,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           );
         });
 
-      const waitThread = (command: RuntimeThreadControlState, timeoutMs: number | undefined): Effect.Effect<ThreadWaitResult> =>
+      const waitThread = (command: RuntimeThreadAddressState, timeoutMs: number | undefined): Effect.Effect<ThreadWaitResult> =>
         Effect.gen(function* () {
           const threadEntry = sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId);
           if (threadEntry === undefined) {
@@ -2223,7 +2221,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         });
 
       const waitReviewerExecution = (
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         token: ReviewerExecutionToken,
         timeoutMs: number | undefined,
       ): Effect.Effect<ReviewerExecutionWaitResult> =>
@@ -2270,7 +2268,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           };
         });
 
-      const inspectThread = (command: RuntimeThreadControlState): Effect.Effect<ThreadSnapshotResult> =>
+      const inspectThread = (command: RuntimeThreadAddressState): Effect.Effect<ThreadSnapshotResult> =>
         Effect.sync(() => {
           const threadEntry = sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId);
           if (threadEntry === undefined) {
@@ -2294,7 +2292,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         });
 
       const inspectReviewerExecution = (
-        command: RuntimeThreadControlState,
+        command: RuntimeThreadAddressState,
         token: ReviewerExecutionToken,
       ): Effect.Effect<ReviewerExecutionSnapshotResult> =>
         Effect.gen(function* () {
@@ -2437,7 +2435,7 @@ function classifyRunExitOutcome(
 
 function reviewerTokenAddressesCommand(
   token: ReviewerExecutionToken,
-  command: RuntimeThreadControlState,
+  command: RuntimeThreadAddressState,
 ): boolean {
   return token.reviewId.length > 0
     && token.reviewerThreadId === command.sessionThreadId
@@ -2455,7 +2453,7 @@ function reviewerTokensEqual(
 }
 
 function reviewerExecutionRejection(
-  command: RuntimeThreadControlState,
+  command: RuntimeThreadAddressState,
   reason: ReviewerExecutionRejectionReason,
 ): Extract<ReviewerExecutionControlResult, { readonly ok: false }> {
   return {

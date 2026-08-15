@@ -21,11 +21,14 @@ func (runtimeInputExhaustionWorkspaceLister) ListIDs(context.Context) ([]workspa
 	return []workspace.ID{"ws_execution_store"}, nil
 }
 
-type runtimeInputExhaustionSender struct{ calls int }
+type runtimeInputExhaustionSender struct {
+	agentruntimebridge.RuntimeCommandSender
+	calls int
+}
 
-func (s *runtimeInputExhaustionSender) SendRuntimeCommand(context.Context, agentruntimebridge.RuntimePodTarget, *agentruntimev1.RuntimeInputCommandRequest) (*agentruntimev1.RuntimeInputCommandResponse, error) {
+func (s *runtimeInputExhaustionSender) AcceptTaskNotification(context.Context, agentruntimebridge.RuntimePodTarget, *agentruntimev1.AcceptTaskNotificationRequest) (*agentruntimev1.AcceptTaskNotificationResponse, error) {
 	s.calls++
-	return &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}, nil
+	return &agentruntimev1.AcceptTaskNotificationResponse{Outcome: &agentruntimev1.AcceptTaskNotificationResponse_Accepted{Accepted: &agentruntimev1.AcceptTaskNotificationAccepted{}}}, nil
 }
 
 type runtimeInputExhaustionDeliverer struct {

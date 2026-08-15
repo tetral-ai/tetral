@@ -25,12 +25,6 @@ export interface ParentTranscriptFeed {
   readonly messages: readonly RuntimeMessage[];
 }
 
-/** Reviewer trunk snapshot paired with the durable parent boundary captured with it. */
-export interface ReviewerTrunkSnapshot {
-  readonly messages: readonly RuntimeMessage[];
-  readonly parentBoundaryEventId: string;
-}
-
 /** Atomic lease used to choose one winner between an acknowledged reviewer outcome and cancellation. */
 export interface ApprovalReviewExecutionLease {
   readonly kind: "trunk" | "sidecar";
@@ -106,23 +100,38 @@ interface ParentTranscriptCursor {
 //              services/agent-runtime/packages/core/src/tools/tool-gate.ts
 /** Owns one public thread's disposable reviewer coordination and scoped fibers. */
 export class AutoApprovalReviewerManager {
+  #trunkEnsureOperationId: string | undefined;
   #trunkThreadId: string | undefined;
   #trunkBusy = false;
   #feedCursor: ParentTranscriptCursor | undefined;
-  #lastCommittedTrunkSnapshot: ReviewerTrunkSnapshot | undefined;
   readonly #decisionMemo = new Map<string, ApprovalReviewerOutcome>();
   readonly #ephemeralReviews = new Set<string>();
   readonly #executions = new Map<string, MutableReviewerExecutionState>();
   readonly #scope = Scope.makeUnsafe("parallel");
   #disposed = false;
 
-  /** Returns the one fresh reviewer trunk identity held for this hot lifetime. */
-  trunkThreadId(createId: (prefix: string) => string): string {
+  /** Returns the one Bridge idempotency identity held for this hot lifetime. */
+  trunkEnsureOperationId(createId: (prefix: string) => string): string {
     if (this.#disposed) {
       throw new Error("approval reviewer manager is disposed");
     }
-    this.#trunkThreadId ??= createId("thrd_aprv");
+    this.#trunkEnsureOperationId ??= createId("aprv_ensure");
+    return this.#trunkEnsureOperationId;
+  }
+
+  trunkThreadId(): string | undefined {
     return this.#trunkThreadId;
+  }
+
+  installTrunkThreadId(threadId: string): boolean {
+    if (this.#disposed || threadId.length === 0) {
+      return false;
+    }
+    if (this.#trunkThreadId !== undefined && this.#trunkThreadId !== threadId) {
+      return false;
+    }
+    this.#trunkThreadId = threadId;
+    return true;
   }
 
   beginReview(reviewId: string): ApprovalReviewExecutionLease {
@@ -171,11 +180,7 @@ export class AutoApprovalReviewerManager {
     };
   }
 
-  completeTrunkReview(
-    view: ParentTranscriptView,
-    snapshot: readonly RuntimeMessage[],
-    parentBoundaryEventId: string,
-  ): void {
+  completeTrunkReview(view: ParentTranscriptView): void {
     if (this.#disposed) {
       return;
     }
@@ -183,19 +188,6 @@ export class AutoApprovalReviewerManager {
       generation: view.generation,
       fedEntryCount: view.messages.length,
     };
-    this.#lastCommittedTrunkSnapshot = {
-      messages: [...snapshot],
-      parentBoundaryEventId,
-    };
-  }
-
-  trunkSnapshot(): ReviewerTrunkSnapshot | undefined {
-    return this.#lastCommittedTrunkSnapshot === undefined
-      ? undefined
-      : {
-          messages: [...this.#lastCommittedTrunkSnapshot.messages],
-          parentBoundaryEventId: this.#lastCommittedTrunkSnapshot.parentBoundaryEventId,
-        };
   }
 
   /** Forgets an unusable trunk after unknown settlement or failed quiescence. */
@@ -205,7 +197,6 @@ export class AutoApprovalReviewerManager {
     }
     this.#trunkThreadId = undefined;
     this.#feedCursor = undefined;
-    this.#lastCommittedTrunkSnapshot = undefined;
   }
 
   decisionFor(key: string): ApprovalReviewerOutcome | undefined {
@@ -241,7 +232,6 @@ export class AutoApprovalReviewerManager {
       this.#disposed = true;
       this.#trunkBusy = false;
       this.#feedCursor = undefined;
-      this.#lastCommittedTrunkSnapshot = undefined;
       this.#decisionMemo.clear();
       this.#ephemeralReviews.clear();
       for (const execution of this.#executions.values()) {

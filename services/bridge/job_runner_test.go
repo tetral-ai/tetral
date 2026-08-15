@@ -46,8 +46,8 @@ func TestJobRunnerAcksRuntimeInputOnlyAfterRuntimeAccepts(t *testing.T) {
 	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_1"}) {
 		t.Fatalf("queue transitions = %v; want ack after runtime accepts", queueClient.transitions)
 	}
-	if deliverer.jobs[0].CommandKind != agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES {
-		t.Fatalf("command kind = %v; want messages", deliverer.jobs[0].CommandKind)
+	if deliverer.jobs[0].InputKind != "messages" {
+		t.Fatalf("input kind = %q; want messages", deliverer.jobs[0].InputKind)
 	}
 	if !reflect.DeepEqual(queueClient.leaseKinds, []string{"runtime_input", "runtime_config_update", "cleanup_session", "session_delete_cleanup"}) {
 		t.Fatalf("lease kinds = %v; want Bridge runtime-facing kinds", queueClient.leaseKinds)
@@ -65,8 +65,8 @@ func TestDecodeRuntimeInputJobAcceptsEventlessAgentMail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeRuntimeJob agent_mail: %v", err)
 	}
-	if job.InputKind != "agent_mail" || job.CommandKind != agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_AGENT_MAIL {
-		t.Fatalf("decoded agent_mail = kind %q command %s; want agent_mail command", job.InputKind, job.CommandKind)
+	if job.InputKind != "agent_mail" {
+		t.Fatalf("decoded agent_mail = kind %q; want agent_mail", job.InputKind)
 	}
 }
 
@@ -686,13 +686,11 @@ func TestJobRunnerHandlesRuntimeConfigAndCleanupAsSeparateQueueKinds(t *testing.
 		t.Fatalf("delivered jobs = %d; want 3", got)
 	}
 	if deliverer.jobs[0].Kind != "runtime_config_update" ||
-		deliverer.jobs[0].CommandKind != agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH ||
 		deliverer.jobs[0].RuntimeInputID != "runtime_config_update:sesn_1:7" ||
 		deliverer.jobs[0].ConfigGeneration != "7" {
 		t.Fatalf("runtime config job = %#v", deliverer.jobs[0])
 	}
 	if deliverer.jobs[1].Kind != "cleanup_session" ||
-		deliverer.jobs[1].CommandKind != agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION ||
 		deliverer.jobs[1].CleanupJobID != "cleanup_1" {
 		t.Fatalf("cleanup job = %#v", deliverer.jobs[1])
 	}
@@ -899,7 +897,6 @@ func TestRuntimeConfigUpdateDecodesReferenceOnlyMCPManifestIntent(t *testing.T) 
 		t.Fatalf("DecodeRuntimeJob refs-only MCP manifest: %v", err)
 	}
 	if decoded.Kind != "runtime_config_update" ||
-		decoded.CommandKind != agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH ||
 		decoded.RuntimeInputID != "runtime_config_update:mcp_manifest:sesn_1:github:7" ||
 		decoded.ConfigGeneration != "" ||
 		decoded.MCPServerName != "github" ||
@@ -976,7 +973,6 @@ func TestRuntimeInputTaskNotificationDoesNotRequirePublicEvents(t *testing.T) {
 		t.Fatalf("DecodeRuntimeJob task_notification: %v", err)
 	}
 	if decoded.InputKind != "task_notification" ||
-		decoded.CommandKind != agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION ||
 		len(decoded.EventIDs) != 0 ||
 		decoded.SequenceFrom != 0 ||
 		decoded.SequenceTo != 0 ||
@@ -1036,115 +1032,55 @@ func TestJobRunnerMapsRuntimeRejectedResponse(t *testing.T) {
 	}
 }
 
-func TestRuntimeDeliveryResultFromResponse(t *testing.T) {
+func TestRuntimeDeliveryResultFromAcceptInputResponse(t *testing.T) {
 	tests := []struct {
 		name     string
-		response *agentruntimev1.RuntimeInputCommandResponse
+		response *agentruntimev1.AcceptInputResponse
 		want     RuntimeDeliveryResult
 	}{
 		{
 			name:     "accepted",
-			response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED},
+			response: &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Accepted{Accepted: &agentruntimev1.AcceptInputAccepted{}}},
 			want:     RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted},
 		},
 		{
 			name:     "duplicate",
-			response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_DUPLICATE},
+			response: &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Duplicate{Duplicate: &agentruntimev1.AcceptInputDuplicate{}}},
 			want:     RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate},
 		},
 		{
 			name: "rejected",
-			response: &agentruntimev1.RuntimeInputCommandResponse{
-				Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
-				Retryable: true,
-				ErrorCode: agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH,
+			response: &agentruntimev1.AcceptInputResponse{
+				Outcome: &agentruntimev1.AcceptInputResponse_Rejected{Rejected: &agentruntimev1.AcceptInputRejected{
+					Reason: agentruntimev1.AcceptInputFailure_ACCEPT_INPUT_FAILURE_BINDING_MISMATCH, Retryable: true,
+				}},
 			},
 			want: RuntimeDeliveryResult{
 				Status:       RuntimeDeliveryRejected,
 				Retryable:    true,
-				ErrorKind:    "binding_identity_mismatch",
-				ErrorMessage: "runtime rejected input",
+				ErrorKind:    "binding_mismatch",
+				ErrorMessage: "runtime rejected operation",
 			},
 		},
 		{
-			name: "control busy",
-			response: &agentruntimev1.RuntimeInputCommandResponse{
-				Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
-				Retryable: true,
-				ErrorCode: agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
-			},
-			want: RuntimeDeliveryResult{
-				Status:       RuntimeDeliveryRejected,
-				Retryable:    true,
-				ErrorKind:    "control_busy",
-				ErrorMessage: "runtime rejected input",
-			},
-		},
-		{
-			name: "unspecified error code folds to generic",
-			response: &agentruntimev1.RuntimeInputCommandResponse{
-				Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
-				Retryable: false,
-				ErrorCode: agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED,
-			},
-			want: RuntimeDeliveryResult{
-				Status:       RuntimeDeliveryRejected,
-				Retryable:    false,
-				ErrorKind:    "runtime_rejected_input",
-				ErrorMessage: "runtime rejected input",
-			},
+			name:     "missing outcome",
+			response: &agentruntimev1.AcceptInputResponse{},
+			want:     invalidRuntimeResponse(),
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := RuntimeDeliveryResultFromResponse(test.response); !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("RuntimeDeliveryResultFromResponse = %#v; want %#v", got, test.want)
+			if got := runtimeResultFromAcceptInput(test.response); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("runtimeResultFromAcceptInput = %#v; want %#v", got, test.want)
 			}
 		})
 	}
 }
 
-func TestRuntimeDeliveryResultFromResponseForRequestRejectsIdentityMismatch(t *testing.T) {
-	request := &agentruntimev1.RuntimeInputCommandRequest{
-		SessionId:         "sesn_1",
-		RuntimeInputId:    "rin_1",
-		BindingId:         "bind_1",
-		BindingGeneration: 7,
-	}
-	for _, response := range []*agentruntimev1.RuntimeInputCommandResponse{
-		{
-			Status:            agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-			SessionId:         "sesn_other",
-			RuntimeInputId:    "rin_1",
-			BindingId:         "bind_1",
-			BindingGeneration: 7,
-		},
-		{
-			Status:            agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_DUPLICATE,
-			SessionId:         "sesn_1",
-			RuntimeInputId:    "rin_other",
-			BindingId:         "bind_1",
-			BindingGeneration: 7,
-		},
-		{
-			Status:            agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
-			SessionId:         "sesn_1",
-			RuntimeInputId:    "rin_1",
-			BindingId:         "bind_other",
-			BindingGeneration: 7,
-		},
-		{
-			Status:            agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
-			SessionId:         "sesn_1",
-			RuntimeInputId:    "rin_1",
-			BindingId:         "bind_1",
-			BindingGeneration: 8,
-		},
-	} {
-		result := RuntimeDeliveryResultFromResponseForRequest(response, request)
-		if result.Status != RuntimeDeliveryRejected || result.Retryable || result.ErrorKind != "invalid_runtime_response_identity" {
-			t.Fatalf("identity mismatch response result = %#v; want terminal invalid_runtime_response_identity", result)
-		}
+func TestRuntimeDeliveryOperationResponseCarriesNoEchoIdentity(t *testing.T) {
+	response := &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Accepted{Accepted: &agentruntimev1.AcceptInputAccepted{}}}
+	if got := runtimeResultFromAcceptInput(response); got.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("typed operation response = %#v; want accepted without echoed request identity", got)
 	}
 }
 

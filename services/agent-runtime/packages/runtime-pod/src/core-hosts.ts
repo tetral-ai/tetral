@@ -7,15 +7,13 @@
  * ownership to SessionManager before control operations that require resident state. It exposes active-run
  * shutdown and scope release as separate operations that the process composition root orders.
  */
-import { status } from "@grpc/grpc-js";
-import type { ServiceError } from "@grpc/grpc-js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import * as ContextLoader from "@tetral/agent-runtime-core/src/context/context-loader.js";
+import type { RuntimeLoadedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host/session-run-host.js";
-import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
-import type { RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
+import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadAddressState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
@@ -25,7 +23,7 @@ import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/
 import type { RuntimeCloseoutEvent, RuntimeMCPManifestUpdateEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
-import { runtimeAgentMailText, runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
+import { runtimeAgentMailText } from "./agent-mail.js";
 import { recordCheckpointReconstructionFailure } from "./logger.js";
 import type { RuntimePodLogger } from "./logger.js";
 
@@ -48,19 +46,19 @@ export interface RuntimeCoreHosts {
 export interface RuntimeSubAgentRunHost {
   readonly enqueueThreadInput: (input: RuntimeAcceptedInputState) => Promise<SessionManager.AcceptInputResult>;
   readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "turnCheckpoint" | "turnToolRouteView" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
-  readonly evictReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
-  readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
-  readonly releaseReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
+  readonly evictReviewerExecution: (command: RuntimeThreadAddressState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
+  readonly interruptReviewerExecution: (command: RuntimeThreadAddressState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
+  readonly releaseReviewerExecution: (command: RuntimeThreadAddressState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: Parameters<SessionRunHost.Interface["handleMarkThreadClosed"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly markThreadActive: (command: Parameters<SessionRunHost.Interface["handleMarkThreadActive"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly waitThread: (command: Parameters<SessionRunHost.Interface["handleWaitThread"]>[0], timeoutMs: number | undefined, abortSignal?: AbortSignal | undefined) => Promise<SessionManager.ThreadWaitResult>;
   readonly pullAgentMail?: (
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
     sourceThreadId: string,
   ) => Promise<{ readonly deliveryId: string; readonly finalMessage: string } | undefined>;
-  readonly waitReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken, timeoutMs: number | undefined, abortSignal?: AbortSignal | undefined) => Promise<SessionManager.ReviewerExecutionWaitResult>;
+  readonly waitReviewerExecution: (command: RuntimeThreadAddressState, token: SessionManager.ReviewerExecutionToken, timeoutMs: number | undefined, abortSignal?: AbortSignal | undefined) => Promise<SessionManager.ReviewerExecutionWaitResult>;
   readonly inspectThread: (command: Parameters<SessionRunHost.Interface["handleInspectThread"]>[0]) => Promise<SessionManager.ThreadSnapshotResult>;
-  readonly inspectReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionSnapshotResult>;
+  readonly inspectReviewerExecution: (command: RuntimeThreadAddressState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionSnapshotResult>;
   readonly commitApprovalReviewDecision: (command: RuntimeApprovalReviewAcceptedInputState, event: Extract<SessionEvent, { readonly type: "approval_review.decision" }>) => Promise<SessionEventWriterAppendResult>;
   readonly commitApprovalReviewFailure: (command: RuntimeApprovalReviewAcceptedInputState, event: Extract<SessionEvent, { readonly type: "approval_review.failure" }>) => Promise<SessionEventWriterAppendResult>;
 }
@@ -103,30 +101,14 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
     now: options.now,
     ...(options.contextLoader.loadThreadContext !== undefined
       ? {
-          loadThreadContext: async (command: RuntimeThreadControlState): Promise<RuntimeThreadPreloadState> => {
+          loadThreadContext: async (command: RuntimeThreadAddressState): Promise<RuntimeThreadPreloadState> => {
             const context = await options.contextLoader.loadThreadContext!(command);
             const pendingAgentMail: Array<Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }>> = [];
             if ((context.pendingAgentMail?.length ?? 0) > 0 && context.thread === undefined) {
               throw new Error("pending agent mail requires durable thread lineage");
             }
-            for (const descriptor of context.pendingAgentMail ?? []) {
-              if (options.contextLoader.resolveAgentMail === undefined) {
-                throw new Error("agent mail resolver is unavailable");
-              }
-              // Resolver authority is parent-scoped even when the cold target is the child.
-              const currentIsChild = context.thread?.parentThreadId === descriptor.sourceThreadId;
-              const resolverCommand = currentIsChild
-                ? { ...command, sessionThreadId: descriptor.sourceThreadId }
-                : command;
-              const childThreadId = currentIsChild
-                ? command.sessionThreadId
-                : descriptor.sourceThreadId;
-              const resolved = await options.contextLoader.resolveAgentMail(
-                resolverCommand,
-                childThreadId,
-                descriptor.deliveryId,
-              );
-              pendingAgentMail.push(acceptedResolvedAgentMail(command, resolved, context.thread));
+            for (const mail of context.pendingAgentMail ?? []) {
+              pendingAgentMail.push(acceptedLoadedAgentMail(command, mail, context.thread));
             }
             let turnCheckpoint: ThreadTurnCheckpoint;
             let turnToolRouteView: ThreadToolRouteView;
@@ -264,21 +246,14 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         abortSignal === undefined ? undefined : { signal: abortSignal },
       ),
       pullAgentMail: async (command, sourceThreadId) => {
-        if (options.contextLoader.resolveAgentMail === undefined) {
-          throw new Error("agent mail resolver is unavailable");
+        if (options.contextLoader.readAgentMail === undefined) {
+          throw new Error("agent mail reader is unavailable");
         }
-        let resolved: RuntimeResolvedAgentMail;
-        try {
-          resolved = await options.contextLoader.resolveAgentMail(command, sourceThreadId);
-        } catch (error) {
-          if (isGrpcStatus(error, status.NOT_FOUND)) {
-            return undefined;
-          }
-          throw error;
-        }
+        const resolved = await options.contextLoader.readAgentMail(command, sourceThreadId);
+        if (resolved === undefined) return undefined;
         return {
           deliveryId: resolved.deliveryId,
-          finalMessage: runtimeAgentMailText(runtimeMessageFromPublicAgentMail(resolved.publicMessageJson)),
+          finalMessage: resolved.content,
         };
       },
       waitReviewerExecution: async (command, token, timeoutMs, abortSignal) => await Effect.runPromise(
@@ -288,7 +263,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       inspectThread: async (command) => await Effect.runPromise(host.handleInspectThread(command)),
       inspectReviewerExecution: async (command, token) => await Effect.runPromise(host.handleInspectReviewerExecution(command, token)),
       commitApprovalReviewDecision: async (command, event) => await options.threadLoop.sessionEventWriter.append({
-        requestId: command.requestId,
+        requestId: command.runtimeInputId,
         workspaceId: command.workspaceId,
         sessionId: command.sessionId,
         sessionThreadId: command.sessionThreadId,
@@ -299,7 +274,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         event,
       }),
       commitApprovalReviewFailure: async (command, event) => await reviewerFailureWriter.append({
-        requestId: command.requestId,
+        requestId: command.runtimeInputId,
         workspaceId: command.workspaceId,
         sessionId: command.sessionId,
         sessionThreadId: command.sessionThreadId,
@@ -353,22 +328,16 @@ export function validateClosedThreadResumeCheckpoint(
   }
 }
 
-function acceptedResolvedAgentMail(
-  command: RuntimeThreadControlState,
-  mail: RuntimeResolvedAgentMail,
+function acceptedLoadedAgentMail(
+  command: RuntimeThreadAddressState,
+  mail: RuntimeLoadedAgentMail,
   thread: RuntimeThreadPreloadState["thread"],
 ): Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }> {
   return {
     ...command,
-    requestId: `agent_mail:${mail.deliveryId}`,
     runtimeInputId: `agent_mail:${mail.deliveryId}`,
-    eventIds: [mail.receivedEventId],
-    sequenceFrom: mail.receivedSequence,
-    sequenceTo: mail.receivedSequence,
     kind: "inter_agent_message",
     deliveryId: mail.deliveryId,
-    sourceThreadId: mail.sourceThreadId,
-    sourceToolUseEventId: mail.sourceToolUseEventId,
     message: mail.message,
     thread,
   };
@@ -383,16 +352,11 @@ function acceptedAgentMailCommand(
   };
 }
 
-function isGrpcStatus(error: unknown, code: status): boolean {
-  return typeof error === "object" && error !== null && (error as Partial<ServiceError>).code === code;
-}
-
 function runtimeAcceptedInputFromCommand(command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]): RuntimeAcceptedInputState {
   if (command.kind === "rejection") {
     return { ...command };
   }
   return {
-    requestId: command.requestId,
     workspaceId: command.workspaceId,
     sessionId: command.sessionId,
     sessionThreadId: command.sessionThreadId,
@@ -400,10 +364,8 @@ function runtimeAcceptedInputFromCommand(command: Parameters<RuntimeSessionRunHo
     bindingGeneration: command.bindingGeneration,
     targetPodUid: command.targetPodUid,
     runtimeInputId: command.runtimeInputId,
-    eventIds: [...command.eventIds],
-    sequenceFrom: command.sequenceFrom,
-    sequenceTo: command.sequenceTo,
+    inputOrder: command.inputOrder,
     kind: "messages",
-    payloadJson: command.payloadJson,
+    contentJson: command.contentJson,
   };
 }

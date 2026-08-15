@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -30,11 +29,15 @@ import (
 // the task-notification inbox birth; Bridge verifies the Runtime declaration
 // against that stored terminal result before committing one event and message.
 func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Context, request *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error) {
-	if request.GetRuntimeInputId() == "" || request.GetTaskId() == "" || request.GetResultJson() == "" || request.GetMessageCreate() == nil {
+	if request.GetRuntimeInputId() == "" || request.GetDisposition() == bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_UNSPECIFIED {
 		return nil, status.Error(codes.InvalidArgument, "invalid task notification result request")
 	}
-	key := request.GetTaskId() + ":" + request.GetRuntimeInputId()
-	sourceID := stableRuntimeID("task_notification", request.GetRuntimeInputId(), request.GetTaskId())
+	taskID := strings.TrimPrefix(request.GetRuntimeInputId(), "task_notification:")
+	if taskID == request.GetRuntimeInputId() || taskID == "" || request.GetRuntimeInputId() != queue.FormatTaskNotificationRuntimeInputID(taskID) {
+		return nil, status.Error(codes.InvalidArgument, "invalid task notification target")
+	}
+	key := taskID + ":" + request.GetRuntimeInputId()
+	sourceID := stableRuntimeID("task_notification", request.GetRuntimeInputId(), taskID)
 	declarationDigest, err := taskNotificationDeclarationDigest(request)
 	if err != nil {
 		return nil, err
@@ -42,7 +45,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 	now := s.now()
 	var ack *bridgev1.BridgeWriteAck
 	var receipt *bridgev1.DeclarationReceipt
-	var rejectionValidator string
+	var duplicate bool
+	var outcome string
+	var assignedContextSequences []int64
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_task_notification_result", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
@@ -56,8 +61,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			if existing.RequestHash != declarationDigest {
 				return status.Error(codes.AlreadyExists, "task notification idempotency conflict")
 			}
+			if existing.AckStatus == bridgeAckRejected && existing.ErrorCode == "task_notification_stale" {
+				outcome = "stale"
+				return nil
+			}
 			if existing.AckStatus == bridgeAckRejected && taskNotificationRejectionCode(existing.ErrorCode) {
-				ack = rejectedTaskNotificationAck(request.GetRuntimeInputId(), existing.ErrorCode)
+				outcome = "rejected"
 				return nil
 			}
 			return status.Error(codes.FailedPrecondition, "task notification operation is invalid")
@@ -80,21 +89,37 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 				return status.Error(codes.FailedPrecondition, "task notification receipt is invalid")
 			}
 			ack = duplicateAck(sourceID, "")
-			return nil
+			duplicate = true
+			typed, err := commitInputsTypedResultFromReceipt(receipt)
+			if err == nil {
+				assignedContextSequences = typed.assignedContextSequences
+			}
+			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if request.GetRuntimeInputId() != queue.FormatTaskNotificationRuntimeInputID(request.GetTaskId()) {
-			return status.Error(codes.FailedPrecondition, "task notification Inbox does not belong to the declared task")
-		}
-		facts, err := lockTaskNotificationSettlementFactsTx(ctx, tx, request)
+		facts, err := lockTaskNotificationSettlementFactsTx(ctx, tx, request, taskID)
 		if err != nil {
 			return err
 		}
 		if facts.SourceEventType != "agent.tool_use" && facts.SourceEventType != "agent.mcp_tool_use" {
-			rejectionValidator = "task_notification.source_event_type"
-			return rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest, rejectionValidator, "task_notification_result_invalid", now, &ack)
+			if err := rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest,
+				"task_notification.durable_source", "task_notification_result_invalid", now, &ack); err != nil {
+				return err
+			}
+			outcome = "rejected"
+			return nil
+		}
+		if request.GetDisposition() == bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_DEFER {
+			if err := deferTaskNotificationResultTx(ctx, tx, request.GetScope(), request.GetRuntimeInputId(), now); err != nil {
+				return err
+			}
+			outcome = "deferred"
+			return nil
+		}
+		if request.GetDisposition() == bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_REJECT {
+			return status.Error(codes.FailedPrecondition, "task notification rejection is not permitted for a valid durable result")
 		}
 		if facts.InboxStatus == "queued" || facts.InboxStatus == "parked" {
 			closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId())
@@ -105,7 +130,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 				if err := deferTaskNotificationResultTx(ctx, tx, request.GetScope(), request.GetRuntimeInputId(), now); err != nil {
 					return err
 				}
-				ack = rejectedAck("task_notification_deferred")
+				outcome = "deferred"
 				return nil
 			}
 		}
@@ -114,7 +139,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 				if err := insertTaskNotificationStaleOperationTx(ctx, tx, request, key, declarationDigest, now); err != nil {
 					return err
 				}
-				ack = rejectedTaskNotificationAck(request.GetRuntimeInputId(), "task_notification_stale")
+				outcome = "stale"
 				return nil
 			}
 			if facts.InboxStatus != "delivering" && facts.InboxStatus != "accepted" {
@@ -137,42 +162,36 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			if err := insertTaskNotificationStaleOperationTx(ctx, tx, request, key, declarationDigest, now); err != nil {
 				return err
 			}
-			ack = rejectedTaskNotificationAck(request.GetRuntimeInputId(), "task_notification_stale")
+			outcome = "stale"
 			return nil
 		}
 		if facts.InboxStatus != "delivering" && facts.InboxStatus != "accepted" {
 			return status.Error(codes.FailedPrecondition, "task notification input is not deliverable")
 		}
 		if !validBackgroundTaskTerminalStatus(facts.TaskStatus) || facts.StoredResultJSON == "" {
-			return status.Error(codes.FailedPrecondition, "background task terminal result is invalid")
+			if err := rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest,
+				"task_notification.durable_result", "task_notification_result_invalid", now, &ack); err != nil {
+				return err
+			}
+			outcome = "rejected"
+			return nil
 		}
 		expectedResultJSON, err := canonicalTaskNotificationPayloadJSON(
-			request.GetTaskId(), facts.SourceToolUseEventID, facts.TaskStatus, facts.StoredResultJSON,
+			taskID, facts.SourceToolUseEventID, facts.TaskStatus, facts.StoredResultJSON,
 		)
 		if err != nil {
-			return status.Error(codes.FailedPrecondition, "background task terminal result is invalid")
-		}
-		declaredTaskID, declaredSourceToolUseEventID, identityOK := taskNotificationDeclaredIdentity(request.GetResultJson())
-		if identityOK && (declaredTaskID != request.GetTaskId() || declaredSourceToolUseEventID != facts.SourceToolUseEventID) {
-			return status.Error(codes.FailedPrecondition, "task notification result identity does not match durable task")
-		}
-		if err := validateDeclaredTaskNotificationResult(request.GetResultJson()); err != nil {
-			rejectionValidator = "task_notification.result_shape"
-			return rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest, rejectionValidator, "task_notification_result_invalid", now, &ack)
-		}
-		messageText, err := validateTaskNotificationCreateShape(request.GetMessageCreate())
-		if err != nil {
-			rejectionValidator = "task_notification.message_shape"
-			return rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest, rejectionValidator, "task_notification_message_invalid", now, &ack)
-		}
-		if request.GetResultJson() != expectedResultJSON || messageText != expectedResultJSON {
-			rejectionValidator = "task_notification.canonical_bytes"
-			return rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest, rejectionValidator, "task_notification_payload_mismatch", now, &ack)
+			if rejectErr := rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest,
+				"task_notification.durable_result", "task_notification_result_invalid", now, &ack); rejectErr != nil {
+				return rejectErr
+			}
+			outcome = "rejected"
+			return nil
 		}
 		settled, committedReceipt, err := commitTaskNotificationDeclarationTx(
 			ctx,
 			tx,
 			request,
+			taskID,
 			sourceID,
 			facts,
 			expectedResultJSON,
@@ -185,7 +204,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			if err := insertTaskNotificationStaleOperationTx(ctx, tx, request, key, declarationDigest, now); err != nil {
 				return err
 			}
-			ack = rejectedTaskNotificationAck(request.GetRuntimeInputId(), "task_notification_stale")
+			outcome = "stale"
 			return nil
 		}
 		result, err := tx.Exec(ctx,
@@ -224,15 +243,28 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			return err
 		}
 		ack = committedAck(sourceID, "")
+		typed, err := commitInputsTypedResultFromReceipt(receipt)
+		if err != nil {
+			return err
+		}
+		assignedContextSequences = typed.assignedContextSequences
 		return nil
 	}); err != nil {
 		return nil, err
 	}
+	if outcome == "stale" {
+		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Stale{Stale: &bridgev1.CommitTaskNotificationResultStale{}}}, nil
+	}
+	if outcome == "deferred" {
+		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Deferred{Deferred: &bridgev1.CommitTaskNotificationResultDeferred{}}}, nil
+	}
+	if outcome == "rejected" {
+		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Rejected{Rejected: &bridgev1.CommitTaskNotificationResultRejected{
+			Reason: bridgev1.TaskNotificationRejectionReason_TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID,
+		}}}, nil
+	}
 	if receipt == nil {
-		if rejectionValidator != "" {
-			logTaskNotificationDeclarationRejected(s.Logger, request.GetScope(), request.GetRuntimeInputId(), request.GetTaskId(), rejectionValidator)
-		}
-		return &bridgev1.CommitTaskNotificationResultResponse{Ack: ack}, nil
+		return nil, status.Error(codes.Internal, "task notification result is unavailable")
 	}
 	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
 	if err != nil {
@@ -248,15 +280,13 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		ack,
 		observation,
 	)
-	return &bridgev1.CommitTaskNotificationResultResponse{
-		Ack: ack,
-		Declaration: &bridgev1.DeclarationResponse{
-			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
-			ObservedBindingId:         observation.BindingID,
-			ObservedBindingGeneration: observation.BindingGeneration,
-			ApplicationDisposition:    observation.Disposition,
-		},
-	}, nil
+	if observation.Disposition == bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY {
+		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Stale{Stale: &bridgev1.CommitTaskNotificationResultStale{}}}, nil
+	}
+	if duplicate {
+		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Duplicate{Duplicate: &bridgev1.CommitTaskNotificationResultDuplicate{AssignedContextSequences: assignedContextSequences}}}, nil
+	}
+	return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Committed{Committed: &bridgev1.CommitTaskNotificationResultCommitted{AssignedContextSequences: assignedContextSequences}}}, nil
 }
 
 type taskNotificationSettlementFacts struct {
@@ -273,6 +303,7 @@ func lockTaskNotificationSettlementFactsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.CommitTaskNotificationResultRequest,
+	taskID string,
 ) (taskNotificationSettlementFacts, error) {
 	scope := request.GetScope()
 	var facts taskNotificationSettlementFacts
@@ -303,7 +334,7 @@ func lockTaskNotificationSettlementFactsTx(
 		FROM session_background_tasks
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND task_id=$4
 		FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), request.GetTaskId(),
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), taskID,
 	).Scan(&facts.TaskStatus, &facts.SourceToolUseEventID, &storedResultJSON, &facts.TerminalEventID)
 	if dbconnect.IsNoRows(err) {
 		return taskNotificationSettlementFacts{}, status.Error(codes.FailedPrecondition, "background task ownership is missing")
@@ -355,86 +386,6 @@ func deferTaskNotificationResultTx(
 	return nil
 }
 
-func taskNotificationDeclaredIdentity(resultJSON string) (string, string, bool) {
-	var object map[string]json.RawMessage
-	if json.Unmarshal([]byte(resultJSON), &object) != nil || object == nil {
-		return "", "", false
-	}
-	taskID, taskErr := requiredNonEmptyStringRaw(object["task_id"], "task notification task_id")
-	sourceID, sourceErr := requiredNonEmptyStringRaw(object["source_tool_use_event_id"], "task notification source_tool_use_event_id")
-	return taskID, sourceID, taskErr == nil && sourceErr == nil
-}
-
-func validateDeclaredTaskNotificationResult(resultJSON string) error {
-	var object map[string]json.RawMessage
-	if json.Unmarshal([]byte(resultJSON), &object) != nil || object == nil ||
-		!exactRawFields(object, []string{"task_id", "source_tool_use_event_id", "status", "stdout", "stderr"}, []string{"exit_code"}) {
-		return errors.New("task notification result shape is invalid")
-	}
-	if _, err := requiredNonEmptyStringRaw(object["task_id"], "task notification task_id"); err != nil {
-		return err
-	}
-	if _, err := requiredNonEmptyStringRaw(object["source_tool_use_event_id"], "task notification source_tool_use_event_id"); err != nil {
-		return err
-	}
-	statusValue, err := requiredStringRaw(object["status"], "task notification status")
-	if err != nil || (statusValue != "completed" && statusValue != "failed" && statusValue != "cancelled" && statusValue != "expired") {
-		return errors.New("task notification status is invalid")
-	}
-	if raw, ok := object["exit_code"]; ok {
-		if _, err := nullableSafeIntegerRaw(raw, "task notification exit_code", false); err != nil {
-			return err
-		}
-	}
-	for _, field := range []string{"stdout", "stderr"} {
-		if err := validateDeclaredTaskNotificationStream(object[field], field); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateDeclaredTaskNotificationStream(raw json.RawMessage, field string) error {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) != nil || object == nil ||
-		!exactRawFields(object, []string{"text", "truncated"}, []string{"original_bytes", "original_lines"}) {
-		return errors.New("task notification " + field + " shape is invalid")
-	}
-	if _, err := requiredStringRaw(object["text"], "task notification "+field+" text"); err != nil {
-		return err
-	}
-	if _, err := requiredBoolRaw(object["truncated"], "task notification "+field+" truncated"); err != nil {
-		return err
-	}
-	for _, optional := range []string{"original_bytes", "original_lines"} {
-		if rawOptional, ok := object[optional]; ok {
-			if _, err := nullableSafeIntegerRaw(rawOptional, "task notification "+field+" "+optional, true); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func exactRawFields(object map[string]json.RawMessage, required []string, optional []string) bool {
-	allowed := make(map[string]struct{}, len(required)+len(optional))
-	for _, field := range required {
-		if _, ok := object[field]; !ok {
-			return false
-		}
-		allowed[field] = struct{}{}
-	}
-	for _, field := range optional {
-		allowed[field] = struct{}{}
-	}
-	for field := range object {
-		if _, ok := allowed[field]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 func nullableSafeIntegerRaw(raw json.RawMessage, field string, nonNegative bool) (any, error) {
 	value, err := nullableIntegerRaw(raw, field)
 	if err != nil || value == nil {
@@ -445,29 +396,6 @@ func nullableSafeIntegerRaw(raw json.RawMessage, field string, nonNegative bool)
 		return nil, errors.New(field + " must be a safe integer or null")
 	}
 	return integer, nil
-}
-
-func validateTaskNotificationCreateShape(create *bridgev1.RuntimeMessageCreate) (string, error) {
-	if create == nil || create.GetMessageKind() != bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION || len(create.GetParts()) != 1 {
-		return "", errors.New("task notification Message shape is invalid")
-	}
-	message, err := decodeRuntimeDeclarationObject(create.GetMessageInfoJson())
-	if err != nil || len(message) != 3 || message["role"] != "user" || message["origin"] != "runtime" || message["status"] != "completed" {
-		return "", errors.New("task notification Message info is invalid")
-	}
-	partCreate := create.GetParts()[0]
-	if partCreate == nil || partCreate.GetPartKind() != "text" {
-		return "", errors.New("task notification Message part is invalid")
-	}
-	part, err := decodeRuntimeDeclarationObject(partCreate.GetPartJson())
-	if err != nil || len(part) != 4 || part["type"] != "text" || part["truncated"] != false || part["status"] != "completed" {
-		return "", errors.New("task notification Message part is invalid")
-	}
-	textValue, ok := part["text"].(string)
-	if !ok {
-		return "", errors.New("task notification Message text is invalid")
-	}
-	return textValue, nil
 }
 
 func rejectTaskNotificationDeclarationTx(
@@ -537,31 +465,6 @@ func insertTaskNotificationStaleOperationTx(
 		AckStatus: bridgeAckRejected, RuntimeInputID: sql.NullString{String: request.GetRuntimeInputId(), Valid: true},
 		ErrorCode: sql.NullString{String: "task_notification_stale", Valid: true}, ResultJSON: resultJSON, Now: now,
 	})
-}
-
-func logTaskNotificationDeclarationRejected(
-	logger *slog.Logger,
-	scope *bridgev1.RuntimeScope,
-	runtimeInputID string,
-	taskID string,
-	validatorID string,
-) {
-	if logger == nil || scope == nil {
-		return
-	}
-	defer func() { _ = recover() }()
-	logger.Info("task notification declaration rejected",
-		slog.String("operation", bridgeOpCommitTaskNotificationResult),
-		slog.String("event.kind", "runtime_declaration_rejected"),
-		slog.String("component", ServiceNameBridgeAPI),
-		slog.String("validator.id", validatorID),
-		slog.String("rpc.grpc.status_name", codes.OK.String()),
-		slog.String("workspace.id", scope.GetWorkspaceId()),
-		slog.String("session.id", scope.GetSessionId()),
-		slog.String("thread.id", scope.GetSessionThreadId()),
-		slog.String("runtime_input.id", runtimeInputID),
-		slog.String("task.id", taskID),
-	)
 }
 
 func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, request *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {
@@ -1115,6 +1018,7 @@ func commitTaskNotificationDeclarationTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.CommitTaskNotificationResultRequest,
+	taskID string,
 	sourceID string,
 	facts taskNotificationSettlementFacts,
 	resultJSON string,
@@ -1124,7 +1028,7 @@ func commitTaskNotificationDeclarationTx(
 	sourceToolUseEventID := facts.SourceToolUseEventID
 	terminalStatus := facts.TaskStatus
 	notificationJSON, err := runtimeNotificationJSON(
-		request.GetTaskId(),
+		taskID,
 		sourceToolUseEventID,
 		terminalStatus,
 		resultJSON,
@@ -1160,7 +1064,10 @@ func commitTaskNotificationDeclarationTx(
 		"task_notification",
 		eventID,
 		nil,
-		request.GetMessageCreate(),
+		runtimeTextMessageCreate(
+			bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION,
+			"user", "runtime", []string{resultJSON},
+		),
 		now,
 	)
 	if err != nil {
@@ -1179,7 +1086,7 @@ func commitTaskNotificationDeclarationTx(
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		request.GetTaskId(),
+		taskID,
 		sourceToolUseEventID,
 		eventID,
 		now,

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -20,7 +21,8 @@ import (
 )
 
 const (
-	MailFetchMaxEnvelopes = 4
+	MailFetchMaxEnvelopes    = 4
+	AgentMailContentMaxBytes = 2 * 1024 * 1024
 )
 
 type storedAgentMailEnvelope struct {
@@ -31,7 +33,8 @@ type storedAgentMailEnvelope struct {
 	SourceThreadID       string
 	TargetThreadID       string
 	SourceToolUseEventID string
-	MessageJSON          json.RawMessage
+	Content              string
+	PublicMessageJSON    json.RawMessage
 }
 
 type admittedAgentMailDelivery struct {
@@ -39,6 +42,168 @@ type admittedAgentMailDelivery struct {
 	ReceivedEventID  string
 	ReceivedSequence int64
 	Terminal         bool
+}
+
+func agentMailDeliveryID(sourceToolUseEventID string, targetThreadID string) string {
+	digest := sha256.Sum256([]byte(sourceToolUseEventID + ":" + targetThreadID + ":0"))
+	return "delivery_" + hex.EncodeToString(digest[:])[:32]
+}
+
+// appendSubagentMailEnvelopeTx owns the sender-side half of direct agent mail.
+// The durable Tool Use is the command authority: the caller supplies only its
+// exact identity, target, deterministic delivery identity, and bounded text.
+// Bridge validates those facts and authors the Runtime message and public sent
+// event before Inbox/Queue custody is born in the same transaction.
+func appendSubagentMailEnvelopeTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	deliveryID string,
+	targetThreadID string,
+	sourceToolUseEventID string,
+	content string,
+	now time.Time,
+) (storedAgentMailEnvelope, error) {
+	if deliveryID == "" || targetThreadID == "" || sourceToolUseEventID == "" || content == "" || len([]byte(content)) > AgentMailContentMaxBytes {
+		return storedAgentMailEnvelope{}, status.Error(codes.InvalidArgument, "agent mail identity and bounded content are required")
+	}
+	if deliveryID != agentMailDeliveryID(sourceToolUseEventID, targetThreadID) {
+		return storedAgentMailEnvelope{}, status.Error(codes.InvalidArgument, "agent mail delivery identity is invalid")
+	}
+	var payloadJSON string
+	if err := tx.QueryRow(ctx, `SELECT payload_json
+		FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		AND event_id=$4 AND type='agent.tool_use' AND visibility='public'
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceToolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool Use is missing")
+	} else if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	var tool runtimeToolUseEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &tool); err != nil {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool Use is malformed")
+	}
+	var input struct {
+		TaskName string `json:"task_name"`
+		Prompt   string `json:"prompt"`
+		Message  string `json:"message"`
+	}
+	if err := json.Unmarshal(tool.Input, &input); err != nil {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool input is malformed")
+	}
+	input.TaskName = strings.TrimSpace(input.TaskName)
+	durableContent := ""
+	switch tool.Name {
+	case "spawn_agent":
+		durableContent = strings.TrimSpace(input.Prompt)
+	case "send_message":
+		durableContent = strings.TrimSpace(input.Message)
+	default:
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool name is invalid")
+	}
+	if !validActorTaskName(input.TaskName) || durableContent == "" || durableContent != content {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail request conflicts with its durable Tool Use")
+	}
+	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, sourceToolUseEventID); err != nil {
+		return storedAgentMailEnvelope{}, err
+	} else if terminal {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool Use is terminal")
+	}
+	var targetTaskName string
+	if err := tx.QueryRow(ctx, `SELECT task_name
+		FROM session_threads
+		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND parent_thread_id=$4
+		AND role='subagent' AND visibility='public' AND task_name=$5
+		AND status NOT IN ('closed_for_runtime','failed','terminated')
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, scope.GetSessionThreadId(), input.TaskName).Scan(&targetTaskName); dbconnect.IsNoRows(err) {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail target does not match the durable Tool Use")
+	} else if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	messageJSON, err := directAgentMailRuntimeMessageJSON(scope.GetSessionId(), deliveryID, content, now)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":                     "agent.thread_message_sent",
+		"delivery_id":              deliveryID,
+		"source_thread_id":         scope.GetSessionThreadId(),
+		"target_thread_id":         targetThreadID,
+		"target_task_name":         targetTaskName,
+		"source_tool_use_event_id": sourceToolUseEventID,
+		"message":                  json.RawMessage(messageJSON),
+	})
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	eventID := stableRuntimeID("agent_mail_sent_event", scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), deliveryID)
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO session_events (
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
+		visibility,session_visible,runtime_write_id,projection_json,created_at,updated_at,processed_at
+	) VALUES ($1,$2,$3,$4,$5,'agent.thread_message_sent',$6,'public',true,$7,$6,$8,$8,$8)`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
+		eventPayloadJSON, deliveryID, now); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, "public", true, now); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if err := birthCompletionMailCustodyTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, deliveryID, now); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	return storedAgentMailEnvelope{
+		SentEventID: eventID, SentSequence: sequence, SentThreadID: scope.GetSessionThreadId(),
+		DeliveryID: deliveryID, SourceThreadID: scope.GetSessionThreadId(), TargetThreadID: targetThreadID,
+		SourceToolUseEventID: sourceToolUseEventID, Content: content, PublicMessageJSON: json.RawMessage(messageJSON),
+	}, nil
+}
+
+func directAgentMailRuntimeMessageJSON(sessionID string, deliveryID string, content string, now time.Time) (string, error) {
+	timestamp := now.UTC().Format(time.RFC3339Nano)
+	messageID := "msg_" + deliveryID
+	return marshalBridgeJSON(map[string]any{
+		"id": messageID, "sessionId": sessionID, "role": "user", "origin": "runtime",
+		"sequence": 0, "status": "completed", "createdAt": timestamp, "updatedAt": timestamp,
+		"content": []map[string]string{{"type": "text", "text": content}},
+		"parts": []map[string]any{{
+			"id": messageID + "_text", "sessionId": sessionID, "messageId": messageID,
+			"sequence": 0, "type": "text", "text": content, "truncated": false, "status": "completed",
+			"createdAt": timestamp, "updatedAt": timestamp, "completedAt": timestamp,
+		}},
+	})
+}
+
+// agentMailContentFromPublicMessage isolates the target-owned mail body from
+// the frozen public Event projection. Runtime delivery and cold load carry
+// this text only; the broad public Message representation never crosses the
+// private target boundary.
+func agentMailContentFromPublicMessage(raw json.RawMessage) (string, error) {
+	var message struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &message); err != nil || len(message.Content) == 0 {
+		return "", status.Error(codes.FailedPrecondition, "agent mail content is malformed")
+	}
+	texts := make([]string, 0, len(message.Content))
+	for _, block := range message.Content {
+		if block.Type != "text" {
+			return "", status.Error(codes.FailedPrecondition, "agent mail content is not text")
+		}
+		texts = append(texts, block.Text)
+	}
+	content := strings.Join(texts, "\n")
+	if content == "" || len([]byte(content)) > AgentMailContentMaxBytes {
+		return "", status.Error(codes.FailedPrecondition, "agent mail content exceeds its bound")
+	}
+	return content, nil
 }
 
 func completionDeliveryID(childThreadID string, runtimeWriteID string) string {
@@ -111,11 +276,16 @@ func loadStoredAgentMailEnvelopeByDeliveryTx(
 	if err != nil {
 		return storedAgentMailEnvelope{}, err
 	}
+	content, err := agentMailContentFromPublicMessage(publicMessage)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
 	envelope.DeliveryID = payload.DeliveryID
 	envelope.SourceThreadID = payload.SourceThreadID
 	envelope.TargetThreadID = payload.TargetThreadID
 	envelope.SourceToolUseEventID = payload.SourceToolUseEventID
-	envelope.MessageJSON = publicMessage
+	envelope.Content = content
+	envelope.PublicMessageJSON = publicMessage
 	if envelope.SentThreadID != envelope.SourceThreadID {
 		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail sent event does not belong to its declared source")
 	}
@@ -308,7 +478,7 @@ func admitAgentMailDeliveryTx(
 		"source_thread_id":         envelope.SourceThreadID,
 		"source_task_name":         nullableJSONString(sourceTaskName),
 		"source_tool_use_event_id": envelope.SourceToolUseEventID,
-		"message":                  envelope.MessageJSON,
+		"message":                  envelope.PublicMessageJSON,
 	})
 	if err != nil {
 		return admittedAgentMailDelivery{}, err

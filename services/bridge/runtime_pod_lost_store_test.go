@@ -17,7 +17,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -262,7 +261,6 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		SequenceFrom:    3,
 		SequenceTo:      3,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_pod_loss","session_thread_id":"thr_bridge_pod_loss","runtime_input_id":"rin_pod_loss_later","event_ids":["evt_pod_loss_later"],"sequence_from":3,"sequence_to":3,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -270,8 +268,8 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand after pod loss: %v", err)
 	}
-	if plan.Request == nil || plan.Request.GetTargetPodUid() != "pod_uid_pod_loss_new" {
-		t.Fatalf("plan target pod uid = %#v; want replacement pod", plan.Request)
+	if plan.AcceptInput == nil || plan.AcceptInput.GetTargetPodUid() != "pod_uid_pod_loss_new" {
+		t.Fatalf("plan target pod uid = %#v; want replacement pod", plan.AcceptInput)
 	}
 	var replacementReleaseJobID, replacementReleaseStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT o.queue_job_id, q.status

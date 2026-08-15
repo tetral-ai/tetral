@@ -72,16 +72,12 @@ func runTaskNotificationInterruptRace(t *testing.T, notificationFirst bool) {
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 3, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
 		`["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 3, 3)
-	canonical, err := canonicalTaskNotificationPayloadJSON(taskID, "sevt_notification_interrupt_source", "completed", storedResult)
-	if err != nil {
-		t.Fatalf("build canonical task notification: %v", err)
-	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	notificationRequest := bridgeTaskNotificationRequestForTest(t, scope, notificationID, taskID, canonical)
+	notificationRequest := bridgeTaskNotificationRequestForTest(t, scope, notificationID)
 	interruptRequest := &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: interruptID, InputKind: "interrupt_control",
-		EventIds: []string{interruptEvent}, SequenceFrom: 3, SequenceTo: 3,
+		Scope: scope, RuntimeInputId: interruptID,
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	blocker, err := admin.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -97,21 +93,21 @@ func runTaskNotificationInterruptRace(t *testing.T, notificationFirst bool) {
 		t.Fatalf("read blocker pid: %v", err)
 	}
 	type outcome struct {
-		kind string
-		ack  *bridgev1.BridgeWriteAck
-		err  error
+		kind      string
+		committed bool
+		err       error
 	}
 	results := make(chan outcome, 2)
 	startNotification := func() {
 		go func() {
 			response, err := store.CommitTaskNotificationResult(context.Background(), notificationRequest)
-			results <- outcome{kind: "notification", ack: response.GetAck(), err: err}
+			results <- outcome{kind: "notification", committed: response.GetCommitted() != nil, err: err}
 		}()
 	}
 	startInterrupt := func() {
 		go func() {
 			response, err := store.CommitInputs(context.Background(), interruptRequest)
-			results <- outcome{kind: "interrupt", ack: response.GetAck(), err: err}
+			results <- outcome{kind: "interrupt", committed: response.GetCommitted() != nil, err: err}
 		}()
 	}
 	if notificationFirst {
@@ -129,8 +125,8 @@ func runTaskNotificationInterruptRace(t *testing.T, notificationFirst bool) {
 	}
 	for range 2 {
 		result := <-results
-		if result.err != nil || result.ack.GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-			t.Fatalf("%s outcome = %#v/%v; want committed", result.kind, result.ack, result.err)
+		if result.err != nil || !result.committed {
+			t.Fatalf("%s outcome = committed:%t/%v; want committed", result.kind, result.committed, result.err)
 		}
 	}
 	var notificationStatus, interruptStatus, sessionStatus string
@@ -186,14 +182,10 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 	) VALUES ('default',$1,'running',$3,0,$2,1,$3,$3)`, sessionID, bindingID, now); err != nil {
 		t.Fatalf("seed running Runtime status: %v", err)
 	}
-	canonical, err := canonicalTaskNotificationPayloadJSON(taskID, "sevt_notification_termination_source", "completed", storedResult)
-	if err != nil {
-		t.Fatalf("build canonical task notification: %v", err)
-	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return now.Add(time.Second) }
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	notificationRequest := bridgeTaskNotificationRequestForTest(t, scope, inputID, taskID, canonical)
+	notificationRequest := bridgeTaskNotificationRequestForTest(t, scope, inputID)
 	terminationRequest := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: turnID,
 		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
@@ -256,7 +248,7 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 		t.Fatalf("termination outcome = %#v/%v", terminationOutcome.termination, terminationOutcome.err)
 	}
 	if notificationFirst {
-		if notificationOutcome.err != nil || notificationOutcome.notification.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		if notificationOutcome.err != nil || notificationOutcome.notification.GetCommitted() == nil {
 			t.Fatalf("notification-first outcome = %#v/%v", notificationOutcome.notification, notificationOutcome.err)
 		}
 	} else if notificationOutcome.err == nil {
@@ -362,11 +354,8 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 	store.Clock = func() time.Time { return now.Add(3 * time.Second) }
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	commitRequest := &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: inputID, InputKind: "messages",
-		EventIds: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{
-			bridgeUserInputCreateForTest("default", sessionID, threadID, inputID, eventID, "race input"),
-		},
+		Scope: scope, RuntimeInputId: inputID,
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	terminationRequest := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: turnID,
@@ -431,7 +420,7 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 		t.Fatalf("termination result = %#v/%v; want committed", terminationResult.termination, terminationResult.err)
 	}
 	if commitFirst {
-		if commitResult.err != nil || commitResult.commit.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		if commitResult.err != nil || commitResult.commit.GetCommitted() == nil {
 			t.Fatalf("commit-first input result = %#v/%v; want committed", commitResult.commit, commitResult.err)
 		}
 	} else if commitResult.err == nil {

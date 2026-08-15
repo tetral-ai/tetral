@@ -22,7 +22,7 @@ import type {
   RuntimeConfigPatchState,
   RuntimePreloadedBackgroundToolState,
   RuntimePreloadedSandboxExecutionState,
-  RuntimeThreadControlState,
+  RuntimeThreadAddressState,
 } from "../thread-loop/thread-state.js";
 import type { RuntimeThreadIdentity } from "../thread-loop/thread-runtime.js";
 import type { ThreadContextPrefix } from "../session/context-manager.js";
@@ -35,7 +35,7 @@ export interface ContextLoader {
    * A residency never calls this operation again after installation.
    */
   readonly loadThreadContext?: (
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
   ) => Promise<{
     readonly messages: readonly DurableRuntimeMessage[];
     readonly turnFacts: ThreadTurnLoadFacts;
@@ -67,12 +67,11 @@ export interface ContextLoader {
       readonly messageCreates?: readonly RuntimeMessageCreate[] | undefined;
     },
   ) => Promise<AcceptedInputCommitResult>;
-  /** Resolves one durable sent envelope into its database-stamped input source. */
-  readonly resolveAgentMail?: (
-    command: RuntimeThreadControlState,
-    childThreadId: string,
-    deliveryId?: string | undefined,
-  ) => Promise<RuntimeResolvedAgentMail>;
+  /** Reads the latest durable envelope owned by the addressed target thread. */
+  readonly readAgentMail?: (
+    command: RuntimeThreadAddressState,
+    sourceThreadId: string,
+  ) => Promise<RuntimeLoadedAgentMail | undefined>;
 }
 
 /** Result of committing one accepted command before mutating its hot thread state. */
@@ -105,20 +104,11 @@ export interface RuntimeLoadedPendingToolUse {
   readonly status: "pending" | "resolving";
 }
 
-/** Unreceipted child completion reconstructed from the durable sent-event ledger. */
+/** Unconsumed agent mail reconstructed from the target thread's durable inbox. */
 export interface RuntimeLoadedAgentMail {
   readonly deliveryId: string;
-  readonly sourceThreadId: string;
-  readonly sourceToolUseEventId: string;
-}
-
-/** Database-stamped agent-mail input returned by the durable resolver. */
-export interface RuntimeResolvedAgentMail extends RuntimeLoadedAgentMail {
-  readonly targetThreadId: string;
-  readonly receivedEventId: string;
-  readonly receivedSequence: number;
   readonly message: RuntimeMessage;
-  readonly publicMessageJson: string;
+  readonly content: string;
 }
 
 /** Effect service tag through which orchestration obtains the active context loader. */

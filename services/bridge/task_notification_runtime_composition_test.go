@@ -1,18 +1,22 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	internalsandbox "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
@@ -22,21 +26,14 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type taskNotificationRuntimeCompositionOutput struct {
-	Declaration       json.RawMessage `json:"declaration"`
-	DeclarationDigest string          `json:"declarationDigest"`
-	DurableMessages   []struct {
-		ID    string `json:"id"`
-		Parts []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"parts"`
-	} `json:"durableMessages"`
-	ReducerAction struct {
-		Action string `json:"action"`
-	} `json:"reducerAction"`
+	Declaration  json.RawMessage `json:"declaration"`
+	CommitResult json.RawMessage `json:"commitResult"`
 }
 
 func TestTaskNotificationCanonicalShapesCrossRuntimeDeclarationBoundary(t *testing.T) {
@@ -60,12 +57,11 @@ func TestTaskNotificationCanonicalShapesCrossRuntimeDeclarationBoundary(t *testi
 			if err != nil {
 				t.Fatalf("build canonical shape: %v", err)
 			}
-			request := &agentruntimev1.RuntimeInputCommandRequest{
-				RequestId: "req_task_shape", WorkspaceId: "default", SessionId: "sesn_task_shape", SessionThreadId: "thr_task_shape",
+			request := &agentruntimev1.AcceptTaskNotificationRequest{
+				WorkspaceId: "default", SessionId: "sesn_task_shape", SessionThreadId: "thr_task_shape",
 				BindingId: "bind_task_shape", BindingGeneration: 1, TargetPodUid: "pod_task_shape",
-				TargetPodNamespace: "engine", TargetPodName: "runtime-pod-composition", TargetPodIp: "127.0.0.1",
-				RuntimeInputId: "task_notification:" + testCase.taskID, CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
-				PayloadJson: payload,
+				RuntimeInputId: "task_notification:" + testCase.taskID, InputOrder: 0,
+				NotificationJson: payload,
 			}
 			composed, err := runTaskNotificationRuntimeComposition(context.Background(), t.TempDir()+"/shape.json", request, nil)
 			if err != nil {
@@ -75,8 +71,9 @@ func TestTaskNotificationCanonicalShapesCrossRuntimeDeclarationBoundary(t *testi
 			if err := protojson.Unmarshal(composed.Declaration, declaration); err != nil {
 				t.Fatalf("decode Runtime declaration: %v", err)
 			}
-			if declaration.GetResultJson() != payload {
-				t.Fatalf("Runtime declaration changed canonical bytes: got %q want %q", declaration.GetResultJson(), payload)
+			if declaration.GetRuntimeInputId() != request.GetRuntimeInputId() ||
+				declaration.GetDisposition() != bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT {
+				t.Fatalf("Runtime declaration = %#v; want input target plus commit disposition", declaration)
 			}
 			if len([]byte(payload)) > runtimeTaskNotificationPayloadMaxBytes {
 				t.Fatalf("Runtime declaration payload bytes = %d; want <= %d", len([]byte(payload)), runtimeTaskNotificationPayloadMaxBytes)
@@ -85,28 +82,12 @@ func TestTaskNotificationCanonicalShapesCrossRuntimeDeclarationBoundary(t *testi
 			if err := json.Unmarshal([]byte(payload), &payloadObject); err != nil || payloadObject["status"] != testCase.wantStatus {
 				t.Fatalf("canonical status = %#v/%v; want %s", payloadObject["status"], err, testCase.wantStatus)
 			}
-			goDigest, err := taskNotificationDeclarationDigest(declaration)
-			if err != nil || goDigest != composed.DeclarationDigest {
-				t.Fatalf("declaration digest = Go:%s Runtime:%s err:%v", goDigest, composed.DeclarationDigest, err)
+			declarationJSON := string(composed.Declaration)
+			if strings.Contains(declarationJSON, "notificationJson") || strings.Contains(declarationJSON, "resultJson") || strings.Contains(declarationJSON, "stdout") || strings.Contains(declarationJSON, "stderr") {
+				t.Fatalf("Runtime declaration echoed canonical task payload: %s", declarationJSON)
 			}
 		})
 	}
-}
-
-type taskNotificationRuntimeCompositionSender struct {
-	inputPath   string
-	declaration *bridgev1.CommitTaskNotificationResultRequest
-}
-
-type taskNotificationCompositionDeliverer struct {
-	inner RuntimePodDirectDeliverer
-}
-
-func (d taskNotificationCompositionDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
-	return d.inner.DeliverRuntimeJob(ctx, job)
-}
-func (d taskNotificationCompositionDeliverer) ReplayRuntimeDeliveryFinalization(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
-	return d.inner.ReplayRuntimeDeliveryFinalization(ctx, job)
 }
 
 type terminalBackgroundProvider struct {
@@ -150,37 +131,14 @@ func (terminalBackgroundProvider) Release(context.Context, tetralsandbox.Release
 	return tetralsandbox.ProviderOutcome[tetralsandbox.ReleaseResult]{}
 }
 
-func (s *taskNotificationRuntimeCompositionSender) SendRuntimeCommand(
-	ctx context.Context,
-	_ RuntimePodTarget,
-	request *agentruntimev1.RuntimeInputCommandRequest,
-) (*agentruntimev1.RuntimeInputCommandResponse, error) {
-	output, err := runTaskNotificationRuntimeComposition(ctx, s.inputPath, request, nil)
-	if err != nil {
-		return nil, err
-	}
-	declaration := &bridgev1.CommitTaskNotificationResultRequest{}
-	if err := protojson.Unmarshal(output.Declaration, declaration); err != nil {
-		return nil, err
-	}
-	s.declaration = declaration
-	return &agentruntimev1.RuntimeInputCommandResponse{
-		Status:            agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-		SessionId:         request.GetSessionId(),
-		RuntimeInputId:    request.GetRuntimeInputId(),
-		BindingId:         request.GetBindingId(),
-		BindingGeneration: request.GetBindingGeneration(),
-	}, nil
-}
-
 func runTaskNotificationRuntimeComposition(
 	ctx context.Context,
 	inputPath string,
-	request *agentruntimev1.RuntimeInputCommandRequest,
+	request *agentruntimev1.AcceptTaskNotificationRequest,
 	commitResponse *bridgev1.CommitTaskNotificationResultResponse,
 ) (taskNotificationRuntimeCompositionOutput, error) {
 	input := map[string]any{
-		"payloadJson":       request.GetPayloadJson(),
+		"notificationJson":  request.GetNotificationJson(),
 		"workspaceId":       request.GetWorkspaceId(),
 		"sessionId":         request.GetSessionId(),
 		"sessionThreadId":   request.GetSessionThreadId(),
@@ -188,52 +146,25 @@ func runTaskNotificationRuntimeComposition(
 		"bindingGeneration": request.GetBindingGeneration(),
 		"targetPodUid":      request.GetTargetPodUid(),
 		"runtimeInputId":    request.GetRuntimeInputId(),
+		"inputOrder":        request.GetInputOrder(),
 	}
 	if commitResponse != nil {
-		declaration := commitResponse.GetDeclaration()
-		receipts := make([]map[string]any, 0, len(declaration.GetReceipts()))
-		for _, receipt := range declaration.GetReceipts() {
-			events := make([]map[string]any, 0, len(receipt.GetEvents()))
-			for _, event := range receipt.GetEvents() {
-				events = append(events, map[string]any{
-					"sessionThreadId": event.GetSessionThreadId(), "eventId": event.GetEventId(),
-					"eventSequence": event.GetEventSequence(), "disposition": event.GetDisposition(),
-				})
-			}
-			messages := make([]map[string]any, 0, len(receipt.GetMessages()))
-			for _, message := range receipt.GetMessages() {
-				parts := make([]map[string]any, 0, len(message.GetParts()))
-				for _, part := range message.GetParts() {
-					parts = append(parts, map[string]any{
-						"partId": part.GetPartId(), "messageId": part.GetMessageId(), "partSequence": part.GetPartSequence(),
-						"createdAt": part.GetCreatedAt(), "updatedAt": part.GetUpdatedAt(), "disposition": part.GetDisposition(),
-					})
-				}
-				messages = append(messages, map[string]any{
-					"sessionThreadId": message.GetSessionThreadId(), "messageId": message.GetMessageId(),
-					"messageSequence": message.GetMessageSequence(), "createdAt": message.GetCreatedAt(),
-					"updatedAt": message.GetUpdatedAt(), "disposition": message.GetDisposition(), "parts": parts,
-				})
-			}
-			receipts = append(receipts, map[string]any{
-				"sessionThreadId": receipt.GetSessionThreadId(), "operationKind": receipt.GetOperationKind(),
-				"sourceKind": receipt.GetSourceKind(), "operationId": receipt.GetOperationId(),
-				"events": events, "messages": messages, "pendingAttachmentDeltaJson": []string{},
-				"prefixConsumptions": []any{}, "declarationDigest": receipt.GetDeclarationDigest(),
-				"childLifecycle": []any{}, "interruptToolProjections": []any{},
-			})
+		var outcome map[string]any
+		switch {
+		case commitResponse.GetCommitted() != nil:
+			outcome = map[string]any{"committed": assignedContextSequencesForComposition(commitResponse.GetCommitted().GetAssignedContextSequences())}
+		case commitResponse.GetDuplicate() != nil:
+			outcome = map[string]any{"duplicate": assignedContextSequencesForComposition(commitResponse.GetDuplicate().GetAssignedContextSequences())}
+		case commitResponse.GetStale() != nil:
+			outcome = map[string]any{"stale": map[string]any{}}
+		case commitResponse.GetDeferred() != nil:
+			outcome = map[string]any{"deferred": map[string]any{}}
+		case commitResponse.GetRejected() != nil:
+			outcome = map[string]any{"rejected": map[string]any{"reason": commitResponse.GetRejected().GetReason()}}
+		default:
+			return taskNotificationRuntimeCompositionOutput{}, errors.New("commit response has no outcome")
 		}
-		input["commitResponse"] = map[string]any{
-			"ack": map[string]any{
-				"status": commitResponse.GetAck().GetStatus(), "runtimeInputId": commitResponse.GetAck().GetRuntimeInputId(),
-				"runtimeWriteId": commitResponse.GetAck().GetRuntimeWriteId(), "errorCode": commitResponse.GetAck().GetErrorCode(),
-			},
-			"declaration": map[string]any{
-				"receipts": receipts, "observedBindingId": declaration.GetObservedBindingId(),
-				"observedBindingGeneration": declaration.GetObservedBindingGeneration(),
-				"applicationDisposition":    declaration.GetApplicationDisposition(),
-			},
-		}
+		input["commitResponse"] = outcome
 	}
 	rawInput, err := json.Marshal(input)
 	if err != nil {
@@ -253,6 +184,121 @@ func runTaskNotificationRuntimeComposition(
 		return taskNotificationRuntimeCompositionOutput{}, err
 	}
 	return composed, nil
+}
+
+func assignedContextSequencesForComposition(sequences []int64) map[string]any {
+	return map[string]any{"assignedContextSequences": sequences}
+}
+
+type runningTaskNotificationRuntime struct {
+	command *exec.Cmd
+	output  bytes.Buffer
+	port    int
+}
+
+func startTaskNotificationRuntimeComposition(t *testing.T, inputPath string, request *agentruntimev1.AcceptTaskNotificationRequest, bridgeAddress string) *runningTaskNotificationRuntime {
+	t.Helper()
+	readyPath := t.TempDir() + "/runtime-ready.json"
+	input := map[string]any{
+		"notificationJson": request.GetNotificationJson(), "workspaceId": request.GetWorkspaceId(),
+		"sessionId": request.GetSessionId(), "sessionThreadId": request.GetSessionThreadId(),
+		"bindingId": request.GetBindingId(), "bindingGeneration": request.GetBindingGeneration(),
+		"targetPodUid": request.GetTargetPodUid(), "runtimeInputId": request.GetRuntimeInputId(),
+		"inputOrder": request.GetInputOrder(), "bridgeAddress": bridgeAddress, "readyPath": readyPath,
+	}
+	rawInput, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("encode resident Runtime composition input: %v", err)
+	}
+	if err := os.WriteFile(inputPath, rawInput, 0o600); err != nil {
+		t.Fatalf("write resident Runtime composition input: %v", err)
+	}
+	running := &runningTaskNotificationRuntime{}
+	running.command = exec.Command("bun", "packages/runtime-pod/test/fixtures/task-notification-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	running.command.Dir = "../agent-runtime"
+	running.command.Stdout = &running.output
+	running.command.Stderr = &running.output
+	if err := running.command.Start(); err != nil {
+		t.Fatalf("start resident Runtime composition: %v", err)
+	}
+	t.Cleanup(func() {
+		if running.command.ProcessState == nil {
+			_ = running.command.Process.Kill()
+			_ = running.command.Wait()
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rawReady, readErr := os.ReadFile(readyPath)
+		if readErr == nil {
+			var ready struct {
+				Port int `json:"port"`
+			}
+			if json.Unmarshal(rawReady, &ready) == nil && ready.Port > 0 {
+				running.port = ready.Port
+				return running
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = running.command.Process.Kill()
+	_ = running.command.Wait()
+	t.Fatalf("resident Runtime did not become ready: %s", running.output.String())
+	return nil
+}
+
+func (r *runningTaskNotificationRuntime) wait(t *testing.T) taskNotificationRuntimeCompositionOutput {
+	t.Helper()
+	if err := r.command.Wait(); err != nil {
+		t.Fatalf("resident Runtime composition: %v: %s", err, r.output.String())
+	}
+	var composed taskNotificationRuntimeCompositionOutput
+	if err := json.Unmarshal(r.output.Bytes(), &composed); err != nil {
+		t.Fatalf("decode resident Runtime composition: %v: %s", err, r.output.String())
+	}
+	return composed
+}
+
+type taskNotificationRuntimeTokenSource struct{}
+
+func (taskNotificationRuntimeTokenSource) Token(context.Context) (string, error) {
+	return "task-notification-composition-token", nil
+}
+
+type taskNotificationLostACKStore struct {
+	BridgeAPIStore
+	mu          sync.Mutex
+	dropped     bool
+	declaration *bridgev1.CommitTaskNotificationResultRequest
+}
+
+func (s *taskNotificationLostACKStore) CommitTaskNotificationResult(ctx context.Context, request *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error) {
+	s.mu.Lock()
+	s.declaration = request
+	s.mu.Unlock()
+	response, err := s.BridgeAPIStore.CommitTaskNotificationResult(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.dropped && response.GetCommitted() != nil {
+		s.dropped = true
+		return nil, status.Error(codes.Unavailable, "task notification acknowledgement unavailable")
+	}
+	return response, nil
+}
+
+func (s *taskNotificationLostACKStore) request() *bridgev1.CommitTaskNotificationResultRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.declaration
+}
+
+func (s *taskNotificationLostACKStore) didDrop() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dropped
 }
 
 func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *testing.T) {
@@ -330,50 +376,67 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		t.Fatalf("producer-born notification custody = Inbox:%s Queue:%s", bornInboxStatus, bornQueueStatus)
 	}
 
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
-		BindingID: bindingID, BindingGeneration: 1, Namespace: "engine", PodName: "runtime-pod-composition",
-		PodUID: podUID, PodIP: "127.0.0.1",
+	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("task-notification-composition-key")
+	bridgeServerStore := &taskNotificationLostACKStore{BridgeAPIStore: bridgeStore}
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for task notification Bridge: %v", err)
+	}
+	bridgeGRPCServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeGRPCServer, bridgeServerStore)
+	go func() { _ = bridgeGRPCServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeGRPCServer.Stop()
+		_ = bridgeListener.Close()
+	})
+
+	runtimeRequest := &agentruntimev1.AcceptTaskNotificationRequest{
+		WorkspaceId: "default", SessionId: sessionID, SessionThreadId: threadID,
+		BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
+		RuntimeInputId: inputID, InputOrder: 0,
+		NotificationJson: mustCanonicalTaskNotificationPayloadJSON(t, taskID, sourceID, "completed", storedResultJSON),
+	}
+	runningRuntime := startTaskNotificationRuntimeComposition(t, t.TempDir()+"/task-notification-live.json", runtimeRequest, bridgeListener.Addr().String())
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
+		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
+		t.Fatalf("align production Runtime visibility snapshot: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runningRuntime.port)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
+		}})
 	}}
-	sender := &taskNotificationRuntimeCompositionSender{inputPath: t.TempDir() + "/task-notification.json"}
 	runner := &JobRunner{
 		Queue:      tetralqueue.NewServer(queueStore, nil),
 		Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer:  taskNotificationCompositionDeliverer{inner: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
-		Config:     JobRunnerConfig{LeaseOwner: "task-notification-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Deliverer: RuntimePodDirectDeliverer{
+			Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
+		},
+		Config: JobRunnerConfig{LeaseOwner: "task-notification-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	active, err := runner.RunOnceWithActivity(context.Background())
-	if err != nil || !active || sender.declaration == nil {
-		t.Fatalf("deliver task notification through Job Runner = active:%t declaration:%t err:%v", active, sender.declaration != nil, err)
+	if err != nil || !active {
+		t.Fatalf("deliver task notification through generated Runtime gRPC = active:%t err:%v", active, err)
 	}
-
-	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	commitResponse, err := bridgeStore.CommitTaskNotificationResult(context.Background(), sender.declaration)
-	if err != nil {
-		t.Fatalf("commit Runtime declaration through Bridge: %v", err)
+	composed := runningRuntime.wait(t)
+	if !bridgeServerStore.didDrop() {
+		t.Fatal("task notification composition did not exercise committed lost-ACK replay")
 	}
-	if commitResponse.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("task notification ACK = %#v; want committed", commitResponse.GetAck())
+	declaration := bridgeServerStore.request()
+	if declaration.GetRuntimeInputId() != inputID || declaration.GetDisposition() != bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT {
+		t.Fatalf("resident Runtime declaration = %#v; want exact committed task input", declaration)
 	}
-	composed, err := runTaskNotificationRuntimeComposition(
-		context.Background(), t.TempDir()+"/task-notification-receipt.json",
-		&agentruntimev1.RuntimeInputCommandRequest{
-			RequestId: "req_task_notification_composition", WorkspaceId: "default", SessionId: sessionID,
-			SessionThreadId: threadID, BindingId: bindingID, BindingGeneration: 1,
-			TargetPodNamespace: "engine", TargetPodName: "runtime-pod-composition", TargetPodUid: podUID,
-			TargetPodIp: "127.0.0.1", RuntimeInputId: inputID,
-			CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
-			PayloadJson: sender.declaration.GetResultJson(),
-		},
-		commitResponse,
-	)
-	if err != nil {
-		t.Fatalf("apply task notification receipt in Runtime: %v", err)
+	var committedResult struct {
+		Type             string `json:"type"`
+		InputDisposition string `json:"inputDisposition"`
+		Receipt          struct {
+			Messages []json.RawMessage `json:"messages"`
+		} `json:"receipt"`
 	}
-	if len(composed.DurableMessages) != 1 || len(composed.DurableMessages[0].Parts) != 1 ||
-		composed.DurableMessages[0].Parts[0].Text != sender.declaration.GetResultJson() ||
-		composed.ReducerAction.Action != "prepare_next_request" {
-		t.Fatalf("Runtime receipt application = messages:%+v reducer:%+v", composed.DurableMessages, composed.ReducerAction)
+	if err := json.Unmarshal(composed.CommitResult, &committedResult); err != nil || committedResult.Type != "receipt" || committedResult.InputDisposition != "duplicate" || len(committedResult.Receipt.Messages) != 1 {
+		t.Fatalf("Runtime typed application = %s err:%v; want lost-ACK duplicate one-message projection", composed.CommitResult, err)
 	}
 
 	var inboxStatus, queueStatus, storedMessageText string
@@ -399,8 +462,17 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		WHERE workspace_id='default' AND session_id=$1 AND kind='runtime_notification'`, sessionID).Scan(&storedMessageText); err != nil {
 		t.Fatalf("read stored notification Message text: %v", err)
 	}
-	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || eventCount != 1 || messageCount != 1 || storedMessageText != sender.declaration.GetResultJson() {
+	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || eventCount != 1 || messageCount != 1 || storedMessageText != runtimeRequest.GetNotificationJson() {
 		t.Fatalf("durable settlement = Inbox:%s Queue:%s Events:%d Messages:%d text-match:%t",
-			inboxStatus, queueStatus, eventCount, messageCount, storedMessageText == sender.declaration.GetResultJson())
+			inboxStatus, queueStatus, eventCount, messageCount, storedMessageText == runtimeRequest.GetNotificationJson())
 	}
+}
+
+func mustCanonicalTaskNotificationPayloadJSON(t *testing.T, taskID, sourceID, statusValue, resultJSON string) string {
+	t.Helper()
+	payload, err := canonicalTaskNotificationPayloadJSON(taskID, sourceID, statusValue, resultJSON)
+	if err != nil {
+		t.Fatalf("build canonical task notification: %v", err)
+	}
+	return payload
 }

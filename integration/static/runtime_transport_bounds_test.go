@@ -77,7 +77,7 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 			t.Fatalf("TypeScript transport bounds missing %q", required)
 		}
 	}
-	if required := `export const MaxPayloadJsonBytes\s*=\s*2\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(protocolBody) {
+	if required := `export const MaxRuntimeIngressContentBytes\s*=\s*2\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(protocolBody) {
 		t.Fatalf("TypeScript protocol bounds missing %q", required)
 	}
 	for _, required := range []string{

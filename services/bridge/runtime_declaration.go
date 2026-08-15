@@ -100,19 +100,13 @@ func marshalRuntimeDeclarationObjectWithRawField(value map[string]any, fieldName
 }
 
 func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
-	creates, err := canonicalRuntimeMessageCreates(request.GetMessageCreates())
-	if err != nil {
-		return "", err
-	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"event_ids":         request.GetEventIds(),
-		"input_kind":        inputKind,
-		"message_creates":   creates,
-		"operation_kind":    bridgeOpCommitInputs,
-		"runtime_input_id":  request.GetRuntimeInputId(),
-		"sequence_from":     request.GetSequenceFrom(),
-		"sequence_to":       request.GetSequenceTo(),
-		"session_thread_id": request.GetScope().GetSessionThreadId(),
+		"approval_review_text": request.GetApprovalReviewText(),
+		"disposition":          request.GetDisposition().String(),
+		"input_kind":           inputKind,
+		"operation_kind":       bridgeOpCommitInputs,
+		"runtime_input_id":     request.GetRuntimeInputId(),
+		"session_thread_id":    request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
@@ -202,10 +196,7 @@ func writeRequestEndDeclarationDigest(
 	var interruptSettlement any
 	if value := request.GetInterruptSettlement(); value != nil {
 		interruptSettlement = map[string]any{
-			"event_ids":        value.GetEventIds(),
 			"runtime_input_id": value.GetRuntimeInputId(),
-			"sequence_from":    value.GetSequenceFrom(),
-			"sequence_to":      value.GetSequenceTo(),
 		}
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
@@ -336,25 +327,11 @@ func internalToolRepairDeclarationDigest(
 func taskNotificationDeclarationDigest(
 	request *bridgev1.CommitTaskNotificationResultRequest,
 ) (string, error) {
-	create := request.GetMessageCreate()
-	parts := make([]map[string]any, 0, len(create.GetParts()))
-	for _, part := range create.GetParts() {
-		parts = append(parts, map[string]any{
-			"part_json": part.GetPartJson(),
-			"part_kind": part.GetPartKind(),
-		})
-	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"message_create": map[string]any{
-			"message_info_json": create.GetMessageInfoJson(),
-			"message_kind":      create.GetMessageKind(),
-			"parts":             parts,
-		},
+		"disposition":       request.GetDisposition().String(),
 		"operation_kind":    bridgeOpCommitTaskNotificationResult,
-		"result_json":       request.GetResultJson(),
 		"runtime_input_id":  request.GetRuntimeInputId(),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
-		"task_id":           request.GetTaskId(),
 	})
 	if err != nil {
 		return "", err

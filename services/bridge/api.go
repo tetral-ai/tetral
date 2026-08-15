@@ -19,13 +19,18 @@ type BridgeAPIStore interface {
 	SettleToolResult(context.Context, *bridgev1.SettleToolResultRequest) (*bridgev1.SettleToolResultResponse, error)
 	WriteRequestEnd(context.Context, *bridgev1.WriteRequestEndRequest) (*bridgev1.WriteRequestEndResponse, error)
 	FinishIdle(context.Context, *bridgev1.FinishIdleRequest) (*bridgev1.FinishIdleResponse, error)
-	CreateChildThread(context.Context, *bridgev1.CreateChildThreadRequest) (*bridgev1.CreateChildThreadResponse, error)
+	CreateSubagentThread(context.Context, *bridgev1.CreateSubagentThreadRequest) (*bridgev1.CreateSubagentThreadResponse, error)
+	EnsureApprovalReviewerTrunk(context.Context, *bridgev1.EnsureApprovalReviewerTrunkRequest) (*bridgev1.EnsureApprovalReviewerTrunkResponse, error)
+	EnsureApprovalReviewerSidecar(context.Context, *bridgev1.EnsureApprovalReviewerSidecarRequest) (*bridgev1.EnsureApprovalReviewerSidecarResponse, error)
+	AdmitApprovalReviewInput(context.Context, *bridgev1.AdmitApprovalReviewInputRequest) (*bridgev1.AdmitApprovalReviewInputResponse, error)
 	ResolveChildThread(context.Context, *bridgev1.ResolveChildThreadRequest) (*bridgev1.ResolveChildThreadResponse, error)
 	ListChildThreads(context.Context, *bridgev1.ListChildThreadsRequest) (*bridgev1.ListChildThreadsResponse, error)
-	ResolveInterAgentDelivery(context.Context, *bridgev1.ResolveInterAgentDeliveryRequest) (*bridgev1.ResolveInterAgentDeliveryResponse, error)
+	DeliverInterAgentMail(context.Context, *bridgev1.DeliverInterAgentMailRequest) (*bridgev1.DeliverInterAgentMailResponse, error)
+	ReadAgentMail(context.Context, *bridgev1.ReadAgentMailRequest) (*bridgev1.ReadAgentMailResponse, error)
 	AdmitChildInterrupt(context.Context, *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error)
 	AwaitChildInterrupt(context.Context, *bridgev1.AwaitChildInterruptRequest) (*bridgev1.AwaitChildInterruptResponse, error)
-	MarkChildThreadClosed(context.Context, *bridgev1.MarkChildThreadClosedRequest) (*bridgev1.MarkChildThreadClosedResponse, error)
+	CloseChildControl(context.Context, *bridgev1.CloseChildControlRequest) (*bridgev1.CloseChildControlResponse, error)
+	CloseApprovalReviewer(context.Context, *bridgev1.CloseApprovalReviewerRequest) (*bridgev1.CloseApprovalReviewerResponse, error)
 	MarkChildThreadActive(context.Context, *bridgev1.MarkChildThreadActiveRequest) (*bridgev1.MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error)
 	AwaitSandboxExecution(context.Context, *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error)
@@ -160,12 +165,36 @@ func (s BridgeAPIServer) CommitRuntimeTermination(ctx context.Context, request *
 	return store.CommitRuntimeTermination(ctx, request)
 }
 
-func (s BridgeAPIServer) CreateChildThread(ctx context.Context, request *bridgev1.CreateChildThreadRequest) (*bridgev1.CreateChildThreadResponse, error) {
+func (s BridgeAPIServer) CreateSubagentThread(ctx context.Context, request *bridgev1.CreateSubagentThreadRequest) (*bridgev1.CreateSubagentThreadResponse, error) {
 	store, err := s.requireStore()
 	if err != nil {
 		return nil, err
 	}
-	return store.CreateChildThread(ctx, request)
+	return store.CreateSubagentThread(ctx, request)
+}
+
+func (s BridgeAPIServer) EnsureApprovalReviewerTrunk(ctx context.Context, request *bridgev1.EnsureApprovalReviewerTrunkRequest) (*bridgev1.EnsureApprovalReviewerTrunkResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.EnsureApprovalReviewerTrunk(ctx, request)
+}
+
+func (s BridgeAPIServer) EnsureApprovalReviewerSidecar(ctx context.Context, request *bridgev1.EnsureApprovalReviewerSidecarRequest) (*bridgev1.EnsureApprovalReviewerSidecarResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.EnsureApprovalReviewerSidecar(ctx, request)
+}
+
+func (s BridgeAPIServer) AdmitApprovalReviewInput(ctx context.Context, request *bridgev1.AdmitApprovalReviewInputRequest) (*bridgev1.AdmitApprovalReviewInputResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.AdmitApprovalReviewInput(ctx, request)
 }
 
 func (s BridgeAPIServer) ResolveChildThread(ctx context.Context, request *bridgev1.ResolveChildThreadRequest) (*bridgev1.ResolveChildThreadResponse, error) {
@@ -184,12 +213,20 @@ func (s BridgeAPIServer) ListChildThreads(ctx context.Context, request *bridgev1
 	return store.ListChildThreads(ctx, request)
 }
 
-func (s BridgeAPIServer) ResolveInterAgentDelivery(ctx context.Context, request *bridgev1.ResolveInterAgentDeliveryRequest) (*bridgev1.ResolveInterAgentDeliveryResponse, error) {
+func (s BridgeAPIServer) DeliverInterAgentMail(ctx context.Context, request *bridgev1.DeliverInterAgentMailRequest) (*bridgev1.DeliverInterAgentMailResponse, error) {
 	store, err := s.requireStore()
 	if err != nil {
 		return nil, err
 	}
-	return store.ResolveInterAgentDelivery(ctx, request)
+	return store.DeliverInterAgentMail(ctx, request)
+}
+
+func (s BridgeAPIServer) ReadAgentMail(ctx context.Context, request *bridgev1.ReadAgentMailRequest) (*bridgev1.ReadAgentMailResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ReadAgentMail(ctx, request)
 }
 
 func (s BridgeAPIServer) AdmitChildInterrupt(ctx context.Context, request *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error) {
@@ -208,12 +245,20 @@ func (s BridgeAPIServer) AwaitChildInterrupt(ctx context.Context, request *bridg
 	return store.AwaitChildInterrupt(ctx, request)
 }
 
-func (s BridgeAPIServer) MarkChildThreadClosed(ctx context.Context, request *bridgev1.MarkChildThreadClosedRequest) (*bridgev1.MarkChildThreadClosedResponse, error) {
+func (s BridgeAPIServer) CloseChildControl(ctx context.Context, request *bridgev1.CloseChildControlRequest) (*bridgev1.CloseChildControlResponse, error) {
 	store, err := s.requireStore()
 	if err != nil {
 		return nil, err
 	}
-	return store.MarkChildThreadClosed(ctx, request)
+	return store.CloseChildControl(ctx, request)
+}
+
+func (s BridgeAPIServer) CloseApprovalReviewer(ctx context.Context, request *bridgev1.CloseApprovalReviewerRequest) (*bridgev1.CloseApprovalReviewerResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.CloseApprovalReviewer(ctx, request)
 }
 
 func (s BridgeAPIServer) MarkChildThreadActive(ctx context.Context, request *bridgev1.MarkChildThreadActiveRequest) (*bridgev1.MarkChildThreadActiveResponse, error) {

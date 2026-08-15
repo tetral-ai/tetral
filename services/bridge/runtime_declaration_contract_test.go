@@ -295,21 +295,6 @@ func TestRuntimeDeclarationWritersLogCanonicalRejectionsOnceAndFailOpen(t *testi
 		call      func(*PostgreSQLBridgeAPIStore) error
 	}{
 		{
-			name: "commit inputs", operation: bridgeOpCommitInputs,
-			call: func(store *PostgreSQLBridgeAPIStore) error {
-				_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-					Scope: scope, RuntimeInputId: "input_1", InputKind: "messages",
-					EventIds: []string{"event_1"}, SequenceFrom: 1, SequenceTo: 1,
-					MessageCreates: []*bridgev1.RuntimeMessageCreate{{
-						MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT,
-						MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
-						Parts:           []*bridgev1.RuntimePartCreate{invalidPart},
-					}},
-				})
-				return err
-			},
-		},
-		{
 			name: "write event", operation: bridgeOpWriteEvent,
 			call: func(store *PostgreSQLBridgeAPIStore) error {
 				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{

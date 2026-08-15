@@ -102,18 +102,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareSessionDeleteCleanupCommandTx(ct
 	if !rowsAffected(result) {
 		return RuntimeCommandPlan{StaleAccepted: true}, nil
 	}
-	payloadJSON, err := cleanupSessionPayloadJSON(job.DeleteCleanupID)
-	if err != nil {
-		return RuntimeCommandPlan{}, err
-	}
 	return RuntimeCommandPlan{
-		Target: RuntimePodTarget{Namespace: state.Binding.Namespace, PodName: state.Binding.PodName, PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, Port: port},
-		Request: &agentruntimev1.RuntimeInputCommandRequest{
-			RequestId: job.JobID + ":" + job.LeaseToken, WorkspaceId: job.WorkspaceID, SessionId: job.SessionID,
-			SessionThreadId: state.SessionThreadID, BindingId: state.Binding.BindingID,
-			BindingGeneration: state.Binding.BindingGeneration, TargetPodNamespace: state.Binding.Namespace,
-			TargetPodName: state.Binding.PodName, TargetPodUid: state.Binding.PodUID, TargetPodIp: state.Binding.PodIP,
-			RuntimeInputId: job.RuntimeInputID, CommandKind: job.CommandKind, PayloadJson: payloadJSON,
+		Target:           RuntimePodTarget{Namespace: state.Binding.Namespace, PodName: state.Binding.PodName, PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, Port: port},
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: state.Binding.BindingID, Generation: state.Binding.BindingGeneration, TargetPodUID: state.Binding.PodUID},
+		CleanupSession: &agentruntimev1.CleanupSessionRequest{
+			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, BindingId: state.Binding.BindingID,
+			BindingGeneration: state.Binding.BindingGeneration, TargetPodUid: state.Binding.PodUID,
+			CleanupOperationId: job.DeleteCleanupID, Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_OPERATOR_REQUESTED,
 		},
 	}, nil
 }
@@ -163,10 +158,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareCleanupSessionCommandTx(ctx cont
 	if provenGone {
 		return RuntimeCommandPlan{CleanupTargetGone: true}, nil
 	}
-	payloadJSON, err := cleanupSessionPayloadJSON(job.CleanupJobID)
-	if err != nil {
-		return RuntimeCommandPlan{}, err
-	}
 	return RuntimeCommandPlan{
 		Target: RuntimePodTarget{
 			Namespace: claim.Namespace,
@@ -175,20 +166,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareCleanupSessionCommandTx(ctx cont
 			PodIP:     claim.PodIP,
 			Port:      port,
 		},
-		Request: &agentruntimev1.RuntimeInputCommandRequest{
-			RequestId:          job.JobID + ":" + job.LeaseToken,
-			WorkspaceId:        job.WorkspaceID,
-			SessionId:          job.SessionID,
-			SessionThreadId:    claim.SessionThreadID,
-			BindingId:          claim.BindingID,
-			BindingGeneration:  claim.BindingGeneration,
-			TargetPodNamespace: claim.Namespace,
-			TargetPodName:      claim.PodName,
-			TargetPodUid:       claim.PodUID,
-			TargetPodIp:        claim.PodIP,
-			RuntimeInputId:     job.RuntimeInputID,
-			CommandKind:        job.CommandKind,
-			PayloadJson:        payloadJSON,
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: claim.BindingID, Generation: claim.BindingGeneration, TargetPodUID: claim.PodUID},
+		CleanupSession: &agentruntimev1.CleanupSessionRequest{
+			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, BindingId: claim.BindingID,
+			BindingGeneration: claim.BindingGeneration, TargetPodUid: claim.PodUID,
+			CleanupOperationId: job.CleanupJobID, Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_EXPIRED,
 		},
 	}, nil
 }

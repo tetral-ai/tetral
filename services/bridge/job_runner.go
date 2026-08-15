@@ -11,7 +11,6 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -111,7 +110,6 @@ type RuntimeJob struct {
 	SequenceTo            int64
 	InputKind             string
 	RejectionReasonCode   string
-	CommandKind           agentruntimev1.RuntimeCommandKind
 	PayloadJSON           string
 	AttemptCount          int32
 	MaxAttempts           int32
@@ -612,9 +610,8 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 	if !eventless && (payload.SequenceFrom <= 0 || payload.SequenceTo < payload.SequenceFrom) {
 		return RuntimeJob{}, errors.New("runtime input payload sequence range is invalid")
 	}
-	commandKind, err := RuntimeCommandKindForInputKind(payload.InputKind)
-	if err != nil {
-		return RuntimeJob{}, err
+	if !validRuntimeInputKind(payload.InputKind) {
+		return RuntimeJob{}, fmt.Errorf("unknown runtime input kind %q", payload.InputKind)
 	}
 	return RuntimeJob{
 		JobID:           queueJob.GetId(),
@@ -628,7 +625,6 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		SequenceFrom:    payload.SequenceFrom,
 		SequenceTo:      payload.SequenceTo,
 		InputKind:       payload.InputKind,
-		CommandKind:     commandKind,
 		PayloadJSON:     queueJob.GetPayloadJson(),
 		AttemptCount:    queueJob.GetAttemptCount(),
 		MaxAttempts:     queueJob.GetMaxAttempts(),
@@ -685,7 +681,6 @@ func decodeRuntimeConfigUpdateJob(queueJob *queuev1.QueueJob) (RuntimeJob, error
 		ConfigGeneration:      configGeneration,
 		MCPServerName:         mcpServerName,
 		MCPManifestGeneration: manifestGeneration,
-		CommandKind:           agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
 		PayloadJSON:           queueJob.GetPayloadJson(),
 		AttemptCount:          queueJob.GetAttemptCount(),
 		MaxAttempts:           queueJob.GetMaxAttempts(),
@@ -737,7 +732,6 @@ func decodeCleanupSessionJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		SessionID:      payload.SessionID,
 		RuntimeInputID: "cleanup_session:" + payload.CleanupJobID,
 		CleanupJobID:   payload.CleanupJobID,
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    queueJob.GetPayloadJson(),
 	}, nil
 }
@@ -763,109 +757,16 @@ func decodeSessionDeleteCleanupJob(queueJob *queuev1.QueueJob) (RuntimeJob, erro
 		RuntimeInputID: "session_delete_cleanup:" + payload.DeleteCleanupID,
 		CleanupJobID:   payload.DeleteCleanupID, DeleteCleanupID: payload.DeleteCleanupID,
 		AttemptCount: queueJob.GetAttemptCount(), MaxAttempts: queueJob.GetMaxAttempts(),
-		CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON: queueJob.GetPayloadJson(),
 	}, nil
 }
 
-func RuntimeCommandKindForInputKind(inputKind string) (agentruntimev1.RuntimeCommandKind, error) {
+func validRuntimeInputKind(inputKind string) bool {
 	switch inputKind {
-	case "messages":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES, nil
-	case "interrupt_control":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL, nil
-	case "tool_confirmation":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION, nil
-	case "task_notification":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION, nil
-	case "agent_mail":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_AGENT_MAIL, nil
-	case "rejection":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES, nil
+	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "rejection":
+		return true
 	default:
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_UNSPECIFIED, fmt.Errorf("unknown runtime input kind %q", inputKind)
-	}
-}
-
-func RuntimeDeliveryResultFromResponse(response *agentruntimev1.RuntimeInputCommandResponse) RuntimeDeliveryResult {
-	return RuntimeDeliveryResultFromResponseForRequest(response, nil)
-}
-
-func RuntimeDeliveryResultFromResponseForRequest(
-	response *agentruntimev1.RuntimeInputCommandResponse,
-	request *agentruntimev1.RuntimeInputCommandRequest,
-) RuntimeDeliveryResult {
-	if response == nil {
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			ErrorKind:    "invalid_runtime_response",
-			ErrorMessage: "runtime response is missing",
-		}
-	}
-	if request != nil && !runtimeResponseIdentityMatchesRequest(response, request) {
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    false,
-			ErrorKind:    "invalid_runtime_response_identity",
-			ErrorMessage: "runtime response identity does not match command",
-		}
-	}
-	switch response.GetStatus() {
-	case agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED:
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
-	case agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_DUPLICATE:
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
-	case agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED:
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    response.GetRetryable(),
-			ErrorKind:    runtimeInputErrorKind(response.GetErrorCode()),
-			ErrorMessage: "runtime rejected input",
-		}
-	default:
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			ErrorKind:    "invalid_runtime_response",
-			ErrorMessage: "runtime response status is invalid",
-		}
-	}
-}
-
-func runtimeResponseIdentityMatchesRequest(response *agentruntimev1.RuntimeInputCommandResponse, request *agentruntimev1.RuntimeInputCommandRequest) bool {
-	return response.GetSessionId() == request.GetSessionId() &&
-		response.GetRuntimeInputId() == request.GetRuntimeInputId() &&
-		response.GetBindingId() == request.GetBindingId() &&
-		response.GetBindingGeneration() == request.GetBindingGeneration()
-}
-
-func runtimeInputErrorKind(code agentruntimev1.RuntimeInputErrorCode) string {
-	switch code {
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH:
-		return "selected_pod_identity_mismatch"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT:
-		return "runtime_input_identity_conflict"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH:
-		return "binding_identity_mismatch"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE:
-		return "bridge_commit_unavailable"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED:
-		return "bridge_commit_rejected"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE:
-		return "bridge_token_unavailable"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID:
-		return "bridge_task_notification_projection_invalid"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT:
-		return "runtime_control_conflict"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED:
-		return "runtime_context_load_failed"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED:
-		return "runtime_control_not_accepted"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY:
-		return "control_busy"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT:
-		return "runtime_rejected_input"
-	default:
-		return "runtime_rejected_input"
+		return false
 	}
 }
 

@@ -7,6 +7,7 @@
  * metadata factory, accept committed or duplicate acknowledgements as durable proof, validate
  * populated projected JSON before exposing it, and keep per-thread scope bookkeeping local and disposable.
  */
+import { createHash } from "node:crypto";
 import { credentials, status } from "@grpc/grpc-js";
 import type { CallOptions, Metadata, ServiceError } from "@grpc/grpc-js";
 import {
@@ -18,6 +19,7 @@ import {
   PrefixConsumptionDisposition,
   ReceiptApplicationDisposition,
   RequestRescheduleDisposition,
+  RuntimeInputDisposition,
   RuntimeMessageCreateKind,
   WriteEventRequest as WriteEventRequestMessage,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -30,20 +32,25 @@ import type {
   CommitRuntimeTerminationRequest,
   CommitRuntimeTerminationResponse,
   CommitTaskNotificationResultResponse,
-  CreateChildThreadRequest,
-  CreateChildThreadResponse,
+  AdmitApprovalReviewInputRequest,
+  AdmitApprovalReviewInputResponse,
+  CloseApprovalReviewerRequest,
+  CloseApprovalReviewerResponse,
+  EnsureApprovalReviewerSidecarRequest,
+  EnsureApprovalReviewerSidecarResponse,
+  EnsureApprovalReviewerTrunkRequest,
+  EnsureApprovalReviewerTrunkResponse,
   FinishIdleRequest,
   FinishIdleResponse,
   LoadContextRequest,
   LoadContextResponse,
   MarkChildThreadActiveResponse,
-  MarkChildThreadClosedRequest,
-  MarkChildThreadClosedResponse,
+  ReadAgentMailRequest,
+  ReadAgentMailResponse,
   RefreshRuntimeBindingTokenRequest,
   RefreshRuntimeBindingTokenResponse,
-  ResolveInterAgentDeliveryRequest,
-  ResolveInterAgentDeliveryResponse,
   RuntimeScope,
+  RuntimeInterruptToolResult,
   SettleToolResultRequest,
   SettleToolResultResponse,
   WriteEventRequest,
@@ -51,14 +58,14 @@ import type {
   WriteRequestEndRequest,
   WriteRequestEndResponse,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import type { AcceptedInputCommitResult, ContextLoader, RuntimeLoadedAgentMail, RuntimeLoadedPendingToolUse, RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
+import type { AcceptedInputCommitResult, ContextLoader, RuntimeLoadedAgentMail, RuntimeLoadedPendingToolUse } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
   RuntimeAcceptedInputState,
   RuntimeAcceptedThreadMetadataState,
   RuntimeConfigPatchState,
   RuntimePreloadedBackgroundToolState,
   RuntimePreloadedSandboxExecutionState,
-  RuntimeThreadControlState,
+  RuntimeThreadAddressState,
   RuntimeColdCoverage,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { RuntimeThreadIdentity } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
@@ -77,6 +84,7 @@ import {
   runtimeToolErrorFromFailure,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
+import { runtimeMessageFromAgentMailContent } from "./agent-mail.js";
 import type {
   DurableRuntimeMessage,
   RuntimeProviderAttachment,
@@ -124,7 +132,6 @@ import {
 } from "./bounds.js";
 import { sessionEventForDurableWrite } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import {
-  childLifecycleDeclarationDigest,
   commitInputsDeclarationDigest,
   finishIdleDeclarationDigest,
   internalToolRepairDeclarationDigest,
@@ -132,8 +139,6 @@ import {
   writeEventDeclarationDigest,
   writeRequestEndDeclarationDigest,
 } from "./runtime-declaration-wire.js";
-import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
-import { runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
 
 interface BridgeDeclarationEvidenceOptions {
   readonly logger?: RuntimePodLogger | undefined;
@@ -185,16 +190,13 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
         message: "control input durable commit failed",
       };
     }
-    const request = {
+    const request: CommitInputsRequest = {
       scope: bridgeScope(input.scope),
       runtimeInputId: input.scope.runtimeInputId,
-      eventIds: [...input.scope.eventIds],
-      sequenceFrom: input.scope.sequenceFrom,
-      sequenceTo: input.scope.sequenceTo,
-      inputKind: input.inputKind,
-      messageCreates: input.messageCreates.map(runtimeMessageCreateForBridge),
+      disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
+      approvalReviewText: [],
     };
-    const declarationDigest = commitInputsDeclarationDigest(request);
+    const declarationDigest = commitInputsDeclarationDigest(request, input.inputKind);
     let response: CommitInputsResponse | undefined;
     for (let attempt = 0; response === undefined; attempt += 1) {
       try {
@@ -215,138 +217,84 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
         await this.sleep(backoffMs);
       }
     }
-    if (bridgeAckAccepted(response.ack?.status)) {
-      const declaration = response.declaration;
-      const bridgeReceipt = declaration?.receipts[0];
-      const applicationDisposition = declaration === undefined
-        ? undefined
-        : runtimeReceiptApplicationDisposition(declaration.applicationDisposition);
-      let receipt: RuntimeDeclarationReceipt | undefined;
-      try {
-        receipt = bridgeReceipt === undefined ? undefined : runtimeDeclarationReceipt(bridgeReceipt);
-      } catch {
-        receipt = undefined;
-      }
-      const receiptValid =
-        declaration !== undefined &&
-        declaration.receipts.length === 1 &&
-        receipt !== undefined &&
-        applicationDisposition !== undefined &&
-        receipt.sessionThreadId === input.scope.sessionThreadId &&
-        receipt.operationKind === "commit_inputs" &&
-        receipt.sourceKind === input.inputKind &&
-        receipt.operationId === input.scope.runtimeInputId &&
-        receipt.declarationDigest === declarationDigest &&
-        receipt.messages.length === input.messageCreates.length &&
-        receipt.messages.every((message, index) => {
-          const create = input.messageCreates[index];
-          return create !== undefined &&
-            message.sessionThreadId === input.scope.sessionThreadId &&
-            message.parts.length === create.parts.length &&
-            message.parts.every((part) => part.messageId === message.messageId);
-        }) &&
-        receipt.pendingAttachmentDelta.length === 0 &&
-        (input.inputKind === "interrupt_control" || receipt.interruptToolProjections.length === 0) &&
-        receipt.prefixConsumptions.length === 0 &&
-        receipt.requestReschedule === undefined &&
-        receipt.idleCloseout === undefined &&
-        receipt.compactedThroughMessageSequence === undefined &&
-        receipt.childLifecycle.length === 0 &&
-        receipt.events.length === input.scope.eventIds.length &&
-        receipt.events.every((event, index) =>
-          event.sessionThreadId === input.scope.sessionThreadId &&
-          event.eventId === input.scope.eventIds[index]
-        );
-      if (!receiptValid) {
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: input.scope.workspaceId,
-          sessionId: input.scope.sessionId,
-          sessionThreadId: input.scope.sessionThreadId,
-          operation: "commit_inputs",
-          sourceKind: input.inputKind,
-          operationId: input.scope.runtimeInputId,
-          declarationDigest,
-          bindingId: declaration?.observedBindingId ?? input.scope.bindingId,
-          bindingGeneration: declaration?.observedBindingGeneration ?? input.scope.bindingGeneration,
-          ...(applicationDisposition === undefined ? {} : { applicationDisposition }),
-          outcome: receipt?.declarationDigest !== undefined && receipt.declarationDigest !== declarationDigest
-            ? "declaration_digest_mismatch"
-            : "receipt_shape_invalid",
-        });
+    if (!exactlyOneDefined(response.committed, response.duplicate, response.stale)) {
+      return {
+        ok: false as const,
+        retryable: false,
+        errorCode: "bridge_commit_rejected",
+        message: "control input durable commit returned malformed outcome",
+      };
+    }
+    if (response.stale !== undefined) {
+      return { ok: true as const, stale: true as const };
+    }
+    const result = response.committed ?? response.duplicate;
+    if (result !== undefined) {
+      if (!exactlyOneDefined(result.context, result.interrupt)) {
         return {
           ok: false as const,
           retryable: false,
-          errorCode: "bridge_control_input_receipt_invalid",
-          message: "control input durable commit returned malformed receipt",
+          errorCode: "bridge_commit_rejected",
+          message: "control input durable commit returned malformed application",
         };
       }
-      if (applicationDisposition === "stale_custody") {
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: input.scope.workspaceId,
-          sessionId: input.scope.sessionId,
-          sessionThreadId: input.scope.sessionThreadId,
-          operation: "commit_inputs",
-          sourceKind: input.inputKind,
-          operationId: input.scope.runtimeInputId,
-          declarationDigest,
-          bindingId: declaration.observedBindingId,
-          bindingGeneration: declaration.observedBindingGeneration,
-          applicationDisposition,
-          outcome: "stale_custody",
-        });
-        return { ok: true as const, stale: true as const };
+      if (input.inputKind === "interrupt_control" && result.interrupt !== undefined) {
+        try {
+          const receipt = hotReceiptFromAssignedContext({
+            sessionId: input.scope.sessionId,
+            sessionThreadId: input.scope.sessionThreadId,
+            sourceKind: input.inputKind,
+            runtimeInputId: input.scope.runtimeInputId,
+            declarationDigest,
+            creates: input.messageCreates,
+            assignedContextSequences: [],
+            interruptToolResults: result.interrupt.interruptToolResults,
+            pendingAttachmentJson: [],
+          });
+          return { ok: true as const, receipt };
+        } catch {
+          return {
+            ok: false as const,
+            retryable: false,
+            errorCode: "bridge_commit_rejected",
+            message: "control input durable commit returned malformed interrupt application",
+          };
+        }
       }
-      if (
-        declaration.observedBindingId !== input.scope.bindingId ||
-        declaration.observedBindingGeneration !== input.scope.bindingGeneration
-      ) {
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: input.scope.workspaceId,
-          sessionId: input.scope.sessionId,
-          sessionThreadId: input.scope.sessionThreadId,
-          operation: "commit_inputs",
-          sourceKind: input.inputKind,
-          operationId: input.scope.runtimeInputId,
-          declarationDigest,
-          bindingId: declaration.observedBindingId,
-          bindingGeneration: declaration.observedBindingGeneration,
-          applicationDisposition,
-          outcome: "binding_identity_mismatch",
-        });
-        return {
-          ok: false as const,
-          retryable: false,
-          errorCode: "bridge_control_input_receipt_invalid",
-          message: "control input durable commit returned mismatched custody",
-        };
+      if (input.inputKind !== "interrupt_control" && result.context !== undefined) {
+        try {
+          const receipt = hotReceiptFromAssignedContext({
+            sessionId: input.scope.sessionId,
+            sessionThreadId: input.scope.sessionThreadId,
+            sourceKind: input.inputKind,
+            runtimeInputId: input.scope.runtimeInputId,
+            declarationDigest,
+            creates: input.messageCreates,
+            assignedContextSequences: result.context.assignedContextSequences,
+            interruptToolResults: [],
+            pendingAttachmentJson: result.context.pendingAttachmentJson,
+          });
+          return { ok: true as const, receipt };
+        } catch {
+          return {
+            ok: false as const,
+            retryable: false,
+            errorCode: "bridge_commit_rejected",
+            message: "control input durable commit returned malformed context application",
+          };
+        }
       }
-      if (receipt === undefined) {
-        return {
-          ok: false as const,
-          retryable: false,
-          errorCode: "bridge_control_input_receipt_invalid",
-          message: "control input durable commit returned malformed receipt",
-        };
-      }
-      recordBridgeReceiptEvidence(this.options, {
-        workspaceId: input.scope.workspaceId,
-        sessionId: input.scope.sessionId,
-        sessionThreadId: input.scope.sessionThreadId,
-        operation: "commit_inputs",
-        sourceKind: input.inputKind,
-        operationId: input.scope.runtimeInputId,
-        declarationDigest,
-        bindingId: declaration.observedBindingId,
-        bindingGeneration: declaration.observedBindingGeneration,
-        applicationDisposition,
-        outcome: "applied",
-      });
-      return { ok: true as const, receipt };
+      return {
+        ok: false as const,
+        retryable: false,
+        errorCode: "bridge_commit_rejected",
+        message: "control input durable commit returned mismatched application",
+      };
     }
     return {
       ok: false as const,
       retryable: false,
-      errorCode: response.ack?.errorCode || "bridge_commit_rejected",
+      errorCode: "bridge_commit_rejected",
       message: "control input durable commit rejected",
     };
   }
@@ -409,9 +357,7 @@ export class BridgeAPITaskNotificationCommitter {
         },
       },
       runtimeInputId: input.command.runtimeInputId,
-      taskId: input.command.taskId,
-      resultJson: input.command.payloadJson,
-      messageCreate: runtimeMessageCreateForBridge(input.command.messageCreate),
+      disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
     };
     const declarationDigest = taskNotificationDeclarationDigest(request);
     let response: CommitTaskNotificationResultResponse;
@@ -443,117 +389,48 @@ export class BridgeAPITaskNotificationCommitter {
         message: "task notification durable commit failed",
       };
     }
-    const ackStatus = response.ack?.status;
-    if (ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED || ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE) {
-      const declaration = response.declaration;
-      const bridgeReceipt = declaration?.receipts[0];
-      const applicationDisposition = declaration === undefined
-        ? undefined
-        : runtimeReceiptApplicationDisposition(declaration.applicationDisposition);
+    if (!exactlyOneDefined(
+      response.committed,
+      response.duplicate,
+      response.stale,
+      response.deferred,
+      response.rejected,
+    )) {
+      return {
+        ok: false as const,
+        retryable: true,
+        errorCode: "bridge_task_notification_projection_invalid",
+        message: "task notification durable commit returned malformed outcome",
+      };
+    }
+    const committed = response.committed ?? response.duplicate;
+    if (committed !== undefined) {
       const operationId = taskNotificationOperationId(input.command.runtimeInputId, input.command.taskId);
-      if (
-        declaration !== undefined &&
-        declaration.receipts.length === 1 &&
-        bridgeReceipt !== undefined &&
-        applicationDisposition === "stale_custody" &&
-        bridgeReceipt.declarationDigest === declarationDigest &&
-        bridgeReceipt.compactedThroughMessageSequence === undefined
-      ) {
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: input.scope.workspaceId,
-          sessionId: input.scope.sessionId,
-          sessionThreadId: input.scope.sessionThreadId,
-          operation: "commit_task_notification_result",
-          sourceKind: "task_notification",
-          operationId: operationId,
-          declarationDigest,
-          bindingId: declaration.observedBindingId,
-          bindingGeneration: declaration.observedBindingGeneration,
-          applicationDisposition,
-          outcome: "stale_custody",
-        });
-        return { ok: true as const, stale: true as const };
-      }
-      if (
-        declaration === undefined ||
-        declaration.receipts.length !== 1 ||
-        bridgeReceipt === undefined ||
-        applicationDisposition !== "current_custody" ||
-        declaration.observedBindingId !== input.scope.bindingId ||
-        declaration.observedBindingGeneration !== input.scope.bindingGeneration ||
-        bridgeReceipt.declarationDigest !== declarationDigest
-      ) {
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: input.scope.workspaceId,
-          sessionId: input.scope.sessionId,
-          sessionThreadId: input.scope.sessionThreadId,
-          operation: "commit_task_notification_result",
-          sourceKind: "task_notification",
-          operationId: operationId,
-          declarationDigest,
-          bindingId: declaration?.observedBindingId ?? input.scope.bindingId,
-          bindingGeneration: declaration?.observedBindingGeneration ?? input.scope.bindingGeneration,
-          ...(applicationDisposition === undefined ? {} : { applicationDisposition }),
-          outcome: bridgeReceipt !== undefined && bridgeReceipt.declarationDigest !== declarationDigest
-            ? "declaration_digest_mismatch"
-            : applicationDisposition === "current_custody" &&
-                (
-                  declaration?.observedBindingId !== input.scope.bindingId ||
-                  declaration.observedBindingGeneration !== input.scope.bindingGeneration
-                )
-              ? "binding_identity_mismatch"
-              : "receipt_shape_invalid",
-        });
-        return {
-          ok: false as const,
-          retryable: true,
-          errorCode: "bridge_task_notification_projection_invalid",
-          message: "task notification durable commit returned malformed receipt",
-        };
-      }
       try {
-        const receipt = ordinaryRuntimeDeclarationReceipt(bridgeReceipt);
+        const receipt = hotTaskNotificationReceiptFromAssignedContext({
+          sessionId: input.scope.sessionId,
+          sessionThreadId: input.scope.sessionThreadId,
+          runtimeInputId: input.command.runtimeInputId,
+          taskId: input.command.taskId,
+          declarationDigest,
+          create: input.command.messageCreate,
+          assignedContextSequences: committed.assignedContextSequences,
+        });
         const message = applyTaskNotificationReceipt({
           sessionId: input.scope.sessionId,
           sessionThreadId: input.scope.sessionThreadId,
           operationId,
           create: input.command.messageCreate,
         }, receipt);
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: input.scope.workspaceId,
-          sessionId: input.scope.sessionId,
-          sessionThreadId: input.scope.sessionThreadId,
-          operation: "commit_task_notification_result",
-          sourceKind: "task_notification",
-          operationId: operationId,
-          declarationDigest,
-          bindingId: declaration.observedBindingId,
-          bindingGeneration: declaration.observedBindingGeneration,
-          applicationDisposition,
-          outcome: "applied",
-        });
         return {
           ok: true as const,
           committedMessage: message,
           receipt,
-          inputDisposition: ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE
+          inputDisposition: response.duplicate !== undefined
             ? "duplicate" as const
             : "committed" as const,
         };
       } catch {
-        recordBridgeReceiptEvidence(this.options, {
-          workspaceId: input.scope.workspaceId,
-          sessionId: input.scope.sessionId,
-          sessionThreadId: input.scope.sessionThreadId,
-          operation: "commit_task_notification_result",
-          sourceKind: "task_notification",
-          operationId: operationId,
-          declarationDigest,
-          bindingId: declaration.observedBindingId,
-          bindingGeneration: declaration.observedBindingGeneration,
-          applicationDisposition,
-          outcome: "receipt_application_failed",
-        });
         return {
           ok: false as const,
           retryable: true,
@@ -562,26 +439,19 @@ export class BridgeAPITaskNotificationCommitter {
         };
       }
     }
-    if (ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack?.errorCode === "task_notification_stale") {
+    if (response.stale !== undefined) {
       return { ok: true as const, stale: true as const };
     }
-    if (ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack?.errorCode === "task_notification_deferred") {
+    if (response.deferred !== undefined) {
       return { ok: true as const, deferred: true as const };
     }
-    const rejectionErrorCode = response.ack?.errorCode;
-    if (
-      ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED &&
-      response.declaration === undefined &&
-      response.ack?.runtimeInputId === input.command.runtimeInputId &&
-      rejectionErrorCode !== undefined &&
-      taskNotificationRejectionCode(rejectionErrorCode)
-    ) {
-      return { ok: true as const, rejected: true as const, errorCode: rejectionErrorCode };
+    if (response.rejected !== undefined) {
+      return { ok: true as const, rejected: true as const, errorCode: "task_notification_result_invalid" as const };
     }
     return {
       ok: false as const,
       retryable: false,
-      errorCode: response.ack?.errorCode || "bridge_commit_rejected",
+      errorCode: "bridge_commit_rejected",
       message: "task notification durable commit rejected",
     };
   }
@@ -617,7 +487,7 @@ export class BridgeAPIApprovalReviewerThreadCreator implements RuntimeApprovalRe
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
   }
 
-  /** Creates a prefixless trunk or a sidecar whose thread-context-prefix snapshot may be empty, ACK-gated. */
+  /** Creates a prefixless trunk or a sidecar whose durable parent context is selected by Bridge. */
   async createApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
     let metadata: Metadata;
     try {
@@ -625,19 +495,49 @@ export class BridgeAPIApprovalReviewerThreadCreator implements RuntimeApprovalRe
     } catch {
       return { ok: false as const, message: "approval reviewer thread credential is unavailable" };
     }
-    let response: CreateChildThreadResponse;
+    let response: EnsureApprovalReviewerTrunkResponse | EnsureApprovalReviewerSidecarResponse;
     try {
-      response = await createChildThread(this.client, approvalReviewerCreateChildThreadRequest(input), metadata);
+      response = input.isTrunk
+        ? await ensureApprovalReviewerTrunk(this.client, {
+            scope: approvalReviewerParentScope(input),
+            ensureOperationId: input.ensureOperationId ?? "",
+          }, metadata)
+        : await ensureApprovalReviewerSidecar(this.client, {
+            scope: approvalReviewerParentScope(input),
+            reviewId: input.reviewId,
+          }, metadata);
     } catch {
       return { ok: false as const, message: "approval reviewer thread creation is unavailable" };
     }
-    if (bridgeAckAccepted(response.ack?.status)) {
-      return { ok: true as const };
+    if (!exactlyOneDefined(response.committed, response.duplicate)) {
+      return { ok: false as const, message: "approval reviewer thread result was malformed" };
     }
-    return {
-      ok: false as const,
-      message: response.ack?.errorCode || "approval reviewer thread was not acknowledged",
-    };
+    const outcome = response.committed ?? response.duplicate;
+    const reviewerThreadId = outcome?.reviewerThreadId;
+    if (reviewerThreadId === undefined || reviewerThreadId.length === 0) {
+      return {
+        ok: false as const,
+        message: "approval reviewer thread was not acknowledged",
+      };
+    }
+    let admitted: AdmitApprovalReviewInputResponse;
+    try {
+      admitted = await admitApprovalReviewInput(this.client, {
+        scope: approvalReviewerParentScope(input),
+        reviewerThreadId,
+        reviewId: input.reviewId,
+      }, metadata);
+    } catch {
+      return { ok: false as const, message: "approval reviewer input admission is unavailable" };
+    }
+    if (!exactlyOneDefined(admitted.committed, admitted.duplicate)) {
+      return { ok: false as const, message: "approval reviewer input admission result was malformed" };
+    }
+    const runtimeInputId = (admitted.committed ?? admitted.duplicate)?.runtimeInputId;
+    if (runtimeInputId === undefined || runtimeInputId.length === 0) {
+      return { ok: false as const, message: "approval reviewer input admission result was malformed" };
+    }
+    return { ok: true as const, reviewerThreadId, runtimeInputId };
   }
 
   /** Closes the reviewer child thread and releases local scope only after Bridge acknowledges it. */
@@ -648,34 +548,23 @@ export class BridgeAPIApprovalReviewerThreadCreator implements RuntimeApprovalRe
     } catch {
       return { ok: false as const, message: "approval reviewer thread credential is unavailable" };
     }
-    let response: MarkChildThreadClosedResponse;
+    let response: CloseApprovalReviewerResponse;
     try {
-      response = await markChildThreadClosed(this.client, {
+      response = await closeApprovalReviewer(this.client, {
         scope: approvalReviewerParentScope(input),
-        childThreadId: input.reviewerThreadId,
-        source: { reviewerReviewId: input.reviewId },
-        targets: [],
+        reviewerThreadId: input.reviewerThreadId ?? "",
+        reviewId: input.reviewId,
       }, metadata);
     } catch {
       return { ok: false as const, message: "approval reviewer thread close is unavailable" };
     }
-    const declaration = validateChildLifecycleDeclarationResponse({
-      action: "close",
-      sessionThreadId: input.request.sessionThreadId,
-      childThreadId: input.reviewerThreadId,
-      sourceKind: "approval_review",
-      sourceCommandId: input.reviewId,
-      bindingId: input.request.bindingId,
-      bindingGeneration: input.request.bindingGeneration,
-    }, response);
-    if (declaration.ok) {
-      return { ok: true as const };
+    if (!exactlyOneDefined(response.committed, response.duplicate, response.stale)) {
+      return { ok: false as const, message: "bridge_child_lifecycle_result_invalid" };
     }
-    return {
-      ok: false as const,
-      message: declaration.errorCode,
-      discardHotState: declaration.discardHotState,
-    };
+    if (response.stale !== undefined) {
+      return { ok: false as const, message: "scope_superseded", discardHotState: true };
+    }
+    return { ok: true as const };
   }
 }
 
@@ -788,14 +677,14 @@ export class BridgeAPIContextLoader implements ContextLoader {
 
   /** Loads and validates the complete cold-start projection for the supplied thread command. */
   async loadThreadContext(
-    command: RuntimeThreadControlState,
+    command: RuntimeThreadAddressState,
   ): Promise<{
     readonly messages: readonly DurableRuntimeMessage[];
     readonly turnFacts: ThreadTurnLoadFacts;
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
     readonly durableTurnId?: string | undefined;
     readonly runtimeBindingToken: string;
-    readonly thread: RuntimeAcceptedThreadMetadataState;
+    readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
     readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
     readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
@@ -808,69 +697,38 @@ export class BridgeAPIContextLoader implements ContextLoader {
     return await this.loadContext(command);
   }
 
-  /** Resolves and durably admits one stored inter-agent envelope. */
-  async resolveAgentMail(
-    command: RuntimeThreadControlState,
-    childThreadId: string,
-    deliveryId?: string,
-  ): Promise<RuntimeResolvedAgentMail> {
-    const metadata = await this.metadata();
-    const response = await resolveInterAgentDelivery(this.client, {
+  /** Reads target-owned durable mail without mutating sender or Inbox state. */
+  async readAgentMail(command: RuntimeThreadAddressState, sourceThreadId: string): Promise<RuntimeLoadedAgentMail | undefined> {
+    const response = await readAgentMail(this.client, {
       scope: bridgeScope(command),
-      childThreadId,
-      deliveryId: deliveryId ?? "",
-    }, metadata);
-    if (
-      !bridgeAckAccepted(response.ack?.status) ||
-      response.deliveryId.length === 0 ||
-      response.sourceThreadId.length === 0 ||
-      response.targetThreadId.length === 0 ||
-      response.sourceToolUseEventId.length === 0 ||
-      response.receivedEventId.length === 0 ||
-      response.receivedSequence <= 0 ||
-      response.messageJson.length === 0
-    ) {
+      sourceThreadId,
+    }, await this.metadata());
+    if (!exactlyOneDefined(response.found, response.empty)) {
       throw normalizeContextLoaderError({
         code: "schema_mismatch",
         sessionId: command.sessionId,
-        reason: response.ack?.errorCode || "agent mail resolver returned an invalid envelope",
+        reason: "agent mail reader returned an invalid result",
       });
     }
-    if (
-      !(
-        response.sourceThreadId === command.sessionThreadId &&
-        response.targetThreadId === childThreadId
-      ) &&
-      !(
-        response.sourceThreadId === childThreadId &&
-        response.targetThreadId === command.sessionThreadId
-      )
-    ) {
-      throw normalizeContextLoaderError({
-        code: "schema_mismatch",
-        sessionId: command.sessionId,
-        reason: "agent mail resolver returned an invalid thread relationship",
-      });
+    if (response.empty !== undefined) {
+      return undefined;
     }
-    let message: RuntimeMessage;
-    try {
-      message = runtimeMessageFromPublicAgentMail(response.messageJson);
-    } catch {
+    const found = response.found;
+    if (found === undefined || found.deliveryId.length === 0 || found.content.length === 0) {
       throw normalizeContextLoaderError({
         code: "schema_mismatch",
         sessionId: command.sessionId,
-        reason: "agent mail resolver returned an invalid public message",
+        reason: "agent mail reader returned an invalid result",
       });
     }
     return {
-      deliveryId: response.deliveryId,
-      sourceThreadId: response.sourceThreadId,
-      targetThreadId: response.targetThreadId,
-      sourceToolUseEventId: response.sourceToolUseEventId,
-      receivedEventId: response.receivedEventId,
-      receivedSequence: response.receivedSequence,
-      message,
-      publicMessageJson: response.messageJson,
+      deliveryId: found.deliveryId,
+      message: runtimeMessageFromAgentMailContent({
+        sessionId: command.sessionId,
+        deliveryId: found.deliveryId,
+        content: found.content,
+      }),
+      content: found.content,
     };
   }
 
@@ -901,7 +759,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
           taskId: input.taskId,
           sourceToolUseEventId: input.sourceToolUseEventId,
           status: input.status,
-          payloadJson: input.payloadJson,
+          payloadJson: input.notificationJson,
           messageCreate,
         },
       });
@@ -941,13 +799,10 @@ export class BridgeAPIContextLoader implements ContextLoader {
     const request = {
       scope,
       runtimeInputId: input.runtimeInputId,
-      eventIds: [...input.eventIds],
-      sequenceFrom: input.sequenceFrom,
-      sequenceTo: input.sequenceTo,
-      inputKind: sourceKind,
-      messageCreates: messageCreates.map(runtimeMessageCreateForBridge),
+      disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
+      approvalReviewText: input.kind === "approval_review" ? orderedText(messageCreates) : [],
     };
-    const declarationDigest = commitInputsDeclarationDigest(request);
+    const declarationDigest = commitInputsDeclarationDigest(request, sourceKind);
     let response: CommitInputsResponse;
     try {
       response = await commitInputs(this.client, request, metadata);
@@ -963,143 +818,58 @@ export class BridgeAPIContextLoader implements ContextLoader {
         reason: "commit inputs transport failed",
       });
     }
-    if (!bridgeAckAccepted(response.ack?.status)) {
-      throw normalizeContextLoaderError({
-        code: "unavailable",
-        sessionId: input.sessionId,
-        reason: response.ack?.errorCode || "commit inputs rejected",
-      });
-    }
-    const inputDisposition =
-      response.ack?.status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE ? "duplicate" : "committed";
-    const declaration = response.declaration;
-    const receipt = declaration?.receipts[0];
-    if (declaration === undefined || declaration.receipts.length !== 1 || receipt === undefined) {
-      recordBridgeReceiptEvidence(this.options, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        sessionThreadId: input.sessionThreadId,
-        operation: "commit_inputs",
-        sourceKind,
-        operationId: input.runtimeInputId,
-        declarationDigest,
-        bindingId: input.bindingId,
-        bindingGeneration: input.bindingGeneration,
-        outcome: "receipt_shape_invalid",
-      });
+    if (!exactlyOneDefined(response.committed, response.duplicate, response.stale)) {
       throw normalizeContextLoaderError({
         code: "schema_mismatch",
         sessionId: input.sessionId,
-        reason: "commit inputs did not return exactly one declaration receipt",
+        reason: "commit inputs returned malformed outcome",
       });
     }
-    if (receipt.declarationDigest !== declarationDigest) {
-      recordBridgeReceiptEvidence(this.options, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        sessionThreadId: input.sessionThreadId,
-        operation: "commit_inputs",
-        sourceKind,
-        operationId: input.runtimeInputId,
-        declarationDigest,
-        bindingId: input.bindingId,
-        bindingGeneration: input.bindingGeneration,
-        outcome: "declaration_digest_mismatch",
-      });
+    if (response.stale !== undefined) {
+      return { type: "stale_custody" };
+    }
+    const result = response.committed ?? response.duplicate;
+    if (result === undefined) {
       throw normalizeContextLoaderError({
         code: "schema_mismatch",
         sessionId: input.sessionId,
-        reason: "commit inputs returned a mismatched declaration digest",
+        reason: "commit inputs returned no outcome",
       });
     }
-    if (receipt.compactedThroughMessageSequence !== undefined) {
+    if (!exactlyOneDefined(result.context, result.interrupt) || result.context === undefined) {
       throw normalizeContextLoaderError({
         code: "schema_mismatch",
         sessionId: input.sessionId,
-        reason: "commit inputs returned a compaction boundary on an ordinary receipt",
+        reason: "commit inputs returned mismatched application",
       });
     }
-    const applicationDisposition = declaration.applicationDisposition ===
-      ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY
-      ? "current_custody"
-      : declaration.applicationDisposition === ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
-        ? "stale_custody"
-        : undefined;
-    if (applicationDisposition === undefined) {
-      recordBridgeReceiptEvidence(this.options, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        sessionThreadId: input.sessionThreadId,
-        operation: "commit_inputs",
-        sourceKind,
-        operationId: input.runtimeInputId,
-        declarationDigest,
-        bindingId: input.bindingId,
-        bindingGeneration: input.bindingGeneration,
-        outcome: "receipt_shape_invalid",
-      });
-      throw normalizeContextLoaderError({
-        code: "schema_mismatch",
-        sessionId: input.sessionId,
-        reason: "commit inputs returned an invalid custody disposition",
-      });
-    }
-    if (
-      applicationDisposition === "current_custody" &&
-      (
-        declaration.observedBindingId !== input.bindingId ||
-        declaration.observedBindingGeneration !== input.bindingGeneration
-      )
-    ) {
-      recordBridgeReceiptEvidence(this.options, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        sessionThreadId: input.sessionThreadId,
-        operation: "commit_inputs",
-        sourceKind,
-        operationId: input.runtimeInputId,
-        declarationDigest,
-        bindingId: declaration.observedBindingId,
-        bindingGeneration: declaration.observedBindingGeneration,
-        applicationDisposition,
-        outcome: "binding_identity_mismatch",
-      });
-      throw normalizeContextLoaderError({
-        code: "schema_mismatch",
-        sessionId: input.sessionId,
-        reason: "commit inputs returned mismatched current custody identity",
-      });
-    }
-    recordBridgeReceiptEvidence(this.options, {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sessionThreadId: input.sessionThreadId,
-      operation: "commit_inputs",
-      sourceKind,
-      operationId: input.runtimeInputId,
-      declarationDigest,
-      bindingId: declaration.observedBindingId,
-      bindingGeneration: declaration.observedBindingGeneration,
-      applicationDisposition,
-      outcome: applicationDisposition === "current_custody" ? "applied" : "stale_custody",
-    });
     return {
       type: "receipt",
-      inputDisposition,
-      applicationDisposition,
-      receipt: runtimeDeclarationReceipt(receipt),
+      inputDisposition: response.duplicate === undefined ? "committed" : "duplicate",
+      applicationDisposition: "current_custody",
+      receipt: hotReceiptFromAssignedContext({
+        sessionId: input.sessionId,
+        sessionThreadId: input.sessionThreadId,
+        sourceKind,
+        runtimeInputId: input.runtimeInputId,
+        declarationDigest,
+        creates: messageCreates,
+        assignedContextSequences: result.context.assignedContextSequences,
+        interruptToolResults: [],
+        pendingAttachmentJson: result.context.pendingAttachmentJson,
+      }),
     };
   }
 
   private async loadContext(
-    input: RuntimeThreadControlState,
+    input: RuntimeThreadAddressState,
   ): Promise<{
     readonly messages: readonly DurableRuntimeMessage[];
     readonly turnFacts: ThreadTurnLoadFacts;
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
     readonly durableTurnId?: string | undefined;
     readonly runtimeBindingToken: string;
-    readonly thread: RuntimeAcceptedThreadMetadataState;
+    readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
     readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
     readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
@@ -1112,9 +882,9 @@ export class BridgeAPIContextLoader implements ContextLoader {
     const metadata = await this.metadata();
     const response = await loadContext(this.client, {
       scope: bridgeScope(input),
-      runtimeInputId: input.runtimeInputId,
-      sequenceFrom: input.sequenceFrom,
-      sequenceTo: input.sequenceTo,
+      runtimeInputId: hotContextIdentity("cold_load", input.bindingId, input.bindingGeneration),
+      sequenceFrom: 0,
+      sequenceTo: 0,
     }, metadata);
     if (!bridgeAckAccepted(response.ack?.status)) {
       throw normalizeContextLoaderError({
@@ -1398,12 +1168,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         compactionEventPayloadJson: envelope.compactionEventPayloadJson ?? "",
         interruptSettlement: envelope.interruptSettlement === undefined
           ? undefined
-          : {
-              runtimeInputId: envelope.interruptSettlement.runtimeInputId,
-              eventIds: [...envelope.interruptSettlement.eventIds],
-              sequenceFrom: envelope.interruptSettlement.sequenceFrom,
-              sequenceTo: envelope.interruptSettlement.sequenceTo,
-            },
+          : { runtimeInputId: envelope.interruptSettlement.runtimeInputId },
       };
       const declarationDigest = writeRequestEndDeclarationDigest(request);
       const interruptRequest = request.interruptSettlement === undefined
@@ -1411,15 +1176,12 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         : {
             scope: request.scope,
             runtimeInputId: request.interruptSettlement.runtimeInputId,
-            eventIds: request.interruptSettlement.eventIds,
-            sequenceFrom: request.interruptSettlement.sequenceFrom,
-            sequenceTo: request.interruptSettlement.sequenceTo,
-            inputKind: "interrupt_control",
-            messageCreates: [],
+            disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
+            approvalReviewText: [],
           };
       const interruptDigest = interruptRequest === undefined
         ? undefined
-        : commitInputsDeclarationDigest(interruptRequest);
+        : commitInputsDeclarationDigest(interruptRequest, "interrupt_control");
       const response = await writeRequestEnd(this.client, request, metadata);
       if (!bridgeAckAccepted(response.ack?.status)) {
         return eventWriterRejected(envelope.sessionId, envelope.writeId, response.ack?.errorCode);
@@ -1954,13 +1716,13 @@ function commitInputs(
   });
 }
 
-function createChildThread(
+function ensureApprovalReviewerTrunk(
   client: AgentRuntimeBridgeServiceClient,
-  request: CreateChildThreadRequest,
+  request: EnsureApprovalReviewerTrunkRequest,
   metadata: Metadata,
-): Promise<CreateChildThreadResponse> {
+): Promise<EnsureApprovalReviewerTrunkResponse> {
   return new Promise((resolve, reject) => {
-    client.createChildThread(request, metadata, (error: ServiceError | null, response: CreateChildThreadResponse) => {
+    client.ensureApprovalReviewerTrunk(request, metadata, (error: ServiceError | null, response: EnsureApprovalReviewerTrunkResponse) => {
       if (error !== null) {
         reject(error);
         return;
@@ -1970,13 +1732,61 @@ function createChildThread(
   });
 }
 
-function markChildThreadClosed(
+function ensureApprovalReviewerSidecar(
   client: AgentRuntimeBridgeServiceClient,
-  request: MarkChildThreadClosedRequest,
+  request: EnsureApprovalReviewerSidecarRequest,
   metadata: Metadata,
-): Promise<MarkChildThreadClosedResponse> {
+): Promise<EnsureApprovalReviewerSidecarResponse> {
   return new Promise((resolve, reject) => {
-    client.markChildThreadClosed(request, metadata, (error: ServiceError | null, response: MarkChildThreadClosedResponse) => {
+    client.ensureApprovalReviewerSidecar(request, metadata, (error: ServiceError | null, response: EnsureApprovalReviewerSidecarResponse) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function admitApprovalReviewInput(
+  client: AgentRuntimeBridgeServiceClient,
+  request: AdmitApprovalReviewInputRequest,
+  metadata: Metadata,
+): Promise<AdmitApprovalReviewInputResponse> {
+  return new Promise((resolve, reject) => {
+    client.admitApprovalReviewInput(request, metadata, (error: ServiceError | null, response: AdmitApprovalReviewInputResponse) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function closeApprovalReviewer(
+  client: AgentRuntimeBridgeServiceClient,
+  request: CloseApprovalReviewerRequest,
+  metadata: Metadata,
+): Promise<CloseApprovalReviewerResponse> {
+  return new Promise((resolve, reject) => {
+    client.closeApprovalReviewer(request, metadata, (error: ServiceError | null, response: CloseApprovalReviewerResponse) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function readAgentMail(
+  client: AgentRuntimeBridgeServiceClient,
+  request: ReadAgentMailRequest,
+  metadata: Metadata,
+): Promise<ReadAgentMailResponse> {
+  return new Promise((resolve, reject) => {
+    client.readAgentMail(request, metadata, (error: ServiceError | null, response: ReadAgentMailResponse) => {
       if (error !== null) {
         reject(error);
         return;
@@ -1993,22 +1803,6 @@ function loadContext(
 ): Promise<LoadContextResponse> {
   return new Promise((resolve, reject) => {
     client.loadContext(request, metadata, (error: ServiceError | null, response: LoadContextResponse) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
-function resolveInterAgentDelivery(
-  client: AgentRuntimeBridgeServiceClient,
-  request: ResolveInterAgentDeliveryRequest,
-  metadata: Metadata,
-): Promise<ResolveInterAgentDeliveryResponse> {
-  return new Promise((resolve, reject) => {
-    client.resolveInterAgentDelivery(request, metadata, (error: ServiceError | null, response: ResolveInterAgentDeliveryResponse) => {
       if (error !== null) {
         reject(error);
         return;
@@ -2224,115 +2018,6 @@ function parseRuntimeRequestKind(
     return value;
   }
   throw new Error("declaration receipt has an invalid request-start stamp");
-}
-
-export function validateChildLifecycleDeclarationResponse(
-  input: {
-    readonly action: "close" | "resume";
-    readonly sessionThreadId: string;
-    readonly childThreadId: string;
-    readonly sourceKind: "tool_use" | "approval_review";
-    readonly sourceCommandId: string;
-    readonly bindingId: string;
-    readonly bindingGeneration: number;
-  },
-  response: MarkChildThreadClosedResponse | MarkChildThreadActiveResponse,
-): { readonly ok: true; readonly dispositions: readonly RuntimeDeclarationReceipt["childLifecycle"][number][] } |
-  { readonly ok: false; readonly errorCode: string; readonly discardHotState: boolean } {
-  if (!bridgeAckAccepted(response.ack?.status)) {
-    return {
-      ok: false,
-      errorCode: response.ack?.errorCode || "bridge_child_lifecycle_rejected",
-      discardHotState: false,
-    };
-  }
-  const operationKind = input.action === "close" ? "mark_child_thread_closed" : "mark_child_thread_active";
-  const sourceKind = input.action === "close" ? "child_close_command" : "child_resume_command";
-  const operationId = stableRuntimeID(
-    input.action === "close" ? "child_tree_close" : "child_resume",
-    input.sourceCommandId,
-    input.childThreadId,
-  );
-  const declaration = response.declaration;
-  const applicationDisposition = declaration === undefined
-    ? undefined
-    : runtimeReceiptApplicationDisposition(declaration.applicationDisposition);
-  if (
-    declaration === undefined ||
-    applicationDisposition === undefined ||
-    declaration.receipts.length === 0 ||
-    declaration.observedBindingId !== input.bindingId ||
-    declaration.observedBindingGeneration !== input.bindingGeneration
-  ) {
-    return {
-      ok: false,
-      errorCode: "bridge_child_lifecycle_receipt_invalid",
-      discardHotState: true,
-    };
-  }
-  if (applicationDisposition !== "current_custody") {
-    return { ok: false, errorCode: "scope_superseded", discardHotState: true };
-  }
-  let receipts: RuntimeDeclarationReceipt[];
-  try {
-    receipts = declaration.receipts.map(ordinaryRuntimeDeclarationReceipt);
-  } catch {
-    return {
-      ok: false,
-      errorCode: "bridge_child_lifecycle_receipt_invalid",
-      discardHotState: true,
-    };
-  }
-  const digest = childLifecycleDeclarationDigest({
-    operationKind,
-    action: input.action,
-    sessionThreadId: input.sessionThreadId,
-    childThreadId: input.childThreadId,
-    sourceKind: input.sourceKind,
-    sourceCommandId: input.sourceCommandId,
-  });
-  const stamps = receipts.flatMap((receipt) => receipt.childLifecycle);
-  const receiptTargets = new Set(receipts.map((receipt) => receipt.sessionThreadId));
-  const validDisposition = input.action === "close"
-    ? (value: string): boolean =>
-        value === "closed" ||
-        value === "already_closed" ||
-        value === "preserved_failed" ||
-        value === "preserved_terminated"
-    : (value: string): boolean =>
-        value === "resumed" ||
-        value === "already_active" ||
-        value === "preserved_failed" ||
-        value === "preserved_terminated";
-  if (
-    receiptTargets.size !== receipts.length ||
-    !receiptTargets.has(input.childThreadId) ||
-    receipts.some((receipt) =>
-      receipt.operationKind !== operationKind ||
-      receipt.sourceKind !== sourceKind ||
-      receipt.operationId !== operationId ||
-      receipt.declarationDigest !== digest ||
-      receipt.events.length !== 0 ||
-      receipt.messages.length !== 0 ||
-      receipt.pendingAttachmentDelta.length !== 0 ||
-      receipt.interruptToolProjections.length !== 0 ||
-      receipt.prefixConsumptions.length !== 0 ||
-      receipt.requestReschedule !== undefined ||
-      receipt.idleCloseout !== undefined ||
-      receipt.compactedThroughMessageSequence !== undefined ||
-      receipt.childLifecycle.length !== 1 ||
-      receipt.childLifecycle[0]?.childThreadId !== receipt.sessionThreadId ||
-      !validDisposition(receipt.childLifecycle[0]?.disposition ?? "")
-    ) ||
-    (input.action === "resume" && (receipts.length !== 1 || receipts[0]?.sessionThreadId !== input.childThreadId))
-  ) {
-    return {
-      ok: false,
-      errorCode: "bridge_child_lifecycle_receipt_invalid",
-      discardHotState: true,
-    };
-  }
-  return { ok: true, dispositions: stamps };
 }
 
 function runtimeRequestRescheduleStamp(
@@ -2566,25 +2251,132 @@ function approvalReviewerParentScope(input: ApprovalReviewerThreadCreation): Run
   };
 }
 
-function approvalReviewerCreateChildThreadRequest(input: ApprovalReviewerThreadCreation): CreateChildThreadRequest {
+function bridgeAckAccepted(status: BridgeWriteStatus | undefined): boolean {
+  return status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED || status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE;
+}
+
+function hotReceiptFromAssignedContext(input: {
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly sourceKind: string;
+  readonly runtimeInputId: string;
+  readonly declarationDigest: string;
+  readonly creates: readonly CoreRuntimeMessageCreate[];
+  readonly assignedContextSequences: readonly number[];
+  readonly interruptToolResults: readonly RuntimeInterruptToolResult[];
+  readonly pendingAttachmentJson: readonly string[];
+}): RuntimeDeclarationReceipt {
+  if (
+    input.creates.length !== input.assignedContextSequences.length ||
+    input.assignedContextSequences.some((sequence) => !Number.isSafeInteger(sequence) || sequence <= 0)
+  ) {
+    throw new Error("Bridge assigned context sequences do not match the accepted input projection");
+  }
+  const timestamp = "1970-01-01T00:00:00.000Z";
+  const events = input.creates.map((_, index) => ({
+    sessionThreadId: input.sessionThreadId,
+    eventId: hotContextIdentity("event", input.runtimeInputId, index),
+    eventSequence: input.assignedContextSequences[index] ?? index + 1,
+    disposition: "created" as const,
+  }));
+  const messages = input.creates.map((create, index) => {
+    const messageId = hotContextIdentity("message", input.runtimeInputId, index);
+    return {
+      sessionThreadId: input.sessionThreadId,
+      messageId,
+      messageSequence: input.assignedContextSequences[index]!,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      disposition: "created" as const,
+      parts: create.parts.map((_, partIndex) => ({
+        partId: hotContextIdentity("part", input.runtimeInputId, index, partIndex),
+        messageId,
+        partSequence: partIndex,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        disposition: "created" as const,
+      })),
+    };
+  });
+  const interruptToolProjections = input.interruptToolResults.map((result, index) => {
+    if (!exactlyOneDefined(result.error, result.cancelled)) {
+      throw new Error("Bridge interrupt result must contain exactly one outcome");
+    }
+    const error = result.error === undefined
+      ? undefined
+      : RuntimeToolErrorSchema.parse(JSON.parse(result.error.errorJson));
+    const cancelledError = result.cancelled?.errorJson === undefined
+      ? undefined
+      : RuntimeToolErrorSchema.parse(JSON.parse(result.cancelled.errorJson));
+    if (error === undefined && result.cancelled === undefined) {
+      throw new Error("Bridge interrupt result is malformed");
+    }
+    return {
+      toolUseEventId: result.toolUseEventId,
+      resultEvent: {
+        sessionThreadId: input.sessionThreadId,
+        eventId: hotContextIdentity("interrupt", input.runtimeInputId, index),
+        eventSequence: index + 1,
+        disposition: "created" as const,
+      },
+      terminalState: error === undefined
+        ? { type: "cancelled" as const, ...(cancelledError === undefined ? {} : { error: cancelledError }) }
+        : { type: "error" as const, error },
+    };
+  });
   return {
-    scope: approvalReviewerParentScope(input),
-    parentThreadId: input.request.sessionThreadId,
-    childThreadId: input.reviewerThreadId,
-    role: "approval_reviewer",
-    taskName: "",
-    metadataJson: "{}",
-    agentType: "approval_reviewer",
-    sourceToolUseEventId: "",
-    forkTurns: input.isTrunk ? "none" : "all",
-    threadContextPrefixJson: input.threadContextPrefixJson,
-    isTrunk: input.isTrunk,
-    reviewerReviewId: input.isTrunk ? "" : input.reviewId,
+    sessionThreadId: input.sessionThreadId,
+    operationKind: "commit_inputs",
+    sourceKind: input.sourceKind,
+    operationId: input.runtimeInputId,
+    declarationDigest: input.declarationDigest,
+    events,
+    messages,
+    pendingAttachmentDelta: parsePendingAttachments(input.pendingAttachmentJson.map((item) => JSON.parse(item))) ?? [],
+    interruptToolProjections,
+    prefixConsumptions: [],
+    childLifecycle: [],
   };
 }
 
-function bridgeAckAccepted(status: BridgeWriteStatus | undefined): boolean {
-  return status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED || status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE;
+/** Builds the hot projection receipt for the dedicated task-notification commit operation. */
+function hotTaskNotificationReceiptFromAssignedContext(input: {
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly runtimeInputId: string;
+  readonly taskId: string;
+  readonly declarationDigest: string;
+  readonly create: CoreRuntimeMessageCreate;
+  readonly assignedContextSequences: readonly number[];
+}): RuntimeDeclarationReceipt {
+  const receipt = hotReceiptFromAssignedContext({
+    sessionId: input.sessionId,
+    sessionThreadId: input.sessionThreadId,
+    sourceKind: "task_notification",
+    runtimeInputId: input.runtimeInputId,
+    declarationDigest: input.declarationDigest,
+    creates: [input.create],
+    assignedContextSequences: input.assignedContextSequences,
+    interruptToolResults: [],
+    pendingAttachmentJson: [],
+  });
+  return {
+    ...receipt,
+    operationKind: "commit_task_notification_result",
+    operationId: taskNotificationOperationId(input.runtimeInputId, input.taskId),
+  };
+}
+
+function hotContextIdentity(kind: string, runtimeInputId: string, ...positions: number[]): string {
+  return `hot_${createHash("sha256").update([kind, runtimeInputId, ...positions].join("\u0000")).digest("hex").slice(0, 24)}`;
+}
+
+function orderedText(creates: readonly CoreRuntimeMessageCreate[]): string[] {
+  return creates.flatMap((create) => create.parts.flatMap((part) => part.type === "text" ? [part.text] : []));
+}
+
+function exactlyOneDefined(...values: readonly unknown[]): boolean {
+  return values.filter((value) => value !== undefined).length === 1;
 }
 
 function bridgeCommitErrorRetryable(error: unknown): boolean {
@@ -2622,7 +2414,7 @@ function internalToolRepairStoreFailure(
   };
 }
 
-function parseContextPayload(contextJson: string, input: RuntimeThreadControlState, logger?: RuntimePodLogger | undefined): {
+function parseContextPayload(contextJson: string, input: RuntimeThreadAddressState, logger?: RuntimePodLogger | undefined): {
   readonly messages: readonly DurableRuntimeMessage[];
   readonly turnFacts: ThreadTurnLoadFacts;
   readonly threadContextPrefix?: ThreadContextPrefix | undefined;
@@ -2733,7 +2525,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
       input,
       "pending_agent_mail_parse",
       "invalid_pending_agent_mail_shape",
-      () => parsePendingAgentMail(parsed.pendingAgentMail),
+      () => parsePendingAgentMail(parsed.pendingAgentMail, input.sessionId),
     );
     const coldCoverage = parseContextLoadPhase(
       logger,
@@ -2769,7 +2561,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
 
 function parseContextLoadPhase<T>(
   logger: RuntimePodLogger | undefined,
-  input: RuntimeThreadControlState,
+  input: RuntimeThreadAddressState,
   phase: RuntimeContextLoadParsePhase,
   reason: RuntimeContextLoadParseReason | (() => RuntimeContextLoadParseReason),
   parse: () => T,
@@ -2910,7 +2702,7 @@ function parseThreadMetadata(value: unknown): RuntimeAcceptedThreadMetadataState
   };
 }
 
-function parsePendingAgentMail(value: unknown): readonly RuntimeLoadedAgentMail[] | undefined {
+function parsePendingAgentMail(value: unknown, sessionId: string): readonly RuntimeLoadedAgentMail[] | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -2921,10 +2713,16 @@ function parsePendingAgentMail(value: unknown): readonly RuntimeLoadedAgentMail[
     if (!isRecord(item)) {
       throw new Error("load context pendingAgentMail is malformed");
     }
+    const deliveryId = requiredStringField(item, "deliveryId");
+    const content = requiredStringField(item, "content");
     return {
-      deliveryId: requiredStringField(item, "deliveryId"),
-      sourceThreadId: requiredStringField(item, "sourceThreadId"),
-      sourceToolUseEventId: requiredStringField(item, "sourceToolUseEventId"),
+      deliveryId,
+      message: runtimeMessageFromAgentMailContent({
+        sessionId,
+        deliveryId,
+        content,
+      }),
+      content,
     };
   });
   if (parsed.length > MailFetchMaxEnvelopes) {
@@ -2988,7 +2786,7 @@ function parsePendingAttachments(value: unknown): readonly RuntimeProviderAttach
 
 function mcpManifestPatchesFromContextPayload(
   value: unknown,
-  input: RuntimeThreadControlState,
+  input: RuntimeThreadAddressState,
 ): readonly RuntimeConfigPatchState[] | undefined {
   if (value === undefined) {
     return undefined;
@@ -3030,13 +2828,13 @@ function mcpManifestPatchesFromContextPayload(
     });
     return {
       ...input,
-      runtimeInputId: `runtime_config_update:mcp_manifest:${input.sessionId}:${mcpServerName}:${generation}`,
+      configIdentity: `mcp_manifest:${mcpServerName}`,
       generation,
       mcpServerName,
       ...(manifestETag !== undefined ? { manifestETag } : {}),
       manifestReadiness,
       ...(diagnostic !== undefined ? { manifestDiagnostic: diagnostic } : {}),
-      payloadJson: JSON.stringify({
+      contentJson: JSON.stringify({
         mcp_manifest: {
           mcp_server_name: mcpServerName,
           manifest_generation: generation,
@@ -3070,7 +2868,7 @@ function parseBackgroundTools(value: unknown): readonly RuntimePreloadedBackgrou
 
 function runtimeConfigPatchFromContextPayload(
   payload: Record<string, unknown>,
-  input: RuntimeThreadControlState,
+  input: RuntimeThreadAddressState,
 ): RuntimeConfigPatchState | undefined {
   const runtimeConfig = recordField(payload, "runtimeConfig") ?? recordField(payload, "runtime_config");
   if (runtimeConfig === undefined) {
@@ -3088,10 +2886,11 @@ function runtimeConfigPatchFromContextPayload(
   const installedBuiltinFamily = installedBuiltinFamilyFromRuntimeConfig(runtimeConfig);
   return {
     ...input,
+    configIdentity: "runtime_config",
     generation,
     coldLoad: true,
     installedBuiltinFamily,
-    payloadJson: JSON.stringify({
+    contentJson: JSON.stringify({
       config_generation: generation,
       ...(approvalMode !== undefined ? { approval_mode: approvalMode } : {}),
       ...(toolPolicy !== undefined ? { tool_policy: toolPolicy } : {}),

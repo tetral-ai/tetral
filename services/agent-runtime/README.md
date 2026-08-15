@@ -327,7 +327,7 @@ specialized sub-agent loop and no reviewer-only model-call path. The parent
 thread sees tool use/result; child work stays child-thread-local.
 
 - Interface: the `subagent` route operations dispatch in `tool-runner.ts`; child
-  threads are created through Bridge `CreateChildThread` with a thread context prefix;
+  threads are created through Bridge `CreateSubagentThread`; Bridge derives and stores the thread context prefix;
   `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
 - Lifecycle: `spawn_agent` prepares a durable child row and context prefix before the
   first message; `send_message` resolves the child by `task_name`, delivering
@@ -338,7 +338,7 @@ thread sees tool use/result; child work stays child-thread-local.
 Invariants a replacement must preserve:
 
 - Child durable thread and context prefix exist before the initial message; a crash
-  after `CreateChildThread` ACK reuses the same child and prefix.
+  after a duplicate `CreateSubagentThread` result reuses the same Bridge-owned child and prefix.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → stamped input
   receipt. Pod-loss reconciliation hands an accepted input back to the existing
@@ -364,10 +364,11 @@ Conformance tests: `core/test/unit/session-manager.test.ts`,
 
 ### Command boundary
 
-Every inbound command must name this exact pod — namespace, name, UID (and IP
-when configured) — carry a non-empty binding id and a non-zero binding
-generation, and authenticate through TokenReview to the closed command set; a
-mismatch is a retryable rejection, never a processed command. Anchors:
+Every inbound method-specific request must select this exact pod UID, carry a
+non-empty current binding id and a non-zero binding generation, and authenticate
+through TokenReview to the closed RPC set; a mismatch is a retryable rejection,
+never a processed command. The Runtime Pod does not accept or echo Pod
+namespace, name, or IP as command payload. Anchors:
 `runtime-pod/src/command.ts` (dispatch), `runtime-pod/src/runtime-service.ts`
 (scope binding), `runtime-pod/src/auth.ts` (TokenReview). The pod queries no
 database, calls no sandbox provider, terminates no public HTTP, and holds no
@@ -399,7 +400,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `core/test/unit/approval-reviewer-manager.test.ts` | reviewer trunk/sidecar selection, cursor and snapshot succession, decision memo |
 | `core/test/unit/conversation-turns.test.ts` | `fork_turns` turn partitioning |
 | `core/test/unit/session-run-static-boundaries.test.ts`, `static-boundaries.test.ts` | import confinement and dependency boundaries |
-| `runtime-pod/test/unit/command.test.ts`, `runtime-service.test.ts` | command-envelope validation and scope binding |
+| `runtime-pod/test/unit/command.test.ts`, `runtime-service.test.ts` | method-specific ingress validation and scope binding |
 | `runtime-pod/test/unit/auth.test.ts` | TokenReview identity and the closed command set |
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |
 | `runtime-pod/test/unit/tool-runner.test.ts` | route dispatch across sandbox / gateway / bridge / subagent |

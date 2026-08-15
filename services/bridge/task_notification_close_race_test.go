@@ -76,9 +76,7 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	apiStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	admitRequest := &bridgev1.AdmitChildInterruptRequest{
-		Scope: parentScope, RootChildThreadId: childID,
-		SourceToolUseEventId: closeSource.GetSourceToolUseEventId(), Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
-		IncludeDescendants: true,
+		Scope: parentScope, SourceToolUseEventId: closeSource,
 	}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
@@ -141,38 +139,43 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 			initialPlan = result.plan
 		}
 	}
-	if admitted == nil || len(admitted.GetTargets()) != 1 {
-		t.Fatalf("close admission = %#v; want one frozen target", admitted)
+	if admitted == nil || admitted.GetCommitted().GetControlOperationId() == "" {
+		t.Fatalf("close admission = %#v; want Bridge-owned control operation", admitted)
 	}
 	if admissionFirst {
-		if !initialPlan.SettledAccepted || !initialPlan.QueueLeaseSettled || initialPlan.Request != nil {
+		if !initialPlan.SettledAccepted || !initialPlan.QueueLeaseSettled || initialPlan.hasCommand() {
 			t.Fatalf("admission-first prepare = %#v; want parked Inbox and lease-fenced Queue ACK", initialPlan)
 		}
-	} else if initialPlan.Request == nil || initialPlan.SettledAccepted {
+	} else if initialPlan.AcceptTask == nil || initialPlan.SettledAccepted {
 		t.Fatalf("runner-first prepare = %#v; want live Runtime request before close fence", initialPlan)
 	}
 
-	target := admitted.GetTargets()[0]
+	controlOperationID := admitted.GetCommitted().GetControlOperationId()
+	var controlRuntimeInputID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT payload_json::jsonb ->> 'runtime_input_id'
+		FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		AND type=$3 AND payload_json::jsonb ->> 'control_operation_id'=$4`,
+		sessionID, childID, childInterruptRequestedEventType, controlOperationID,
+	).Scan(&controlRuntimeInputID); err != nil {
+		t.Fatalf("read frozen child-close control input: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
 		SET status='accepted',binding_id=$2,binding_generation=1,target_pod_uid=$3
-		WHERE workspace_id='default' AND runtime_input_id=$1`, target.GetRuntimeInputId(), bindingID, podUID); err != nil {
+		WHERE workspace_id='default' AND runtime_input_id=$1`, controlRuntimeInputID, bindingID, podUID); err != nil {
 		t.Fatalf("accept child-close control: %v", err)
 	}
 	childScope := scopeForThread(parentScope, childID)
 	if _, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: childScope, RuntimeInputId: target.GetRuntimeInputId(), InputKind: "interrupt_control",
-		EventIds: []string{target.GetInterruptEventId()}, SequenceFrom: target.GetInterruptEventSequence(), SequenceTo: target.GetInterruptEventSequence(),
+		Scope: childScope, RuntimeInputId: controlRuntimeInputID,
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("commit child-close control: %v", err)
 	}
 	awaitRequest := &bridgev1.AwaitChildInterruptRequest{
-		Scope: parentScope, RootChildThreadId: childID, SourceToolUseEventId: closeSource.GetSourceToolUseEventId(),
-		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE, IncludeDescendants: true, Targets: admitted.GetTargets(),
+		Scope: parentScope, ControlOperationId: controlOperationID,
 	}
-	closeSourceID := closeSource.GetSourceToolUseEventId()
-	closeRequest := &bridgev1.MarkChildThreadClosedRequest{
-		Scope: parentScope, ChildThreadId: childID, Source: closeSource,
-		SourceToolUseEventId: &closeSourceID, Targets: admitted.GetTargets(),
+	closeRequest := &bridgev1.CloseChildControlRequest{
+		Scope: parentScope, ControlOperationId: controlOperationID,
 	}
 	controlQueueSettled := false
 	if !admissionFirst {
@@ -238,24 +241,26 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 			t.Fatalf("ACK committed child-close control = %t, %v; want true", acked, err)
 		}
 	}
-	closed, err := apiStore.MarkChildThreadClosed(context.Background(), closeRequest)
-	if err != nil || closed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+	closed, err := apiStore.CloseChildControl(context.Background(), closeRequest)
+	if err != nil || len(closed.GetCommitted().GetChildren()) == 0 {
 		t.Fatalf("close after notification quiescence = %#v/%v; want committed receipt", closed, err)
 	}
 	var inboxStatus, taskQueueStatus, childStatus string
-	var activeJobs, errorEvents int
+	var activeJobs, errorEvents, controlFenceReceipts int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$3 AND id=$4),
 		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND partition_key='session:default:' || $3 AND status IN ('pending','leased')),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND type='session.error')`,
-		inputID, queued.ID, sessionID, childID,
-	).Scan(&inboxStatus, &taskQueueStatus, &childStatus, &activeJobs, &errorEvents); err != nil {
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND type='session.error'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$3
+		 AND operation='close_child_control' AND source_kind='child_close_command' AND idempotency_key=$5)`,
+		inputID, queued.ID, sessionID, childID, controlOperationID,
+	).Scan(&inboxStatus, &taskQueueStatus, &childStatus, &activeJobs, &errorEvents, &controlFenceReceipts); err != nil {
 		t.Fatalf("read final close custody: %v", err)
 	}
-	if inboxStatus != "parked" || taskQueueStatus != queue.StatusAcknowledged || childStatus != "closed_for_runtime" || activeJobs != 0 || errorEvents != 0 {
-		t.Fatalf("final close custody = Inbox %s Queue %s child %s active %d errors %d; want parked/acknowledged/closed/0/0",
-			inboxStatus, taskQueueStatus, childStatus, activeJobs, errorEvents)
+	if inboxStatus != "parked" || taskQueueStatus != queue.StatusAcknowledged || childStatus != "closed_for_runtime" || activeJobs != 0 || errorEvents != 0 || controlFenceReceipts != 1 {
+		t.Fatalf("final close custody = Inbox %s Queue %s child %s active %d errors %d control receipts %d; want parked/acknowledged/closed/0/0/1",
+			inboxStatus, taskQueueStatus, childStatus, activeJobs, errorEvents, controlFenceReceipts)
 	}
 }

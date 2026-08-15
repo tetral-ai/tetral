@@ -33,10 +33,22 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc WriteRequestEnd(WriteRequestEndRequest) returns (WriteRequestEndResponse);",
 		"rpc FinishIdle(FinishIdleRequest) returns (FinishIdleResponse);",
 		"rpc CommitRuntimeTermination(CommitRuntimeTerminationRequest) returns (CommitRuntimeTerminationResponse);",
-		"rpc CreateChildThread(CreateChildThreadRequest) returns (CreateChildThreadResponse);",
+		"rpc CreateSubagentThread(CreateSubagentThreadRequest) returns (CreateSubagentThreadResponse);",
+		"rpc EnsureApprovalReviewerTrunk(EnsureApprovalReviewerTrunkRequest) returns (EnsureApprovalReviewerTrunkResponse);",
+		"rpc EnsureApprovalReviewerSidecar(EnsureApprovalReviewerSidecarRequest) returns (EnsureApprovalReviewerSidecarResponse);",
+		"rpc AdmitApprovalReviewInput(AdmitApprovalReviewInputRequest) returns (AdmitApprovalReviewInputResponse);",
 		"rpc ResolveChildThread(ResolveChildThreadRequest) returns (ResolveChildThreadResponse);",
 		"rpc ListChildThreads(ListChildThreadsRequest) returns (ListChildThreadsResponse);",
-		"rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);",
+		"rpc DeliverInterAgentMail(DeliverInterAgentMailRequest) returns (DeliverInterAgentMailResponse);",
+		"rpc ReadAgentMail(ReadAgentMailRequest) returns (ReadAgentMailResponse);",
+		"rpc AdmitChildInterrupt(AdmitChildInterruptRequest) returns (AdmitChildInterruptResponse);",
+		"rpc AwaitChildInterrupt(AwaitChildInterruptRequest) returns (AwaitChildInterruptResponse);",
+		"message ChildThreadFact",
+		"message DeliverInterAgentMailCommitted {}",
+		"message AdmitChildInterruptCommitted { string control_operation_id = 1; }",
+		"message MarkChildThreadActiveCommitted { ChildLifecycleDisposition disposition = 1; }",
+		"rpc CloseChildControl(CloseChildControlRequest) returns (CloseChildControlResponse);",
+		"rpc CloseApprovalReviewer(CloseApprovalReviewerRequest) returns (CloseApprovalReviewerResponse);",
 		"rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);",
 		"rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);",
 		"rpc AwaitSandboxExecution(AwaitSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);",
@@ -83,6 +95,10 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	for _, forbidden := range []string{
 		"string memory" + "_store_id",
 		"memory" + "_store_id =",
+		"rpc CreateChildThread(",
+		"rpc ResolveInterAgentDelivery(",
+		"message ChildLifecycleSource",
+		"string child_thread_json",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("bridge proto exposes forbidden Runtime boundary field %q", forbidden)
@@ -127,27 +143,25 @@ func TestRuntimePodServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	for _, required := range []string{
 		"package tetral.agent_runtime.v1;",
 		"github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1;agentruntimev1",
-		"rpc AcceptInput(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc AcceptTaskNotification(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc Interrupt(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc ResolveToolConfirmation(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc ApplyRuntimeConfig(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc CleanupSession(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"RUNTIME_COMMAND_KIND_MESSAGES",
-		"RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL",
-		"RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION",
-		"RUNTIME_COMMAND_KIND_TASK_NOTIFICATION",
-		"RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH",
-		"RUNTIME_COMMAND_KIND_CLEANUP_SESSION",
-		"string session_thread_id = 4;",
-		"int64 binding_generation = 6;",
-		"string runtime_input_id = 11;",
-		"repeated string event_ids = 12;",
-		"RuntimeCommandKind command_kind = 15;",
-		"string payload_json = 16;",
+		"rpc AcceptInput(AcceptInputRequest) returns (AcceptInputResponse);",
+		"rpc AcceptAgentMail(AcceptAgentMailRequest) returns (AcceptAgentMailResponse);",
+		"rpc AcceptTaskNotification(AcceptTaskNotificationRequest) returns (AcceptTaskNotificationResponse);",
+		"rpc Interrupt(InterruptRequest) returns (InterruptResponse);",
+		"rpc ResolveToolConfirmation(ResolveToolConfirmationRequest) returns (ResolveToolConfirmationResponse);",
+		"rpc ApplyRuntimeConfig(ApplyRuntimeConfigRequest) returns (ApplyRuntimeConfigResponse);",
+		"rpc CleanupSession(CleanupSessionRequest) returns (CleanupSessionResponse);",
+		"int64 input_order = 8;",
+		"string delivery_id = 8;",
+		"string tool_use_event_id = 8;",
+		"string cleanup_operation_id = 6;",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("runtime pod proto missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"RuntimeInput" + "CommandRequest", "RuntimeInput" + "CommandResponse", "RuntimeCommand" + "Kind", "command_kind", "event_ids"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("runtime pod proto retained universal command member %q", forbidden)
 		}
 	}
 	for _, generated := range []string{
@@ -291,12 +305,12 @@ func TestGeneratedTypeScriptProtocolUsesSafeNumericScalars(t *testing.T) {
 		t.Fatalf("read generated runtime pod protocol: %v", err)
 	}
 	text := string(agentRuntimeBody)
-	for _, forbidden := range []string{"bindingGeneration: bigint", "bindingGeneration: string", "sequenceFrom: bigint", "sequenceTo: bigint"} {
+	for _, forbidden := range []string{"bindingGeneration: bigint", "bindingGeneration: string", "inputOrder: bigint", "inputOrder: string"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("generated Runtime Pod protocol contains forbidden scalar %q", forbidden)
 		}
 	}
-	for _, required := range []string{"bindingGeneration: number", "sequenceFrom: number", "sequenceTo: number"} {
+	for _, required := range []string{"bindingGeneration: number", "inputOrder: number"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("generated Runtime Pod protocol missing TypeScript number scalar %q", required)
 		}

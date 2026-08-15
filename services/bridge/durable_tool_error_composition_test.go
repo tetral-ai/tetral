@@ -160,13 +160,10 @@ func TestPostgreSQLDurableToolErrorDeclarationColdLoadsAndReducerContinues(t *te
 		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, nextInputEventID, nextEventSequence, "user.message", `{"content":[{"type":"text","text":"continue"}]}`)
 		seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, nextRuntimeInputID, "messages", `["`+nextInputEventID+`"]`, "delivering", bindingID, podUID, nextEventSequence, nextEventSequence)
 		accepted, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope: scope, RuntimeInputId: nextRuntimeInputID, InputKind: "messages",
-			EventIds: []string{nextInputEventID}, SequenceFrom: nextEventSequence, SequenceTo: nextEventSequence,
-			MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
-				"default", sessionID, threadID, nextRuntimeInputID, nextInputEventID, "continue",
-			)},
+			Scope: scope, RuntimeInputId: nextRuntimeInputID,
+			Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 		})
-		if err != nil || accepted.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		if err != nil || accepted.GetCommitted() == nil {
 			t.Fatalf("accept next input after Tool-error cold load: response=%#v err=%v", accepted, err)
 		}
 		resumed, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{

@@ -103,7 +103,7 @@ const (
 	//   running              child-thread status write                     running / thread_status_running
 	//   idle                 child idle / finalization                     idle / thread_status_idle
 	//   requires_action      pending external-wait projection              idle + stop-reason / requires-action metadata
-	//   closed_for_runtime   MarkChildThreadClosed (close_agent)           idle; resumable by resume_agent
+	//   closed_for_runtime   CloseChildControl (close_agent)               idle; resumable by resume_agent
 	//   rescheduling         child retry settlement                        rescheduling / thread_status_rescheduled
 	//   terminated           terminal closeout (CommitRuntimeTermination)  terminated / thread_status_terminated
 	//   failed               terminal closeout (CommitRuntimeTermination)  terminated / thread_status_terminated
@@ -755,9 +755,11 @@ const (
 			'write_request_end',
 			'finish_idle',
 			'create_child_thread',
+			'deliver_inter_agent_mail',
 			'resolve_child_thread',
 			'list_child_threads',
-			'mark_child_thread_closed',
+			'close_child_control',
+			'close_approval_reviewer',
 			'mark_child_thread_active',
 			'read_command_result',
 			'send_command_input',

@@ -7,16 +7,20 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/id"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 const (
 	sandboxToolCancelMaxAttempts = 5
+	maxApprovalReviewTextParts   = 16
+	maxApprovalReviewTextBytes   = 2 * 1024 * 1024
 )
 
 // This file owns the Bridge inputs protocol-family boundary.
@@ -24,33 +28,27 @@ const (
 func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *bridgev1.CommitInputsRequest) (response *bridgev1.CommitInputsResponse, resultErr error) {
 	logStartedAt := time.Now()
 	evidence := runtimeDeclarationRejectionEvidence{
-		Active:      len(request.GetMessageCreates()) > 0,
+		Active:      true,
 		Kind:        "identity",
 		Operation:   bridgeOpCommitInputs,
 		OperationID: request.GetRuntimeInputId(),
 	}
-	if creates := request.GetMessageCreates(); len(creates) > 0 && creates[0] != nil {
-		evidence.MessageOrPart = creates[0].GetMessageKind().String()
-	}
 	defer func() { logRuntimeDeclarationRejected(s.Logger, request.GetScope(), evidence, resultErr) }()
-	inputKind := defaultString(request.GetInputKind(), "messages")
-	if request.GetRuntimeInputId() == "" {
+	if request.GetRuntimeInputId() == "" || request.GetDisposition() != bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT {
 		return nil, status.Error(codes.InvalidArgument, "invalid commit inputs request")
 	}
-	if err := validateCommitInputsRequest(inputKind, request); err != nil {
-		evidence.Kind = "schema"
+	if err := validateApprovalReviewText(request.GetApprovalReviewText()); err != nil {
 		return nil, err
 	}
-	evidence.Kind = "canonicality"
 	key := request.GetRuntimeInputId()
-	declarationDigest, err := commitInputsDeclarationDigest(request, inputKind)
-	if err != nil {
-		return nil, err
-	}
 	now := s.now()
 	var ack *bridgev1.BridgeWriteAck
 	var receipt *bridgev1.DeclarationReceipt
 	var observation declarationApplicationObservation
+	var inputKind string
+	var declarationDigest string
+	var duplicate bool
+	var typedResult *commitInputsTypedResult
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
 		// Serialize replay lookup before validating the current binding. A replacement
 		// binding may recover an ACK lost by its predecessor, while concurrent writers
@@ -62,6 +60,18 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		var err error
+		inputKind, err = commitInputKindTx(ctx, tx, request)
+		if err != nil {
+			evidence.Kind = "schema"
+			return err
+		}
+		evidence.MessageOrPart = inputKind
+		declarationDigest, err = commitInputsDeclarationDigest(request, inputKind)
+		if err != nil {
+			return err
+		}
+		evidence.Kind = "canonicality"
 		evidence.Kind = "transaction"
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
@@ -84,7 +94,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 				return status.Error(codes.FailedPrecondition, "commit inputs receipt is invalid")
 			}
 			ack = duplicateAck(key, "")
+			duplicate = true
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			if err != nil {
+				return err
+			}
+			typedResult, err = commitInputsTypedResultFromReceipt(receipt)
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -95,6 +110,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			return err
 		}
 		evidence.ThreadRole = threadScope.role
+		if inputKind == "approval_review" && (threadScope.role != "approval_reviewer" || threadScope.visibility != "internal") {
+			evidence.Kind = "lineage"
+		}
 		receipt, err = commitInputDeclarationTx(ctx, tx, request, inputKind, key, now)
 		if err != nil {
 			return err
@@ -119,6 +137,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		}
 		ack = committedAck(key, "")
 		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+		if err != nil {
+			return err
+		}
+		typedResult, err = commitInputsTypedResultFromReceipt(receipt)
 		return err
 	}); err != nil {
 		return nil, err
@@ -140,15 +162,40 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		}
 		s.logCommittedThreadInterrupt(ctx, request, event, len(receipt.GetInterruptToolProjections()), time.Since(logStartedAt).Milliseconds())
 	}
-	return &bridgev1.CommitInputsResponse{
-		Ack: ack,
-		Declaration: &bridgev1.DeclarationResponse{
-			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
-			ObservedBindingId:         observation.BindingID,
-			ObservedBindingGeneration: observation.BindingGeneration,
-			ApplicationDisposition:    observation.Disposition,
-		},
-	}, nil
+	if observation.Disposition == bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY {
+		return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Stale{Stale: &bridgev1.CommitInputsStale{}}}, nil
+	}
+	if typedResult == nil {
+		return nil, status.Error(codes.Internal, "commit inputs result is unavailable")
+	}
+	if duplicate {
+		return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Duplicate{
+			Duplicate: commitInputsDuplicateResult(inputKind, typedResult),
+		}}, nil
+	}
+	return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Committed{
+		Committed: commitInputsCommittedResult(inputKind, typedResult),
+	}}, nil
+}
+
+// validateApprovalReviewText bounds the only caller-authored CommitInputs
+// content before Bridge begins the declaration transaction. The count and one
+// aggregate UTF-8 byte budget apply to the complete ordered vector.
+func validateApprovalReviewText(text []string) error {
+	if len(text) > maxApprovalReviewTextParts {
+		return status.Error(codes.InvalidArgument, "approval review content exceeds part count limit")
+	}
+	aggregateBytes := 0
+	for _, part := range text {
+		if !utf8.ValidString(part) {
+			return status.Error(codes.InvalidArgument, "approval review content must be valid UTF-8")
+		}
+		aggregateBytes += len(part)
+		if aggregateBytes > maxApprovalReviewTextBytes {
+			return status.Error(codes.InvalidArgument, "approval review content exceeds aggregate byte limit")
+		}
+	}
+	return nil
 }
 
 func commitInputDeclarationTx(
@@ -160,10 +207,12 @@ func commitInputDeclarationTx(
 	now time.Time,
 ) (*bridgev1.DeclarationReceipt, error) {
 	inboxStatus := ""
+	eventIDs := []string(nil)
+	messageCreates := []*bridgev1.RuntimeMessageCreate(nil)
 	var approvalReviewEvent *bridgev1.DurableEventStamp
 	if commitInputsKindUsesRuntimeInbox(inputKind) {
 		var err error
-		inboxStatus, err = lockAndValidateRuntimeInboxCommitTx(ctx, tx, request, inputKind)
+		inboxStatus, eventIDs, messageCreates, err = lockAndBuildRuntimeInboxCommitTx(ctx, tx, request, inputKind)
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +221,7 @@ func commitInputDeclarationTx(
 		return nil, status.Error(codes.FailedPrecondition, "committed runtime input is missing idempotency state")
 	}
 	if expectedEventType := commitInputEventType(inputKind); expectedEventType != "" {
-		if err := requireCommitInputEventTypesTx(ctx, tx, request.GetScope(), request.GetEventIds(), expectedEventType); err != nil {
+		if err := requireCommitInputEventTypesTx(ctx, tx, request.GetScope(), eventIDs, expectedEventType); err != nil {
 			return nil, err
 		}
 	}
@@ -186,30 +235,29 @@ func commitInputDeclarationTx(
 			tx,
 			request.GetScope(),
 			key,
-			request.GetEventIds()[0],
+			id.New("evt_"),
 			now,
 		)
 		if err != nil {
 			return nil, err
 		}
+		eventIDs = []string{approvalReviewEvent.GetEventId()}
 	}
 	if inputKind == "agent_mail" {
 		if err := requireAgentMailInputTargetTx(ctx, tx, request.GetScope()); err != nil {
 			return nil, err
 		}
 	}
-	if commitInputsKindUsesRuntimeInbox(inputKind) {
-		if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
-			return nil, err
-		}
+	if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
+		return nil, err
 	}
 	if inputKind != "approval_review" {
-		if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+		if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), eventIDs, now); err != nil {
 			return nil, err
 		}
 	}
 	if inputKind == "tool_confirmation" {
-		if err := settleToolConfirmationEventsTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+		if err := settleToolConfirmationEventsTx(ctx, tx, request.GetScope(), eventIDs, now); err != nil {
 			return nil, err
 		}
 	}
@@ -219,8 +267,8 @@ func commitInputDeclarationTx(
 		request.GetScope(),
 		inputKind,
 		key,
-		request.GetEventIds(),
-		request.GetMessageCreates(),
+		eventIDs,
+		messageCreates,
 		now,
 	)
 	if err != nil {
@@ -242,7 +290,7 @@ func commitInputDeclarationTx(
 			ctx,
 			tx,
 			request.GetScope(),
-			request.GetEventIds(),
+			eventIDs,
 		)
 		if err != nil {
 			return nil, err
@@ -253,7 +301,7 @@ func commitInputDeclarationTx(
 			ctx,
 			tx,
 			request.GetScope(),
-			request.GetEventIds()[0],
+			eventIDs[0],
 			now,
 		)
 		if err != nil {
@@ -314,14 +362,39 @@ func createApprovalReviewInputEventTx(
 
 func commitInputsKindUsesRuntimeInbox(inputKind string) bool {
 	switch inputKind {
-	case "messages", "interrupt_control", "tool_confirmation", "agent_mail", "rejection":
+	case "messages", "interrupt_control", "tool_confirmation", "agent_mail", "approval_review", "rejection":
 		return true
 	default:
 		return false
 	}
 }
 
-func lockAndValidateRuntimeInboxCommitTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
+func commitInputKindTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CommitInputsRequest) (string, error) {
+	var inputKind string
+	err := tx.QueryRow(ctx, `SELECT input_kind FROM session_runtime_inbox
+		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 FOR UPDATE`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetRuntimeInputId(),
+	).Scan(&inputKind)
+	if dbconnect.IsNoRows(err) {
+		return "", status.Error(codes.FailedPrecondition, "runtime input is not deliverable")
+	}
+	if err != nil {
+		return "", err
+	}
+	if inputKind == "approval_review" {
+		if len(request.GetApprovalReviewText()) == 0 {
+			return "", status.Error(codes.InvalidArgument, "approval review content is required")
+		}
+	} else if len(request.GetApprovalReviewText()) != 0 {
+		return "", status.Error(codes.InvalidArgument, "approval review content is not valid for Inbox input")
+	}
+	if !commitInputsKindUsesRuntimeInbox(inputKind) {
+		return "", status.Error(codes.FailedPrecondition, "runtime input kind is not committable")
+	}
+	return inputKind, nil
+}
+
+func lockAndBuildRuntimeInboxCommitTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CommitInputsRequest, inputKind string) (string, []string, []*bridgev1.RuntimeMessageCreate, error) {
 	scope := request.GetScope()
 	runtimeInputID := request.GetRuntimeInputId()
 	row := tx.QueryRow(ctx,
@@ -356,29 +429,218 @@ func lockAndValidateRuntimeInboxCommitTx(ctx context.Context, tx *dbconnect.Tx, 
 		&inboxBindingGeneration,
 		&inboxTargetPodUID,
 	); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.FailedPrecondition, "runtime input is not deliverable")
+		return "", nil, nil, status.Error(codes.FailedPrecondition, "runtime input is not deliverable")
 	} else if err != nil {
-		return "", err
+		return "", nil, nil, err
 	}
 	if inboxBindingID != scope.GetBinding().GetBindingId() ||
 		inboxBindingGeneration != scope.GetBinding().GetBindingGeneration() ||
 		inboxTargetPodUID != scope.GetBinding().GetTargetPodUid() ||
 		(inboxStatus != "delivering" && inboxStatus != "accepted" && inboxStatus != "committed") {
-		return "", status.Error(codes.FailedPrecondition, "runtime input is not deliverable")
+		return "", nil, nil, status.Error(codes.FailedPrecondition, "runtime input is not deliverable")
 	}
 	var inboxEventIDs []string
 	if err := json.Unmarshal([]byte(inboxEventIDsJSON), &inboxEventIDs); err != nil {
-		return "", status.Error(codes.FailedPrecondition, "runtime inbox payload is invalid")
+		return "", nil, nil, status.Error(codes.FailedPrecondition, "runtime inbox payload is invalid")
 	}
 	if inboxSessionID != scope.GetSessionId() ||
 		inboxThreadID != scope.GetSessionThreadId() ||
-		inboxKind != inputKind ||
-		!sameBridgeStringSlice(inboxEventIDs, request.GetEventIds()) ||
-		!sameBridgeSequence(inboxSequenceFrom, request.GetSequenceFrom()) ||
-		!sameBridgeSequence(inboxSequenceTo, request.GetSequenceTo()) {
-		return "", status.Error(codes.AlreadyExists, "commit inputs payload conflicts with runtime inbox")
+		inboxKind != inputKind {
+		return "", nil, nil, status.Error(codes.AlreadyExists, "commit inputs target conflicts with runtime inbox")
 	}
-	return inboxStatus, nil
+	_ = inboxSequenceFrom
+	_ = inboxSequenceTo
+	if inputKind == "approval_review" {
+		return inboxStatus, inboxEventIDs, []*bridgev1.RuntimeMessageCreate{approvalReviewCreate(request.GetApprovalReviewText())}, nil
+	}
+	creates, err := buildRuntimeInboxMessageCreatesTx(ctx, tx, scope, inputKind, inboxEventIDs)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return inboxStatus, inboxEventIDs, creates, nil
+}
+
+func buildRuntimeInboxMessageCreatesTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	inputKind string,
+	eventIDs []string,
+) ([]*bridgev1.RuntimeMessageCreate, error) {
+	if inputKind == "interrupt_control" {
+		return nil, nil
+	}
+	if inputKind == "rejection" && len(eventIDs) == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "rejection input source is missing")
+	}
+	creates := make([]*bridgev1.RuntimeMessageCreate, 0, len(eventIDs))
+	for _, eventID := range eventIDs {
+		var eventType string
+		var payloadJSON string
+		if err := tx.QueryRow(ctx, `SELECT type,payload_json FROM session_events
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4 FOR UPDATE`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID,
+		).Scan(&eventType, &payloadJSON); err != nil {
+			return nil, err
+		}
+		switch inputKind {
+		case "messages":
+			if eventType != "user.message" {
+				return nil, status.Error(codes.FailedPrecondition, "message input source is invalid")
+			}
+			var payload struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+				return nil, status.Error(codes.FailedPrecondition, "message input source is malformed")
+			}
+			texts := make([]string, 0, len(payload.Content))
+			for _, content := range payload.Content {
+				if content.Type == "text" {
+					texts = append(texts, content.Text)
+				}
+			}
+			creates = append(creates, runtimeTextMessageCreate(
+				bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT, "user", "user", texts,
+			))
+		case "rejection":
+			if len(creates) == 0 {
+				creates = append(creates, runtimeTextMessageCreate(
+					bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION,
+					"assistant", "agent", []string{"The session runtime could not accept this input."},
+				))
+			}
+		case "tool_confirmation":
+			if eventType != "user.tool_confirmation" {
+				return nil, status.Error(codes.FailedPrecondition, "tool confirmation source is invalid")
+			}
+			var payload struct {
+				Result      string  `json:"result"`
+				DenyMessage *string `json:"deny_message"`
+			}
+			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || (payload.Result != "allow" && payload.Result != "deny") {
+				return nil, status.Error(codes.FailedPrecondition, "tool confirmation source is malformed")
+			}
+			text := "Approval allowed"
+			if payload.Result == "deny" {
+				text = "Approval denied"
+				if payload.DenyMessage != nil && *payload.DenyMessage != "" {
+					text += ": " + *payload.DenyMessage
+				}
+			}
+			creates = append(creates, runtimeTextMessageCreate(
+				bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT, "user", "user", []string{text},
+			))
+		case "agent_mail":
+			if eventType != "agent.thread_message_received" {
+				return nil, status.Error(codes.FailedPrecondition, "agent mail source is invalid")
+			}
+			var envelope struct {
+				Message json.RawMessage `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(payloadJSON), &envelope); err != nil || len(envelope.Message) == 0 {
+				return nil, status.Error(codes.FailedPrecondition, "agent mail source is malformed")
+			}
+			publicMessage, err := publicInterAgentMessageJSON(envelope.Message)
+			if err != nil {
+				return nil, err
+			}
+			content, err := agentMailContentFromPublicMessage(publicMessage)
+			if err != nil {
+				return nil, err
+			}
+			creates = append(creates, runtimeTextMessageCreate(
+				bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
+				"user", "runtime", []string{content},
+			))
+		default:
+			return nil, status.Error(codes.FailedPrecondition, "runtime input kind is not committable")
+		}
+	}
+	return creates, nil
+}
+
+func approvalReviewCreate(texts []string) *bridgev1.RuntimeMessageCreate {
+	return runtimeTextMessageCreate(
+		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT,
+		"user", "runtime", texts,
+	)
+}
+
+func runtimeTextMessageCreate(kind bridgev1.RuntimeMessageCreateKind, role, origin string, texts []string) *bridgev1.RuntimeMessageCreate {
+	parts := make([]*bridgev1.RuntimePartCreate, 0, len(texts))
+	for _, text := range texts {
+		partJSON, _ := marshalBridgeJSON(map[string]any{
+			"type": "text", "text": text, "truncated": false, "status": "completed",
+		})
+		parts = append(parts, &bridgev1.RuntimePartCreate{PartKind: "text", PartJson: partJSON})
+	}
+	infoJSON, _ := marshalBridgeJSON(map[string]any{"role": role, "origin": origin, "status": "completed"})
+	return &bridgev1.RuntimeMessageCreate{MessageKind: kind, MessageInfoJson: infoJSON, Parts: parts}
+}
+
+type commitInputsTypedResult struct {
+	assignedContextSequences []int64
+	interruptToolResults     []*bridgev1.RuntimeInterruptToolResult
+	pendingAttachmentJSON    []string
+}
+
+func commitInputsTypedResultFromReceipt(receipt *bridgev1.DeclarationReceipt) (*commitInputsTypedResult, error) {
+	result := &commitInputsTypedResult{
+		assignedContextSequences: make([]int64, 0, len(receipt.GetMessages())),
+		interruptToolResults:     make([]*bridgev1.RuntimeInterruptToolResult, 0, len(receipt.GetInterruptToolProjections())),
+		pendingAttachmentJSON:    append([]string(nil), receipt.GetPendingAttachmentDeltaJson()...),
+	}
+	for _, stamp := range receipt.GetMessages() {
+		if stamp.GetMessageSequence() <= 0 {
+			return nil, status.Error(codes.FailedPrecondition, "committed input context sequence is invalid")
+		}
+		result.assignedContextSequences = append(result.assignedContextSequences, stamp.GetMessageSequence())
+	}
+	for _, projection := range receipt.GetInterruptToolProjections() {
+		converted := &bridgev1.RuntimeInterruptToolResult{ToolUseEventId: projection.GetToolUseEventId()}
+		switch terminal := projection.GetTerminalState().(type) {
+		case *bridgev1.InterruptToolProjection_Error:
+			converted.Outcome = &bridgev1.RuntimeInterruptToolResult_Error{Error: &bridgev1.RuntimeContextToolFailed{ErrorJson: terminal.Error.GetErrorJson()}}
+		case *bridgev1.InterruptToolProjection_Cancelled:
+			converted.Outcome = &bridgev1.RuntimeInterruptToolResult_Cancelled{Cancelled: &bridgev1.RuntimeContextToolCancelled{ErrorJson: terminal.Cancelled.ErrorJson}}
+		default:
+			return nil, status.Error(codes.FailedPrecondition, "interrupt Tool result is malformed")
+		}
+		result.interruptToolResults = append(result.interruptToolResults, converted)
+	}
+	return result, nil
+}
+
+func commitInputsCommittedResult(inputKind string, result *commitInputsTypedResult) *bridgev1.CommitInputsCommitted {
+	if inputKind == "interrupt_control" {
+		return &bridgev1.CommitInputsCommitted{Application: &bridgev1.CommitInputsCommitted_Interrupt{
+			Interrupt: &bridgev1.CommitInputsInterruptApplication{InterruptToolResults: result.interruptToolResults},
+		}}
+	}
+	return &bridgev1.CommitInputsCommitted{Application: &bridgev1.CommitInputsCommitted_Context{
+		Context: &bridgev1.CommitInputsContextApplication{
+			AssignedContextSequences: result.assignedContextSequences,
+			PendingAttachmentJson:    result.pendingAttachmentJSON,
+		},
+	}}
+}
+
+func commitInputsDuplicateResult(inputKind string, result *commitInputsTypedResult) *bridgev1.CommitInputsDuplicate {
+	if inputKind == "interrupt_control" {
+		return &bridgev1.CommitInputsDuplicate{Application: &bridgev1.CommitInputsDuplicate_Interrupt{
+			Interrupt: &bridgev1.CommitInputsInterruptApplication{InterruptToolResults: result.interruptToolResults},
+		}}
+	}
+	return &bridgev1.CommitInputsDuplicate{Application: &bridgev1.CommitInputsDuplicate_Context{
+		Context: &bridgev1.CommitInputsContextApplication{
+			AssignedContextSequences: result.assignedContextSequences,
+			PendingAttachmentJson:    result.pendingAttachmentJSON,
+		},
+	}}
 }
 
 func markRuntimeInboxCommittedTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, runtimeInputID string, now time.Time) error {
@@ -409,22 +671,6 @@ func markRuntimeInboxCommittedTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		return status.Error(codes.FailedPrecondition, "runtime input is not deliverable")
 	}
 	return nil
-}
-
-func sameBridgeStringSlice(left []string, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func sameBridgeSequence(expected sql.NullInt64, actual int64) bool {
-	return expected.Valid == (actual > 0) && (!expected.Valid || expected.Int64 == actual)
 }
 
 func markSessionEventsProcessed(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventIDs []string, now time.Time) error {
@@ -636,43 +882,6 @@ func settleToolConfirmationEventsTx(ctx context.Context, tx *dbconnect.Tx, scope
 	return nil
 }
 
-func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInputsRequest) error {
-	switch inputKind {
-	case "messages":
-		if len(request.GetEventIds()) == 0 || len(request.GetMessageCreates()) != len(request.GetEventIds()) {
-			return status.Error(codes.InvalidArgument, "message commit requires one message create per event")
-		}
-		return nil
-	case "interrupt_control":
-		if len(request.GetEventIds()) != 1 || len(request.GetMessageCreates()) != 0 {
-			return status.Error(codes.InvalidArgument, "interrupt commit requires one event id")
-		}
-		return nil
-	case "tool_confirmation":
-		if len(request.GetEventIds()) != 1 || len(request.GetMessageCreates()) != 1 {
-			return status.Error(codes.InvalidArgument, "tool confirmation commit requires one approval message create")
-		}
-		return nil
-	case "agent_mail":
-		if len(request.GetEventIds()) != 1 || len(request.GetMessageCreates()) != 1 {
-			return status.Error(codes.InvalidArgument, "agent mail commit requires one mail message create")
-		}
-		return nil
-	case "approval_review":
-		if len(request.GetEventIds()) != 1 || len(request.GetMessageCreates()) != 1 {
-			return status.Error(codes.InvalidArgument, "approval review commit requires one reviewer message create")
-		}
-		return nil
-	case "rejection":
-		if len(request.GetEventIds()) == 0 || len(request.GetMessageCreates()) != len(request.GetEventIds()) {
-			return status.Error(codes.InvalidArgument, "rejection commit requires one rejection message create per event")
-		}
-		return nil
-	default:
-		return status.Error(codes.InvalidArgument, "unsupported commit inputs kind")
-	}
-}
-
 func commitInputEventType(inputKind string) string {
 	switch inputKind {
 	case "messages":
@@ -711,45 +920,6 @@ func requireAgentMailInputTargetTx(ctx context.Context, tx *dbconnect.Tx, scope 
 		return status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 	}
 	return nil
-}
-
-func publicSentInterAgentEventPayloadTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	raw string,
-) (string, error) {
-	var payload map[string]json.RawMessage
-	if json.Unmarshal([]byte(raw), &payload) != nil || payload == nil {
-		return "", status.Error(codes.InvalidArgument, "sent inter-agent event payload must be an object")
-	}
-	message, ok := payload["message"]
-	if !ok {
-		return "", status.Error(codes.InvalidArgument, "sent inter-agent event payload requires message")
-	}
-	publicMessage, err := publicInterAgentMessageJSON(message)
-	if err != nil {
-		return "", err
-	}
-	var targetThreadID string
-	if json.Unmarshal(payload["target_thread_id"], &targetThreadID) != nil || targetThreadID == "" {
-		return "", status.Error(codes.InvalidArgument, "sent inter-agent event payload requires target thread id")
-	}
-	targetTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, scope, targetThreadID)
-	if err != nil {
-		return "", err
-	}
-	targetTaskNameJSON, err := json.Marshal(nullableJSONString(targetTaskName))
-	if err != nil {
-		return "", err
-	}
-	payload["target_task_name"] = targetTaskNameJSON
-	payload["message"] = publicMessage
-	projected, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
-	return string(projected), nil
 }
 
 func publicInterAgentMessageJSON(raw json.RawMessage) (json.RawMessage, error) {

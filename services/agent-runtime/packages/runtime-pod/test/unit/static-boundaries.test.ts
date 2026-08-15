@@ -73,16 +73,23 @@ describe("Runtime Pod static boundaries", () => {
     expect(violations).toEqual([]);
   });
 
-  test("protocol exposes Runtime Pod command envelope identity", async () => {
+  test("protocol exposes method-specific Runtime Pod ingress contracts", async () => {
     const protocol = await readFile(
       new URL("src/gen/tetral/agent_runtime/v1/agent_runtime.ts", protocolRoot),
       "utf8",
     );
 
-    expect(protocol).toContain("export interface RuntimeInputCommandRequest");
+    expect(protocol).toContain("export interface AcceptInputRequest");
+    expect(protocol).toContain("export interface AcceptAgentMailRequest");
+    expect(protocol).toContain("export interface AcceptTaskNotificationRequest");
+    expect(protocol).toContain("export interface InterruptRequest");
+    expect(protocol).toContain("export interface ResolveToolConfirmationRequest");
+    expect(protocol).toContain("export interface ApplyRuntimeConfigRequest");
+    expect(protocol).toContain("export interface CleanupSessionRequest");
     expect(protocol).toContain("sessionThreadId: string;");
     expect(protocol).toContain("runtimeInputId: string;");
-    expect(protocol).toContain("RuntimeCommandKind");
+    expect(protocol).not.toContain("RuntimeInput" + "CommandRequest");
+    expect(protocol).not.toContain("RuntimeCommand" + "Kind");
     expect(protocol).toContain("bindingGeneration: number;");
   });
 

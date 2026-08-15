@@ -319,16 +319,16 @@ export class ProviderStreamAccumulator {
   }
 
   /** Interrupt intent carries no Tool census; Bridge owns every outcome. */
-  prepareInterruptSettlement(interrupt: { readonly eventIds: readonly string[] }, _failure: RuntimeFailure): void {
-    if (this.terminal || interrupt.eventIds.length !== 1) {
-      throw new Error("interrupt settlement requires one open request and one admitted event");
+  prepareInterruptSettlement(_interrupt: { readonly runtimeInputId: string }, _failure: RuntimeFailure): void {
+    if (this.terminal) {
+      throw new Error("interrupt settlement requires one open request");
     }
     this.terminal = true;
     this.discardUnreceiptedMembers();
   }
 
   applyInterruptSettlement(
-    interrupt: { readonly runtimeInputId: string; readonly eventIds: readonly string[] },
+    interrupt: { readonly runtimeInputId: string },
     receipt: RuntimeDeclarationReceipt,
   ): void {
     const expected = this.unfinishedDurableTools()
@@ -337,7 +337,6 @@ export class ProviderStreamAccumulator {
     const projections = applyInterruptInputReceipt({
       sessionThreadId: this.options.sessionThreadId,
       runtimeInputId: interrupt.runtimeInputId,
-      eventIds: interrupt.eventIds,
       expectedToolUseEventIds: expected,
     }, receipt);
     const updated = new Map<string, RuntimePart>();

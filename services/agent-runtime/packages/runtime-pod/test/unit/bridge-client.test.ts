@@ -6,7 +6,7 @@ import {
   DurableEventDisposition,
   DurableProjectionDisposition,
   ReceiptApplicationDisposition,
-  RuntimeMessageCreateKind,
+  RuntimeInputDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   AgentRuntimeBridgeServiceClient,
@@ -15,6 +15,10 @@ import type {
   CommitRuntimeTerminationRequest,
   CommitRuntimeTerminationResponse,
   CommitTaskNotificationResultRequest,
+  AdmitApprovalReviewInputRequest,
+  CloseApprovalReviewerRequest,
+  EnsureApprovalReviewerSidecarRequest,
+  EnsureApprovalReviewerTrunkRequest,
   FinishIdleRequest,
   LoadContextRequest,
   RuntimeMessageCreate,
@@ -47,12 +51,13 @@ import {
   BridgeAPIControlInputCommitter,
   BridgeAPIEventWriter,
   BridgeAPIInternalToolRepairCommitter,
+  BridgeAPIApprovalReviewerThreadCreator,
 } from "../../src/bridge-client.js";
+import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
 import {
   commitInputsDeclarationDigest,
   finishIdleDeclarationDigest,
   internalToolRepairDeclarationDigest,
-  taskNotificationDeclarationDigest,
   writeEventDeclarationDigest,
   writeRequestEndDeclarationDigest,
 } from "../../src/runtime-declaration-wire.js";
@@ -63,6 +68,63 @@ import {
 const now = "2026-08-08T00:00:00.000Z";
 
 describe("Bridge runtime declaration adapters", () => {
+  test("requires exact reviewer ensure and input-admission result variants", async () => {
+    const bridge = new ReviewerBridge();
+    const creator = new BridgeAPIApprovalReviewerThreadCreator({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    bridge.ensureTrunkResponse = {
+      committed: { reviewerThreadId: "thr_review" },
+      duplicate: { reviewerThreadId: "thr_review" },
+    };
+    await expect(creator.createApprovalReviewerThread(reviewerCreation())).resolves.toEqual({
+      ok: false,
+      message: "approval reviewer thread result was malformed",
+    });
+    expect(bridge.admitRequests).toEqual([]);
+
+    bridge.ensureTrunkResponse = { committed: { reviewerThreadId: "thr_review" } };
+    bridge.admitResponse = {
+      committed: { runtimeInputId: "rin_review" },
+      duplicate: { runtimeInputId: "rin_review" },
+    };
+    await expect(creator.createApprovalReviewerThread(reviewerCreation())).resolves.toEqual({
+      ok: false,
+      message: "approval reviewer input admission result was malformed",
+    });
+  });
+
+  test("uses the Bridge-authored reviewer input identity and rejects contradictory close results", async () => {
+    const bridge = new ReviewerBridge();
+    const creator = new BridgeAPIApprovalReviewerThreadCreator({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+    bridge.ensureTrunkResponse = { duplicate: { reviewerThreadId: "thr_review" } };
+    bridge.admitResponse = { committed: { runtimeInputId: "rin_bridge_review" } };
+
+    await expect(creator.createApprovalReviewerThread(reviewerCreation())).resolves.toEqual({
+      ok: true,
+      reviewerThreadId: "thr_review",
+      runtimeInputId: "rin_bridge_review",
+    });
+    expect(bridge.admitRequests).toEqual([expect.objectContaining({
+      reviewerThreadId: "thr_review",
+      reviewId: "review_1",
+    })]);
+
+    bridge.closeResponse = { committed: {}, stale: {} };
+    await expect(creator.closeApprovalReviewerThread({
+      ...reviewerCreation(),
+      reviewerThreadId: "thr_review",
+    })).resolves.toEqual({ ok: false, message: "bridge_child_lifecycle_result_invalid" });
+  });
   test("loads a populated cold context through the production context loader", async () => {
     const bridge = new DeclarationBridge();
     const loader = new BridgeAPIContextLoader(options(bridge));
@@ -76,6 +138,23 @@ describe("Bridge runtime declaration adapters", () => {
       pendingSandboxExecutionIds: [],
       pendingAttachmentIdentities: [],
       undeliveredMailDeliveryIds: [],
+    });
+  });
+
+  test("requires exactly one target-owned agent-mail read result", async () => {
+    const bridge = new DeclarationBridge();
+    const loader = new BridgeAPIContextLoader(options(bridge));
+
+    bridge.readAgentMailResponse = { found: { deliveryId: "delivery_1", content: "done" } };
+    await expect(loader.readAgentMail(control("rin_mail"), "thr_child")).resolves.toMatchObject({
+      deliveryId: "delivery_1",
+      content: "done",
+      message: { parts: [{ text: "done" }] },
+    });
+
+    bridge.readAgentMailResponse = { found: { deliveryId: "delivery_1", content: "done" }, empty: {} };
+    await expect(loader.readAgentMail(control("rin_mail"), "thr_child")).rejects.toMatchObject({
+      code: "schema_mismatch",
     });
   });
 
@@ -335,8 +414,34 @@ describe("Bridge runtime declaration adapters", () => {
     }
     expect(result.receipt.operationId).toBe(input.runtimeInputId);
     expect(result.receipt.messages).toHaveLength(1);
-    expect(bridge.commitInputsRequests[0]?.messageCreates).toHaveLength(1);
-    expect(bridge.commitInputsRequests[0]?.messageCreates[0]).not.toHaveProperty("runtimeLocalId");
+    expect(bridge.commitInputsRequests[0]).toMatchObject({
+      runtimeInputId: input.runtimeInputId,
+      disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
+      approvalReviewText: [],
+    });
+    expect(bridge.commitInputsRequests[0]).not.toHaveProperty("messageCreates");
+  });
+
+  test("rejects zero, multiple, and mismatched CommitInputs variants", async () => {
+    const validContext = { assignedContextSequences: [1], pendingAttachmentJson: [] };
+    const malformedResponses = [
+      {},
+      { committed: { context: validContext }, duplicate: { context: validContext } },
+      { committed: {} },
+      { committed: { context: validContext, interrupt: { interruptToolResults: [] } } },
+      { committed: { interrupt: { interruptToolResults: [] } } },
+    ];
+    for (const response of malformedResponses) {
+      const bridge = new DeclarationBridge();
+      bridge.commitInputsResponse = response;
+      const loader = new BridgeAPIContextLoader(options(bridge));
+      const input = acceptedInput("rin_malformed_commit_inputs");
+      await expect(loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) })).rejects.toMatchObject({
+        type: "context-loader",
+        code: "schema_mismatch",
+        retryable: false,
+      });
+    }
   });
 
   test("retries live task-notification lease contention and converges after custody settles", async () => {
@@ -354,8 +459,33 @@ describe("Bridge runtime declaration adapters", () => {
     });
     const result = await loader.commitAcceptedInput(input, { messageCreates });
 
-    expect(result).toMatchObject({ type: "receipt", inputDisposition: "committed" });
+    expect(result).toMatchObject({
+      type: "receipt",
+      inputDisposition: "committed",
+      receipt: {
+        operationKind: "commit_task_notification_result",
+        operationId: taskNotificationOperationId(input.runtimeInputId, input.taskId),
+      },
+    });
     expect(bridge.commitTaskNotificationRequests).toHaveLength(2);
+  });
+
+  test("projects a duplicate task notification through the same task operation identity", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.duplicateTaskNotification = true;
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_duplicate");
+
+    const result = await loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) });
+
+    expect(result).toMatchObject({
+      type: "receipt",
+      inputDisposition: "duplicate",
+      receipt: {
+        operationKind: "commit_task_notification_result",
+        operationId: taskNotificationOperationId(input.runtimeInputId, input.taskId),
+      },
+    });
   });
 
   test("treats missing task-notification Queue custody as terminal without retry", async () => {
@@ -415,7 +545,7 @@ describe("Bridge runtime declaration adapters", () => {
 
     expect(result).toEqual({
       type: "task_notification_rejected",
-      errorCode: "task_notification_payload_mismatch",
+      errorCode: "task_notification_result_invalid",
     });
     expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
   });
@@ -435,6 +565,23 @@ describe("Bridge runtime declaration adapters", () => {
     expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
   });
 
+  test("rejects zero and multiple task-notification outcomes", async () => {
+    for (const response of [
+      {},
+      { committed: { assignedContextSequences: [1] }, duplicate: { assignedContextSequences: [1] } },
+    ]) {
+      const bridge = new DeclarationBridge();
+      bridge.taskNotificationResponse = response;
+      const loader = new BridgeAPIContextLoader(options(bridge));
+      const input = taskNotificationInput("rin_task_malformed_outcome");
+      await expect(loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) })).rejects.toMatchObject({
+        type: "context-loader",
+        code: "unavailable",
+        retryable: true,
+      });
+    }
+  });
+
   test("lowers the shared reviewer declaration through the production CommitInputs adapter", async () => {
     const fixture = await Bun.file(new URL("../../../../testdata/reviewer-input-declaration.json", import.meta.url)).json() as {
       message: unknown;
@@ -444,6 +591,7 @@ describe("Bridge runtime declaration adapters", () => {
     const loader = new BridgeAPIContextLoader(options(bridge));
     const input: Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }> = {
       ...control("rin_reviewer_shared"),
+      inputOrder: 0,
       kind: "approval_review",
       reviewId: "review_shared",
       parentThreadId: "thrd_parent",
@@ -463,10 +611,9 @@ describe("Bridge runtime declaration adapters", () => {
     const result = await loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) });
 
     expect(result).toMatchObject({ type: "receipt", inputDisposition: "committed" });
-    const lowered = bridge.commitInputsRequests[0]?.messageCreates[0];
-    expect(lowered?.messageKind).toBe(RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT);
-    expect(JSON.parse(lowered?.messageInfoJson ?? "null")).toEqual(fixture.messageCreate.messageInfo);
-    expect(JSON.parse(lowered?.parts[0]?.partJson ?? "null")).toEqual(fixture.messageCreate.part);
+    expect(bridge.commitInputsRequests[0]?.approvalReviewText).toEqual([
+      (fixture.messageCreate.part as { text: string }).text,
+    ]);
   });
 
   test("commits interrupt intent without a client-owned Tool census", async () => {
@@ -483,9 +630,29 @@ describe("Bridge runtime declaration adapters", () => {
     expect(result).toMatchObject({ ok: true, receipt: { operationId: "rin_interrupt", messages: [] } });
     expect(bridge.commitInputsRequests[0]).toMatchObject({
       runtimeInputId: "rin_interrupt",
-      inputKind: "interrupt_control",
-      messageCreates: [],
+      disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
+      approvalReviewText: [],
     });
+    expect(bridge.commitInputsRequests[0]).not.toHaveProperty("messageCreates");
+  });
+
+  test("rejects interrupt results without exactly one terminal outcome", async () => {
+    for (const interruptToolResult of [
+      { toolUseEventId: "sevt_tool" },
+      { toolUseEventId: "sevt_tool", error: { errorJson: `{}` }, cancelled: {} },
+    ]) {
+      const bridge = new DeclarationBridge();
+      bridge.commitInputsResponse = {
+        committed: { interrupt: { interruptToolResults: [interruptToolResult] } },
+      };
+      const committer = new BridgeAPIControlInputCommitter(options(bridge));
+      const result = await committer.commitControlInput({
+        scope: control("rin_interrupt_malformed"),
+        inputKind: "interrupt_control",
+        messageCreates: [],
+      });
+      expect(result).toMatchObject({ ok: false, retryable: false, errorCode: "bridge_commit_rejected" });
+    }
   });
 
   test("projects Assistant append and Tool settlement through disjoint RPCs", async () => {
@@ -709,9 +876,6 @@ describe("Bridge runtime declaration adapters", () => {
       finishReason: "cancelled",
       interruptSettlement: {
         runtimeInputId: "rin_interrupt_joined",
-        eventIds: ["sevt_interrupt"],
-        sequenceFrom: 8,
-        sequenceTo: 8,
       },
     };
 
@@ -726,9 +890,6 @@ describe("Bridge runtime declaration adapters", () => {
     });
     expect(bridge.writeRequestEndRequests[0]?.interruptSettlement).toEqual({
       runtimeInputId: "rin_interrupt_joined",
-      eventIds: ["sevt_interrupt"],
-      sequenceFrom: 8,
-      sequenceTo: 8,
     });
   });
 
@@ -898,6 +1059,7 @@ function control(runtimeInputId: string) {
     bindingGeneration: 3,
     targetPodUid: "pod_1",
     runtimeInputId,
+    inputOrder: 7,
     eventIds: [`sevt_${runtimeInputId}`],
     sequenceFrom: 7,
     sequenceTo: 7,
@@ -908,7 +1070,7 @@ function acceptedInput(runtimeInputId: string): RuntimeAcceptedInputState {
   return {
     ...control(runtimeInputId),
     kind: "messages",
-    payloadJson: JSON.stringify({ messages: [runtimeMessage(`msg_${runtimeInputId}`, "hello")] }),
+    contentJson: JSON.stringify({ messages: [runtimeMessage(`msg_${runtimeInputId}`, "hello")] }),
   };
 }
 
@@ -919,7 +1081,7 @@ function taskNotificationInput(runtimeInputId: string): Extract<RuntimeAcceptedI
     taskId: `task_${runtimeInputId}`,
     sourceToolUseEventId: `sevt_tool_${runtimeInputId}`,
     status: "completed",
-    payloadJson: JSON.stringify({ status: "completed", text: "background task completed" }),
+    notificationJson: JSON.stringify({ status: "completed", text: "background task completed" }),
   };
 }
 
@@ -956,8 +1118,79 @@ function mcpSettlementEnvelope(): SessionEventWriterToolSettlementEnvelope {
   };
 }
 
+function reviewerCreation(): ApprovalReviewerThreadCreation {
+  return {
+    request: {
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thrd_parent",
+      bindingId: "bind_1",
+      bindingGeneration: 3,
+      targetPodUid: "pod_1",
+    } as ApprovalReviewerThreadCreation["request"],
+    reviewId: "review_1",
+    isTrunk: true,
+    ensureOperationId: "ensure_1",
+  };
+}
+
+class ReviewerBridge {
+  readonly admitRequests: AdmitApprovalReviewInputRequest[] = [];
+  ensureTrunkResponse: unknown = { committed: { reviewerThreadId: "thr_review" } };
+  ensureSidecarResponse: unknown = { committed: { reviewerThreadId: "thr_review" } };
+  admitResponse: unknown = { committed: { runtimeInputId: "rin_review" } };
+  closeResponse: unknown = { committed: {} };
+
+  client(): AgentRuntimeBridgeServiceClient {
+    return {
+      ensureApprovalReviewerTrunk: this.ensureApprovalReviewerTrunk.bind(this),
+      ensureApprovalReviewerSidecar: this.ensureApprovalReviewerSidecar.bind(this),
+      admitApprovalReviewInput: this.admitApprovalReviewInput.bind(this),
+      closeApprovalReviewer: this.closeApprovalReviewer.bind(this),
+    } as unknown as AgentRuntimeBridgeServiceClient;
+  }
+
+  private ensureApprovalReviewerTrunk(
+    _request: EnsureApprovalReviewerTrunkRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    callback(null, this.ensureTrunkResponse);
+    return grpcCall();
+  }
+
+  private ensureApprovalReviewerSidecar(
+    _request: EnsureApprovalReviewerSidecarRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    callback(null, this.ensureSidecarResponse);
+    return grpcCall();
+  }
+
+  private admitApprovalReviewInput(
+    request: AdmitApprovalReviewInputRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    this.admitRequests.push(request);
+    callback(null, this.admitResponse);
+    return grpcCall();
+  }
+
+  private closeApprovalReviewer(
+    _request: CloseApprovalReviewerRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    callback(null, this.closeResponse);
+    return grpcCall();
+  }
+}
+
 class DeclarationBridge {
   readonly loadContextRequests: LoadContextRequest[] = [];
+  readonly readAgentMailRequests: unknown[] = [];
   readonly commitInputsRequests: CommitInputsRequest[] = [];
   readonly writeEventRequests: WriteEventRequest[] = [];
   readonly settleToolResultRequests: SettleToolResultRequest[] = [];
@@ -974,7 +1207,11 @@ class DeclarationBridge {
   readonly taskNotificationErrors: number[] = [];
   readonly taskNotificationRejections: string[] = [];
   loadContextJson: string | undefined;
+  readAgentMailResponse: unknown = { empty: {} };
+  commitInputsResponse: unknown | undefined;
+  taskNotificationResponse: unknown | undefined;
   corruptTaskNotificationDigest = false;
+  duplicateTaskNotification = false;
   repairOperationId = "repair";
   private eventSequence = 0;
   private messageSequence = 0;
@@ -984,6 +1221,7 @@ class DeclarationBridge {
   client(): AgentRuntimeBridgeServiceClient {
     return {
       loadContext: this.loadContext.bind(this),
+      readAgentMail: this.readAgentMail.bind(this),
       commitInputs: this.commitInputs.bind(this),
       writeEvent: this.writeEvent.bind(this),
       settleToolResult: this.settleToolResult.bind(this),
@@ -1015,23 +1253,23 @@ class DeclarationBridge {
     return grpcCall();
   }
 
+  private readAgentMail(request: unknown, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.readAgentMailRequests.push(request);
+    callback(null, this.readAgentMailResponse);
+    return grpcCall();
+  }
+
   private commitInputs(request: CommitInputsRequest, _metadata: Metadata, _options: CallOptions, callback: (error: Error | null, response: unknown) => void): unknown {
     this.commitInputsRequests.push(request);
-    const events = request.eventIds.map((eventId, index) => this.event(
-      request,
-      eventId,
-      request.sequenceFrom + index,
-      request.inputKind === "approval_review" ? "created" : "existing",
-    ));
-    callback(null, response(request, request.runtimeInputId, [receipt({
-      request,
-      operationKind: "commit_inputs",
-      sourceKind: request.inputKind,
-      operationId: request.runtimeInputId,
-      digest: commitInputsDeclarationDigest(request),
-      events,
-      messages: request.messageCreates.map((create, index) => this.message(request, create, events[index]!.eventId)),
-    })]));
+    if (this.commitInputsResponse !== undefined) {
+      callback(null, this.commitInputsResponse);
+      return grpcCall();
+    }
+    callback(null, {
+      committed: request.runtimeInputId === "rin_interrupt"
+        ? { interrupt: { interruptToolResults: [] } }
+        : { context: { assignedContextSequences: [++this.messageSequence], pendingAttachmentJson: [] } },
+    });
     return grpcCall();
   }
 
@@ -1048,26 +1286,21 @@ class DeclarationBridge {
     }
     const rejectionCode = this.taskNotificationRejections.shift();
     if (rejectionCode !== undefined) {
-      callback(null, {
-        ack: {
-          status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED,
-          runtimeInputId: request.runtimeInputId,
-          errorCode: rejectionCode,
-        },
-      });
+      callback(null, { rejected: {} });
       return grpcCall();
     }
-    const event = this.event(request, `sevt_${request.runtimeInputId}`);
-    const operationId = taskNotificationOperationId(request.runtimeInputId, request.taskId);
-    callback(null, response(request, request.runtimeInputId, [receipt({
-      request,
-      operationKind: "commit_task_notification_result",
-      sourceKind: "task_notification",
-      operationId,
-      digest: this.corruptTaskNotificationDigest ? "corrupt-task-notification-digest" : taskNotificationDeclarationDigest(request),
-      events: [event],
-      messages: request.messageCreate === undefined ? [] : [this.message(request, request.messageCreate, event.eventId)],
-    })]));
+    if (this.taskNotificationResponse !== undefined) {
+      callback(null, this.taskNotificationResponse);
+      return grpcCall();
+    }
+    const result = {
+      assignedContextSequences: this.corruptTaskNotificationDigest
+        ? []
+        : [++this.messageSequence],
+    };
+    callback(null, this.duplicateTaskNotification
+      ? { duplicate: result }
+      : { committed: result });
     return grpcCall();
   }
 
@@ -1174,18 +1407,10 @@ class DeclarationBridge {
       digest: commitInputsDeclarationDigest({
         scope: request.scope,
         runtimeInputId: request.interruptSettlement.runtimeInputId,
-        eventIds: request.interruptSettlement.eventIds,
-        sequenceFrom: request.interruptSettlement.sequenceFrom,
-        sequenceTo: request.interruptSettlement.sequenceTo,
-        inputKind: "interrupt_control",
-        messageCreates: [],
-      }),
-      events: request.interruptSettlement.eventIds.map((eventId, index) => this.event(
-        request,
-        eventId,
-        request.interruptSettlement!.sequenceFrom + index,
-        "existing",
-      )),
+        disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
+        approvalReviewText: [],
+      }, "interrupt_control"),
+      events: [],
       messages: [],
     })];
     callback(null, response(request, request.runtimeWriteId, [...interrupt, main]));

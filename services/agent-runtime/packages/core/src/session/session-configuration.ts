@@ -5,7 +5,7 @@ export interface RuntimeConfigurationPatch {
   readonly manifestETag?: string | undefined;
   readonly manifestReadiness?: "ready" | "unready" | undefined;
   readonly manifestDiagnostic?: string | undefined;
-  readonly payloadJson: string;
+  readonly contentJson: string;
   readonly coldLoad?: true | undefined;
   readonly installedBuiltinFamily?: "claude" | "gpt" | undefined;
 }
@@ -115,7 +115,7 @@ export class SessionConfiguration {
 
 function clonePatch(patch: RuntimeConfigurationPatch): RuntimeConfigurationPatch {
   return {
-    payloadJson: patch.payloadJson,
+    contentJson: patch.contentJson,
     ...(patch.generation !== undefined ? { generation: patch.generation } : {}),
     ...(patch.mcpServerName !== undefined ? { mcpServerName: patch.mcpServerName } : {}),
     ...(patch.manifestETag !== undefined ? { manifestETag: patch.manifestETag } : {}),

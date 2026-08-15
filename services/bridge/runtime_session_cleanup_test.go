@@ -15,7 +15,6 @@ import (
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -458,13 +457,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 		SessionID:      "sesn_bridge_cleanup_preclaim",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_preclaim_1",
 		CleanupJobID:   "cleanup_bridge_preclaim_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_preclaim","cleanup_job_id":"cleanup_bridge_preclaim_1"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup preclaim: %v", err)
 	}
-	if !plan.StaleAccepted || plan.Request != nil {
+	if !plan.StaleAccepted || plan.CleanupSession != nil {
 		t.Fatalf("cleanup preclaim plan = %#v; want stale with no Runtime command", plan)
 	}
 	var claimedAt sql.NullString
@@ -508,7 +506,7 @@ func TestPostgreSQLRuntimeDeliveryStoreDeletedSessionSilentlyStalesOrdinaryJobs(
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand %s: %v", job.Kind, err)
 		}
-		if !plan.StaleAccepted || plan.Request != nil {
+		if !plan.StaleAccepted || plan.CleanupSession != nil {
 			t.Fatalf("deleted %s plan = %#v; want silent stale ack", job.Kind, plan)
 		}
 	}
@@ -551,14 +549,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 		SessionID:      "sesn_bridge_cleanup_confirm",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_confirm_1",
 		CleanupJobID:   "cleanup_bridge_confirm_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_confirm","cleanup_job_id":"cleanup_bridge_confirm_1"}`,
 	}
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup confirmation: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup confirmation plan = %#v; want claimed Runtime command", plan)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -646,13 +643,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedIn
 		SessionID:      "sesn_bridge_cleanup_preidle",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_preidle_1",
 		CleanupJobID:   "cleanup_bridge_preidle_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_preidle","cleanup_job_id":"cleanup_bridge_preidle_1"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup preidle: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup preidle plan = %#v; want claim despite pre-idle unprocessed child input", plan)
 	}
 }
@@ -694,13 +690,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsPostIdleChildInputBy
 		SessionID:      "sesn_bridge_cleanup_child_postidle",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_child_postidle_1",
 		CleanupJobID:   "cleanup_bridge_child_postidle_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_child_postidle","cleanup_job_id":"cleanup_bridge_child_postidle_1"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup child post-idle: %v", err)
 	}
-	if !plan.StaleAccepted || plan.Request != nil {
+	if !plan.StaleAccepted || plan.CleanupSession != nil {
 		t.Fatalf("cleanup child post-idle plan = %#v; want stale without Runtime command", plan)
 	}
 }
@@ -726,7 +721,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhileChildRuns(t
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand with running child: %v", err)
 	}
-	if !plan.StaleAccepted || plan.Request != nil {
+	if !plan.StaleAccepted || plan.CleanupSession != nil {
 		t.Fatalf("cleanup plan with running child = %#v; want benign skip", plan)
 	}
 	assertBridgeCleanupTreeRescheduled(t, admin, sessionID, "2026-01-01T01:01:00Z")
@@ -750,7 +745,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhileChildRuns(t
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand after child idle: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup plan after child idle = %#v; want claimed Runtime command", plan)
 	}
 }
@@ -771,7 +766,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhenChildStartsB
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand before child starts: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup claim before child starts = %#v; want Runtime command", plan)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -820,7 +815,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand with requires_action child: %v", err)
 		}
-		if plan.StaleAccepted || plan.Request == nil {
+		if plan.StaleAccepted || plan.CleanupSession == nil {
 			t.Fatalf("cleanup plan with requires_action child = %#v; want claimed Runtime command", plan)
 		}
 	})
@@ -846,7 +841,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand with post-idle confirmation: %v", err)
 		}
-		if !plan.StaleAccepted || plan.Request != nil {
+		if !plan.StaleAccepted || plan.CleanupSession != nil {
 			t.Fatalf("cleanup plan with post-idle confirmation = %#v; want wake-fenced skip", plan)
 		}
 	})
@@ -872,7 +867,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand with running reviewer: %v", err)
 		}
-		if !plan.StaleAccepted || plan.Request != nil {
+		if !plan.StaleAccepted || plan.CleanupSession != nil {
 			t.Fatalf("cleanup plan with running reviewer = %#v; want role-blind busy skip", plan)
 		}
 		assertBridgeCleanupTreeRescheduled(t, admin, sessionID, "2026-01-01T01:01:00Z")
@@ -929,9 +924,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 		t.Fatalf("mark cleanup enqueued: %v", err)
 	}
 
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	store.TargetResolver = KubernetesRuntimeTargetResolver{
@@ -952,7 +945,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 		SessionID:      "sesn_bridge_cleanup_gone",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_gone_1",
 		CleanupJobID:   "cleanup_bridge_gone_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_gone","cleanup_job_id":"cleanup_bridge_gone_1"}`,
 	}
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
@@ -1122,15 +1114,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		},
 	}
 	result, err := (RuntimePodDirectDeliverer{
-		Store: cleanupStore,
-		Sender: &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-			Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-		}},
+		Store:  cleanupStore,
+		Sender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
 	}).DeliverRuntimeJob(context.Background(), RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID: "qjob_cleanup_cold_approval", LeaseToken: "lease_cleanup_cold_approval",
 		Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: sessionID,
 		RuntimeInputID: "cleanup_session:cleanup_cold_approval_1", CleanupJobID: "cleanup_cold_approval_1",
-		CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"cleanup_cold_approval_1"}`,
 	})
 	if err != nil {
@@ -1227,11 +1216,8 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		t.Fatalf("seed cleanup approval confirmation inbox: %v", err)
 	}
 	if _, err := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_deny", InputKind: "tool_confirmation",
-		EventIds: []string{confirmationEventID}, SequenceFrom: confirmationSequence, SequenceTo: confirmationSequence,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeApprovalInputCreateForTest(
-			"default", sessionID, threadID, "rin_cleanup_cold_approval_deny", confirmationEventID, "Approval denied: not safe",
-		)},
+		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_deny",
+		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("commit cleanup approval denial: %v", err)
 	}
@@ -1299,7 +1285,6 @@ func cleanupTreeJob(sessionID string, cleanupID string) RuntimeJob {
 		SessionID:      sessionID,
 		RuntimeInputID: "cleanup_session:" + cleanupID,
 		CleanupJobID:   cleanupID,
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"` + cleanupID + `"}`,
 	}
 }
