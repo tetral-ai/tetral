@@ -305,7 +305,7 @@ and active lifecycle facts directly from durable rows.
   separate terminal Tool Result without mutating the earlier Tool Call. A
   successful `WriteRequestEnd` may append an otherwise
   unanchored reasoning/step suffix before sealing the request. Runtime declares
-  each part identity; Bridge assigns durable message and event identities,
+  the ordered parts; Bridge assigns durable message and event identities,
   sequences, and timestamps. Completed
   conversation results contain only the final provider-visible text; truncation
   and cancellation diagnostics remain on their owning Tool Event/operation.
