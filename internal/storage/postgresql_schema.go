@@ -332,7 +332,6 @@ const (
 		insert_stream_position BIGINT NOT NULL DEFAULT 0,
 		runtime_write_id TEXT,
 		model_request_id TEXT,
-		stable_reasoning_json TEXT,
 		projection_json TEXT NOT NULL DEFAULT '{}',
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,

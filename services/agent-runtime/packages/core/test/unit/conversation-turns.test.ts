@@ -1,48 +1,76 @@
 import { describe, expect, test } from "bun:test";
-import { partitionRuntimeConversationTurns, selectRecentUserLedTurns } from "../../src/runtime/conversation-turns.js";
+import type {
+	RuntimeContextEntry,
+	RuntimeContextKind,
+} from "../../src/contracts/runtime.js";
 import {
-  buildConversationTurnsTextMessage as textMessage,
-  buildConversationTurnsToolMessage as toolMessage,
-} from "./runtime-message-builders.js";
+	partitionRuntimeConversationTurns,
+	selectRecentUserLedTurns,
+} from "../../src/runtime/conversation-turns.js";
+
+function textEntry(
+	messageSequence: number,
+	contextKind: RuntimeContextKind,
+	text: string,
+): RuntimeContextEntry {
+	return { messageSequence, contextKind, parts: [{ type: "text", text }] };
+}
+
+function toolEntry(
+	messageSequence: number,
+	modelToolCallId: string,
+	toolName: string,
+): RuntimeContextEntry {
+	return {
+		messageSequence,
+		contextKind: "assistant",
+		parts: [
+			{ type: "tool_call", modelToolCallId, toolName, canonicalInput: {} },
+		],
+	};
+}
 
 describe("conversation turn boundaries", () => {
-  test("fork selection keeps the complete latest user-led turn", () => {
-    const messages = [
-      textMessage("user-1", "user", "user", 0, "first"),
-      toolMessage("assistant-1", 1, "call-1", "tool-1"),
-      textMessage("user-2", "user", "runtime", 2, "inter-agent input"),
-      textMessage("assistant-2", "assistant", "agent", 3, "answer"),
-    ];
+	test("fork selection keeps the complete latest user-led turn", () => {
+		const entries = [
+			textEntry(1, "user", "first"),
+			toolEntry(2, "call-1", "tool-1"),
+			textEntry(3, "runtime_notification", "inter-agent input"),
+			textEntry(4, "assistant", "answer"),
+		];
 
-    expect(selectRecentUserLedTurns(messages, 1).map((message) => message.id)).toEqual([
-      "user-2",
-      "assistant-2",
-    ]);
-    expect(selectRecentUserLedTurns(messages, 2).map((message) => message.id)).toEqual([
-      "user-1",
-      "assistant-1",
-      "user-2",
-      "assistant-2",
-    ]);
-  });
+		expect(
+			selectRecentUserLedTurns(entries, 1).map(
+				(entry) => entry.messageSequence,
+			),
+		).toEqual([3, 4]);
+		expect(
+			selectRecentUserLedTurns(entries, 2).map(
+				(entry) => entry.messageSequence,
+			),
+		).toEqual([1, 2, 3, 4]);
+	});
 
-  test("compaction checkpoints stay inside the preceding user-led turn", () => {
-    const messages = [
-      textMessage("user-1", "user", "user", 0, "first"),
-      textMessage("assistant-1", "assistant", "agent", 1, "answer"),
-      textMessage("checkpoint", "user", "runtime", 2, "<conversation-checkpoint>summary</conversation-checkpoint>"),
-      textMessage("assistant-after-checkpoint", "assistant", "agent", 3, "continued"),
-    ];
+	test("compaction checkpoints stay inside the preceding user-led turn", () => {
+		const entries = [
+			textEntry(1, "user", "first"),
+			textEntry(2, "assistant", "answer"),
+			textEntry(
+				3,
+				"compaction",
+				"<conversation-checkpoint>summary</conversation-checkpoint>",
+			),
+			textEntry(4, "assistant", "continued"),
+		];
 
-    const turns = partitionRuntimeConversationTurns(messages);
-    expect(turns).toHaveLength(1);
-    expect(turns[0]?.userLed).toBe(true);
-    expect(turns[0]?.compactable).toBe(false);
-    expect(selectRecentUserLedTurns(messages, 1).map((message) => message.id)).toEqual([
-      "user-1",
-      "assistant-1",
-      "checkpoint",
-      "assistant-after-checkpoint",
-    ]);
-  });
+		const turns = partitionRuntimeConversationTurns(entries);
+		expect(turns).toHaveLength(1);
+		expect(turns[0]?.userLed).toBe(true);
+		expect(turns[0]?.compactable).toBe(false);
+		expect(
+			selectRecentUserLedTurns(entries, 1).map(
+				(entry) => entry.messageSequence,
+			),
+		).toEqual([1, 2, 3, 4]);
+	});
 });

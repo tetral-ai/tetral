@@ -121,7 +121,7 @@ func appendSubagentMailEnvelopeTx(
 	} else if err != nil {
 		return storedAgentMailEnvelope{}, err
 	}
-	messageJSON, err := directAgentMailRuntimeMessageJSON(scope.GetSessionId(), deliveryID, content, now)
+	messageJSON, err := publicAgentMailMessageJSON(content)
 	if err != nil {
 		return storedAgentMailEnvelope{}, err
 	}
@@ -163,18 +163,9 @@ func appendSubagentMailEnvelopeTx(
 	}, nil
 }
 
-func directAgentMailRuntimeMessageJSON(sessionID string, deliveryID string, content string, now time.Time) (string, error) {
-	timestamp := now.UTC().Format(time.RFC3339Nano)
-	messageID := "msg_" + deliveryID
+func publicAgentMailMessageJSON(content string) (string, error) {
 	return marshalBridgeJSON(map[string]any{
-		"id": messageID, "sessionId": sessionID, "role": "user", "origin": "runtime",
-		"sequence": 0, "status": "completed", "createdAt": timestamp, "updatedAt": timestamp,
 		"content": []map[string]string{{"type": "text", "text": content}},
-		"parts": []map[string]any{{
-			"id": messageID + "_text", "sessionId": sessionID, "messageId": messageID,
-			"sequence": 0, "type": "text", "text": content, "truncated": false, "status": "completed",
-			"createdAt": timestamp, "updatedAt": timestamp, "completedAt": timestamp,
-		}},
 	})
 }
 
@@ -272,7 +263,7 @@ func loadStoredAgentMailEnvelopeByDeliveryTx(
 		len(payload.Message) == 0 {
 		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail envelope is malformed")
 	}
-	publicMessage, err := publicInterAgentMessageJSON(payload.Message)
+	publicMessage, err := validatedPublicInterAgentMessageJSON(payload.Message)
 	if err != nil {
 		return storedAgentMailEnvelope{}, err
 	}
@@ -330,97 +321,6 @@ func validateAgentMailEnvelopeRelationshipTx(
 		return status.Error(codes.FailedPrecondition, "agent mail envelope does not describe a parent-child delivery")
 	}
 	return nil
-}
-
-func loadOldestUncommittedCompletionEnvelopeTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	parentThreadID string,
-	childThreadID string,
-) (storedAgentMailEnvelope, error) {
-	var deliveryID string
-	err := tx.QueryRow(ctx,
-		`SELECT sent.payload_json::jsonb ->> 'delivery_id'
-		   FROM session_events sent
-		   JOIN session_runtime_inbox inbox
-		     ON inbox.workspace_id = sent.workspace_id
-		    AND inbox.session_id = sent.session_id
-		    AND inbox.session_thread_id = $4
-		    AND inbox.runtime_input_id =
-		        'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
-		    AND inbox.input_kind = 'agent_mail'
-		    AND inbox.status IN ('queued', 'delivering', 'accepted')
-		  WHERE sent.workspace_id = $1
-		    AND sent.session_id = $2
-		    AND sent.type = 'agent.thread_message_sent'
-		    AND sent.payload_json::jsonb ->> 'source_thread_id' = $3
-		    AND sent.payload_json::jsonb ->> 'target_thread_id' = $4
-		    AND EXISTS (
-		        SELECT 1
-		          FROM session_threads child
-		         WHERE child.workspace_id = sent.workspace_id
-		           AND child.session_id = sent.session_id
-		           AND child.id = $3
-		           AND child.parent_thread_id = $4
-		           AND child.role = 'subagent'
-		    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_events received
-		         WHERE received.workspace_id = sent.workspace_id
-		           AND received.session_id = sent.session_id
-		           AND received.session_thread_id = $4
-		           AND received.type = 'agent.thread_message_received'
-		           AND received.payload_json::jsonb ->> 'delivery_id' =
-		               sent.payload_json::jsonb ->> 'delivery_id'
-		           AND received.processed_at IS NOT NULL
-		    )
-		  ORDER BY sent.sequence ASC, sent.event_id ASC
-		  LIMIT 1
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-		childThreadID,
-		parentThreadID,
-	).Scan(&deliveryID)
-	if dbconnect.IsNoRows(err) {
-		return storedAgentMailEnvelope{}, status.Error(codes.NotFound, "uncommitted child completion mail not found")
-	}
-	if err != nil {
-		return storedAgentMailEnvelope{}, err
-	}
-	return loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, workspaceID, sessionID, deliveryID)
-}
-
-func loadDeliverableAgentMailEnvelopeByDeliveryTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	deliveryID string,
-) (storedAgentMailEnvelope, error) {
-	var targetThreadID string
-	err := tx.QueryRow(ctx, `SELECT session_thread_id
-		FROM session_runtime_inbox
-		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id='agent_mail:' || $3
-		AND input_kind='agent_mail' AND status IN ('queued','delivering','accepted')
-		FOR UPDATE`, workspaceID, sessionID, deliveryID).Scan(&targetThreadID)
-	if dbconnect.IsNoRows(err) {
-		return storedAgentMailEnvelope{}, status.Error(codes.NotFound, "agent mail custody not found")
-	}
-	if err != nil {
-		return storedAgentMailEnvelope{}, err
-	}
-	envelope, err := loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, workspaceID, sessionID, deliveryID)
-	if err != nil {
-		return storedAgentMailEnvelope{}, err
-	}
-	if envelope.TargetThreadID != targetThreadID {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail custody conflicts with the stored envelope")
-	}
-	return envelope, nil
 }
 
 func admitAgentMailDeliveryTx(
@@ -644,17 +544,16 @@ func appendDeclaredCompletionMailTx(
 	scope *bridgev1.RuntimeScope,
 	threadScope threadMutationScope,
 	durableTurnID string,
-	create *bridgev1.RuntimeMessageCreate,
+	text string,
 	now time.Time,
-) (*bridgev1.DurableEventStamp, *bridgev1.DurableMessageStamp, error) {
+) (string, error) {
 	return appendDeclaredCompletionMailForSourceTx(
 		ctx,
 		tx,
 		scope,
 		threadScope,
-		"finish_idle",
 		durableTurnID,
-		create,
+		text,
 		now,
 	)
 }
@@ -664,37 +563,25 @@ func appendDeclaredCompletionMailForSourceTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	threadScope threadMutationScope,
-	sourceKind string,
 	sourceID string,
-	create *bridgev1.RuntimeMessageCreate,
+	text string,
 	now time.Time,
-) (*bridgev1.DurableEventStamp, *bridgev1.DurableMessageStamp, error) {
-	if create == nil {
-		return nil, nil, nil
+) (string, error) {
+	if strings.TrimSpace(text) == "" {
+		return "", status.Error(codes.InvalidArgument, "completion mail text is required")
 	}
 	if threadScope.role != "subagent" || threadScope.status == "closed_for_runtime" {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail requires a live sub-agent thread")
-	}
-	if create.GetMessageKind() != bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL ||
-		len(create.GetParts()) != 1 {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail create identity is invalid")
-	}
-	if _, err := validateRuntimeMessageCreate(create); err != nil {
-		return nil, nil, err
-	}
-	part := create.GetParts()[0]
-	if part == nil || part.GetPartKind() != "text" {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail part identity is invalid")
+		return "", status.Error(codes.InvalidArgument, "completion mail requires a live sub-agent thread")
 	}
 
 	parentThreadID, sourceToolUseEventID, targetTaskName, err := completionLineageTx(ctx, tx, scope)
 	if err != nil {
-		return nil, nil, err
+		return "", err
 	}
 	deliveryID := completionDeliveryID(scope.GetSessionThreadId(), sourceID)
-	messageJSON, err := completionRuntimeMessageJSON(scope.GetSessionId(), deliveryID, create, now)
+	messageJSON, err := publicAgentMailMessageJSON(text)
 	if err != nil {
-		return nil, nil, err
+		return "", err
 	}
 	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
 		"type":                     "agent.thread_message_sent",
@@ -706,12 +593,12 @@ func appendDeclaredCompletionMailForSourceTx(
 		"message":                  json.RawMessage(messageJSON),
 	})
 	if err != nil {
-		return nil, nil, err
+		return "", err
 	}
 	eventID := id.New("evt_")
 	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
 	if err != nil {
-		return nil, nil, err
+		return "", err
 	}
 	visibility, sessionVisible := threadScope.publicProjection("agent.thread_message_sent")
 	if _, err := tx.Exec(ctx,
@@ -730,10 +617,10 @@ func appendDeclaredCompletionMailForSourceTx(
 		sourceID,
 		now,
 	); err != nil {
-		return nil, nil, err
+		return "", err
 	}
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return nil, nil, err
+		return "", err
 	}
 	if err := birthCompletionMailCustodyTx(
 		ctx,
@@ -744,32 +631,9 @@ func appendDeclaredCompletionMailForSourceTx(
 		deliveryID,
 		now,
 	); err != nil {
-		return nil, nil, err
+		return "", err
 	}
-	timestamp := now.UTC().Format(time.RFC3339Nano)
-	messageID := "msg_" + deliveryID
-	partID := messageID + "_text"
-	return &bridgev1.DurableEventStamp{
-			SessionThreadId: scope.GetSessionThreadId(),
-			EventId:         eventID,
-			EventSequence:   sequence,
-			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-		}, &bridgev1.DurableMessageStamp{
-			SessionThreadId: scope.GetSessionThreadId(),
-			MessageId:       messageID,
-			MessageSequence: 0,
-			CreatedAt:       timestamp,
-			UpdatedAt:       timestamp,
-			Disposition:     bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
-			Parts: []*bridgev1.DurablePartStamp{{
-				PartId:       partID,
-				MessageId:    messageID,
-				PartSequence: 0,
-				CreatedAt:    timestamp,
-				UpdatedAt:    timestamp,
-				Disposition:  bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
-			}},
-		}, nil
+	return eventID, nil
 }
 
 // Completion mail is born with its Runtime Inbox row and Queue job in the same
@@ -930,41 +794,4 @@ func completionLineageTx(
 	}
 	targetTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, scope, parentThreadID)
 	return parentThreadID, sourceToolUseEventID, targetTaskName, err
-}
-
-func completionRuntimeMessageJSON(sessionID string, deliveryID string, create *bridgev1.RuntimeMessageCreate, now time.Time) (string, error) {
-	message, err := validateRuntimeMessageCreate(create)
-	if err != nil {
-		return "", err
-	}
-	timestamp := now.UTC().Format(time.RFC3339Nano)
-	messageID := "msg_" + deliveryID
-	parts := make([]any, 0, len(create.GetParts()))
-	content := make([]map[string]string, 0, len(create.GetParts()))
-	for index, partCreate := range create.GetParts() {
-		part, err := validateRuntimePartCreate(partCreate)
-		if err != nil {
-			return "", err
-		}
-		text, ok := part["text"].(string)
-		if partCreate.GetPartKind() != "text" || !ok {
-			return "", status.Error(codes.InvalidArgument, "completion mail part is invalid")
-		}
-		part["id"] = messageID + "_text"
-		part["sessionId"] = sessionID
-		part["messageId"] = messageID
-		part["sequence"] = index
-		part["createdAt"] = timestamp
-		part["updatedAt"] = timestamp
-		parts = append(parts, part)
-		content = append(content, map[string]string{"type": "text", "text": text})
-	}
-	message["id"] = messageID
-	message["sessionId"] = sessionID
-	message["sequence"] = 0
-	message["createdAt"] = timestamp
-	message["updatedAt"] = timestamp
-	message["parts"] = parts
-	message["content"] = content
-	return marshalBridgeJSON(message)
 }

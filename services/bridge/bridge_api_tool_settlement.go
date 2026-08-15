@@ -24,7 +24,6 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 ) (response *bridgev1.SettleToolResultResponse, resultErr error) {
 	settlement := request.GetSettlement()
 	evidence := runtimeDeclarationRejectionEvidence{
-		Active:        settlement != nil,
 		Kind:          "identity",
 		Operation:     bridgeOpSettleToolResult,
 		OperationID:   settlement.GetToolUseEventId(),
@@ -115,9 +114,9 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id, stable_reasoning_json,
+				visibility, session_visible, runtime_write_id, model_request_id,
 				projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, NULL, '{}', $11, $11, $11)`,
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, '{}', $11, $11, $11)`,
 			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(),
 			eventID, sequence, resultEventType, payloadJSON, visibility, sessionVisible, tool.ModelRequestID, now,
 		); err != nil {
@@ -220,8 +219,9 @@ func durableToolResultPayloadJSON(eventType string, toolUseEventID string, settl
 	}
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
-		var output map[string]any
-		if err := json.Unmarshal([]byte(outcome.Completed.GetOutputJson()), &output); err != nil || validateRuntimeBoundedText(output) != nil {
+		decoded, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		output, ok := decoded.(map[string]any)
+		if err != nil || !ok || validateRuntimeBoundedText(output) != nil {
 			return "", status.Error(codes.InvalidArgument, "Tool completion output is invalid")
 		}
 		text, _ := output["text"].(string)

@@ -111,7 +111,7 @@ unavailable**:
 | `SnapshotNotReady` / `NotReady` / `NotServing` / `Terminating` | Merely unavailable | Retry; never finalize |
 
 For `runtime_input` the runner reconciles referenced events first — all
-already processed → stale-ack with no command; superseded by a processed
+already processed → stale with no command; superseded by a processed
 interrupt fence → never delivered — then upserts the delivery-inbox row and
 sends the typed command addressed to the bound pod
 **directly** (never through a load-balanced service, which could livelock on
@@ -151,7 +151,7 @@ independent of Runtime Pod loss. Provider text is never reconstructed
 ### Cleanup order (hot Runtime state only)
 
 1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
-2. durable `approval` waits and their recoverable Sandbox receipts remain for a later confirmation; other `pending` external waits and unowned Sandbox executions expire by terminal projection;
+2. durable `approval` waits and their recoverable Sandbox execution records remain for a later confirmation; other `pending` external waits and unowned Sandbox executions expire by terminal projection;
 3. the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
 4. durable `session_threads`, `session_events`, `session_messages`, Sandbox bindings, and provider resources are never deleted by TTL cleanup.
 
@@ -164,7 +164,7 @@ is busy (`running` or `rescheduling`; `idle`, `requires_action`,
 `requires_action` is expressly quiescent — an approval may wait days on a
 durable, wake-fenced confirmation). A busy result **reschedules at both
 enforcement points** (clearing `cleanup_job_id`, `cleanup_claimed_at`,
-`cleanup_enqueued_at` and pushing `cleanup_after` forward); a bare stale-ack at
+`cleanup_enqueued_at` and pushing `cleanup_after` forward); a bare stale result at
 finalize would strand `cleanup_job_id` set on a past-due row forever. The
 pod-side eviction refusal (`session_busy` while any run slot is active or any
 thread's accepted-input queue is non-empty) remains the final authority.
@@ -188,14 +188,13 @@ default:
 
 | Disposition | Trigger | Bridge behavior |
 | --- | --- | --- |
-| Retryable (default) | Any closeout-write failure with no release sentinel — transport codes and every un-sentineled Bridge rejection of any code | The pod retries whole-envelope cycles (1 s doubling to 60 s cap) until the write lands, a sentinel arrives, or shutdown supersedes; duplicate acks are success |
-| Superseded (`scope_superseded`) | Custody has demonstrably ended: binding row absent, binding replaced (stale generation), session deleted or not found, caller pod-UID mismatch, or a write targeting a terminal child (`terminated` / `archived` / `failed`) | Bridge converts the condition at the `WriteEvent` / `WriteRequestEnd` / `FinishIdle` handlers into an OK response carrying a REJECTED ack with `errorCode = scope_superseded`; the pod releases without writing. Message string-matching is forbidden — the sentinel is typed |
-| Unrepairable (`closeout_unrepairable`) | Rejections known to be durable: closeout-write validation failures, missing thread row, or incomplete declaration identity; plus the pod-side self-detections `schema_mismatch` / `ack_mismatch` | Bridge sentinel-types the rejection; the pod terminates retry, emits a bounded redacted record, and releases — the durable row may stay running until pod identity changes, a next delivery cold-resumes, or an operator acts. Loud, never silent |
+| Retryable (default) | Any closeout-write failure with no release sentinel | The pod retries the same immutable operation (1 s doubling to 60 s cap) until it commits, replays as duplicate, reaches a typed terminal condition, or shutdown supersedes it |
+| Superseded (`scope_superseded`) | Custody has demonstrably ended: binding row absent or replaced, session deleted, caller pod-UID mismatch, or a terminal target | Bridge maps the condition to that RPC's closed `stale` result; the pod releases without writing |
+| Unrepairable (`closeout_unrepairable`) | A durable validation or target failure means the same operation cannot succeed | Bridge preserves the typed gRPC failure; the pod terminates retry and emits a bounded redacted record |
 
-Bridge echoes the committed `runtime_write_id` on every committed and
-duplicate ack (so the pod can trip `ack_mismatch` on an empty or divergent
-id), and its ack mapping is `errorCode`-keyed — a superseded condition must
-never fall through into the retryable code and loop forever.
+Each closeout RPC returns its own closed result union. A committed or duplicate
+variant contains only Bridge-created facts that its caller immediately uses;
+it never echoes the operation identity or submitted declaration payload.
 
 ## Seams
 
@@ -204,17 +203,19 @@ replacement must preserve, and the conformance suites that prove it.
 
 ### Runtime declaration boundary
 
-Runtime owns the business values of every new message and part. It sends the
-already-canonical output of its strict message-create and part-create schemas;
-Bridge rejects unknown, over-bound, durable-identity, or transform-bearing
-non-canonical values and persists accepted declarations unchanged. Bridge adds
-only durable ids, ordering, timestamps, and relational fields. Source kind
-authorizes a message-create kind, while transaction-local checks continue to
-own caller scope, target role, source-event lineage, replay equality, task
-result equality, completion-mail lineage, and Assistant ownership. The same
-part-create validator guards `CommitInputs`, `WriteEvent` Assistant appends,
-and `WriteRequestEnd` trailing appends without merging those writers' separate
-transactions or lifecycle rules.
+Runtime owns Agent business content and sends operation-specific, bounded
+context deltas. Bridge validates caller scope, durable target, custody,
+fencing, idempotency, bounds, projection safety, and transaction ownership; it
+does not validate a Runtime message state machine or accept database message,
+part, status, origin, or timestamp fields. PostgreSQL assigns durable ordering
+and audit metadata outside the stored provider-visible context.
+
+`CommitInputs`, `WriteEvent`, `SettleToolResult`, `WriteRequestEnd`, repair,
+compaction, idle, and termination retain separate request and result types.
+There is no generic declaration result. Each successful hot-path application
+uses the immutable request plus only newly assigned facts returned by that
+operation. Cold recovery reconstructs sealed context, the open request draft,
+and active lifecycle facts directly from durable rows.
 
 ### Event-writer and Tool-settlement boundaries
 
@@ -235,9 +236,9 @@ transactions or lifecycle rules.
 - **Lifecycle.** `WriteEvent` is idempotency-keyed by `runtime_write_id`; the attached
   reasoning set folds into the request hash. `SettleToolResult` hashes its
   bounded outcome, including optional web usage, under the Tool Use identity. Runtime updates
-  hot state only after applying the declaration receipt. An unknown transport
-  result retries the same frozen declaration and receives the committed
-  receipt without reconstructing content. `SettleToolResult` is keyed by the
+  hot state from the immutable declaration and operation-specific result. An unknown transport
+  result retries the same frozen declaration and receives the duplicate
+  variant without reconstructing content. `SettleToolResult` is keyed by the
   durable Tool Use and returns only `committed`, `duplicate`, or `stale`; cold
   recovery reads the resulting durable Event and projection directly.
 - **Invariants a replacement must preserve.** Event and message declaration are atomic;
@@ -253,16 +254,15 @@ transactions or lifecycle rules.
   inserts the request-end span, inserts request usage detail idempotently, and
   updates `sessions.usage` only when the detail insert wins. It may append the
   request's final not-yet-durable Assistant members and then seals the existing
-  assistant projection without replacing its owning event. The receipt returns
-  stamps only for declarations written by this operation before Runtime may
-  rebase or issue another provider request.
-  A no-content end still returns and applies its declaration receipt so a stale
-  custodian cannot continue merely because there is no assistant projection.
+  assistant projection without replacing its owning event. Its closed result
+  distinguishes ordinary, rescheduled, and compacted commits and returns only
+  Bridge-assigned facts with an immediate caller.
+  A no-content end still commits the request boundary so a stale custodian
+  cannot continue merely because there is no assistant projection.
   An interrupt received while the request is open carries only its admitted
   source envelope. Bridge derives and terminalizes the locked unfinished-Tool
-  census in the nested input transaction. The response returns one receipt for
-  the request and one for the interrupt; callers match them by operation kind,
-  source kind, and operation identity, never by response order.
+  census in the nested input transaction. The response carries only the
+  operation-specific interrupt Tool outcomes needed by the caller.
   The reschedule leg increments `session_turn_retries` and writes rescheduled
   status only when the ceiling admits. `FinishIdle` adopts a Sandbox-staged
   output-capture generation into `session_output_captures` and the file tables,
@@ -306,28 +306,27 @@ transactions or lifecycle rules.
   request after a committed or duplicate result.
 - **Budget.** `MaxStableReasoningPartsPerRequest` (16) and
   `MaxStableReasoningBytesPerRequest` (2 MiB) are one budget enforced ACROSS
-  the durable Assistant message, not per append. Bridge derives the cumulative
-  `stable_reasoning_json` ledger from locked durable reasoning members after a
-  successful member append or Request End; Runtime does not transport or cache
-  a cumulative ledger. No production reader consumes this audit projection: it
-  is not a recovery input and does not participate in Runtime or Bridge state.
+  the locked durable Assistant message, not per append. Reasoning remains only
+  in its provider-visible context member; Bridge does not create a second audit
+  projection or synthetic Part identity.
 - **Invariants a replacement must preserve.** Each append and create is atomic,
   positional, and idempotent under its owning operation key. Tool settlement
   is independent of prior reasoning, text, and sibling Tool Uses. Replay must
   return the operation-specific result; a changed declaration conflicts.
-- **Failure behavior.** An error or pod-lost request-end carries no reasoning
-  parts. Parts left UNANCHORED at such an end — buffered in pod memory,
-  attached to no committed tool — are discarded with the turn, and the retry
-  regenerates its own reasoning. Parts ANCHORED by a committed tool are
-  already durable and SURVIVE the failed turn, because their committed tool is
-  their anchor. Error and reschedule closeout therefore preserve that prefix
-  without re-submitting it as the successful settlement set; a failed turn can
-  leave a durable anchored prefix while its unanchored suffix is discarded.
+- **Failure behavior.** An error or rescheduled request end carries no new
+  Assistant append. Every member already acknowledged by its owning
+  `WriteEvent` remains durable and provider-visible; request-local fragments
+  still buffered in pod memory are discarded and regenerated on retry. A
+  committed Tool Use forces its preceding ordered prefix through the same
+  durable append boundary, but Tool membership is not a separate survival
+  rule. Pod loss remains stricter: an abandoned open draft is excluded unless
+  reconciliation completes the exact Tool Call/Result repair pair.
 - **Conformance.** `bridge_api_events_test.go` drives PostgreSQL `WriteEvent`
-  and `WriteRequestEnd` to prove cumulative R1/R2 ledgers, deterministic replay,
-  target-only Tool settlement, and exact/one-over count and byte bounds with
-  transactional rollback. `internal/eventstream/eventstream_test.go` proves the
-  internal ledger does not alter or leak through public list and stream bytes.
+  and `WriteRequestEnd` to prove ordered durable members, deterministic replay,
+  global Tool Call identity, target-only Tool settlement, and exact/one-over
+  count and byte bounds with transactional rollback. Context-load and Pod-loss
+  tests distinguish ordinary failed/rescheduled preservation from incomplete
+  Pod-loss repair exclusion.
 
 ### Delivery and durable wake machinery
 
@@ -421,7 +420,7 @@ transactions or lifecycle rules.
   mount resources, build helper payloads, or reset lifecycle state.
 - **Lifecycle.** Sandbox Service resolves the current binding, performs fresh
   provider inspection, and converges activation and materialization before it
-  authorizes command submission. The materialization receipt carries the
+  authorizes command submission. The materialization result carries the
   resource roots and credential expiry used by the provider adapter.
 - **Invariants a replacement must preserve.** Bridge remains a durable clerk:
   it validates declaration identity, writes refs-only business facts, and
@@ -493,7 +492,7 @@ never deletes durable history.
 | `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`, `command_read_claim_test.go` | Background-command follow-ups and stdin write-sequence dedupe |
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
-| `closeout_sentinel_test.go` | `scope_superseded` / `closeout_unrepairable` typing and `errorCode`-keyed ack mapping |
+| `closeout_sentinel_test.go` | `scope_superseded` stale mapping and precise `closeout_unrepairable` status typing |
 | `job_runner_test.go`, `runtime_delivery_test.go`, `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go` | Queue reconcile, direct-to-pod delivery, inbox upsert, delivery-exhaustion fencing |
 | `completion_mail_test.go`, `completion_mail_delivery_test.go` | Child completion-return discriminator and atomic envelope-plus-wake write |
 | `runtime_pod_lost.go` suites (`runtime_pod_loss_repair_test.go`, `runtime_pod_lost_interrupt_fence_test.go`, `runtime_pod_lost_delivery_repair_test.go`, `runtime_pod_lost_store_test.go`) | Lazy proven-gone discovery, snapshot/pagination and concurrency fences, interrupted-then-lost quiet settlement, and Sandbox-lifecycle independence |

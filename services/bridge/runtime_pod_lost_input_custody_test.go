@@ -60,7 +60,7 @@ func TestPostgreSQLRuntimePodLossAgentMailHandoffReclaimsExistingProjection(t *t
 		}})
 	}}
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), originalJob)
-	if err != nil || plan.AcceptInput == nil {
+	if err != nil || plan.AcceptAgentMail == nil {
 		t.Fatalf("prepare original agent mail = %#v, %v; want Runtime request", plan, err)
 	}
 	settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), originalJob, plan.AttemptedBinding)
@@ -378,7 +378,9 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_early", 1, "user.message", `{"content":[{"type":"text","text":"first"}]}`)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_late", 2, "agent.thread_message_received", `{"delivery_id":"a_pod_loss_late","message":{"parts":[{"type":"text","text":"third"}]}}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_late", 2, "agent.thread_message_received", bridgeInterAgentMessageJSON(
+		t, "a_pod_loss_late", threadID, "evt_pod_loss_mail_source", bridgePublicMessageJSONForTest(t, "third"),
+	))
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "evt_pod_loss_task_source")
 	taskResult := `{"task_id":"task_m_pod_loss_middle","source_tool_use_event_id":"evt_pod_loss_task_source","status":"completed","stdout":{"text":"second","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":0}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", taskResult)
@@ -453,7 +455,7 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	}); err != nil {
 		t.Fatalf("commit final replacement input: %v", err)
 	}
-	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope, RuntimeInputId: "rin_pod_loss_order_context"})
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("load replacement Context: %v", err)
 	}
@@ -461,20 +463,21 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode replacement Context: %v", err)
 	}
-	if len(payload.Messages) != 3 {
+	if len(payload.ContextEntries) != 3 {
 		t.Fatalf("replacement Context messages = %s; want three mixed-kind inputs", loaded.GetContextJson())
 	}
 	var contextTexts []string
-	for _, raw := range payload.Messages {
-		var message struct {
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
+	for _, entry := range payload.ContextEntries {
+		var part struct {
+			Text string `json:"text"`
 		}
-		if err := json.Unmarshal(raw, &message); err != nil || len(message.Parts) != 1 {
-			t.Fatalf("decode replacement Context message: %v; message=%s", err, raw)
+		if len(entry.Parts) != 1 {
+			t.Fatalf("replacement Context entry parts = %#v; want one", entry.Parts)
 		}
-		contextTexts = append(contextTexts, message.Parts[0].Text)
+		if err := json.Unmarshal(entry.Parts[0], &part); err != nil {
+			t.Fatalf("decode replacement Context part: %v; part=%s", err, entry.Parts[0])
+		}
+		contextTexts = append(contextTexts, part.Text)
 	}
 	if len(contextTexts) != 3 || contextTexts[0] != "first" || !strings.Contains(contextTexts[1], taskID) || contextTexts[2] != "third" {
 		t.Fatalf("replacement Context order = %v; want user/task/agent-mail creation order; context=%s", contextTexts, loaded.GetContextJson())

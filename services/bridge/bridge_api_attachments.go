@@ -528,9 +528,8 @@ func logTransientAttachmentGC(logger *slog.Logger, result TransientAttachmentGCR
 	}
 }
 
-// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/runtime-declaration-wire.ts
-// (internalProviderPayloadFields). These fields are removed before declaration
-// digesting on both sides of the receipt contract.
+// Provider execution metadata is not part of a durable Tool output or its
+// declaration digest; Bridge removes it before comparing or storing output.
 var internalProviderPayloadFields = map[string]struct{}{
 	"background_task":                {},
 	"engine_sandbox_id":              {},

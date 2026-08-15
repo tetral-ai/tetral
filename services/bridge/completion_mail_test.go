@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -39,9 +38,7 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 		"task_"+completionTestChildID(suffix),
 		"the loop authored this body\nverbatim",
 	)
-	request.CompletionMailCreate = bridgeCompletionMailCreateForTest(request.GetScope(), request.GetDurableTurnId(), wantEnvelope)
-	request.CompletionMailCreate.MessageInfoJson = `{"role":"user","origin":"runtime","status":"completed","finishReason":"stop","responseId":"completion_response","usage":{"inputTokens":1,"outputTokens":2,"reasoningTokens":3,"cacheReadTokens":4,"cacheWriteTokens":5}}`
-	request.CompletionMailCreate.Parts[0].PartJson = fmt.Sprintf(`{"type":"text","text":%q,"truncated":true,"status":"failed","startedAt":"2026-01-01T00:00:40Z","completedAt":"2026-01-01T00:00:41Z"}`, wantEnvelope)
+	request.CompletionMailText = bridgeString(wantEnvelope)
 
 	response, err := finishIdleWithStagedCaptureForTest(t, admin, store, request)
 	if err != nil {
@@ -51,9 +48,8 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 	if err != nil {
 		t.Fatalf("FinishIdle replay: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("FinishIdle ACKs = %s/%s; want committed/duplicate", response.GetAck().GetStatus(), replay.GetAck().GetStatus())
+	if response.GetCommitted() == nil || replay.GetDuplicate() == nil {
+		t.Fatalf("FinishIdle results = %#v/%#v; want committed/duplicate", response, replay)
 	}
 	mailCount, jobCount, envelope := completionMailRows(t, admin, completionTestSessionID(suffix))
 	if mailCount != 1 || jobCount != 1 || envelope != wantEnvelope {
@@ -66,38 +62,6 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 	}
 	if inboxCount != 1 || queuedInboxCount != 1 {
 		t.Fatalf("completion mail Inbox rows = %d queued = %d; want exactly one queued row", inboxCount, queuedInboxCount)
-	}
-	var semantics struct {
-		Message struct {
-			Origin       string         `json:"origin"`
-			Status       string         `json:"status"`
-			FinishReason string         `json:"finishReason"`
-			ResponseID   string         `json:"responseId"`
-			Usage        map[string]any `json:"usage"`
-			Parts        []struct {
-				Truncated   bool   `json:"truncated"`
-				Status      string `json:"status"`
-				StartedAt   string `json:"startedAt"`
-				CompletedAt string `json:"completedAt"`
-			} `json:"parts"`
-		} `json:"message"`
-	}
-	var raw string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'`,
-		completionTestSessionID(suffix),
-	).Scan(&raw); err != nil {
-		t.Fatalf("read completion declaration: %v", err)
-	}
-	if err := json.Unmarshal([]byte(raw), &semantics); err != nil {
-		t.Fatalf("decode completion declaration: %v", err)
-	}
-	part := semantics.Message.Parts[0]
-	if semantics.Message.Origin != "runtime" || semantics.Message.Status != "completed" ||
-		semantics.Message.FinishReason != "stop" || semantics.Message.ResponseID != "completion_response" ||
-		semantics.Message.Usage["reasoningTokens"] != float64(3) || !part.Truncated || part.Status != "failed" ||
-		part.StartedAt != "2026-01-01T00:00:40Z" || part.CompletedAt != "2026-01-01T00:00:41Z" {
-		t.Fatalf("completion declaration semantics changed: %#v", semantics.Message)
 	}
 }
 
@@ -113,10 +77,7 @@ func TestPostgreSQLCompletionMailBirthRollsBackSourceInboxAndQueueTogether(t *te
 	}
 	store := completionMailTestStore(t, runtime)
 	request := bridgeAPIChildFinishIdleFailureRequest(suffix)
-	request.CompletionMailCreate = bridgeCompletionMailCreateForTest(
-		request.GetScope(), request.GetDurableTurnId(),
-		completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "rollback"),
-	)
+	request.CompletionMailText = bridgeString(completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "rollback"))
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, request); err == nil {
 		t.Fatal("FinishIdle succeeded despite injected completion mail Queue failure")
 	}
@@ -142,7 +103,7 @@ func TestPostgreSQLCompletionMailRequiresActionThenSameChildCompletesNextTurn(t 
 
 	first := bridgeAPIChildFinishIdleFailureRequest(suffix)
 	first.StopReasonJson = `{"type":"requires_action","event_ids":["evt_pending"]}`
-	first.CompletionMailCreate = nil
+	first.CompletionMailText = nil
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, first); err != nil {
 		t.Fatalf("FinishIdle requires_action: %v", err)
 	}
@@ -164,11 +125,7 @@ func TestPostgreSQLCompletionMailRequiresActionThenSameChildCompletesNextTurn(t 
 
 	second := bridgeAPIChildFinishIdleFailureRequest(suffix)
 	second.DurableTurnId = "evt_completion_running_second_" + suffix
-	second.CompletionMailCreate = bridgeCompletionMailCreateForTest(
-		second.GetScope(),
-		second.GetDurableTurnId(),
-		completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "completed after action"),
-	)
+	second.CompletionMailText = bridgeString(completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "completed after action"))
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, second); err != nil {
 		t.Fatalf("FinishIdle next clean turn: %v", err)
 	}
@@ -268,9 +225,8 @@ func TestBridgeAPIServerLateFinishIdleOnFailedChildIsSupersededWithoutCompletion
 	if err != nil {
 		t.Fatalf("late FinishIdle on failed child: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-		response.GetAck().GetErrorCode() != closeoutScopeSupersededCode {
-		t.Fatalf("late failed-child FinishIdle ack = %+v; want rejected %q", response.GetAck(), closeoutScopeSupersededCode)
+	if response.GetStale() == nil {
+		t.Fatalf("late failed-child FinishIdle result = %+v; want stale", response)
 	}
 	var childStatus string
 	if err := admin.QueryRowContext(context.Background(),
@@ -336,16 +292,16 @@ func completionMailRows(t *testing.T, db *sql.DB, sessionID string) (int, int, s
 	}
 	var payload struct {
 		Message struct {
-			Parts []struct {
+			Content []struct {
 				Text string `json:"text"`
-			} `json:"parts"`
+			} `json:"content"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatalf("decode completion mail event: %v", err)
 	}
-	if len(payload.Message.Parts) != 1 {
-		t.Fatalf("completion mail parts = %d; want 1", len(payload.Message.Parts))
+	if len(payload.Message.Content) != 1 {
+		t.Fatalf("completion mail content members = %d; want 1", len(payload.Message.Content))
 	}
-	return mailCount, jobCount, payload.Message.Parts[0].Text
+	return mailCount, jobCount, payload.Message.Content[0].Text
 }

@@ -505,15 +505,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 	if err := validateInternalToolRepairRequest(request); err != nil {
 		return nil, err
 	}
-	repairKey := internalToolRepairKey(request.GetModelRequestId(), request.GetModelToolCallId(), request.GetToolName())
+	repairKey := request.GetRepairKey()
 	declarationDigest, err := internalToolRepairDeclarationDigest(request, repairKey)
 	if err != nil {
 		return nil, err
 	}
 	now := s.now()
 	var (
-		ack     *bridgev1.BridgeWriteAck
-		receipt *bridgev1.DeclarationReceipt
+		facts     internalToolRepairDurableFacts
+		duplicate bool
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_internal_tool_repair", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
@@ -538,16 +538,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			return err
 		} else if ok {
 			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
-				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+				return status.Error(codes.FailedPrecondition, "stored internal tool repair result is invalid")
 			}
 			if existing.DeclarationDigest != declarationDigest {
 				return status.Error(codes.AlreadyExists, "internal tool repair idempotency conflict")
 			}
-			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
-			if err != nil {
-				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+			if err := json.Unmarshal([]byte(existing.ReceiptJSON), &facts); err != nil || facts.RepairEventID == "" || facts.AssignedMessageSequence <= 0 {
+				return status.Error(codes.FailedPrecondition, "stored internal tool repair result is invalid")
 			}
-			ack = duplicateAck("", repairKey)
+			duplicate = true
 			return nil
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -561,24 +560,24 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			return err
 		}
 		if err := verifyModelToolCallIDAvailableTx(
-			ctx, tx, request.GetScope(), request.GetModelRequestId(), request.GetModelToolCallId(),
+			ctx, tx, request.GetScope(), request.GetModelToolCallId(),
 		); err != nil {
 			return err
 		}
-		eventID, eventSequence, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
+		eventID, _, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
 		if err != nil {
 			return err
 		}
-		receipt, err = commitInternalToolRepairCreateTx(
+		facts, err = commitInternalToolRepairContextTx(
 			ctx,
 			tx,
 			request.GetScope(),
-			repairKey,
 			eventID,
-			eventSequence,
+			request.GetModelRequestId(),
 			request.GetModelToolCallId(),
 			request.GetToolName(),
-			request.GetMessageCreate(),
+			request.GetCanonicalInputJson(),
+			request.GetError(),
 			now,
 		)
 		if err != nil {
@@ -588,17 +587,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			ctx,
 			tx,
 			request.GetScope(),
-			request.GetModelRequestId(),
 			request.GetModelToolCallId(),
 		); err != nil {
 			return err
 		}
-		receipt.DeclarationDigest = declarationDigest
-		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		resultJSON, err := marshalBridgeJSON(facts)
 		if err != nil {
 			return err
 		}
-		if err := insertBridgeDeclarationOperationTx(
+		return insertBridgeDeclarationOperationTx(
 			ctx,
 			tx,
 			request.GetScope(),
@@ -606,18 +603,14 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			"internal_tool_repair",
 			repairKey,
 			declarationDigest,
-			receiptJSON,
+			resultJSON,
 			now,
-		); err != nil {
-			return err
-		}
-		ack = committedAck("", repairKey)
-		return nil
+		)
 	}); err != nil {
 		return nil, err
 	}
-	if receipt == nil || len(receipt.GetEvents()) != 1 || len(receipt.GetMessages()) != 1 {
-		return nil, status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+	if facts.RepairEventID == "" || facts.AssignedMessageSequence <= 0 {
+		return nil, status.Error(codes.FailedPrecondition, "internal tool repair result is invalid")
 	}
 	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
 	if err != nil {
@@ -630,29 +623,40 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		"internal_tool_repair",
 		repairKey,
 		declarationDigest,
-		ack,
+		duplicate,
 		observation,
 	)
-	return &bridgev1.CommitInternalToolRepairResponse{
-		Ack: ack,
-		Declaration: &bridgev1.DeclarationResponse{
-			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
-			ObservedBindingId:         observation.BindingID,
-			ObservedBindingGeneration: observation.BindingGeneration,
-			ApplicationDisposition:    observation.Disposition,
-		},
-	}, nil
+	if !observation.Current {
+		return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Stale{Stale: &bridgev1.CommitInternalToolRepairStale{}}}, nil
+	}
+	if duplicate {
+		return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Duplicate{Duplicate: &bridgev1.CommitInternalToolRepairDuplicate{
+			RepairEventId: facts.RepairEventID, AssignedMessageSequence: facts.AssignedMessageSequence,
+		}}}, nil
+	}
+	return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Committed{Committed: &bridgev1.CommitInternalToolRepairCommitted{
+		RepairEventId: facts.RepairEventID, AssignedMessageSequence: facts.AssignedMessageSequence,
+	}}}, nil
 }
 
 func validateInternalToolRepairRequest(request *bridgev1.CommitInternalToolRepairRequest) error {
 	if err := validateRuntimeScope(request.GetScope()); err != nil {
 		return err
 	}
-	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || request.GetMessageCreate() == nil {
+	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || request.GetCanonicalInputJson() == "" || request.GetError() == nil || request.GetRepairKey() == "" {
 		return status.Error(codes.InvalidArgument, "invalid internal tool repair request")
 	}
 	if len([]byte(request.GetModelToolCallId())) > internalToolRepairIDMaxBytes || len([]byte(request.GetToolName())) > internalToolRepairIDMaxBytes {
 		return status.Error(codes.InvalidArgument, "internal tool repair identifiers are too large")
+	}
+	if request.GetRepairKey() != internalToolRepairKey(request.GetModelRequestId(), request.GetModelToolCallId(), request.GetToolName()) {
+		return status.Error(codes.InvalidArgument, "internal tool repair key is invalid")
+	}
+	if _, err := canonicalRunToolJSON(request.GetCanonicalInputJson()); err != nil {
+		return status.Error(codes.InvalidArgument, "internal tool repair canonical input is invalid")
+	}
+	if _, err := canonicalRuntimeToolError(request.GetError()); err != nil {
+		return err
 	}
 	return nil
 }

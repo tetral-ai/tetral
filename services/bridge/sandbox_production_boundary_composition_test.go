@@ -69,23 +69,20 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 	})
-	if err != nil || start.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+	if err != nil || start.GetCommitted() == nil {
 		t.Fatalf("WriteEvent request start = %#v/%v; want committed", start, err)
 	}
 	const inputJSON = `{"cmd":"printf production-boundary"}`
 	toolUse, err := client.WriteEvent(runtimeContext, &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_sandbox_production_tool", ModelRequestId: modelRequestID,
 		EventType: "agent.tool_use", SessionVisible: true,
-		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":` + inputJSON + `,"evaluated_permission":"allow"}`,
-		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
-			t, scope, "rwrite_sandbox_production_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"exec_command","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":` + inputJSON + `,"preview":"{}","truncated":false}}}`},
-		),
+		PayloadJson:           `{"type":"agent.tool_use","name":"exec_command","input":` + inputJSON + `,"evaluated_permission":"allow"}`,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, "exec_command", inputJSON),
 	})
-	if err != nil || toolUse.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || toolUse.GetEventId() == "" {
+	if err != nil || toolUse.GetCommitted() == nil || toolUse.GetCommitted().GetEventId() == "" {
 		t.Fatalf("WriteEvent Tool use = %#v/%v; want committed durable target", toolUse, err)
 	}
-	toolUseEventID := toolUse.GetEventId()
+	toolUseEventID := toolUse.GetCommitted().GetEventId()
 
 	bunPath, err := exec.LookPath("bun")
 	if err != nil {

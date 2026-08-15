@@ -251,7 +251,7 @@ func safeActorDiagnosticIdentity(value string) string {
 
 // logCommittedThreadInterrupt derives the public-safe control identity from the
 // durable interrupt event. Logging stays outside the declaration transaction
-// and cannot change receipt application or retry behavior.
+// and cannot change typed-result application or retry behavior.
 func (s *PostgreSQLBridgeAPIStore) logCommittedThreadInterrupt(ctx context.Context, request *bridgev1.CommitInputsRequest, event string, projectionCount int, durationMS int64) {
 	if s == nil || s.Logger == nil || request == nil || request.GetRuntimeInputId() == "" {
 		return

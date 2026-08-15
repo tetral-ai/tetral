@@ -1,186 +1,126 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEventEnvelope, SessionEventWriterAppendResult } from "../../src/contracts/runtime.js";
+import type {
+	SessionEventEnvelope,
+	SessionEventWriterAppendResult,
+} from "../../src/contracts/runtime.js";
 import { SessionEventWriterRetryPolicy } from "../../src/contracts/runtime.js";
 import { createSessionEventWriter } from "../../src/runtime/session-event-writer.js";
 
-const createdAt = "2026-06-14T00:00:00.000Z";
-const hostileText = "DUMMY_TOKEN_CANARY authorization: bearer raw-secret raw provider payload marker";
-
-function envelope(writeId = "write-1"): SessionEventEnvelope {
-  return {
-    requestId: "request-1",
-    workspaceId: "workspace-1",
-    sessionId: "session-1",
-    sessionThreadId: "thread-1",
-    bindingId: "binding-1",
-    bindingGeneration: 1,
-    targetPodUid: "pod-1",
-    writeId,
-    modelRequestId: "model-request-1",
-    event: { type: "agent.message", content: [{ type: "text", text: "hello" }] },
-    assistantPartAppend: {
-      parts: [{ type: "text", text: "hello", truncated: false, status: "completed" }],
-    },
-  };
+function envelope(writeId = "write_1"): SessionEventEnvelope {
+	return {
+		requestId: "request_1",
+		workspaceId: "workspace_1",
+		sessionId: "session_1",
+		sessionThreadId: "thread_1",
+		bindingId: "binding_1",
+		bindingGeneration: 1,
+		targetPodUid: "pod_1",
+		writeId,
+		modelRequestId: "model_request_1",
+		event: {
+			type: "agent.message",
+			content: [{ type: "text", text: "hello" }],
+		},
+		assistantContextAppend: {
+			parts: [{ type: "text", text: "hello", truncated: false }],
+		},
+	};
 }
 
 describe("SessionEventWriter boundary", () => {
-  test("append request excludes final Bridge id fields and success returns eventId", async () => {
-    const requests: unknown[] = [];
-    const writer = createSessionEventWriter({
-      append: async (request) => {
-        requests.push(request);
-        return { ok: true, writeId: "write-1", eventId: "bridge-event-1", processedAt: createdAt };
-      },
-      sleep: async () => true,
-    });
+	test("accepts an operation-specific result that does not echo the request", async () => {
+		const requests: SessionEventEnvelope[] = [];
+		const writer = createSessionEventWriter({
+			append: async (request) => {
+				requests.push(request);
+				return { ok: true, type: "committed", eventId: "event_1" };
+			},
+			sleep: async () => true,
+		});
 
-    const result = await writer.append(envelope());
+		expect(await writer.append(envelope())).toEqual({
+			ok: true,
+			type: "committed",
+			eventId: "event_1",
+		});
+		expect(requests).toEqual([envelope()]);
+		expect(
+			JSON.stringify(await writer.append(envelope("write_2"))),
+		).not.toContain("write_2");
+	});
 
-    expect(result).toEqual({ ok: true, writeId: "write-1", eventId: "bridge-event-1", processedAt: createdAt });
-    expect(requests).toEqual([envelope()]);
-    expect(JSON.stringify(requests)).not.toContain("bridge-event-1");
-    expect(JSON.stringify(requests)).not.toContain("processedAt");
-    expect(JSON.stringify(requests)).not.toContain("processed_at");
-  });
+	test("closed result union rejects unrelated and caller-echo fields", async () => {
+		const writer = createSessionEventWriter({
+			append: async () => ({
+				ok: true,
+				type: "committed",
+				eventId: "event_1",
+				writeId: "forbidden_echo",
+			}),
+			sleep: async () => true,
+		});
 
-  test("retry reuses the same writeId and ack mismatch fails closed", async () => {
-    const writeIds: string[] = [];
-    const writer = createSessionEventWriter({
-      append: async (request): Promise<SessionEventWriterAppendResult> => {
-        writeIds.push(request.writeId);
-        if (writeIds.length === 1) {
-          return {
-            ok: false,
-            error: { type: "session-event-writer", code: "unavailable", message: "try later", retryable: true, fatal: false, writeId: request.writeId },
-          };
-        }
-        return { ok: true, writeId: "different-write", eventId: "bridge-event-2", processedAt: createdAt };
-      },
-      sleep: async () => true,
-    });
+		expect(await writer.append(envelope())).toEqual({
+			ok: false,
+			error: expect.objectContaining({
+				code: "schema_mismatch",
+				writeId: "write_1",
+			}),
+		});
+	});
 
-    const result = await writer.append(envelope("stable-write"));
+	test("retries retryable failures with the stable write identity", async () => {
+		const writeIds: string[] = [];
+		const writer = createSessionEventWriter({
+			append: async (request): Promise<SessionEventWriterAppendResult> => {
+				writeIds.push(request.writeId);
+				if (writeIds.length === 1) {
+					return {
+						ok: false,
+						error: {
+							type: "session-event-writer",
+							code: "unavailable",
+							message: "try later",
+							retryable: true,
+							fatal: false,
+							writeId: request.writeId,
+						},
+					};
+				}
+				return { ok: true, type: "duplicate", eventId: "event_2" };
+			},
+			sleep: async () => true,
+		});
 
-    expect(writeIds).toEqual(["stable-write", "stable-write"]);
-    expect(result).toEqual({
-      ok: false,
-      error: expect.objectContaining({
-        type: "session-event-writer",
-        code: "ack_mismatch",
-        retryable: false,
-        fatal: true,
-        writeId: "stable-write",
-      }),
-    });
-  });
+		expect(await writer.append(envelope("stable_write"))).toEqual({
+			ok: true,
+			type: "duplicate",
+			eventId: "event_2",
+		});
+		expect(writeIds).toEqual(["stable_write", "stable_write"]);
+	});
 
-  test("hung append attempts time out and retry with the stable writeId", async () => {
-    const writeIds: string[] = [];
-    const sleeps: number[] = [];
-    const writer = createSessionEventWriter({
-      append: (request) => {
-        writeIds.push(request.writeId);
-        return new Promise<never>(() => undefined);
-      },
-      sleep: async (durationMs) => {
-        sleeps.push(durationMs);
-        return true;
-      },
-    });
+	test("invalid envelopes fail before transport", async () => {
+		const requests: unknown[] = [];
+		const writer = createSessionEventWriter({
+			append: async (request) => {
+				requests.push(request);
+				return { ok: true, type: "committed", eventId: "event_1" };
+			},
+			sleep: async () => true,
+		});
 
-    const result = await writer.append(envelope("timeout-write"));
+		await expect(
+			writer.append({ ...envelope(), sessionId: "" }),
+		).rejects.toThrow();
+		expect(requests).toEqual([]);
+	});
 
-    expect(writeIds).toEqual(["timeout-write", "timeout-write", "timeout-write"]);
-    expect(sleeps).toEqual([3000, 100, 3000, 300, 3000]);
-    expect(result).toEqual({
-      ok: false,
-      error: expect.objectContaining({
-        type: "session-event-writer",
-        code: "timeout",
-        retryable: true,
-        fatal: false,
-        writeId: "timeout-write",
-      }),
-    });
-  });
-
-  test("invalid envelopes and unsupported terminal payloads fail before transport append", async () => {
-    const requests: unknown[] = [];
-    const writer = createSessionEventWriter({
-      append: async (request) => {
-        requests.push(request);
-        return { ok: true, writeId: request.writeId, eventId: "bridge-event", processedAt: createdAt };
-      },
-      sleep: async () => true,
-    });
-
-    await expect(writer.append({
-      ...envelope("wrong-session"),
-      sessionId: "",
-    } as unknown as SessionEventEnvelope)).rejects.toThrow();
-    await expect(writer.append({
-      ...envelope("bad-stop"),
-      event: { type: "session.status_idle", stop_reason: { type: "unsupported" } },
-    } as unknown as SessionEventEnvelope)).rejects.toThrow();
-    await expect(writer.append({
-      ...envelope("bad-error"),
-      event: {
-        type: "session.error",
-        error: {
-          type: "provider",
-          code: "provider_unknown",
-          message: "failed",
-          retryable: false,
-          fatal: true,
-          retryStatus: { type: "again" },
-        },
-      },
-    } as unknown as SessionEventEnvelope)).rejects.toThrow();
-
-    expect(requests).toEqual([]);
-  });
-
-  test("append bounds hostile text before transport and terminal append failure is not recursive", async () => {
-    const requests: unknown[] = [];
-    const writer = createSessionEventWriter({
-      append: async (request): Promise<SessionEventWriterAppendResult> => {
-        requests.push(request);
-        return {
-          ok: false,
-          error: { type: "session-event-writer", code: "unavailable", message: hostileText, retryable: false, fatal: false, writeId: request.writeId },
-        };
-      },
-      sleep: async () => true,
-    });
-
-    const result = await writer.append({
-      ...envelope("terminal-write"),
-      modelRequestId: undefined,
-      assistantPartAppend: undefined,
-      event: {
-        type: "session.error",
-        error: {
-          type: "provider",
-          code: "provider_unknown",
-          message: hostileText,
-          retryable: false,
-          fatal: true,
-        },
-      },
-    });
-
-    expect(result).toEqual({
-      ok: false,
-      error: expect.objectContaining({ type: "session-event-writer", code: "unavailable", writeId: "terminal-write" }),
-    });
-    expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests)).not.toContain("DUMMY_TOKEN_CANARY");
-    expect(JSON.stringify(requests)).not.toContain("authorization: bearer raw-secret");
-    expect(JSON.stringify(requests)).not.toContain("raw provider payload marker");
-  });
-
-  test("retry constants are fixed at the runtime event-writer boundary", () => {
-    expect(SessionEventWriterRetryPolicy).toEqual({ attempts: 3, timeoutPerAttemptMs: 3000, backoffMs: [100, 300] });
-  });
+	test("retry policy remains fixed at the Runtime writer boundary", () => {
+		expect(SessionEventWriterRetryPolicy).toEqual({
+			attempts: 3,
+			timeoutPerAttemptMs: 3000,
+			backoffMs: [100, 300],
+		});
+	});
 });

@@ -43,57 +43,6 @@ service AgentRuntimeBridgeService {
   rpc CommitRuntimeTermination(CommitRuntimeTerminationRequest) returns (CommitRuntimeTerminationResponse);
 }
 
-enum BridgeWriteStatus {
-  BRIDGE_WRITE_STATUS_UNSPECIFIED = 0;
-  BRIDGE_WRITE_STATUS_COMMITTED = 1;
-  BRIDGE_WRITE_STATUS_DUPLICATE = 2;
-  BRIDGE_WRITE_STATUS_REJECTED = 3;
-}
-
-enum RuntimeMessageCreateKind {
-  RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED = 0;
-  RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT = 1;
-  RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT = 2;
-  RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT = 3;
-  RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT = 4;
-  RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION = 5;
-  RUNTIME_MESSAGE_CREATE_KIND_REJECTION = 6;
-  RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL = 7;
-  RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT = 8;
-  RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR = 9;
-  RUNTIME_MESSAGE_CREATE_KIND_TERMINATION = 10;
-}
-
-enum DurableEventDisposition {
-  DURABLE_EVENT_DISPOSITION_UNSPECIFIED = 0;
-  DURABLE_EVENT_DISPOSITION_EXISTING = 1;
-  DURABLE_EVENT_DISPOSITION_CREATED = 2;
-}
-
-enum DurableProjectionDisposition {
-  DURABLE_PROJECTION_DISPOSITION_UNSPECIFIED = 0;
-  DURABLE_PROJECTION_DISPOSITION_CREATED = 1;
-  DURABLE_PROJECTION_DISPOSITION_UPDATED = 2;
-}
-
-enum PrefixConsumptionDisposition {
-  PREFIX_CONSUMPTION_DISPOSITION_UNSPECIFIED = 0;
-  PREFIX_CONSUMPTION_DISPOSITION_CONSUMED = 1;
-}
-
-enum ReceiptApplicationDisposition {
-  RECEIPT_APPLICATION_DISPOSITION_UNSPECIFIED = 0;
-  RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY = 1;
-  RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY = 2;
-}
-
-enum RequestRescheduleDisposition {
-  REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED = 0;
-  REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED = 1;
-  REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH = 2;
-  REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED = 3;
-}
-
 enum ChildLifecycleDisposition {
   CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED = 0;
   CHILD_LIFECYCLE_DISPOSITION_CLOSED = 1;
@@ -127,19 +76,38 @@ enum ChildInterruptOutcome {
   CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED = 5;
 }
 
-message RuntimeMessageCreate {
-  RuntimeMessageCreateKind message_kind = 2;
-  string message_info_json = 3;
-  repeated RuntimePartCreate parts = 4;
+message RuntimeContextDelta {
+  repeated RuntimeContextPart parts = 1;
 }
 
-message RuntimePartCreate {
-  string part_kind = 1;
-  string part_json = 2;
+message RuntimeContextPart {
+  oneof content {
+    RuntimeContextText text = 1;
+    RuntimeContextReasoning reasoning = 2;
+    RuntimeContextToolCall tool_call = 3;
+    RuntimeContextToolResult tool_result = 4;
+  }
 }
 
-message RuntimeAssistantPartAppend {
-  repeated RuntimePartCreate parts = 1;
+message RuntimeContextText {
+  string text = 1;
+}
+message RuntimeContextReasoning {
+  string text = 1;
+  optional string provider_metadata_json = 2;
+}
+message RuntimeContextToolCall {
+  string model_tool_call_id = 1;
+  string tool_name = 2;
+  string canonical_input_json = 3;
+}
+message RuntimeContextToolResult {
+  string model_tool_call_id = 1;
+  oneof outcome {
+    RuntimeToolCompleted completed = 2;
+    RuntimeToolError error = 3;
+    RuntimeToolCancelled cancelled = 4;
+  }
 }
 
 message RuntimeToolSettlement {
@@ -165,102 +133,9 @@ message RuntimeToolCancelled {
   optional string error_json = 1;
 }
 
-message DurableEventStamp {
-  string session_thread_id = 1;
-  string event_id = 2;
-  int64 event_sequence = 3;
-  DurableEventDisposition disposition = 4;
-}
-
-message DurablePartStamp {
-  string part_id = 1;
-  string message_id = 2;
-  int64 part_sequence = 3;
-  string created_at = 4;
-  string updated_at = 5;
-  DurableProjectionDisposition disposition = 6;
-}
-
-message DurableMessageStamp {
-  string session_thread_id = 1;
-  string message_id = 3;
-  int64 message_sequence = 4;
-  string created_at = 5;
-  string updated_at = 6;
-  DurableProjectionDisposition disposition = 7;
-  repeated DurablePartStamp parts = 8;
-}
-
-message PrefixConsumptionStamp {
-  string child_thread_id = 1;
-  string parent_boundary_event_id = 2;
-  string checkpoint_message_id = 3;
-  PrefixConsumptionDisposition disposition = 4;
-}
-
 message PrefixConsumptionDraft {
   string child_thread_id = 1;
   string parent_boundary_event_id = 2;
-}
-
-message RequestRescheduleStamp {
-  RequestRescheduleDisposition disposition = 1;
-  string request_kind = 2;
-  int64 attempt = 3;
-  string effective_deadline = 4;
-}
-
-message ChildLifecycleStamp {
-  string child_thread_id = 1;
-  ChildLifecycleDisposition disposition = 2;
-  string effective_at = 3;
-}
-
-message IdleCloseoutStamp {
-  string durable_turn_id = 1;
-  string idle_event_id = 2;
-  int64 idle_event_sequence = 3;
-  string committed_idle_at = 4;
-}
-
-message RequestStartStamp {
-  string request_kind = 1;
-  int64 context_through_message_sequence = 2;
-}
-
-message DeclarationReceipt {
-  string session_thread_id = 1;
-  string operation_kind = 2;
-  string source_kind = 3;
-  string operation_id = 4;
-  repeated DurableEventStamp events = 5;
-  repeated DurableMessageStamp messages = 6;
-  repeated string pending_attachment_delta_json = 7;
-  reserved 8;
-  repeated PrefixConsumptionStamp prefix_consumptions = 9;
-  string declaration_digest = 10;
-  RequestRescheduleStamp request_reschedule = 11;
-  repeated ChildLifecycleStamp child_lifecycle = 12;
-  RequestStartStamp request_start = 13;
-  IdleCloseoutStamp idle_closeout = 14;
-  optional int64 compacted_through_message_sequence = 15;
-  repeated InterruptToolProjection interrupt_tool_projections = 16;
-}
-
-message InterruptToolProjection {
-  string tool_use_event_id = 1;
-  DurableEventStamp result_event = 2;
-  oneof terminal_state {
-    RuntimeToolError error = 3;
-    RuntimeToolCancelled cancelled = 4;
-  }
-}
-
-message DeclarationResponse {
-  repeated DeclarationReceipt receipts = 1;
-  string observed_binding_id = 2;
-  int64 observed_binding_generation = 3;
-  ReceiptApplicationDisposition application_disposition = 4;
 }
 
 message RuntimeBindingRef {
@@ -278,26 +153,13 @@ message RuntimeScope {
   RuntimeBindingRef binding = 5;
 }
 
-message BridgeWriteAck {
-  BridgeWriteStatus status = 1;
-  string runtime_input_id = 2;
-  string runtime_write_id = 3;
-  string error_code = 4;
-}
-
 message LoadContextRequest {
   RuntimeScope scope = 1;
-  string runtime_input_id = 2;
-  int64 sequence_from = 3;
-  int64 sequence_to = 4;
-  reserved 5;
-  reserved "agent_mail_source_thread_id";
 }
 
 message LoadContextResponse {
-  BridgeWriteAck ack = 1;
-  string context_json = 2;
-  string runtime_binding_token = 3;
+  string context_json = 1;
+  string runtime_binding_token = 2;
 }
 
 message RefreshRuntimeBindingTokenRequest {
@@ -330,8 +192,12 @@ enum RuntimeInputDisposition {
   RUNTIME_INPUT_DISPOSITION_REJECT = 3;
 }
 
-message RuntimeContextToolFailed { string error_json = 1; }
-message RuntimeContextToolCancelled { optional string error_json = 1; }
+message RuntimeContextToolFailed {
+  string error_json = 1;
+}
+message RuntimeContextToolCancelled {
+  optional string error_json = 1;
+}
 
 message RuntimeInterruptToolResult {
   string tool_use_event_id = 1;
@@ -396,7 +262,9 @@ message CommitTaskNotificationResultDuplicate {
 }
 message CommitTaskNotificationResultStale {}
 message CommitTaskNotificationResultDeferred {}
-message CommitTaskNotificationResultRejected { TaskNotificationRejectionReason reason = 1; }
+message CommitTaskNotificationResultRejected {
+  TaskNotificationRejectionReason reason = 1;
+}
 
 enum TaskNotificationRejectionReason {
   TASK_NOTIFICATION_REJECTION_REASON_UNSPECIFIED = 0;
@@ -444,7 +312,9 @@ message McpToolClaimAcquired {
   string input_json = 3;
 }
 
-message McpToolAlreadyCompleted { string result_json = 1; }
+message McpToolAlreadyCompleted {
+  string result_json = 1;
+}
 message McpToolClaimInFlight {}
 message McpToolClaimStale {}
 
@@ -499,13 +369,27 @@ message CommitInternalToolRepairRequest {
   string model_request_id = 2;
   string model_tool_call_id = 3;
   string tool_name = 4;
-  RuntimeMessageCreate message_create = 5;
+  string canonical_input_json = 5;
+  RuntimeToolError error = 6;
+  string repair_key = 7;
 }
 
 message CommitInternalToolRepairResponse {
-  BridgeWriteAck ack = 1;
-  DeclarationResponse declaration = 2;
+  oneof outcome {
+    CommitInternalToolRepairCommitted committed = 1;
+    CommitInternalToolRepairDuplicate duplicate = 2;
+    CommitInternalToolRepairStale stale = 3;
+  }
 }
+message CommitInternalToolRepairCommitted {
+  string repair_event_id = 1;
+  int64 assigned_message_sequence = 2;
+}
+message CommitInternalToolRepairDuplicate {
+  string repair_event_id = 1;
+  int64 assigned_message_sequence = 2;
+}
+message CommitInternalToolRepairStale {}
 
 message CommitRuntimeTerminationRequest {
   RuntimeScope scope = 1;
@@ -633,7 +517,7 @@ message WriteEventRequest {
   bool session_visible = 7;
   reserved 8, 9;
   reserved "server_tool_use";
-  RuntimeAssistantPartAppend assistant_part_append = 10;
+  RuntimeContextDelta assistant_context_delta = 10;
   reserved 11, 12;
   reserved "mcp_materialization_handle", "sandbox_result_digest";
   optional int64 context_through_message_sequence = 13;
@@ -648,11 +532,25 @@ message ServerToolUseUsage {
 }
 
 message WriteEventResponse {
-  BridgeWriteAck ack = 1;
-  string event_id = 2;
-  int64 sequence = 3;
-  DeclarationResponse declaration = 4;
+  oneof outcome {
+    WriteEventCommitted committed = 1;
+    WriteEventDuplicate duplicate = 2;
+    WriteEventStale stale = 3;
+  }
 }
+message WriteEventCommitted {
+  string event_id = 1;
+  int64 event_sequence = 2;
+  optional int64 assigned_message_sequence = 3;
+  repeated string created_tool_use_event_ids = 4;
+}
+message WriteEventDuplicate {
+  string event_id = 1;
+  int64 event_sequence = 2;
+  optional int64 assigned_message_sequence = 3;
+  repeated string created_tool_use_event_ids = 4;
+}
+message WriteEventStale {}
 
 message SettleToolResultRequest {
   RuntimeScope scope = 1;
@@ -679,20 +577,22 @@ message WriteRequestEndRequest {
   string model_request_id = 3;
   string finish_reason = 4;
   string usage_json = 5;
-  string model_request_start_event_id = 6;
+  reserved 6;
+  reserved "model_request_start_event_id";
   bool is_error = 7;
   string error_kind = 8;
   repeated string consumed_attachment_refs = 9;
-  string request_kind = 10;
+  reserved 10;
+  reserved "request_kind";
   RequestEndReschedule reschedule = 11;
   reserved 12;
   repeated FileAttachmentPair consumed_file_attachments = 13;
-  RuntimeAssistantPartAppend trailing_part_append = 14;
+  RuntimeContextDelta trailing_context_delta = 14;
   PrefixConsumptionDraft prefix_consumption = 15;
   optional int64 compacted_through_message_sequence = 16;
   string compaction_event_payload_json = 17;
   RequestEndInterruptSettlement interrupt_settlement = 18;
-  RuntimeMessageCreate compaction_checkpoint_create = 19;
+  RuntimeContextDelta compaction_context = 19;
 }
 
 message RequestEndInterruptSettlement {
@@ -700,9 +600,45 @@ message RequestEndInterruptSettlement {
 }
 
 message WriteRequestEndResponse {
-  BridgeWriteAck ack = 1;
-  reserved 2;
-  DeclarationResponse declaration = 3;
+  oneof outcome {
+    WriteRequestEndCommitted committed = 1;
+    WriteRequestEndDuplicate duplicate = 2;
+    WriteRequestEndStale stale = 3;
+  }
+}
+
+message WriteRequestEndCommitted {
+  string request_end_event_id = 1;
+  oneof disposition {
+    RequestEndOrdinary ordinary = 2;
+    RequestEndRescheduled rescheduled = 3;
+    RequestEndCompacted compacted = 4;
+  }
+  repeated RuntimeInterruptToolResult interrupt_tool_results = 5;
+  repeated string pending_attachment_json = 6;
+}
+message WriteRequestEndDuplicate {
+  string request_end_event_id = 1;
+  oneof disposition {
+    RequestEndOrdinary ordinary = 2;
+    RequestEndRescheduled rescheduled = 3;
+    RequestEndCompacted compacted = 4;
+  }
+  repeated RuntimeInterruptToolResult interrupt_tool_results = 5;
+  repeated string pending_attachment_json = 6;
+}
+message WriteRequestEndStale {}
+message RequestEndOrdinary {
+  optional int64 sealed_message_sequence = 1;
+}
+message RequestEndRescheduled {
+  reserved 1;
+  reserved "attempt";
+  string effective_deadline = 2;
+}
+message RequestEndCompacted {
+  string compaction_event_id = 1;
+  int64 checkpoint_message_sequence = 2;
 }
 
 message RequestEndReschedule {
@@ -711,25 +647,28 @@ message RequestEndReschedule {
   int64 backoff_ms = 3;
 }
 
-message RequestEndRescheduleDisposition {
-  string status = 1;
-  string denial_reason = 2;
-  int32 attempt = 3;
-  string effective_deadline = 4;
-}
-
 message FinishIdleRequest {
   RuntimeScope scope = 1;
   reserved 2, 3;
   string stop_reason_json = 4;
   string durable_turn_id = 5;
-  RuntimeMessageCreate completion_mail_create = 6;
+  optional string completion_mail_text = 6;
 }
 
 message FinishIdleResponse {
-  BridgeWriteAck ack = 1;
-  DeclarationResponse declaration = 2;
+  oneof outcome {
+    FinishIdleCommitted committed = 1;
+    FinishIdleDuplicate duplicate = 2;
+    FinishIdleStale stale = 3;
+  }
 }
+message FinishIdleCommitted {
+  string idle_event_id = 1;
+}
+message FinishIdleDuplicate {
+  string idle_event_id = 1;
+}
+message FinishIdleStale {}
 
 message CreateSubagentThreadRequest {
   RuntimeScope scope = 1;
@@ -745,8 +684,12 @@ message CreateSubagentThreadResponse {
     CreateSubagentThreadDuplicate duplicate = 2;
   }
 }
-message CreateSubagentThreadCommitted { string child_thread_id = 1; }
-message CreateSubagentThreadDuplicate { string child_thread_id = 1; }
+message CreateSubagentThreadCommitted {
+  string child_thread_id = 1;
+}
+message CreateSubagentThreadDuplicate {
+  string child_thread_id = 1;
+}
 
 message EnsureApprovalReviewerTrunkRequest {
   RuntimeScope scope = 1;
@@ -758,8 +701,12 @@ message EnsureApprovalReviewerTrunkResponse {
     EnsureApprovalReviewerTrunkDuplicate duplicate = 2;
   }
 }
-message EnsureApprovalReviewerTrunkCommitted { string reviewer_thread_id = 1; }
-message EnsureApprovalReviewerTrunkDuplicate { string reviewer_thread_id = 1; }
+message EnsureApprovalReviewerTrunkCommitted {
+  string reviewer_thread_id = 1;
+}
+message EnsureApprovalReviewerTrunkDuplicate {
+  string reviewer_thread_id = 1;
+}
 
 message EnsureApprovalReviewerSidecarRequest {
   RuntimeScope scope = 1;
@@ -771,8 +718,12 @@ message EnsureApprovalReviewerSidecarResponse {
     EnsureApprovalReviewerSidecarDuplicate duplicate = 2;
   }
 }
-message EnsureApprovalReviewerSidecarCommitted { string reviewer_thread_id = 1; }
-message EnsureApprovalReviewerSidecarDuplicate { string reviewer_thread_id = 1; }
+message EnsureApprovalReviewerSidecarCommitted {
+  string reviewer_thread_id = 1;
+}
+message EnsureApprovalReviewerSidecarDuplicate {
+  string reviewer_thread_id = 1;
+}
 
 message AdmitApprovalReviewInputRequest {
   RuntimeScope scope = 1;
@@ -785,8 +736,12 @@ message AdmitApprovalReviewInputResponse {
     AdmitApprovalReviewInputDuplicate duplicate = 2;
   }
 }
-message AdmitApprovalReviewInputCommitted { string runtime_input_id = 1; }
-message AdmitApprovalReviewInputDuplicate { string runtime_input_id = 1; }
+message AdmitApprovalReviewInputCommitted {
+  string runtime_input_id = 1;
+}
+message AdmitApprovalReviewInputDuplicate {
+  string runtime_input_id = 1;
+}
 
 message ResolveChildThreadRequest {
   RuntimeScope scope = 1;
@@ -794,9 +749,13 @@ message ResolveChildThreadRequest {
 }
 
 message ResolveChildThreadResponse {
-  oneof outcome { ResolveChildThreadResolved resolved = 1; }
+  oneof outcome {
+    ResolveChildThreadResolved resolved = 1;
+  }
 }
-message ResolveChildThreadResolved { ChildThreadFact child = 1; }
+message ResolveChildThreadResolved {
+  ChildThreadFact child = 1;
+}
 
 message ListChildThreadsRequest {
   RuntimeScope scope = 1;
@@ -804,9 +763,13 @@ message ListChildThreadsRequest {
 }
 
 message ListChildThreadsResponse {
-  oneof outcome { ListChildThreadsCompleted completed = 1; }
+  oneof outcome {
+    ListChildThreadsCompleted completed = 1;
+  }
 }
-message ListChildThreadsCompleted { repeated ChildThreadFact children = 1; }
+message ListChildThreadsCompleted {
+  repeated ChildThreadFact children = 1;
+}
 message ChildThreadFact {
   string child_thread_id = 1;
   string parent_thread_id = 2;
@@ -869,8 +832,12 @@ message AdmitChildInterruptResponse {
     AdmitChildInterruptDuplicate duplicate = 2;
   }
 }
-message AdmitChildInterruptCommitted { string control_operation_id = 1; }
-message AdmitChildInterruptDuplicate { string control_operation_id = 1; }
+message AdmitChildInterruptCommitted {
+  string control_operation_id = 1;
+}
+message AdmitChildInterruptDuplicate {
+  string control_operation_id = 1;
+}
 
 message AwaitChildInterruptRequest {
   RuntimeScope scope = 1;
@@ -888,7 +855,9 @@ message AwaitChildInterruptResponse {
     AwaitChildInterruptCompleted completed = 1;
   }
 }
-message AwaitChildInterruptCompleted { repeated ChildInterruptTargetOutcome targets = 1; }
+message AwaitChildInterruptCompleted {
+  repeated ChildInterruptTargetOutcome targets = 1;
+}
 
 message CloseChildControlRequest {
   RuntimeScope scope = 1;
@@ -901,8 +870,12 @@ message CloseChildControlResponse {
     CloseChildControlStale stale = 3;
   }
 }
-message CloseChildControlCommitted { repeated ChildLifecycleResult children = 1; }
-message CloseChildControlDuplicate { repeated ChildLifecycleResult children = 1; }
+message CloseChildControlCommitted {
+  repeated ChildLifecycleResult children = 1;
+}
+message CloseChildControlDuplicate {
+  repeated ChildLifecycleResult children = 1;
+}
 message CloseChildControlStale {}
 
 message CloseApprovalReviewerRequest {
@@ -938,8 +911,12 @@ message MarkChildThreadActiveResponse {
     MarkChildThreadActiveStale stale = 3;
   }
 }
-message MarkChildThreadActiveCommitted { ChildLifecycleDisposition disposition = 1; }
-message MarkChildThreadActiveDuplicate { ChildLifecycleDisposition disposition = 1; }
+message MarkChildThreadActiveCommitted {
+  ChildLifecycleDisposition disposition = 1;
+}
+message MarkChildThreadActiveDuplicate {
+  ChildLifecycleDisposition disposition = 1;
+}
 message MarkChildThreadActiveStale {}
 
 message AcceptSandboxExecutionRequest {
@@ -998,7 +975,9 @@ message ReadCommandResultResponse {
   }
 }
 
-message CommandReadCompleted { string result_json = 1; }
+message CommandReadCompleted {
+  string result_json = 1;
+}
 message CommandReadStale {}
 
 message SendCommandInputRequest {
@@ -1047,8 +1026,12 @@ message CancelCommandResponse {
   }
 }
 
-message CommandCancelCommitted { string result_json = 1; }
-message CommandCancelDuplicate { string result_json = 1; }
+message CommandCancelCommitted {
+  string result_json = 1;
+}
+message CommandCancelDuplicate {
+  string result_json = 1;
+}
 message CommandCancelStale {}
 
 message RunMemoryRequest {
@@ -1067,6 +1050,10 @@ message RunMemoryResponse {
   }
 }
 
-message MemoryRunCommitted { string result_json = 1; }
-message MemoryRunDuplicate { string result_json = 1; }
+message MemoryRunCommitted {
+  string result_json = 1;
+}
+message MemoryRunDuplicate {
+  string result_json = 1;
+}
 message MemoryRunStale {}

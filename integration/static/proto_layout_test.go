@@ -45,8 +45,10 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc AwaitChildInterrupt(AwaitChildInterruptRequest) returns (AwaitChildInterruptResponse);",
 		"message ChildThreadFact",
 		"message DeliverInterAgentMailCommitted {}",
-		"message AdmitChildInterruptCommitted { string control_operation_id = 1; }",
-		"message MarkChildThreadActiveCommitted { ChildLifecycleDisposition disposition = 1; }",
+		"message AdmitChildInterruptCommitted",
+		"string control_operation_id = 1;",
+		"message MarkChildThreadActiveCommitted",
+		"ChildLifecycleDisposition disposition = 1;",
 		"rpc CloseChildControl(CloseChildControlRequest) returns (CloseChildControlResponse);",
 		"rpc CloseApprovalReviewer(CloseApprovalReviewerRequest) returns (CloseApprovalReviewerResponse);",
 		"rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);",
@@ -86,7 +88,6 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"message RuntimeTerminationStale {}",
 		"int64 web_search_requests = 1;",
 		"int64 web_fetch_requests = 2;",
-		"BRIDGE_WRITE_STATUS_COMMITTED",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("bridge proto missing %q", required)
@@ -242,11 +243,8 @@ func TestGatewayServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		}
 	}
 	for _, retired := range []string{
-		"message RuntimeMessage",
-		"message RuntimePart",
 		"optional string tool_use_event_id = 3;",
 		"string source_tool_use_event_id",
-		"repeated RuntimeMessage messages = 13;",
 	} {
 		if strings.Contains(text, retired) {
 			t.Fatalf("Gateway provider carrier retained Runtime-owned member %q", retired)

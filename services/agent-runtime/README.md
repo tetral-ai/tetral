@@ -41,7 +41,7 @@ invariants stated with them.
 | `ThreadEntry` | `session-manager.ts` | one resident thread with role, status, `ThreadRuntime`, command channel, and `run_slot` | released whole on cleanup — no orphan fibers, timers, or maps survive |
 | `ThreadRunSlot` | `session-manager.ts` | the single-owner run guard (below) | hot memory only; durable truth is `session_events` / `session_messages` / `session_pending_tool_uses` / `session_threads` |
 | `ThreadState` | `thread-loop/thread-state.ts` | accepted inputs, pending tool and approval work, attachments, configuration views, and request usage hints for one resident thread | rebuilt from durable state on cold start; held limits and usage hints are never durable |
-| `ContextManager` | `context-manager.ts` | hot `RuntimeMessage` state for one thread | appends only after durable ACK |
+| `ContextManager` | `context-manager.ts` | sealed provider context plus one optional open Assistant draft | mutates only after an operation-specific durable result |
 | `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
 | `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; failure fallback requires an ACKed outcome, failed requests reach durable idle before trunk reuse, and uncertain outcomes evict only the addressed execution |
@@ -66,7 +66,7 @@ the reducer, not a side-channel wake flag, decides whether work remains.
 | --- | --- |
 | `run_id` / `owner_fiber` / `scope` / `done_deferred` | the active run, its scope, and the deferred that joined waiters await |
 | `stopping` | interrupt installed; the owner is unwinding |
-| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, deferral, or terminal disposition receipt |
+| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, deferral, or terminal disposition result |
 
 | Event | Idle thread | Active, `stopping = false` | Active, `stopping = true` |
 | --- | --- | --- | --- |
@@ -121,11 +121,11 @@ state are awaited Effects, never detached background work.
 
 | RPC | Hot mutation it gates |
 | --- | --- |
-| `CommitInputs` | append accepted messages to `ContextManager` |
-| `WriteEvent` | update hot assistant/tool state; open or resolve pending waits |
-| `WriteRequestEnd` | validate current custody even when no assistant seal exists; otherwise apply the terminal message/part stamps. An interrupt during an open provider request also applies the identity-matched `CommitInputs` receipt returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
+| `CommitInputs` | apply the caller-held accepted-input context drafts at the Bridge-assigned sequences after a committed or duplicate result |
+| `WriteEvent` | apply the closed event result and its optional Assistant context append; open or resolve pending waits |
+| `WriteRequestEnd` | validate current custody even when no Assistant draft exists; otherwise seal the open draft. An interrupt during an open provider request also applies the identity-matched input commit returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |
-| `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; validate every returned stamp before removing pending tools or releasing the turn |
+| `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; apply the closed termination result before removing pending tools or releasing the turn |
 
 `Effect` is the shape of every operation with I/O, failure, or cancellation.
 `Fiber` exists only for owned lifetimes — the ThreadRun owner, the provider
@@ -340,12 +340,12 @@ Invariants a replacement must preserve:
 - Child durable thread and context prefix exist before the initial message; a crash
   after a duplicate `CreateSubagentThread` result reuses the same Bridge-owned child and prefix.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
-  sent envelope → received source/inbox → Runtime command → stamped input
-  receipt. Pod-loss reconciliation hands an accepted input back to the existing
+  sent envelope → received source/inbox → Runtime command → committed input
+  result. Pod-loss reconciliation hands an accepted input back to the existing
   queue job or creates one replacement only after exact Runtime custody is lost.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
-- Completion return rides the same durable wake/receipt rail: the child
+- Completion return rides the same durable wake rail: the child
   settlement writes one sent envelope and wake, admission creates or reuses the
   received source and inbox, and the parent's `CommitInputs` projects it once.
   `wait_agent` returns the exact stored envelope immediately while ensuring the
@@ -394,7 +394,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `core/test/unit/thread-loop/provider-request.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |
 | `core/test/unit/llm-service.test.ts` | provider-stream ordering/identity validation and normalization |
 | `core/test/unit/runtime-accumulator.test.ts` | per-turn `ProviderStreamAccumulator` framing that never leaks across turns |
-| `core/test/unit/session-event-writer.test.ts`, `runtime-message-projection.test.ts` | `WriteEvent` projection whitelist and hot-state updates after ACK |
+| `core/test/unit/session-event-writer.test.ts`, `runtime-context-projection.test.ts` | `WriteEvent` projection whitelist and hot-state updates after ACK |
 | `core/test/unit/turn-retry-budget.test.ts` | provider and compaction reschedule budgets |
 | `core/test/unit/tool-system.test.ts` | `evaluateToolGate` decisions, `runPolicy` serialization/parallelism, invalid-tool repair, approval routing |
 | `core/test/unit/approval-reviewer-manager.test.ts` | reviewer trunk/sidecar selection, cursor and snapshot succession, decision memo |

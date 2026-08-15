@@ -289,7 +289,7 @@ func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndCold
 		t.Fatalf("readiness-only row = tools=%v etag=%v generation=%d readiness=%q diagnostic=%q", toolsJSON, etag, generation, readiness, diagnostic.String)
 	}
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"), RuntimeInputId: "rin_mcp_first_over",
+		Scope: bridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext readiness-only row: %v", err)
@@ -435,7 +435,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 	store.MCPManifestLister = lister
 
 	first, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"), RuntimeInputId: "rin_mcp_cold",
+		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext first binding: %v", err)
@@ -455,13 +455,10 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 		t.Fatalf("replace runtime binding: %v", err)
 	}
 	second, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"), RuntimeInputId: "rin_mcp_cold",
+		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext replacement binding: %v", err)
-	}
-	if second.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("replacement binding ACK = %s; want committed fresh load", second.GetAck().GetStatus())
 	}
 	assertLoadContextMCPManifest(t, second.GetContextJson(), "etag_2", 2, "github_issue")
 	if lister.calls != 0 {

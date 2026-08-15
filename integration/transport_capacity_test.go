@@ -224,7 +224,7 @@ func (s *settlingTransportSender) AcceptInput(
 	if contextThroughMessageSequence <= 0 {
 		return nil, fmt.Errorf("runtime input commit returned invalid message sequence")
 	}
-	start, err := s.bridge.WriteEvent(ctx, &bridgev1.WriteEventRequest{
+	if _, err := s.bridge.WriteEvent(ctx, &bridgev1.WriteEventRequest{
 		Scope:                         scope,
 		RuntimeWriteId:                "rwrite_transport_start_" + s.suffix,
 		ModelRequestId:                modelRequestID,
@@ -232,17 +232,15 @@ func (s *settlingTransportSender) AcceptInput(
 		PayloadJson:                   fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, modelRequestID),
 		RequestKind:                   "agent_provider_request",
 		ContextThroughMessageSequence: &contextThroughMessageSequence,
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
 	if _, err := s.bridge.WriteRequestEnd(ctx, &bridgev1.WriteRequestEndRequest{
-		Scope:                    scope,
-		RuntimeWriteId:           "rwrite_transport_end_" + s.suffix,
-		ModelRequestId:           modelRequestID,
-		ModelRequestStartEventId: start.GetEventId(),
-		FinishReason:             "stop",
-		UsageJson:                `{"input_tokens":1,"output_tokens":1}`,
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_transport_end_" + s.suffix,
+		ModelRequestId: modelRequestID,
+		FinishReason:   "stop",
+		UsageJson:      `{"input_tokens":1,"output_tokens":1}`,
 	}); err != nil {
 		return nil, err
 	}

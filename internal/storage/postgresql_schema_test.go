@@ -648,7 +648,6 @@ func TestSessionEventsSchemaMatchesDraftLedger(t *testing.T) {
 		"insert_stream_position",
 		"runtime_write_id",
 		"model_request_id",
-		"stable_reasoning_json",
 		"projection_json",
 		"created_at",
 		"updated_at",

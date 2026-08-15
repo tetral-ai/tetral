@@ -81,6 +81,7 @@ func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) 
 func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplacement(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "thr_bridge_pod_loss_closed")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_pod_loss", "bind_bridge_pod_loss_old", 7, "pod_uid_pod_loss_old")
 	seedRuntimePodLostStatusFence(t, admin, "sesn_bridge_pod_loss", "bind_bridge_pod_loss_old", 7)
 	if _, err := admin.ExecContext(context.Background(),
@@ -88,12 +89,12 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 		) VALUES
-		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_start', 1, 'span.model_request_start',
+		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_start', 5, 'span.model_request_start',
 		 '{}',
 		 'internal', false, 'mrq_pod_loss',
 		 '{"type":"span.model_request_start","model_request_id":"mrq_pod_loss","context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_tool', 2, 'agent.tool_use',
+		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_tool', 6, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}',
 		 'public', true, 'mrq_pod_loss',
 		 '{}',
@@ -111,6 +112,13 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		"tool-call-pod-loss",
 		"Write",
 	)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
+		SET data_json = jsonb_insert(data_json::jsonb, '{parts,0}',
+			'{"type":"text","text":"partial output must not survive Pod loss"}'::jsonb)::text
+		WHERE workspace_id='default' AND session_id='sesn_bridge_pod_loss'
+		  AND session_thread_id='thr_bridge_pod_loss' AND model_request_id='mrq_pod_loss'`); err != nil {
+		t.Fatalf("seed partial Pod-loss Assistant output: %v", err)
+	}
 	attachmentStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	attachmentStore.AttachmentBlobStore = blob.NewFakeBlobStore()
 	attachmentStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
@@ -192,23 +200,23 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		WHERE workspace_id='default' AND operation_id=$1`, releaseOperationID); err != nil {
 		t.Fatalf("park pod-loss Sandbox release: %v", err)
 	}
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "evt_pod_loss_later", 3, "user.message", `{"content":[{"type":"text","text":"after pod loss"}]}`)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "evt_pod_loss_later", 4, "user.message", `{"content":[{"type":"text","text":"after pod loss"}]}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 		) VALUES
-		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_closed_start', 4, 'span.model_request_start',
+		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss_closed', 'evt_pod_loss_closed_start', 1, 'span.model_request_start',
 		 '{"type":"span.model_request_start","model_request_id":"mrq_pod_loss_closed","request_kind":"agent_provider_request"}',
 		 'internal', false, 'mrq_pod_loss_closed',
 		 '{"context_through_message_sequence":1,"request_kind":"agent_provider_request"}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_closed_tool', 5, 'agent.tool_use',
+		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss_closed', 'evt_pod_loss_closed_tool', 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"src/b.ts"},"evaluated_permission":"allow"}',
 		 'public', false, 'mrq_pod_loss_closed', '{}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_closed_end', 6, 'span.model_request_end',
-		 '{"type":"span.model_request_end","model_request_id":"mrq_pod_loss_closed","finish_reason":"tool_calls"}',
+		('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss_closed', 'evt_pod_loss_closed_end', 3, 'span.model_request_end',
+		 '{"type":"span.model_request_end","model_request_id":"mrq_pod_loss_closed","model_request_start_id":"evt_pod_loss_closed_start","finish_reason":"tool_calls","is_error":false}',
 		 'internal', false, 'mrq_pod_loss_closed', '{}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed closed request with running tool: %v", err)
@@ -218,7 +226,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		admin,
 		"default",
 		"sesn_bridge_pod_loss",
-		"thr_bridge_pod_loss",
+		"thr_bridge_pod_loss_closed",
 		"mrq_pod_loss_closed",
 		"evt_pod_loss_closed_tool",
 		"tool-call-pod-loss-closed",
@@ -258,10 +266,10 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		SessionThreadID: "thr_bridge_pod_loss",
 		RuntimeInputID:  "rin_pod_loss_later",
 		EventIDs:        []string{"evt_pod_loss_later"},
-		SequenceFrom:    3,
-		SequenceTo:      3,
+		SequenceFrom:    4,
+		SequenceTo:      4,
 		InputKind:       "messages",
-		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_pod_loss","session_thread_id":"thr_bridge_pod_loss","runtime_input_id":"rin_pod_loss_later","event_ids":["evt_pod_loss_later"],"sequence_from":3,"sequence_to":3,"input_kind":"messages"}`,
+		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_pod_loss","session_thread_id":"thr_bridge_pod_loss","runtime_input_id":"rin_pod_loss_later","event_ids":["evt_pod_loss_later"],"sequence_from":4,"sequence_to":4,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
@@ -358,10 +366,75 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		    AND source_event_id = 'evt_pod_loss_tool'`).Scan(&messageCount, &messageData); err != nil {
 		t.Fatalf("read pod-loss terminal tool message: %v", err)
 	}
-	if messageCount != 1 || !strings.Contains(messageData, `"status":"completed"`) ||
-		!strings.Contains(messageData, `"status":"error"`) ||
-		!strings.Contains(messageData, `"message":"Tool result unavailable because the runtime pod was lost."`) {
+	if messageCount != 1 {
 		t.Fatalf("pod-loss terminal tool messages = %d/%s; want one repaired durable message", messageCount, messageData)
+	}
+	assertPodLossDurableToolErrorContext(t, messageData, "tool-call-pod-loss")
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("pod-loss-cold-context-signing-key")
+	var replacementBindingID, replacementPodUID string
+	var replacementGeneration int64
+	if err := admin.QueryRowContext(context.Background(), `SELECT binding_id,binding_generation,agent_runtime_pod_uid
+		FROM session_runtime_bindings WHERE workspace_id='default' AND session_id='sesn_bridge_pod_loss'`).Scan(
+		&replacementBindingID, &replacementGeneration, &replacementPodUID,
+	); err != nil {
+		t.Fatalf("read replacement binding scope: %v", err)
+	}
+	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(
+		"sesn_bridge_pod_loss", "thr_bridge_pod_loss", replacementBindingID, replacementGeneration, replacementPodUID,
+	)})
+	if err != nil {
+		t.Fatalf("LoadContext after Pod-loss repair: %v", err)
+	}
+	if strings.Contains(loaded.GetContextJson(), "partial output must not survive Pod loss") {
+		t.Fatalf("Pod-loss cold context exposed failed partial output: %s", loaded.GetContextJson())
+	}
+	var coldPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &coldPayload); err != nil {
+		t.Fatalf("decode Pod-loss cold context: %v", err)
+	}
+	foundRepair := false
+	for _, entry := range coldPayload.ContextEntries {
+		if entry.ContextKind != "assistant" || len(entry.Parts) != 2 {
+			continue
+		}
+		if strings.Contains(string(entry.Parts[0]), `"modelToolCallId":"tool-call-pod-loss"`) &&
+			strings.Contains(string(entry.Parts[1]), `"modelToolCallId":"tool-call-pod-loss"`) {
+			foundRepair = true
+		}
+	}
+	if !foundRepair {
+		t.Fatalf("Pod-loss cold context omitted repaired Tool pair: %#v", coldPayload.ContextEntries)
+	}
+	assertRuntimeDirectContextComposition(t, loaded.GetContextJson())
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+	) SELECT workspace_id, session_id, session_thread_id, 'evt_pod_loss_rescheduled', max(sequence) + 1,
+		'session.status_rescheduled', '{"type":"session.status_rescheduled"}', 'internal', false,
+		'mrq_pod_loss', '{}', '2026-01-01T00:06:00Z', '2026-01-01T00:06:00Z'
+	  FROM session_events
+	 WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_pod_loss'
+	 GROUP BY workspace_id, session_id, session_thread_id
+	 HAVING session_thread_id = 'thr_bridge_pod_loss'`); err != nil {
+		t.Fatalf("reschedule repaired request: %v", err)
+	}
+	rescheduled, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(
+		"sesn_bridge_pod_loss", "thr_bridge_pod_loss", replacementBindingID, replacementGeneration, replacementPodUID,
+	)})
+	if err != nil {
+		t.Fatalf("LoadContext after repaired request reschedule: %v", err)
+	}
+	var rescheduledPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(rescheduled.GetContextJson()), &rescheduledPayload); err != nil {
+		t.Fatalf("decode rescheduled Pod-loss context: %v", err)
+	}
+	for _, entry := range rescheduledPayload.ContextEntries {
+		for _, part := range entry.Parts {
+			if strings.Contains(string(part), `"modelToolCallId":"tool-call-pod-loss"`) {
+				t.Fatalf("rescheduled Pod-loss repair leaked into provider context: %#v", rescheduledPayload.ContextEntries)
+			}
+		}
 	}
 	var boundPodUID string
 	if err := admin.QueryRowContext(context.Background(),
@@ -381,10 +454,10 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		WHERE workspace_id='default' AND session_id='sesn_bridge_pod_loss' AND tool_use_event_id='evt_pod_loss_tool'`).Scan(
 		&executionState, &storedResult, &consumptionReason,
 	); err != nil {
-		t.Fatalf("read pod-loss execution receipt: %v", err)
+		t.Fatalf("read pod-loss execution record: %v", err)
 	}
 	if executionState != "consumed" || storedResult.Valid || consumptionReason != "pod_lost" {
-		t.Fatalf("pod-loss execution = %q/%v/%q; want consumed thin receipt", executionState, storedResult, consumptionReason)
+		t.Fatalf("pod-loss execution = %q/%v/%q; want consumed thin record", executionState, storedResult, consumptionReason)
 	}
 	attachmentStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
 	if result, err := attachmentStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 1 {
@@ -480,10 +553,7 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 	).Scan(&messageJSON); err != nil {
 		t.Fatalf("read repaired MCP message: %v", err)
 	}
-	if !strings.Contains(messageJSON, `"status":"error"`) ||
-		!strings.Contains(messageJSON, `"retryable":false`) {
-		t.Fatalf("repaired MCP message = %s; want non-retryable terminal error", messageJSON)
-	}
+	assertPodLossDurableToolErrorContext(t, messageJSON, "call_mcp_pod_loss")
 	if _, err := runRuntimePodLostRepairTransaction(
 		context.Background(), runtime, sessionID, binding, time.Date(2026, 1, 1, 0, 6, 0, 0, time.UTC),
 	); err != nil {
@@ -501,6 +571,31 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 	}
 	if resultCount != 1 {
 		t.Fatalf("MCP pod-loss result count = %d; want exactly one", resultCount)
+	}
+}
+
+func assertPodLossDurableToolErrorContext(t *testing.T, raw, modelToolCallID string) {
+	t.Helper()
+	stored, err := decodeRuntimeDeclarationObject(raw)
+	if err != nil {
+		t.Fatalf("decode repaired Tool context: %v", err)
+	}
+	parts, ok := stored["parts"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("repaired Tool context parts = %#v; want call and result", stored["parts"])
+	}
+	resultPart, ok := parts[1].(map[string]any)
+	if !ok || len(resultPart) != 3 || resultPart["type"] != "tool_result" || resultPart["modelToolCallId"] != modelToolCallID {
+		t.Fatalf("repaired Tool result = %#v; want exact narrow result identity", parts[1])
+	}
+	outcome, ok := resultPart["result"].(map[string]any)
+	if !ok || len(outcome) != 2 || outcome["type"] != "error" {
+		t.Fatalf("repaired Tool outcome = %#v; want exact error outcome", resultPart["result"])
+	}
+	toolError, ok := outcome["error"].(map[string]any)
+	if !ok || len(toolError) != 3 || toolError["type"] != "runtime_pod_lost" ||
+		toolError["message"] != "Tool result unavailable because the runtime pod was lost." || toolError["retryable"] != false {
+		t.Fatalf("repaired Tool error = %#v; want non-retryable pod-loss error", outcome["error"])
 	}
 }
 
@@ -773,7 +868,8 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 				   FROM session_events
 				  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
 				    AND type = 'agent.tool_result'
-				    AND payload_json::jsonb ->> 'tool_use_event_id' = $3`,
+				    AND (payload_json::jsonb ->> 'tool_use_event_id' = $3
+				         OR payload_json::jsonb ->> 'tool_use_id' = $3)`,
 				sessionID, threadID, toolUseEventID,
 			).Scan(&resultCount, &resultEventID, &resultPayload); err != nil {
 				t.Fatalf("read approval pod-loss result: %v", err)
@@ -829,8 +925,7 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 			}
 
 			loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
-				RuntimeInputId: "rin_pod_loss_approval_cold_" + suffix,
+				Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
 			})
 			if err != nil {
 				t.Fatalf("LoadContext after approval pod loss: %v", err)
@@ -839,8 +934,8 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 			if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 				t.Fatalf("decode approval pod-loss context: %v", err)
 			}
-			if len(payload.PendingToolUses) != 0 || len(payload.ColdCoverage.PendingToolIDs) != 0 {
-				t.Fatalf("approval pod-loss pending context = %+v/%+v; want no live approval route", payload.PendingToolUses, payload.ColdCoverage.PendingToolIDs)
+			if len(payload.PendingToolUses) != 0 {
+				t.Fatalf("approval pod-loss pending context = %+v; want no live approval route", payload.PendingToolUses)
 			}
 		})
 	}
@@ -911,9 +1006,18 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		sessionID,
 		threadID,
 		modelRequestID,
-		`[{"type":"tool","toolCallId":"tool-call-pod-loss-multiple-resolving","toolName":"Write","toolUseEventId":"evt_pod_loss_multiple_tool_resolving","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}]`,
+		`[{"type":"tool_call","modelToolCallId":"tool-call-pod-loss-multiple-resolving","toolName":"Write","canonicalInput":{}}]`,
 	); err != nil {
 		t.Fatalf("append second durable tool part: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events
+		    SET projection_json = '{"model_tool_call_id":"tool-call-pod-loss-multiple-resolving","tool_name":"Write"}'
+		  WHERE workspace_id='default' AND session_id=$1
+		    AND event_id='evt_pod_loss_multiple_tool_resolving'`,
+		sessionID,
+	); err != nil {
+		t.Fatalf("seed second durable Tool Use identity: %v", err)
 	}
 	for _, tool := range []struct {
 		eventID    string

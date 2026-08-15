@@ -64,7 +64,7 @@ func TestPostgreSQLAcceptanceTimeTaskNotificationParkingLogsCommittedCustody(t *
 		PodUID: podUID, PodIP: "10.0.0.1",
 	}}
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
-	if err != nil || plan.AcceptInput == nil {
+	if err != nil || plan.AcceptTask == nil {
 		t.Fatalf("prepare task notification = %#v, %v; want Runtime request", plan, err)
 	}
 

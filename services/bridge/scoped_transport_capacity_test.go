@@ -53,13 +53,12 @@ type largeContextTransportServer struct {
 
 func (largeContextTransportServer) LoadContext(context.Context, *bridgev1.LoadContextRequest) (*bridgev1.LoadContextResponse, error) {
 	return &bridgev1.LoadContextResponse{
-		Ack:         committedAck("", ""),
 		ContextJson: strings.Repeat("c", 33*1024*1024),
 	}, nil
 }
 
 func (largeContextTransportServer) WriteEvent(context.Context, *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
-	return &bridgev1.WriteEventResponse{Ack: committedAck("", "")}, nil
+	return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Committed{Committed: &bridgev1.WriteEventCommitted{}}}, nil
 }
 
 func TestGatewayMCPManifestListerReceivesManifestAboveSharedSessionCap(t *testing.T) {

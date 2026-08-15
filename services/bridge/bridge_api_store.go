@@ -642,37 +642,6 @@ func rowsAffected(result sql.Result) bool {
 	return err == nil && count > 0
 }
 
-func committedAck(runtimeInputID string, runtimeWriteID string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:         bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED,
-		RuntimeInputId: runtimeInputID,
-		RuntimeWriteId: runtimeWriteID,
-	}
-}
-
-func duplicateAck(runtimeInputID string, runtimeWriteID string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:         bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE,
-		RuntimeInputId: runtimeInputID,
-		RuntimeWriteId: runtimeWriteID,
-	}
-}
-
-func rejectedAck(errorCode string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:    bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED,
-		ErrorCode: errorCode,
-	}
-}
-
-func rejectedTaskNotificationAck(runtimeInputID string, errorCode string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:         bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED,
-		RuntimeInputId: runtimeInputID,
-		ErrorCode:      errorCode,
-	}
-}
-
 // defaultTime parses a wire timestamp, falling back when the caller omitted it.
 // Wire timestamps are RFC 3339; durable columns are native timestamps, so an
 // unparsable value is rejected here rather than stored.
@@ -711,13 +680,6 @@ func nullableSQLString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }
 
-func boolHashPart(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
-}
-
 func bridgeRequestHash(parts ...string) string {
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(digest[:])
@@ -728,14 +690,6 @@ func nullableJSONString(value sql.NullString) any {
 		return nil
 	}
 	return value.String
-}
-
-// nullableJSONTime renders a nullable durable timestamp for a JSON projection.
-func nullableJSONTime(value sql.NullTime) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time.UTC().Format(time.RFC3339Nano)
 }
 
 var _ BridgeAPIStore = (*PostgreSQLBridgeAPIStore)(nil)

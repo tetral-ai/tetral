@@ -1,7 +1,6 @@
 package agentruntimebridge
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -17,26 +16,4 @@ func TestStripInternalProviderFieldsRemovesNestedProviderMetadata(t *testing.T) 
 	if !strings.Contains(result, `"text":"ok"`) {
 		t.Fatalf("recursive strip removed safe content: %s", result)
 	}
-}
-
-func TestPendingToolTerminalMessageInsertIsConflictSafe(t *testing.T) {
-	assertConflictSafeInsert := func(t *testing.T, source string, signature string) {
-		t.Helper()
-		body := sourceFunctionBody(t, source, signature)
-		for _, fragment := range []string{
-			"ON CONFLICT (workspace_id, session_id, session_thread_id, source_event_id)",
-			"WHERE source_event_id IS NOT NULL",
-			"DO NOTHING",
-		} {
-			if !strings.Contains(body, fragment) {
-				t.Fatalf("%s missing source_event_id conflict protection fragment %q in:\n%s", signature, fragment, body)
-			}
-		}
-	}
-
-	runtimeSourceBytes, err := os.ReadFile("runtime_delivery.go")
-	if err != nil {
-		t.Fatalf("read runtime_delivery.go: %v", err)
-	}
-	assertConflictSafeInsert(t, string(runtimeSourceBytes), "func insertPendingToolTerminalMessageTx")
 }

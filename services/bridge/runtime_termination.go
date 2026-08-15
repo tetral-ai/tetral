@@ -248,13 +248,13 @@ func settleRuntimeTerminationDurableFactsTx(
 			return err
 		}
 	}
-	completionMail, err := runtimeTerminationCompletionMailCreateTx(ctx, tx, scope, threadScope, failure)
+	completionMail, err := runtimeTerminationCompletionMailTextTx(ctx, tx, scope, threadScope, failure)
 	if err != nil {
 		return err
 	}
 	if completionMail != nil {
-		if _, _, err := appendDeclaredCompletionMailForSourceTx(
-			ctx, tx, scope, threadScope, "runtime_termination", runtimeWriteID, completionMail, now,
+		if _, err := appendDeclaredCompletionMailForSourceTx(
+			ctx, tx, scope, threadScope, runtimeWriteID, *completionMail, now,
 		); err != nil {
 			return err
 		}
@@ -266,13 +266,13 @@ const runtimeTerminationCompletionReasonMaxBytes = 3600
 
 const runtimeTerminationCompletionGuidance = "This agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."
 
-func runtimeTerminationCompletionMailCreateTx(
+func runtimeTerminationCompletionMailTextTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	threadScope threadMutationScope,
 	failure runtimeTerminationFailure,
-) (*bridgev1.RuntimeMessageCreate, error) {
+) (*string, error) {
 	if threadScope.role != "subagent" {
 		return nil, nil
 	}
@@ -299,20 +299,7 @@ func runtimeTerminationCompletionMailCreateTx(
 		"Payload:",
 		payload,
 	}, "\n")
-	partJSON, err := marshalBridgeJSON(map[string]any{
-		"type": "text", "text": envelope, "truncated": false, "status": "completed",
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &bridgev1.RuntimeMessageCreate{
-		MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL,
-		MessageInfoJson: `{"origin":"runtime","role":"user","status":"completed"}`,
-		Parts: []*bridgev1.RuntimePartCreate{{
-			PartKind: "text",
-			PartJson: partJSON,
-		}},
-	}, nil
+	return &envelope, nil
 }
 
 func truncateRuntimeTerminationCompletionReason(reason string) string {
@@ -493,7 +480,7 @@ func closeRuntimeTerminatedSessionSiblingsTx(
 // custody owned by a terminalized Thread. Main-thread termination covers the
 // whole Session tree; child termination remains thread-local. Reactivated task
 // jobs are cancelled together with queued/parked Inbox rows, invalidating any
-// runner lease before the Runtime receipt can release hot state.
+// runner lease before the Runtime's typed result can release hot state.
 type runtimeTerminationCustodyTransitions struct {
 	accepted int
 	parked   int
@@ -554,17 +541,17 @@ func cancelRuntimeTerminationInputsTx(
 	return transitions, err
 }
 
-func appendRuntimeTerminationErrorTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, failureJSON string, now time.Time) (*bridgev1.DurableEventStamp, error) {
+func appendRuntimeTerminationErrorTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, failureJSON string, now time.Time) (runtimeTerminationEventFact, error) {
 	var failure runtimeTerminationFailure
 	if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
-		return nil, err
+		return runtimeTerminationEventFact{}, err
 	}
 	payloadJSON, err := marshalBridgeJSON(map[string]any{
 		"type":  "session.error",
 		"error": publicRuntimeTerminationError(failure),
 	})
 	if err != nil {
-		return nil, err
+		return runtimeTerminationEventFact{}, err
 	}
 	return insertRuntimeTerminationEventTx(
 		ctx,
@@ -595,26 +582,26 @@ func publicRuntimeTerminationError(failure runtimeTerminationFailure) map[string
 	}
 }
 
-func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, now time.Time) (*bridgev1.DurableEventStamp, error) {
+func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, now time.Time) (runtimeTerminationEventFact, error) {
 	eventType := "session.thread_status_terminated"
 	payloadJSON, err := threadStatusPayloadJSON(eventType, scope, threadScope, "")
 	if err != nil {
-		return nil, err
+		return runtimeTerminationEventFact{}, err
 	}
 	if threadScope.role == "main" {
 		eventType = "session.status_terminated"
 		payloadJSON, err = marshalBridgeJSON(map[string]any{"type": eventType})
 		if err != nil {
-			return nil, err
+			return runtimeTerminationEventFact{}, err
 		}
 		result, err := tx.Exec(ctx,
 			`UPDATE sessions SET status = 'terminated', updated_at = $3 WHERE workspace_id = $1 AND id = $2`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), now)
 		if err != nil {
-			return nil, err
+			return runtimeTerminationEventFact{}, err
 		}
 		if !rowsAffected(result) {
-			return nil, status.Error(codes.FailedPrecondition, "runtime session is stale")
+			return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "runtime session is stale")
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE session_runtime_status
@@ -626,7 +613,7 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 			        updated_at = $3
 			  WHERE workspace_id = $1 AND session_id = $2`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), now); err != nil {
-			return nil, err
+			return runtimeTerminationEventFact{}, err
 		}
 		result, err = tx.Exec(ctx,
 			`UPDATE session_threads
@@ -636,10 +623,10 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 			    AND status NOT IN ('terminated', 'failed')`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now)
 		if err != nil {
-			return nil, err
+			return runtimeTerminationEventFact{}, err
 		}
 		if !rowsAffected(result) {
-			return nil, status.Error(codes.FailedPrecondition, "runtime main thread status update failed")
+			return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "runtime main thread status update failed")
 		}
 	} else {
 		result, err := tx.Exec(ctx,
@@ -648,13 +635,18 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 			  WHERE workspace_id = $1 AND session_id = $2 AND id = $3 AND role <> 'main'`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now)
 		if err != nil {
-			return nil, err
+			return runtimeTerminationEventFact{}, err
 		}
 		if !rowsAffected(result) {
-			return nil, status.Error(codes.FailedPrecondition, "child thread status update failed")
+			return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "child thread status update failed")
 		}
 	}
 	return insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID, runtimeWriteID, eventType, payloadJSON, now)
+}
+
+type runtimeTerminationEventFact struct {
+	EventID       string
+	EventSequence int64
 }
 
 func insertRuntimeTerminationEventTx(
@@ -667,12 +659,12 @@ func insertRuntimeTerminationEventTx(
 	eventType string,
 	payloadJSON string,
 	now time.Time,
-) (*bridgev1.DurableEventStamp, error) {
+) (runtimeTerminationEventFact, error) {
 	visibility, sessionVisible := threadScope.publicProjection(eventType)
 	eventID := id.New("evt_")
 	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
 	if err != nil {
-		return nil, err
+		return runtimeTerminationEventFact{}, err
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
@@ -681,15 +673,10 @@ func insertRuntimeTerminationEventTx(
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $7, $11, $11, $11)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
 		eventType, payloadJSON, visibility, sessionVisible, runtimeWriteID, now); err != nil {
-		return nil, err
+		return runtimeTerminationEventFact{}, err
 	}
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return nil, err
+		return runtimeTerminationEventFact{}, err
 	}
-	return &bridgev1.DurableEventStamp{
-		SessionThreadId: scope.GetSessionThreadId(),
-		EventId:         eventID,
-		EventSequence:   sequence,
-		Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-	}, nil
+	return runtimeTerminationEventFact{EventID: eventID, EventSequence: sequence}, nil
 }

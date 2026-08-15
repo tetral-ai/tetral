@@ -2077,32 +2077,19 @@ func acceptedMessageCommandPayloadTx(ctx context.Context, tx *dbconnect.Tx, job 
 	if len(job.EventIDs) == 0 || job.SessionThreadID == "" {
 		return "", runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "message runtime input is incomplete", retryable: false}
 	}
-	var nextSequence int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3`,
-		job.WorkspaceID, job.SessionID, job.SessionThreadID,
-	).Scan(&nextSequence); err != nil {
-		return "", err
-	}
-	scope := bridgeSessionScope(string(job.WorkspaceID), job.SessionID, job.SessionThreadID)
 	messages := make([]json.RawMessage, 0, len(job.EventIDs))
-	for index, eventID := range job.EventIDs {
+	for _, eventID := range job.EventIDs {
 		var eventType string
 		var payloadJSON string
-		var createdAt time.Time
 		if err := tx.QueryRow(ctx,
-			`SELECT type, payload_json, created_at
+			`SELECT type, payload_json
 			   FROM session_events
 			  WHERE workspace_id = $1
 			    AND session_id = $2
 			    AND session_thread_id = $3
 			    AND event_id = $4`,
 			job.WorkspaceID, job.SessionID, job.SessionThreadID, eventID,
-		).Scan(&eventType, &payloadJSON, &createdAt); dbconnect.IsNoRows(err) {
+		).Scan(&eventType, &payloadJSON); dbconnect.IsNoRows(err) {
 			return "", runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "message runtime input event is missing", retryable: false}
 		} else if err != nil {
 			return "", err
@@ -2110,9 +2097,7 @@ func acceptedMessageCommandPayloadTx(ctx context.Context, tx *dbconnect.Tx, job 
 		if eventType != "user.message" {
 			return "", runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "message runtime input event type is invalid", retryable: false}
 		}
-		timestamp := createdAt.UTC()
-		identity := bridgeRequestHash("accepted_message", string(job.WorkspaceID), job.SessionID, job.SessionThreadID, eventID)
-		messageJSON, err := userMessageDataJSON(scope, "msg_input_"+identity[:32], nextSequence+int64(index), payloadJSON, timestamp)
+		messageJSON, err := userMessageContextDraftJSON(payloadJSON)
 		if err != nil {
 			return "", err
 		}
@@ -2196,17 +2181,14 @@ func loadSingleRuntimeInputEventTx(ctx context.Context, tx *dbconnect.Tx, job Ru
 type cleanupPendingWait struct {
 	ThreadID        string
 	ToolUseEventID  string
+	ModelRequestID  string
 	ModelToolCallID string
-	ToolName        string
-	InputJSON       string
 	EventType       string
-	MCPServerName   string
 }
 
 type pendingToolTerminal struct {
-	PartStatus string
-	ErrorType  string
-	Message    string
+	ErrorType string
+	Message   string
 }
 
 func insertPendingToolTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, wait cleanupPendingWait, terminal pendingToolTerminal, now time.Time) (string, error) {
@@ -2241,7 +2223,17 @@ func insertPendingToolTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, sc
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return "", err
 	}
-	if err := insertPendingToolTerminalMessageTx(ctx, tx, scope, eventID, wait, terminal, now); err != nil {
+	if err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, runtimeOrphanToolUse{
+		SessionThreadID: wait.ThreadID,
+		EventID:         wait.ToolUseEventID,
+		EventType:       wait.EventType,
+		ModelRequestID:  wait.ModelRequestID,
+		ModelToolCallID: wait.ModelToolCallID,
+	}, runtimeTerminalToolResult{
+		ErrorType: terminal.ErrorType,
+		Message:   terminal.Message,
+		Retryable: false,
+	}); err != nil {
 		return "", err
 	}
 	return eventID, nil
@@ -2266,103 +2258,6 @@ func pendingToolTerminalPayloadJSON(wait cleanupPendingWait, terminal pendingToo
 		},
 	})
 	return payload, eventType, err
-}
-
-func insertPendingToolTerminalMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string, wait cleanupPendingWait, terminal pendingToolTerminal, now time.Time) error {
-	var existing string
-	err := tx.QueryRow(ctx,
-		`SELECT message_id
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND source_event_id = $2
-		  LIMIT 1`,
-		scope.GetWorkspaceId(),
-		eventID,
-	).Scan(&existing)
-	if err == nil {
-		return nil
-	}
-	if !dbconnect.IsNoRows(err) {
-		return err
-	}
-	var sequence int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&sequence); err != nil {
-		return err
-	}
-	messageID := id.New("msg_")
-	timestamp := now
-	dataJSON, err := marshalBridgeJSON(map[string]any{
-		"id":        messageID,
-		"sessionId": scope.GetSessionId(),
-		"role":      "assistant",
-		"origin":    "agent",
-		"sequence":  sequence - 1,
-		"status":    "completed",
-		"createdAt": timestamp,
-		"updatedAt": timestamp,
-		"parts": []map[string]any{
-			{
-				"id":             messageID + "_tool",
-				"sessionId":      scope.GetSessionId(),
-				"messageId":      messageID,
-				"sequence":       0,
-				"createdAt":      timestamp,
-				"updatedAt":      timestamp,
-				"type":           "tool",
-				"toolCallId":     wait.ModelToolCallID,
-				"toolName":       wait.ToolName,
-				"toolUseEventId": wait.ToolUseEventID,
-				"toolEvent":      pendingToolEventProjection(wait),
-				"state": map[string]any{
-					"status": terminal.PartStatus,
-					"input":  cleanupRuntimeBoundedJSON(wait.InputJSON),
-					"error": map[string]any{
-						"type":      terminal.ErrorType,
-						"message":   terminal.Message,
-						"retryable": false,
-					},
-				},
-				"completedAt": timestamp,
-			},
-		},
-	})
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx,
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $8, $8)
-		ON CONFLICT (workspace_id, session_id, session_thread_id, source_event_id)
-		WHERE source_event_id IS NOT NULL
-		DO NOTHING`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		messageID,
-		sequence,
-		dataJSON,
-		eventID,
-		timestamp,
-	)
-	return err
-}
-
-func pendingToolEventProjection(wait cleanupPendingWait) map[string]any {
-	if wait.EventType == "agent.mcp_tool_use" {
-		return map[string]any{"kind": "mcp", "mcpServerName": wait.MCPServerName}
-	}
-	return map[string]any{"kind": "tool"}
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(

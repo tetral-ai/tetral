@@ -218,10 +218,9 @@ func constantGoString(expression ast.Expr, resolving map[*ast.Object]bool) (stri
 func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	want := map[string]bool{
-		"services/bridge/bridge_api_events.go:userMessageDataJSON":                 true,
+		"services/bridge/bridge_api_events.go:userMessageContextDraftJSON":         true,
 		"services/bridge/bridge_api_mcp.go:runtimeMCPManifestCommandPayload":       true,
 		"services/bridge/bridge_api_settlement.go:validateStableReasoningBudget":   true,
-		"services/bridge/runtime_declaration.go:stableReasoningLedgerTx":           true,
 		"services/bridge/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
 		"services/bridge/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
 		"services/bridge/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,

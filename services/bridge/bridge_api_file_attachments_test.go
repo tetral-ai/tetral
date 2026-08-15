@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -219,11 +218,10 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttach
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_pending_later"}}]}`)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_first", "sevt_file_pending_first", 1)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_later", "sevt_file_pending_later", 2)
-	requestStart := seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 2)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 2)
 	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_file_pending_end", ModelRequestId: "mreq_file_pending",
-		ModelRequestStartEventId: requestStart.GetEventId(), FinishReason: "stop", UsageJson: `{}`,
-		RequestKind: "agent_provider_request",
+		FinishReason: "stop", UsageJson: `{}`,
 	})
 	if err != nil {
 		t.Fatalf("seed request end: %v", err)
@@ -245,9 +243,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttach
 		t.Fatalf("seed consumed file attachment: %v", err)
 	}
 
-	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: scope, RuntimeInputId: "rin_bridge_file_pending",
-	})
+	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("LoadContext pending attachments: %v", err)
 	}
@@ -390,8 +386,7 @@ func seedBridgeAPIFileAttachment(t *testing.T, db *sql.DB, blobStore blob.BlobSt
 
 func seedBridgeAPIProjectedUserMessage(t *testing.T, db *sql.DB, sessionID, threadID, messageID, sourceEventID string, sequence int64) {
 	t.Helper()
-	dataJSON := `{"id":"` + messageID + `","sessionId":"` + sessionID + `","role":"user","origin":"user","sequence":` +
-		strconv.FormatInt(sequence-1, 10) + `,"status":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","parts":[]}`
+	dataJSON := `{"parts":[]}`
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,

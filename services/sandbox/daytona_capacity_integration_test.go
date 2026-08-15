@@ -292,26 +292,31 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 		Scope: bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_tool_use", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`,
-		AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
-			Parts: []*bridgev1.RuntimePartCreate{{
-				PartKind: "tool",
-				PartJson: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"exec_command","state":{"status":"running","input":{"value":{"cmd":"true"},"preview":"{\"cmd\":\"true\"}","truncated":false}}}`,
-			}},
+		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
+			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
+				ToolCall: &bridgev1.RuntimeContextToolCall{
+					ModelToolCallId: modelToolCallID, ToolName: "exec_command", CanonicalInputJson: inputJSON,
+				},
+			}}},
 		},
 	})
 	if err != nil {
 		t.Fatalf("commit capacity-chain Tool Use: %v", err)
 	}
+	if toolUse.GetCommitted() == nil || len(toolUse.GetCommitted().GetCreatedToolUseEventIds()) != 1 {
+		t.Fatalf("capacity-chain Tool Use result = %#v; want one committed Tool identity", toolUse)
+	}
+	toolUseEventID := toolUse.GetCommitted().GetCreatedToolUseEventIds()[0]
 	inputHash := sandboxCapacitySHA256(inputJSON)
 	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
 		SET tool_use_event_id=$1, normalized_input_hash=$2, tool_name='exec_command', input_json=$3,
 			model_tool_call_id=$4
 		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
-		  AND tool_use_event_id='evt_execution_a'`, toolUse.GetEventId(), inputHash, inputJSON, modelToolCallID); err != nil {
+		  AND tool_use_event_id='evt_execution_a'`, toolUseEventID, inputHash, inputJSON, modelToolCallID); err != nil {
 		t.Fatalf("bind capacity-chain execution to durable Tool Use: %v", err)
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
-	work := loadSandboxExecutionWork(t, coordinator, toolUse.GetEventId())
+	work := loadSandboxExecutionWork(t, coordinator, toolUseEventID)
 	if err := coordinator.WaitForActivation(sandboxTestQueueContext(t, runtimeDB), work, ExecutionNeedsCreation); err != nil {
 		t.Fatalf("WaitForActivation: %v", err)
 	}
@@ -337,7 +342,7 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 		runtime: runtimeDB, admin: adminDB, client: client,
 		queueJobID: identity.queueJobID, operationID: identity.operationID,
 		sdk: sdkClient, logs: logs, bridgeStore: bridgeStore, bridgeScope: bridgeScope,
-		toolUseEventID: toolUse.GetEventId(), modelRequestID: modelRequestID,
+		toolUseEventID: toolUseEventID, modelRequestID: modelRequestID,
 		modelToolCallID: modelToolCallID, inputJSON: inputJSON, inputHash: inputHash,
 		runner: &SandboxActivationJobRunner{
 			Queue:     sandboxProductionQueueClient(t, queue.NewPostgreSQLStore(client)),
@@ -406,28 +411,33 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_shared_tool_use", ModelRequestId: h.modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"printf shared"},"evaluated_permission":"allow"}`,
-		AssistantPartAppend: &bridgev1.RuntimeAssistantPartAppend{
-			Parts: []*bridgev1.RuntimePartCreate{{
-				PartKind: "tool",
-				PartJson: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"exec_command","state":{"status":"running","input":{"value":{"cmd":"printf shared"},"preview":"{\"cmd\":\"printf shared\"}","truncated":false}}}`,
-			}},
+		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
+			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
+				ToolCall: &bridgev1.RuntimeContextToolCall{
+					ModelToolCallId: modelToolCallID, ToolName: "exec_command", CanonicalInputJson: inputJSON,
+				},
+			}}},
 		},
 	})
 	if err != nil {
 		t.Fatalf("commit shared capacity Tool Use: %v", err)
 	}
+	if written.GetCommitted() == nil || len(written.GetCommitted().GetCreatedToolUseEventIds()) != 1 {
+		t.Fatalf("shared capacity Tool Use result = %#v; want one committed Tool identity", written)
+	}
+	toolUseEventID := written.GetCommitted().GetCreatedToolUseEventIds()[0]
 	inputHash := sandboxCapacitySHA256(inputJSON)
 	if _, err := h.admin.Exec(`UPDATE session_runtime_tool_results
 		SET tool_use_event_id=$1, normalized_input_hash=$2, tool_name='exec_command', input_json=$3,
 			model_tool_call_id=$4
 		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
-		  AND tool_use_event_id='evt_execution_b'`, written.GetEventId(), inputHash, inputJSON, modelToolCallID); err != nil {
+		  AND tool_use_event_id='evt_execution_b'`, toolUseEventID, inputHash, inputJSON, modelToolCallID); err != nil {
 		t.Fatalf("bind shared capacity execution to durable Tool Use: %v", err)
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(h.client, 30*time.Minute)
 	work, current, err := coordinator.LoadExecution(context.Background(), SandboxExecutionJob{Ref: SandboxExecutionRef{
 		WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
-		SessionThreadID: "thr_execution_store", ToolUseEventID: written.GetEventId(),
+		SessionThreadID: "thr_execution_store", ToolUseEventID: toolUseEventID,
 	}, AttemptGeneration: 1})
 	if err != nil || !current || work.Binding == nil {
 		t.Fatalf("load shared capacity execution = current %t binding %+v err %v", current, work.Binding, err)
@@ -438,7 +448,7 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 	var operationID string
 	if err := h.admin.QueryRow(`SELECT waiting_activation_operation_id FROM session_runtime_tool_results
 		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND tool_use_event_id=$1`,
-		written.GetEventId()).Scan(&operationID); err != nil {
+		toolUseEventID).Scan(&operationID); err != nil {
 		t.Fatalf("read shared waiter operation: %v", err)
 	}
 	if operationID != h.operationID {
@@ -446,7 +456,7 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 	}
 	return daytonaCapacityWaiter{
 		sessionID: "sesn_execution_store", threadID: "thr_execution_store",
-		toolUseEventID: written.GetEventId(), modelToolCallID: modelToolCallID,
+		toolUseEventID: toolUseEventID, modelToolCallID: modelToolCallID,
 		operationID: operationID,
 	}
 }

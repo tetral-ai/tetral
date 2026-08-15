@@ -103,8 +103,8 @@ func (s BridgeAPIServer) WriteEvent(ctx context.Context, request *bridgev1.Write
 		return nil, err
 	}
 	response, err := store.WriteEvent(ctx, request)
-	if errorCode, ok := closeoutWriteRejectionCode(err); ok {
-		return &bridgev1.WriteEventResponse{Ack: rejectedAck(errorCode)}, nil
+	if isScopeSupersededError(err) {
+		return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Stale{Stale: &bridgev1.WriteEventStale{}}}, nil
 	}
 	return response, err
 }
@@ -123,8 +123,8 @@ func (s BridgeAPIServer) WriteRequestEnd(ctx context.Context, request *bridgev1.
 		return nil, err
 	}
 	response, err := store.WriteRequestEnd(ctx, request)
-	if errorCode, ok := closeoutWriteRejectionCode(err); ok {
-		return &bridgev1.WriteRequestEndResponse{Ack: rejectedAck(errorCode)}, nil
+	if isScopeSupersededError(err) {
+		return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Stale{Stale: &bridgev1.WriteRequestEndStale{}}}, nil
 	}
 	return response, err
 }
@@ -151,8 +151,8 @@ func (s BridgeAPIServer) FinishIdle(ctx context.Context, request *bridgev1.Finis
 		return nil, err
 	}
 	response, err := store.FinishIdle(ctx, request)
-	if errorCode, ok := closeoutWriteRejectionCode(err); ok {
-		return &bridgev1.FinishIdleResponse{Ack: rejectedAck(errorCode)}, nil
+	if isScopeSupersededError(err) {
+		return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 	}
 	return response, err
 }

@@ -15,6 +15,10 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -26,9 +30,6 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type taskNotificationRuntimeCompositionOutput struct {
@@ -321,7 +322,6 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, "mreq_"+sourceID, sourceID); err != nil {
 		t.Fatalf("make background source Tool Use public: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, "mreq_"+sourceID, sourceID, "toolu_"+sourceID, "exec_command")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
 		workspace_id,session_id,logical_sandbox_id,environment_id,environment_generation,
 		provider,provider_resource_id,binding_revision,materialized_resource_revision,
@@ -429,14 +429,11 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		t.Fatalf("resident Runtime declaration = %#v; want exact committed task input", declaration)
 	}
 	var committedResult struct {
-		Type             string `json:"type"`
-		InputDisposition string `json:"inputDisposition"`
-		Receipt          struct {
-			Messages []json.RawMessage `json:"messages"`
-		} `json:"receipt"`
+		Type                     string  `json:"type"`
+		AssignedContextSequences []int64 `json:"assignedContextSequences"`
 	}
-	if err := json.Unmarshal(composed.CommitResult, &committedResult); err != nil || committedResult.Type != "receipt" || committedResult.InputDisposition != "duplicate" || len(committedResult.Receipt.Messages) != 1 {
-		t.Fatalf("Runtime typed application = %s err:%v; want lost-ACK duplicate one-message projection", composed.CommitResult, err)
+	if err := json.Unmarshal(composed.CommitResult, &committedResult); err != nil || committedResult.Type != "duplicate" || len(committedResult.AssignedContextSequences) != 1 {
+		t.Fatalf("Runtime typed application = %s err:%v; want lost-ACK duplicate with one assigned context sequence", composed.CommitResult, err)
 	}
 
 	var inboxStatus, queueStatus, storedMessageText string

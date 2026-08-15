@@ -1,173 +1,299 @@
 import { describe, expect, test } from "bun:test";
 import type {
-  RuntimeAssistantPartAppend,
-  RuntimeDeclarationReceipt,
+	RuntimeContextEntry,
+	RuntimeToolError,
 } from "../../src/contracts/runtime.js";
-import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
 import {
-  acceptedInputCreates,
-  applyAcceptedInputReceipt,
-  applyAssistantPartAppendReceipt,
-  applyInterruptInputReceipt,
-  applyInterruptToolProjections,
+	acceptedInputContextDrafts,
+	applyAcceptedInputResult,
+	applyAssistantAppendResult,
+	applyInternalToolRepairResult,
+	applyInterruptToolResults,
+	applyToolSettlementToContext,
+	assistantAppendFromDraftParts,
+	internalToolRepairContext,
+	sealAssistantDraft,
 } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeAcceptedInputState } from "../../src/thread-loop/thread-state.js";
 
-const timestamp = "2026-01-01T00:00:00.000Z";
-
-function baseReceipt(overrides: Partial<RuntimeDeclarationReceipt>): RuntimeDeclarationReceipt {
-  return {
-    sessionThreadId: "thread",
-    operationKind: "write_event",
-    sourceKind: "agent.message",
-    operationId: "write",
-    declarationDigest: "digest",
-    events: [],
-    messages: [],
-    pendingAttachmentDelta: [],
-    interruptToolProjections: [],
-    prefixConsumptions: [],
-    childLifecycle: [],
-    ...overrides,
-  };
+function messageInput(
+	contentJson: string,
+): Extract<RuntimeAcceptedInputState, { readonly kind: "messages" }> {
+	return {
+		workspaceId: "wksp_1",
+		sessionId: "sesn_1",
+		sessionThreadId: "thr_1",
+		bindingId: "bind_1",
+		bindingGeneration: 1,
+		targetPodUid: "pod_1",
+		runtimeInputId: "rin_1",
+		inputOrder: 1,
+		kind: "messages",
+		contentJson,
+	};
 }
 
-describe("incremental Runtime declarations", () => {
-  test("accepted input creates receive identity only from positional stamps", () => {
-    const input: RuntimeAcceptedInputState = {
-      workspaceId: "workspace",
-      sessionId: "session",
-      sessionThreadId: "thread",
-      bindingId: "binding",
-      bindingGeneration: 1,
-      targetPodUid: "pod",
-      runtimeInputId: "input",
-      inputOrder: 4,
-      kind: "messages",
-      contentJson: JSON.stringify({ messages: [{
-        id: "provider_message",
-        sessionId: "session",
-        role: "user",
-        origin: "user",
-        sequence: 1,
-        status: "completed",
-        createdAt: timestamp,
-        parts: [{ id: "provider_part", sessionId: "session", messageId: "provider_message", sequence: 0, type: "text", text: "hello", truncated: false, status: "completed", createdAt: timestamp }],
-      }] }),
-    };
-    const creates = acceptedInputCreates(input);
-    expect(JSON.stringify(creates)).not.toContain("provider_message");
-    const messages = applyAcceptedInputReceipt(input, creates, baseReceipt({
-      operationKind: "commit_inputs",
-      sourceKind: "messages",
-      operationId: "input",
-      events: [{ sessionThreadId: "thread", eventId: "event", eventSequence: 4, disposition: "existing" }],
-      messages: [{
-        sessionThreadId: "thread", messageId: "message", messageSequence: 1,
-        createdAt: timestamp, updatedAt: timestamp, disposition: "created",
-        parts: [{ partId: "part", messageId: "message", partSequence: 0, createdAt: timestamp, updatedAt: timestamp, disposition: "created" }],
-      }],
-    }));
-    expect(messages[0]?.id).toBe("message");
-    expect(messages[0]?.parts[0]?.id).toBe("part");
-  });
+const toolError: RuntimeToolError = {
+	type: "runtime_shutdown",
+	message: "cancelled by Runtime shutdown",
+	retryable: false,
+};
 
-  test("Assistant append rejects a non-contiguous Bridge part stamp", () => {
-    const append: RuntimeAssistantPartAppend = { parts: [{ type: "text", text: "hello", truncated: false, status: "completed" }] };
-    expect(() => applyAssistantPartAppendReceipt({
-      sessionId: "session", sessionThreadId: "thread", operationKind: "write_event",
-      sourceKind: "agent.message", operationId: "write", eventId: "event", append,
-    }, baseReceipt({
-      events: [{ sessionThreadId: "thread", eventId: "event", eventSequence: 1, disposition: "created" }],
-      messages: [{
-        sessionThreadId: "thread", messageId: "message", messageSequence: 1,
-        createdAt: timestamp, updatedAt: timestamp, disposition: "created",
-        parts: [{ partId: "part", messageId: "message", partSequence: 1, createdAt: timestamp, updatedAt: timestamp, disposition: "created" }],
-      }],
-    }))).toThrow();
-  });
+describe("Runtime context declaration applicators", () => {
+	test("normal input consumes only the canonical Bridge messages payload", () => {
+		const drafts = acceptedInputContextDrafts(
+			messageInput(
+				JSON.stringify({
+					messages: [
+						{
+							id: "db identity is deliberately ignored",
+							role: "user",
+							origin: "user",
+							parts: [
+								{
+									id: "part identity is deliberately ignored",
+									type: "text",
+									text: "hello",
+								},
+								{ type: "unsupported", value: "ignored" },
+							],
+						},
+					],
+				}),
+			),
+		);
 
-  test("interrupt projections reject the closed malformed census before hot mutation", () => {
-    const input = {
-      sessionThreadId: "thread",
-      runtimeInputId: "interrupt",
-      eventIds: ["interrupt_event"],
-      expectedToolUseEventIds: ["tool_a", "tool_b"],
-    };
-    const projection = (toolUseEventId: string, eventSequence: number, sessionThreadId = "thread") => ({
-      toolUseEventId,
-      resultEvent: {
-        sessionThreadId,
-        eventId: `result_${toolUseEventId}`,
-        eventSequence,
-        disposition: "created" as const,
-      },
-      terminalState: { type: "cancelled" as const },
-    });
-    const valid = baseReceipt({
-      operationKind: "commit_inputs",
-      sourceKind: "interrupt_control",
-      operationId: "interrupt",
-      events: [{ sessionThreadId: "thread", eventId: "interrupt_event", eventSequence: 4, disposition: "existing" }],
-      interruptToolProjections: [projection("tool_a", 5), projection("tool_b", 6)],
-    });
-    expect(applyInterruptInputReceipt(input, valid)).toHaveLength(2);
+		expect(drafts).toEqual([
+			{ contextKind: "user", parts: [{ type: "text", text: "hello" }] },
+		]);
+		expect(() =>
+			acceptedInputContextDrafts(
+				messageInput(JSON.stringify({ text: "legacy fallback" })),
+			),
+		).toThrow("accepted input payload has no content");
+	});
 
-    const malformed = [
-      { name: "missing", receipt: { ...valid, interruptToolProjections: valid.interruptToolProjections.slice(0, 1) } },
-      { name: "duplicate", receipt: { ...valid, interruptToolProjections: [projection("tool_a", 5), projection("tool_a", 6)] } },
-      { name: "cross-thread", receipt: { ...valid, interruptToolProjections: [projection("tool_a", 5, "other_thread"), projection("tool_b", 6)] } },
-      { name: "out-of-order", receipt: { ...valid, interruptToolProjections: [projection("tool_a", 6), projection("tool_b", 5)] } },
-      { name: "wrong-disposition", receipt: { ...valid, interruptToolProjections: [
-        { ...projection("tool_a", 5), resultEvent: { ...projection("tool_a", 5).resultEvent, disposition: "existing" as const } },
-        projection("tool_b", 6),
-      ] } },
-    ];
-    for (const candidate of malformed) {
-      expect(() => applyInterruptInputReceipt(input, candidate.receipt), candidate.name).toThrow();
-    }
+	test("accepted input result adds only Bridge-assigned context sequences", () => {
+		const drafts = [
+			{
+				contextKind: "user" as const,
+				parts: [{ type: "text" as const, text: "hello" }],
+			},
+		];
+		expect(applyAcceptedInputResult(drafts, [7])).toEqual([
+			{
+				messageSequence: 7,
+				contextKind: "user",
+				parts: [{ type: "text", text: "hello" }],
+			},
+		]);
+		expect(() => applyAcceptedInputResult(drafts, [])).toThrow(
+			"assigned sequence count",
+		);
+	});
 
-    const messages = [RuntimeMessageSchema.parse({
-      id: "message",
-      sessionId: "session",
-      sequence: 1,
-      role: "assistant",
-      origin: "agent",
-      status: "completed",
-      createdAt: timestamp,
-      parts: [
-        { id: "part_a", sessionId: "session", messageId: "message", sequence: 0, type: "tool", toolCallId: "call_a", toolName: "Read", toolUseEventId: "tool_a", state: { status: "pending" }, createdAt: timestamp },
-        { id: "part_b", sessionId: "session", messageId: "message", sequence: 1, type: "tool", toolCallId: "call_b", toolName: "Read", toolUseEventId: "tool_b", state: { status: "running", input: { value: {}, preview: "{}", truncated: false } }, createdAt: timestamp },
-      ],
-    })];
-    expect(() => applyInterruptToolProjections(messages, [projection("tool_b", 5), projection("tool_a", 6)]))
-      .toThrow("interrupt projection census does not match hot unfinished Tools");
-    expect(() => applyInterruptToolProjections(messages, [{
-      ...projection("tool_a", 5),
-      terminalState: { type: "error", error: { unrecognized: true } } as never,
-    }, projection("tool_b", 6)])).toThrow();
-    const projected = applyInterruptToolProjections(messages, [{
-      ...projection("tool_a", 5),
-      terminalState: {
-        type: "error" as const,
-        error: { type: "runtime_interrupted_outcome_unknown", message: "Tool outcome is unknown.", retryable: false },
-      },
-    }, projection("tool_b", 6)]);
-    expect(projected[0]?.parts[0]).toMatchObject({
-      state: {
-        status: "error",
-        error: { type: "runtime_interrupted_outcome_unknown", message: "Tool outcome is unknown.", retryable: false },
-      },
-    });
-    const contradictory = [{
-      ...messages[0]!,
-      parts: messages[0]!.parts.map((part) => part.type === "tool" && part.toolUseEventId === "tool_a"
-        ? { ...part, state: { status: "completed" as const, input: { value: {}, preview: "{}", truncated: false }, output: { text: "already done", truncated: false } } }
-        : part),
-    }];
-    expect(() => applyInterruptToolProjections(contradictory, [projection("tool_a", 5), projection("tool_b", 6)]))
-      .toThrow("interrupt projection census does not match hot unfinished Tools");
-    expect(messages[0]?.parts.map((part) => part.type === "tool" ? part.state.status : part.type))
-      .toEqual(["pending", "running"]);
-  });
+	test("Assistant append remains an open draft until Request End seals it", () => {
+		const append = assistantAppendFromDraftParts([
+			{ type: "text", text: "working", truncated: false },
+			{
+				type: "tool",
+				modelToolCallId: "call_1",
+				toolName: "read_file",
+				state: {
+					status: "running",
+					input: {
+						value: { path: "/tmp/a" },
+						preview: "{path}",
+						truncated: false,
+					},
+				},
+			},
+		]);
+		const applied = applyAssistantAppendResult({
+			modelRequestId: "req_1",
+			append,
+			result: { messageSequence: 8, createdToolUseEventIds: ["evt_tool_1"] },
+		});
+
+		expect(applied.draft).toEqual({
+			modelRequestId: "req_1",
+			messageSequence: 8,
+			parts: [
+				{ type: "text", text: "working" },
+				{
+					type: "tool_call",
+					modelToolCallId: "call_1",
+					toolName: "read_file",
+					canonicalInput: { path: "/tmp/a" },
+				},
+			],
+		});
+		expect(applied.activeToolParts[0]?.toolUseEventId).toBe("evt_tool_1");
+		expect(sealAssistantDraft(applied.draft)).toEqual({
+			messageSequence: 8,
+			contextKind: "assistant",
+			parts: applied.draft.parts,
+		});
+	});
+
+	test("Tool settlement pairs by modelToolCallId without rewriting the call", () => {
+		const entries: readonly RuntimeContextEntry[] = [
+			{
+				messageSequence: 8,
+				contextKind: "assistant",
+				parts: [
+					{
+						type: "tool_call",
+						modelToolCallId: "call_1",
+						toolName: "read_file",
+						canonicalInput: {},
+					},
+				],
+			},
+		];
+		const settled = applyToolSettlementToContext({
+			entries,
+			assistantMessageSequence: 8,
+			modelToolCallId: "call_1",
+			settlement: {
+				type: "completed",
+				output: { text: "done", truncated: false },
+			},
+		});
+
+		expect(settled[0]?.parts).toEqual([
+			{
+				type: "tool_call",
+				modelToolCallId: "call_1",
+				toolName: "read_file",
+				canonicalInput: {},
+			},
+			{
+				type: "tool_result",
+				modelToolCallId: "call_1",
+				result: {
+					type: "completed",
+					output: { text: "done", truncated: false },
+				},
+			},
+		]);
+		expect(() =>
+			applyToolSettlementToContext({
+				entries: settled,
+				assistantMessageSequence: 8,
+				modelToolCallId: "call_1",
+				settlement: { type: "cancelled" },
+			}),
+		).toThrow("missing or already terminal");
+	});
+
+	test("interrupt settlement preserves the exact typed Tool error", () => {
+		const entries: readonly RuntimeContextEntry[] = [
+			{
+				messageSequence: 8,
+				contextKind: "assistant",
+				parts: [
+					{
+						type: "tool_call",
+						modelToolCallId: "call_1",
+						toolName: "read_file",
+						canonicalInput: {},
+					},
+				],
+			},
+		];
+		const updated = applyInterruptToolResults({
+			entries,
+			routes: [
+				{
+					toolUseEventId: "evt_tool_1",
+					assistantMessageSequence: 8,
+					modelToolCallId: "call_1",
+				},
+			],
+			results: [
+				{
+					toolUseEventId: "evt_tool_1",
+					result: { type: "error", error: toolError },
+				},
+			],
+		});
+		expect(updated[0]?.parts[1]).toEqual({
+			type: "tool_result",
+			modelToolCallId: "call_1",
+			result: { type: "error", error: toolError },
+		});
+	});
+
+	test("internal repair emits one paired Assistant context draft", () => {
+		const repair = internalToolRepairContext({
+			modelToolCallId: "call_invalid",
+			toolName: "missing_tool",
+			canonicalInput: {},
+			error: {
+				type: "runtime",
+				code: "runtime_invalid_sequence",
+				message: "invalid",
+				retryable: false,
+				fatal: false,
+			},
+		});
+		expect(repair.contextKind).toBe("assistant");
+		expect(repair.parts.map((part) => part.type)).toEqual([
+			"tool_call",
+			"tool_result",
+		]);
+	});
+
+	test("internal repair joins the request-owned open Assistant draft", () => {
+		const repair = internalToolRepairContext({
+			modelToolCallId: "call_invalid",
+			toolName: "missing_tool",
+			canonicalInput: {},
+			error: {
+				type: "runtime",
+				code: "runtime_invalid_sequence",
+				message: "invalid",
+				retryable: false,
+				fatal: false,
+			},
+		});
+		const repairOnly = applyInternalToolRepairResult({
+			modelRequestId: "mreq_1",
+			assignedMessageSequence: 8,
+			context: repair,
+		});
+		expect(repairOnly).toMatchObject({
+			modelRequestId: "mreq_1",
+			messageSequence: 8,
+			parts: [
+				{ type: "tool_call", modelToolCallId: "call_invalid" },
+				{ type: "tool_result", modelToolCallId: "call_invalid" },
+			],
+		});
+
+		const mixed = applyInternalToolRepairResult({
+			modelRequestId: "mreq_1",
+			assignedMessageSequence: 8,
+			existingDraft: {
+				modelRequestId: "mreq_1",
+				messageSequence: 8,
+				parts: [{ type: "text", text: "before repair" }],
+			},
+			context: repair,
+		});
+		expect(mixed.parts.map((part) => part.type)).toEqual([
+			"text",
+			"tool_call",
+			"tool_result",
+		]);
+		expect(() =>
+			applyInternalToolRepairResult({
+				modelRequestId: "mreq_1",
+				assignedMessageSequence: 9,
+				existingDraft: repairOnly,
+				context: repair,
+			}),
+		).toThrow("changed the open Request draft identity");
+	});
 });

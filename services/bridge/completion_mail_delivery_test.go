@@ -25,12 +25,7 @@ func seedCompletionMailSentAt(
 ) {
 	t.Helper()
 	eventID := "evt_" + deliveryID
-	messageJSON := bridgeRuntimeNotificationMessageJSON(
-		t,
-		sessionID,
-		"msg_"+deliveryID,
-		completionMailEnvelope("main", "sender", deliveryID),
-	)
+	messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "sender", deliveryID))
 	seedBridgeAPIEvent(
 		t,
 		db,
@@ -229,12 +224,7 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 			deliveryID := "delivery_completion_mail_finalize_stale_" + suffix
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
-			messageJSON := bridgeRuntimeNotificationMessageJSON(
-				t,
-				sessionID,
-				"msg_completion_mail_finalize_stale_"+suffix,
-				completionMailEnvelope("main", "task_"+childID, "completion"),
-			)
+			messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "completion"))
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_completion_mail_finalize_stale_sent_"+suffix, 1,
 				"agent.thread_message_sent",
 				bridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "sevt_completion_mail_finalize_stale_"+suffix, messageJSON))
@@ -292,7 +282,6 @@ func TestPostgreSQLAgentMailPrepareLocksSessionBeforeInbox(t *testing.T) {
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedCompletionMailSentAt(t, admin, sessionID, mainID, childID, delivery, 1, "2026-01-01T00:00:00Z")
-	seedAgentMailCustody(t, admin, sessionID, mainID, delivery, now)
 
 	blocker, blockerPID := lockPostgreSQLFinalizationFence(t, admin,
 		`SELECT id FROM sessions WHERE workspace_id='default' AND id=$1 FOR UPDATE`,

@@ -108,7 +108,7 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 		t.Fatalf("exhaustion messages count/max sequence = %d/%d; want 1/%d", messageCount, maximumSequence, messageSequence)
 	}
 	if _, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: scope, RuntimeInputId: "rin_exhaustion_cold_load",
+		Scope: scope,
 	}); err != nil {
 		t.Fatalf("LoadContext after exhaustion: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 				)
 				seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 				seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-				messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_invalid_missing_mail", completionMailEnvelope("main", "task_child", "done"))
+				messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_child", "done"))
 				seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_invalid_missing_mail", 1, "agent.thread_message_sent",
 					bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_invalid_missing_mail", messageJSON))
 				request, _, err := agentMailWakeEnqueueRequest("default", sessionID, mainID, delivery, now)

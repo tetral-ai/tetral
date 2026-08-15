@@ -6,16 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
 )
 
 func startActorProductionBridge(t *testing.T, runtime *sql.DB) bridgev1.AgentRuntimeBridgeServiceClient {
@@ -106,13 +110,14 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		t.Fatalf("deliver inter-agent mail through generated gRPC = %#v/%v", delivered, err)
 	}
 	childScope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
-	loaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope, RuntimeInputId: "cold_load:actor-production"})
-	if err != nil || (loaded.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED && loaded.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE) {
+	loaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope})
+	if err != nil {
 		t.Fatalf("cold-load target-owned mail through generated gRPC = %#v/%v", loaded, err)
 	}
 	if !strings.Contains(loaded.GetContextJson(), deliveryID) || !strings.Contains(loaded.GetContextJson(), mailContent) {
 		t.Fatalf("cold target context does not contain durable delivery/content: %s", loaded.GetContextJson())
 	}
+	assertRuntimeDirectContextComposition(t, loaded.GetContextJson())
 
 	closeSourceID := "evt_actor_production_close"
 	seedActorSourceEvent(t, admin, sessionID, parentID, closeSourceID, "agent.tool_use",
@@ -197,6 +202,58 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	}
 	if finalStatus != "idle" {
 		t.Fatalf("resumed child status = %s; want idle", finalStatus)
+	}
+}
+
+func assertRuntimeDirectContextComposition(t *testing.T, contextJSON string) {
+	t.Helper()
+	var direct map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(contextJSON), &direct); err != nil {
+		t.Fatalf("decode generated LoadContext direct facts: %v", err)
+	}
+	if _, ok := direct["contextEntries"]; !ok {
+		t.Fatalf("generated LoadContext omitted contextEntries: %s", contextJSON)
+	}
+	input, err := json.Marshal(map[string]any{"contextJson": contextJSON, "providerComposition": true})
+	if err != nil {
+		t.Fatalf("encode Runtime direct-context composition input: %v", err)
+	}
+	inputPath := t.TempDir() + "/runtime-direct-context.json"
+	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
+		t.Fatalf("write Runtime direct-context composition input: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/cold-checkpoint-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compose generated LoadContext through Runtime parser/reducer: %v: %s", err, output)
+	}
+	var composed struct {
+		Checkpoint    json.RawMessage `json:"checkpoint"`
+		ReducerAction struct {
+			Action string `json:"action"`
+		} `json:"reducerAction"`
+		ProviderComposition struct {
+			CarrierMessages []json.RawMessage `json:"carrierMessages"`
+			Strategies      []struct {
+				Validation struct {
+					OK bool `json:"ok"`
+				} `json:"validation"`
+			} `json:"strategies"`
+		} `json:"providerComposition"`
+	}
+	if err := json.Unmarshal(output, &composed); err != nil || len(composed.Checkpoint) == 0 || composed.ReducerAction.Action == "" {
+		t.Fatalf("Runtime direct-context composition = %s err:%v", output, err)
+	}
+	if len(composed.ProviderComposition.Strategies) == 0 {
+		t.Fatalf("Runtime provider composition omitted strategies: %s", output)
+	}
+	for _, strategy := range composed.ProviderComposition.Strategies {
+		if !strategy.Validation.OK {
+			t.Fatalf("Runtime provider composition rejected a strategy: %s", output)
+		}
 	}
 }
 

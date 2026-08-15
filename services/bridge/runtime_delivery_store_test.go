@@ -620,8 +620,7 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 		t.Fatalf("rebuild runtime config: %v", err)
 	}
 	cold, err := bridge.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:          bridgeAPIScope(sessionID, "thrd_"+sessionID, "bind_manifest_composition", 1, "pod_manifest_composition"),
-		RuntimeInputId: "rin_manifest_composition_cold",
+		Scope: bridgeAPIScope(sessionID, "thrd_"+sessionID, "bind_manifest_composition", 1, "pod_manifest_composition"),
 	})
 	if err != nil {
 		t.Fatalf("load replacement Runtime context: %v", err)
@@ -2031,21 +2030,25 @@ func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *
 		t.Fatalf("replayed message payload = %q; want byte-identical %q", replayedPlan.AcceptInput.GetMessagesJson(), plan.AcceptInput.GetMessagesJson())
 	}
 	var payload struct {
-		Messages []struct {
-			Origin string `json:"origin"`
-			Role   string `json:"role"`
-			Parts  []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"messages"`
+		Messages []json.RawMessage `json:"messages"`
 	}
 	if err := json.Unmarshal([]byte(plan.AcceptInput.GetMessagesJson()), &payload); err != nil {
 		t.Fatalf("decode accepted message payload: %v", err)
 	}
-	if len(payload.Messages) != 1 || payload.Messages[0].Origin != "user" || payload.Messages[0].Role != "user" ||
-		len(payload.Messages[0].Parts) != 1 || payload.Messages[0].Parts[0].Type != "text" || payload.Messages[0].Parts[0].Text != "hello" {
-		t.Fatalf("accepted message payload = %#v; want canonical SDK user message", payload.Messages)
+	if len(payload.Messages) != 1 {
+		t.Fatalf("accepted message payload = %#v; want one context draft", payload.Messages)
+	}
+	message, err := decodeRuntimeDeclarationObject(string(payload.Messages[0]))
+	if err != nil || len(message) != 1 {
+		t.Fatalf("accepted message payload = %#v, %v; want parts-only context draft", message, err)
+	}
+	parts, ok := message["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("accepted message parts = %#v; want one text part", message["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok || len(part) != 3 || part["type"] != "text" || part["text"] != "hello" || part["truncated"] != false {
+		t.Fatalf("accepted message part = %#v; want exact narrow text", parts[0])
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_inbox

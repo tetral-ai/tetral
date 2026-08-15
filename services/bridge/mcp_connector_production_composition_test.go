@@ -51,16 +51,13 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	cleanupToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_cleanup_use", ModelRequestId: "mreq_mcp_durable_claim",
 		EventType: "agent.mcp_tool_use", SessionVisible: true,
-		PayloadJson: `{"type":"agent.mcp_tool_use","name":"create_issue","mcp_server_name":"github","input":{"mode":"cleanup"},"evaluated_permission":"allow"}`,
-		AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
-			t, scope, "rwrite_mcp_production_cleanup_use", "agent.mcp_tool_use", "streaming",
-			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_mcp_production_cleanup","toolName":"create_issue","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"mode":"cleanup"},"preview":"{}","truncated":false}}}`},
-		),
+		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"create_issue","mcp_server_name":"github","input":{"mode":"cleanup"},"evaluated_permission":"allow"}`,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_production_cleanup", "create_issue", `{"mode":"cleanup"}`),
 	})
-	if err != nil || cleanupToolUse.GetEventId() == "" {
+	if err != nil || cleanupToolUse.GetCommitted() == nil || cleanupToolUse.GetCommitted().GetEventId() == "" {
 		t.Fatalf("write cleanup MCP Tool use = %#v/%v", cleanupToolUse, err)
 	}
-	cleanupToolUseEventID := cleanupToolUse.GetEventId()
+	cleanupToolUseEventID := cleanupToolUse.GetCommitted().GetEventId()
 
 	bridge := &mcpConnectorProductionBridgeServer{
 		store: store,

@@ -8,7 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"time"
+	"log/slog"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -21,18 +21,24 @@ import (
 
 // This file owns the Bridge context protocol-family boundary.
 
-func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bridgev1.LoadContextRequest) (*bridgev1.LoadContextResponse, error) {
-	if request.GetRuntimeInputId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "runtime input id is required")
+func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bridgev1.LoadContextRequest) (response *bridgev1.LoadContextResponse, resultErr error) {
+	phase := "request_validation"
+	defer func() {
+		logRuntimeContextLoadRejected(s.Logger, request.GetScope(), phase, resultErr)
+	}()
+	if request == nil {
+		return nil, status.Error(codes.InvalidArgument, "load context request is required")
 	}
-	var response *bridgev1.LoadContextResponse
+	phase = "scope_validation"
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.load_context", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		phase = "thread_validation"
 		if err := verifyRuntimeThreadScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		phase = "durable_projection"
 		contextJSON, err := loadThreadContextJSONTx(
 			ctx,
 			tx,
@@ -43,20 +49,43 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 		if err != nil {
 			return err
 		}
+		phase = "binding_token"
 		token, err := s.runtimeBindingToken(request.GetScope())
 		if err != nil {
 			return err
 		}
 		response = &bridgev1.LoadContextResponse{
-			Ack:                 committedAck(request.GetRuntimeInputId(), ""),
 			ContextJson:         contextJSON,
 			RuntimeBindingToken: token,
 		}
+		phase = "complete"
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 	return response, nil
+}
+
+func logRuntimeContextLoadRejected(logger *slog.Logger, scope *bridgev1.RuntimeScope, phase string, rejection error) {
+	if logger == nil || rejection == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	attributes := []any{
+		slog.String("operation", "load_context"),
+		slog.String("event.kind", "runtime_context_load_rejected"),
+		slog.String("component", ServiceNameBridgeAPI),
+		slog.String("phase", phase),
+		slog.String("reason", status.Code(rejection).String()),
+	}
+	if scope != nil {
+		attributes = append(attributes,
+			slog.String("workspace.id", safeActorDiagnosticIdentity(scope.GetWorkspaceId())),
+			slog.String("session.id", safeActorDiagnosticIdentity(scope.GetSessionId())),
+			slog.String("thread.id", safeActorDiagnosticIdentity(scope.GetSessionThreadId())),
+		)
+	}
+	logger.Error("runtime context load rejected", attributes...)
 }
 
 func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Context, request *bridgev1.RefreshRuntimeBindingTokenRequest) (*bridgev1.RefreshRuntimeBindingTokenResponse, error) {
@@ -81,44 +110,45 @@ func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Contex
 }
 
 type bridgeLoadContextPayload struct {
-	Messages                 []json.RawMessage                    `json:"messages"`
+	ContextEntries           []bridgeRuntimeContextEntry          `json:"contextEntries"`
+	OpenRequestDraft         *bridgeRuntimeOpenRequestDraft       `json:"openRequestDraft"`
 	TurnFacts                bridgeLoadContextTurnFacts           `json:"turnFacts"`
 	ThreadContextPrefix      *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
-	DurableTurnID            *string                              `json:"durableTurnId"`
 	Thread                   bridgeLoadContextThread              `json:"thread"`
 	RuntimeConfig            bridgeLoadContextRuntimeConfig       `json:"runtimeConfig"`
 	MCPManifests             []bridgeLoadContextMCPManifest       `json:"mcpManifests"`
 	PendingToolUses          []bridgeLoadContextPendingTool       `json:"pendingToolUses"`
 	PendingSandboxExecutions []bridgeLoadContextSandboxExecution  `json:"pendingSandboxExecutions"`
-	BackgroundTools          []bridgeLoadContextBackgroundTool    `json:"backgroundTools"`
 	PendingAttachments       []bridgeLoadContextPendingAttachment `json:"pendingAttachments"`
 	PendingAgentMail         []bridgeLoadContextAgentMail         `json:"pendingAgentMail"`
-	ColdCoverage             bridgeLoadContextColdCoverage        `json:"coldCoverage"`
 }
 
 type bridgeLoadContextMessageDescriptor struct {
-	Kind            string
-	MessageID       string
-	MessageSequence int64
-	SourceEventID   *string
-	ModelRequestID  *string
-	DataJSON        json.RawMessage
+	Kind                  string
+	MessageID             string
+	MessageSequence       int64
+	SourceEventID         *string
+	ModelRequestID        *string
+	HasUnresolvedToolCall bool
 }
 
-type bridgeLoadContextColdCoverage struct {
-	PendingToolIDs              []string `json:"pendingToolIds"`
-	PendingSandboxExecutionIDs  []string `json:"pendingSandboxExecutionIds"`
-	PendingAttachmentIdentities []string `json:"pendingAttachmentIdentities"`
-	UndeliveredMailDeliveryIDs  []string `json:"undeliveredMailDeliveryIds"`
+type bridgeRuntimeContextEntry struct {
+	MessageSequence int64             `json:"messageSequence"`
+	ContextKind     string            `json:"contextKind"`
+	Parts           []json.RawMessage `json:"parts"`
+}
+
+type bridgeRuntimeOpenRequestDraft struct {
+	ModelRequestID  string            `json:"modelRequestId"`
+	MessageSequence int64             `json:"messageSequence"`
+	Parts           []json.RawMessage `json:"parts"`
 }
 
 type bridgeLoadContextThreadPrefix struct {
-	ChildThreadID                 string            `json:"childThreadId"`
-	ParentThreadID                string            `json:"parentThreadId"`
-	ParentBoundaryEventID         string            `json:"parentBoundaryEventId"`
-	Entries                       []json.RawMessage `json:"entries"`
-	CreatedAt                     string            `json:"createdAt"`
-	ConsumedByCheckpointMessageID *string           `json:"consumedByCheckpointMessageId"`
+	ChildThreadID         string                      `json:"childThreadId"`
+	ParentThreadID        string                      `json:"parentThreadId"`
+	ParentBoundaryEventID string                      `json:"parentBoundaryEventId"`
+	Entries               []bridgeRuntimeContextEntry `json:"entries"`
 }
 
 type bridgeLoadContextThread struct {
@@ -223,11 +253,6 @@ type bridgeLoadContextSandboxExecution struct {
 	ExecutionState  string          `json:"executionState"`
 }
 
-type bridgeLoadContextBackgroundTool struct {
-	TaskID               string `json:"taskId"`
-	SourceToolUseEventID string `json:"sourceToolUseEventId"`
-}
-
 func loadThreadContextJSONTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -250,10 +275,6 @@ func loadThreadContextJSONTx(
 		return "", err
 	}
 	pendingSandboxExecutions, err := loadThreadSandboxExecutionsTx(ctx, tx, scope)
-	if err != nil {
-		return "", err
-	}
-	backgroundTools, err := loadThreadBackgroundToolsTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
 	}
@@ -288,12 +309,50 @@ func loadThreadContextJSONTx(
 		)
 			SELECT m.kind,
 			       m.message_id,
-		       m.sequence,
-		       m.data_json,
-		       m.source_event_id,
-		       m.model_request_id,
-		       m.created_at,
-		       m.updated_at
+			       m.sequence,
+			       m.data_json,
+			       m.source_event_id,
+			       m.model_request_id,
+			       CASE
+			         WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
+			         WHEN NOT EXISTS (
+			           SELECT 1 FROM session_events ended
+			            WHERE ended.workspace_id = m.workspace_id
+			              AND ended.session_id = m.session_id
+			              AND ended.session_thread_id = m.session_thread_id
+			              AND ended.model_request_id = m.model_request_id
+			              AND ended.type = 'span.model_request_end'
+			         ) THEN 'open'
+			         WHEN EXISTS (
+			           SELECT 1 FROM session_events ended
+			            WHERE ended.workspace_id = m.workspace_id
+			              AND ended.session_id = m.session_id
+			              AND ended.session_thread_id = m.session_thread_id
+			              AND ended.model_request_id = m.model_request_id
+			              AND ended.type = 'span.model_request_end'
+			              AND ended.payload_json::jsonb ->> 'error_kind' = 'runtime_pod_lost'
+			         ) THEN 'pod_lost'
+			         ELSE 'sealed'
+			       END AS context_state
+			       , COALESCE((
+			         SELECT ended.payload_json::jsonb ->> 'error_kind'
+			           FROM session_events ended
+			          WHERE ended.workspace_id = m.workspace_id
+			            AND ended.session_id = m.session_id
+			            AND ended.session_thread_id = m.session_thread_id
+			            AND ended.model_request_id = m.model_request_id
+			            AND ended.type = 'span.model_request_end'
+			          ORDER BY ended.sequence DESC
+			          LIMIT 1
+			       ), '') AS request_error_kind
+			       , EXISTS (
+			         SELECT 1 FROM session_events rescheduled
+			          WHERE rescheduled.workspace_id = m.workspace_id
+			            AND rescheduled.session_id = m.session_id
+			            AND rescheduled.session_thread_id = m.session_thread_id
+			            AND rescheduled.model_request_id = m.model_request_id
+			            AND rescheduled.type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
+			       ) AS request_rescheduled
 		  FROM session_messages m
 		  CROSS JOIN latest_compaction c
 		 WHERE m.workspace_id = $1
@@ -309,7 +368,8 @@ func loadThreadContextJSONTx(
 		return "", err
 	}
 	defer func() { _ = rows.Close() }()
-	messages := make([]json.RawMessage, 0)
+	contextEntries := make([]bridgeRuntimeContextEntry, 0)
+	var openRequestDraft *bridgeRuntimeOpenRequestDraft
 	messageDescriptors := make([]bridgeLoadContextMessageDescriptor, 0)
 	for rows.Next() {
 		var kind string
@@ -318,8 +378,9 @@ func loadThreadContextJSONTx(
 		var raw string
 		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
-		var createdAt time.Time
-		var updatedAt time.Time
+		var contextState string
+		var requestErrorKind string
+		var requestRescheduled bool
 		if err := rows.Scan(
 			&kind,
 			&messageID,
@@ -327,38 +388,49 @@ func loadThreadContextJSONTx(
 			&raw,
 			&sourceEventID,
 			&modelRequestID,
-			&createdAt,
-			&updatedAt,
+			&contextState,
+			&requestErrorKind,
+			&requestRescheduled,
 		); err != nil {
 			return "", err
 		}
 		if !json.Valid([]byte(raw)) {
 			return "", status.Error(codes.FailedPrecondition, "session message projection is malformed")
 		}
-		if kind == "compaction" {
-			projected, err := compactionProjectionForLoad(raw, sequence)
-			if err != nil {
-				return "", err
-			}
-			raw = projected
-		}
-		stamped, err := stampRuntimeMessageForLoad(
-			raw,
-			scope.GetSessionId(),
-			messageID,
-			sequence,
-			createdAt,
-			updatedAt,
-		)
+		parts, err := decodeStoredRuntimeContextParts(raw)
 		if err != nil {
 			return "", err
 		}
-		messages = append(messages, stamped)
+		if contextState == "pod_lost" && requestErrorKind == "runtime_pod_lost" && !requestRescheduled && runtimeContextIsCompleteToolRepair(parts) {
+			contextState = "sealed"
+		}
+		switch contextState {
+		case "sealed":
+			contextEntries = append(contextEntries, bridgeRuntimeContextEntry{
+				MessageSequence: sequence,
+				ContextKind:     kind,
+				Parts:           parts,
+			})
+		case "open":
+			if kind != "assistant" || !modelRequestID.Valid || openRequestDraft != nil {
+				return "", status.Error(codes.FailedPrecondition, "open request draft is ambiguous")
+			}
+			openRequestDraft = &bridgeRuntimeOpenRequestDraft{
+				ModelRequestID:  modelRequestID.String,
+				MessageSequence: sequence,
+				Parts:           parts,
+			}
+		case "pod_lost":
+			// A Pod-loss draft has no hot owner. Only the complete Tool repair
+			// promoted above is safe provider-visible history.
+		default:
+			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
+		}
 		descriptor := bridgeLoadContextMessageDescriptor{
-			Kind:            kind,
-			MessageID:       messageID,
-			MessageSequence: sequence,
-			DataJSON:        stamped,
+			Kind:                  kind,
+			MessageID:             messageID,
+			MessageSequence:       sequence,
+			HasUnresolvedToolCall: runtimeContextHasUnresolvedToolCall(parts),
 		}
 		if modelRequestID.Valid {
 			descriptor.ModelRequestID = &modelRequestID.String
@@ -379,58 +451,78 @@ func loadThreadContextJSONTx(
 		return "", err
 	}
 	return marshalBridgeJSON(bridgeLoadContextPayload{
-		Messages:                 messages,
+		ContextEntries:           contextEntries,
+		OpenRequestDraft:         openRequestDraft,
 		TurnFacts:                turnFacts,
 		ThreadContextPrefix:      threadContextPrefix,
-		DurableTurnID:            durableTurnID,
 		Thread:                   thread,
 		RuntimeConfig:            runtimeConfig,
 		MCPManifests:             mcpManifests,
 		PendingToolUses:          pendingToolUses,
 		PendingSandboxExecutions: pendingSandboxExecutions,
-		BackgroundTools:          backgroundTools,
 		PendingAttachments:       pendingAttachments,
 		PendingAgentMail:         pendingAgentMail,
-		ColdCoverage:             coldCoverageForLoad(pendingToolUses, pendingSandboxExecutions, pendingAttachments, pendingAgentMail),
 	})
 }
 
-func coldCoverageForLoad(
-	pendingToolUses []bridgeLoadContextPendingTool,
-	pendingSandboxExecutions []bridgeLoadContextSandboxExecution,
-	pendingAttachments []bridgeLoadContextPendingAttachment,
-	pendingAgentMail []bridgeLoadContextAgentMail,
-) bridgeLoadContextColdCoverage {
-	coverage := bridgeLoadContextColdCoverage{
-		PendingToolIDs:              make([]string, 0, len(pendingToolUses)),
-		PendingSandboxExecutionIDs:  make([]string, 0, len(pendingSandboxExecutions)),
-		PendingAttachmentIdentities: make([]string, 0, len(pendingAttachments)),
-		UndeliveredMailDeliveryIDs:  make([]string, 0, len(pendingAgentMail)),
+func runtimeContextIsCompleteToolRepair(parts []json.RawMessage) bool {
+	if len(parts) == 0 {
+		return false
 	}
-	for _, pending := range pendingToolUses {
-		coverage.PendingToolIDs = append(coverage.PendingToolIDs, pending.ToolUseEventID)
-	}
-	for _, execution := range pendingSandboxExecutions {
-		coverage.PendingSandboxExecutionIDs = append(coverage.PendingSandboxExecutionIDs, execution.ToolUseEventID)
-	}
-	for _, attachment := range pendingAttachments {
-		switch {
-		case attachment.Origin.Transient != nil:
-			coverage.PendingAttachmentIdentities = append(
-				coverage.PendingAttachmentIdentities,
-				"transient:"+attachment.Origin.Transient.SourceToolUseEventID+":"+attachment.Origin.Transient.AttachmentRef,
-			)
-		case attachment.Origin.FileBacked != nil:
-			coverage.PendingAttachmentIdentities = append(
-				coverage.PendingAttachmentIdentities,
-				"file:"+attachment.Origin.FileBacked.SourceEventID+":"+attachment.Origin.FileBacked.FileID,
-			)
+	calls := make(map[string]int)
+	results := make(map[string]int)
+	for _, raw := range parts {
+		var part struct {
+			Type            string `json:"type"`
+			ModelToolCallID string `json:"modelToolCallId"`
+		}
+		if json.Unmarshal(raw, &part) != nil || part.ModelToolCallID == "" {
+			return false
+		}
+		switch part.Type {
+		case "tool_call":
+			calls[part.ModelToolCallID]++
+		case "tool_result":
+			results[part.ModelToolCallID]++
+		default:
+			return false
 		}
 	}
-	for _, mail := range pendingAgentMail {
-		coverage.UndeliveredMailDeliveryIDs = append(coverage.UndeliveredMailDeliveryIDs, mail.DeliveryID)
+	if len(calls) == 0 || len(calls) != len(results) {
+		return false
 	}
-	return coverage
+	for modelToolCallID, count := range calls {
+		if count != 1 || results[modelToolCallID] != 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func runtimeContextHasUnresolvedToolCall(parts []json.RawMessage) bool {
+	calls := make(map[string]struct{})
+	results := make(map[string]struct{})
+	for _, raw := range parts {
+		var part struct {
+			Type            string `json:"type"`
+			ModelToolCallID string `json:"modelToolCallId"`
+		}
+		if json.Unmarshal(raw, &part) != nil || part.ModelToolCallID == "" {
+			continue
+		}
+		switch part.Type {
+		case "tool_call":
+			calls[part.ModelToolCallID] = struct{}{}
+		case "tool_result":
+			results[part.ModelToolCallID] = struct{}{}
+		}
+	}
+	for modelToolCallID := range calls {
+		if _, settled := results[modelToolCallID]; !settled {
+			return true
+		}
+	}
+	return false
 }
 
 func loadThreadContextPrefixTx(
@@ -440,15 +532,11 @@ func loadThreadContextPrefixTx(
 ) (*bridgeLoadContextThreadPrefix, error) {
 	var prefix bridgeLoadContextThreadPrefix
 	var entriesJSON string
-	var createdAt time.Time
-	var consumed sql.NullString
 	err := tx.QueryRow(ctx,
 		`SELECT child_thread_id,
 		        parent_thread_id,
 		        parent_boundary_event_id,
-		        entries_json,
-		        created_at,
-		        consumed_by_checkpoint_message_id
+		        entries_json
 		   FROM session_thread_context_prefixes
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -462,8 +550,6 @@ func loadThreadContextPrefixTx(
 		&prefix.ParentThreadID,
 		&prefix.ParentBoundaryEventID,
 		&entriesJSON,
-		&createdAt,
-		&consumed,
 	)
 	if dbconnect.IsNoRows(err) {
 		return nil, nil
@@ -474,73 +560,7 @@ func loadThreadContextPrefixTx(
 	if err := json.Unmarshal([]byte(entriesJSON), &prefix.Entries); err != nil || prefix.Entries == nil {
 		return nil, status.Error(codes.FailedPrecondition, "thread context prefix is malformed")
 	}
-	prefix.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-	if consumed.Valid {
-		prefix.ConsumedByCheckpointMessageID = &consumed.String
-	}
 	return &prefix, nil
-}
-
-func stampRuntimeMessageForLoad(
-	raw string,
-	sessionID string,
-	messageID string,
-	messageSequence int64,
-	createdAt time.Time,
-	updatedAt time.Time,
-) (json.RawMessage, error) {
-	var message map[string]any
-	if err := json.Unmarshal([]byte(raw), &message); err != nil || message == nil {
-		return nil, status.Error(codes.FailedPrecondition, "session message projection is malformed")
-	}
-	if _, ok := message["providerId"]; ok {
-		return nil, status.Error(codes.FailedPrecondition, "session message projection contains routing metadata")
-	}
-	if _, ok := message["modelId"]; ok {
-		return nil, status.Error(codes.FailedPrecondition, "session message projection contains routing metadata")
-	}
-	parts, ok := message["parts"].([]any)
-	if !ok {
-		return nil, status.Error(codes.FailedPrecondition, "session message projection parts are malformed")
-	}
-	for index, rawPart := range parts {
-		part, ok := rawPart.(map[string]any)
-		if !ok {
-			return nil, status.Error(codes.FailedPrecondition, "session message projection part is malformed")
-		}
-		partID, partIDOK := part["id"].(string)
-		partMessageID, partMessageIDOK := part["messageId"].(string)
-		partSessionID, partSessionIDOK := part["sessionId"].(string)
-		partSequence, partSequenceOK := declarationJSONInt64(part["sequence"])
-		partCreatedAt, partCreatedAtOK := part["createdAt"].(string)
-		partUpdatedAt, partUpdatedAtOK := part["updatedAt"].(string)
-		if !partIDOK || partID == "" ||
-			!partMessageIDOK || partMessageID != messageID ||
-			!partSessionIDOK || partSessionID != sessionID ||
-			!partSequenceOK || partSequence != int64(index) ||
-			!partCreatedAtOK || partCreatedAt == "" ||
-			!partUpdatedAtOK || partUpdatedAt == "" {
-			return nil, status.Error(codes.FailedPrecondition, "session message projection part stamp is invalid")
-		}
-	}
-	message["id"] = messageID
-	message["sessionId"] = sessionID
-	message["sequence"] = messageSequence
-	message["createdAt"] = createdAt.UTC().Format(time.RFC3339Nano)
-	message["updatedAt"] = updatedAt.UTC().Format(time.RFC3339Nano)
-	stamped, err := json.Marshal(message)
-	if err != nil {
-		return nil, err
-	}
-	return stamped, nil
-}
-
-func declarationJSONInt64(value any) (int64, bool) {
-	number, ok := value.(float64)
-	if !ok || number != float64(int64(number)) {
-		return 0, false
-	}
-	return int64(number), true
 }
 
 func loadThreadMetadataForContextTx(
@@ -691,7 +711,7 @@ func loadThreadPendingAgentMailTx(
 		if mail.DeliveryID == "" || storedMessageJSON == "" {
 			return nil, status.Error(codes.FailedPrecondition, "pending agent mail is malformed")
 		}
-		publicMessage, err := publicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		publicMessage, err := validatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
 		if err != nil {
 			return nil, err
 		}
@@ -702,19 +722,6 @@ func loadThreadPendingAgentMailTx(
 		pending = append(pending, mail)
 	}
 	return pending, rows.Err()
-}
-
-func compactionProjectionForLoad(raw string, sequence int64) (string, error) {
-	var projection map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &projection); err != nil || projection == nil {
-		return "", status.Error(codes.FailedPrecondition, "compaction projection is malformed")
-	}
-	encodedSequence, err := json.Marshal(sequence)
-	if err != nil {
-		return "", err
-	}
-	projection["sequence"] = encodedSequence
-	return marshalBridgeJSON(projection)
 }
 
 const loadThreadPendingFileAttachmentsSQL = `WITH media_events AS MATERIALIZED (
@@ -903,36 +910,6 @@ func loadSessionMCPManifestsTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		manifests = append(manifests, manifest)
 	}
 	return manifests, rows.Err()
-}
-
-func loadThreadBackgroundToolsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]bridgeLoadContextBackgroundTool, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT task_id, source_tool_use_event_id
-		   FROM session_background_tasks
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND (binding_id IS NULL OR binding_id = $4)
-		    AND status = 'running'
-		  ORDER BY created_at ASC, task_id ASC`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		scope.GetBinding().GetBindingId(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	backgroundTools := make([]bridgeLoadContextBackgroundTool, 0)
-	for rows.Next() {
-		var task bridgeLoadContextBackgroundTool
-		if err := rows.Scan(&task.TaskID, &task.SourceToolUseEventID); err != nil {
-			return nil, err
-		}
-		backgroundTools = append(backgroundTools, task)
-	}
-	return backgroundTools, rows.Err()
 }
 
 func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (bridgeLoadContextRuntimeConfig, error) {

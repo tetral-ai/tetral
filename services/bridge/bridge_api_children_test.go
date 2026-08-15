@@ -12,33 +12,81 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestSelectForkEntriesUsesUserLedTurnBoundaries(t *testing.T) {
-	entries := []json.RawMessage{
-		json.RawMessage(`{"id":"u1"}`),
-		json.RawMessage(`{"id":"a1"}`),
-		json.RawMessage(`{"id":"c1"}`),
-		json.RawMessage(`{"id":"u2"}`),
-		json.RawMessage(`{"id":"a2"}`),
+	entries := []bridgeRuntimeContextEntry{
+		{MessageSequence: 1, ContextKind: "user"},
+		{MessageSequence: 2, ContextKind: "assistant"},
+		{MessageSequence: 3, ContextKind: "compaction"},
+		{MessageSequence: 4, ContextKind: "runtime_notification"},
+		{MessageSequence: 5, ContextKind: "assistant"},
 	}
 	kinds := []string{"user", "assistant", "compaction", "runtime_notification", "assistant"}
 
 	selected := selectForkEntries(entries, kinds, "1")
-	if len(selected) != 2 || string(selected[0]) != `{"id":"u2"}` || string(selected[1]) != `{"id":"a2"}` {
-		t.Fatalf("last user-led turn = %s; want u2,a2", mustJSON(selected))
+	if len(selected) != 2 || selected[0].MessageSequence != 4 || selected[1].MessageSequence != 5 {
+		t.Fatalf("last user-led turn = %#v; want sequences 4,5", selected)
 	}
 	all := selectForkEntries(entries, kinds, "2")
 	if len(all) != len(entries) {
 		t.Fatalf("two user-led turns selected %d entries; want %d", len(all), len(entries))
+	}
+}
+
+func TestDurablePrefixIncludesAcknowledgedFailedAndRescheduledAssistantParts(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_prefix_sealed_only"
+		threadID  = "thr_prefix_sealed_only"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
+		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,model_request_id,created_at,updated_at
+	) VALUES
+		('default',$1,$2,'msg_prefix_success',1,'assistant','{"parts":[{"type":"text","text":"success"}]}','mreq_prefix_success',now(),now()),
+		('default',$1,$2,'msg_prefix_failed',2,'assistant','{"parts":[{"type":"text","text":"failed partial"}]}','mreq_prefix_failed',now(),now()),
+		('default',$1,$2,'msg_prefix_rescheduled',3,'assistant','{"parts":[{"type":"text","text":"rescheduled partial"}]}','mreq_prefix_rescheduled',now(),now()),
+		('default',$1,$2,'msg_prefix_user',4,'user','{"parts":[{"type":"text","text":"next input"}]}',NULL,now(),now())`, sessionID, threadID); err != nil {
+		t.Fatalf("seed prefix messages: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,model_request_id,created_at,updated_at
+	) VALUES
+		('default',$1,$2,'evt_prefix_success_end',1,'span.model_request_end','{"is_error":false}','mreq_prefix_success',now(),now()),
+		('default',$1,$2,'evt_prefix_failed_end',2,'span.model_request_end','{"is_error":true}','mreq_prefix_failed',now(),now()),
+		('default',$1,$2,'evt_prefix_rescheduled_end',3,'span.model_request_end','{"is_error":false}','mreq_prefix_rescheduled',now(),now()),
+		('default',$1,$2,'evt_prefix_rescheduled',4,'session.status_rescheduled','{}','mreq_prefix_rescheduled',now(),now())`, sessionID, threadID); err != nil {
+		t.Fatalf("seed prefix request dispositions: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	var entries []bridgeRuntimeContextEntry
+	var kinds []string
+	err := client.WithWorkspaceTx(context.Background(), "default", "test.prefix.sealed_only", func(tx *dbconnect.Tx) error {
+		var err error
+		entries, kinds, err = loadDurablePrefixEntriesThroughTx(
+			context.Background(), tx,
+			&bridgev1.RuntimeScope{WorkspaceId: "default", SessionId: sessionID, SessionThreadId: threadID},
+			4,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("load durable prefix: %v", err)
+	}
+	if len(entries) != 4 || entries[0].MessageSequence != 1 || entries[1].MessageSequence != 2 ||
+		entries[2].MessageSequence != 3 || entries[3].MessageSequence != 4 || len(kinds) != 4 ||
+		kinds[0] != "assistant" || kinds[1] != "assistant" || kinds[2] != "assistant" || kinds[3] != "user" {
+		t.Fatalf("acknowledged prefix entries/kinds = %#v/%v", entries, kinds)
 	}
 }
 
@@ -499,9 +547,4 @@ func TestActorResponsesExposeOnlyOperationSpecificResults(t *testing.T) {
 	if reviewerClosed.GetCommitted() == nil || reviewerClosed.GetDuplicate() != nil || reviewerClosed.GetStale() != nil {
 		t.Fatal("reviewer close response is not a closed operation-specific result")
 	}
-}
-
-func mustJSON(values []json.RawMessage) string {
-	encoded, _ := json.Marshal(values)
-	return string(encoded)
 }

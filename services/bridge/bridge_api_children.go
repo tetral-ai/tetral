@@ -460,7 +460,7 @@ func (s *PostgreSQLBridgeAPIStore) ReadAgentMail(ctx context.Context, request *b
 		if deliveryID == "" || storedMessageJSON == "" {
 			return status.Error(codes.FailedPrecondition, "agent mail envelope is malformed")
 		}
-		messageJSON, err := publicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		messageJSON, err := validatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
 		if err != nil {
 			return err
 		}
@@ -565,8 +565,8 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		return nil, err
 	}
 	var (
-		ack                *bridgev1.BridgeWriteAck
-		receipts           []*bridgev1.DeclarationReceipt
+		duplicate          bool
+		children           []*bridgev1.ChildLifecycleResult
 		custodyTransitions childCloseCustodyTransitions
 	)
 	if err := s.withScopeTx(ctx, scope, "agentruntimebridge."+operationKind, func(tx *dbconnect.Tx) error {
@@ -579,7 +579,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		if err := validateChildLifecycleSourceTx(ctx, tx, scope, childThreadID, command); err != nil {
 			return err
 		}
-		if existingReceipts, ok, err := readChildLifecycleOperationReceiptSetTx(
+		if existingChildren, ok, err := readChildLifecycleOperationResultSetTx(
 			ctx,
 			tx,
 			scope,
@@ -588,8 +588,8 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		); err != nil {
 			return err
 		} else if ok {
-			receipts = existingReceipts
-			ack = duplicateAck("", command.operationID)
+			children = existingChildren
+			duplicate = true
 			return nil
 		}
 		targetIDs, err := childLifecycleSubtreeIDsTx(ctx, tx, scope, childThreadID)
@@ -625,7 +625,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 			disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED
 			switch threadScope.status {
 			case "closed_for_runtime":
-				// The per-target receipt still records this target in the frozen subtree.
+				// The per-target stored result still records this target in the frozen subtree.
 			case "failed":
 				// Closing a subtree records terminal members without rewriting their durable outcome.
 				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED
@@ -652,8 +652,8 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 				}
 				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED
 			}
-			receipt := childLifecycleReceipt(childScope, command, operationKind, threadID, disposition)
-			receiptJSON, err := marshalDeclarationReceipt(receipt)
+			child := &bridgev1.ChildLifecycleResult{ChildThreadId: threadID, Disposition: disposition}
+			resultJSON, err := marshalBridgeJSON(childLifecycleStoredResult{ChildThreadID: threadID, Disposition: disposition.String()})
 			if err != nil {
 				return err
 			}
@@ -665,31 +665,29 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 				command.operationSourceKind,
 				command.operationID,
 				command.declarationDigest,
-				receiptJSON,
+				resultJSON,
 				now,
 			); err != nil {
 				return err
 			}
-			receipts = append(receipts, receipt)
+			children = append(children, child)
 		}
-		ack = committedAck("", command.operationID)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 	logRuntimeInputCustodyTransition(s.Logger, scope, "accepted_to_parked", custodyTransitions.parked)
 	logRuntimeInputCustodyTransition(s.Logger, scope, "accepted_to_cancelled", custodyTransitions.cancelled)
-	declaration, err := s.childLifecycleDeclarationResponse(ctx, scope, receipts, ack)
+	current, err := s.runtimeScopeApplicationCurrent(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
-	if declaration.GetApplicationDisposition() == bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY {
+	if !current {
 		return &closeChildLifecycleResult{stale: true}, nil
 	}
-	children := childLifecycleResults(receipts)
 	return &closeChildLifecycleResult{
 		children:  children,
-		duplicate: ack.GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED,
+		duplicate: duplicate,
 	}, nil
 }
 
@@ -786,8 +784,8 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 	var (
 		childThreadID string
 		command       childLifecycleCommand
-		ack           *bridgev1.BridgeWriteAck
-		receipts      []*bridgev1.DeclarationReceipt
+		duplicate     bool
+		results       []*bridgev1.ChildLifecycleResult
 	)
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge."+bridgeOpMarkChildThreadActive, func(tx *dbconnect.Tx) error {
@@ -810,7 +808,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			return err
 		}
 		childScope := scopeForThread(request.GetScope(), childThreadID)
-		if existingReceipts, ok, err := readChildLifecycleOperationReceiptsTx(
+		if existingResults, ok, err := readChildLifecycleOperationResultsTx(
 			ctx,
 			tx,
 			request.GetScope(),
@@ -820,8 +818,8 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		); err != nil {
 			return err
 		} else if ok {
-			receipts = existingReceipts
-			ack = duplicateAck("", command.operationID)
+			results = existingResults
+			duplicate = true
 			return nil
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -877,8 +875,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 				return err
 			}
 		}
-		receipt := childLifecycleReceipt(childScope, command, bridgeOpMarkChildThreadActive, childThreadID, disposition)
-		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		resultJSON, err := marshalBridgeJSON(childLifecycleStoredResult{ChildThreadID: childThreadID, Disposition: disposition.String()})
 		if err != nil {
 			return err
 		}
@@ -890,32 +887,30 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			command.operationSourceKind,
 			command.operationID,
 			command.declarationDigest,
-			receiptJSON,
+			resultJSON,
 			now,
 		); err != nil {
 			return err
 		}
-		receipts = []*bridgev1.DeclarationReceipt{receipt}
-		ack = committedAck("", command.operationID)
+		results = []*bridgev1.ChildLifecycleResult{{ChildThreadId: childThreadID, Disposition: disposition}}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	phase = "observe_application"
-	declaration, err := s.childLifecycleDeclarationResponse(ctx, request.GetScope(), receipts, ack)
+	current, err := s.runtimeScopeApplicationCurrent(ctx, request.GetScope())
 	if err != nil {
 		return nil, err
 	}
-	if declaration.GetApplicationDisposition() == bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY {
+	if !current {
 		return &bridgev1.MarkChildThreadActiveResponse{Outcome: &bridgev1.MarkChildThreadActiveResponse_Stale{Stale: &bridgev1.MarkChildThreadActiveStale{}}}, nil
 	}
-	results := childLifecycleResults(receipts)
 	if len(results) != 1 || results[0].GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED {
 		return nil, status.Error(codes.FailedPrecondition, "child resume disposition is invalid")
 	}
 	disposition := results[0].GetDisposition()
-	if ack.GetStatus() == bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+	if !duplicate {
 		return &bridgev1.MarkChildThreadActiveResponse{Outcome: &bridgev1.MarkChildThreadActiveResponse_Committed{Committed: &bridgev1.MarkChildThreadActiveCommitted{Disposition: disposition}}}, nil
 	}
 	return &bridgev1.MarkChildThreadActiveResponse{Outcome: &bridgev1.MarkChildThreadActiveResponse_Duplicate{Duplicate: &bridgev1.MarkChildThreadActiveDuplicate{Disposition: disposition}}}, nil
@@ -1007,7 +1002,7 @@ func parseChildLifecycleCommand(
 		operationIDParts[0] = "child_resume"
 	} else if sourceKind == "tool_use" {
 		// The Bridge-owned control operation is the sole close fence across
-		// admission, completion, lifecycle receipts, and hot release.
+		// admission, completion, lifecycle results, and hot release.
 		operationID = sourceCommandID
 	}
 	if operationID == "" {
@@ -1219,13 +1214,18 @@ func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.T
 	return nil
 }
 
-func readChildLifecycleOperationReceiptSetTx(
+type childLifecycleStoredResult struct {
+	ChildThreadID string `json:"childThreadId"`
+	Disposition   string `json:"disposition"`
+}
+
+func readChildLifecycleOperationResultSetTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	callerScope *bridgev1.RuntimeScope,
 	command childLifecycleCommand,
 	operationKind string,
-) ([]*bridgev1.DeclarationReceipt, bool, error) {
+) ([]*bridgev1.ChildLifecycleResult, bool, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT session_thread_id, COALESCE(declaration_digest, ''), COALESCE(receipt_json, '')
 		   FROM session_bridge_operations
@@ -1246,7 +1246,7 @@ func readChildLifecycleOperationReceiptSetTx(
 		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
-	var receipts []*bridgev1.DeclarationReceipt
+	var results []*bridgev1.ChildLifecycleResult
 	for rows.Next() {
 		var targetID, declarationDigest, receiptJSON string
 		if err := rows.Scan(&targetID, &declarationDigest, &receiptJSON); err != nil {
@@ -1255,27 +1255,27 @@ func readChildLifecycleOperationReceiptSetTx(
 		if declarationDigest != command.declarationDigest || receiptJSON == "" {
 			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle idempotency conflict")
 		}
-		receipt, err := unmarshalDeclarationReceipt(receiptJSON)
-		if err != nil || !validStoredChildLifecycleReceipt(receipt, targetID, operationKind, command) {
-			return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle receipt is invalid")
+		result, err := unmarshalChildLifecycleStoredResult(receiptJSON, targetID, command.action)
+		if err != nil {
+			return nil, false, err
 		}
-		receipts = append(receipts, receipt)
+		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, false, err
 	}
-	return receipts, len(receipts) > 0, nil
+	return results, len(results) > 0, nil
 }
 
-func readChildLifecycleOperationReceiptsTx(
+func readChildLifecycleOperationResultsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	callerScope *bridgev1.RuntimeScope,
 	targetIDs []string,
 	command childLifecycleCommand,
 	operationKind string,
-) ([]*bridgev1.DeclarationReceipt, bool, error) {
-	receipts := make([]*bridgev1.DeclarationReceipt, 0, len(targetIDs))
+) ([]*bridgev1.ChildLifecycleResult, bool, error) {
+	results := make([]*bridgev1.ChildLifecycleResult, 0, len(targetIDs))
 	existingCount := 0
 	for _, targetID := range targetIDs {
 		targetScope := scopeForThread(callerScope, targetID)
@@ -1297,71 +1297,40 @@ func readChildLifecycleOperationReceiptsTx(
 		if existing.DeclarationDigest != command.declarationDigest || existing.ReceiptJSON == "" {
 			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle idempotency conflict")
 		}
-		receipt, err := unmarshalDeclarationReceipt(existing.ReceiptJSON)
-		if err != nil || !validStoredChildLifecycleReceipt(receipt, targetID, operationKind, command) {
-			return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle receipt is invalid")
+		result, err := unmarshalChildLifecycleStoredResult(existing.ReceiptJSON, targetID, command.action)
+		if err != nil {
+			return nil, false, err
 		}
-		receipts = append(receipts, receipt)
+		results = append(results, result)
 	}
 	if existingCount == 0 {
 		return nil, false, nil
 	}
 	if existingCount != len(targetIDs) {
-		return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle receipt set is incomplete")
+		return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle stored result set is incomplete")
 	}
-	return receipts, true, nil
+	return results, true, nil
 }
 
-func validStoredChildLifecycleReceipt(
-	receipt *bridgev1.DeclarationReceipt,
-	targetID string,
-	operationKind string,
-	command childLifecycleCommand,
-) bool {
-	if receipt == nil ||
-		receipt.GetSessionThreadId() != targetID ||
-		receipt.GetOperationKind() != operationKind ||
-		receipt.GetSourceKind() != command.operationSourceKind ||
-		receipt.GetOperationId() != command.operationID ||
-		receipt.GetDeclarationDigest() != command.declarationDigest ||
-		len(receipt.GetChildLifecycle()) != 1 {
-		return false
+func unmarshalChildLifecycleStoredResult(raw, targetID, action string) (*bridgev1.ChildLifecycleResult, error) {
+	var stored childLifecycleStoredResult
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil || stored.ChildThreadID != targetID {
+		return nil, status.Error(codes.FailedPrecondition, "child lifecycle result is invalid")
 	}
-	stamp := receipt.GetChildLifecycle()[0]
-	if stamp.GetChildThreadId() != targetID || stamp.GetEffectiveAt() == "" {
-		return false
+	disposition := bridgev1.ChildLifecycleDisposition(bridgev1.ChildLifecycleDisposition_value[stored.Disposition])
+	valid := disposition == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED ||
+		disposition == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
+	if action == "close" {
+		valid = valid || disposition == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED ||
+			disposition == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED
+	} else {
+		valid = valid || disposition == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED ||
+			disposition == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
 	}
-	if command.action == "close" {
-		return stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED ||
-			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED ||
-			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED ||
-			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
+	if !valid {
+		return nil, status.Error(codes.FailedPrecondition, "child lifecycle result is invalid")
 	}
-	return stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED ||
-		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE ||
-		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED ||
-		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
-}
-
-func childLifecycleReceipt(
-	targetScope *bridgev1.RuntimeScope,
-	command childLifecycleCommand,
-	operationKind string,
-	targetID string,
-	disposition bridgev1.ChildLifecycleDisposition,
-) *bridgev1.DeclarationReceipt {
-	return &bridgev1.DeclarationReceipt{
-		SessionThreadId:   targetScope.GetSessionThreadId(),
-		OperationKind:     operationKind,
-		SourceKind:        command.operationSourceKind,
-		OperationId:       command.operationID,
-		DeclarationDigest: command.declarationDigest,
-		ChildLifecycle: []*bridgev1.ChildLifecycleStamp{{
-			ChildThreadId: targetID,
-			Disposition:   disposition,
-			EffectiveAt:   command.requestedAt,
-		}},
-	}
+	return &bridgev1.ChildLifecycleResult{ChildThreadId: targetID, Disposition: disposition}, nil
 }
 
 func childLifecycleSubtreeIDsTx(
@@ -1412,54 +1381,10 @@ func childLifecycleSubtreeIDsTx(
 	return ids, nil
 }
 
-func (s *PostgreSQLBridgeAPIStore) childLifecycleDeclarationResponse(
-	ctx context.Context,
-	scope *bridgev1.RuntimeScope,
-	receipts []*bridgev1.DeclarationReceipt,
-	ack *bridgev1.BridgeWriteAck,
-) (*bridgev1.DeclarationResponse, error) {
-	observation, err := s.declarationApplicationObservation(ctx, scope)
-	if err != nil {
-		return nil, err
-	}
-	if len(receipts) > 0 {
-		receipt := receipts[0]
-		logRuntimeDeclaration(
-			s.Logger,
-			scope,
-			receipt.GetOperationKind(),
-			receipt.GetSourceKind(),
-			receipt.GetOperationId(),
-			receipt.GetDeclarationDigest(),
-			ack,
-			observation,
-		)
-	}
-	return &bridgev1.DeclarationResponse{
-		Receipts:                  receipts,
-		ObservedBindingId:         observation.BindingID,
-		ObservedBindingGeneration: observation.BindingGeneration,
-		ApplicationDisposition:    observation.Disposition,
-	}, nil
-}
-
-func childLifecycleResults(receipts []*bridgev1.DeclarationReceipt) []*bridgev1.ChildLifecycleResult {
-	results := make([]*bridgev1.ChildLifecycleResult, 0, len(receipts))
-	for _, receipt := range receipts {
-		for _, stamp := range receipt.GetChildLifecycle() {
-			results = append(results, &bridgev1.ChildLifecycleResult{
-				ChildThreadId: stamp.GetChildThreadId(),
-				Disposition:   stamp.GetDisposition(),
-			})
-		}
-	}
-	return results
-}
-
 type threadContextPrefixEnvelope struct {
-	SourceParentThreadID  string            `json:"source_parent_thread_id"`
-	ParentBoundaryEventID string            `json:"parent_boundary_event_id"`
-	RuntimeMessages       []json.RawMessage `json:"runtime_messages_snapshot"`
+	SourceParentThreadID  string                      `json:"sourceParentThreadId"`
+	ParentBoundaryEventID string                      `json:"parentBoundaryEventId"`
+	Entries               []bridgeRuntimeContextEntry `json:"entries"`
 }
 
 func replayCreatedChild(existing bridgeOperation, requestHash string) (createChildThreadResult, error) {
@@ -1528,8 +1453,14 @@ func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *brid
 		return nil, err
 	}
 	var requestEnded bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND type='span.model_request_end' AND model_request_id=$4)`,
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events ended
+		WHERE ended.workspace_id=$1 AND ended.session_id=$2 AND ended.session_thread_id=$3
+		 AND ended.type='span.model_request_end' AND ended.model_request_id=$4
+		 AND NOT COALESCE((ended.payload_json::jsonb ->> 'is_error')::boolean, FALSE)
+		 AND NOT EXISTS (SELECT 1 FROM session_events rescheduled
+		   WHERE rescheduled.workspace_id=ended.workspace_id AND rescheduled.session_id=ended.session_id
+		    AND rescheduled.session_thread_id=ended.session_thread_id AND rescheduled.model_request_id=ended.model_request_id
+		    AND rescheduled.type IN ('session.status_rescheduled','session.thread_status_rescheduled')))`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), modelRequestID.String,
 	).Scan(&requestEnded); err != nil {
 		return nil, err
@@ -1543,7 +1474,7 @@ func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *brid
 	}
 	entries = selectForkEntries(entries, kinds, request.GetForkTurns())
 	return &threadContextPrefixEnvelope{
-		SourceParentThreadID: request.GetScope().GetSessionThreadId(), ParentBoundaryEventID: request.GetSourceToolUseEventId(), RuntimeMessages: entries,
+		SourceParentThreadID: request.GetScope().GetSessionThreadId(), ParentBoundaryEventID: request.GetSourceToolUseEventId(), Entries: entries,
 	}, nil
 }
 
@@ -1567,6 +1498,11 @@ func selectReviewerSidecarPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope 
 		 AND assistant.session_thread_id=ended.session_thread_id AND assistant.model_request_id=ended.model_request_id
 		WHERE ended.workspace_id=$1 AND ended.session_id=$2 AND ended.session_thread_id=$3
 		 AND ended.type='span.model_request_end'
+		 AND NOT COALESCE((ended.payload_json::jsonb ->> 'is_error')::boolean, FALSE)
+		 AND NOT EXISTS (SELECT 1 FROM session_events rescheduled
+		   WHERE rescheduled.workspace_id=ended.workspace_id AND rescheduled.session_id=ended.session_id
+		    AND rescheduled.session_thread_id=ended.session_thread_id AND rescheduled.model_request_id=ended.model_request_id
+		    AND rescheduled.type IN ('session.status_rescheduled','session.thread_status_rescheduled'))
 		ORDER BY ended.sequence DESC LIMIT 1 FOR SHARE OF ended, assistant`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), trunkThreadID,
 	).Scan(&boundaryEventID, &boundarySequence)
@@ -1584,17 +1520,40 @@ func selectReviewerSidecarPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope 
 	if err != nil {
 		return nil, err
 	}
-	return &threadContextPrefixEnvelope{SourceParentThreadID: trunkThreadID, ParentBoundaryEventID: boundaryEventID, RuntimeMessages: entries}, nil
+	return &threadContextPrefixEnvelope{SourceParentThreadID: trunkThreadID, ParentBoundaryEventID: boundaryEventID, Entries: entries}, nil
 }
 
-func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, boundarySequence int64) ([]json.RawMessage, []string, error) {
+func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, boundarySequence int64) ([]bridgeRuntimeContextEntry, []string, error) {
 	if boundarySequence == 0 {
-		return []json.RawMessage{}, []string{}, nil
+		return []bridgeRuntimeContextEntry{}, []string{}, nil
 	}
 	rows, err := tx.Query(ctx, `WITH latest_compaction AS (
 		SELECT MAX(sequence) AS boundary_sequence FROM session_messages
 		 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND kind='compaction' AND sequence <= $4
-	) SELECT m.kind,m.message_id,m.sequence,m.data_json,m.created_at,m.updated_at
+	) SELECT m.kind,m.sequence,m.data_json,
+		CASE
+		  WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
+		  WHEN NOT EXISTS (
+		    SELECT 1 FROM session_events ended
+		     WHERE ended.workspace_id=m.workspace_id AND ended.session_id=m.session_id
+		       AND ended.session_thread_id=m.session_thread_id AND ended.model_request_id=m.model_request_id
+		       AND ended.type='span.model_request_end'
+		  ) THEN 'open'
+		  WHEN EXISTS (
+		    SELECT 1 FROM session_events ended
+		     WHERE ended.workspace_id=m.workspace_id AND ended.session_id=m.session_id
+		       AND ended.session_thread_id=m.session_thread_id AND ended.model_request_id=m.model_request_id
+		       AND ended.type='span.model_request_end'
+		       AND ended.payload_json::jsonb ->> 'error_kind' = 'runtime_pod_lost'
+		  ) THEN 'pod_lost'
+		  ELSE 'sealed'
+		END AS context_state,
+		EXISTS (
+		  SELECT 1 FROM session_events rescheduled
+		   WHERE rescheduled.workspace_id=m.workspace_id AND rescheduled.session_id=m.session_id
+		     AND rescheduled.session_thread_id=m.session_thread_id AND rescheduled.model_request_id=m.model_request_id
+		     AND rescheduled.type IN ('session.status_rescheduled','session.thread_status_rescheduled')
+		) AS request_rescheduled
 	FROM session_messages m CROSS JOIN latest_compaction c
 	WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$3 AND m.sequence <= $4
 	 AND (c.boundary_sequence IS NULL OR m.sequence >= c.boundary_sequence)
@@ -1603,46 +1562,50 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 		return nil, nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var entries []json.RawMessage
+	var entries []bridgeRuntimeContextEntry
 	var kinds []string
 	for rows.Next() {
-		var kind, messageID, raw string
+		var kind, raw, contextState string
 		var sequence int64
-		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&kind, &messageID, &sequence, &raw, &createdAt, &updatedAt); err != nil {
+		var requestRescheduled bool
+		if err := rows.Scan(&kind, &sequence, &raw, &contextState, &requestRescheduled); err != nil {
 			return nil, nil, err
 		}
-		if kind == "compaction" {
-			projected, err := compactionProjectionForLoad(raw, sequence)
-			if err != nil {
-				return nil, nil, err
-			}
-			raw = projected
-		}
-		stamped, err := stampRuntimeMessageForLoad(raw, scope.GetSessionId(), messageID, sequence, createdAt, updatedAt)
+		parts, err := decodeStoredRuntimeContextParts(raw)
 		if err != nil {
 			return nil, nil, err
 		}
-		entries = append(entries, stamped)
+		switch contextState {
+		case "sealed":
+		case "pod_lost":
+			if requestRescheduled || !runtimeContextIsCompleteToolRepair(parts) {
+				continue
+			}
+		case "open":
+			continue
+		default:
+			return nil, nil, status.Error(codes.FailedPrecondition, "durable context state is invalid")
+		}
+		entries = append(entries, bridgeRuntimeContextEntry{MessageSequence: sequence, ContextKind: kind, Parts: parts})
 		kinds = append(kinds, kind)
 	}
 	return entries, kinds, rows.Err()
 }
 
-func selectForkEntries(entries []json.RawMessage, kinds []string, forkTurns string) []json.RawMessage {
+func selectForkEntries(entries []bridgeRuntimeContextEntry, kinds []string, forkTurns string) []bridgeRuntimeContextEntry {
 	if forkTurns == "none" {
-		return []json.RawMessage{}
+		return []bridgeRuntimeContextEntry{}
 	}
 	if forkTurns == "all" {
 		return entries
 	}
 	count, err := strconv.Atoi(forkTurns)
 	if err != nil || count <= 0 {
-		return []json.RawMessage{}
+		return []bridgeRuntimeContextEntry{}
 	}
 	type turn struct {
 		userLed bool
-		entries []json.RawMessage
+		entries []bridgeRuntimeContextEntry
 	}
 	var turns []turn
 	for index, entry := range entries {
@@ -1662,7 +1625,7 @@ func selectForkEntries(entries []json.RawMessage, kinds []string, forkTurns stri
 	if count > len(userTurns) {
 		count = len(userTurns)
 	}
-	var selected []json.RawMessage
+	var selected []bridgeRuntimeContextEntry
 	for _, value := range userTurns[len(userTurns)-count:] {
 		selected = append(selected, value.entries...)
 	}
@@ -1905,7 +1868,7 @@ func insertChildThreadCreatedEventTx(
 }
 
 func insertThreadContextPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, prefix *threadContextPrefixEnvelope, now time.Time) error {
-	if prefix == nil || prefix.SourceParentThreadID == "" || prefix.ParentBoundaryEventID == "" || prefix.RuntimeMessages == nil {
+	if prefix == nil || prefix.SourceParentThreadID == "" || prefix.ParentBoundaryEventID == "" || prefix.Entries == nil {
 		return status.Error(codes.FailedPrecondition, "thread context prefix is invalid")
 	}
 	var boundaryThreadID string
@@ -1925,7 +1888,7 @@ func insertThreadContextPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 	if boundaryThreadID != prefix.SourceParentThreadID {
 		return status.Error(codes.FailedPrecondition, "thread context prefix parent boundary does not belong to the parent thread")
 	}
-	entriesJSON, err := json.Marshal(prefix.RuntimeMessages)
+	entriesJSON, err := json.Marshal(prefix.Entries)
 	if err != nil {
 		return err
 	}
@@ -1945,31 +1908,6 @@ func insertThreadContextPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		return err
 	}
 	return nil
-}
-
-func (s *PostgreSQLBridgeAPIStore) readChildThread(ctx context.Context, scope *bridgev1.RuntimeScope, childThreadID string, operation string) (string, error) {
-	var threadJSON string
-	if err := s.withScopeTx(ctx, scope, "agentruntimebridge."+operation, func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
-			return err
-		}
-		row := tx.QueryRow(ctx,
-			`SELECT id, parent_thread_id, role, status, agent_type, task_name, created_at, updated_at, closed_at
-			   FROM session_threads
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND id = $3`,
-			scope.GetWorkspaceId(),
-			scope.GetSessionId(),
-			childThreadID,
-		)
-		var err error
-		threadJSON, err = scanThreadJSON(row)
-		return err
-	}); err != nil {
-		return "", err
-	}
-	return threadJSON, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) readChildThreadFact(ctx context.Context, scope *bridgev1.RuntimeScope, childThreadID string, operation string) (*bridgev1.ChildThreadFact, error) {
@@ -2002,63 +1940,4 @@ func scanChildThreadFact(scanner interface{ Scan(dest ...any) error }) (*bridgev
 	}
 	child.ParentThreadId, child.TaskName = parentID.String, taskName.String
 	return &child, nil
-}
-
-func readChildThreadForDeliveryTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID string) (string, string, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT id, parent_thread_id, role, status, agent_type, task_name, created_at, updated_at, closed_at
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND id = $3
-		    AND parent_thread_id = $4
-		    AND role = 'subagent'`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		childThreadID,
-		scope.GetSessionThreadId(),
-	)
-	threadJSON, statusValue, err := scanThreadJSONWithStatus(row)
-	if err != nil {
-		return "", "", err
-	}
-	return threadJSON, statusValue, nil
-}
-
-func scanThreadJSON(scanner interface {
-	Scan(dest ...any) error
-}) (string, error) {
-	threadJSON, _, err := scanThreadJSONWithStatus(scanner)
-	return threadJSON, err
-}
-
-func scanThreadJSONWithStatus(scanner interface {
-	Scan(dest ...any) error
-}) (string, string, error) {
-	var threadID string
-	var parentThreadID sql.NullString
-	var role string
-	var statusValue string
-	var agentType string
-	var taskName sql.NullString
-	var createdAt time.Time
-	var updatedAt time.Time
-	var closedAt sql.NullTime
-	if err := scanner.Scan(&threadID, &parentThreadID, &role, &statusValue, &agentType, &taskName, &createdAt, &updatedAt, &closedAt); dbconnect.IsNoRows(err) {
-		return "", "", status.Error(codes.NotFound, "child thread not found")
-	} else if err != nil {
-		return "", "", err
-	}
-	threadJSON, err := marshalBridgeJSON(map[string]any{
-		"session_thread_id": threadID,
-		"parent_thread_id":  nullableJSONString(parentThreadID),
-		"role":              role,
-		"status":            statusValue,
-		"agent_type":        agentType,
-		"task_name":         nullableJSONString(taskName),
-		"created_at":        createdAt.UTC().Format(time.RFC3339Nano),
-		"updated_at":        updatedAt.UTC().Format(time.RFC3339Nano),
-		"closed_at":         nullableJSONTime(closedAt),
-	})
-	return threadJSON, statusValue, err
 }

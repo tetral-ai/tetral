@@ -592,9 +592,7 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 			taskStatus, terminalEventID.Valid, inboxStatus, notificationMessages, notificationEvents)
 	}
 	var notificationMessage struct {
-		Role   string `json:"role"`
-		Origin string `json:"origin"`
-		Parts  []struct {
+		Parts []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"parts"`
@@ -602,13 +600,15 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	if err := json.Unmarshal([]byte(notificationDataJSON), &notificationMessage); err != nil {
 		t.Fatalf("decode runtime notification message: %v", err)
 	}
-	if notificationMessage.Role != "user" || notificationMessage.Origin != "runtime" || len(notificationMessage.Parts) != 1 ||
+	if len(notificationMessage.Parts) != 1 ||
 		notificationMessage.Parts[0].Type != "text" ||
 		!strings.Contains(notificationMessage.Parts[0].Text, `"task_id":"task_bridge_notify"`) ||
 		strings.Contains(notificationMessage.Parts[0].Text, `"output_paths"`) ||
 		strings.Contains(notificationMessage.Parts[0].Text, `/tmp/tetral-runtime/tasks/`) ||
-		strings.Contains(notificationDataJSON, "provider_") {
-		t.Fatalf("runtime notification data = %s; want runtime-origin RuntimeMessage without task output paths or provider metadata", notificationDataJSON)
+		strings.Contains(notificationDataJSON, "provider_") ||
+		strings.Contains(notificationDataJSON, `"role"`) ||
+		strings.Contains(notificationDataJSON, `"origin"`) {
+		t.Fatalf("runtime notification data = %s; want narrow provider-visible parts without task output paths or provider metadata", notificationDataJSON)
 	}
 }
 

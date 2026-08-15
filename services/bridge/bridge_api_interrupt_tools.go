@@ -45,7 +45,7 @@ func settleInterruptedThreadToolsTx(
 	scope *bridgev1.RuntimeScope,
 	interruptEventID string,
 	now time.Time,
-) ([]*bridgev1.InterruptToolProjection, error) {
+) ([]*bridgev1.RuntimeInterruptToolResult, error) {
 	tools, err := lockUnfinishedRuntimeToolsTx(ctx, tx, scope)
 	if err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func settleInterruptedThreadToolsTx(
 	if err != nil {
 		return nil, err
 	}
-	projections := make([]*bridgev1.InterruptToolProjection, 0, len(tools))
+	projections := make([]*bridgev1.RuntimeInterruptToolResult, 0, len(tools))
 	var cancellationJobs []queue.EnqueueRequest
 	for _, tool := range tools {
 		settlement, safeMessage, execution, err := interruptedToolOutcomeTx(ctx, tx, scope, tool.eventID)
@@ -123,19 +123,16 @@ func settleInterruptedThreadToolsTx(
 				return nil, err
 			}
 		}
-		projection := &bridgev1.InterruptToolProjection{
-			ToolUseEventId: tool.eventID,
-			ResultEvent: &bridgev1.DurableEventStamp{
-				SessionThreadId: scope.GetSessionThreadId(), EventId: resultEventID,
-				EventSequence: resultSequence,
-				Disposition:   bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-			},
-		}
+		projection := &bridgev1.RuntimeInterruptToolResult{ToolUseEventId: tool.eventID}
 		switch outcome := settlement.GetOutcome().(type) {
 		case *bridgev1.RuntimeToolSettlement_Error:
-			projection.TerminalState = &bridgev1.InterruptToolProjection_Error{Error: outcome.Error}
+			projection.Outcome = &bridgev1.RuntimeInterruptToolResult_Error{
+				Error: &bridgev1.RuntimeContextToolFailed{ErrorJson: outcome.Error.GetErrorJson()},
+			}
 		case *bridgev1.RuntimeToolSettlement_Cancelled:
-			projection.TerminalState = &bridgev1.InterruptToolProjection_Cancelled{Cancelled: outcome.Cancelled}
+			projection.Outcome = &bridgev1.RuntimeInterruptToolResult_Cancelled{
+				Cancelled: &bridgev1.RuntimeContextToolCancelled{ErrorJson: outcome.Cancelled.ErrorJson},
+			}
 		default:
 			return nil, status.Error(codes.Internal, "interrupt Tool outcome is not terminal")
 		}
