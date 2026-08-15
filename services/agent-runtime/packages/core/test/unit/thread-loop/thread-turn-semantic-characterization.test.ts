@@ -8,10 +8,43 @@ import {
 	initializeThreadTurnReduction,
 	reduceThreadTurn,
 } from "../../../src/thread-loop/thread-turn-reducer.js";
+import { toGatewayProviderContext } from "../../../src/runtime/context-projection.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
 
 describe("Thread-turn semantic characterization", () => {
+	test("a pending durable Tool Call is valid context but cannot start the next provider request", () => {
+		expect(toGatewayProviderContext([{
+			messageSequence: 1,
+			contextKind: "assistant",
+			parts: [{
+				type: "tool_call",
+				modelToolCallId: "call_pending",
+				toolName: "Read",
+				canonicalInput: { path: "README.md" },
+			}],
+		}])).toMatchObject({ ok: true });
+
+		const pending = initializeThreadTurnReduction(
+			sealedRequest([pendingTool("tool_pending", "call_pending", "Read")]),
+			{ routes: [{ toolUseEventId: "tool_pending", disposition: "hot_execution" }] },
+		);
+		expect(pending).toMatchObject({
+			state: { state: "waiting_for_tool_results" },
+			action: { action: "await_tool_results", toolUseEventIds: ["tool_pending"] },
+		});
+
+		const terminal = reduceThreadTurn(
+			pending,
+			{ fact: "tool_result_committed", toolUseEventId: "tool_pending", outcome: "success" },
+			noRoutes,
+		);
+		expect(terminal).toMatchObject({
+			state: { state: "ready_to_request" },
+			action: { action: "prepare_next_request" },
+		});
+	});
+
 	test("durable facts select the established state and action truth table", () => {
 		const awaitingApproval = sealedRequest([
 			pendingTool("tool_approval", "call_approval", "Write"),

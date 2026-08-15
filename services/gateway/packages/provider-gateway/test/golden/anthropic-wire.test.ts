@@ -334,21 +334,21 @@ describe("multi-Tool captured provider wire composition", () => {
 			const registry = new ProviderClientRegistry({ fetch: mock.fetch });
 			try {
 				const afterFirstSettlement = multiToolHistoryRequest(scenario.request, [
-					"call_beta",
+					"call/shared",
 				]);
 				expect(providerContextPendingToolCallIds(afterFirstSettlement)).toEqual(
-					["call_alpha", "call_gamma"],
+					["call:shared", "call_gamma"],
 				);
 				const pendingRequest = multiToolHistoryRequest(scenario.request, [
-					"call_beta",
-					"call_alpha",
+					"call/shared",
+					"call:shared",
 				]);
 				expect(providerContextPendingToolCallIds(pendingRequest)).toEqual([
 					"call_gamma",
 				]);
 				const settledRequest = multiToolHistoryRequest(scenario.request, [
-					"call_beta",
-					"call_alpha",
+					"call/shared",
+					"call:shared",
 					"call_gamma",
 				]);
 				expect(providerContextPendingToolCallIds(settledRequest)).toEqual([]);
@@ -361,8 +361,8 @@ describe("multi-Tool captured provider wire composition", () => {
 
 				expect(mock.requests).toHaveLength(1);
 				assertCapturedMultiToolWire(scenario.family, mock.requests[0]!.body, [
-					"call_beta",
-					"call_alpha",
+					"call/shared",
+					"call:shared",
 					"call_gamma",
 				]);
 			} finally {
@@ -1836,8 +1836,8 @@ describe("Session provider golden wire path", () => {
 type ProviderWireFamily = "anthropic" | "openai" | "openai-compatible";
 
 const MultiToolCalls = [
-	{ modelToolCallId: "call_alpha", name: "Alpha", input: { value: "alpha" } },
-	{ modelToolCallId: "call_beta", name: "Beta", input: { value: "beta" } },
+	{ modelToolCallId: "call:shared", name: "Alpha", input: { value: "alpha" } },
+	{ modelToolCallId: "call/shared", name: "Beta", input: { value: "beta" } },
 	{ modelToolCallId: "call_gamma", name: "Gamma", input: { value: "gamma" } },
 ] as const;
 
@@ -1931,39 +1931,81 @@ function assertCapturedMultiToolWire(
 	expectedResultIds: readonly string[],
 ): void {
 	const wire = capturedToolWire(family, body);
-	const expectedCallIds = MultiToolCalls.map((call) => call.modelToolCallId);
+	const originalCallIds: string[] = MultiToolCalls.map((call) => call.modelToolCallId);
+	const expectedCallIds: string[] = family === "anthropic"
+		? ["call_shared", "call_shared_2", "call_gamma"]
+		: originalCallIds;
+	const providerIdByOriginal = new Map<string, string>(
+		originalCallIds.map((id, index) => [id, expectedCallIds[index]!] as const),
+	);
 	expect(wire.calls.map((call) => call.id)).toEqual(expectedCallIds);
 	expect(new Set(wire.calls.map((call) => call.id)).size).toBe(
 		expectedCallIds.length,
 	);
-	expect(wire.results.map((result) => result.id)).toEqual([
-		...expectedResultIds,
-	]);
+	expect(wire.results.map((result) => result.id)).toEqual(
+		expectedResultIds.map((id) => providerIdByOriginal.get(id)!),
+	);
 	expect(new Set(wire.results.map((result) => result.id)).size).toBe(
 		expectedResultIds.length,
 	);
 
 	for (const expected of MultiToolCalls) {
 		const call = wire.calls.find(
-			(candidate) => candidate.id === expected.modelToolCallId,
+			(candidate) => candidate.id === providerIdByOriginal.get(expected.modelToolCallId),
 		);
 		expect(call).toMatchObject({
-			id: expected.modelToolCallId,
+			id: providerIdByOriginal.get(expected.modelToolCallId),
 			name: expected.name,
 			input: expected.input,
 		});
 	}
-	for (const result of wire.results) {
+	for (const [index, result] of wire.results.entries()) {
 		const call = wire.calls.find((candidate) => candidate.id === result.id);
 		expect(call).toBeDefined();
 		expect(result.index).toBeGreaterThan(call!.index);
-		expect(JSON.stringify(result.output)).toContain(result.id);
+		expect(JSON.stringify(result.output)).toContain(expectedResultIds[index]!);
 	}
 
-	const pendingCallIds = expectedCallIds.filter(
+	const pendingCallIds = originalCallIds.filter(
 		(id) => !expectedResultIds.includes(id),
 	);
 	expect(pendingCallIds).toEqual([]);
+	assertCapturedToolMessageGrouping(family, body, expectedCallIds, wire.results.map((result) => result.id));
+}
+
+function assertCapturedToolMessageGrouping(
+	family: ProviderWireFamily,
+	body: Record<string, unknown>,
+	expectedCallIds: readonly string[],
+	expectedResultIds: readonly string[],
+): void {
+	if (family === "anthropic") {
+		const messages = body.messages as readonly { readonly role: string; readonly content: readonly Record<string, unknown>[] }[];
+		const callMessages = messages.filter((message) => message.content.some((part) => part.type === "tool_use"));
+		expect(callMessages).toHaveLength(1);
+		expect(callMessages[0]?.role).toBe("assistant");
+		expect(callMessages[0]?.content.filter((part) => part.type === "tool_use").map((part) => part.id)).toEqual([...expectedCallIds]);
+		const resultMessages = messages.filter((message) => message.content.some((part) => part.type === "tool_result"));
+		expect(resultMessages.every((message) => message.role === "user")).toBe(true);
+		expect(resultMessages.flatMap((message) => message.content.filter((part) => part.type === "tool_result").map((part) => part.tool_use_id))).toEqual([...expectedResultIds]);
+		return;
+	}
+	if (family === "openai") {
+		const items = body.input as readonly Record<string, unknown>[];
+		const callItems = items.filter((item) => item.type === "function_call");
+		expect(callItems.map((item) => item.call_id)).toEqual([...expectedCallIds]);
+		expect(callItems.every((item) => item.type === "function_call")).toBe(true);
+		const resultItems = items.filter((item) => item.type === "function_call_output");
+		expect(resultItems.map((item) => item.call_id)).toEqual([...expectedResultIds]);
+		return;
+	}
+	const messages = body.messages as readonly Record<string, unknown>[];
+	const callMessages = messages.filter((message) => Array.isArray(message.tool_calls));
+	expect(callMessages).toHaveLength(1);
+	expect(callMessages[0]?.role).toBe("assistant");
+	expect((callMessages[0]?.tool_calls as readonly Record<string, unknown>[]).map((call) => call.id)).toEqual([...expectedCallIds]);
+	const resultMessages = messages.filter((message) => message.role === "tool");
+	expect(resultMessages.map((message) => message.tool_call_id)).toEqual([...expectedResultIds]);
 }
 
 function capturedToolWire(

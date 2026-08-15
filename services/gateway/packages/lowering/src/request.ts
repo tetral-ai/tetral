@@ -318,38 +318,40 @@ function lowerProviderContext(
   rules: ProviderRules,
 ): readonly LoweredMessageEnvelope[] {
   const toolCalls = new Map<string, LoweredProviderToolCallIdentity>();
+  const providerToolCallIds = new Set<string>();
   const toolResults = new Set<string>();
-  return context.flatMap((entry) => lowerProviderContextEntry(entry, rules, toolCalls, toolResults));
+  return context.flatMap((entry) => lowerProviderContextEntry(entry, rules, toolCalls, providerToolCallIds, toolResults));
 }
 
 function lowerProviderContextEntry(
   entry: ProviderContextEntry,
   rules: ProviderRules,
   toolCalls: Map<string, LoweredProviderToolCallIdentity>,
+  providerToolCallIds: Set<string>,
   toolResults: Set<string>,
 ): readonly LoweredMessageEnvelope[] {
   if (rules.reasoning.strategy === "provider-options" && entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT) {
-    return lowerProviderOptionsReasoningEntry(entry, rules, toolCalls, toolResults);
+    return lowerProviderOptionsReasoningEntry(entry, rules, toolCalls, providerToolCallIds, toolResults);
   }
 
-  const envelopes: LoweredMessageEnvelope[] = [];
-  const normalContent: Array<LoweredTextPart | LoweredReasoningPart> = [];
+  const assistantContent: LoweredAssistantContentPart[] = [];
+  const toolContent: LoweredToolResultPart[] = [];
   const hasSignedReasoning = entry.content.some((item) => item.reasoning !== undefined && hasSignedProviderReasoning(item, rules));
 
   for (const item of entry.content) {
     if (item.text !== undefined) {
       const text = sanitizeText(item.text.text);
       if (text.length > 0) {
-        normalContent.push({ type: "text", text });
+        assistantContent.push({ type: "text", text });
       } else if (hasSignedReasoning && entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT) {
-        normalContent.push({ type: "text", text: " " });
+        assistantContent.push({ type: "text", text: " " });
       }
       continue;
     }
     if (item.reasoning !== undefined) {
       const lowered = lowerReasoningContent(item, rules);
       if (lowered !== undefined) {
-        normalContent.push(lowered);
+        assistantContent.push(lowered);
       }
       continue;
     }
@@ -357,24 +359,28 @@ function lowerProviderContextEntry(
       throw new Error("gateway_protocol_error: user provider context may contain only text");
     }
     if (item.toolCall !== undefined) {
-      envelopes.push(lowerToolCall(item.toolCall, rules, toolCalls));
+      assistantContent.push(lowerToolCall(item.toolCall, rules, toolCalls, providerToolCallIds));
       continue;
     }
     if (item.toolResult !== undefined) {
-      envelopes.push(lowerToolResult(item.toolResult, toolCalls, toolResults));
+      toolContent.push(lowerToolResult(item.toolResult, toolCalls, toolResults));
     }
   }
 
   if (
     hasSignedReasoning &&
     entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT &&
-    !normalContent.some((part) => part.type === "text")
+    !assistantContent.some((part) => part.type === "text")
   ) {
-    normalContent.push({ type: "text", text: " " });
+    assistantContent.push({ type: "text", text: " " });
   }
 
-  if (normalContent.length > 0) {
-    envelopes.unshift({ message: messageForRole(entry.role, normalContent), systemCacheCandidate: false });
+  const envelopes: LoweredMessageEnvelope[] = [];
+  if (assistantContent.length > 0) {
+    envelopes.push({ message: messageForRole(entry.role, assistantContent), systemCacheCandidate: false });
+  }
+  if (toolContent.length > 0) {
+    envelopes.push({ message: { role: "tool", content: toolContent }, systemCacheCandidate: false });
   }
   return envelopes;
 }
@@ -500,6 +506,7 @@ function lowerProviderOptionsReasoningEntry(
   entry: ProviderContextEntry,
   rules: ProviderRules,
   toolCalls: Map<string, LoweredProviderToolCallIdentity>,
+  providerToolCallIds: Set<string>,
   toolResults: Set<string>,
 ): readonly LoweredMessageEnvelope[] {
   if (rules.reasoning.strategy !== "provider-options") {
@@ -507,8 +514,8 @@ function lowerProviderOptionsReasoningEntry(
   }
   const reasoningRules = rules.reasoning;
 
-  const envelopes: LoweredMessageEnvelope[] = [];
-  const normalParts: LoweredTextPart[] = [];
+  const normalParts: LoweredAssistantContentPart[] = [];
+  const toolParts: LoweredToolResultPart[] = [];
   const reasoningParts: string[] = [];
 
   for (const item of entry.content) {
@@ -524,16 +531,20 @@ function lowerProviderOptionsReasoningEntry(
       continue;
     }
     if (item.toolCall !== undefined) {
-      envelopes.push(lowerToolCall(item.toolCall, rules, toolCalls));
+      normalParts.push(lowerToolCall(item.toolCall, rules, toolCalls, providerToolCallIds));
       continue;
     }
     if (item.toolResult !== undefined) {
-      envelopes.push(lowerToolResult(item.toolResult, toolCalls, toolResults));
+      toolParts.push(lowerToolResult(item.toolResult, toolCalls, toolResults));
     }
   }
 
+  const envelopes: LoweredMessageEnvelope[] = [];
   if (normalParts.length > 0 || reasoningParts.length > 0) {
-    envelopes.unshift({ message: { role: "assistant", content: normalParts }, systemCacheCandidate: false });
+    envelopes.push({ message: { role: "assistant", content: normalParts }, systemCacheCandidate: false });
+  }
+  if (toolParts.length > 0) {
+    envelopes.push({ message: { role: "tool", content: toolParts }, systemCacheCandidate: false });
   }
 
   const reasoningContent = reasoningParts.length > 0 ? reasoningParts.join("") : "";
@@ -581,21 +592,23 @@ function lowerToolCall(
   tool: ProviderToolCall,
   rules: ProviderRules,
   toolCalls: Map<string, LoweredProviderToolCallIdentity>,
-): LoweredMessageEnvelope {
+  providerToolCallIds: Set<string>,
+): LoweredToolCallPart {
   if (toolCalls.has(tool.modelToolCallId)) {
     throw new Error("gateway_protocol_error: provider Tool Call identity is duplicated");
   }
   const sanitizedToolCallId = sanitizeText(tool.modelToolCallId);
-  const toolCallId = rules.scrubToolCallIds ? scrubClaudeToolCallId(sanitizedToolCallId) : sanitizedToolCallId;
+  const toolCallId = rules.scrubToolCallIds
+    ? allocateProviderToolCallId(scrubClaudeToolCallId(sanitizedToolCallId), providerToolCallIds)
+    : registerProviderToolCallId(sanitizedToolCallId, providerToolCallIds);
   const toolName = sanitizeText(tool.name);
   const input = parseProviderJson(tool.inputJson, "tool input");
   toolCalls.set(tool.modelToolCallId, { toolCallId, toolName });
   return {
-    message: {
-      role: "assistant",
-      content: [{ type: "tool-call", toolCallId, toolName, input }],
-    },
-    systemCacheCandidate: false,
+    type: "tool-call",
+    toolCallId,
+    toolName,
+    input,
   };
 }
 
@@ -603,7 +616,7 @@ function lowerToolResult(
   result: ProviderToolResult,
   toolCalls: ReadonlyMap<string, LoweredProviderToolCallIdentity>,
   toolResults: Set<string>,
-): LoweredMessageEnvelope {
+): LoweredToolResultPart {
   const call = toolCalls.get(result.modelToolCallId);
   if (call === undefined || toolResults.has(result.modelToolCallId)) {
     throw new Error("gateway_protocol_error: provider Tool Result does not pair with exactly one prior Tool Call");
@@ -613,7 +626,7 @@ function lowerToolResult(
   if (outcomeCount !== 1) {
     throw new Error("gateway_protocol_error: provider Tool Result must select exactly one outcome");
   }
-  const content: LoweredToolResultPart = result.completed !== undefined
+  return result.completed !== undefined
     ? {
         type: "tool-result",
         ...call,
@@ -632,15 +645,11 @@ function lowerToolResult(
           output: { type: "text", text: "[tool execution cancelled]" },
           isError: true,
         };
-  return {
-    message: { role: "tool", content: [content] },
-    systemCacheCandidate: false,
-  };
 }
 
 function messageForRole(
   role: ProviderContextRole,
-  parts: readonly (LoweredTextPart | LoweredReasoningPart)[],
+  parts: readonly LoweredAssistantContentPart[],
 ): LoweredUserMessage | LoweredAssistantMessage {
   switch (role) {
     case ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER:
@@ -1247,6 +1256,29 @@ function sanitizeProviderJsonValue(value: unknown): unknown {
 
 function scrubClaudeToolCallId(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+function allocateProviderToolCallId(base: string, used: Set<string>): string {
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  for (let collision = 2; ; collision += 1) {
+    const suffix = `_${collision}`;
+    const candidate = `${base.slice(0, Math.max(0, 128 - suffix.length))}${suffix}`;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+}
+
+function registerProviderToolCallId(toolCallId: string, used: Set<string>): string {
+  if (used.has(toolCallId)) {
+    throw new Error("gateway_protocol_error: provider Tool Call identities collide after text sanitation");
+  }
+  used.add(toolCallId);
+  return toolCallId;
 }
 
 function sanitizeText(value: string): string {

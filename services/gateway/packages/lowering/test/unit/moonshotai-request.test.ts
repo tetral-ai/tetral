@@ -41,14 +41,11 @@ describe("moonshotai Kimi request lowering", () => {
       role: "assistant",
       content: [
         { type: "reasoning", text: "", providerMetadata: { anthropic: { signature: "sig_1" } } },
+        { type: "tool-call", toolCallId: "call:with/slashes and spaces" },
         { type: "text", text: " " },
       ],
     });
     expect(lowered.messages[2]).toMatchObject({
-      role: "assistant",
-      content: [{ type: "tool-call", toolCallId: "call:with/slashes and spaces" }],
-    });
-    expect(lowered.messages[3]).toMatchObject({
       role: "tool",
       content: [{ type: "tool-result", toolCallId: "call:with/slashes and spaces" }],
     });

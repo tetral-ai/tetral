@@ -104,6 +104,54 @@ describe("anthropic request lowering", () => {
     });
   });
 
+  test("keeps one ordered assistant envelope and assigns collision-free scrubbed Tool ids", () => {
+    const reasoningMetadata = JSON.stringify({ anthropic: { signature: "sig_collision" } });
+    const lowered = lowerAnthropicRequest(anthropicRequest({
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { text: { text: "before" } },
+          { toolCall: { modelToolCallId: "call:a", name: "Alpha", inputJson: "{}" } },
+          { reasoning: { text: "thinking", metadataJson: reasoningMetadata } },
+          { toolCall: { modelToolCallId: "call/a", name: "Beta", inputJson: "{}" } },
+          { text: { text: "after" } },
+          { toolResult: {
+            modelToolCallId: "call:a",
+            completed: { outputJson: JSON.stringify({ result: "alpha" }) },
+            error: undefined,
+            cancelled: undefined,
+          } },
+          { toolResult: {
+            modelToolCallId: "call/a",
+            completed: { outputJson: JSON.stringify({ result: "beta" }) },
+            error: undefined,
+            cancelled: undefined,
+          } },
+        ],
+      }],
+    }));
+
+    expect(lowered.messages.slice(1)).toMatchObject([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "before" },
+          { type: "tool-call", toolCallId: "call_a", toolName: "Alpha", input: {} },
+          { type: "reasoning", text: "thinking", providerMetadata: JSON.parse(reasoningMetadata) },
+          { type: "tool-call", toolCallId: "call_a_2", toolName: "Beta", input: {} },
+          { type: "text", text: "after" },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "call_a", toolName: "Alpha", output: { result: "alpha" } },
+          { type: "tool-result", toolCallId: "call_a_2", toolName: "Beta", output: { result: "beta" } },
+        ],
+      },
+    ]);
+  });
+
   test("anthropic-media-lowering lowers resolved image, PDF, and plain-text attachments into user media parts", () => {
     expect(AnthropicOpus48Rules.supportedMedia).toEqual({
       exactMimes: ["application/pdf", "text/plain"],
