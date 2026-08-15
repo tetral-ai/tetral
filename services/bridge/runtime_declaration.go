@@ -884,20 +884,18 @@ func settleRuntimeToolPartTx(
 	if modelRequestID == "" || settlement == nil || settlement.GetToolUseEventId() == "" {
 		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime Tool settlement is incomplete")
 	}
-	eventType := "agent.tool_use"
-	var storedEventType string
+	var eventType string
 	if err := tx.QueryRow(ctx,
 		`SELECT type FROM session_events
 		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 		    AND event_id=$4 AND type IN ('agent.tool_use','agent.mcp_tool_use')
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), settlement.GetToolUseEventId(),
-	).Scan(&storedEventType); dbconnect.IsNoRows(err) {
+	).Scan(&eventType); dbconnect.IsNoRows(err) {
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is missing")
 	} else if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
-	eventType = storedEventType
 	tool, err := loadDurableToolExecutionTx(ctx, tx, scope, settlement.GetToolUseEventId(), eventType, false)
 	if err != nil {
 		return runtimeToolProjectionPayload{}, err
@@ -959,7 +957,7 @@ func settleRuntimeToolPartTx(
 }
 
 func runtimeToolProjectionFromSettlement(tool durableToolExecution, settlement *bridgev1.RuntimeToolSettlement) (runtimeToolProjectionPayload, error) {
-	result := map[string]any{}
+	var result map[string]any
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
 		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
