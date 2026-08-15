@@ -64,7 +64,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 						modelToolCallId: "call_1",
 						result: {
 							type: "completed",
-							output: { text: "sunny", truncated: false },
+							output: { text: "sunny" },
 						},
 					},
 				],
@@ -173,7 +173,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 						origin: {
 							transient: {
 								attachmentRef: "att_1",
-								sourceToolUseEventId: "tool_1",
 							},
 							file_backed: { sourceEventId: "evt_1", fileId: "file_1" },
 						},
@@ -905,7 +904,7 @@ function controlScope(runtimeInputId: string) {
 }
 
 function eventScope(writeId: string) {
-	return { requestId: `req_${writeId}`, ...threadScope(), writeId };
+	return { ...threadScope(), writeId };
 }
 
 function durableContext() {
@@ -931,7 +930,7 @@ function durableContext() {
 						modelToolCallId: "call_1",
 						result: {
 							type: "completed",
-							output: { text: "sunny", truncated: false },
+							output: { text: "sunny" },
 						},
 					},
 				],
@@ -993,7 +992,6 @@ function toolSettlement(): SessionEventWriterToolSettlementEnvelope {
 
 function internalRepair(): RuntimeInternalToolRepairCommit {
 	return {
-		requestId: "req_repair_1",
 		...threadScope(),
 		modelRequestId: "mrq_1",
 		modelToolCallId: "call_bad",

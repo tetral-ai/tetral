@@ -15,6 +15,7 @@ import type {
 	RuntimeToolSettlementDeclaration,
 } from "../contracts/runtime.js";
 import {
+	finalizeRuntimeToolOutput,
 	RuntimeAssistantContextAppendSchema,
 	RuntimeContextEntrySchema,
 	RuntimeOpenRequestDraftSchema,
@@ -461,10 +462,11 @@ export function contextToolResultFromSettlement(
 	settlement: RuntimeToolSettlementDeclaration["outcome"],
 ): Extract<RuntimeContextPart, { readonly type: "tool_result" }> {
 	if (settlement.type === "completed") {
+		const output = finalizeRuntimeToolOutput(settlement.output);
 		return {
 			type: "tool_result",
 			modelToolCallId,
-			result: { type: "completed", output: settlement.output },
+			result: { type: "completed", output: { text: output.text } },
 		};
 	}
 	if (settlement.type === "error") {
@@ -480,11 +482,6 @@ export function contextToolResultFromSettlement(
 	return {
 		type: "tool_result",
 		modelToolCallId,
-		result: {
-			type: "cancelled",
-			...(settlement.error === undefined
-				? {}
-				: { error: runtimeToolErrorFromFailure(settlement.error) }),
-		},
+		result: { type: "cancelled" },
 	};
 }

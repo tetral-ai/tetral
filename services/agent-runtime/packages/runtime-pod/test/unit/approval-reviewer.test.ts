@@ -101,7 +101,7 @@ function completedToolEntry(
 				modelToolCallId,
 				result: {
 					type: "completed",
-					output: { text: output, truncated: false },
+					output: { text: output },
 				},
 			},
 		],

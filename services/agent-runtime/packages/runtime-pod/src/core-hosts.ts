@@ -440,7 +440,6 @@ export async function buildRuntimeCoreHosts(
 				),
 			commitApprovalReviewDecision: async (command, event) =>
 				await options.threadLoop.sessionEventWriter.append({
-					requestId: command.runtimeInputId,
 					workspaceId: command.workspaceId,
 					sessionId: command.sessionId,
 					sessionThreadId: command.sessionThreadId,
@@ -452,7 +451,6 @@ export async function buildRuntimeCoreHosts(
 				}),
 			commitApprovalReviewFailure: async (command, event) =>
 				await reviewerFailureWriter.append({
-					requestId: command.runtimeInputId,
 					workspaceId: command.workspaceId,
 					sessionId: command.sessionId,
 					sessionThreadId: command.sessionThreadId,

@@ -15,7 +15,7 @@ func TestRuntimeContextDeltaAcceptsOnlyNarrowProviderParts(t *testing.T) {
 		{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: "done"}}},
 		{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{Text: "why", ProviderMetadataJson: bridgeString(`{"provider":"x"}`)}}},
 		{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call_1", ToolName: "read", CanonicalInputJson: `{"path":"a"}`}}},
-		{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call_1", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: `{"type":"tool_failure","message":"safe","retryable":false}`}}}}},
+		{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call_1", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: `{"type":"tool_failure","message":"safe","retryable":false}`}}}}},
 	}}
 	parts, err := canonicalRuntimeContextParts(delta)
 	if err != nil {
@@ -72,15 +72,14 @@ func TestRuntimeContextDeltaEnforcesExactJSONByteBounds(t *testing.T) {
 		{
 			name: "Tool output", maxBytes: runtimeToolOutputJSONMaxBytes, emptyJSON: `{"text":""}`,
 			delta: func(raw string) *bridgev1.RuntimeContextDelta {
-				output := strings.TrimSuffix(raw, "}") + `,"truncated":false}`
-				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeToolCompleted{OutputJson: output}}}}}}}
+				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeContextToolCompleted{OutputJson: raw}}}}}}}
 			},
 		},
 		{
 			name: "Tool error", maxBytes: runtimeToolOutputJSONMaxBytes, emptyJSON: `{"error":{"type":"tool_failure","message":"","retryable":false}}`,
 			delta: func(raw string) *bridgev1.RuntimeContextDelta {
 				errorJSON := strings.TrimPrefix(strings.TrimSuffix(raw, "}"), `{"error":`)
-				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: errorJSON}}}}}}}
+				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: errorJSON}}}}}}}
 			},
 		},
 	}
@@ -149,7 +148,7 @@ func TestRuntimeContextTextAndIdentifiersMatchGatewayByteBounds(t *testing.T) {
 }
 
 func TestStoredRuntimeContextAcceptsProviderIdentifiersWithoutSensitiveTextClassification(t *testing.T) {
-	parts, err := decodeStoredRuntimeContextParts(`{"parts":[{"type":"tool_call","modelToolCallId":"dummy-call-1","toolName":"Read","canonicalInput":{}},{"type":"tool_result","modelToolCallId":"dummy-call-1","result":{"type":"completed","output":{"text":"ok","truncated":false}}}]}`)
+	parts, err := decodeStoredRuntimeContextParts(`{"parts":[{"type":"tool_call","modelToolCallId":"dummy-call-1","toolName":"Read","canonicalInput":{}},{"type":"tool_result","modelToolCallId":"dummy-call-1","result":{"type":"completed","output":{"text":"ok"}}}]}`)
 	if err != nil {
 		t.Fatalf("decode durable provider identifiers: %v", err)
 	}
@@ -173,11 +172,11 @@ func TestRuntimeContextDeltaRejectsUnpairedUnicodeSurrogates(t *testing.T) {
 		},
 		{
 			name:  "output",
-			delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeToolCompleted{OutputJson: `{"text":"\ud800","truncated":false}`}}}}}}},
+			delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeContextToolCompleted{OutputJson: `{"text":"\ud800"}`}}}}}}},
 		},
 		{
 			name:  "error",
-			delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: `{"type":"tool_failure","message":"\udc00","retryable":false}`}}}}}}},
+			delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: `{"type":"tool_failure","message":"\udc00","retryable":false}`}}}}}}},
 		},
 	}
 	for _, test := range invalid {

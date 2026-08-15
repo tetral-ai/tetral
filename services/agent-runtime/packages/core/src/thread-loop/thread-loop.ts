@@ -4317,7 +4317,6 @@ function resumeRecoveredToolJobEffect(
 				entry: pending.entry,
 				input: pending.job.input,
 				...(currentModel !== undefined ? { currentModel } : {}),
-				committedContext: pending.committedContext,
 			};
 			let executionResult: RuntimeToolExecutionResult;
 			if (tokenRefresh.type === "stale_custody") {
@@ -4850,7 +4849,6 @@ function coordinateRuntimeToolJobEffect(
 					approvalSource: gateDecision.approvalSource,
 				},
 				entry,
-				committedContext: session.state.contextManager.entries(),
 				...(session.state.currentModel() !== undefined
 					? { currentModel: session.state.currentModel() }
 					: {}),
@@ -4922,7 +4920,6 @@ function coordinateRuntimeToolJobEffect(
 				...(session.state.currentModel() !== undefined
 					? { currentModel: session.state.currentModel() }
 					: {}),
-				committedContext: session.state.contextManager.entries(),
 			};
 			let executionResult: RuntimeToolExecutionResult;
 			if (tokenRefresh.type === "stale_custody") {
@@ -4974,7 +4971,6 @@ function coordinateRuntimeToolJobEffect(
 									gateState: "runnable",
 								},
 								entry,
-								committedContext: session.state.contextManager.entries(),
 								...(session.state.currentModel() !== undefined
 									? { currentModel: session.state.currentModel() }
 									: {}),
@@ -6377,7 +6373,6 @@ async function appendModelRequestEndEvent(
 				],
 	);
 	const envelope: SessionEventWriterRequestEndEnvelope = {
-		requestId: writeId,
 		workspaceId: session.identity.workspaceId,
 		sessionId: session.sessionId,
 		sessionThreadId: session.identity.sessionThreadId,
@@ -6799,7 +6794,6 @@ async function appendEventWithWriteId(
 	const startedAt = options.runtime.monotonicMs();
 	try {
 		const result = await options.sessionEventWriter.append({
-			requestId: writeId,
 			workspaceId: session.identity.workspaceId,
 			sessionId: session.sessionId,
 			sessionThreadId: session.identity.sessionThreadId,

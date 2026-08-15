@@ -868,7 +868,7 @@ function writerFrom(
 			envelope.assistantContextAppend !== undefined &&
 			!("assistant" in supplied)
 		) {
-			const requestKey = envelope.modelRequestId ?? envelope.requestId;
+			const requestKey = envelope.modelRequestId ?? envelope.writeId;
 			const assignedMessageSequence = assistantMessageSequence(
 				durableSequence,
 				requestKey,
@@ -916,7 +916,6 @@ function writerFrom(
 		writeRequestEnd ??
 		(async (envelope) => {
 			const appendResult = await appendWithFacts({
-				requestId: envelope.requestId,
 				workspaceId: envelope.workspaceId,
 				sessionId: envelope.sessionId,
 				sessionThreadId: envelope.sessionThreadId,
@@ -977,7 +976,6 @@ function writerFrom(
 			withFinishIdleResultForTest(
 				envelope,
 				await appendWithFacts({
-					requestId: envelope.durableTurnId,
 					workspaceId: envelope.workspaceId,
 					sessionId: envelope.sessionId,
 					sessionThreadId: envelope.sessionThreadId,

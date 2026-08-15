@@ -177,11 +177,10 @@ type bridgeLoadContextAttachmentOrigin struct {
 }
 
 type bridgeLoadContextTransientAttachment struct {
-	AttachmentRef        string `json:"attachmentRef"`
-	SourceToolUseEventID string `json:"sourceToolUseEventId"`
-	SourcePath           string `json:"sourcePath,omitempty"`
-	PageRange            string `json:"pageRange,omitempty"`
-	Detail               string `json:"detail,omitempty"`
+	AttachmentRef string `json:"attachmentRef"`
+	SourcePath    string `json:"sourcePath,omitempty"`
+	PageRange     string `json:"pageRange,omitempty"`
+	Detail        string `json:"detail,omitempty"`
 }
 
 type bridgeLoadContextFileAttachment struct {
@@ -757,7 +756,7 @@ func loadThreadPendingAttachmentsTx(
 ) ([]bridgeLoadContextPendingAttachment, error) {
 	pending := make([]bridgeLoadContextPendingAttachment, 0)
 	transientRows, err := tx.Query(ctx,
-		`SELECT attachment_ref, source_tool_use_event_id, mime, metadata_json
+		`SELECT attachment_ref, mime, metadata_json
 		   FROM session_transient_attachments
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -772,8 +771,8 @@ func loadThreadPendingAttachmentsTx(
 		return nil, err
 	}
 	for transientRows.Next() {
-		var attachmentRef, sourceToolUseEventID, mime, metadataJSON string
-		if err := transientRows.Scan(&attachmentRef, &sourceToolUseEventID, &mime, &metadataJSON); err != nil {
+		var attachmentRef, mime, metadataJSON string
+		if err := transientRows.Scan(&attachmentRef, &mime, &metadataJSON); err != nil {
 			_ = transientRows.Close()
 			return nil, err
 		}
@@ -784,11 +783,10 @@ func loadThreadPendingAttachmentsTx(
 		}
 		pending = append(pending, bridgeLoadContextPendingAttachment{
 			Origin: bridgeLoadContextAttachmentOrigin{Transient: &bridgeLoadContextTransientAttachment{
-				AttachmentRef:        attachmentRef,
-				SourceToolUseEventID: sourceToolUseEventID,
-				SourcePath:           metadata.SourcePath,
-				PageRange:            metadata.PageRange,
-				Detail:               metadata.Detail,
+				AttachmentRef: attachmentRef,
+				SourcePath:    metadata.SourcePath,
+				PageRange:     metadata.PageRange,
+				Detail:        metadata.Detail,
 			}},
 			Mime:     mime,
 			Filename: metadata.Filename,

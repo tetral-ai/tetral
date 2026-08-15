@@ -89,7 +89,6 @@ function request(
 		toolUseEventId: input.toolUseEventId,
 		entry,
 		input: value,
-		committedContext: [],
 		abortSignal: new AbortController().signal,
 	};
 }

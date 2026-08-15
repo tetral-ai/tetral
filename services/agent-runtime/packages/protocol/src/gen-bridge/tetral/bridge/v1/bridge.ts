@@ -331,9 +331,20 @@ export interface RuntimeContextToolCall {
 
 export interface RuntimeContextToolResult {
   modelToolCallId: string;
-  completed?: RuntimeToolCompleted | undefined;
-  error?: RuntimeToolError | undefined;
-  cancelled?: RuntimeToolCancelled | undefined;
+  completed?: RuntimeContextToolCompleted | undefined;
+  error?: RuntimeContextToolError | undefined;
+  cancelled?: RuntimeContextToolCancelled | undefined;
+}
+
+export interface RuntimeContextToolCompleted {
+  outputJson: string;
+}
+
+export interface RuntimeContextToolError {
+  errorJson: string;
+}
+
+export interface RuntimeContextToolCancelled {
 }
 
 export interface RuntimeToolSettlement {
@@ -403,18 +414,18 @@ export interface CommitInputsResponse {
   stale?: CommitInputsStale | undefined;
 }
 
-export interface RuntimeContextToolFailed {
+export interface RuntimeInterruptToolFailed {
   errorJson: string;
 }
 
-export interface RuntimeContextToolCancelled {
+export interface RuntimeInterruptToolCancelled {
   errorJson?: string | undefined;
 }
 
 export interface RuntimeInterruptToolResult {
   toolUseEventId: string;
-  error?: RuntimeContextToolFailed | undefined;
-  cancelled?: RuntimeContextToolCancelled | undefined;
+  error?: RuntimeInterruptToolFailed | undefined;
+  cancelled?: RuntimeInterruptToolCancelled | undefined;
 }
 
 export interface CommitInputsContextApplication {
@@ -617,7 +628,6 @@ export interface TransientAttachmentRef {
   attachmentRef: string;
   mime: string;
   filename: string;
-  sourceToolUseEventId: string;
   sourcePath: string;
   pageRange: string;
   detail: string;
@@ -714,14 +724,12 @@ export interface WriteEventResponse {
 
 export interface WriteEventCommitted {
   eventId: string;
-  eventSequence: number;
   assignedMessageSequence?: number | undefined;
   createdToolUseEventIds: string[];
 }
 
 export interface WriteEventDuplicate {
   eventId: string;
-  eventSequence: number;
   assignedMessageSequence?: number | undefined;
   createdToolUseEventIds: string[];
 }
@@ -1675,13 +1683,13 @@ export const RuntimeContextToolResult: MessageFns<RuntimeContextToolResult> = {
       writer.uint32(10).string(message.modelToolCallId);
     }
     if (message.completed !== undefined) {
-      RuntimeToolCompleted.encode(message.completed, writer.uint32(18).fork()).join();
+      RuntimeContextToolCompleted.encode(message.completed, writer.uint32(18).fork()).join();
     }
     if (message.error !== undefined) {
-      RuntimeToolError.encode(message.error, writer.uint32(26).fork()).join();
+      RuntimeContextToolError.encode(message.error, writer.uint32(26).fork()).join();
     }
     if (message.cancelled !== undefined) {
-      RuntimeToolCancelled.encode(message.cancelled, writer.uint32(34).fork()).join();
+      RuntimeContextToolCancelled.encode(message.cancelled, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -1706,7 +1714,7 @@ export const RuntimeContextToolResult: MessageFns<RuntimeContextToolResult> = {
             break;
           }
 
-          message.completed = RuntimeToolCompleted.decode(reader, reader.uint32());
+          message.completed = RuntimeContextToolCompleted.decode(reader, reader.uint32());
           continue;
         }
         case 3: {
@@ -1714,7 +1722,7 @@ export const RuntimeContextToolResult: MessageFns<RuntimeContextToolResult> = {
             break;
           }
 
-          message.error = RuntimeToolError.decode(reader, reader.uint32());
+          message.error = RuntimeContextToolError.decode(reader, reader.uint32());
           continue;
         }
         case 4: {
@@ -1722,7 +1730,7 @@ export const RuntimeContextToolResult: MessageFns<RuntimeContextToolResult> = {
             break;
           }
 
-          message.cancelled = RuntimeToolCancelled.decode(reader, reader.uint32());
+          message.cancelled = RuntimeContextToolCancelled.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -1741,9 +1749,9 @@ export const RuntimeContextToolResult: MessageFns<RuntimeContextToolResult> = {
         : isSet(object.model_tool_call_id)
         ? globalThis.String(object.model_tool_call_id)
         : "",
-      completed: isSet(object.completed) ? RuntimeToolCompleted.fromJSON(object.completed) : undefined,
-      error: isSet(object.error) ? RuntimeToolError.fromJSON(object.error) : undefined,
-      cancelled: isSet(object.cancelled) ? RuntimeToolCancelled.fromJSON(object.cancelled) : undefined,
+      completed: isSet(object.completed) ? RuntimeContextToolCompleted.fromJSON(object.completed) : undefined,
+      error: isSet(object.error) ? RuntimeContextToolError.fromJSON(object.error) : undefined,
+      cancelled: isSet(object.cancelled) ? RuntimeContextToolCancelled.fromJSON(object.cancelled) : undefined,
     };
   },
 
@@ -1753,13 +1761,13 @@ export const RuntimeContextToolResult: MessageFns<RuntimeContextToolResult> = {
       obj.modelToolCallId = message.modelToolCallId;
     }
     if (message.completed !== undefined) {
-      obj.completed = RuntimeToolCompleted.toJSON(message.completed);
+      obj.completed = RuntimeContextToolCompleted.toJSON(message.completed);
     }
     if (message.error !== undefined) {
-      obj.error = RuntimeToolError.toJSON(message.error);
+      obj.error = RuntimeContextToolError.toJSON(message.error);
     }
     if (message.cancelled !== undefined) {
-      obj.cancelled = RuntimeToolCancelled.toJSON(message.cancelled);
+      obj.cancelled = RuntimeContextToolCancelled.toJSON(message.cancelled);
     }
     return obj;
   },
@@ -1771,14 +1779,185 @@ export const RuntimeContextToolResult: MessageFns<RuntimeContextToolResult> = {
     const message = createBaseRuntimeContextToolResult();
     message.modelToolCallId = object.modelToolCallId ?? "";
     message.completed = (object.completed !== undefined && object.completed !== null)
-      ? RuntimeToolCompleted.fromPartial(object.completed)
+      ? RuntimeContextToolCompleted.fromPartial(object.completed)
       : undefined;
     message.error = (object.error !== undefined && object.error !== null)
-      ? RuntimeToolError.fromPartial(object.error)
+      ? RuntimeContextToolError.fromPartial(object.error)
       : undefined;
     message.cancelled = (object.cancelled !== undefined && object.cancelled !== null)
-      ? RuntimeToolCancelled.fromPartial(object.cancelled)
+      ? RuntimeContextToolCancelled.fromPartial(object.cancelled)
       : undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeContextToolCompleted(): RuntimeContextToolCompleted {
+  return { outputJson: "" };
+}
+
+export const RuntimeContextToolCompleted: MessageFns<RuntimeContextToolCompleted> = {
+  encode(message: RuntimeContextToolCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.outputJson !== "") {
+      writer.uint32(10).string(message.outputJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeContextToolCompleted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeContextToolCompleted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.outputJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeContextToolCompleted {
+    return {
+      outputJson: isSet(object.outputJson)
+        ? globalThis.String(object.outputJson)
+        : isSet(object.output_json)
+        ? globalThis.String(object.output_json)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeContextToolCompleted): unknown {
+    const obj: any = {};
+    if (message.outputJson !== "") {
+      obj.outputJson = message.outputJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeContextToolCompleted>, I>>(base?: I): RuntimeContextToolCompleted {
+    return RuntimeContextToolCompleted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeContextToolCompleted>, I>>(object: I): RuntimeContextToolCompleted {
+    const message = createBaseRuntimeContextToolCompleted();
+    message.outputJson = object.outputJson ?? "";
+    return message;
+  },
+};
+
+function createBaseRuntimeContextToolError(): RuntimeContextToolError {
+  return { errorJson: "" };
+}
+
+export const RuntimeContextToolError: MessageFns<RuntimeContextToolError> = {
+  encode(message: RuntimeContextToolError, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.errorJson !== "") {
+      writer.uint32(10).string(message.errorJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeContextToolError {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeContextToolError();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.errorJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeContextToolError {
+    return {
+      errorJson: isSet(object.errorJson)
+        ? globalThis.String(object.errorJson)
+        : isSet(object.error_json)
+        ? globalThis.String(object.error_json)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeContextToolError): unknown {
+    const obj: any = {};
+    if (message.errorJson !== "") {
+      obj.errorJson = message.errorJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeContextToolError>, I>>(base?: I): RuntimeContextToolError {
+    return RuntimeContextToolError.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeContextToolError>, I>>(object: I): RuntimeContextToolError {
+    const message = createBaseRuntimeContextToolError();
+    message.errorJson = object.errorJson ?? "";
+    return message;
+  },
+};
+
+function createBaseRuntimeContextToolCancelled(): RuntimeContextToolCancelled {
+  return {};
+}
+
+export const RuntimeContextToolCancelled: MessageFns<RuntimeContextToolCancelled> = {
+  encode(_: RuntimeContextToolCancelled, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeContextToolCancelled {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeContextToolCancelled();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): RuntimeContextToolCancelled {
+    return {};
+  },
+
+  toJSON(_: RuntimeContextToolCancelled): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeContextToolCancelled>, I>>(base?: I): RuntimeContextToolCancelled {
+    return RuntimeContextToolCancelled.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeContextToolCancelled>, I>>(_: I): RuntimeContextToolCancelled {
+    const message = createBaseRuntimeContextToolCancelled();
     return message;
   },
 };
@@ -2905,22 +3084,22 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
   },
 };
 
-function createBaseRuntimeContextToolFailed(): RuntimeContextToolFailed {
+function createBaseRuntimeInterruptToolFailed(): RuntimeInterruptToolFailed {
   return { errorJson: "" };
 }
 
-export const RuntimeContextToolFailed: MessageFns<RuntimeContextToolFailed> = {
-  encode(message: RuntimeContextToolFailed, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const RuntimeInterruptToolFailed: MessageFns<RuntimeInterruptToolFailed> = {
+  encode(message: RuntimeInterruptToolFailed, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.errorJson !== "") {
       writer.uint32(10).string(message.errorJson);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeContextToolFailed {
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeInterruptToolFailed {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeContextToolFailed();
+    const message = createBaseRuntimeInterruptToolFailed();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -2941,7 +3120,7 @@ export const RuntimeContextToolFailed: MessageFns<RuntimeContextToolFailed> = {
     return message;
   },
 
-  fromJSON(object: any): RuntimeContextToolFailed {
+  fromJSON(object: any): RuntimeInterruptToolFailed {
     return {
       errorJson: isSet(object.errorJson)
         ? globalThis.String(object.errorJson)
@@ -2951,7 +3130,7 @@ export const RuntimeContextToolFailed: MessageFns<RuntimeContextToolFailed> = {
     };
   },
 
-  toJSON(message: RuntimeContextToolFailed): unknown {
+  toJSON(message: RuntimeInterruptToolFailed): unknown {
     const obj: any = {};
     if (message.errorJson !== "") {
       obj.errorJson = message.errorJson;
@@ -2959,32 +3138,32 @@ export const RuntimeContextToolFailed: MessageFns<RuntimeContextToolFailed> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeContextToolFailed>, I>>(base?: I): RuntimeContextToolFailed {
-    return RuntimeContextToolFailed.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<RuntimeInterruptToolFailed>, I>>(base?: I): RuntimeInterruptToolFailed {
+    return RuntimeInterruptToolFailed.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeContextToolFailed>, I>>(object: I): RuntimeContextToolFailed {
-    const message = createBaseRuntimeContextToolFailed();
+  fromPartial<I extends Exact<DeepPartial<RuntimeInterruptToolFailed>, I>>(object: I): RuntimeInterruptToolFailed {
+    const message = createBaseRuntimeInterruptToolFailed();
     message.errorJson = object.errorJson ?? "";
     return message;
   },
 };
 
-function createBaseRuntimeContextToolCancelled(): RuntimeContextToolCancelled {
+function createBaseRuntimeInterruptToolCancelled(): RuntimeInterruptToolCancelled {
   return { errorJson: undefined };
 }
 
-export const RuntimeContextToolCancelled: MessageFns<RuntimeContextToolCancelled> = {
-  encode(message: RuntimeContextToolCancelled, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const RuntimeInterruptToolCancelled: MessageFns<RuntimeInterruptToolCancelled> = {
+  encode(message: RuntimeInterruptToolCancelled, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.errorJson !== undefined) {
       writer.uint32(10).string(message.errorJson);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeContextToolCancelled {
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeInterruptToolCancelled {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeContextToolCancelled();
+    const message = createBaseRuntimeInterruptToolCancelled();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -3005,7 +3184,7 @@ export const RuntimeContextToolCancelled: MessageFns<RuntimeContextToolCancelled
     return message;
   },
 
-  fromJSON(object: any): RuntimeContextToolCancelled {
+  fromJSON(object: any): RuntimeInterruptToolCancelled {
     return {
       errorJson: isSet(object.errorJson)
         ? globalThis.String(object.errorJson)
@@ -3015,7 +3194,7 @@ export const RuntimeContextToolCancelled: MessageFns<RuntimeContextToolCancelled
     };
   },
 
-  toJSON(message: RuntimeContextToolCancelled): unknown {
+  toJSON(message: RuntimeInterruptToolCancelled): unknown {
     const obj: any = {};
     if (message.errorJson !== undefined) {
       obj.errorJson = message.errorJson;
@@ -3023,11 +3202,13 @@ export const RuntimeContextToolCancelled: MessageFns<RuntimeContextToolCancelled
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeContextToolCancelled>, I>>(base?: I): RuntimeContextToolCancelled {
-    return RuntimeContextToolCancelled.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<RuntimeInterruptToolCancelled>, I>>(base?: I): RuntimeInterruptToolCancelled {
+    return RuntimeInterruptToolCancelled.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeContextToolCancelled>, I>>(object: I): RuntimeContextToolCancelled {
-    const message = createBaseRuntimeContextToolCancelled();
+  fromPartial<I extends Exact<DeepPartial<RuntimeInterruptToolCancelled>, I>>(
+    object: I,
+  ): RuntimeInterruptToolCancelled {
+    const message = createBaseRuntimeInterruptToolCancelled();
     message.errorJson = object.errorJson ?? undefined;
     return message;
   },
@@ -3043,10 +3224,10 @@ export const RuntimeInterruptToolResult: MessageFns<RuntimeInterruptToolResult> 
       writer.uint32(10).string(message.toolUseEventId);
     }
     if (message.error !== undefined) {
-      RuntimeContextToolFailed.encode(message.error, writer.uint32(18).fork()).join();
+      RuntimeInterruptToolFailed.encode(message.error, writer.uint32(18).fork()).join();
     }
     if (message.cancelled !== undefined) {
-      RuntimeContextToolCancelled.encode(message.cancelled, writer.uint32(26).fork()).join();
+      RuntimeInterruptToolCancelled.encode(message.cancelled, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -3071,7 +3252,7 @@ export const RuntimeInterruptToolResult: MessageFns<RuntimeInterruptToolResult> 
             break;
           }
 
-          message.error = RuntimeContextToolFailed.decode(reader, reader.uint32());
+          message.error = RuntimeInterruptToolFailed.decode(reader, reader.uint32());
           continue;
         }
         case 3: {
@@ -3079,7 +3260,7 @@ export const RuntimeInterruptToolResult: MessageFns<RuntimeInterruptToolResult> 
             break;
           }
 
-          message.cancelled = RuntimeContextToolCancelled.decode(reader, reader.uint32());
+          message.cancelled = RuntimeInterruptToolCancelled.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -3098,8 +3279,8 @@ export const RuntimeInterruptToolResult: MessageFns<RuntimeInterruptToolResult> 
         : isSet(object.tool_use_event_id)
         ? globalThis.String(object.tool_use_event_id)
         : "",
-      error: isSet(object.error) ? RuntimeContextToolFailed.fromJSON(object.error) : undefined,
-      cancelled: isSet(object.cancelled) ? RuntimeContextToolCancelled.fromJSON(object.cancelled) : undefined,
+      error: isSet(object.error) ? RuntimeInterruptToolFailed.fromJSON(object.error) : undefined,
+      cancelled: isSet(object.cancelled) ? RuntimeInterruptToolCancelled.fromJSON(object.cancelled) : undefined,
     };
   },
 
@@ -3109,10 +3290,10 @@ export const RuntimeInterruptToolResult: MessageFns<RuntimeInterruptToolResult> 
       obj.toolUseEventId = message.toolUseEventId;
     }
     if (message.error !== undefined) {
-      obj.error = RuntimeContextToolFailed.toJSON(message.error);
+      obj.error = RuntimeInterruptToolFailed.toJSON(message.error);
     }
     if (message.cancelled !== undefined) {
-      obj.cancelled = RuntimeContextToolCancelled.toJSON(message.cancelled);
+      obj.cancelled = RuntimeInterruptToolCancelled.toJSON(message.cancelled);
     }
     return obj;
   },
@@ -3124,10 +3305,10 @@ export const RuntimeInterruptToolResult: MessageFns<RuntimeInterruptToolResult> 
     const message = createBaseRuntimeInterruptToolResult();
     message.toolUseEventId = object.toolUseEventId ?? "";
     message.error = (object.error !== undefined && object.error !== null)
-      ? RuntimeContextToolFailed.fromPartial(object.error)
+      ? RuntimeInterruptToolFailed.fromPartial(object.error)
       : undefined;
     message.cancelled = (object.cancelled !== undefined && object.cancelled !== null)
-      ? RuntimeContextToolCancelled.fromPartial(object.cancelled)
+      ? RuntimeInterruptToolCancelled.fromPartial(object.cancelled)
       : undefined;
     return message;
   },
@@ -6406,15 +6587,7 @@ export const RuntimeTerminationStale: MessageFns<RuntimeTerminationStale> = {
 };
 
 function createBaseTransientAttachmentRef(): TransientAttachmentRef {
-  return {
-    attachmentRef: "",
-    mime: "",
-    filename: "",
-    sourceToolUseEventId: "",
-    sourcePath: "",
-    pageRange: "",
-    detail: "",
-  };
+  return { attachmentRef: "", mime: "", filename: "", sourcePath: "", pageRange: "", detail: "" };
 }
 
 export const TransientAttachmentRef: MessageFns<TransientAttachmentRef> = {
@@ -6427,9 +6600,6 @@ export const TransientAttachmentRef: MessageFns<TransientAttachmentRef> = {
     }
     if (message.filename !== "") {
       writer.uint32(26).string(message.filename);
-    }
-    if (message.sourceToolUseEventId !== "") {
-      writer.uint32(34).string(message.sourceToolUseEventId);
     }
     if (message.sourcePath !== "") {
       writer.uint32(42).string(message.sourcePath);
@@ -6474,14 +6644,6 @@ export const TransientAttachmentRef: MessageFns<TransientAttachmentRef> = {
           message.filename = reader.string();
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.sourceToolUseEventId = reader.string();
-          continue;
-        }
         case 5: {
           if (tag !== 42) {
             break;
@@ -6524,11 +6686,6 @@ export const TransientAttachmentRef: MessageFns<TransientAttachmentRef> = {
         : "",
       mime: isSet(object.mime) ? globalThis.String(object.mime) : "",
       filename: isSet(object.filename) ? globalThis.String(object.filename) : "",
-      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
-        ? globalThis.String(object.sourceToolUseEventId)
-        : isSet(object.source_tool_use_event_id)
-        ? globalThis.String(object.source_tool_use_event_id)
-        : "",
       sourcePath: isSet(object.sourcePath)
         ? globalThis.String(object.sourcePath)
         : isSet(object.source_path)
@@ -6554,9 +6711,6 @@ export const TransientAttachmentRef: MessageFns<TransientAttachmentRef> = {
     if (message.filename !== "") {
       obj.filename = message.filename;
     }
-    if (message.sourceToolUseEventId !== "") {
-      obj.sourceToolUseEventId = message.sourceToolUseEventId;
-    }
     if (message.sourcePath !== "") {
       obj.sourcePath = message.sourcePath;
     }
@@ -6577,7 +6731,6 @@ export const TransientAttachmentRef: MessageFns<TransientAttachmentRef> = {
     message.attachmentRef = object.attachmentRef ?? "";
     message.mime = object.mime ?? "";
     message.filename = object.filename ?? "";
-    message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
     message.sourcePath = object.sourcePath ?? "";
     message.pageRange = object.pageRange ?? "";
     message.detail = object.detail ?? "";
@@ -8092,16 +8245,13 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
 };
 
 function createBaseWriteEventCommitted(): WriteEventCommitted {
-  return { eventId: "", eventSequence: 0, assignedMessageSequence: undefined, createdToolUseEventIds: [] };
+  return { eventId: "", assignedMessageSequence: undefined, createdToolUseEventIds: [] };
 }
 
 export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
   encode(message: WriteEventCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.eventId !== "") {
       writer.uint32(10).string(message.eventId);
-    }
-    if (message.eventSequence !== 0) {
-      writer.uint32(16).int64(message.eventSequence);
     }
     if (message.assignedMessageSequence !== undefined) {
       writer.uint32(24).int64(message.assignedMessageSequence);
@@ -8125,14 +8275,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
           }
 
           message.eventId = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
-            break;
-          }
-
-          message.eventSequence = longToNumber(reader.int64());
           continue;
         }
         case 3: {
@@ -8167,11 +8309,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
         : isSet(object.event_id)
         ? globalThis.String(object.event_id)
         : "",
-      eventSequence: isSet(object.eventSequence)
-        ? globalThis.Number(object.eventSequence)
-        : isSet(object.event_sequence)
-        ? globalThis.Number(object.event_sequence)
-        : 0,
       assignedMessageSequence: isSet(object.assignedMessageSequence)
         ? globalThis.Number(object.assignedMessageSequence)
         : isSet(object.assigned_message_sequence)
@@ -8190,9 +8327,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
     if (message.eventId !== "") {
       obj.eventId = message.eventId;
     }
-    if (message.eventSequence !== 0) {
-      obj.eventSequence = Math.round(message.eventSequence);
-    }
     if (message.assignedMessageSequence !== undefined) {
       obj.assignedMessageSequence = Math.round(message.assignedMessageSequence);
     }
@@ -8208,7 +8342,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
   fromPartial<I extends Exact<DeepPartial<WriteEventCommitted>, I>>(object: I): WriteEventCommitted {
     const message = createBaseWriteEventCommitted();
     message.eventId = object.eventId ?? "";
-    message.eventSequence = object.eventSequence ?? 0;
     message.assignedMessageSequence = object.assignedMessageSequence ?? undefined;
     message.createdToolUseEventIds = object.createdToolUseEventIds?.map((e) => e) || [];
     return message;
@@ -8216,16 +8349,13 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
 };
 
 function createBaseWriteEventDuplicate(): WriteEventDuplicate {
-  return { eventId: "", eventSequence: 0, assignedMessageSequence: undefined, createdToolUseEventIds: [] };
+  return { eventId: "", assignedMessageSequence: undefined, createdToolUseEventIds: [] };
 }
 
 export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
   encode(message: WriteEventDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.eventId !== "") {
       writer.uint32(10).string(message.eventId);
-    }
-    if (message.eventSequence !== 0) {
-      writer.uint32(16).int64(message.eventSequence);
     }
     if (message.assignedMessageSequence !== undefined) {
       writer.uint32(24).int64(message.assignedMessageSequence);
@@ -8249,14 +8379,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
           }
 
           message.eventId = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
-            break;
-          }
-
-          message.eventSequence = longToNumber(reader.int64());
           continue;
         }
         case 3: {
@@ -8291,11 +8413,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
         : isSet(object.event_id)
         ? globalThis.String(object.event_id)
         : "",
-      eventSequence: isSet(object.eventSequence)
-        ? globalThis.Number(object.eventSequence)
-        : isSet(object.event_sequence)
-        ? globalThis.Number(object.event_sequence)
-        : 0,
       assignedMessageSequence: isSet(object.assignedMessageSequence)
         ? globalThis.Number(object.assignedMessageSequence)
         : isSet(object.assigned_message_sequence)
@@ -8314,9 +8431,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
     if (message.eventId !== "") {
       obj.eventId = message.eventId;
     }
-    if (message.eventSequence !== 0) {
-      obj.eventSequence = Math.round(message.eventSequence);
-    }
     if (message.assignedMessageSequence !== undefined) {
       obj.assignedMessageSequence = Math.round(message.assignedMessageSequence);
     }
@@ -8332,7 +8446,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
   fromPartial<I extends Exact<DeepPartial<WriteEventDuplicate>, I>>(object: I): WriteEventDuplicate {
     const message = createBaseWriteEventDuplicate();
     message.eventId = object.eventId ?? "";
-    message.eventSequence = object.eventSequence ?? 0;
     message.assignedMessageSequence = object.assignedMessageSequence ?? undefined;
     message.createdToolUseEventIds = object.createdToolUseEventIds?.map((e) => e) || [];
     return message;

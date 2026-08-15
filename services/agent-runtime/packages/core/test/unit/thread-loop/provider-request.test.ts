@@ -2125,7 +2125,6 @@ describe("ThreadLoop", () => {
 		const transientAttachment = {
 			transient: {
 				attachmentRef: "att_failed_reasoning",
-				sourceToolUseEventId: "sevt_failed_reasoning",
 				sourcePath: "mcp:test/failed-reasoning.png",
 				pageRange: "",
 				detail: "auto",

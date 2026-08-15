@@ -36,7 +36,6 @@ const result = await runner.runTool({
 	entry,
 	input: { command: "sleep 60", timeout: 120_000, run_in_background: true },
 	currentModel: { providerId: "anthropic", modelId: "claude-opus-4-8" },
-	committedContext: [],
 	abortSignal: new AbortController().signal,
 });
 process.stdout.write(JSON.stringify(result));

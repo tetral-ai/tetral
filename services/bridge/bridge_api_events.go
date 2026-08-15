@@ -214,7 +214,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			request.GetScope(),
 			eventType,
 			eventID,
-			sequence,
 			request.GetModelRequestId(),
 			request.GetAssistantContextDelta(),
 			now,
@@ -304,18 +303,18 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	}
 	if duplicate {
 		return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Duplicate{Duplicate: &bridgev1.WriteEventDuplicate{
-			EventId: facts.EventID, EventSequence: facts.EventSequence, AssignedMessageSequence: facts.MessageSequence,
+			EventId: facts.EventID, AssignedMessageSequence: facts.MessageSequence,
 			CreatedToolUseEventIds: facts.CreatedToolUseEventIDs,
 		}}}, nil
 	}
 	return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Committed{Committed: &bridgev1.WriteEventCommitted{
-		EventId: facts.EventID, EventSequence: facts.EventSequence, AssignedMessageSequence: facts.MessageSequence,
+		EventId: facts.EventID, AssignedMessageSequence: facts.MessageSequence,
 		CreatedToolUseEventIds: facts.CreatedToolUseEventIDs,
 	}}}, nil
 }
 
 func validWriteEventDurableFacts(facts writeEventDurableFacts) bool {
-	return facts.EventID != "" && facts.EventSequence > 0 && facts.CreatedToolUseEventIDs != nil
+	return facts.EventID != "" && facts.CreatedToolUseEventIDs != nil
 }
 
 func verifyRequestStartUniqueTx(

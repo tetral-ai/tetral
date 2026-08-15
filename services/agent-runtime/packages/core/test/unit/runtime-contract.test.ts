@@ -54,9 +54,8 @@ const rawHeaders = "authorization: bearer raw-header-secret";
 const rawPrompt = "system prompt raw backend payload marker";
 const rawProviderPayload = "raw provider payload marker";
 
-function writerIdentity(requestId: string) {
+function writerBinding() {
 	return {
-		requestId,
 		bindingId: "binding-1",
 		bindingGeneration: 1,
 		targetPodUid: "pod-1",
@@ -246,7 +245,7 @@ function internalToolRepairCommit(): RuntimeInternalToolRepairCommit {
 	const modelToolCallId = "tool-call-1";
 	const toolName = "tool";
 	return RuntimeInternalToolRepairCommitSchema.parse({
-		...writerIdentity("repair-request-1"),
+		...writerBinding(),
 		workspaceId: "workspace-1",
 		sessionId: "session-1",
 		sessionThreadId: "thread-1",
@@ -303,7 +302,7 @@ function internalToolRepairResult(
 describe("runtime boundary contracts", () => {
 	test("assistant projection events carry model request identity under the closed association law", () => {
 		const base = {
-			...writerIdentity("rwrite_1"),
+			...writerBinding(),
 			workspaceId: "workspace-1",
 			sessionId: "sesn_1",
 			sessionThreadId: "thr_1",
@@ -362,7 +361,7 @@ describe("runtime boundary contracts", () => {
 		).toBe(false);
 		expect(
 			SessionEventEnvelopeSchema.safeParse({
-				...writerIdentity("rwrite_2"),
+				...writerBinding(),
 				workspaceId: "workspace-1",
 				sessionId: "sesn_1",
 				sessionThreadId: "thr_1",
@@ -391,7 +390,7 @@ describe("runtime boundary contracts", () => {
 		).toBe(true);
 
 		const projectionBase = {
-			...writerIdentity("rwrite_projection"),
+			...writerBinding(),
 			workspaceId: "workspace-1",
 			sessionId: "sesn_1",
 			sessionThreadId: "thr_1",
@@ -485,7 +484,7 @@ describe("runtime boundary contracts", () => {
 
 	test("request-end carries only the trailing incremental Assistant append on successful completion", () => {
 		const base = {
-			...writerIdentity("rwrite_1"),
+			...writerBinding(),
 			workspaceId: "workspace-1",
 			sessionId: "sesn_1",
 			sessionThreadId: "thr_1",
@@ -529,7 +528,7 @@ describe("runtime boundary contracts", () => {
 
 	test("request-end attachment settlement is combined-bounded and absent on reschedule", () => {
 		const base = {
-			...writerIdentity("rwrite_attachments"),
+			...writerBinding(),
 			workspaceId: "workspace-1",
 			sessionId: "sesn_1",
 			sessionThreadId: "thr_1",
@@ -930,7 +929,7 @@ describe("runtime boundary contracts", () => {
 		).toBe(false);
 		expect(
 			SessionEventEnvelopeSchema.parse({
-				...writerIdentity("write-1"),
+				...writerBinding(),
 				workspaceId: "workspace-1",
 				sessionId: "session-1",
 				sessionThreadId: "thread-1",

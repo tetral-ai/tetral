@@ -53,7 +53,6 @@ export type RuntimeProviderAttachment =
 	| {
 			readonly transient: {
 				readonly attachmentRef: string;
-				readonly sourceToolUseEventId: string;
 				readonly sourcePath: string;
 				readonly pageRange: string;
 				readonly detail: string;
@@ -271,6 +270,47 @@ export const RuntimeBoundedTextSchema = z
 	);
 export type RuntimeBoundedText = z.infer<typeof RuntimeBoundedTextSchema>;
 
+export const RuntimeToolOutputTruncationNotice =
+	"\n\n[Tool output was truncated to fit the provider context limit.]";
+
+const RuntimeContextToolOutputSchema = z
+	.strictObject({ text: RuntimeTextSchema })
+	.refine(
+		(value) =>
+			byteLength(JSON.stringify(value)) <=
+			MaxProviderRequestToolOutputJsonBytes,
+		`tool output JSON must be at most ${MaxProviderRequestToolOutputJsonBytes} UTF-8 bytes`,
+	);
+
+/** Produces the final provider-visible Tool text while retaining internal truncation evidence. */
+export function finalizeRuntimeToolOutput(
+	output: RuntimeBoundedText,
+): RuntimeBoundedText {
+	if (!output.truncated) return output;
+	const characters = [...output.text];
+	let low = 0;
+	let high = characters.length;
+	while (low < high) {
+		const candidate = Math.ceil((low + high) / 2);
+		const text =
+			characters.slice(0, candidate).join("") +
+			RuntimeToolOutputTruncationNotice;
+		if (
+			byteLength(JSON.stringify({ text, truncated: true })) <=
+			MaxProviderRequestToolOutputJsonBytes
+		) {
+			low = candidate;
+		} else {
+			high = candidate - 1;
+		}
+	}
+	return RuntimeBoundedTextSchema.parse({
+		text:
+			characters.slice(0, low).join("") + RuntimeToolOutputTruncationNotice,
+		truncated: true,
+	});
+}
+
 export type RuntimeJsonValue =
 	| null
 	| boolean
@@ -421,7 +461,7 @@ export const RuntimeContextPartSchema = z.discriminatedUnion("type", [
 		result: z.discriminatedUnion("type", [
 			z.strictObject({
 				type: z.literal("completed"),
-				output: RuntimeBoundedTextSchema,
+				output: RuntimeContextToolOutputSchema,
 			}),
 			z.strictObject({
 				type: z.literal("error"),
@@ -429,7 +469,6 @@ export const RuntimeContextPartSchema = z.discriminatedUnion("type", [
 			}),
 			z.strictObject({
 				type: z.literal("cancelled"),
-				error: RuntimeToolErrorSchema.optional(),
 			}),
 		]),
 	}),
@@ -525,7 +564,6 @@ export interface RuntimeInterruptToolResult {
 
 /** One self-contained invalid-tool repair committed before it enters hot history. */
 export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
-	requestId: SanitizedIdentifierSchema,
 	workspaceId: SanitizedIdentifierSchema,
 	sessionId: SanitizedIdentifierSchema,
 	sessionThreadId: SanitizedIdentifierSchema,
@@ -922,7 +960,6 @@ export const SessionEventWriterAppendEventSchema = SessionEventSchema.refine(
 /** WriteEvent payload for public events and optional Assistant-member append. */
 export const SessionEventEnvelopeSchema = z
 	.strictObject({
-		requestId: SanitizedIdentifierSchema,
 		workspaceId: SanitizedIdentifierSchema,
 		sessionId: SanitizedIdentifierSchema,
 		sessionThreadId: SanitizedIdentifierSchema,
@@ -1014,7 +1051,6 @@ export type SessionEventWriterToolSettlementEnvelope = z.infer<
 /** Request-end settlement payload and its disjoint append/checkpoint declarations. */
 export const SessionEventWriterRequestEndEnvelopeSchema = z
 	.strictObject({
-		requestId: SanitizedIdentifierSchema,
 		workspaceId: SanitizedIdentifierSchema,
 		sessionId: SanitizedIdentifierSchema,
 		sessionThreadId: SanitizedIdentifierSchema,
@@ -1176,7 +1212,6 @@ export type SessionEventWriterFinishIdleEnvelope = z.infer<
 
 export const SessionEventWriterRuntimeTerminationEnvelopeSchema =
 	z.strictObject({
-		requestId: SanitizedIdentifierSchema,
 		workspaceId: SanitizedIdentifierSchema,
 		sessionId: SanitizedIdentifierSchema,
 		sessionThreadId: SanitizedIdentifierSchema,

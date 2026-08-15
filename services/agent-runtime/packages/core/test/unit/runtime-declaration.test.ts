@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
 	RuntimeContextEntry,
 	RuntimeToolError,
+} from "../../src/contracts/runtime.js";
+import {
+	finalizeRuntimeToolOutput,
+	RuntimeBoundedTextSchema,
+	RuntimeToolOutputTruncationNotice,
 } from "../../src/contracts/runtime.js";
 import {
 	acceptedInputContextDrafts,
@@ -173,7 +179,7 @@ describe("Runtime context declaration applicators", () => {
 				modelToolCallId: "call_1",
 				result: {
 					type: "completed",
-					output: { text: "done", truncated: false },
+					output: { text: "done" },
 				},
 			},
 		]);
@@ -185,6 +191,75 @@ describe("Runtime context declaration applicators", () => {
 				settlement: { type: "cancelled" },
 			}),
 		).toThrow("missing or already terminal");
+
+		const cancelled = applyToolSettlementToContext({
+			entries,
+			assistantMessageSequence: 8,
+			modelToolCallId: "call_1",
+			settlement: {
+				type: "cancelled",
+				error: {
+					type: "runtime",
+					code: "runtime_invalid_sequence",
+					message: "internal cancellation detail",
+					retryable: false,
+					fatal: true,
+				},
+			},
+		});
+		expect(cancelled[0]?.parts[1]).toEqual({
+			type: "tool_result",
+			modelToolCallId: "call_1",
+			result: { type: "cancelled" },
+		});
+	});
+
+	test("truncated Tool output stores one bounded final provider-visible text", () => {
+		const emptyEnvelopeBytes = Buffer.byteLength(
+			JSON.stringify({ text: "", truncated: true }),
+			"utf8",
+		);
+		const bounded = RuntimeBoundedTextSchema.parse({
+			text: "x".repeat(
+				MaxProviderRequestToolOutputJsonBytes - emptyEnvelopeBytes,
+			),
+			truncated: true,
+		});
+		const finalOutput = finalizeRuntimeToolOutput(bounded);
+
+		expect(finalOutput.truncated).toBe(true);
+		expect(finalOutput.text.endsWith(RuntimeToolOutputTruncationNotice)).toBe(
+			true,
+		);
+		expect(Buffer.byteLength(JSON.stringify(finalOutput), "utf8")).toBeLessThanOrEqual(
+			MaxProviderRequestToolOutputJsonBytes,
+		);
+
+		const settled = applyToolSettlementToContext({
+			entries: [
+				{
+					messageSequence: 8,
+					contextKind: "assistant",
+					parts: [
+						{
+							type: "tool_call",
+							modelToolCallId: "call_truncated",
+							toolName: "read_file",
+							canonicalInput: {},
+						},
+					],
+				},
+			],
+			assistantMessageSequence: 8,
+			modelToolCallId: "call_truncated",
+			settlement: { type: "completed", output: bounded },
+		});
+		expect(settled[0]?.parts[1]).toEqual({
+			type: "tool_result",
+			modelToolCallId: "call_truncated",
+			result: { type: "completed", output: { text: finalOutput.text } },
+		});
+		expect(settled[0]?.parts[1]).not.toHaveProperty("result.output.truncated");
 	});
 
 	test("interrupt settlement preserves the exact typed Tool error", () => {

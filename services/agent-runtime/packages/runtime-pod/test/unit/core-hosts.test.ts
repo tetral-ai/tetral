@@ -2076,7 +2076,6 @@ function writerFrom(
 		writeRequestEnd: async (envelope) => requestEndResult(envelope),
 		finishIdle: async (envelope) => {
 			const appended = appendWithAssignments({
-				requestId: envelope.durableTurnId,
 				workspaceId: envelope.workspaceId,
 				sessionId: envelope.sessionId,
 				sessionThreadId: envelope.sessionThreadId,

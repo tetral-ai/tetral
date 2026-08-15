@@ -471,7 +471,6 @@ type durableContextWrite struct {
 
 type writeEventDurableFacts struct {
 	EventID                string   `json:"eventId"`
-	EventSequence          int64    `json:"eventSequence"`
 	MessageSequence        *int64   `json:"messageSequence,omitempty"`
 	CreatedToolUseEventIDs []string `json:"createdToolUseEventIds"`
 }
@@ -482,12 +481,11 @@ func commitWriteEventContextTx(
 	scope *bridgev1.RuntimeScope,
 	eventType string,
 	eventID string,
-	eventSequence int64,
 	modelRequestID string,
 	delta *bridgev1.RuntimeContextDelta,
 	now time.Time,
 ) (writeEventDurableFacts, error) {
-	facts := writeEventDurableFacts{EventID: eventID, EventSequence: eventSequence, CreatedToolUseEventIDs: []string{}}
+	facts := writeEventDurableFacts{EventID: eventID, CreatedToolUseEventIDs: []string{}}
 	if delta != nil {
 		write, err := appendRuntimeAssistantContextTx(ctx, tx, scope, eventType, eventID, modelRequestID, delta, now)
 		if err != nil {
@@ -910,11 +908,20 @@ func settleRuntimeToolPartTx(
 	result := &bridgev1.RuntimeContextToolResult{ModelToolCallId: tool.ModelToolCallID}
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
-		result.Outcome = &bridgev1.RuntimeContextToolResult_Completed{Completed: outcome.Completed}
+		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		if err != nil || validateRuntimeBoundedText(output) != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
+		}
+		outputObject := output.(map[string]any)
+		contextOutputJSON, err := marshalBridgeJSON(map[string]any{"text": outputObject["text"]})
+		if err != nil {
+			return runtimeToolProjectionPayload{}, err
+		}
+		result.Outcome = &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeContextToolCompleted{OutputJson: contextOutputJSON}}
 	case *bridgev1.RuntimeToolSettlement_Error:
-		result.Outcome = &bridgev1.RuntimeContextToolResult_Error{Error: outcome.Error}
+		result.Outcome = &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: outcome.Error.GetErrorJson()}}
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
-		result.Outcome = &bridgev1.RuntimeContextToolResult_Cancelled{Cancelled: outcome.Cancelled}
+		result.Outcome = &bridgev1.RuntimeContextToolResult_Cancelled{Cancelled: &bridgev1.RuntimeContextToolCancelled{}}
 	default:
 		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
 	}
@@ -948,7 +955,37 @@ func settleRuntimeToolPartTx(
 	if !rowsAffected(updateResult) {
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement lost its durable message")
 	}
-	return runtimeToolProjectionFromDurableTool(tool, resultValue), nil
+	return runtimeToolProjectionFromSettlement(tool, settlement)
+}
+
+func runtimeToolProjectionFromSettlement(tool durableToolExecution, settlement *bridgev1.RuntimeToolSettlement) (runtimeToolProjectionPayload, error) {
+	result := map[string]any{}
+	switch outcome := settlement.GetOutcome().(type) {
+	case *bridgev1.RuntimeToolSettlement_Completed:
+		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		if err != nil || validateRuntimeBoundedText(output) != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
+		}
+		result = map[string]any{"type": "completed", "output": output}
+	case *bridgev1.RuntimeToolSettlement_Error:
+		toolError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
+		if err != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool error is invalid")
+		}
+		result = map[string]any{"type": "error", "error": toolError}
+	case *bridgev1.RuntimeToolSettlement_Cancelled:
+		result = map[string]any{"type": "cancelled"}
+		if outcome.Cancelled.ErrorJson != nil {
+			toolError, err := decodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
+			if err != nil {
+				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
+			}
+			result["error"] = toolError
+		}
+	default:
+		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
+	}
+	return runtimeToolProjectionFromDurableTool(tool, result), nil
 }
 
 // Runtime owns failure projection; Bridge accepts and stores only the strict
@@ -1087,7 +1124,9 @@ func commitInternalToolRepairContextTx(
 		}}},
 		{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{
 			ModelToolCallId: modelToolCallID,
-			Outcome:         &bridgev1.RuntimeContextToolResult_Error{Error: toolError},
+			Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{
+				ErrorJson: toolError.GetErrorJson(),
+			}},
 		}}},
 	}}
 	write, err := appendRuntimeAssistantContextTx(

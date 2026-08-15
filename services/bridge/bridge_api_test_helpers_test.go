@@ -1142,7 +1142,7 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 				'modelToolCallId', 'call_' || $4,
 				'result', jsonb_build_object(
 					'type', 'completed',
-					'output', jsonb_build_object('text', 'Background command accepted.', 'truncated', false)
+					'output', jsonb_build_object('text', 'Background command accepted.')
 				)
 			))
 		)::text

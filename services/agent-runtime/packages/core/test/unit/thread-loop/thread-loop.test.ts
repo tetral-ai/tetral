@@ -1330,7 +1330,6 @@ describe("ThreadLoop", () => {
 		const activeRide = Array.from({ length: 32 }, (_, index) => ({
 			transient: {
 				attachmentRef: `att_hot_active_${index}`,
-				sourceToolUseEventId: `sevt_hot_active_${index}`,
 				sourcePath: `mcp:github/hot-active-${index}.png`,
 				pageRange: "",
 				detail: "auto" as const,
@@ -1342,7 +1341,6 @@ describe("ThreadLoop", () => {
 		const nextRide = {
 			transient: {
 				attachmentRef: "att_hot_next",
-				sourceToolUseEventId: "sevt_hot_next",
 				sourcePath: "mcp:github/hot-next.png",
 				pageRange: "",
 				detail: "auto" as const,
@@ -1764,7 +1762,6 @@ describe("ThreadState", () => {
 			Array.from({ length: MaxProviderAttachments + 3 }, (_, index) => ({
 				transient: {
 					attachmentRef: `att_${index}`,
-					sourceToolUseEventId: `sevt_tool_${index}`,
 					sourcePath: `/tmp/image-${index}.png`,
 					pageRange: "",
 					detail: "auto",
@@ -1786,7 +1783,6 @@ describe("ThreadState", () => {
 		const attachment = {
 			transient: {
 				attachmentRef: "att_original",
-				sourceToolUseEventId: "sevt_tool_1",
 				sourcePath: "/tmp/image.png",
 				pageRange: "",
 				detail: "auto",
@@ -1814,7 +1810,6 @@ describe("ThreadState", () => {
 			(_, index) => ({
 				transient: {
 					attachmentRef: `att_active_${index}`,
-					sourceToolUseEventId: `sevt_active_${index}`,
 					sourcePath: `/tmp/active-${index}.png`,
 					pageRange: "",
 					detail: "auto" as const,
@@ -1827,7 +1822,6 @@ describe("ThreadState", () => {
 		const nextRide = {
 			transient: {
 				attachmentRef: "att_next",
-				sourceToolUseEventId: "sevt_next",
 				sourcePath: "/tmp/next.png",
 				pageRange: "",
 				detail: "auto" as const,
@@ -1945,7 +1939,6 @@ describe("ThreadState", () => {
 			{
 				transient: {
 					attachmentRef: "att_1",
-					sourceToolUseEventId: "sevt_tool_1",
 					sourcePath: "/tmp/image.png",
 					pageRange: "",
 					detail: "auto",

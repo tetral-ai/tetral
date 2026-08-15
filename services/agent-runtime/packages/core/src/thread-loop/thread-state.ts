@@ -309,7 +309,6 @@ export interface RuntimePendingApprovalToolJobState {
 	>;
 	readonly job: ToolJob;
 	readonly entry: ToolEntry;
-	readonly committedContext: readonly RuntimeContextEntry[];
 	readonly currentModel?: SessionCurrentModel | undefined;
 }
 
@@ -326,7 +325,6 @@ export interface RuntimePendingSandboxExecutionJobState {
 	>;
 	readonly job: ToolJob;
 	readonly entry: ToolEntry;
-	readonly committedContext: readonly RuntimeContextEntry[];
 	readonly currentModel?: SessionCurrentModel | undefined;
 }
 

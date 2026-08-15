@@ -8,7 +8,8 @@
 
 import type { ProviderContextEntry as GatewayProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { Effect, type Exit, Fiber, type Scope } from "effect";
+import type { Exit, Scope } from "effect";
+import { Effect, Fiber } from "effect";
 import type {
 	RuntimeContextEntry,
 	RuntimeFailure,

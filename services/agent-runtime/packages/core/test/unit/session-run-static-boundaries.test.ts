@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, relative, sep } from "node:path";
+import ts from "typescript";
 
 const packageRoot = new URL("../../", import.meta.url);
 const sourceRoot = new URL("../../src/", import.meta.url);
@@ -67,6 +68,35 @@ function namedInterfaceBody(text: string, interfaceName: string): string {
 		throw new Error(`missing interface ${interfaceName}`);
 	}
 	return match[1].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function namedVariableInitializer(text: string, variableName: string): string {
+	const source = ts.createSourceFile(
+		"boundary.ts",
+		text,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let initializer: ts.Expression | undefined;
+	const visit = (node: ts.Node): void => {
+		if (
+			initializer === undefined &&
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === variableName &&
+			node.initializer !== undefined
+		) {
+			initializer = node.initializer;
+			return;
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(source);
+	if (initializer === undefined) {
+		throw new Error(`missing variable ${variableName}`);
+	}
+	return initializer.getText(source);
 }
 
 function packageRelativePath(filePath: string): string {
@@ -470,12 +500,10 @@ describe("session run static boundaries", () => {
 			"utf8",
 		);
 		const normalizedThreadLoop = normalizeSource(threadLoopSource);
-		const preloadStart = managerSource.indexOf("const preloadThread");
-		const preloadEnd = managerSource.indexOf(
-			"\n      const interruptReviewerExecution",
-			preloadStart,
+		const preloadSection = namedVariableInitializer(
+			managerSource,
+			"preloadThread",
 		);
-		const preloadSection = managerSource.slice(preloadStart, preloadEnd);
 		const normalizedPreload = normalizeSource(preloadSection);
 		const installIndex = normalizedPreload.indexOf(
 			"threadLoop.installLoadedPendingToolUses",
@@ -490,8 +518,6 @@ describe("session run static boundaries", () => {
 			"threadResult.sessionEntry.sharedStateReady",
 		);
 
-		expect(preloadStart).toBeGreaterThanOrEqual(0);
-		expect(preloadEnd).toBeGreaterThan(preloadStart);
 		expect(installIndex).toBeGreaterThanOrEqual(0);
 		expect(normalizedThreadLoop).toContain(
 			"installLoadedPendingToolUses:(session,pendingToolUses,entries,openRequestDraft,)=>Effect.sync(()=>installLoadedPendingToolUses(",
@@ -525,9 +551,6 @@ describe("session run static boundaries", () => {
 		expect(normalizedPendingState).toContain("assistantMessageSequence:number");
 		expect(normalizedPendingState).toContain(
 			'toolPart:Extract<RuntimeAssistantDraftPart,{readonlytype:"tool"}>',
-		);
-		expect(normalizedPendingState).toContain(
-			"committedContext:readonlyRuntimeContextEntry[]",
 		);
 		expect(pendingState).not.toContain("SessionProcessor");
 		expect(pendingState).not.toMatch(/\bprocessor\s*:/);

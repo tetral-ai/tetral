@@ -9,7 +9,7 @@ are the exception. Sandbox execution crosses two distinct boundaries:
 `AcceptSandboxExecution` atomically records the execution and its refs-only
 Queue job, while `AwaitSandboxExecution` only reads that durable execution
 until Sandbox Service stores a terminal result. Acceptance validates the exact
-durable Tool Use event and its stamped Tool Part in the shared assistant
+durable Tool Use event and its immutable Tool Call in the shared assistant
 projection; approval input comes from the event rather than the bounded message
 preview. Sandbox Service stores the terminal refs-only result and its internal
 digest together. `AwaitSandboxExecution` returns only the executor result;
@@ -228,11 +228,14 @@ and active lifecycle facts directly from durable rows.
   `status='pending'` row (`applyToolEventBookkeepingTx` in `bridge_api_events.go`),
   while `allow` and `deny` write no row. A public tool event may
   carry an anchored reasoning prefix. `SettleToolResult` is the sole ordinary
-  Tool-result writer: Runtime supplies the durable Tool target and bounded
-  outcome, while Bridge derives the public result Event, Tool family, and any
-  accepted Sandbox result digest from durable state. Web usage is part of the
-  bounded outcome and increments `sessions.usage` exactly once. Neither digest
-  nor settlement payload is returned to Runtime.
+  Tool-result writer: Runtime supplies the durable Tool target and final bounded
+  provider-visible outcome, while Bridge resolves the immutable Tool Call from
+  its direct Tool Event/execution facts and appends a separate terminal Tool
+  Result paired by call id. The Tool Call is never rewritten. Bridge derives the
+  public result Event, Tool family, and any accepted Sandbox result digest from
+  those direct facts. Web usage is part of the bounded outcome and increments
+  `sessions.usage` exactly once. Neither digest nor settlement payload is
+  returned to Runtime.
 - **Lifecycle.** `WriteEvent` is idempotency-keyed by `runtime_write_id`; the attached
   reasoning set folds into the request hash. `SettleToolResult` hashes its
   bounded outcome, including optional web usage, under the Tool Use identity. Runtime updates
@@ -298,10 +301,14 @@ and active lifecycle facts directly from durable rows.
 - **Contract.** `WriteEvent` appends only newly completed Assistant members.
   A text or Tool Use event may carry preceding reasoning or step-boundary
   members in the same ordered append; later writes never resend them.
-  `SettleToolResult` independently names one durable Tool Use and changes only
-  that Tool part's terminal state. A successful `WriteRequestEnd` may append an otherwise
+  `SettleToolResult` independently names one durable Tool Use and appends its
+  separate terminal Tool Result without mutating the earlier Tool Call. A
+  successful `WriteRequestEnd` may append an otherwise
   unanchored reasoning/step suffix before sealing the request. Bridge assigns
-  every durable message, part, event id, sequence, and timestamp. The settlement
+  every durable message, part, event id, sequence, and timestamp. Completed
+  conversation results contain only the final provider-visible text; truncation
+  and cancellation diagnostics remain on their owning Tool Event/operation.
+  The settlement
   response does not return any of those facts; Runtime applies its immutable
   request after a committed or duplicate result.
 - **Budget.** `MaxStableReasoningPartsPerRequest` (16) and

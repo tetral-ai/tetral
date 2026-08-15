@@ -664,7 +664,6 @@ export class ProviderStreamAccumulator {
 			return { ok: false, events: [], error: semanticSequenceFailure() };
 		const commit = await this.options.writer.commitInternalToolRepair(
 			{
-				requestId: this.options.requestId,
 				workspaceId: this.options.workspaceId,
 				sessionId: this.options.sessionId,
 				sessionThreadId: this.options.sessionThreadId,

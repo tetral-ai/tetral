@@ -139,7 +139,7 @@ function completedToolMessage(
 				modelToolCallId,
 				result: {
 					type: "completed",
-					output: { text: output, truncated: false },
+					output: { text: output },
 				},
 			},
 		],
@@ -862,7 +862,6 @@ describe("RuntimePodToolRunner", () => {
 				old_string: "line",
 				new_string: "row",
 			}),
-			committedContext: [readMessage],
 		});
 		expect(editBridge.acceptSandboxExecutionRequests[0]).toMatchObject({
 			toolUseEventId: "sevt_tool_1",
@@ -1033,7 +1032,6 @@ describe("RuntimePodToolRunner", () => {
 			});
 			await makeRunner({ bridge }).runTool({
 				...toolRequest(testCase.tool, testCase.input),
-				committedContext: [readMessage],
 			});
 			expect(bridge.acceptSandboxExecutionRequests[0], testCase.tool).toEqual(
 				expect.objectContaining({ toolUseEventId: "sevt_tool_1" }),
@@ -1138,7 +1136,6 @@ describe("RuntimePodToolRunner", () => {
 				{
 					transient: {
 						attachmentRef: "att_bridge_view_image",
-						sourceToolUseEventId: "sevt_tool_1",
 						sourcePath: "plot.png",
 						pageRange: "",
 						detail: "auto",
@@ -1186,7 +1183,6 @@ describe("RuntimePodToolRunner", () => {
 				{
 					transient: {
 						attachmentRef: "att_bridge_pdf",
-						sourceToolUseEventId: "sevt_tool_1",
 						sourcePath: "docs/report.pdf",
 						pageRange: "2-6",
 						detail: "auto",
@@ -2076,7 +2072,6 @@ describe("RuntimePodToolRunner", () => {
 				{
 					transient: {
 						attachmentRef: "att_mcp_error",
-						sourceToolUseEventId: "sevt_tool_1",
 						sourcePath: "mcp:github/error.png",
 					},
 					fileBacked: undefined,
@@ -2208,7 +2203,6 @@ describe("RuntimePodToolRunner", () => {
 				{
 					transient: {
 						attachmentRef: "att_mcp_plot",
-						sourceToolUseEventId: "sevt_tool_1",
 						sourcePath: "mcp:github/plot.png",
 						pageRange: "",
 						detail: "auto",
@@ -2934,24 +2928,6 @@ describe("RuntimePodToolRunner", () => {
 				prompt: "work on the latest turn",
 				fork_turns: "1",
 			}),
-			committedContext: [
-				runtimeTextMessage("user-old", "user", "user", 0, "old input"),
-				completedToolMessage("Read", { file_path: "old.txt" }, "old result", 2),
-				runtimeTextMessage(
-					"user-latest",
-					"user",
-					"runtime",
-					2,
-					"inter-agent input",
-				),
-				runtimeTextMessage(
-					"assistant-latest",
-					"assistant",
-					"agent",
-					3,
-					"latest answer",
-				),
-			],
 		} satisfies RuntimeToolExecutionRequest;
 
 		const result = await runner.runTool(request);
@@ -4146,7 +4122,6 @@ function toolRequest(
 		entry,
 		input,
 		currentModel: { providerId: "openai", modelId: "gpt-5.5" },
-		committedContext: [],
 		abortSignal,
 	};
 }

@@ -149,7 +149,7 @@ func canonicalRuntimeToolResultOutcome(result *bridgev1.RuntimeContextToolResult
 			return nil, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
 		}
 		output, err := decodeRuntimeDeclarationValue(value.Completed.GetOutputJson())
-		if err != nil || validateRuntimeBoundedText(output) != nil {
+		if err != nil || validateRuntimeContextToolOutput(output) != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
 		}
 		return map[string]any{"type": "completed", "output": output}, nil
@@ -166,15 +166,7 @@ func canonicalRuntimeToolResultOutcome(result *bridgev1.RuntimeContextToolResult
 		if value.Cancelled == nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
 		}
-		result := map[string]any{"type": "cancelled"}
-		if value.Cancelled.ErrorJson != nil {
-			failure, err := decodeRuntimeToolErrorJSON(value.Cancelled.GetErrorJson())
-			if err != nil {
-				return nil, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
-			}
-			result["error"] = failure
-		}
-		return result, nil
+		return map[string]any{"type": "cancelled"}, nil
 	default:
 		return nil, status.Error(codes.InvalidArgument, "runtime tool result outcome is missing")
 	}
@@ -272,7 +264,7 @@ func validateStoredRuntimeToolResult(result map[string]any) error {
 	statusValue, _ := result["type"].(string)
 	switch statusValue {
 	case "completed":
-		if requireRuntimeObjectFields(result, []string{"type", "output"}, []string{"type", "output"}) != nil || validateRuntimeBoundedText(result["output"]) != nil {
+		if requireRuntimeObjectFields(result, []string{"type", "output"}, []string{"type", "output"}) != nil || validateRuntimeContextToolOutput(result["output"]) != nil {
 			return fmt.Errorf("invalid completion")
 		}
 	case "error":
@@ -280,10 +272,7 @@ func validateStoredRuntimeToolResult(result map[string]any) error {
 			return fmt.Errorf("invalid error")
 		}
 	case "cancelled":
-		if requireRuntimeObjectFields(result, []string{"type"}, []string{"type", "error"}) != nil {
-			return fmt.Errorf("invalid cancellation")
-		}
-		if failure, ok := result["error"]; ok && validateRuntimeToolError(failure) != nil {
+		if requireRuntimeObjectFields(result, []string{"type"}, []string{"type"}) != nil {
 			return fmt.Errorf("invalid cancellation")
 		}
 	default:
@@ -302,6 +291,17 @@ func validateRuntimeBoundedText(value any) error {
 	}
 	if _, ok := output["truncated"].(bool); !ok || runtimeJSONBytes(map[string]any{"text": output["text"]}) > runtimeToolOutputJSONMaxBytes {
 		return fmt.Errorf("invalid bounded text")
+	}
+	return nil
+}
+
+func validateRuntimeContextToolOutput(value any) error {
+	output, ok := value.(map[string]any)
+	if !ok || requireRuntimeObjectFields(output, []string{"text"}, []string{"text"}) != nil {
+		return fmt.Errorf("invalid context Tool output")
+	}
+	if _, ok := output["text"].(string); !ok || runtimeJSONBytes(output) > runtimeToolOutputJSONMaxBytes {
+		return fmt.Errorf("invalid context Tool output")
 	}
 	return nil
 }

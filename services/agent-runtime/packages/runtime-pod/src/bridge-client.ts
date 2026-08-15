@@ -38,6 +38,7 @@ import type {
 	SessionEventWriterToolSettlementEnvelope,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import {
+	finalizeRuntimeToolOutput,
 	normalizeContextLoaderError,
 	normalizeRuntimeInternalToolRepairStoreError,
 	normalizeSessionEventWriterError,
@@ -1831,10 +1832,7 @@ function runtimeSealedContextDeltaForBridge(context: {
 										},
 									}
 								: {
-										cancelled:
-											part.result.error === undefined
-												? {}
-												: { errorJson: JSON.stringify(part.result.error) },
+										cancelled: {},
 									};
 					return {
 						toolResult: { modelToolCallId: part.modelToolCallId, ...result },
@@ -1851,10 +1849,11 @@ function runtimeToolSettlementForBridge(
 ) {
 	switch (settlement.type) {
 		case "completed":
+			const output = finalizeRuntimeToolOutput(settlement.output);
 			return {
 				toolUseEventId,
 				completed: {
-					outputJson: JSON.stringify(settlement.output),
+					outputJson: JSON.stringify(output),
 					serverToolUse: settlement.serverToolUse,
 				},
 			};
@@ -2581,10 +2580,6 @@ function parsePendingAttachments(
 			return {
 				transient: {
 					attachmentRef: requiredStringField(transient, "attachmentRef"),
-					sourceToolUseEventId: requiredStringField(
-						transient,
-						"sourceToolUseEventId",
-					),
 					sourcePath: stringField(transient, "sourcePath") ?? "",
 					pageRange: stringField(transient, "pageRange") ?? "",
 					detail: stringField(transient, "detail") ?? "",

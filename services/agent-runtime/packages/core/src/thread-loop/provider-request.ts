@@ -21,7 +21,8 @@ import {
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { Cause, Effect, Exit, Fiber, type Scope } from "effect";
+import type { Scope } from "effect";
+import { Cause, Effect, Exit, Fiber } from "effect";
 import type {
 	RuntimeAssistantContextAppend,
 	RuntimeFailure,

@@ -148,7 +148,6 @@ export async function closeFailedThreadRun(
 		(toolUseEventId) => ({ toolUseEventId }),
 	);
 	const termination = await commitRuntimeTerminationWithRetry(options, {
-		requestId: durableTurnId,
 		workspaceId: session.identity.workspaceId,
 		sessionId: session.identity.sessionId,
 		sessionThreadId: session.identity.sessionThreadId,
@@ -357,7 +356,6 @@ export async function closeFailedRunDurably(
 				(toolUseEventId) => ({ toolUseEventId }),
 			);
 			const termination = await commitRuntimeTerminationWithRetry(options, {
-				requestId: durableTurnId,
 				workspaceId: session.identity.workspaceId,
 				sessionId: session.identity.sessionId,
 				sessionThreadId: session.identity.sessionThreadId,

@@ -584,7 +584,6 @@ export async function runMaximumReadTransportProof() {
 		entry,
 		input,
 		currentModel: { providerId: "openai", modelId: "gpt-5.5" },
-		committedContext: [],
 		abortSignal: new AbortController().signal,
 	};
 	const result = await runner.runTool(toolRequest);
@@ -1232,7 +1231,7 @@ function completedToolParts(): readonly RuntimeContextPart[] {
 		{
 			type: "tool_result",
 			modelToolCallId: "call_capacity",
-			result: { type: "completed", output: { text: output, truncated: false } },
+			result: { type: "completed", output: { text: output } },
 		},
 	];
 }
@@ -1258,7 +1257,7 @@ function escapeDenseToolParts(
 		{
 			type: "tool_result",
 			modelToolCallId: `call_escape_${index}`,
-			result: { type: "completed", output: { text: output, truncated: false } },
+			result: { type: "completed", output: { text: output } },
 		},
 	];
 }

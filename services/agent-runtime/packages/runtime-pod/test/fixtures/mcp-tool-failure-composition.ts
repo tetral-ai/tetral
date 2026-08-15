@@ -99,7 +99,6 @@ const request: RuntimeToolExecutionRequest = {
 	toolUseEventId: input.toolUseEventId,
 	entry,
 	input: { query: "tetral" },
-	committedContext: [],
 	abortSignal: new AbortController().signal,
 };
 const result = await runner.runTool(request);

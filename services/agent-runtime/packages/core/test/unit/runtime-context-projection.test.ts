@@ -36,10 +36,10 @@ function toolResult(
 	result:
 		| {
 				readonly type: "completed";
-				readonly output: { readonly text: string; readonly truncated: boolean };
+				readonly output: { readonly text: string };
 		  }
 		| { readonly type: "error"; readonly error: RuntimeToolError }
-		| { readonly type: "cancelled"; readonly error?: RuntimeToolError },
+		| { readonly type: "cancelled" },
 	modelToolCallId = "call-1",
 ): RuntimeContextPart {
 	return { type: "tool_result", modelToolCallId, result };
@@ -59,7 +59,7 @@ describe("Runtime provider-context projection", () => {
 				toolCall(),
 				toolResult({
 					type: "completed",
-					output: { text: "result", truncated: false },
+					output: { text: "result" },
 				}),
 			]),
 		]);
@@ -111,7 +111,7 @@ describe("Runtime provider-context projection", () => {
 					toolResult(
 						{
 							type: "completed",
-							output: { text: "child result", truncated: false },
+							output: { text: "child result" },
 						},
 						"call-child",
 					),
@@ -161,7 +161,7 @@ describe("Runtime provider-context projection", () => {
 		const terminal = entry(2, "assistant", [
 			toolResult({
 				type: "completed",
-				output: { text: "result", truncated: false },
+				output: { text: "result" },
 			}),
 		]);
 
@@ -225,7 +225,7 @@ describe("Runtime provider-context projection", () => {
 							type: "tool_result",
 							result: {
 								type: "completed",
-								output: { text: "result", truncated: false },
+								output: { text: "result" },
 							},
 						},
 					],
@@ -265,7 +265,7 @@ describe("Runtime provider-context projection", () => {
 				status: "completed",
 				result: {
 					type: "completed" as const,
-					output: { text: "result", truncated: false },
+					output: { text: "result" },
 				},
 				output: { text: "result" },
 				isError: undefined,

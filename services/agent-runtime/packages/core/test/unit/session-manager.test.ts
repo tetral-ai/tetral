@@ -1784,7 +1784,6 @@ describe("SessionManager", () => {
 						gateState: "waiting_approval",
 						approvalSource: "user",
 					},
-					committedContext: [],
 				});
 				const approvalMessage = pendingApprovalAssistantEntry(
 					"sesn_1",
@@ -1824,7 +1823,6 @@ describe("SessionManager", () => {
 						runPolicy: { mode: "parallel_safe", conflictKeys: null },
 						gateState: "runnable",
 					},
-					committedContext: [approvalMessage, sandboxMessage],
 				});
 				session.state.installThreadTurn(
 					{
@@ -2929,7 +2927,6 @@ describe("SessionManager", () => {
 			{
 				transient: {
 					attachmentRef: "att_cold",
-					sourceToolUseEventId: "sevt_tool_cold",
 					sourcePath: "mcp:github/chart.png",
 					pageRange: "",
 					detail: "auto",
@@ -3395,7 +3392,6 @@ describe("SessionManager", () => {
 						gateState: "waiting_approval",
 						approvalSource: "user",
 					},
-					committedContext: [],
 				});
 
 				const confirmationCommand = {
@@ -3517,7 +3513,6 @@ describe("SessionManager", () => {
 						gateState: "waiting_approval",
 						approvalSource: "user",
 					},
-					committedContext: [],
 				});
 
 				expect(

@@ -760,13 +760,12 @@ func newTransientAttachmentRef(create transientAttachmentCreate) (*bridgev1.Tran
 		return nil, err
 	}
 	return &bridgev1.TransientAttachmentRef{
-		AttachmentRef:        "att_" + base64.RawURLEncoding.EncodeToString(randomBytes[:]),
-		Mime:                 create.Mime,
-		Filename:             create.Filename,
-		SourceToolUseEventId: create.SourceToolUseEventID,
-		SourcePath:           create.SourcePath,
-		PageRange:            create.PageRange,
-		Detail:               create.Detail,
+		AttachmentRef: "att_" + base64.RawURLEncoding.EncodeToString(randomBytes[:]),
+		Mime:          create.Mime,
+		Filename:      create.Filename,
+		SourcePath:    create.SourcePath,
+		PageRange:     create.PageRange,
+		Detail:        create.Detail,
 	}, nil
 }
 

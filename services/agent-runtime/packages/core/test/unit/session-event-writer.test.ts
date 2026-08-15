@@ -8,7 +8,6 @@ import { createSessionEventWriter } from "../../src/runtime/session-event-writer
 
 function envelope(writeId = "write_1"): SessionEventEnvelope {
 	return {
-		requestId: "request_1",
 		workspaceId: "workspace_1",
 		sessionId: "session_1",
 		sessionThreadId: "thread_1",

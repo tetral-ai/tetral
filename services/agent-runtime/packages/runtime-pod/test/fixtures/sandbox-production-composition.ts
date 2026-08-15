@@ -45,7 +45,6 @@ const request: RuntimeToolExecutionRequest = {
 	toolUseEventId: input.toolUseEventId,
 	entry,
 	input: { cmd: "printf production-boundary" },
-	committedContext: [],
 	abortSignal: new AbortController().signal,
 };
 const runner = new RuntimePodToolRunner({

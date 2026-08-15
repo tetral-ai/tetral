@@ -1011,7 +1011,6 @@ describe("ThreadLoop", () => {
 		const attachment = {
 			transient: {
 				attachmentRef: "att_interrupted_reasoning",
-				sourceToolUseEventId: "sevt_interrupted_reasoning",
 				sourcePath: "mcp:test/interrupted-reasoning.png",
 				pageRange: "",
 				detail: "auto",
@@ -1226,7 +1225,6 @@ describe("ThreadLoop", () => {
 		const attachment = {
 			transient: {
 				attachmentRef: "att_interrupt_before_provider",
-				sourceToolUseEventId: "sevt_tool_interrupt_before_provider",
 				sourcePath: "mcp:github/interrupt.png",
 				pageRange: "",
 				detail: "auto",
@@ -1433,7 +1431,6 @@ describe("ThreadLoop", () => {
 		const attachment = {
 			transient: {
 				attachmentRef: "att_cooperative_before_provider",
-				sourceToolUseEventId: "sevt_tool_cooperative_before_provider",
 				sourcePath: "mcp:github/cooperative.png",
 				pageRange: "",
 				detail: "auto",
@@ -2638,7 +2635,6 @@ describe("ThreadLoop", () => {
 			releaseSession: { reason: "terminated" },
 		});
 		expect(terminations).toHaveLength(1);
-		expect(terminations[0]?.requestId).toBe(terminations[0]?.writeId);
 		expect(terminations[0]?.writeId).toMatch(/^bridge-stid_/);
 		expect(terminations[0]).toMatchObject({
 			sessionId: "sesn_1",

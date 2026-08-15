@@ -1315,7 +1315,6 @@ describe("ThreadLoop", () => {
 		const transientAttachment = {
 			transient: {
 				attachmentRef: "att_1",
-				sourceToolUseEventId: "sevt_tool_1",
 				sourcePath: "mcp:github/plot.png",
 				pageRange: "",
 				detail: "auto",
@@ -1336,7 +1335,6 @@ describe("ThreadLoop", () => {
 		const lateAttachment = {
 			transient: {
 				attachmentRef: "att_late",
-				sourceToolUseEventId: "sevt_tool_late",
 				sourcePath: "mcp:github/late.png",
 				pageRange: "",
 				detail: "auto",
@@ -1351,7 +1349,6 @@ describe("ThreadLoop", () => {
 			...Array.from({ length: 30 }, (_, index) => ({
 				transient: {
 					attachmentRef: `att_fill_${index}`,
-					sourceToolUseEventId: `sevt_tool_fill_${index}`,
 					sourcePath: `mcp:github/fill-${index}.png`,
 					pageRange: "",
 					detail: "auto" as const,
@@ -1439,7 +1436,6 @@ describe("ThreadLoop", () => {
 		const attachments = Array.from({ length: 35 }, (_, index) => ({
 			transient: {
 				attachmentRef: `att_${index + 1}`,
-				sourceToolUseEventId: `sevt_tool_${index + 1}`,
 				sourcePath: `mcp:test/plot-${index + 1}.png`,
 				pageRange: "",
 				detail: "auto" as const,
@@ -1487,7 +1483,6 @@ describe("ThreadLoop", () => {
 		const attachment = {
 			transient: {
 				attachmentRef: "att_1",
-				sourceToolUseEventId: "sevt_tool_1",
 				sourcePath: "mcp:github/plot.png",
 				pageRange: "",
 				detail: "auto",
@@ -1822,7 +1817,6 @@ describe("ThreadLoop", () => {
 		const transientAttachment = {
 			transient: {
 				attachmentRef: "att_1",
-				sourceToolUseEventId: "sevt_tool_1",
 				sourcePath: "mcp:github/plot.png",
 				pageRange: "",
 				detail: "auto",
@@ -3637,7 +3631,6 @@ describe("ThreadLoop", () => {
 		const attachment = {
 			transient: {
 				attachmentRef: "att_post_success_cooperative_failure",
-				sourceToolUseEventId: "sevt_post_success_cooperative_failure",
 				sourcePath: "mcp:test/post-success-cooperative-failure.png",
 				pageRange: "",
 				detail: "auto",
@@ -3759,7 +3752,6 @@ describe("ThreadLoop", () => {
 		const attachment = {
 			transient: {
 				attachmentRef: "att_post_success_interrupt_failure",
-				sourceToolUseEventId: "sevt_post_success_interrupt_failure",
 				sourcePath: "mcp:test/post-success-interrupt-failure.png",
 				pageRange: "",
 				detail: "auto",
@@ -4657,7 +4649,6 @@ describe("ThreadLoop", () => {
 					{
 						transient: {
 							attachmentRef: "att_late_non_cooperative",
-							sourceToolUseEventId: "sevt_non_cooperative_route_1",
 							sourcePath: "tool:late-non-cooperative.png",
 							pageRange: "",
 							detail: "auto",
@@ -4695,7 +4686,6 @@ describe("ThreadLoop", () => {
 					{
 						transient: {
 							attachmentRef: "att_cleanup",
-							sourceToolUseEventId: "sevt_non_cooperative_route_1",
 							sourcePath: "tool:cleanup.png",
 							pageRange: "",
 							detail: "auto",
@@ -4958,7 +4948,6 @@ describe("ThreadLoop", () => {
 					{
 						transient: {
 							attachmentRef: "att_late_approved",
-							sourceToolUseEventId: "sevt_approved_late",
 							sourcePath: "tool:late-approved.png",
 							pageRange: "",
 							detail: "auto",
@@ -4995,7 +4984,6 @@ describe("ThreadLoop", () => {
 					{
 						transient: {
 							attachmentRef: "att_cleanup",
-							sourceToolUseEventId: "sevt_approved_late",
 							sourcePath: "tool:cleanup.png",
 							pageRange: "",
 							detail: "auto",

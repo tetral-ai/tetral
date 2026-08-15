@@ -107,7 +107,197 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
 		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.ContextEntries[0].Parts[1], parts[1])
 	}
-	assertRuntimeHotColdToolComposition(t, baseLoaded.GetContextJson(), loaded.GetContextJson(), toolUse.GetCommitted().GetAssignedMessageSequence(), payload)
+	assertRuntimeHotColdToolComposition(
+		t,
+		baseLoaded.GetContextJson(),
+		loaded.GetContextJson(),
+		toolUse.GetCommitted().GetAssignedMessageSequence(),
+		payload,
+		"call_durable_error",
+		map[string]any{"type": "error", "error": map[string]any{
+			"type": "runtime", "code": "provider_tool_protocol_error", "message": "Read failed", "retryable": false, "fatal": false,
+		}},
+	)
+}
+
+func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID        = "sesn_durable_truncation"
+		threadID         = "sthr_durable_truncation"
+		bindingID        = "bind_durable_truncation"
+		podUID           = "pod_durable_truncation"
+		modelRequestID   = "mreq_durable_truncation"
+		modelToolCallID  = "call_durable_truncation"
+		originalText     = "partial output"
+		truncationNotice = "\n\n[Tool output was truncated to fit the provider context limit.]"
+		finalText        = originalText + truncationNotice
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("durable-truncation-test-signing-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_truncation_start", modelRequestID, requestKindAgentProviderRequest, 0)
+
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_durable_truncation_use", ModelRequestId: modelRequestID,
+		EventType:             "agent.tool_use",
+		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, "Read", `{}`),
+	})
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("write truncated Tool Use: response=%#v err=%v", toolUse, err)
+	}
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_durable_truncation_end", ModelRequestId: modelRequestID,
+		FinishReason: "tool-calls", UsageJson: `{}`,
+	}); err != nil {
+		t.Fatalf("write truncated Tool Request End: %v", err)
+	}
+	baseLoaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("LoadContext pending truncated Tool: %v", err)
+	}
+
+	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
+		Outcome: &bridgev1.RuntimeToolSettlement_Completed{Completed: &bridgev1.RuntimeToolCompleted{
+			OutputJson: `{"text":"partial output\n\n[Tool output was truncated to fit the provider context limit.]","truncated":true}`,
+		}},
+	}))
+	if err != nil || settled.GetCommitted() == nil {
+		t.Fatalf("settle truncated Tool completion: response=%#v err=%v", settled, err)
+	}
+
+	var dataJSON, projectionJSON string
+	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		sessionID, threadID, modelRequestID).Scan(&dataJSON); err != nil {
+		t.Fatalf("read durable truncated Tool context: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT projection_json FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result'`,
+		sessionID, threadID).Scan(&projectionJSON); err != nil {
+		t.Fatalf("read truncated Tool Event projection: %v", err)
+	}
+	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	if err != nil || len(parts) != 2 {
+		t.Fatalf("durable truncated Tool context = %s err=%v", dataJSON, err)
+	}
+	var result struct {
+		Result struct {
+			Output map[string]any `json:"output"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(parts[1], &result); err != nil {
+		t.Fatalf("decode durable truncated Tool result: %v", err)
+	}
+	if !reflect.DeepEqual(result.Result.Output, map[string]any{"text": finalText}) {
+		t.Fatalf("durable completed output = %#v; want final provider-visible text only", result.Result.Output)
+	}
+	var projection struct {
+		Output struct {
+			Text      string `json:"text"`
+			Truncated bool   `json:"truncated"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil || projection.Output.Text != finalText || !projection.Output.Truncated {
+		t.Fatalf("Tool Event truncation evidence = %#v err=%v", projection, err)
+	}
+
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("LoadContext durable truncated Tool: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode cold truncated Tool context: %v", err)
+	}
+	if len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 2 || string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
+		t.Fatalf("cold truncated Tool result diverged: cold=%#v stored=%s", payload.ContextEntries, parts[1])
+	}
+	assertRuntimeHotColdToolComposition(
+		t,
+		baseLoaded.GetContextJson(),
+		loaded.GetContextJson(),
+		toolUse.GetCommitted().GetAssignedMessageSequence(),
+		payload,
+		modelToolCallID,
+		map[string]any{"type": "completed", "output": map[string]any{"text": originalText, "truncated": true}},
+	)
+}
+
+func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_durable_cancel"
+		threadID       = "sthr_durable_cancel"
+		bindingID      = "bind_durable_cancel"
+		podUID         = "pod_durable_cancel"
+		modelRequestID = "mreq_durable_cancel"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("durable-cancellation-test-signing-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_cancel_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_durable_cancel_use", ModelRequestId: modelRequestID,
+		EventType:             "agent.tool_use",
+		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_durable_cancel", "Read", `{}`),
+	})
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("write cancelled Tool Use: response=%#v err=%v", toolUse, err)
+	}
+	const cancellationError = `{"type":"runtime_shutdown","message":"internal cancellation detail","retryable":false}`
+	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
+		Outcome: &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{
+			ErrorJson: bridgeString(cancellationError),
+		}},
+	}))
+	if err != nil || settled.GetCommitted() == nil {
+		t.Fatalf("settle cancelled Tool: response=%#v err=%v", settled, err)
+	}
+
+	var dataJSON, projectionJSON string
+	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		sessionID, threadID, modelRequestID).Scan(&dataJSON); err != nil {
+		t.Fatalf("read cancelled Tool context: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT projection_json FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result'`,
+		sessionID, threadID).Scan(&projectionJSON); err != nil {
+		t.Fatalf("read cancelled Tool projection: %v", err)
+	}
+	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	if err != nil || len(parts) != 2 {
+		t.Fatalf("cancelled Tool context = %s err=%v", dataJSON, err)
+	}
+	var contextResult struct {
+		Result map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(parts[1], &contextResult); err != nil || !reflect.DeepEqual(contextResult.Result, map[string]any{"type": "cancelled"}) {
+		t.Fatalf("provider-visible cancellation = %#v err=%v", contextResult.Result, err)
+	}
+	var projection struct {
+		Error map[string]any `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil || projection.Error["message"] != "internal cancellation detail" {
+		t.Fatalf("internal cancellation evidence = %#v err=%v", projection.Error, err)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("LoadContext cancelled Tool: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || payload.OpenRequestDraft == nil || len(payload.OpenRequestDraft.Parts) != 2 || string(payload.OpenRequestDraft.Parts[1]) != string(parts[1]) {
+		t.Fatalf("cold cancellation context diverged: draft=%#v err=%v", payload.OpenRequestDraft, err)
+	}
 }
 
 func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
@@ -172,6 +362,8 @@ func assertRuntimeHotColdToolComposition(
 	coldContextJSON string,
 	assistantMessageSequence int64,
 	coldPayload bridgeLoadContextPayload,
+	modelToolCallID string,
+	settlement any,
 ) {
 	t.Helper()
 	input, err := json.Marshal(map[string]any{
@@ -181,10 +373,8 @@ func assertRuntimeHotColdToolComposition(
 			"baseContextJson":          baseContextJSON,
 			"kind":                     "tool_settlement",
 			"assistantMessageSequence": assistantMessageSequence,
-			"modelToolCallId":          "call_durable_error",
-			"settlement": map[string]any{"type": "error", "error": map[string]any{
-				"type": "runtime", "code": "provider_tool_protocol_error", "message": "Read failed", "retryable": false, "fatal": false,
-			}},
+			"modelToolCallId":          modelToolCallID,
+			"settlement":               settlement,
 			"turnFacts":                coldPayload.TurnFacts,
 			"pendingToolUses":          coldPayload.PendingToolUses,
 			"pendingSandboxExecutions": coldPayload.PendingSandboxExecutions,

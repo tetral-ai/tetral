@@ -491,9 +491,6 @@ export class RuntimePodToolRunner {
 						attachmentRef,
 						mime,
 						filename,
-						sourceToolUseEventId:
-							stringField(source, "source_tool_use_event_id") ??
-							request.toolUseEventId,
 						sourcePath,
 						pageRange,
 						detail: stringField(source, "detail") ?? "auto",
@@ -3352,7 +3349,6 @@ function providerAttachmentFromBridge(
 	return {
 		transient: {
 			attachmentRef: attachment.attachmentRef,
-			sourceToolUseEventId: attachment.sourceToolUseEventId,
 			sourcePath: attachment.sourcePath,
 			pageRange: attachment.pageRange,
 			detail: attachment.detail,
@@ -3371,7 +3367,6 @@ function providerAttachmentFromMcp(
 	return {
 		transient: {
 			attachmentRef: attachment.attachmentRef,
-			sourceToolUseEventId: request.toolUseEventId,
 			sourcePath: `mcp:${mcpServerName}/${attachment.suggestedFilename}`,
 			pageRange: "",
 			detail: "auto",

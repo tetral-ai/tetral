@@ -104,11 +104,21 @@ message RuntimeContextToolCall {
 message RuntimeContextToolResult {
   string model_tool_call_id = 1;
   oneof outcome {
-    RuntimeToolCompleted completed = 2;
-    RuntimeToolError error = 3;
-    RuntimeToolCancelled cancelled = 4;
+    RuntimeContextToolCompleted completed = 2;
+    RuntimeContextToolError error = 3;
+    RuntimeContextToolCancelled cancelled = 4;
   }
 }
+
+message RuntimeContextToolCompleted {
+  string output_json = 1;
+}
+
+message RuntimeContextToolError {
+  string error_json = 1;
+}
+
+message RuntimeContextToolCancelled {}
 
 message RuntimeToolSettlement {
   string tool_use_event_id = 1;
@@ -187,18 +197,18 @@ message CommitInputsResponse {
   }
 }
 
-message RuntimeContextToolFailed {
+message RuntimeInterruptToolFailed {
   string error_json = 1;
 }
-message RuntimeContextToolCancelled {
+message RuntimeInterruptToolCancelled {
   optional string error_json = 1;
 }
 
 message RuntimeInterruptToolResult {
   string tool_use_event_id = 1;
   oneof outcome {
-    RuntimeContextToolFailed error = 2;
-    RuntimeContextToolCancelled cancelled = 3;
+    RuntimeInterruptToolFailed error = 2;
+    RuntimeInterruptToolCancelled cancelled = 3;
   }
 }
 
@@ -411,7 +421,8 @@ message TransientAttachmentRef {
   string attachment_ref = 1;
   string mime = 2;
   string filename = 3;
-  string source_tool_use_event_id = 4;
+  reserved 4;
+  reserved "source_tool_use_event_id";
   string source_path = 5;
   string page_range = 6;
   string detail = 7;
@@ -528,13 +539,15 @@ message WriteEventResponse {
 }
 message WriteEventCommitted {
   string event_id = 1;
-  int64 event_sequence = 2;
+  reserved 2;
+  reserved "event_sequence";
   optional int64 assigned_message_sequence = 3;
   repeated string created_tool_use_event_ids = 4;
 }
 message WriteEventDuplicate {
   string event_id = 1;
-  int64 event_sequence = 2;
+  reserved 2;
+  reserved "event_sequence";
   optional int64 assigned_message_sequence = 3;
   repeated string created_tool_use_event_ids = 4;
 }

@@ -9,7 +9,8 @@
  * @packageDocumentation
  */
 
-import { Effect, Exit, type Fiber, Scope } from "effect";
+import type { Fiber } from "effect";
+import { Effect, Exit, Scope } from "effect";
 import type { RuntimeContextEntry } from "../contracts/runtime.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
 

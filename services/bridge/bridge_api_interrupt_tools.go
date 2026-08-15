@@ -132,11 +132,11 @@ func settleInterruptedThreadToolsTx(
 		switch outcome := settlement.GetOutcome().(type) {
 		case *bridgev1.RuntimeToolSettlement_Error:
 			projection.Outcome = &bridgev1.RuntimeInterruptToolResult_Error{
-				Error: &bridgev1.RuntimeContextToolFailed{ErrorJson: outcome.Error.GetErrorJson()},
+				Error: &bridgev1.RuntimeInterruptToolFailed{ErrorJson: outcome.Error.GetErrorJson()},
 			}
 		case *bridgev1.RuntimeToolSettlement_Cancelled:
 			projection.Outcome = &bridgev1.RuntimeInterruptToolResult_Cancelled{
-				Cancelled: &bridgev1.RuntimeContextToolCancelled{ErrorJson: outcome.Cancelled.ErrorJson},
+				Cancelled: &bridgev1.RuntimeInterruptToolCancelled{ErrorJson: outcome.Cancelled.ErrorJson},
 			}
 		default:
 			return nil, status.Error(codes.Internal, "interrupt Tool outcome is not terminal")

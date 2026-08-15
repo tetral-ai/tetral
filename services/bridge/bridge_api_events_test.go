@@ -59,14 +59,14 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
 	}
-	if first.GetCommitted() == nil || first.GetCommitted().GetEventId() == "" || first.GetCommitted().GetEventSequence() <= 0 || first.GetCommitted().AssignedMessageSequence != nil {
+	if first.GetCommitted() == nil || first.GetCommitted().GetEventId() == "" || first.GetCommitted().AssignedMessageSequence != nil {
 		t.Fatalf("start result = %#v", first)
 	}
 	second, err := store.WriteEvent(context.Background(), startRequest)
 	if err != nil {
 		t.Fatalf("WriteEvent duplicate: %v", err)
 	}
-	if second.GetDuplicate() == nil || second.GetDuplicate().GetEventId() != first.GetCommitted().GetEventId() || second.GetDuplicate().GetEventSequence() != first.GetCommitted().GetEventSequence() {
+	if second.GetDuplicate() == nil || second.GetDuplicate().GetEventId() != first.GetCommitted().GetEventId() {
 		t.Fatalf("duplicate result = %#v; first = %#v", second, first)
 	}
 
