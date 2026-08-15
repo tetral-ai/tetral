@@ -320,6 +320,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		return nil, err
 	}
 	now := s.now()
+	commitOutcomeUnknown := false
 	err = s.withScopeTxAndCleanup(ctx, request.GetScope(), "agentruntimebridge.commit_mcp_tool_result", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
 			ctx,
@@ -338,7 +339,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			return err
 		}
 		if replayed {
-			cleanupBlob()
+			// The deterministic blob pointer may already be referenced by the
+			// committed replay. Never delete it after observing durable success.
+			blobStored = false
 			return nil
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -378,6 +381,14 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if err := storeMCPToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), request.GetClaimId(), refsOnlyResultJSON, now); err != nil {
 			return err
 		}
+		attachmentRef := ""
+		if attachment != nil {
+			attachmentRef = attachment.GetAttachmentRef()
+		}
+		commitResultJSON, err := marshalBridgeJSON(mcpToolCommitResult{AttachmentRef: &attachmentRef})
+		if err != nil {
+			return err
+		}
 		if err := insertBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -386,20 +397,26 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			"mcp_tool_execution",
 			sourceID,
 			declarationDigest,
-			`{}`,
+			commitResultJSON,
 			now,
 		); err != nil {
 			return err
 		}
-		response = &bridgev1.CommitMcpToolResultResponse{Outcome: &bridgev1.CommitMcpToolResultResponse_Committed{Committed: &bridgev1.McpToolCommitCommitted{}}}
+		response = &bridgev1.CommitMcpToolResultResponse{Outcome: &bridgev1.CommitMcpToolResultResponse_Committed{Committed: &bridgev1.McpToolCommitCommitted{AttachmentRef: attachmentRef}}}
 		return nil
-	}, cleanupBlob)
+	}, func() { commitOutcomeUnknown = true })
 	if err != nil {
-		cleanupBlob()
+		if !commitOutcomeUnknown {
+			cleanupBlob()
+		}
 		return nil, err
 	}
 	blobStored = false
 	return response, nil
+}
+
+type mcpToolCommitResult struct {
+	AttachmentRef *string `json:"attachment_ref"`
 }
 
 func replayMCPCommitTx(
@@ -426,19 +443,13 @@ func replayMCPCommitTx(
 	if existingOperation.DeclarationDigest != declarationDigest {
 		return nil, false, status.Error(codes.AlreadyExists, "mcp tool commit idempotency conflict")
 	}
-	existingResult, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
-	if err != nil {
-		return nil, false, err
-	}
-	if !ok {
-		return nil, false, status.Error(codes.FailedPrecondition, "mcp tool result is missing")
-	}
-	if existingResult.MCPClaimStatus.String != mcpClaimStatusStored &&
-		existingResult.MCPClaimStatus.String != mcpClaimStatusConsumed {
-		return nil, false, status.Error(codes.FailedPrecondition, "mcp tool result is not stored")
+	var result mcpToolCommitResult
+	if existingOperation.ReceiptJSON == "" || json.Unmarshal([]byte(existingOperation.ReceiptJSON), &result) != nil ||
+		result.AttachmentRef == nil {
+		return nil, false, status.Error(codes.FailedPrecondition, "mcp tool commit result is invalid")
 	}
 	return &bridgev1.CommitMcpToolResultResponse{
-		Outcome: &bridgev1.CommitMcpToolResultResponse_Duplicate{Duplicate: &bridgev1.McpToolCommitDuplicate{}},
+		Outcome: &bridgev1.CommitMcpToolResultResponse_Duplicate{Duplicate: &bridgev1.McpToolCommitDuplicate{AttachmentRef: *result.AttachmentRef}},
 	}, true, nil
 }
 

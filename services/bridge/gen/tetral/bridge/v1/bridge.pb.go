@@ -3048,6 +3048,7 @@ func (*CommitMcpToolResultResponse_Stale) isCommitMcpToolResultResponse_Outcome(
 
 type McpToolCommitCommitted struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	AttachmentRef string                 `protobuf:"bytes,1,opt,name=attachment_ref,json=attachmentRef,proto3" json:"attachment_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3082,8 +3083,16 @@ func (*McpToolCommitCommitted) Descriptor() ([]byte, []int) {
 	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{45}
 }
 
+func (x *McpToolCommitCommitted) GetAttachmentRef() string {
+	if x != nil {
+		return x.AttachmentRef
+	}
+	return ""
+}
+
 type McpToolCommitDuplicate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	AttachmentRef string                 `protobuf:"bytes,1,opt,name=attachment_ref,json=attachmentRef,proto3" json:"attachment_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3116,6 +3125,13 @@ func (x *McpToolCommitDuplicate) ProtoReflect() protoreflect.Message {
 // Deprecated: Use McpToolCommitDuplicate.ProtoReflect.Descriptor instead.
 func (*McpToolCommitDuplicate) Descriptor() ([]byte, []int) {
 	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *McpToolCommitDuplicate) GetAttachmentRef() string {
+	if x != nil {
+		return x.AttachmentRef
+	}
+	return ""
 }
 
 type McpToolCommitStale struct {
@@ -11607,9 +11623,11 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\tcommitted\x18\x01 \x01(\v2(.tetral.bridge.v1.McpToolCommitCommittedH\x00R\tcommitted\x12H\n" +
 	"\tduplicate\x18\x02 \x01(\v2(.tetral.bridge.v1.McpToolCommitDuplicateH\x00R\tduplicate\x12<\n" +
 	"\x05stale\x18\x03 \x01(\v2$.tetral.bridge.v1.McpToolCommitStaleH\x00R\x05staleB\t\n" +
-	"\aoutcome\"\x18\n" +
-	"\x16McpToolCommitCommitted\"\x18\n" +
-	"\x16McpToolCommitDuplicate\"\x14\n" +
+	"\aoutcome\"?\n" +
+	"\x16McpToolCommitCommitted\x12%\n" +
+	"\x0eattachment_ref\x18\x01 \x01(\tR\rattachmentRef\"?\n" +
+	"\x16McpToolCommitDuplicate\x12%\n" +
+	"\x0eattachment_ref\x18\x01 \x01(\tR\rattachmentRef\"\x14\n" +
 	"\x12McpToolCommitStale\"\x9c\x01\n" +
 	"\x1eRelinquishMcpToolResultRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12)\n" +

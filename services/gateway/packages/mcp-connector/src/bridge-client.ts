@@ -18,6 +18,7 @@ import {
   McpRetryStatus,
   RunMcpToolStatus,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { RunMcpToolResponse } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
   ClaimMcpToolResultRequest,
   ClaimMcpToolResultResponse,
@@ -128,8 +129,8 @@ type McpToolClaimResult =
   | { readonly type: "stale" };
 
 type McpToolCommitResult =
-  | { readonly type: "committed" }
-  | { readonly type: "duplicate" }
+  | { readonly type: "committed"; readonly attachmentRef: string }
+  | { readonly type: "duplicate"; readonly attachmentRef: string }
   | { readonly type: "stale" };
 
 type McpToolRelinquishResult =
@@ -223,9 +224,9 @@ export interface BridgeAPIMcpToolResultIdempotencyStoreOptions {
  * Implements MCP tool-result idempotency through Bridge-owned claim and commit RPCs.
  *
  * Claims reserve one durable Tool target for an explicit execution attempt. Commits send pending
- * media bytes on the bounded inline leg, then read the committed durable result through a direct
- * claim read. Claims and commits require tenant, binding, and caller-pod context supplied by the
- * connector service; Bridge supplies the immutable executor facts.
+ * media bytes on the bounded inline leg; committed and duplicate ACKs return only the Bridge-generated
+ * attachment ref, so a later claim read cannot reverse durable success. Claims and commits require
+ * tenant, binding, and caller-pod context supplied by the connector service.
  */
 export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencyStore {
   readonly #localClaims = new Set<string>();
@@ -299,8 +300,10 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       })),
     });
     let activeRequest = request;
+    let activeStored = stored;
     let committingPayloadRejection = false;
     let result: McpToolCommitResult;
+    let committedResponse: RunMcpToolResponse | undefined;
     let outcomeUnknown = false;
     for (let attempt = 0; ; attempt++) {
       let metadata: Metadata;
@@ -321,6 +324,9 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         });
         try {
           result = parseMcpToolCommitResult(response);
+          if (result.type !== "stale") {
+            committedResponse = materializeCommittedMcpToolResponse(activeStored, result.attachmentRef);
+          }
         } catch {
           // A malformed ACK is as ambiguous as a dropped ACK: Bridge may have
           // committed before a proxy or incompatible peer corrupted the
@@ -340,6 +346,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
             resultJson: serializePendingRunMcpToolResponse(MCP_COMMIT_PAYLOAD_REJECTION_RESULT),
             inlineMedia: [],
           });
+          activeStored = MCP_COMMIT_PAYLOAD_REJECTION_RESULT;
           committingPayloadRejection = true;
           outcomeUnknown = false;
           continue;
@@ -357,12 +364,8 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       this.releaseLocalClaim(key, context);
       throw new McpIdempotencyStaleCustodyError();
     }
-    const replay = await this.claim(key, context);
-    if (replay.status !== "replay") {
-      this.releaseLocalClaim(key, context);
-      throw new Error("mcp tool commit could not read its durable result");
-    }
-    return replay.stored.response;
+    this.releaseLocalClaim(key, context);
+    return committedResponse!;
   }
 
   async fail(key: IdempotencyKey, context?: McpIdempotencyContext): Promise<void> {
@@ -569,12 +572,41 @@ function parseMcpToolCommitResult(response: CommitMcpToolResultResponse): McpToo
     throw new BridgeMcpResultContractError("CommitMcpToolResult");
   }
   if (response.committed !== undefined) {
-    return { type: "committed" };
+    return { type: "committed", attachmentRef: response.committed.attachmentRef };
   }
   if (response.duplicate !== undefined) {
-    return { type: "duplicate" };
+    return { type: "duplicate", attachmentRef: response.duplicate.attachmentRef };
   }
   return { type: "stale" };
+}
+
+function materializeCommittedMcpToolResponse(
+  stored: PendingStoredRunMcpToolResponse,
+  attachmentRef: string,
+): RunMcpToolResponse {
+  const pendingAttachments = stored.response.attachments;
+  if (pendingAttachments.length === 0) {
+    if (attachmentRef !== "") {
+      throw new BridgeMcpResultContractError("CommitMcpToolResult");
+    }
+    return {
+      ...stored.response,
+      attachments: [],
+    };
+  }
+  if (pendingAttachments.length !== 1 || attachmentRef === "") {
+    throw new BridgeMcpResultContractError("CommitMcpToolResult");
+  }
+  const attachment = pendingAttachments[0]!;
+  return {
+    ...stored.response,
+    attachments: [{
+      attachmentRef,
+      mime: attachment.mime,
+      sizeBytes: attachment.data.byteLength,
+      suggestedFilename: attachment.suggestedFilename,
+    }],
+  };
 }
 
 function parseMcpToolRelinquishResult(response: RelinquishMcpToolResultResponse): McpToolRelinquishResult {

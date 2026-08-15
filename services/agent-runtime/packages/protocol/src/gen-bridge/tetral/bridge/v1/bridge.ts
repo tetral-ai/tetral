@@ -528,9 +528,11 @@ export interface CommitMcpToolResultResponse {
 }
 
 export interface McpToolCommitCommitted {
+  attachmentRef: string;
 }
 
 export interface McpToolCommitDuplicate {
+  attachmentRef: string;
 }
 
 export interface McpToolCommitStale {
@@ -4970,11 +4972,14 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
 };
 
 function createBaseMcpToolCommitCommitted(): McpToolCommitCommitted {
-  return {};
+  return { attachmentRef: "" };
 }
 
 export const McpToolCommitCommitted: MessageFns<McpToolCommitCommitted> = {
-  encode(_: McpToolCommitCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(message: McpToolCommitCommitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.attachmentRef !== "") {
+      writer.uint32(10).string(message.attachmentRef);
+    }
     return writer;
   },
 
@@ -4985,6 +4990,14 @@ export const McpToolCommitCommitted: MessageFns<McpToolCommitCommitted> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.attachmentRef = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4994,30 +5007,43 @@ export const McpToolCommitCommitted: MessageFns<McpToolCommitCommitted> = {
     return message;
   },
 
-  fromJSON(_: any): McpToolCommitCommitted {
-    return {};
+  fromJSON(object: any): McpToolCommitCommitted {
+    return {
+      attachmentRef: isSet(object.attachmentRef)
+        ? globalThis.String(object.attachmentRef)
+        : isSet(object.attachment_ref)
+        ? globalThis.String(object.attachment_ref)
+        : "",
+    };
   },
 
-  toJSON(_: McpToolCommitCommitted): unknown {
+  toJSON(message: McpToolCommitCommitted): unknown {
     const obj: any = {};
+    if (message.attachmentRef !== "") {
+      obj.attachmentRef = message.attachmentRef;
+    }
     return obj;
   },
 
   create<I extends Exact<DeepPartial<McpToolCommitCommitted>, I>>(base?: I): McpToolCommitCommitted {
     return McpToolCommitCommitted.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<McpToolCommitCommitted>, I>>(_: I): McpToolCommitCommitted {
+  fromPartial<I extends Exact<DeepPartial<McpToolCommitCommitted>, I>>(object: I): McpToolCommitCommitted {
     const message = createBaseMcpToolCommitCommitted();
+    message.attachmentRef = object.attachmentRef ?? "";
     return message;
   },
 };
 
 function createBaseMcpToolCommitDuplicate(): McpToolCommitDuplicate {
-  return {};
+  return { attachmentRef: "" };
 }
 
 export const McpToolCommitDuplicate: MessageFns<McpToolCommitDuplicate> = {
-  encode(_: McpToolCommitDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(message: McpToolCommitDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.attachmentRef !== "") {
+      writer.uint32(10).string(message.attachmentRef);
+    }
     return writer;
   },
 
@@ -5028,6 +5054,14 @@ export const McpToolCommitDuplicate: MessageFns<McpToolCommitDuplicate> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.attachmentRef = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5037,20 +5071,30 @@ export const McpToolCommitDuplicate: MessageFns<McpToolCommitDuplicate> = {
     return message;
   },
 
-  fromJSON(_: any): McpToolCommitDuplicate {
-    return {};
+  fromJSON(object: any): McpToolCommitDuplicate {
+    return {
+      attachmentRef: isSet(object.attachmentRef)
+        ? globalThis.String(object.attachmentRef)
+        : isSet(object.attachment_ref)
+        ? globalThis.String(object.attachment_ref)
+        : "",
+    };
   },
 
-  toJSON(_: McpToolCommitDuplicate): unknown {
+  toJSON(message: McpToolCommitDuplicate): unknown {
     const obj: any = {};
+    if (message.attachmentRef !== "") {
+      obj.attachmentRef = message.attachmentRef;
+    }
     return obj;
   },
 
   create<I extends Exact<DeepPartial<McpToolCommitDuplicate>, I>>(base?: I): McpToolCommitDuplicate {
     return McpToolCommitDuplicate.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<McpToolCommitDuplicate>, I>>(_: I): McpToolCommitDuplicate {
+  fromPartial<I extends Exact<DeepPartial<McpToolCommitDuplicate>, I>>(object: I): McpToolCommitDuplicate {
     const message = createBaseMcpToolCommitDuplicate();
+    message.attachmentRef = object.attachmentRef ?? "";
     return message;
   },
 };

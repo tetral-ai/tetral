@@ -416,9 +416,15 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 	if err != nil || committed.GetCommitted() == nil {
 		t.Fatalf("CommitMcpToolResult = %#v/%v; want committed", committed, err)
 	}
+	if committed.GetCommitted().GetAttachmentRef() != "" {
+		t.Fatalf("committed attachment ref = %q; want no generated fact", committed.GetCommitted().GetAttachmentRef())
+	}
 	duplicateCommit, err := store.CommitMcpToolResult(context.Background(), commitRequest)
 	if err != nil || duplicateCommit.GetDuplicate() == nil {
 		t.Fatalf("CommitMcpToolResult replay = %#v/%v; want duplicate", duplicateCommit, err)
+	}
+	if duplicateCommit.GetDuplicate().GetAttachmentRef() != "" {
+		t.Fatalf("duplicate attachment ref = %q; want no generated fact", duplicateCommit.GetDuplicate().GetAttachmentRef())
 	}
 	completed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
 		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_tool_read",
@@ -554,6 +560,9 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if committed.GetCommitted() == nil {
 		t.Fatalf("commit = %+v; want committed", committed)
 	}
+	if committed.GetCommitted().GetAttachmentRef() == "" {
+		t.Fatal("committed attachment ref is empty; want Bridge-generated fact")
+	}
 	read, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
 		Scope: scope, ToolUseEventId: toolUse.GetCommitted().GetEventId(), ClaimId: "claim_mcp_media_read",
 	})
@@ -562,7 +571,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	}
 	refsOnlyJSON := read.GetAlreadyCompleted().GetResultJson()
 	if refsOnlyJSON == "" || strings.Contains(refsOnlyJSON, "data_base64") || strings.Contains(refsOnlyJSON, "AQID") {
-		t.Fatalf("refs-only result = %q; want non-empty result without media bytes", refsOnlyJSON)
+		t.Fatalf("direct durable result = %q; want non-empty result without media bytes", refsOnlyJSON)
 	}
 	var result struct {
 		Response struct {
@@ -583,6 +592,9 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	attachment := result.Response.Attachments[0]
 	if !strings.HasPrefix(attachment.AttachmentRef, "att_") || attachment.Mime != "image/png" || attachment.SizeBytes != 3 || attachment.SuggestedFilename != "plot.png" {
 		t.Fatalf("refs-only attachment = %+v; want completed ref metadata", attachment)
+	}
+	if committed.GetCommitted().GetAttachmentRef() != attachment.AttachmentRef {
+		t.Fatalf("committed attachment ref = %q; want generated ref %q", committed.GetCommitted().GetAttachmentRef(), attachment.AttachmentRef)
 	}
 
 	var storedResult string
@@ -619,6 +631,15 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	}
 	if duplicate.GetDuplicate() == nil {
 		t.Fatalf("duplicate commit = %+v; want duplicate", duplicate)
+	}
+	if duplicate.GetDuplicate().GetAttachmentRef() != attachment.AttachmentRef {
+		t.Fatalf("duplicate attachment ref = %q; want committed ref %q", duplicate.GetDuplicate().GetAttachmentRef(), attachment.AttachmentRef)
+	}
+	if deletes := blobStore.Deletes(); len(deletes) != 0 {
+		t.Fatalf("blob deletes after durable duplicate = %v; want none", deletes)
+	}
+	if data, ok := blobStore.Bytes(blobPointer); !ok || !bytes.Equal(data, []byte{1, 2, 3}) {
+		t.Fatalf("attachment blob after durable duplicate = %v present=%v; want referenced bytes", data, ok)
 	}
 	var attachmentCount int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_transient_attachments WHERE source_tool_use_event_id = $1`, toolUse.GetCommitted().GetEventId()).Scan(&attachmentCount); err != nil {
@@ -727,6 +748,67 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	}
 	if durableResultAfterReplay != storedResult {
 		t.Fatalf("durable MCP result changed during replay = %q; want %q", durableResultAfterReplay, storedResult)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMCPToolResultPreservesBlobWhenCommitOutcomeIsUnknown(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_mcp_commit_unknown", "bind_bridge_mcp_commit_unknown", 1, "pod_uid_mcp_commit_unknown")
+
+	if _, err := admin.ExecContext(context.Background(), `CREATE TABLE mcp_commit_probe (
+		attachment_ref TEXT PRIMARY KEY
+	)`); err != nil {
+		t.Fatalf("create deferred commit probe: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `GRANT SELECT, REFERENCES ON mcp_commit_probe TO tetral_runtime_test`); err != nil {
+		t.Fatalf("grant deferred commit probe: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `ALTER TABLE session_transient_attachments
+		ADD CONSTRAINT session_transient_attachments_commit_probe
+		FOREIGN KEY (attachment_ref) REFERENCES mcp_commit_probe(attachment_ref)
+		DEFERRABLE INITIALLY DEFERRED`); err != nil {
+		t.Fatalf("install deferred commit failure: %v", err)
+	}
+
+	blobStore := blob.NewFakeBlobStore()
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.AttachmentBlobStore = blobStore
+	scope := bridgeAPIScope("sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown", "bind_bridge_mcp_commit_unknown", 1, "pod_uid_mcp_commit_unknown")
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	claimID := "claim_mcp_commit_unknown"
+	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+	})
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("ClaimMcpToolResult = %#v/%v; want acquired", claimed, err)
+	}
+
+	_, err = store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+		ResultJson: `{"response":{"status":1,"result_text":"[MCP attachment: plot.png]","attachments":[{"mime":"image/png","size_bytes":3,"suggested_filename":"plot.png"}]},"content_items":1,"refresh_triggered":false}`,
+		InlineMedia: []*bridgev1.McpInlineMedia{{
+			Data: []byte{1, 2, 3}, Mime: "image/png", SuggestedFilename: "plot.png",
+		}},
+	})
+	if err == nil {
+		t.Fatal("CommitMcpToolResult with deferred constraint = nil; want commit failure")
+	}
+	if blobStore.Len() != 1 {
+		t.Fatalf("blob count after unknown commit outcome = %d; want conservative retention", blobStore.Len())
+	}
+	if deletes := blobStore.Deletes(); len(deletes) != 0 {
+		t.Fatalf("blob deletes after unknown commit outcome = %v; want none", deletes)
+	}
+	var attachmentCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_transient_attachments WHERE source_tool_use_event_id = $1`,
+		toolUseEventID,
+	).Scan(&attachmentCount); err != nil {
+		t.Fatalf("count rolled-back MCP attachments: %v", err)
+	}
+	if attachmentCount != 0 {
+		t.Fatalf("attachment rows after forced rollback = %d; want zero", attachmentCount)
 	}
 }
 

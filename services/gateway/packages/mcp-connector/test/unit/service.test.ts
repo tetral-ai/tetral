@@ -317,7 +317,7 @@ describe("McpConnectorServiceShell", () => {
     expect(firstClient.calls).toEqual(["callTool"]);
     expect(secondClient.calls).toEqual([]);
     expect(bridge.commitCalls).toHaveLength(1);
-    expect(bridge.claimCalls).toHaveLength(3);
+    expect(bridge.claimCalls).toHaveLength(2);
 
   });
 
@@ -1258,7 +1258,7 @@ class RecordingMcpToolResultBridgeClient {
     const key = bridgeResultKey(request);
     const existing = this.stored.get(key);
     if (existing !== undefined) {
-      callback(null, { duplicate: {} });
+      callback(null, { duplicate: { attachmentRef: fakeBridgeAttachmentRef(existing) } });
       return;
     }
     const claim = this.claims.get(key);
@@ -1267,7 +1267,7 @@ class RecordingMcpToolResultBridgeClient {
       return;
     }
     this.persistCommit(request);
-    callback(null, { committed: {} });
+    callback(null, { committed: { attachmentRef: fakeBridgeAttachmentRef(this.stored.get(key)!) } });
   }
 
   relinquishMcpToolResult(
@@ -1324,6 +1324,13 @@ function fakeBridgeCompleteMcpAttachmentRefs(request: CommitMcpToolResultRequest
     attachment_ref: `att_bridge_${index + 1}`,
   }));
   return JSON.stringify(body);
+}
+
+function fakeBridgeAttachmentRef(resultJson: string): string {
+  const body = JSON.parse(resultJson) as {
+    response: { attachments: Array<{ attachment_ref?: string }> };
+  };
+  return body.response.attachments[0]?.attachment_ref ?? "";
 }
 
 function bridgeResultKey(request: ClaimMcpToolResultRequest | CommitMcpToolResultRequest | RelinquishMcpToolResultRequest): string {

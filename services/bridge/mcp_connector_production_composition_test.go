@@ -173,12 +173,12 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	}
 
 	claims, commits, relinquishes, commitDropped, relinquishDropped, settlementDropped := bridge.snapshot()
-	if len(claims) != 7 || claims[0] != "claim_mcp_production_old" ||
-		claims[1] != "claim_mcp_production_takeover" || claims[2] != "claim_mcp_production_takeover" ||
-		claims[3] != "claim_mcp_production_cleanup_failed" ||
-		claims[4] != "claim_mcp_production_cleanup_reacquired" || claims[5] != "claim_mcp_production_cleanup_reacquired" ||
-		claims[6] != "claim_mcp_production_runtime_replay" {
-		t.Fatalf("Bridge claim sequence = %v; want takeover and immediate cleanup reacquisition", claims)
+	if len(claims) != 5 || claims[0] != "claim_mcp_production_old" ||
+		claims[1] != "claim_mcp_production_takeover" ||
+		claims[2] != "claim_mcp_production_cleanup_failed" ||
+		claims[3] != "claim_mcp_production_cleanup_reacquired" ||
+		claims[4] != "claim_mcp_production_runtime_replay" {
+		t.Fatalf("Bridge claim sequence = %v; want receipt convergence and immediate cleanup reacquisition", claims)
 	}
 	if len(commits) != 4 || commits[0] != "claim_mcp_production_takeover" ||
 		commits[1] != "claim_mcp_production_takeover" || commits[2] != "claim_mcp_production_old" ||

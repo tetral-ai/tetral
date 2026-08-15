@@ -276,13 +276,13 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     }
   });
 
-  test("retries an unknown commit with the exact frozen request then reads durable facts", async () => {
+  test("converges a lost commit ACK from its receipt without a fallible post-commit Claim", async () => {
     const client = new ScriptedMcpClient([
       { response: { acquired: executor } },
-      { response: { alreadyCompleted: { resultJson: storedResultJSON("ok") } } },
+      { error: serviceError(status.UNAVAILABLE) },
     ], [
       { error: serviceError(status.UNKNOWN) },
-      { response: { committed: {} } },
+      { response: { committed: { attachmentRef: "" } } },
     ]);
     const delays: number[] = [];
     const store = durableStore(client, async (delayMs) => { delays.push(delayMs); });
@@ -294,17 +294,16 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     expect(client.commitRequests).toHaveLength(2);
     expect(client.commitRequests[0]).toBe(client.commitRequests[1]);
     expect(client.commitRequests[0]).toEqual(commitRequest(storedResultJSON("ok")));
-    expect(client.claimRequests).toHaveLength(2);
+    expect(client.claimRequests).toHaveLength(1);
   });
 
   test("materializes one terminal failure after Bridge rejects provider result bytes", async () => {
     const terminal = storedTerminalFailureJSON();
     const client = new ScriptedMcpClient([
       { response: { acquired: executor } },
-      { response: { alreadyCompleted: { resultJson: terminal } } },
     ], [
       { error: serviceError(status.INVALID_ARGUMENT) },
-      { response: { committed: {} } },
+      { response: { committed: { attachmentRef: "" } } },
     ]);
     const store = durableStore(client, async () => {
       throw new Error("deterministic rejection must not back off");
@@ -327,11 +326,10 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     const terminal = storedTerminalFailureJSON();
     const client = new ScriptedMcpClient([
       { response: { acquired: executor } },
-      { response: { alreadyCompleted: { resultJson: terminal } } },
     ], [
       { error: serviceError(status.INVALID_ARGUMENT) },
       { error: serviceError(status.UNKNOWN) },
-      { response: { committed: {} } },
+      { response: { committed: { attachmentRef: "" } } },
     ]);
     const delays: number[] = [];
     const store = durableStore(client, async (delayMs) => { delays.push(delayMs); });
@@ -368,14 +366,15 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     await expect(staleStore.store(key, pendingResult("stale"), mcpContext()))
       .rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
 
-    for (const response of [{}, { committed: {}, duplicate: {} }]) {
-      const terminal = storedResultJSON("converged");
+    for (const response of [{}, {
+      committed: { attachmentRef: "att_invalid_committed" },
+      duplicate: { attachmentRef: "att_invalid_duplicate" },
+    }]) {
       const store = durableStore(new ScriptedMcpClient(
         [
           { response: { acquired: executor } },
-          { response: { alreadyCompleted: { resultJson: terminal } } },
         ],
-        [{ response }, { response: { duplicate: {} } }],
+        [{ response }, { response: { duplicate: { attachmentRef: "" } } }],
       ));
       await store.claim(key, mcpContext());
       await expect(store.store(key, pendingResult("converged"), mcpContext()))
@@ -387,13 +386,12 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     const attachmentBytes = Uint8Array.from([1, 2, 3]);
     const client = new ScriptedMcpClient([
       { response: { acquired: executor } },
-      { response: { alreadyCompleted: { resultJson: storedResultJSON("ok") } } },
     ], [
       { error: serviceError(status.DEADLINE_EXCEEDED) },
       { error: serviceError(status.UNKNOWN) },
       { error: serviceError(status.INTERNAL) },
       { error: serviceError(status.RESOURCE_EXHAUSTED) },
-      { response: { duplicate: {} } },
+      { response: { duplicate: { attachmentRef: "att_bridge_1" } } },
     ]);
     const delays: number[] = [];
     let metadataGeneration = 0;
@@ -425,7 +423,6 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     }, mcpContext())).resolves.toMatchObject({ resultText: "ok" });
 
     expect(client.claimOptions).toEqual([
-      { deadline: new Date(1_321) },
       { deadline: new Date(1_321) },
     ]);
     expect(client.commitOptions).toEqual(Array.from({ length: 5 }, () => ({ deadline: new Date(2_234) })));

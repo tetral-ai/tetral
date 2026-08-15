@@ -326,8 +326,12 @@ message CommitMcpToolResultResponse {
   }
 }
 
-message McpToolCommitCommitted {}
-message McpToolCommitDuplicate {}
+message McpToolCommitCommitted {
+  string attachment_ref = 1;
+}
+message McpToolCommitDuplicate {
+  string attachment_ref = 1;
+}
 message McpToolCommitStale {}
 
 message RelinquishMcpToolResultRequest {
