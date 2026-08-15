@@ -207,9 +207,10 @@ export interface ResolvedProviderRequestAttachment extends ProviderRequestAttach
  * Lowers one complete provider request according to its exact model rules.
  *
  * Messages are rendered and filtered before cache points are selected. System
- * messages stay first, provider context entries retain their order, each Tool call
- * expands to an adjacent assistant-call/tool-result pair, and resolved media is
- * appended as one user message. Tool schemas and the request-level structured
+ * messages stay first, provider context entries retain their order, and each
+ * Assistant entry becomes one Assistant message whose ordered content keeps
+ * concurrent Tool Calls grouped. Resolved media is appended as one user message.
+ * Tool schemas and the request-level structured
  * output schema use the selected schema strategy; the latter is accepted only
  * for an approval-reviewer request on a model that enables it. Provider options
  * retain the model's frozen defaults for an empty variant, validate any nonempty
