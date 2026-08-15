@@ -685,12 +685,26 @@ func insertInternalToolRepairEventTx(
 		return "", 0, err
 	}
 	visibility, sessionVisible := threadScope.publicProjection("agent.tool_result")
+	errorValue, err := canonicalRuntimeToolError(request.GetError())
+	if err != nil {
+		return "", 0, err
+	}
+	projection := runtimeToolProjectionFromDurableTool(durableToolExecution{
+		ModelRequestID:  request.GetModelRequestId(),
+		ModelToolCallID: request.GetModelToolCallId(),
+		ToolName:        request.GetToolName(),
+		InputJSON:       request.GetCanonicalInputJson(),
+	}, map[string]any{"type": "error", "error": errorValue})
+	projectionJSON, err := marshalBridgeJSON(projection)
+	if err != nil {
+		return "", 0, err
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
 			created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, '{}', $11, $11, $11)`,
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, $11, $12, $12, $12)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -701,6 +715,7 @@ func insertInternalToolRepairEventTx(
 		sessionVisible,
 		repairKey,
 		request.GetModelRequestId(),
+		projectionJSON,
 		now,
 	); err != nil {
 		return "", 0, err

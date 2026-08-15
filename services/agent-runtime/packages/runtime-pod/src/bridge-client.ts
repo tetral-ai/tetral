@@ -98,7 +98,6 @@ import type {
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	AgentRuntimeBridgeServiceClient,
-	RuntimeInputDisposition,
 	WriteEventRequest as WriteEventRequestMessage,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
@@ -134,7 +133,7 @@ export interface BridgeAPIControlInputCommitterOptions {
 /**
  * Commits control inputs through Bridge before Runtime Core treats the control action as durable.
  * Authentication and transport failures remain retryable unless the gRPC status identifies a
- * deterministic request or idempotency conflict; only committed or duplicate ACKs succeed.
+ * deterministic request or idempotency conflict; a replay returns the same committed application.
  */
 export class BridgeAPIControlInputCommitter
 	implements RuntimeControlInputCommitter
@@ -181,7 +180,6 @@ export class BridgeAPIControlInputCommitter
 		const request: CommitInputsRequest = {
 			scope: bridgeScope(input.scope),
 			runtimeInputId: input.scope.runtimeInputId,
-			disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
 			approvalReviewText: [],
 		};
 		let response: CommitInputsResponse | undefined;
@@ -205,7 +203,7 @@ export class BridgeAPIControlInputCommitter
 			}
 		}
 		if (
-			!exactlyOneDefined(response.committed, response.duplicate, response.stale)
+			!exactlyOneDefined(response.committed, response.stale)
 		) {
 			return {
 				ok: false as const,
@@ -217,7 +215,7 @@ export class BridgeAPIControlInputCommitter
 		if (response.stale !== undefined) {
 			return { ok: true as const, type: "stale" as const };
 		}
-		const result = response.committed ?? response.duplicate;
+		const result = response.committed;
 		if (result !== undefined) {
 			if (!exactlyOneDefined(result.context, result.interrupt)) {
 				return {
@@ -243,10 +241,7 @@ export class BridgeAPIControlInputCommitter
 			try {
 				return {
 					ok: true as const,
-					type:
-						response.duplicate === undefined
-							? ("committed" as const)
-							: ("duplicate" as const),
+					type: "committed" as const,
 					assignedContextSequences:
 						result.context?.assignedContextSequences ?? [],
 					pendingAttachments: parsePendingAttachmentJson(
@@ -286,8 +281,8 @@ export interface BridgeAPITaskNotificationCommitterOptions {
 }
 
 /**
- * Settles a loop-authored terminal background-task notification through Bridge. A stale Bridge
- * disposition is an idempotent success, while malformed operation results fail without retry.
+ * Settles a loop-authored terminal background-task notification through Bridge. Bridge may park
+ * closing custody or return stale/rejected durable outcomes; malformed results fail without retry.
  */
 export class BridgeAPITaskNotificationCommitter {
 	private readonly client: AgentRuntimeBridgeServiceClient;
@@ -339,7 +334,6 @@ export class BridgeAPITaskNotificationCommitter {
 				},
 			},
 			runtimeInputId: input.runtimeInputId,
-			disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
 		};
 		let response: CommitTaskNotificationResultResponse;
 		try {
@@ -377,9 +371,8 @@ export class BridgeAPITaskNotificationCommitter {
 		if (
 			!exactlyOneDefined(
 				response.committed,
-				response.duplicate,
 				response.stale,
-				response.deferred,
+				response.parked,
 				response.rejected,
 			)
 		) {
@@ -390,7 +383,7 @@ export class BridgeAPITaskNotificationCommitter {
 				message: "task notification durable commit returned malformed outcome",
 			};
 		}
-		const committed = response.committed ?? response.duplicate;
+		const committed = response.committed;
 		if (committed !== undefined) {
 			if (
 				committed.assignedContextSequences.length !== 1 ||
@@ -407,17 +400,14 @@ export class BridgeAPITaskNotificationCommitter {
 			}
 			return {
 				ok: true as const,
-				type:
-					response.duplicate === undefined
-						? ("committed" as const)
-						: ("duplicate" as const),
+				type: "committed" as const,
 				assignedContextSequences: committed.assignedContextSequences,
 			};
 		}
 		if (response.stale !== undefined) {
 			return { ok: true as const, stale: true as const };
 		}
-		if (response.deferred !== undefined) {
+		if (response.parked !== undefined) {
 			return { ok: true as const, deferred: true as const };
 		}
 		if (response.rejected !== undefined) {
@@ -895,7 +885,6 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		const request = {
 			scope,
 			runtimeInputId: input.runtimeInputId,
-			disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
 			approvalReviewText:
 				input.kind === "approval_review"
 					? [...(options?.approvalReviewText ?? input.promptText)]
@@ -921,7 +910,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			});
 		}
 		if (
-			!exactlyOneDefined(response.committed, response.duplicate, response.stale)
+			!exactlyOneDefined(response.committed, response.stale)
 		) {
 			throw normalizeContextLoaderError({
 				code: "schema_mismatch",
@@ -932,7 +921,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		if (response.stale !== undefined) {
 			return { type: "stale_custody" };
 		}
-		const result = response.committed ?? response.duplicate;
+		const result = response.committed;
 		if (result === undefined) {
 			throw normalizeContextLoaderError({
 				code: "schema_mismatch",
@@ -940,17 +929,16 @@ export class BridgeAPIContextLoader implements ContextLoader {
 				reason: "commit inputs returned no outcome",
 			});
 		}
-		if (!exactlyOneDefined(result.context, result.interrupt)) {
+		if (result.context === undefined || result.interrupt !== undefined) {
 			throw normalizeContextLoaderError({
 				code: "schema_mismatch",
 				sessionId: input.sessionId,
-				reason: "commit inputs returned mismatched application",
+				reason: "commit inputs returned a non-context application",
 			});
 		}
-		const interrupt = result.interrupt;
 		const context = result.context;
 		return {
-			type: response.duplicate === undefined ? "committed" : "duplicate",
+			type: "committed",
 			assignedContextSequences: context?.assignedContextSequences ?? [],
 			pendingAttachments:
 				parsePendingAttachments(
@@ -958,9 +946,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 						JSON.parse(item),
 					),
 				) ?? [],
-			interruptToolResults: parseInterruptToolResults(
-				interrupt?.interruptToolResults ?? [],
-			),
+			interruptToolResults: [],
 		};
 	}
 

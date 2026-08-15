@@ -231,51 +231,6 @@ export function childInterruptOutcomeToJSON(object: ChildInterruptOutcome): stri
   }
 }
 
-export enum RuntimeInputDisposition {
-  RUNTIME_INPUT_DISPOSITION_UNSPECIFIED = 0,
-  RUNTIME_INPUT_DISPOSITION_COMMIT = 1,
-  RUNTIME_INPUT_DISPOSITION_DEFER = 2,
-  RUNTIME_INPUT_DISPOSITION_REJECT = 3,
-  UNRECOGNIZED = -1,
-}
-
-export function runtimeInputDispositionFromJSON(object: any): RuntimeInputDisposition {
-  switch (object) {
-    case 0:
-    case "RUNTIME_INPUT_DISPOSITION_UNSPECIFIED":
-      return RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_UNSPECIFIED;
-    case 1:
-    case "RUNTIME_INPUT_DISPOSITION_COMMIT":
-      return RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT;
-    case 2:
-    case "RUNTIME_INPUT_DISPOSITION_DEFER":
-      return RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_DEFER;
-    case 3:
-    case "RUNTIME_INPUT_DISPOSITION_REJECT":
-      return RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_REJECT;
-    case -1:
-    case "UNRECOGNIZED":
-    default:
-      return RuntimeInputDisposition.UNRECOGNIZED;
-  }
-}
-
-export function runtimeInputDispositionToJSON(object: RuntimeInputDisposition): string {
-  switch (object) {
-    case RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_UNSPECIFIED:
-      return "RUNTIME_INPUT_DISPOSITION_UNSPECIFIED";
-    case RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT:
-      return "RUNTIME_INPUT_DISPOSITION_COMMIT";
-    case RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_DEFER:
-      return "RUNTIME_INPUT_DISPOSITION_DEFER";
-    case RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_REJECT:
-      return "RUNTIME_INPUT_DISPOSITION_REJECT";
-    case RuntimeInputDisposition.UNRECOGNIZED:
-    default:
-      return "UNRECOGNIZED";
-  }
-}
-
 export enum TaskNotificationRejectionReason {
   TASK_NOTIFICATION_REJECTION_REASON_UNSPECIFIED = 0,
   TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID = 1,
@@ -440,13 +395,11 @@ export interface RefreshRuntimeBindingTokenResponse {
 export interface CommitInputsRequest {
   scope: RuntimeScope | undefined;
   runtimeInputId: string;
-  disposition: RuntimeInputDisposition;
   approvalReviewText: string[];
 }
 
 export interface CommitInputsResponse {
   committed?: CommitInputsCommitted | undefined;
-  duplicate?: CommitInputsDuplicate | undefined;
   stale?: CommitInputsStale | undefined;
 }
 
@@ -478,25 +431,18 @@ export interface CommitInputsCommitted {
   interrupt?: CommitInputsInterruptApplication | undefined;
 }
 
-export interface CommitInputsDuplicate {
-  context?: CommitInputsContextApplication | undefined;
-  interrupt?: CommitInputsInterruptApplication | undefined;
-}
-
 export interface CommitInputsStale {
 }
 
 export interface CommitTaskNotificationResultRequest {
   scope: RuntimeScope | undefined;
   runtimeInputId: string;
-  disposition: RuntimeInputDisposition;
 }
 
 export interface CommitTaskNotificationResultResponse {
   committed?: CommitTaskNotificationResultCommitted | undefined;
-  duplicate?: CommitTaskNotificationResultDuplicate | undefined;
   stale?: CommitTaskNotificationResultStale | undefined;
-  deferred?: CommitTaskNotificationResultDeferred | undefined;
+  parked?: CommitTaskNotificationResultParked | undefined;
   rejected?: CommitTaskNotificationResultRejected | undefined;
 }
 
@@ -504,14 +450,10 @@ export interface CommitTaskNotificationResultCommitted {
   assignedContextSequences: number[];
 }
 
-export interface CommitTaskNotificationResultDuplicate {
-  assignedContextSequences: number[];
-}
-
 export interface CommitTaskNotificationResultStale {
 }
 
-export interface CommitTaskNotificationResultDeferred {
+export interface CommitTaskNotificationResultParked {
 }
 
 export interface CommitTaskNotificationResultRejected {
@@ -2780,7 +2722,7 @@ export const RefreshRuntimeBindingTokenResponse: MessageFns<RefreshRuntimeBindin
 };
 
 function createBaseCommitInputsRequest(): CommitInputsRequest {
-  return { scope: undefined, runtimeInputId: "", disposition: 0, approvalReviewText: [] };
+  return { scope: undefined, runtimeInputId: "", approvalReviewText: [] };
 }
 
 export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
@@ -2790,9 +2732,6 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     }
     if (message.runtimeInputId !== "") {
       writer.uint32(18).string(message.runtimeInputId);
-    }
-    if (message.disposition !== 0) {
-      writer.uint32(24).int32(message.disposition);
     }
     for (const v of message.approvalReviewText) {
       writer.uint32(34).string(v!);
@@ -2823,14 +2762,6 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
           message.runtimeInputId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.disposition = reader.int32() as any;
-          continue;
-        }
         case 4: {
           if (tag !== 34) {
             break;
@@ -2856,7 +2787,6 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
         : isSet(object.runtime_input_id)
         ? globalThis.String(object.runtime_input_id)
         : "",
-      disposition: isSet(object.disposition) ? runtimeInputDispositionFromJSON(object.disposition) : 0,
       approvalReviewText: globalThis.Array.isArray(object?.approvalReviewText)
         ? object.approvalReviewText.map((e: any) => globalThis.String(e))
         : globalThis.Array.isArray(object?.approval_review_text)
@@ -2873,9 +2803,6 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     if (message.runtimeInputId !== "") {
       obj.runtimeInputId = message.runtimeInputId;
     }
-    if (message.disposition !== 0) {
-      obj.disposition = runtimeInputDispositionToJSON(message.disposition);
-    }
     if (message.approvalReviewText?.length) {
       obj.approvalReviewText = message.approvalReviewText;
     }
@@ -2891,23 +2818,19 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.runtimeInputId = object.runtimeInputId ?? "";
-    message.disposition = object.disposition ?? 0;
     message.approvalReviewText = object.approvalReviewText?.map((e) => e) || [];
     return message;
   },
 };
 
 function createBaseCommitInputsResponse(): CommitInputsResponse {
-  return { committed: undefined, duplicate: undefined, stale: undefined };
+  return { committed: undefined, stale: undefined };
 }
 
 export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
   encode(message: CommitInputsResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.committed !== undefined) {
       CommitInputsCommitted.encode(message.committed, writer.uint32(10).fork()).join();
-    }
-    if (message.duplicate !== undefined) {
-      CommitInputsDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
     }
     if (message.stale !== undefined) {
       CommitInputsStale.encode(message.stale, writer.uint32(26).fork()).join();
@@ -2930,14 +2853,6 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
           message.committed = CommitInputsCommitted.decode(reader, reader.uint32());
           continue;
         }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.duplicate = CommitInputsDuplicate.decode(reader, reader.uint32());
-          continue;
-        }
         case 3: {
           if (tag !== 26) {
             break;
@@ -2958,7 +2873,6 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
   fromJSON(object: any): CommitInputsResponse {
     return {
       committed: isSet(object.committed) ? CommitInputsCommitted.fromJSON(object.committed) : undefined,
-      duplicate: isSet(object.duplicate) ? CommitInputsDuplicate.fromJSON(object.duplicate) : undefined,
       stale: isSet(object.stale) ? CommitInputsStale.fromJSON(object.stale) : undefined,
     };
   },
@@ -2967,9 +2881,6 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
     const obj: any = {};
     if (message.committed !== undefined) {
       obj.committed = CommitInputsCommitted.toJSON(message.committed);
-    }
-    if (message.duplicate !== undefined) {
-      obj.duplicate = CommitInputsDuplicate.toJSON(message.duplicate);
     }
     if (message.stale !== undefined) {
       obj.stale = CommitInputsStale.toJSON(message.stale);
@@ -2984,9 +2895,6 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
     const message = createBaseCommitInputsResponse();
     message.committed = (object.committed !== undefined && object.committed !== null)
       ? CommitInputsCommitted.fromPartial(object.committed)
-      : undefined;
-    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
-      ? CommitInputsDuplicate.fromPartial(object.duplicate)
       : undefined;
     message.stale = (object.stale !== undefined && object.stale !== null)
       ? CommitInputsStale.fromPartial(object.stale)
@@ -3470,86 +3378,6 @@ export const CommitInputsCommitted: MessageFns<CommitInputsCommitted> = {
   },
 };
 
-function createBaseCommitInputsDuplicate(): CommitInputsDuplicate {
-  return { context: undefined, interrupt: undefined };
-}
-
-export const CommitInputsDuplicate: MessageFns<CommitInputsDuplicate> = {
-  encode(message: CommitInputsDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.context !== undefined) {
-      CommitInputsContextApplication.encode(message.context, writer.uint32(34).fork()).join();
-    }
-    if (message.interrupt !== undefined) {
-      CommitInputsInterruptApplication.encode(message.interrupt, writer.uint32(42).fork()).join();
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): CommitInputsDuplicate {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseCommitInputsDuplicate();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.context = CommitInputsContextApplication.decode(reader, reader.uint32());
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.interrupt = CommitInputsInterruptApplication.decode(reader, reader.uint32());
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): CommitInputsDuplicate {
-    return {
-      context: isSet(object.context) ? CommitInputsContextApplication.fromJSON(object.context) : undefined,
-      interrupt: isSet(object.interrupt) ? CommitInputsInterruptApplication.fromJSON(object.interrupt) : undefined,
-    };
-  },
-
-  toJSON(message: CommitInputsDuplicate): unknown {
-    const obj: any = {};
-    if (message.context !== undefined) {
-      obj.context = CommitInputsContextApplication.toJSON(message.context);
-    }
-    if (message.interrupt !== undefined) {
-      obj.interrupt = CommitInputsInterruptApplication.toJSON(message.interrupt);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<CommitInputsDuplicate>, I>>(base?: I): CommitInputsDuplicate {
-    return CommitInputsDuplicate.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<CommitInputsDuplicate>, I>>(object: I): CommitInputsDuplicate {
-    const message = createBaseCommitInputsDuplicate();
-    message.context = (object.context !== undefined && object.context !== null)
-      ? CommitInputsContextApplication.fromPartial(object.context)
-      : undefined;
-    message.interrupt = (object.interrupt !== undefined && object.interrupt !== null)
-      ? CommitInputsInterruptApplication.fromPartial(object.interrupt)
-      : undefined;
-    return message;
-  },
-};
-
 function createBaseCommitInputsStale(): CommitInputsStale {
   return {};
 }
@@ -3594,7 +3422,7 @@ export const CommitInputsStale: MessageFns<CommitInputsStale> = {
 };
 
 function createBaseCommitTaskNotificationResultRequest(): CommitTaskNotificationResultRequest {
-  return { scope: undefined, runtimeInputId: "", disposition: 0 };
+  return { scope: undefined, runtimeInputId: "" };
 }
 
 export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificationResultRequest> = {
@@ -3604,9 +3432,6 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     }
     if (message.runtimeInputId !== "") {
       writer.uint32(18).string(message.runtimeInputId);
-    }
-    if (message.disposition !== 0) {
-      writer.uint32(24).int32(message.disposition);
     }
     return writer;
   },
@@ -3634,14 +3459,6 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
           message.runtimeInputId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.disposition = reader.int32() as any;
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3659,7 +3476,6 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
         : isSet(object.runtime_input_id)
         ? globalThis.String(object.runtime_input_id)
         : "",
-      disposition: isSet(object.disposition) ? runtimeInputDispositionFromJSON(object.disposition) : 0,
     };
   },
 
@@ -3670,9 +3486,6 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     }
     if (message.runtimeInputId !== "") {
       obj.runtimeInputId = message.runtimeInputId;
-    }
-    if (message.disposition !== 0) {
-      obj.disposition = runtimeInputDispositionToJSON(message.disposition);
     }
     return obj;
   },
@@ -3690,13 +3503,12 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.runtimeInputId = object.runtimeInputId ?? "";
-    message.disposition = object.disposition ?? 0;
     return message;
   },
 };
 
 function createBaseCommitTaskNotificationResultResponse(): CommitTaskNotificationResultResponse {
-  return { committed: undefined, duplicate: undefined, stale: undefined, deferred: undefined, rejected: undefined };
+  return { committed: undefined, stale: undefined, parked: undefined, rejected: undefined };
 }
 
 export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotificationResultResponse> = {
@@ -3704,14 +3516,11 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     if (message.committed !== undefined) {
       CommitTaskNotificationResultCommitted.encode(message.committed, writer.uint32(10).fork()).join();
     }
-    if (message.duplicate !== undefined) {
-      CommitTaskNotificationResultDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
-    }
     if (message.stale !== undefined) {
       CommitTaskNotificationResultStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
-    if (message.deferred !== undefined) {
-      CommitTaskNotificationResultDeferred.encode(message.deferred, writer.uint32(34).fork()).join();
+    if (message.parked !== undefined) {
+      CommitTaskNotificationResultParked.encode(message.parked, writer.uint32(34).fork()).join();
     }
     if (message.rejected !== undefined) {
       CommitTaskNotificationResultRejected.encode(message.rejected, writer.uint32(42).fork()).join();
@@ -3734,14 +3543,6 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
           message.committed = CommitTaskNotificationResultCommitted.decode(reader, reader.uint32());
           continue;
         }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.duplicate = CommitTaskNotificationResultDuplicate.decode(reader, reader.uint32());
-          continue;
-        }
         case 3: {
           if (tag !== 26) {
             break;
@@ -3755,7 +3556,7 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
             break;
           }
 
-          message.deferred = CommitTaskNotificationResultDeferred.decode(reader, reader.uint32());
+          message.parked = CommitTaskNotificationResultParked.decode(reader, reader.uint32());
           continue;
         }
         case 5: {
@@ -3778,9 +3579,8 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
   fromJSON(object: any): CommitTaskNotificationResultResponse {
     return {
       committed: isSet(object.committed) ? CommitTaskNotificationResultCommitted.fromJSON(object.committed) : undefined,
-      duplicate: isSet(object.duplicate) ? CommitTaskNotificationResultDuplicate.fromJSON(object.duplicate) : undefined,
       stale: isSet(object.stale) ? CommitTaskNotificationResultStale.fromJSON(object.stale) : undefined,
-      deferred: isSet(object.deferred) ? CommitTaskNotificationResultDeferred.fromJSON(object.deferred) : undefined,
+      parked: isSet(object.parked) ? CommitTaskNotificationResultParked.fromJSON(object.parked) : undefined,
       rejected: isSet(object.rejected) ? CommitTaskNotificationResultRejected.fromJSON(object.rejected) : undefined,
     };
   },
@@ -3790,14 +3590,11 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     if (message.committed !== undefined) {
       obj.committed = CommitTaskNotificationResultCommitted.toJSON(message.committed);
     }
-    if (message.duplicate !== undefined) {
-      obj.duplicate = CommitTaskNotificationResultDuplicate.toJSON(message.duplicate);
-    }
     if (message.stale !== undefined) {
       obj.stale = CommitTaskNotificationResultStale.toJSON(message.stale);
     }
-    if (message.deferred !== undefined) {
-      obj.deferred = CommitTaskNotificationResultDeferred.toJSON(message.deferred);
+    if (message.parked !== undefined) {
+      obj.parked = CommitTaskNotificationResultParked.toJSON(message.parked);
     }
     if (message.rejected !== undefined) {
       obj.rejected = CommitTaskNotificationResultRejected.toJSON(message.rejected);
@@ -3817,14 +3614,11 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     message.committed = (object.committed !== undefined && object.committed !== null)
       ? CommitTaskNotificationResultCommitted.fromPartial(object.committed)
       : undefined;
-    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
-      ? CommitTaskNotificationResultDuplicate.fromPartial(object.duplicate)
-      : undefined;
     message.stale = (object.stale !== undefined && object.stale !== null)
       ? CommitTaskNotificationResultStale.fromPartial(object.stale)
       : undefined;
-    message.deferred = (object.deferred !== undefined && object.deferred !== null)
-      ? CommitTaskNotificationResultDeferred.fromPartial(object.deferred)
+    message.parked = (object.parked !== undefined && object.parked !== null)
+      ? CommitTaskNotificationResultParked.fromPartial(object.parked)
       : undefined;
     message.rejected = (object.rejected !== undefined && object.rejected !== null)
       ? CommitTaskNotificationResultRejected.fromPartial(object.rejected)
@@ -3913,86 +3707,6 @@ export const CommitTaskNotificationResultCommitted: MessageFns<CommitTaskNotific
   },
 };
 
-function createBaseCommitTaskNotificationResultDuplicate(): CommitTaskNotificationResultDuplicate {
-  return { assignedContextSequences: [] };
-}
-
-export const CommitTaskNotificationResultDuplicate: MessageFns<CommitTaskNotificationResultDuplicate> = {
-  encode(message: CommitTaskNotificationResultDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    writer.uint32(18).fork();
-    for (const v of message.assignedContextSequences) {
-      writer.int64(v);
-    }
-    writer.join();
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): CommitTaskNotificationResultDuplicate {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseCommitTaskNotificationResultDuplicate();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 2: {
-          if (tag === 16) {
-            message.assignedContextSequences.push(longToNumber(reader.int64()));
-
-            continue;
-          }
-
-          if (tag === 18) {
-            const end2 = reader.uint32() + reader.pos;
-            while (reader.pos < end2) {
-              message.assignedContextSequences.push(longToNumber(reader.int64()));
-            }
-
-            continue;
-          }
-
-          break;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): CommitTaskNotificationResultDuplicate {
-    return {
-      assignedContextSequences: globalThis.Array.isArray(object?.assignedContextSequences)
-        ? object.assignedContextSequences.map((e: any) => globalThis.Number(e))
-        : globalThis.Array.isArray(object?.assigned_context_sequences)
-        ? object.assigned_context_sequences.map((e: any) => globalThis.Number(e))
-        : [],
-    };
-  },
-
-  toJSON(message: CommitTaskNotificationResultDuplicate): unknown {
-    const obj: any = {};
-    if (message.assignedContextSequences?.length) {
-      obj.assignedContextSequences = message.assignedContextSequences.map((e) => Math.round(e));
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<CommitTaskNotificationResultDuplicate>, I>>(
-    base?: I,
-  ): CommitTaskNotificationResultDuplicate {
-    return CommitTaskNotificationResultDuplicate.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<CommitTaskNotificationResultDuplicate>, I>>(
-    object: I,
-  ): CommitTaskNotificationResultDuplicate {
-    const message = createBaseCommitTaskNotificationResultDuplicate();
-    message.assignedContextSequences = object.assignedContextSequences?.map((e) => e) || [];
-    return message;
-  },
-};
-
 function createBaseCommitTaskNotificationResultStale(): CommitTaskNotificationResultStale {
   return {};
 }
@@ -4040,19 +3754,19 @@ export const CommitTaskNotificationResultStale: MessageFns<CommitTaskNotificatio
   },
 };
 
-function createBaseCommitTaskNotificationResultDeferred(): CommitTaskNotificationResultDeferred {
+function createBaseCommitTaskNotificationResultParked(): CommitTaskNotificationResultParked {
   return {};
 }
 
-export const CommitTaskNotificationResultDeferred: MessageFns<CommitTaskNotificationResultDeferred> = {
-  encode(_: CommitTaskNotificationResultDeferred, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const CommitTaskNotificationResultParked: MessageFns<CommitTaskNotificationResultParked> = {
+  encode(_: CommitTaskNotificationResultParked, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): CommitTaskNotificationResultDeferred {
+  decode(input: BinaryReader | Uint8Array, length?: number): CommitTaskNotificationResultParked {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseCommitTaskNotificationResultDeferred();
+    const message = createBaseCommitTaskNotificationResultParked();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -4065,24 +3779,24 @@ export const CommitTaskNotificationResultDeferred: MessageFns<CommitTaskNotifica
     return message;
   },
 
-  fromJSON(_: any): CommitTaskNotificationResultDeferred {
+  fromJSON(_: any): CommitTaskNotificationResultParked {
     return {};
   },
 
-  toJSON(_: CommitTaskNotificationResultDeferred): unknown {
+  toJSON(_: CommitTaskNotificationResultParked): unknown {
     const obj: any = {};
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<CommitTaskNotificationResultDeferred>, I>>(
+  create<I extends Exact<DeepPartial<CommitTaskNotificationResultParked>, I>>(
     base?: I,
-  ): CommitTaskNotificationResultDeferred {
-    return CommitTaskNotificationResultDeferred.fromPartial(base ?? ({} as any));
+  ): CommitTaskNotificationResultParked {
+    return CommitTaskNotificationResultParked.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<CommitTaskNotificationResultDeferred>, I>>(
+  fromPartial<I extends Exact<DeepPartial<CommitTaskNotificationResultParked>, I>>(
     _: I,
-  ): CommitTaskNotificationResultDeferred {
-    const message = createBaseCommitTaskNotificationResultDeferred();
+  ): CommitTaskNotificationResultParked {
+    const message = createBaseCommitTaskNotificationResultParked();
     return message;
   },
 };

@@ -76,6 +76,36 @@ func TestBridgeAPIServerReturnsClosedStaleResultsForSupersededCloseouts(t *testi
 	}
 }
 
+func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.T) {
+	fixture := newCloseoutSentinelFixture(t, "termination_replay_binding")
+	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	running, err := fixture.store.WriteEvent(context.Background(), closeoutWriteEventRequest(scope, "rwrite_termination_replay_binding"))
+	if err != nil || running.GetCommitted() == nil {
+		t.Fatalf("open durable Runtime turn = %#v/%v", running, err)
+	}
+	runtimeWriteID := running.GetCommitted().GetEventId()
+	request := &bridgev1.CommitRuntimeTerminationRequest{
+		Scope: scope, RuntimeWriteId: runtimeWriteID,
+		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
+	}
+	committed, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("CommitRuntimeTermination = %#v/%v; want committed", committed, err)
+	}
+	if _, err := fixture.admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_bindings
+		    SET binding_id='bind_termination_replacement', binding_generation=2,
+		        agent_runtime_pod_uid='pod_termination_replacement'
+		  WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
+	); err != nil {
+		t.Fatalf("replace Runtime binding: %v", err)
+	}
+	replay, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
+	if err != nil || replay.GetStale() == nil {
+		t.Fatalf("old-Pod termination replay = %#v/%v; want stale", replay, err)
+	}
+}
+
 func TestBridgeAPIServerKeepsStructuralFailureOutOfStaleUnion(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "structural")
 	response, err := fixture.server.WriteEvent(context.Background(), closeoutWriteEventRequest(

@@ -124,12 +124,11 @@ type bridgeLoadContextPayload struct {
 }
 
 type bridgeLoadContextMessageDescriptor struct {
-	Kind                  string
-	MessageID             string
-	MessageSequence       int64
-	SourceEventID         *string
-	ModelRequestID        *string
-	HasUnresolvedToolCall bool
+	Kind            string
+	MessageID       string
+	MessageSequence int64
+	SourceEventID   *string
+	ModelRequestID  *string
 }
 
 type bridgeRuntimeContextEntry struct {
@@ -353,6 +352,40 @@ func loadThreadContextJSONTx(
 			            AND rescheduled.model_request_id = m.model_request_id
 			            AND rescheduled.type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
 			       ) AS request_rescheduled
+			       , (
+			         (
+			           EXISTS (
+			             SELECT 1 FROM session_events tool_use
+			              WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
+			                AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
+			                AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+			           )
+			           OR EXISTS (
+			             SELECT 1 FROM session_events repair
+			              WHERE repair.workspace_id=m.workspace_id AND repair.session_id=m.session_id
+			                AND repair.session_thread_id=m.session_thread_id AND repair.model_request_id=m.model_request_id
+			                AND repair.type='agent.tool_result'
+			                AND repair.payload_json::jsonb ->> 'repair_kind'='invalid_tool'
+			           )
+			         )
+			         AND NOT EXISTS (
+			           SELECT 1 FROM session_events tool_use
+			            WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
+			              AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
+			              AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+			              AND NOT EXISTS (
+			                SELECT 1 FROM session_events tool_result
+			                 WHERE tool_result.workspace_id=tool_use.workspace_id AND tool_result.session_id=tool_use.session_id
+			                   AND tool_result.session_thread_id=tool_use.session_thread_id
+			                   AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
+			                   AND COALESCE(
+			                         tool_result.payload_json::jsonb ->> 'tool_use_event_id',
+			                         tool_result.payload_json::jsonb ->> 'tool_use_id',
+			                         tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
+			                       )=tool_use.event_id
+			              )
+			         )
+			       ) AS complete_tool_repair
 		  FROM session_messages m
 		  CROSS JOIN latest_compaction c
 		 WHERE m.workspace_id = $1
@@ -381,6 +414,7 @@ func loadThreadContextJSONTx(
 		var contextState string
 		var requestErrorKind string
 		var requestRescheduled bool
+		var completeToolRepair bool
 		if err := rows.Scan(
 			&kind,
 			&messageID,
@@ -391,6 +425,7 @@ func loadThreadContextJSONTx(
 			&contextState,
 			&requestErrorKind,
 			&requestRescheduled,
+			&completeToolRepair,
 		); err != nil {
 			return "", err
 		}
@@ -401,7 +436,7 @@ func loadThreadContextJSONTx(
 		if err != nil {
 			return "", err
 		}
-		if contextState == "pod_lost" && requestErrorKind == "runtime_pod_lost" && !requestRescheduled && runtimeContextIsCompleteToolRepair(parts) {
+		if contextState == "pod_lost" && requestErrorKind == "runtime_pod_lost" && !requestRescheduled && completeToolRepair {
 			contextState = "sealed"
 		}
 		switch contextState {
@@ -427,10 +462,9 @@ func loadThreadContextJSONTx(
 			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
 		}
 		descriptor := bridgeLoadContextMessageDescriptor{
-			Kind:                  kind,
-			MessageID:             messageID,
-			MessageSequence:       sequence,
-			HasUnresolvedToolCall: runtimeContextHasUnresolvedToolCall(parts),
+			Kind:            kind,
+			MessageID:       messageID,
+			MessageSequence: sequence,
 		}
 		if modelRequestID.Valid {
 			descriptor.ModelRequestID = &modelRequestID.String
@@ -463,66 +497,6 @@ func loadThreadContextJSONTx(
 		PendingAttachments:       pendingAttachments,
 		PendingAgentMail:         pendingAgentMail,
 	})
-}
-
-func runtimeContextIsCompleteToolRepair(parts []json.RawMessage) bool {
-	if len(parts) == 0 {
-		return false
-	}
-	calls := make(map[string]int)
-	results := make(map[string]int)
-	for _, raw := range parts {
-		var part struct {
-			Type            string `json:"type"`
-			ModelToolCallID string `json:"modelToolCallId"`
-		}
-		if json.Unmarshal(raw, &part) != nil || part.ModelToolCallID == "" {
-			return false
-		}
-		switch part.Type {
-		case "tool_call":
-			calls[part.ModelToolCallID]++
-		case "tool_result":
-			results[part.ModelToolCallID]++
-		default:
-			return false
-		}
-	}
-	if len(calls) == 0 || len(calls) != len(results) {
-		return false
-	}
-	for modelToolCallID, count := range calls {
-		if count != 1 || results[modelToolCallID] != 1 {
-			return false
-		}
-	}
-	return true
-}
-
-func runtimeContextHasUnresolvedToolCall(parts []json.RawMessage) bool {
-	calls := make(map[string]struct{})
-	results := make(map[string]struct{})
-	for _, raw := range parts {
-		var part struct {
-			Type            string `json:"type"`
-			ModelToolCallID string `json:"modelToolCallId"`
-		}
-		if json.Unmarshal(raw, &part) != nil || part.ModelToolCallID == "" {
-			continue
-		}
-		switch part.Type {
-		case "tool_call":
-			calls[part.ModelToolCallID] = struct{}{}
-		case "tool_result":
-			results[part.ModelToolCallID] = struct{}{}
-		}
-	}
-	for modelToolCallID := range calls {
-		if _, settled := results[modelToolCallID]; !settled {
-			return true
-		}
-	}
-	return false
 }
 
 func loadThreadContextPrefixTx(

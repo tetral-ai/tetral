@@ -66,7 +66,7 @@ the reducer, not a side-channel wake flag, decides whether work remains.
 | --- | --- |
 | `run_id` / `owner_fiber` / `scope` / `done_deferred` | the active run, its scope, and the deferred that joined waiters await |
 | `stopping` | interrupt installed; the owner is unwinding |
-| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, deferral, or terminal disposition result |
+| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, parked custody, or terminal rejection/stale result |
 
 | Event | Idle thread | Active, `stopping = false` | Active, `stopping = true` |
 | --- | --- | --- | --- |
@@ -121,7 +121,7 @@ state are awaited Effects, never detached background work.
 
 | RPC | Hot mutation it gates |
 | --- | --- |
-| `CommitInputs` | apply the caller-held accepted-input context drafts at the Bridge-assigned sequences after a committed or duplicate result |
+| `CommitInputs` | apply the caller-held accepted-input context drafts at the Bridge-assigned sequences after the committed result (including idempotent replay) |
 | `WriteEvent` | apply the closed event result and its optional Assistant context append; open or resolve pending waits |
 | `WriteRequestEnd` | validate current custody even when no Assistant draft exists; otherwise seal the open draft. An interrupt during an open provider request also applies the identity-matched input commit returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |

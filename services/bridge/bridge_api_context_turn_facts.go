@@ -296,26 +296,38 @@ func loadContextTurnEventFloorTx(
 		}
 	}
 	eventFloor := durableTurnFloor
-	for _, message := range messages {
-		if !message.HasUnresolvedToolCall || message.ModelRequestID == nil || *message.ModelRequestID == "" {
-			continue
-		}
-		var requestFloor int64
-		err := tx.QueryRow(ctx,
-			`SELECT sequence FROM session_events
-			  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			    AND model_request_id=$4 AND type='span.model_request_start'`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *message.ModelRequestID,
-		).Scan(&requestFloor)
-		if dbconnect.IsNoRows(err) {
-			return 0, status.Error(codes.FailedPrecondition, "unresolved Tool request has no Request Start")
-		}
-		if err != nil {
-			return 0, err
-		}
-		if requestFloor < eventFloor {
-			eventFloor = requestFloor
-		}
+	var unresolvedRequestFloor sql.NullInt64
+	err := tx.QueryRow(ctx,
+		`SELECT MIN(request_start.sequence)
+		   FROM session_events tool_use
+		   JOIN session_events request_start
+		     ON request_start.workspace_id=tool_use.workspace_id
+		    AND request_start.session_id=tool_use.session_id
+		    AND request_start.session_thread_id=tool_use.session_thread_id
+		    AND request_start.model_request_id=tool_use.model_request_id
+		    AND request_start.type='span.model_request_start'
+		  WHERE tool_use.workspace_id=$1 AND tool_use.session_id=$2 AND tool_use.session_thread_id=$3
+		    AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+		    AND request_start.sequence >= $4
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_events tool_result
+		       WHERE tool_result.workspace_id=tool_use.workspace_id
+		         AND tool_result.session_id=tool_use.session_id
+		         AND tool_result.session_thread_id=tool_use.session_thread_id
+		         AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		         AND COALESCE(
+		               tool_result.payload_json::jsonb ->> 'tool_use_event_id',
+		               tool_result.payload_json::jsonb ->> 'tool_use_id',
+		               tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
+		             )=tool_use.event_id
+		    )`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), compactionFloor,
+	).Scan(&unresolvedRequestFloor)
+	if err != nil {
+		return 0, err
+	}
+	if unresolvedRequestFloor.Valid && unresolvedRequestFloor.Int64 < eventFloor {
+		eventFloor = unresolvedRequestFloor.Int64
 	}
 	if eventFloor < compactionFloor {
 		eventFloor = compactionFloor
@@ -391,7 +403,7 @@ func bridgeTurnEventFact(
 		}
 		event.ToolUse = toolUse
 	case "agent.tool_result", "agent.mcp_tool_result":
-		result, resultModelRequestID, err := bridgeTurnToolResultFact(ctx, tx, scope, eventType, payloadJSON, runtimeWriteID)
+		result, resultModelRequestID, err := bridgeTurnToolResultFact(ctx, tx, scope, eventType, payloadJSON, projectionJSON, runtimeWriteID)
 		if err != nil {
 			return event, err
 		}
@@ -486,6 +498,7 @@ func bridgeTurnToolResultFact(
 	scope *bridgev1.RuntimeScope,
 	eventType string,
 	payloadJSON string,
+	projectionJSON string,
 	runtimeWriteID sql.NullString,
 ) (*bridgeLoadContextToolResult, string, error) {
 	var payload struct {
@@ -533,63 +546,14 @@ func bridgeTurnToolResultFact(
 	if err != nil {
 		return nil, "", err
 	}
-	outcome, err := runtimeToolResultOutcomeForCallTx(ctx, tx, scope, modelRequestID, toolUse.ModelToolCallID)
-	if err != nil {
-		return nil, "", err
+	var projection struct {
+		State string `json:"state"`
 	}
-	return &bridgeLoadContextToolResult{ModelToolCallID: toolUse.ModelToolCallID, ToolName: toolUse.ToolName, Outcome: outcome}, modelRequestID, nil
-}
-
-func runtimeToolResultOutcomeForCallTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	modelRequestID string,
-	modelToolCallID string,
-) (string, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT data_json FROM session_messages
-		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	)
-	if err != nil {
-		return "", err
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil ||
+		(projection.State != "completed" && projection.State != "error" && projection.State != "cancelled") {
+		return nil, "", status.Error(codes.FailedPrecondition, "tool result direct facts are malformed")
 	}
-	defer func() { _ = rows.Close() }()
-	outcome := ""
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return "", err
-		}
-		stored, err := decodeRuntimeDeclarationObject(raw)
-		if err != nil {
-			return "", status.Error(codes.FailedPrecondition, "durable Tool result context is malformed")
-		}
-		parts, ok := stored["parts"].([]any)
-		if !ok {
-			return "", status.Error(codes.FailedPrecondition, "durable Tool result context is malformed")
-		}
-		for _, rawPart := range parts {
-			part, ok := rawPart.(map[string]any)
-			if !ok || part["type"] != "tool_result" || part["modelToolCallId"] != modelToolCallID {
-				continue
-			}
-			result, ok := part["result"].(map[string]any)
-			candidate, _ := result["type"].(string)
-			if !ok || (candidate != "completed" && candidate != "error" && candidate != "cancelled") || outcome != "" {
-				return "", status.Error(codes.FailedPrecondition, "durable Tool result context is ambiguous")
-			}
-			outcome = candidate
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-	if outcome == "" {
-		return "", status.Error(codes.FailedPrecondition, "durable Tool result context is missing")
-	}
-	return outcome, nil
+	return &bridgeLoadContextToolResult{ModelToolCallID: toolUse.ModelToolCallID, ToolName: toolUse.ToolName, Outcome: projection.State}, modelRequestID, nil
 }
 
 func loadContextRepairFactsTx(

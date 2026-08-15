@@ -173,23 +173,18 @@ message RefreshRuntimeBindingTokenResponse {
 message CommitInputsRequest {
   RuntimeScope scope = 1;
   string runtime_input_id = 2;
-  RuntimeInputDisposition disposition = 3;
+  reserved 3;
+  reserved "disposition";
   repeated string approval_review_text = 4;
 }
 
 message CommitInputsResponse {
+  reserved 2;
+  reserved "duplicate";
   oneof outcome {
     CommitInputsCommitted committed = 1;
-    CommitInputsDuplicate duplicate = 2;
     CommitInputsStale stale = 3;
   }
-}
-
-enum RuntimeInputDisposition {
-  RUNTIME_INPUT_DISPOSITION_UNSPECIFIED = 0;
-  RUNTIME_INPUT_DISPOSITION_COMMIT = 1;
-  RUNTIME_INPUT_DISPOSITION_DEFER = 2;
-  RUNTIME_INPUT_DISPOSITION_REJECT = 3;
 }
 
 message RuntimeContextToolFailed {
@@ -224,28 +219,22 @@ message CommitInputsCommitted {
     CommitInputsInterruptApplication interrupt = 5;
   }
 }
-message CommitInputsDuplicate {
-  reserved 1, 2, 3;
-  reserved "context_delta", "interrupt_tool_results", "pending_attachment_json";
-  oneof application {
-    CommitInputsContextApplication context = 4;
-    CommitInputsInterruptApplication interrupt = 5;
-  }
-}
 message CommitInputsStale {}
 
 message CommitTaskNotificationResultRequest {
   RuntimeScope scope = 1;
   string runtime_input_id = 2;
-  RuntimeInputDisposition disposition = 3;
+  reserved 3;
+  reserved "disposition";
 }
 
 message CommitTaskNotificationResultResponse {
+  reserved 2;
+  reserved "duplicate";
   oneof outcome {
     CommitTaskNotificationResultCommitted committed = 1;
-    CommitTaskNotificationResultDuplicate duplicate = 2;
     CommitTaskNotificationResultStale stale = 3;
-    CommitTaskNotificationResultDeferred deferred = 4;
+    CommitTaskNotificationResultParked parked = 4;
     CommitTaskNotificationResultRejected rejected = 5;
   }
 }
@@ -255,13 +244,8 @@ message CommitTaskNotificationResultCommitted {
   reserved "context_delta";
   repeated int64 assigned_context_sequences = 2;
 }
-message CommitTaskNotificationResultDuplicate {
-  reserved 1;
-  reserved "context_delta";
-  repeated int64 assigned_context_sequences = 2;
-}
 message CommitTaskNotificationResultStale {}
-message CommitTaskNotificationResultDeferred {}
+message CommitTaskNotificationResultParked {}
 message CommitTaskNotificationResultRejected {
   TaskNotificationRejectionReason reason = 1;
 }

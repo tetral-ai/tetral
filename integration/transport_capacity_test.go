@@ -210,7 +210,6 @@ func (s *settlingTransportSender) AcceptInput(
 	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
 		Scope:          scope,
 		RuntimeInputId: request.GetRuntimeInputId(),
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	})
 	if err != nil {
 		return nil, err

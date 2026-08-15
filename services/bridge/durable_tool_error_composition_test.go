@@ -110,6 +110,62 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	assertRuntimeHotColdToolComposition(t, baseLoaded.GetContextJson(), loaded.GetContextJson(), toolUse.GetCommitted().GetAssignedMessageSequence(), payload)
 }
 
+func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_direct_tool_authority"
+		threadID       = "sthr_direct_tool_authority"
+		modelRequestID = "mreq_direct_tool_authority"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_direct_tool_authority", 1, "pod_direct_tool_authority")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	scope := bridgeAPIScope(sessionID, threadID, "bind_direct_tool_authority", 1, "pod_direct_tool_authority")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_direct_tool_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_direct_tool_use", ModelRequestId: modelRequestID,
+		EventType:             "agent.tool_use",
+		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/owned.txt"},"evaluated_permission":"allow"}`,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_direct_tool_authority", "Read", `{"file_path":"/owned.txt"}`),
+	})
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("write direct Tool authority: %#v/%v", toolUse, err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_messages
+		    SET data_json=jsonb_set(data_json::jsonb,'{parts,0,toolName}','"non_authoritative"'::jsonb)::text
+		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		sessionID, threadID, modelRequestID,
+	); err != nil {
+		t.Fatalf("mutate non-authoritative Assistant projection: %v", err)
+	}
+	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
+		Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
+			ErrorJson: `{"type":"provider_tool_protocol_error","message":"read failed","retryable":false}`,
+		}},
+	}))
+	if err != nil || settled.GetCommitted() == nil {
+		t.Fatalf("settle from direct Tool facts: %#v/%v", settled, err)
+	}
+	var projection struct {
+		ModelToolCallID string `json:"model_tool_call_id"`
+		ToolName        string `json:"tool_name"`
+		State           string `json:"state"`
+	}
+	var projectionJSON string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT projection_json FROM session_events
+		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		    AND type='agent.tool_result'`, sessionID, threadID,
+	).Scan(&projectionJSON); err != nil || json.Unmarshal([]byte(projectionJSON), &projection) != nil {
+		t.Fatalf("read direct Tool Result projection: %s/%v", projectionJSON, err)
+	}
+	if projection.ModelToolCallID != "call_direct_tool_authority" || projection.ToolName != "Read" || projection.State != "error" {
+		t.Fatalf("Tool Result authority = %#v; want immutable Tool Use facts", projection)
+	}
+}
+
 func assertRuntimeHotColdToolComposition(
 	t *testing.T,
 	baseContextJSON string,

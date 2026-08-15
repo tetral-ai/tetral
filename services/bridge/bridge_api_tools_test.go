@@ -328,7 +328,6 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		`["evt_bridge_patch_split_allow"]`, "accepted", bindingID, podUID, 3, 3)
 	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: "rin_bridge_patch_split_allow",
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("CommitInputs allow approval: %v", err)
 	}

@@ -59,7 +59,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	request := &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_commit", "thr_bridge_commit", "bind_bridge_commit", 1, "pod_uid_commit"),
 		RuntimeInputId: "rin_bridge_commit",
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	response, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
@@ -101,9 +100,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	if err != nil {
 		t.Fatalf("CommitInputs lost-ACK replay: %v", err)
 	}
-	if replay.GetDuplicate() == nil || !proto.Equal(
+	if replay.GetCommitted() == nil || !proto.Equal(
 		committed.GetContext(),
-		replay.GetDuplicate().GetContext(),
+		replay.GetCommitted().GetContext(),
 	) {
 		t.Fatalf("CommitInputs lost-ACK replay = %#v; want identical durable delta", replay)
 	}
@@ -212,7 +211,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsReturnsFirstTurnFileAttachmentDelta
 	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope(sessionID, threadID, "bind_bridge_commit_media", 1, "pod_uid_commit_media"),
 		RuntimeInputId: runtimeInputID,
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	})
 	if err != nil {
 		t.Fatalf("CommitInputs media: %v", err)
@@ -244,7 +242,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsFencesRuntimeInboxBinding(t *testin
 	_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_commit_fence", "thr_bridge_commit_fence", "bind_bridge_commit_fence", 1, "pod_uid_commit_fence"),
 		RuntimeInputId: "rin_bridge_commit_fence",
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("CommitInputs fenced inbox err = %v; want FailedPrecondition", err)
@@ -277,7 +274,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsToolConfirmationAsMessage(t 
 	_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_commit_confirmation_message", "thr_bridge_commit_confirmation_message", "bind_bridge_commit_confirmation_message", 1, "pod_uid_commit_confirmation_message"),
 		RuntimeInputId: "rin_bridge_confirmation_as_message",
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("CommitInputs messages with tool_confirmation err = %v; want FailedPrecondition", err)
@@ -342,7 +338,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm"),
 		RuntimeInputId: "rin_bridge_generated_confirm",
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	})
 	if err != nil {
 		t.Fatalf("CommitInputs generated confirmation: %v", err)
@@ -440,7 +435,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}
 	request := &bridgev1.CommitInputsRequest{
 		Scope: childScope, RuntimeInputId: runtimeInputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 
 	response, err := store.CommitInputs(context.Background(), request)
@@ -454,8 +448,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	if err != nil {
 		t.Fatalf("CommitInputs inter-agent replay: %v", err)
 	}
-	if replay.GetDuplicate() == nil {
-		t.Fatalf("inter-agent replay outcome = %#v; want duplicate", replay)
+	if replay.GetCommitted() == nil {
+		t.Fatalf("inter-agent replay outcome = %#v; want committed", replay)
 	}
 	loadResponse, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope: childScope,
@@ -579,8 +573,8 @@ func TestPostgreSQLBridgeAPIStoreCompletionCommitReplayProjectsOnce(t *testing.T
 	if err != nil {
 		t.Fatalf("CommitInputs completion replay: %v", err)
 	}
-	if replayed.GetDuplicate() == nil {
-		t.Fatalf("completion replay outcome = %#v; want duplicate", replayed)
+	if replayed.GetCommitted() == nil {
+		t.Fatalf("completion replay outcome = %#v; want committed", replayed)
 	}
 
 	var receiptCount, projectionCount int
@@ -647,7 +641,6 @@ func TestPostgreSQLBridgeAPIStoreConcurrentCompletionCommitCreatesOneReceipt(t *
 	close(start)
 
 	committedCount := 0
-	duplicateCount := 0
 	for range 2 {
 		outcome := <-results
 		if outcome.err != nil {
@@ -656,12 +649,9 @@ func TestPostgreSQLBridgeAPIStoreConcurrentCompletionCommitCreatesOneReceipt(t *
 		if outcome.response.GetCommitted() != nil {
 			committedCount++
 		}
-		if outcome.response.GetDuplicate() != nil {
-			duplicateCount++
-		}
 	}
-	if committedCount != 1 || duplicateCount != 1 {
-		t.Fatalf("concurrent completion outcomes = committed:%d duplicate:%d; want one each", committedCount, duplicateCount)
+	if committedCount != 2 {
+		t.Fatalf("concurrent completion outcomes = committed:%d; want two committed views of one durable result", committedCount)
 	}
 
 	var receiptCount, projectionCount int
@@ -716,8 +706,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 	if err != nil {
 		t.Fatalf("CommitInputs completion mail replay: %v", err)
 	}
-	if first.GetCommitted() == nil || replay.GetDuplicate() == nil {
-		t.Fatalf("completion mail outcomes = %#v/%#v; want committed/duplicate", first, replay)
+	if first.GetCommitted() == nil || replay.GetCommitted() == nil {
+		t.Fatalf("completion mail outcomes = %#v/%#v; want committed replay", first, replay)
 	}
 	var receivedCount, messageCount int
 	var projectedDataJSON string
@@ -794,7 +784,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		}
 		request := &bridgev1.CommitInputsRequest{
 			Scope: bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID), RuntimeInputId: inputID,
-			Disposition:        bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 			ApprovalReviewText: []string{"review this action"},
 		}
 		response, err := store.CommitInputs(context.Background(), request)
@@ -869,9 +858,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		if err != nil {
 			t.Fatalf("replay CommitInputs reviewer input: %v", err)
 		}
-		if replay.GetDuplicate() == nil || !proto.Equal(
+		if replay.GetCommitted() == nil || !proto.Equal(
 			response.GetCommitted().GetContext(),
-			replay.GetDuplicate().GetContext(),
+			replay.GetCommitted().GetContext(),
 		) {
 			t.Fatalf("reviewer input lost-ACK replay = %#v/%#v; want identical durable delta", response, replay)
 		}
@@ -950,7 +939,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "rejection", `["`+eventID1+`","`+eventID2+`"]`, "accepted", bindingID, podUID, 1, 2)
 		request := &bridgev1.CommitInputsRequest{
 			Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-			Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 		}
 		response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInputs(context.Background(), request)
 		if err != nil {

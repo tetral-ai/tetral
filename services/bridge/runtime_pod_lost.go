@@ -112,10 +112,9 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	return repaired, handedOff, nil
 }
 
-// retainRuntimePodLostToolPairsTx removes partial provider output from a
-// request that Bridge closed after proven Pod loss. Only complete Tool pairs
-// survive as provider-visible repair context; their durable array order and
-// modelToolCallId identities are preserved.
+// retainRuntimePodLostToolPairsTx rebuilds provider-visible repair context
+// from immutable Tool Use and separate Tool Result events. Conversation JSON
+// is an output projection here; it is never consulted as settlement authority.
 func retainRuntimePodLostToolPairsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -123,67 +122,57 @@ func retainRuntimePodLostToolPairsTx(
 	sessionID string,
 	start runtimeOpenRequestStart,
 ) error {
-	var messageID, dataJSON string
-	err := tx.QueryRow(ctx,
-		`SELECT message_id, data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND kind = 'assistant'
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-		start.SessionThreadID,
-		start.ModelRequestID,
-	).Scan(&messageID, &dataJSON)
-	if dbconnect.IsNoRows(err) {
-		return nil
-	}
+	rows, err := tx.Query(ctx,
+		`SELECT type, payload_json, projection_json
+		   FROM session_events
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		    AND model_request_id=$4
+		    AND type IN ('agent.tool_use','agent.mcp_tool_use','agent.tool_result','agent.mcp_tool_result')
+		  ORDER BY sequence`,
+		workspaceID, sessionID, start.SessionThreadID, start.ModelRequestID,
+	)
 	if err != nil {
 		return err
 	}
-	message, err := decodeRuntimeDeclarationObject(dataJSON)
-	if err != nil || requireRuntimeObjectFields(message, []string{"parts"}, []string{"parts"}) != nil {
-		return status.Error(codes.FailedPrecondition, "durable pod-loss message is invalid")
-	}
-	parts, ok := message["parts"].([]any)
-	if !ok {
-		return status.Error(codes.FailedPrecondition, "durable pod-loss message is invalid")
-	}
-	calls := make(map[string]int)
-	results := make(map[string]int)
-	for _, rawPart := range parts {
-		part, ok := rawPart.(map[string]any)
-		if !ok {
-			return status.Error(codes.FailedPrecondition, "durable pod-loss message is invalid")
+	defer func() { _ = rows.Close() }()
+	retained := make([]map[string]any, 0)
+	for rows.Next() {
+		var eventType, payloadJSON, projectionJSON string
+		if err := rows.Scan(&eventType, &payloadJSON, &projectionJSON); err != nil {
+			return err
 		}
-		modelToolCallID, _ := part["modelToolCallId"].(string)
-		switch part["type"] {
-		case "tool_call":
-			if modelToolCallID == "" {
-				return status.Error(codes.FailedPrecondition, "durable pod-loss Tool Call is invalid")
+		switch eventType {
+		case "agent.tool_use", "agent.mcp_tool_use":
+			call, err := runtimeToolCallPartFromDirectFacts(payloadJSON, projectionJSON)
+			if err != nil {
+				return err
 			}
-			calls[modelToolCallID]++
-		case "tool_result":
-			if modelToolCallID == "" {
-				return status.Error(codes.FailedPrecondition, "durable pod-loss Tool Result is invalid")
+			retained = append(retained, call)
+		case "agent.tool_result", "agent.mcp_tool_result":
+			var payload struct {
+				RepairKind string `json:"repair_kind"`
 			}
-			results[modelToolCallID]++
+			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+				return status.Error(codes.FailedPrecondition, "durable Tool Result event is malformed")
+			}
+			if payload.RepairKind == "invalid_tool" {
+				call, err := runtimeToolCallPartFromProjection(projectionJSON)
+				if err != nil {
+					return err
+				}
+				retained = append(retained, call)
+			}
+			result, err := runtimeToolResultPartFromProjection(projectionJSON)
+			if err != nil {
+				return err
+			}
+			retained = append(retained, result)
 		}
 	}
-	retained := make([]any, 0, len(parts))
-	for _, rawPart := range parts {
-		part := rawPart.(map[string]any)
-		modelToolCallID, _ := part["modelToolCallId"].(string)
-		if calls[modelToolCallID] == 1 && results[modelToolCallID] == 1 &&
-			(part["type"] == "tool_call" || part["type"] == "tool_result") {
-			retained = append(retained, part)
-		}
+	if err := rows.Err(); err != nil {
+		return err
 	}
-	message["parts"] = retained
-	encoded, err := json.Marshal(message)
+	encoded, err := runtimeContextDataJSON(retained)
 	if err != nil {
 		return err
 	}
@@ -194,22 +183,84 @@ func retainRuntimePodLostToolPairsTx(
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
-		    AND message_id = $4
-		    AND model_request_id = $6`,
+		    AND model_request_id = $4
+		    AND kind = 'assistant'`,
 		workspaceID,
 		sessionID,
 		start.SessionThreadID,
-		messageID,
-		string(encoded),
 		start.ModelRequestID,
+		encoded,
 	)
 	if err != nil {
 		return err
 	}
 	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "durable pod-loss message lost its fence")
+		return nil
 	}
 	return nil
+}
+
+func runtimeToolCallPartFromDirectFacts(payloadJSON string, projectionJSON string) (map[string]any, error) {
+	var payload runtimeToolUseEventPayload
+	var projection struct {
+		ModelToolCallID string `json:"model_tool_call_id"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.Name == "" || len(payload.Input) == 0 ||
+		json.Unmarshal([]byte(projectionJSON), &projection) != nil || projection.ModelToolCallID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "durable Tool Use event is malformed")
+	}
+	var input any
+	if err := json.Unmarshal(payload.Input, &input); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "durable Tool input event is malformed")
+	}
+	return map[string]any{
+		"type": "tool_call", "modelToolCallId": projection.ModelToolCallID,
+		"toolName": payload.Name, "canonicalInput": input,
+	}, nil
+}
+
+func runtimeToolCallPartFromProjection(projectionJSON string) (map[string]any, error) {
+	var projection runtimeToolProjectionPayload
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil ||
+		projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.Input) == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "durable Tool projection is malformed")
+	}
+	var input any
+	if err := json.Unmarshal(projection.Input, &input); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "durable Tool input projection is malformed")
+	}
+	return map[string]any{
+		"type": "tool_call", "modelToolCallId": projection.ModelToolCallID,
+		"toolName": projection.ToolName, "canonicalInput": input,
+	}, nil
+}
+
+func runtimeToolResultPartFromProjection(projectionJSON string) (map[string]any, error) {
+	var projection runtimeToolProjectionPayload
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil || projection.ModelToolCallID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "durable Tool Result projection is malformed")
+	}
+	result := map[string]any{"type": projection.State}
+	switch projection.State {
+	case "completed":
+		if projection.Output == nil {
+			return nil, status.Error(codes.FailedPrecondition, "durable Tool completion projection is malformed")
+		}
+		result["output"] = map[string]any{"text": projection.Output.Text, "truncated": projection.Output.Truncated}
+	case "error":
+		if projection.Error == nil {
+			return nil, status.Error(codes.FailedPrecondition, "durable Tool error projection is malformed")
+		}
+		result["error"] = map[string]any{
+			"type": projection.Error.Type, "message": projection.Error.Message, "retryable": projection.Error.Retryable,
+		}
+	case "cancelled":
+	default:
+		return nil, status.Error(codes.FailedPrecondition, "durable Tool Result projection is malformed")
+	}
+	return map[string]any{
+		"type": "tool_result", "modelToolCallId": projection.ModelToolCallID, "result": result,
+	}, nil
 }
 
 type runtimePodLostAcceptedInput struct {
@@ -1058,12 +1109,6 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 		     ON thread_scope.workspace_id = e.workspace_id
 		    AND thread_scope.session_id = e.session_id
 		    AND thread_scope.id = e.session_thread_id
-		   JOIN session_messages m
-		     ON m.workspace_id = e.workspace_id
-		    AND m.session_id = e.session_id
-		    AND m.session_thread_id = e.session_thread_id
-		    AND m.model_request_id = e.model_request_id
-		    AND m.kind = 'assistant'
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
 		    AND e.session_thread_id IN (SELECT jsonb_array_elements_text($3::jsonb))
@@ -1076,19 +1121,7 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 			      e.type <> 'agent.tool_use'
 			      OR COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
 			    ))
-			    AND EXISTS (
-		        SELECT 1
-		          FROM jsonb_array_elements(
-		               CASE
-		                 WHEN jsonb_typeof(m.data_json::jsonb -> 'parts') = 'array'
-		                   THEN m.data_json::jsonb -> 'parts'
-		                 ELSE '[]'::jsonb
-		               END
-		          ) AS part
-		         WHERE part ->> 'type' = 'tool_call'
-		           AND part ->> 'modelToolCallId' = e.projection_json::jsonb ->> 'model_tool_call_id'
-		    )
-		    AND NOT EXISTS (
+			    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events result
 			         WHERE result.workspace_id = e.workspace_id
@@ -1594,11 +1627,19 @@ func insertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 	if err != nil {
 		return false, err
 	}
+	projection, err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, toolUse, terminal, now)
+	if err != nil {
+		return false, err
+	}
+	projectionJSON, err := marshalBridgeJSON(projection)
+	if err != nil {
+		return false, err
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '{}', $12, $12, $12)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		toolUse.SessionThreadID,
@@ -1610,14 +1651,12 @@ func insertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 		sessionVisible,
 		terminal.WriteIDPrefix+toolUse.EventID,
 		toolUse.ModelRequestID,
+		projectionJSON,
 		now,
 	); err != nil {
 		return false, err
 	}
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return false, err
-	}
-	if err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, toolUse, terminal); err != nil {
 		return false, err
 	}
 	consumptionReason := terminal.ConsumptionReason
@@ -1645,55 +1684,14 @@ func settleRuntimeTerminalToolPartTx(
 	scope *bridgev1.RuntimeScope,
 	toolUse runtimeOrphanToolUse,
 	terminal runtimeTerminalToolResult,
-) error {
-	var messageID, dataJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT message_id, data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND kind = 'assistant'
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		toolUse.ModelRequestID,
-	).Scan(&messageID, &dataJSON); dbconnect.IsNoRows(err) {
-		return status.Error(codes.FailedPrecondition, "durable tool message is missing")
-	} else if err != nil {
-		return err
+	now time.Time,
+) (runtimeToolProjectionPayload, error) {
+	tool, err := loadDurableToolExecutionTx(ctx, tx, scope, toolUse.EventID, toolUse.EventType, false)
+	if err != nil {
+		return runtimeToolProjectionPayload{}, err
 	}
-	message, err := decodeRuntimeDeclarationObject(dataJSON)
-	if err != nil || requireRuntimeObjectFields(message, []string{"parts"}, []string{"parts"}) != nil {
-		return status.Error(codes.FailedPrecondition, "durable tool message is invalid")
-	}
-	parts, ok := message["parts"].([]any)
-	if !ok {
-		return status.Error(codes.FailedPrecondition, "durable tool message is invalid")
-	}
-	foundCall := false
-	for _, rawPart := range parts {
-		part, ok := rawPart.(map[string]any)
-		if !ok {
-			return status.Error(codes.FailedPrecondition, "durable tool message is invalid")
-		}
-		if part["modelToolCallId"] != toolUse.ModelToolCallID {
-			continue
-		}
-		if part["type"] == "tool_result" {
-			return status.Error(codes.FailedPrecondition, "durable tool result already exists")
-		}
-		if part["type"] == "tool_call" {
-			if foundCall {
-				return status.Error(codes.FailedPrecondition, "durable tool call is ambiguous")
-			}
-			foundCall = true
-		}
-	}
-	if !foundCall {
-		return status.Error(codes.FailedPrecondition, "durable tool part is missing")
+	if tool.ModelRequestID != toolUse.ModelRequestID || tool.ModelToolCallID != toolUse.ModelToolCallID {
+		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Tool repair identity is inconsistent")
 	}
 	resultValue := map[string]any{"type": "completed", "output": map[string]any{"text": terminal.Message, "truncated": false}}
 	if !terminal.Success {
@@ -1701,37 +1699,40 @@ func settleRuntimeTerminalToolPartTx(
 			"type": terminal.ErrorType, "message": terminal.Message, "retryable": terminal.Retryable,
 		}}
 	}
-	parts = append(parts, map[string]any{
+	resultPartsJSON, err := json.Marshal([]map[string]any{{
 		"type": "tool_result", "modelToolCallId": toolUse.ModelToolCallID, "result": resultValue,
-	})
-	message["parts"] = parts
-	encoded, err := json.Marshal(message)
+	}})
 	if err != nil {
-		return err
+		return runtimeToolProjectionPayload{}, err
 	}
 	result, err := tx.Exec(ctx,
 		`UPDATE session_messages
-		    SET data_json = $5,
-		        updated_at = clock_timestamp()
+		    SET data_json = jsonb_set(
+		          data_json::jsonb,
+		          '{parts}',
+		          (data_json::jsonb -> 'parts') || $5::jsonb
+		        )::text,
+		        updated_at = $6
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
-		    AND message_id = $4
-		    AND model_request_id = $6`,
+		    AND model_request_id = $4
+		    AND kind = 'assistant'
+		    AND jsonb_typeof(data_json::jsonb -> 'parts') = 'array'`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		messageID,
-		string(encoded),
 		toolUse.ModelRequestID,
+		string(resultPartsJSON),
+		now,
 	)
 	if err != nil {
-		return err
+		return runtimeToolProjectionPayload{}, err
 	}
 	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "durable tool message lost its fence")
+		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable tool message lost its fence")
 	}
-	return nil
+	return runtimeToolProjectionFromDurableTool(tool, resultValue), nil
 }
 
 func modelRequestEndExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, sessionThreadID string, modelRequestID string) (string, bool, error) {

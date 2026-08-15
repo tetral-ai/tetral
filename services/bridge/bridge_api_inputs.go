@@ -34,7 +34,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		OperationID: request.GetRuntimeInputId(),
 	}
 	defer func() { logRuntimeDeclarationRejected(s.Logger, request.GetScope(), evidence, resultErr) }()
-	if request.GetRuntimeInputId() == "" || request.GetDisposition() != bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT {
+	if request.GetRuntimeInputId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid commit inputs request")
 	}
 	if err := validateApprovalReviewText(request.GetApprovalReviewText()); err != nil {
@@ -154,11 +154,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	}
 	if typedResult == nil {
 		return nil, status.Error(codes.Internal, "commit inputs result is unavailable")
-	}
-	if duplicate {
-		return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Duplicate{
-			Duplicate: commitInputsDuplicateResult(inputKind, typedResult),
-		}}, nil
 	}
 	return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Committed{
 		Committed: commitInputsCommittedResult(inputKind, typedResult),
@@ -668,20 +663,6 @@ func commitInputsCommittedResult(inputKind string, result *commitInputsTypedResu
 		}}
 	}
 	return &bridgev1.CommitInputsCommitted{Application: &bridgev1.CommitInputsCommitted_Context{
-		Context: &bridgev1.CommitInputsContextApplication{
-			AssignedContextSequences: result.assignedContextSequences,
-			PendingAttachmentJson:    result.pendingAttachmentJSON,
-		},
-	}}
-}
-
-func commitInputsDuplicateResult(inputKind string, result *commitInputsTypedResult) *bridgev1.CommitInputsDuplicate {
-	if inputKind == "interrupt_control" {
-		return &bridgev1.CommitInputsDuplicate{Application: &bridgev1.CommitInputsDuplicate_Interrupt{
-			Interrupt: &bridgev1.CommitInputsInterruptApplication{InterruptToolResults: result.interruptToolResults},
-		}}
-	}
-	return &bridgev1.CommitInputsDuplicate{Application: &bridgev1.CommitInputsDuplicate_Context{
 		Context: &bridgev1.CommitInputsContextApplication{
 			AssignedContextSequences: result.assignedContextSequences,
 			PendingAttachmentJson:    result.pendingAttachmentJSON,

@@ -22,7 +22,6 @@ import type {
 	WriteEventRequest,
 	WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { RuntimeInputDisposition } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,
@@ -245,12 +244,11 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		expect(bridge.commitInputsRequests[0]).toEqual({
 			scope: expect.objectContaining({ sessionThreadId: "thrd_1" }),
 			runtimeInputId: "rin_confirm",
-			disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
 			approvalReviewText: [],
 		});
 
 		bridge.commitInputsResponse = {
-			duplicate: {
+			committed: {
 				interrupt: {
 					interruptToolResults: [{ toolUseEventId: "tool_1", cancelled: {} }],
 				},
@@ -263,7 +261,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			}),
 		).resolves.toEqual({
 			ok: true,
-			type: "duplicate",
+			type: "committed",
 			assignedContextSequences: [],
 			pendingAttachments: [],
 			interruptToolResults: [
@@ -299,11 +297,27 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		}
 	});
 
+	test("rejects an interrupt application on the accepted-context commit boundary", async () => {
+		const bridge = new TypedBridge();
+		const loader = new BridgeAPIContextLoader(options(bridge));
+		bridge.commitInputsResponse = {
+			committed: { interrupt: { interruptToolResults: [] } },
+		};
+		await expect(
+			loader.commitAcceptedInput({
+				...controlScope("rin_message"),
+				inputOrder: 1,
+				kind: "messages",
+				contentJson: '{"type":"message"}',
+			}),
+		).rejects.toMatchObject({ code: "schema_mismatch" });
+	});
+
 	test("settles task notification from its Inbox identity and returns only assigned context", async () => {
 		const bridge = new TypedBridge();
 		const loader = new BridgeAPIContextLoader(options(bridge));
 		bridge.taskNotificationResponse = {
-			duplicate: { assignedContextSequences: [11] },
+			committed: { assignedContextSequences: [11] },
 		};
 
 		await expect(
@@ -317,7 +331,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				notificationJson: '{"status":"completed"}',
 			}),
 		).resolves.toEqual({
-			type: "duplicate",
+			type: "committed",
 			assignedContextSequences: [11],
 			pendingAttachments: [],
 			interruptToolResults: [],
@@ -325,7 +339,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		expect(bridge.taskNotificationRequests[0]).toEqual({
 			scope: expect.objectContaining({ sessionThreadId: "thrd_1" }),
 			runtimeInputId: "rin_task",
-			disposition: RuntimeInputDisposition.RUNTIME_INPUT_DISPOSITION_COMMIT,
 		});
 	});
 

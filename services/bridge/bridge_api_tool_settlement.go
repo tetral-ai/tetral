@@ -85,6 +85,14 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 		if err != nil {
 			return err
 		}
+		alreadySettled, err := durableToolResultExistsTx(ctx, tx, request.GetScope(), toolUseEventID)
+		if err != nil {
+			return err
+		}
+		if alreadySettled {
+			outcome = "stale"
+			return nil
+		}
 		resultEventType := "agent.tool_result"
 		if toolEventType == "agent.mcp_tool_use" {
 			resultEventType = "agent.mcp_tool_result"
@@ -111,14 +119,18 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			return err
 		}
 		visibility, sessionVisible := threadScope.publicProjection(resultEventType)
+		projectionJSON, err := marshalBridgeJSON(projection)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, runtime_write_id, model_request_id,
 				projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, '{}', $11, $11, $11)`,
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12, $12, $12)`,
 			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(),
-			eventID, sequence, resultEventType, payloadJSON, visibility, sessionVisible, tool.ModelRequestID, now,
+			eventID, sequence, resultEventType, payloadJSON, visibility, sessionVisible, tool.ModelRequestID, projectionJSON, now,
 		); err != nil {
 			return err
 		}
@@ -168,6 +180,29 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 	default:
 		return nil, status.Error(codes.FailedPrecondition, "Tool settlement outcome is missing")
 	}
+}
+
+func durableToolResultExistsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM session_events
+			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			   AND type IN ('agent.tool_result','agent.mcp_tool_result')
+			   AND COALESCE(
+			         payload_json::jsonb ->> 'tool_use_event_id',
+			         payload_json::jsonb ->> 'tool_use_id',
+			         payload_json::jsonb ->> 'mcp_tool_use_id'
+			       ) = $4
+		)`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+	).Scan(&exists)
+	return exists, err
 }
 
 func toolSettlementStaleResponse() *bridgev1.SettleToolResultResponse {

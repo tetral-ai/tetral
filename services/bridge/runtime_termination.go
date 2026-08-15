@@ -222,23 +222,28 @@ func settleRuntimeTerminationDurableFactsTx(
 		if err != nil {
 			return err
 		}
+		projection, err := settleRuntimeToolPartTx(ctx, tx, scope, toolUse.ModelRequestID, settlement, now)
+		if err != nil {
+			return err
+		}
+		projectionJSON, err := marshalBridgeJSON(projection)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
 				created_at, updated_at, processed_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'{}',$12,$12,$12)`,
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$13)`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
 			resultEventType, payloadJSON, visibility, sessionVisible,
 			stableRuntimeID("runtime_termination_tool_result", runtimeWriteID, toolUse.EventID),
-			toolUse.ModelRequestID, now,
+			toolUse.ModelRequestID, projectionJSON, now,
 		); err != nil {
 			return err
 		}
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-			return err
-		}
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, toolUse.ModelRequestID, settlement, now); err != nil {
 			return err
 		}
 		if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUse.EventID, eventID, "runtime_terminated", now); err != nil {

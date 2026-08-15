@@ -135,7 +135,6 @@ func bridgeAgentMailCommitRequestForTest(
 	}
 	return &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: runtimeInputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 }
 
@@ -214,7 +213,6 @@ func bridgeTaskNotificationRequestForTest(t *testing.T, scope *bridgev1.RuntimeS
 	t.Helper()
 	return &bridgev1.CommitTaskNotificationResultRequest{
 		Scope: scope, RuntimeInputId: runtimeInputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 }
 
@@ -1121,11 +1119,16 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 		"mreq_"+sourceToolUseEventID, sourceToolUseEventID, "call_"+sourceToolUseEventID, "exec_command")
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-		visibility, session_visible, model_request_id, created_at, updated_at
+		visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 	) SELECT $1, $2, $3, 'evt_result_' || $4,
 		COALESCE((SELECT MAX(sequence) + 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2), 1),
 		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_event_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
-		'internal', false, 'mreq_' || $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		'internal', false, 'mreq_' || $4,
+		jsonb_build_object(
+			'model_tool_call_id','call_' || $4,'tool_name','exec_command','input','{}'::jsonb,'state','completed',
+			'output',jsonb_build_object('text','Background command accepted.','truncated',false)
+		),
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 	WHERE NOT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND event_id='evt_result_' || $4)`,
 		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
 		t.Fatalf("seed background task source Tool Result: %v", err)

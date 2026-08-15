@@ -1530,7 +1530,7 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 	rows, err := tx.Query(ctx, `WITH latest_compaction AS (
 		SELECT MAX(sequence) AS boundary_sequence FROM session_messages
 		 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND kind='compaction' AND sequence <= $4
-	) SELECT m.kind,m.sequence,m.data_json,
+	) SELECT m.kind,m.sequence,m.data_json,m.model_request_id,
 		CASE
 		  WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
 		  WHEN NOT EXISTS (
@@ -1553,7 +1553,41 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 		   WHERE rescheduled.workspace_id=m.workspace_id AND rescheduled.session_id=m.session_id
 		     AND rescheduled.session_thread_id=m.session_thread_id AND rescheduled.model_request_id=m.model_request_id
 		     AND rescheduled.type IN ('session.status_rescheduled','session.thread_status_rescheduled')
-		) AS request_rescheduled
+		) AS request_rescheduled,
+		(
+		  (
+		    EXISTS (
+		      SELECT 1 FROM session_events tool_use
+		       WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
+		         AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
+		         AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+		    )
+		    OR EXISTS (
+		      SELECT 1 FROM session_events repair
+		       WHERE repair.workspace_id=m.workspace_id AND repair.session_id=m.session_id
+		         AND repair.session_thread_id=m.session_thread_id AND repair.model_request_id=m.model_request_id
+		         AND repair.type='agent.tool_result'
+		         AND repair.payload_json::jsonb ->> 'repair_kind'='invalid_tool'
+		    )
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_events tool_use
+		     WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
+		       AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
+		       AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+		       AND NOT EXISTS (
+		         SELECT 1 FROM session_events tool_result
+		          WHERE tool_result.workspace_id=tool_use.workspace_id AND tool_result.session_id=tool_use.session_id
+		            AND tool_result.session_thread_id=tool_use.session_thread_id
+		            AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		            AND COALESCE(
+		                  tool_result.payload_json::jsonb ->> 'tool_use_event_id',
+		                  tool_result.payload_json::jsonb ->> 'tool_use_id',
+		                  tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
+		                )=tool_use.event_id
+		       )
+		  )
+		) AS complete_tool_repair
 	FROM session_messages m CROSS JOIN latest_compaction c
 	WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$3 AND m.sequence <= $4
 	 AND (c.boundary_sequence IS NULL OR m.sequence >= c.boundary_sequence)
@@ -1567,8 +1601,10 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 	for rows.Next() {
 		var kind, raw, contextState string
 		var sequence int64
+		var modelRequestID sql.NullString
 		var requestRescheduled bool
-		if err := rows.Scan(&kind, &sequence, &raw, &contextState, &requestRescheduled); err != nil {
+		var completeToolRepair bool
+		if err := rows.Scan(&kind, &sequence, &raw, &modelRequestID, &contextState, &requestRescheduled, &completeToolRepair); err != nil {
 			return nil, nil, err
 		}
 		parts, err := decodeStoredRuntimeContextParts(raw)
@@ -1578,7 +1614,7 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 		switch contextState {
 		case "sealed":
 		case "pod_lost":
-			if requestRescheduled || !runtimeContextIsCompleteToolRepair(parts) {
+			if requestRescheduled || !completeToolRepair {
 				continue
 			}
 		case "open":

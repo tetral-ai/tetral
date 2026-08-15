@@ -77,7 +77,6 @@ func runTaskNotificationInterruptRace(t *testing.T, notificationFirst bool) {
 	notificationRequest := bridgeTaskNotificationRequestForTest(t, scope, notificationID)
 	interruptRequest := &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: interruptID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	blocker, err := admin.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -355,7 +354,6 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	commitRequest := &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: inputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	terminationRequest := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: turnID,

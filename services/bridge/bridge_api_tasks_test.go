@@ -522,7 +522,6 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	request := &bridgev1.CommitTaskNotificationResultRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify"),
 		RuntimeInputId: "task_notification:task_bridge_notify",
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	response, err := store.CommitTaskNotificationResult(context.Background(), request)
 	if err != nil {
@@ -535,9 +534,9 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	if err != nil {
 		t.Fatalf("CommitTaskNotificationResult replay: %v", err)
 	}
-	if replay.GetDuplicate() == nil ||
-		len(replay.GetDuplicate().GetAssignedContextSequences()) != 1 ||
-		replay.GetDuplicate().GetAssignedContextSequences()[0] != response.GetCommitted().GetAssignedContextSequences()[0] {
+	if replay.GetCommitted() == nil ||
+		len(replay.GetCommitted().GetAssignedContextSequences()) != 1 ||
+		replay.GetCommitted().GetAssignedContextSequences()[0] != response.GetCommitted().GetAssignedContextSequences()[0] {
 		t.Fatalf("task notification lost-ACK replay diverged: committed=%#v replay=%#v", response, replay)
 	}
 
@@ -638,7 +637,6 @@ func TestPostgreSQLBridgeAPIStoreTaskNotificationStaleSettlementHasStableEvidenc
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.CommitTaskNotificationResultRequest{
 		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		response, err := store.CommitTaskNotificationResult(context.Background(), request)
@@ -686,7 +684,6 @@ func TestPostgreSQLBridgeAPIStoreRejectsInvalidTaskNotificationSourceEventPerInp
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.CommitTaskNotificationResultRequest{
 		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		response, err := store.CommitTaskNotificationResult(context.Background(), request)
@@ -783,7 +780,6 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 	}
 	request := &bridgev1.CommitTaskNotificationResultRequest{
 		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := bridgeStore.CommitTaskNotificationResult(context.Background(), request)
@@ -863,7 +859,6 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 	}
 	request := &bridgev1.CommitTaskNotificationResultRequest{
 		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := apiStore.CommitTaskNotificationResult(context.Background(), request)
@@ -1036,7 +1031,7 @@ func TestPostgreSQLBridgeAPIStoreTaskNotificationRejectsEveryRuntimeScopeMismatc
 	}
 }
 
-func TestPostgreSQLCommitTaskNotificationDeferredReceiptLeavesQueueCustodyToJobRunner(t *testing.T) {
+func TestPostgreSQLCommitTaskNotificationParkedReceiptLeavesQueueCustodyToJobRunner(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_task_deferred_receipt"
@@ -1078,13 +1073,12 @@ func TestPostgreSQLCommitTaskNotificationDeferredReceiptLeavesQueueCustodyToJobR
 
 	response, err := store.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
 		Scope: bridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeInputId: inputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_DEFER,
 	})
 	if err != nil {
 		t.Fatalf("commit deferred task notification: %v", err)
 	}
-	if response.GetDeferred() == nil {
-		t.Fatalf("deferred notification outcome = %#v; want deferred", response)
+	if response.GetParked() == nil {
+		t.Fatalf("parked notification outcome = %#v; want parked", response)
 	}
 	var inboxStatus, queueStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status,job.status

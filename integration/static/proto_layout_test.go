@@ -28,6 +28,8 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc LoadContext(LoadContextRequest) returns (LoadContextResponse);",
 		"rpc CommitInputs(CommitInputsRequest) returns (CommitInputsResponse);",
 		"rpc CommitTaskNotificationResult(CommitTaskNotificationResultRequest) returns (CommitTaskNotificationResultResponse);",
+		"message CommitInputsCommitted",
+		"message CommitTaskNotificationResultParked {}",
 		"rpc WriteEvent(WriteEventRequest) returns (WriteEventResponse);",
 		"rpc SettleToolResult(SettleToolResultRequest) returns (SettleToolResultResponse);",
 		"rpc WriteRequestEnd(WriteRequestEndRequest) returns (WriteRequestEndResponse);",
@@ -100,6 +102,10 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc ResolveInterAgentDelivery(",
 		"message ChildLifecycleSource",
 		"string child_thread_json",
+		"enum RuntimeInputDisposition",
+		"message CommitInputsDuplicate",
+		"message CommitTaskNotificationResultDuplicate",
+		"message CommitTaskNotificationResultDeferred",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("bridge proto exposes forbidden Runtime boundary field %q", forbidden)

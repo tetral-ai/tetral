@@ -2206,34 +2206,41 @@ func insertPendingToolTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, sc
 	if err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $7, $10, $10, $10)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		eventType, payloadJSON, visibility, sessionVisible, now,
-	); err != nil {
-		return "", err
-	}
-	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return "", err
-	}
-	if err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, runtimeOrphanToolUse{
+	toolUse := runtimeOrphanToolUse{
 		SessionThreadID: wait.ThreadID,
 		EventID:         wait.ToolUseEventID,
 		EventType:       wait.EventType,
 		ModelRequestID:  wait.ModelRequestID,
 		ModelToolCallID: wait.ModelToolCallID,
-	}, runtimeTerminalToolResult{
+	}
+	terminalResult := runtimeTerminalToolResult{
 		ErrorType: terminal.ErrorType,
 		Message:   terminal.Message,
 		Retryable: false,
-	}); err != nil {
+	}
+	projection, err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, toolUse, terminalResult, now)
+	if err != nil {
+		return "", err
+	}
+	projectionJSON, err := marshalBridgeJSON(projection)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, projection_json, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $11)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		eventID,
+		sequence,
+		eventType, payloadJSON, visibility, sessionVisible, projectionJSON, now,
+	); err != nil {
+		return "", err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return "", err
 	}
 	return eventID, nil

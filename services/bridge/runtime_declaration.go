@@ -99,7 +99,6 @@ func marshalRuntimeDeclarationObjectWithRawField(value map[string]any, fieldName
 func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"approval_review_text": request.GetApprovalReviewText(),
-		"disposition":          request.GetDisposition().String(),
 		"input_kind":           inputKind,
 		"operation_kind":       bridgeOpCommitInputs,
 		"runtime_input_id":     request.GetRuntimeInputId(),
@@ -325,7 +324,6 @@ func taskNotificationDeclarationDigest(
 	request *bridgev1.CommitTaskNotificationResultRequest,
 ) (string, error) {
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"disposition":       request.GetDisposition().String(),
 		"operation_kind":    bridgeOpCommitTaskNotificationResult,
 		"runtime_input_id":  request.GetRuntimeInputId(),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
@@ -888,64 +886,28 @@ func settleRuntimeToolPartTx(
 	if modelRequestID == "" || settlement == nil || settlement.GetToolUseEventId() == "" {
 		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime Tool settlement is incomplete")
 	}
-	var modelToolCallID string
+	eventType := "agent.tool_use"
+	var storedEventType string
 	if err := tx.QueryRow(ctx,
-		`SELECT projection_json::jsonb ->> 'model_tool_call_id'
-		   FROM session_events
+		`SELECT type FROM session_events
 		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 		    AND event_id=$4 AND type IN ('agent.tool_use','agent.mcp_tool_use')
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), settlement.GetToolUseEventId(),
-	).Scan(&modelToolCallID); dbconnect.IsNoRows(err) {
+	).Scan(&storedEventType); dbconnect.IsNoRows(err) {
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is missing")
 	} else if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
-	if modelToolCallID == "" {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is malformed")
-	}
-	var dataJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND model_request_id = $4 AND kind = 'assistant'
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&dataJSON); dbconnect.IsNoRows(err) {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement has no Assistant message")
-	} else if err != nil {
+	eventType = storedEventType
+	tool, err := loadDurableToolExecutionTx(ctx, tx, scope, settlement.GetToolUseEventId(), eventType, false)
+	if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
-	var message map[string]any
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil || message == nil {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Assistant message is invalid")
+	if tool.ModelRequestID != modelRequestID {
+		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement request identity is inconsistent")
 	}
-	parts, ok := message["parts"].([]any)
-	if !ok {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Assistant parts are invalid")
-	}
-	var selectedCall map[string]any
-	for _, rawPart := range parts {
-		part, ok := rawPart.(map[string]any)
-		if !ok {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Assistant context is malformed")
-		}
-		if part["type"] == "tool_result" && part["modelToolCallId"] == modelToolCallID {
-			return runtimeToolProjectionPayload{}, status.Error(codes.AlreadyExists, "Tool Call already has a terminal result")
-		}
-		if part["type"] != "tool_call" || part["modelToolCallId"] != modelToolCallID {
-			continue
-		}
-		if selectedCall != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is ambiguous")
-		}
-		selectedCall = part
-	}
-	if selectedCall == nil {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is missing")
-	}
-	result := &bridgev1.RuntimeContextToolResult{ModelToolCallId: modelToolCallID}
+	result := &bridgev1.RuntimeContextToolResult{ModelToolCallId: tool.ModelToolCallID}
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
 		result.Outcome = &bridgev1.RuntimeContextToolResult_Completed{Completed: outcome.Completed}
@@ -960,20 +922,25 @@ func settleRuntimeToolPartTx(
 	if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
-	resultPart := map[string]any{"type": "tool_result", "modelToolCallId": modelToolCallID, "result": resultValue}
-	parts = append(parts, resultPart)
-	message["parts"] = parts
-	updatedJSON, err := json.Marshal(message)
+	resultPartsJSON, err := json.Marshal([]map[string]any{{
+		"type": "tool_result", "modelToolCallId": tool.ModelToolCallID, "result": resultValue,
+	}})
 	if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
 	updateResult, err := tx.Exec(ctx,
 		`UPDATE session_messages
-		    SET data_json = $5, updated_at = $6
+		    SET data_json = jsonb_set(
+		          data_json::jsonb,
+		          '{parts}',
+		          (data_json::jsonb -> 'parts') || $5::jsonb
+		        )::text,
+		        updated_at = $6
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND model_request_id = $4 AND kind = 'assistant'`,
+		    AND model_request_id = $4 AND kind = 'assistant'
+		    AND jsonb_typeof(data_json::jsonb -> 'parts') = 'array'`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		modelRequestID, string(updatedJSON), now,
+		modelRequestID, string(resultPartsJSON), now,
 	)
 	if err != nil {
 		return runtimeToolProjectionPayload{}, err
@@ -981,7 +948,7 @@ func settleRuntimeToolPartTx(
 	if !rowsAffected(updateResult) {
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement lost its durable message")
 	}
-	return runtimeToolProjectionFromContext(selectedCall, resultValue), nil
+	return runtimeToolProjectionFromDurableTool(tool, resultValue), nil
 }
 
 // Runtime owns failure projection; Bridge accepts and stores only the strict
@@ -994,11 +961,12 @@ func decodeRuntimeToolErrorJSON(raw string) (map[string]any, error) {
 	return declared, nil
 }
 
-func runtimeToolProjectionFromContext(call map[string]any, result map[string]any) runtimeToolProjectionPayload {
-	projection := runtimeToolProjectionPayload{}
-	projection.ModelToolCallID, _ = call["modelToolCallId"].(string)
-	projection.ToolName, _ = call["toolName"].(string)
-	projection.Input, _ = json.Marshal(call["canonicalInput"])
+func runtimeToolProjectionFromDurableTool(tool durableToolExecution, result map[string]any) runtimeToolProjectionPayload {
+	projection := runtimeToolProjectionPayload{
+		ModelToolCallID: tool.ModelToolCallID,
+		ToolName:        tool.ToolName,
+		Input:           json.RawMessage(tool.InputJSON),
+	}
 	if result != nil {
 		projection.State, _ = result["type"].(string)
 		if output, ok := result["output"].(map[string]any); ok {
@@ -1022,9 +990,6 @@ func runtimeToolProjectionFromContext(call map[string]any, result map[string]any
 				projection.Error = &failure
 			}
 		}
-	}
-	if len(projection.Input) == 0 {
-		projection.Input = json.RawMessage(`{}`)
 	}
 	return projection
 }

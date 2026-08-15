@@ -442,7 +442,6 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: earlyID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("commit first replacement input: %v", err)
 	}
@@ -451,7 +450,6 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	}
 	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: lateID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("commit final replacement input: %v", err)
 	}
@@ -645,7 +643,6 @@ func TestPostgreSQLRuntimePodLossReplacementCommitsTheSameAcceptedInputOnce(t *t
 	}
 	commit := &bridgev1.CommitInputsRequest{
 		Scope: runtimeScopeFromAttempt(job, plan.AttemptedBinding), RuntimeInputId: runtimeInputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	first, err := apiStore.CommitInputs(context.Background(), commit)
@@ -653,8 +650,8 @@ func TestPostgreSQLRuntimePodLossReplacementCommitsTheSameAcceptedInputOnce(t *t
 		t.Fatalf("commit replacement input = %#v, %v; want committed", first, err)
 	}
 	replay, err := apiStore.CommitInputs(context.Background(), commit)
-	if err != nil || replay.GetDuplicate() == nil {
-		t.Fatalf("replay replacement input commit = %#v, %v; want duplicate", replay, err)
+	if err != nil || replay.GetCommitted() == nil {
+		t.Fatalf("replay replacement input commit = %#v, %v; want committed", replay, err)
 	}
 	var inboxStatus string
 	var processed, messages, lineage int

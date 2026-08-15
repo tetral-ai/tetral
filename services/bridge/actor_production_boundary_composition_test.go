@@ -159,7 +159,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 			t.Fatalf("prepare admitted child interrupt through production delivery store = %#v/%v", plan, prepareErr)
 		}
 		committedInterrupt, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope: childScope, RuntimeInputId: interruptInputID, Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
+			Scope: childScope, RuntimeInputId: interruptInputID,
 		})
 		if err != nil || committedInterrupt.GetCommitted().GetInterrupt() == nil {
 			t.Fatalf("commit child interrupt through generated gRPC = %#v/%v", committedInterrupt, err)
@@ -342,7 +342,6 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 	reviewerScope := bridgeAPIScope(sessionID, sidecarID, bindingID, 1, podUID)
 	committedInput, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: reviewerScope, RuntimeInputId: reviewInputID,
-		Disposition:        bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 		ApprovalReviewText: []string{"review the bounded approval evidence"},
 	})
 	if err != nil || committedInput.GetCommitted().GetContext() == nil {

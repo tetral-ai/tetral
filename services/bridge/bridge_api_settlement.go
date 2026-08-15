@@ -66,7 +66,6 @@ func requestEndInterruptCommitRequest(
 	interruptRequest := &bridgev1.CommitInputsRequest{
 		Scope:          request.GetScope(),
 		RuntimeInputId: settlement.GetRuntimeInputId(),
-		Disposition:    bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}
 	if interruptRequest.GetRuntimeInputId() == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement is missing its runtime input")
@@ -1130,6 +1129,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		// A termination ACK belongs to the binding that closed the Runtime turn.
+		// Replays must revalidate that binding before consulting idempotency state so
+		// a replaced Pod cannot recover the predecessor's hot closeout facts.
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitRuntimeTermination, request.GetRuntimeWriteId()); err != nil {
 			return err
 		} else if ok {
@@ -1141,9 +1146,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			}
 			duplicate = true
 			return nil
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {

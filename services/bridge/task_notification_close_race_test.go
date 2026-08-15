@@ -167,7 +167,6 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	childScope := scopeForThread(parentScope, childID)
 	if _, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: childScope, RuntimeInputId: controlRuntimeInputID,
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("commit child-close control: %v", err)
 	}

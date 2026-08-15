@@ -72,9 +72,8 @@ func TestTaskNotificationCanonicalShapesCrossRuntimeDeclarationBoundary(t *testi
 			if err := protojson.Unmarshal(composed.Declaration, declaration); err != nil {
 				t.Fatalf("decode Runtime declaration: %v", err)
 			}
-			if declaration.GetRuntimeInputId() != request.GetRuntimeInputId() ||
-				declaration.GetDisposition() != bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT {
-				t.Fatalf("Runtime declaration = %#v; want input target plus commit disposition", declaration)
+			if declaration.GetRuntimeInputId() != request.GetRuntimeInputId() {
+				t.Fatalf("Runtime declaration = %#v; want exact input target", declaration)
 			}
 			if len([]byte(payload)) > runtimeTaskNotificationPayloadMaxBytes {
 				t.Fatalf("Runtime declaration payload bytes = %d; want <= %d", len([]byte(payload)), runtimeTaskNotificationPayloadMaxBytes)
@@ -154,12 +153,10 @@ func runTaskNotificationRuntimeComposition(
 		switch {
 		case commitResponse.GetCommitted() != nil:
 			outcome = map[string]any{"committed": assignedContextSequencesForComposition(commitResponse.GetCommitted().GetAssignedContextSequences())}
-		case commitResponse.GetDuplicate() != nil:
-			outcome = map[string]any{"duplicate": assignedContextSequencesForComposition(commitResponse.GetDuplicate().GetAssignedContextSequences())}
 		case commitResponse.GetStale() != nil:
 			outcome = map[string]any{"stale": map[string]any{}}
-		case commitResponse.GetDeferred() != nil:
-			outcome = map[string]any{"deferred": map[string]any{}}
+		case commitResponse.GetParked() != nil:
+			outcome = map[string]any{"parked": map[string]any{}}
 		case commitResponse.GetRejected() != nil:
 			outcome = map[string]any{"rejected": map[string]any{"reason": commitResponse.GetRejected().GetReason()}}
 		default:
@@ -425,15 +422,15 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		t.Fatal("task notification composition did not exercise committed lost-ACK replay")
 	}
 	declaration := bridgeServerStore.request()
-	if declaration.GetRuntimeInputId() != inputID || declaration.GetDisposition() != bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT {
+	if declaration.GetRuntimeInputId() != inputID {
 		t.Fatalf("resident Runtime declaration = %#v; want exact committed task input", declaration)
 	}
 	var committedResult struct {
 		Type                     string  `json:"type"`
 		AssignedContextSequences []int64 `json:"assignedContextSequences"`
 	}
-	if err := json.Unmarshal(composed.CommitResult, &committedResult); err != nil || committedResult.Type != "duplicate" || len(committedResult.AssignedContextSequences) != 1 {
-		t.Fatalf("Runtime typed application = %s err:%v; want lost-ACK duplicate with one assigned context sequence", composed.CommitResult, err)
+	if err := json.Unmarshal(composed.CommitResult, &committedResult); err != nil || committedResult.Type != "committed" || len(committedResult.AssignedContextSequences) != 1 {
+		t.Fatalf("Runtime typed application = %s err:%v; want lost-ACK committed replay with one assigned context sequence", composed.CommitResult, err)
 	}
 
 	var inboxStatus, queueStatus, storedMessageText string

@@ -30,7 +30,7 @@ import (
 // the task-notification inbox birth; Bridge verifies the Runtime declaration
 // against that stored terminal result before committing one event and message.
 func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Context, request *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error) {
-	if request.GetRuntimeInputId() == "" || request.GetDisposition() == bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_UNSPECIFIED {
+	if request.GetRuntimeInputId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid task notification result request")
 	}
 	taskID := strings.TrimPrefix(request.GetRuntimeInputId(), "task_notification:")
@@ -105,16 +105,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			outcome = "rejected"
 			return nil
 		}
-		if request.GetDisposition() == bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_DEFER {
-			if err := deferTaskNotificationResultTx(ctx, tx, request.GetScope(), request.GetRuntimeInputId(), now); err != nil {
-				return err
-			}
-			outcome = "deferred"
-			return nil
-		}
-		if request.GetDisposition() == bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_REJECT {
-			return status.Error(codes.FailedPrecondition, "task notification rejection is not permitted for a valid durable result")
-		}
 		if facts.InboxStatus == "queued" || facts.InboxStatus == "parked" {
 			closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId())
 			if err != nil {
@@ -124,7 +114,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 				if err := deferTaskNotificationResultTx(ctx, tx, request.GetScope(), request.GetRuntimeInputId(), now); err != nil {
 					return err
 				}
-				outcome = "deferred"
+				outcome = "parked"
 				return nil
 			}
 		}
@@ -239,8 +229,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 	if outcome == "stale" {
 		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Stale{Stale: &bridgev1.CommitTaskNotificationResultStale{}}}, nil
 	}
-	if outcome == "deferred" {
-		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Deferred{Deferred: &bridgev1.CommitTaskNotificationResultDeferred{}}}, nil
+	if outcome == "parked" {
+		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Parked{Parked: &bridgev1.CommitTaskNotificationResultParked{}}}, nil
 	}
 	if outcome == "rejected" {
 		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Rejected{Rejected: &bridgev1.CommitTaskNotificationResultRejected{
@@ -266,9 +256,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 	)
 	if !observation.Current {
 		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Stale{Stale: &bridgev1.CommitTaskNotificationResultStale{}}}, nil
-	}
-	if duplicate {
-		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Duplicate{Duplicate: &bridgev1.CommitTaskNotificationResultDuplicate{AssignedContextSequences: assignedContextSequences}}}, nil
 	}
 	return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Committed{Committed: &bridgev1.CommitTaskNotificationResultCommitted{AssignedContextSequences: assignedContextSequences}}}, nil
 }

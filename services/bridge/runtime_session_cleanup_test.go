@@ -1256,7 +1256,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}
 	if _, err := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_deny",
-		Disposition: bridgev1.RuntimeInputDisposition_RUNTIME_INPUT_DISPOSITION_COMMIT,
 	}); err != nil {
 		t.Fatalf("commit cleanup approval denial: %v", err)
 	}

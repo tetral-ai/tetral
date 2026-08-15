@@ -89,22 +89,27 @@ func settleInterruptedThreadToolsTx(
 		if err != nil {
 			return nil, err
 		}
+		durableProjection, err := settleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, settlement, now)
+		if err != nil {
+			return nil, err
+		}
+		projectionJSON, err := marshalBridgeJSON(durableProjection)
+		if err != nil {
+			return nil, err
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
 				created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '{}', $12, $12, $12)`,
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), resultEventID,
 			resultSequence, resultEventType, payloadJSON, visibility, sessionVisible,
-			stableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, now,
+			stableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, projectionJSON, now,
 		); err != nil {
 			return nil, err
 		}
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, resultEventID, visibility, sessionVisible, now); err != nil {
-			return nil, err
-		}
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, settlement, now); err != nil {
 			return nil, err
 		}
 		if _, err := tx.Exec(ctx,
