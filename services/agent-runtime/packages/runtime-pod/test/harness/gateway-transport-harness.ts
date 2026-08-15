@@ -28,6 +28,7 @@ import type {
 	RuntimeContextEntry,
 	RuntimeContextPart,
 } from "../../../core/src/contracts/runtime.js";
+import { finalizeRuntimeToolOutput } from "../../../core/src/contracts/runtime.js";
 import type { GatewayClientError } from "../../../core/src/llm/llm-service.js";
 import { createLLMService } from "../../../core/src/llm/llm-service.js";
 import { toGatewayProviderContext } from "../../../core/src/runtime/context-projection.js";
@@ -590,6 +591,7 @@ export async function runMaximumReadTransportProof() {
 	if (result.type !== "completed") {
 		throw new Error(`maximum Read proof did not complete: ${result.type}`);
 	}
+	const providerVisibleOutput = finalizeRuntimeToolOutput(result.output);
 	const runtimeParts: RuntimeContextPart[] = [
 		{
 			type: "tool_call",
@@ -600,7 +602,10 @@ export async function runMaximumReadTransportProof() {
 		{
 			type: "tool_result",
 			modelToolCallId: "call_maximum_read",
-			result: { type: "completed", output: result.output },
+			result: {
+				type: "completed",
+				output: { text: providerVisibleOutput.text },
+			},
 		},
 	];
 	const assembled = assembledVector(
