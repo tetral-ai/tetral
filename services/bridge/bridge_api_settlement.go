@@ -414,45 +414,58 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			facts.EffectiveDeadline = disposition.EffectiveDeadline
 		}
 		if interruptRequest != nil {
-			if _, ok, err := readBridgeDeclarationOperationTx(
+			_, interruptAlreadyCommitted, err := readBridgeDeclarationOperationTx(
 				ctx,
 				tx,
 				request.GetScope(),
 				bridgeOpCommitInputs,
 				"interrupt_control",
 				interruptRequest.GetRuntimeInputId(),
-			); err != nil {
-				return err
-			} else if ok {
-				return status.Error(codes.AlreadyExists, "interrupt input is already settled")
-			}
-			interruptResult, err := commitInputDeclarationTx(
-				ctx,
-				tx,
-				interruptRequest,
-				"interrupt_control",
-				interruptRequest.GetRuntimeInputId(),
-				now,
 			)
 			if err != nil {
 				return err
 			}
-			interruptReplayJSON, err := marshalCommitInputsReplay("interrupt_control", interruptResult)
-			if err != nil {
-				return err
-			}
-			if err := insertBridgeDeclarationOperationTx(
-				ctx,
-				tx,
-				request.GetScope(),
-				bridgeOpCommitInputs,
-				"interrupt_control",
-				interruptRequest.GetRuntimeInputId(),
-				interruptDigest,
-				interruptReplayJSON,
-				now,
-			); err != nil {
-				return err
+			var interruptResult *commitInputsTypedResult
+			if interruptAlreadyCommitted {
+				interruptResult, err = readRequestEndInterruptResultTx(
+					ctx,
+					tx,
+					request.GetScope(),
+					interruptRequest.GetRuntimeInputId(),
+					interruptDigest,
+				)
+				if err != nil {
+					return err
+				}
+			} else {
+				interruptResult, err = commitInputDeclarationTx(
+					ctx,
+					tx,
+					interruptRequest,
+					"interrupt_control",
+					interruptRequest.GetRuntimeInputId(),
+					now,
+				)
+				if err != nil {
+					return err
+				}
+				interruptReplayJSON, err := marshalCommitInputsReplay("interrupt_control", interruptResult)
+				if err != nil {
+					return err
+				}
+				if err := insertBridgeDeclarationOperationTx(
+					ctx,
+					tx,
+					request.GetScope(),
+					bridgeOpCommitInputs,
+					"interrupt_control",
+					interruptRequest.GetRuntimeInputId(),
+					interruptDigest,
+					interruptReplayJSON,
+					now,
+				); err != nil {
+					return err
+				}
 			}
 			facts.InterruptToolResults = append([]*bridgev1.RuntimeInterruptToolResult(nil), interruptResult.interruptToolResults...)
 		}

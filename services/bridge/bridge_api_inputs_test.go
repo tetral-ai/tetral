@@ -113,6 +113,59 @@ func TestPostgreSQLBridgeAPIStoreInterruptReplayFollowsDurableTurnAuthority(t *t
 	}
 }
 
+func TestPostgreSQLWriteRequestEndJoinsPrecommittedActiveRunInterrupt(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_precommitted_active_interrupt"
+		threadID       = "thr_precommitted_active_interrupt"
+		bindingID      = "bind_precommitted_active_interrupt"
+		podUID         = "pod_precommitted_active_interrupt"
+		modelRequestID = "mreq_precommitted_active_interrupt"
+		interruptID    = "rin_precommitted_active_interrupt"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "evt_precommitted_active_run")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_precommitted_active_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	var interruptSequence int64
+	if err := admin.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(sequence), 0) + 1
+		FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, threadID).
+		Scan(&interruptSequence); err != nil {
+		t.Fatalf("allocate active-run interrupt sequence: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_precommitted_active_interrupt", interruptSequence, "user.interrupt", `{}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
+		`["evt_precommitted_active_interrupt"]`, "accepted", bindingID, podUID, interruptSequence, interruptSequence)
+	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: interruptID,
+	})
+	if err != nil || committed.GetCommitted().GetInterrupt() == nil {
+		t.Fatalf("precommit active-run interrupt = %#v/%v; want committed", committed, err)
+	}
+	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_precommitted_active_end", ModelRequestId: modelRequestID,
+		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{RuntimeInputId: interruptID},
+	})
+	if err != nil || ended.GetCommitted() == nil {
+		t.Fatalf("close active request with precommitted interrupt = %#v/%v; want committed", ended, err)
+	}
+	var requestEnds, interruptOperations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		  AND session_thread_id=$2 AND model_request_id=$3 AND type='span.model_request_end'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1
+		  AND session_thread_id=$2 AND operation='commit_inputs' AND source_kind='interrupt_control' AND idempotency_key=$4)`,
+		sessionID, threadID, modelRequestID, interruptID).Scan(&requestEnds, &interruptOperations); err != nil {
+		t.Fatalf("read joined active interrupt facts: %v", err)
+	}
+	if requestEnds != 1 || interruptOperations != 1 {
+		t.Fatalf("joined active interrupt facts = request ends %d, input operations %d; want 1,1", requestEnds, interruptOperations)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_commit", "thr_bridge_commit")
