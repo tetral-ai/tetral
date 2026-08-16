@@ -1714,6 +1714,45 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("a stale durable interrupt commit cannot cancel its active successor", async () => {
+		const threadLoop = makeInterruptRecordingThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_stale_interrupt"))),
+				).toMatchObject({ ok: true, started: true });
+				await waitForInterruptRecordingRuns(threadLoop, 1);
+				const session = threadLoop.runs[0]?.session;
+				if (session === undefined) {
+					throw new Error("expected active successor session");
+				}
+				const command = {
+					...threadControl("sesn_stale_interrupt"),
+					runtimeInputId: "rin_stale_interrupt",
+					inputOrder: 9,
+				};
+				const result = await Effect.runPromise(
+					manager.interruptControl("sesn_stale_interrupt", command, async () => ({
+						ok: true,
+						stale: true,
+					})),
+				);
+
+				expect(result).toEqual({
+					ok: true,
+					sessionId: "sesn_stale_interrupt",
+					created: false,
+					interrupted: false,
+					idleInterrupt: false,
+					stale: true,
+				});
+				expect(threadLoop.interruptions).toEqual([]);
+				expect(session.state.userInterruptRequested()).toBe(false);
+			},
+		);
+	});
+
 	test("interruptControl cancels active work and settles later idle tools", async () => {
 		const threadLoop = makeInterruptRecordingThreadLoop();
 		await withSessionManager(

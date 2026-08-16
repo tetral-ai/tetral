@@ -698,12 +698,13 @@ func loadThreadPendingAgentMailTx(
 }
 
 const loadThreadPendingFileAttachmentsSQL = `WITH media_events AS MATERIALIZED (
-		SELECT event_id, payload_json
+		SELECT event_id, sequence AS event_sequence, payload_json
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
 		   AND session_thread_id = $3
 		   AND type = 'user.message'
+		   AND processed_at IS NOT NULL
 		   AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'
 	),
 	ordered_pairs AS (
@@ -711,22 +712,13 @@ const loadThreadPendingFileAttachmentsSQL = `WITH media_events AS MATERIALIZED (
 		       block.value->'source'->>'file_id' AS file_id,
 		       f.mime_type,
 		       f.filename,
-		       projected.sequence AS message_sequence,
+		       e.event_sequence,
 		       block.position,
 		       ROW_NUMBER() OVER (
 		           PARTITION BY e.event_id, block.value->'source'->>'file_id'
 		           ORDER BY block.position ASC
 		       ) AS pair_rank
 		  FROM media_events e
-		  JOIN LATERAL (
-		      SELECT m.sequence
-		        FROM session_messages m
-		       WHERE m.workspace_id = $1
-		         AND m.session_id = $2
-		         AND m.session_thread_id = $3
-		         AND m.source_event_id = e.event_id
-		       LIMIT 1
-		  ) projected ON TRUE
 		  CROSS JOIN LATERAL jsonb_array_elements(e.payload_json::jsonb->'content')
 		       WITH ORDINALITY AS block(value, position)
 		   LEFT JOIN files f
@@ -747,7 +739,7 @@ const loadThreadPendingFileAttachmentsSQL = `WITH media_events AS MATERIALIZED (
 	          AND c.source_event_id = p.event_id
 	          AND c.file_id = p.file_id
 	   )
-	 ORDER BY p.message_sequence ASC, p.position ASC`
+	 ORDER BY p.event_sequence ASC, p.position ASC`
 
 func loadThreadPendingAttachmentsTx(
 	ctx context.Context,

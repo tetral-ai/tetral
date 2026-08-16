@@ -715,7 +715,7 @@ func validateFileAttachmentConsumptionsTx(
 
 // insertFileAttachmentConsumptionsTx records file-backed consumption durably.
 // A thread's pending file-backed media is never stored: it is always DERIVED as
-// the media blocks of committed, projected messages MINUS the rows written here.
+// the media blocks of processed user input events MINUS the rows written here.
 // That derived-not-stored invariant is what makes hot assembly (a live pod) and
 // cold LoadContext reconstruction run the identical derivation, so pod memory is
 // disposable for user media by construction.

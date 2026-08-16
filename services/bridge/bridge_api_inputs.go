@@ -46,6 +46,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	var inputKind string
 	var declarationDigest string
 	var duplicate bool
+	var supersededInterrupt bool
 	var typedResult *commitInputsTypedResult
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
 		// Serialize replay lookup before validating the current binding. A replacement
@@ -71,6 +72,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		}
 		evidence.Kind = "canonicality"
 		evidence.Kind = "transaction"
+		if inputKind == "interrupt_control" {
+			supersededInterrupt, err = interruptInputSupersededByRunTx(ctx, tx, request)
+			if err != nil {
+				return err
+			}
+		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -92,6 +99,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 				return err
 			}
 			duplicate = true
+			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			return err
+		}
+		if supersededInterrupt {
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 			return err
 		}
@@ -144,12 +155,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	)
 	if inputKind == "interrupt_control" && typedResult != nil {
 		event := "thread_interrupt_completed"
-		if !observation.Current {
+		if !observation.Current || supersededInterrupt {
 			event = "thread_interrupt_stale"
 		}
 		s.logCommittedThreadInterrupt(ctx, request, event, len(typedResult.interruptToolResults), time.Since(logStartedAt).Milliseconds())
 	}
-	if !observation.Current {
+	if !observation.Current || supersededInterrupt {
 		return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Stale{Stale: &bridgev1.CommitInputsStale{}}}, nil
 	}
 	if typedResult == nil {
@@ -158,6 +169,38 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Committed{
 		Committed: commitInputsCommittedResult(inputKind, typedResult),
 	}}, nil
+}
+
+// An interrupt is scoped to the run that was current when its ordered input was
+// admitted. Once a later run-open fact exists, replaying its durable receipt can
+// only target a successor and must terminate before Runtime mutates resident state.
+func interruptInputSupersededByRunTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.CommitInputsRequest,
+) (bool, error) {
+	var superseded bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_runtime_inbox i
+			  JOIN session_events e
+			    ON e.workspace_id = i.workspace_id
+			   AND e.session_id = i.session_id
+			   AND e.session_thread_id = i.session_thread_id
+			 WHERE i.workspace_id = $1
+			   AND i.session_id = $2
+			   AND i.session_thread_id = $3
+			   AND i.runtime_input_id = $4
+			   AND e.type IN ('session.status_running', 'session.thread_status_running')
+			   AND e.sequence > i.sequence_to
+		)`,
+		request.GetScope().GetWorkspaceId(),
+		request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(),
+		request.GetRuntimeInputId(),
+	).Scan(&superseded)
+	return superseded, err
 }
 
 // validateApprovalReviewText bounds the only caller-authored CommitInputs

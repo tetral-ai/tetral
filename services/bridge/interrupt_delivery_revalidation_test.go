@@ -11,11 +11,14 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-func TestJobRunnerRevalidatesPreparedInterruptAfterConcurrentRequestEnd(t *testing.T) {
+func TestJobRunnerRuntimeFenceRejectsInterruptSettledAfterFinalBridgeCheck(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID        = "sesn_interrupt_revalidation"
@@ -84,7 +87,10 @@ func TestJobRunnerRevalidatesPreparedInterruptAfterConcurrentRequestEnd(t *testi
 		prepared:                       make(chan struct{}),
 		release:                        make(chan struct{}),
 	}
-	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	sender := &durableInterruptFenceSender{
+		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{},
+		store:                         apiStore,
+	}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: RuntimePodDirectDeliverer{Store: barrierStore, Sender: sender},
@@ -148,8 +154,16 @@ func TestJobRunnerRevalidatesPreparedInterruptAfterConcurrentRequestEnd(t *testi
 	case <-time.After(5 * time.Second):
 		t.Fatal("interrupt Queue delivery did not finish")
 	}
-	if len(sender.requests) != 0 {
-		t.Fatalf("stale prepared interrupt reached successor Runtime = %#v", sender.requests)
+	if len(sender.requests) != 1 || !sender.stale {
+		t.Fatalf("Runtime fence = requests %#v stale %v; want one delivered interrupt rejected by durable commit", sender.requests, sender.stale)
+	}
+	var threadStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_threads
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID).Scan(&threadStatus); err != nil {
+		t.Fatalf("read successor thread status: %v", err)
+	}
+	if threadStatus != "running" {
+		t.Fatalf("successor thread status = %q; want running after stale interrupt delivery", threadStatus)
 	}
 	var queueStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, queued.ID).
@@ -165,19 +179,24 @@ type preparedInterruptBarrierStore struct {
 	*PostgreSQLRuntimeDeliveryStore
 	prepared chan struct{}
 	release  chan struct{}
-	once     sync.Once
+	mu       sync.Mutex
+	calls    int
 }
 
 func (s *preparedInterruptBarrierStore) PrepareRuntimeCommand(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
 	plan, err := s.PostgreSQLRuntimeDeliveryStore.PrepareRuntimeCommand(ctx, job)
 	if err == nil && plan.Interrupt != nil {
-		s.once.Do(func() {
+		s.mu.Lock()
+		s.calls++
+		finalCheck := s.calls == 2
+		s.mu.Unlock()
+		if finalCheck {
 			close(s.prepared)
 			select {
 			case <-s.release:
 			case <-ctx.Done():
 			}
-		})
+		}
 	}
 	return plan, err
 }
@@ -189,3 +208,42 @@ func (s *preparedInterruptBarrierStore) RepairLostRuntimeBindings(context.Contex
 var _ RuntimeDeliveryStore = (*preparedInterruptBarrierStore)(nil)
 var _ RuntimeDeliveryFinalizationStore = (*preparedInterruptBarrierStore)(nil)
 var _ RuntimePodLossRepairer = (*preparedInterruptBarrierStore)(nil)
+
+type durableInterruptFenceSender struct {
+	*recordingRuntimeCommandSender
+	store *PostgreSQLBridgeAPIStore
+	stale bool
+}
+
+func (s *durableInterruptFenceSender) Interrupt(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.InterruptRequest,
+) (*agentruntimev1.InterruptResponse, error) {
+	s.targets = append(s.targets, target)
+	s.requests = append(s.requests, request)
+	committed, err := s.store.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
+		Scope: bridgeAPIScope(
+			request.GetSessionId(),
+			request.GetSessionThreadId(),
+			request.GetBindingId(),
+			request.GetBindingGeneration(),
+			request.GetTargetPodUid(),
+		),
+		RuntimeInputId: request.GetRuntimeInputId(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if committed.GetStale() == nil {
+		return nil, status.Error(codes.Internal, "interrupt durable fence unexpectedly committed")
+	}
+	s.stale = true
+	return &agentruntimev1.InterruptResponse{
+		Outcome: &agentruntimev1.InterruptResponse_Duplicate{
+			Duplicate: &agentruntimev1.InterruptDuplicate{},
+		},
+	}, nil
+}
+
+var _ RuntimeCommandSender = (*durableInterruptFenceSender)(nil)

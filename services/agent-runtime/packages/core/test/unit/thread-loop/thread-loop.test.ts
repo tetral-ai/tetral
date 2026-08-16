@@ -1864,6 +1864,75 @@ describe("ThreadState", () => {
 		});
 	});
 
+	test("commits a text sibling before sending one request with its pending attachment", async () => {
+		const session = new ThreadRuntime("sesn_attachment_sibling_request");
+		const attachmentInput = {
+			...acceptedInput(
+				"rin_attachment_sibling_first",
+				"sesn_attachment_sibling_request",
+			),
+			contentJson: JSON.stringify({ messages: [{ parts: [] }] }),
+		};
+		const textInput = acceptedInput(
+			"rin_attachment_sibling_text",
+			"sesn_attachment_sibling_request",
+		);
+		const attachment = {
+			transient: undefined,
+			fileBacked: {
+				sourceEventId: "sevt_attachment_sibling",
+				fileId: "file_attachment_sibling",
+			},
+			mime: "image/png",
+			filename: "sibling.png",
+		};
+		expect(session.state.enqueueAcceptedInput(attachmentInput)).toBe("applied");
+		expect(session.state.enqueueAcceptedInput(textInput)).toBe("applied");
+		const loader = new QueuedContextLoader(
+			[],
+			[],
+			[
+				{
+					type: "committed",
+					assignedContextSequences: [],
+					pendingAttachments: [attachment],
+					interruptToolResults: [],
+				},
+			],
+		);
+		const requests: LLMRequest[] = [];
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						onStream: (request) => requests.push(request),
+					}),
+				),
+			),
+		);
+
+		expect(result).toMatchObject({ type: "completed" });
+		expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+			attachmentInput.runtimeInputId,
+			textInput.runtimeInputId,
+		]);
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.context).toEqual([
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+				content: [{ text: { text: "test input" } }],
+			},
+		]);
+		expect(requests[0]?.attachments).toEqual(
+			providerAttachmentsForTest([attachment]),
+		);
+	});
+
 	test("keeps a full active ride separate from attachments queued for the next request", () => {
 		const state = new ThreadState("sesn_attachment_rides");
 		const activeRide = Array.from(

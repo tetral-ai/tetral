@@ -1643,36 +1643,68 @@ export function layer(
 							| Awaited<ReturnType<RuntimeControlInputCommit>>
 							| undefined;
 						let interruptCloseoutCompleted = false;
-						const admitted = yield* submitThreadCommand(
+						const admission = yield* submitThreadCommand(
 							threadEntry,
-							Effect.sync(() => {
+							Effect.gen(function* () {
 								if (runSlot.stopping) {
-									return "conflict" as const;
+									return { type: "conflict" as const };
 								}
+								const declaration = { inputKind: "interrupt" as const };
+								const committed = yield* Effect.promise(() =>
+									commitInput(declaration),
+								);
+								if (!committed.ok) {
+									return { type: "failed" as const, committed };
+								}
+								if ("stale" in committed || "joined" in committed) {
+									return { type: "stale" as const };
+								}
+								interruptCommitResult = committed;
 								threadEntry.bridgeScope = command;
 								const result =
 									threadEntry.runtimeThread.state.beginUserInterrupt(
 										command,
-										async (declaration) => {
-											interruptCommitResult = await commitInput(declaration);
-											return interruptCommitResult;
-										},
+										async () => committed,
 										() => {
 											interruptCloseoutCompleted = true;
 										},
 									);
 								if (result === "applied") {
+									threadEntry.runtimeThread.state.recordJoinedUserInterruptResult(
+										command.runtimeInputId,
+										committed,
+										declaration,
+									);
 									runSlot.stopping = true;
 									threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
 										command.inputOrder,
 										command.origin === "user",
 									);
 								}
-								return result;
+								return { type: result };
 							}),
-							"conflict" as const,
+							{ type: "conflict" as const },
 						);
-						if (admitted === "conflict") {
+						if (admission.type === "failed") {
+							return {
+								ok: false,
+								sessionId,
+								reason: "context_load_failed",
+								retryable: admission.committed.retryable,
+								errorCode: admission.committed.errorCode,
+							};
+						}
+						if (admission.type === "stale") {
+							return {
+								ok: true,
+								sessionId,
+								created: false,
+								interrupted: false,
+								idleInterrupt: false,
+								stale: true,
+							};
+						}
+						if (admission.type === "conflict") {
 							if (
 								sessions
 									.get(commandSessionKey(command))

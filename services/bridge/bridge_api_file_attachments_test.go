@@ -186,7 +186,7 @@ func TestPostgreSQLBridgeAPIStoreReadsBoundedOffsetFileAttachmentChunks(t *testi
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttachments(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProcessedUnconsumedFileAttachments(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_file_pending"
@@ -216,9 +216,13 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttach
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_pending_unprojected"}}]}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_file_pending_later", 3, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_pending_later"}}]}`)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_first", "sevt_file_pending_first", 1)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_later", "sevt_file_pending_later", 2)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 2)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET processed_at=now()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND event_id IN ('sevt_file_pending_first', 'sevt_file_pending_later')`, sessionID, threadID); err != nil {
+		t.Fatalf("mark attachment inputs processed: %v", err)
+	}
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 0)
 	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_file_pending_end", ModelRequestId: "mreq_file_pending",
 		FinishReason: "stop", UsageJson: `{}`,
@@ -281,7 +285,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttach
 	}
 }
 
-func TestPendingFileAttachmentQueryUsesMediaBoundedProjectedMessageLookups(t *testing.T) {
+func TestPendingFileAttachmentQueryUsesMediaBoundedProcessedEventLookups(t *testing.T) {
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_file_plan"
@@ -291,11 +295,16 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedProjectedMessageLookups(t *te
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_file_plan"}}]}`)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_bridge_file_plan_media", eventID, 1)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET processed_at=now()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND event_id=$3`,
+		sessionID, threadID, eventID); err != nil {
+		t.Fatalf("mark media input processed: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
-			payload_json, visibility, session_visible, created_at, updated_at
+			payload_json, visibility, session_visible, processed_at, created_at, updated_at
 		)
 		SELECT 'default', $1, $2,
 		       'sevt_bridge_file_plan_' || value::text,
@@ -305,31 +314,14 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedProjectedMessageLookups(t *te
 		       'public',
 		       TRUE,
 		       '2026-01-01T00:00:00Z',
+		       '2026-01-01T00:00:00Z',
 		       '2026-01-01T00:00:00Z'
 		  FROM generate_series(1, 10000) AS value`,
 		sessionID, threadID,
 	); err != nil {
 		t.Fatalf("seed non-media events: %v", err)
 	}
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, created_at, updated_at
-		)
-		SELECT 'default', $1, $2,
-		       'msg_bridge_file_plan_' || value::text,
-		       value + 1,
-		       'user',
-		       '{"parts":[]}',
-		       'sevt_bridge_file_plan_' || value::text,
-		       '2026-01-01T00:00:00Z',
-		       '2026-01-01T00:00:00Z'
-		  FROM generate_series(1, 10000) AS value`,
-		sessionID, threadID,
-	); err != nil {
-		t.Fatalf("seed non-media projected messages: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_messages, session_events`); err != nil {
+	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events`); err != nil {
 		t.Fatalf("analyze media query tables: %v", err)
 	}
 	rows, err := admin.QueryContext(context.Background(),
@@ -352,11 +344,8 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedProjectedMessageLookups(t *te
 		t.Fatalf("pending file query plan rows: %v", err)
 	}
 	plan := strings.Join(planLines, "\n")
-	if strings.Contains(plan, "Seq Scan on session_messages") {
-		t.Fatalf("pending file query scans total thread messages:\n%s", plan)
-	}
-	if !strings.Contains(plan, "idx_session_messages_source_event") {
-		t.Fatalf("pending file query does not use source-event lookup index:\n%s", plan)
+	if !strings.Contains(plan, "session_events_pending_media_lookup") {
+		t.Fatalf("pending file query does not use the media lookup index:\n%s", plan)
 	}
 	if strings.Contains(plan, "Seq Scan on session_events") {
 		t.Fatalf("pending file query scans non-media session events:\n%s", plan)

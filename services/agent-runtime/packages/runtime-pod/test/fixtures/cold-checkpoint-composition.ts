@@ -12,12 +12,11 @@ import {
 	applyAcceptedInputResult,
 	applyAssistantAppendResult,
 	applyInternalToolRepairResult,
-	contextToolResultFromSettlement,
 	internalToolRepairContext,
 	sealAssistantDraft,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
-import { ContextManager } from "@tetral/agent-runtime-core/src/session/context-manager.js";
-import { ThreadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import { applyCommittedRecoveredToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
+import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import { assembleProviderCallRequest } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import {
 	extractColdThreadToolRouteView,
@@ -159,30 +158,24 @@ if (input.hotScenario !== undefined) {
 		) {
 			throw new Error("Tool settlement hot receipt is incomplete");
 		}
-		const state = new ThreadState("composition_session");
-		state.contextManager.replaceEntries(base.contextEntries);
-		state.contextManager.installOpenRequestDraft(base.openRequestDraft);
-		state.installThreadTurn(baseCheckpoint, baseRoutes);
-		const resultPart = contextToolResultFromSettlement(
-			scenario.modelToolCallId,
+		const runtime = new ThreadRuntime("composition_session");
+		runtime.state.contextManager.replaceEntries(base.contextEntries);
+		runtime.state.contextManager.installOpenRequestDraft(base.openRequestDraft);
+		runtime.state.installThreadTurn(baseCheckpoint, baseRoutes);
+		const applied = applyCommittedRecoveredToolSettlement(
+			runtime,
+			{
+				toolUseEventId: hotSettlement.toolUseEventId,
+				assistantMessageSequence: scenario.assistantMessageSequence,
+				modelToolCallId: scenario.modelToolCallId,
+			},
 			hotSettlement.outcome,
 		);
-		state.contextManager.appendToolResult(
-			scenario.assistantMessageSequence,
-			scenario.modelToolCallId,
-			resultPart.result,
-		);
-		state.applyThreadTurnFact({
-			fact: "tool_result_committed",
-			toolUseEventId: hotSettlement.toolUseEventId,
-			outcome:
-				hotSettlement.outcome.type === "completed"
-					? "success"
-					: hotSettlement.outcome.type,
-		});
-		state.clearThreadToolRoute(hotSettlement.toolUseEventId);
-		hotEntries = state.contextManager.entries();
-		hotCheckpoint = state.threadTurnReduction().checkpoint;
+		if (applied.type !== "settled") {
+			throw new Error(`Tool settlement hot receipt failed: ${applied.type}`);
+		}
+		hotEntries = runtime.state.contextManager.entries();
+		hotCheckpoint = runtime.state.threadTurnReduction().checkpoint;
 	} else {
 		hotEntries = applyHotOperation(
 			base.contextEntries,
@@ -331,29 +324,7 @@ function applyHotOperation(
 			return [...base, sealAssistantDraft(applied.draft)];
 		}
 		case "tool_settlement": {
-			if (
-				scenario.assistantMessageSequence === undefined ||
-				scenario.modelToolCallId === undefined ||
-				scenario.settlement === undefined
-			) {
-				throw new Error("Tool settlement hot scenario is incomplete");
-			}
-			const declaration = RuntimeToolSettlementDeclarationSchema.parse({
-				toolUseEventId: scenario.toolUseEventId,
-				outcome: scenario.settlement,
-			});
-			const contextOwner = new ContextManager("composition_session", base);
-			contextOwner.installOpenRequestDraft(baseOpenRequestDraft);
-			const resultPart = contextToolResultFromSettlement(
-				scenario.modelToolCallId,
-				declaration.outcome,
-			);
-			contextOwner.appendToolResult(
-				scenario.assistantMessageSequence,
-				scenario.modelToolCallId,
-				resultPart.result,
-			);
-			return contextOwner.entries();
+			throw new Error("Tool settlement must use the production hot receipt owner");
 		}
 		case "internal_repair": {
 			if (

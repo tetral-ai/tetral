@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -138,8 +139,11 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 
 	apiStore := NewPostgreSQLBridgeAPIStore(client)
 	apiStore.AttachmentBlobStore = attachmentStore
+	apiStore.RuntimeBindingTokenHMACKey = []byte("attachment-hot-cold-composition-signing-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_attachment_hot_cold_run")
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope:          scope,
 		RuntimeInputId: runtimeInputID,
 	})
 	if err != nil {
@@ -149,7 +153,70 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	if len(application.GetAssignedContextSequences()) != 0 || len(application.GetPendingAttachmentJson()) != 2 {
 		t.Fatalf("attachment receipt = %#v; want zero text sequences and two attachments", application)
 	}
+	loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope,
+	})
+	if err != nil {
+		t.Fatalf("load committed attachment input for cold composition: %v", err)
+	}
+	assertAttachmentHotColdComposition(t, accepted, committed, loaded.GetContextJson())
 	assertAttachmentOnlyRuntimeInputFixture(t, accepted, committed)
+}
+
+func assertAttachmentHotColdComposition(
+	t *testing.T,
+	accepted *agentruntimev1.AcceptInputRequest,
+	committed *bridgev1.CommitInputsResponse,
+	coldContextJSON string,
+) {
+	t.Helper()
+	input := map[string]any{
+		"acceptedInput": map[string]any{
+			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
+			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
+			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(),
+			"runtimeInputId": accepted.GetRuntimeInputId(), "inputOrder": accepted.GetInputOrder(),
+			"kind": "messages", "contentJson": accepted.GetMessagesJson(),
+		},
+		"commitInputsResponse": map[string]any{"committed": map[string]any{"context": map[string]any{
+			"assignedContextSequences": committed.GetCommitted().GetContext().GetAssignedContextSequences(),
+			"pendingAttachmentJson":    committed.GetCommitted().GetContext().GetPendingAttachmentJson(),
+		}}},
+		"coldContextJson": coldContextJSON,
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("encode attachment hot/cold composition: %v", err)
+	}
+	inputPath := t.TempDir() + "/attachment-hot-cold.json"
+	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
+		t.Fatalf("write attachment hot/cold composition: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/attachment-hot-cold-composition.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run attachment hot/cold composition: %v: %s", err, output)
+	}
+	type requestProjection struct {
+		RequestCount int               `json:"requestCount"`
+		Context      []json.RawMessage `json:"context"`
+		Attachments  []json.RawMessage `json:"attachments"`
+	}
+	var composed struct {
+		Hot  requestProjection `json:"hot"`
+		Cold requestProjection `json:"cold"`
+	}
+	if err := json.Unmarshal(output, &composed); err != nil {
+		t.Fatalf("decode attachment hot/cold composition: %v: %s", err, output)
+	}
+	if composed.Hot.RequestCount != 1 || composed.Cold.RequestCount != 1 ||
+		len(composed.Hot.Context) != 0 || len(composed.Cold.Context) != 0 ||
+		len(composed.Hot.Attachments) != 2 || !reflect.DeepEqual(composed.Hot, composed.Cold) {
+		t.Fatalf("attachment hot/cold composition = hot %#v cold %#v; want one identical attachment-only request", composed.Hot, composed.Cold)
+	}
 }
 
 func assertAttachmentOnlyRuntimeInputFixture(t *testing.T, accepted *agentruntimev1.AcceptInputRequest, committed *bridgev1.CommitInputsResponse) {

@@ -67,6 +67,7 @@ import type {
 	RuntimeOpenRequestDraft,
 	RuntimeProviderAttachment,
 	RuntimeRequestErrorKind,
+	RuntimeToolSettlementDeclaration,
 	SessionEvent,
 	SessionEventEnvelope,
 	SessionEventWriter,
@@ -4487,22 +4488,43 @@ async function commitRecoveredToolSettlement(
 	if (result.result.type === "stale") {
 		return { type: "stale_custody" };
 	}
+	return applyCommittedRecoveredToolSettlement(
+		session,
+		{
+			toolUseEventId: pending.toolUseEventId,
+			assistantMessageSequence: pending.assistantMessageSequence,
+			modelToolCallId: pending.toolPart.modelToolCallId,
+		},
+		settlement,
+	);
+}
+
+/** Applies one committed recovered-Tool receipt to the resident Thread projection. */
+export function applyCommittedRecoveredToolSettlement(
+	session: ThreadRuntime,
+	target: {
+		readonly toolUseEventId: string;
+		readonly assistantMessageSequence: number;
+		readonly modelToolCallId: string;
+	},
+	settlement: RuntimeToolSettlementDeclaration["outcome"],
+): ToolSettlementApplicationResult {
 	try {
 		const resultPart = contextToolResultFromSettlement(
-			pending.toolPart.modelToolCallId,
+			target.modelToolCallId,
 			settlement,
 		);
 		session.state.contextManager.appendToolResult(
-			pending.assistantMessageSequence,
-			pending.toolPart.modelToolCallId,
+			target.assistantMessageSequence,
+			target.modelToolCallId,
 			resultPart.result,
 		);
 		session.state.applyThreadTurnFact({
 			fact: "tool_result_committed",
-			toolUseEventId: pending.toolUseEventId,
+			toolUseEventId: target.toolUseEventId,
 			outcome: settlement.type === "completed" ? "success" : settlement.type,
 		});
-		session.state.clearThreadToolRoute(pending.toolUseEventId);
+		session.state.clearThreadToolRoute(target.toolUseEventId);
 	} catch (error) {
 		return {
 			type: "failed",
