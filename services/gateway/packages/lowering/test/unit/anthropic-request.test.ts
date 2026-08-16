@@ -17,6 +17,34 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("anthropic request lowering", () => {
+
+  test("classifies an unpaired Tool Result as a non-retryable lowering error", () => {
+    let caught: unknown;
+    try {
+      lowerAnthropicRequest(anthropicRequest({
+        context: [{
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [{
+            toolResult: {
+              modelToolCallId: "call_missing",
+              error: { errorJson: '{"error":{"message":"missing"}}' },
+              completed: undefined,
+              cancelled: undefined,
+            },
+          }],
+        }],
+      }));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ProviderRequestLoweringError);
+    expect(classifyProviderStreamError(caught)).toMatchObject({
+      code: "provider_request_invalid",
+      retryable: false,
+      fatal: true,
+      statusCode: 400,
+    });
+  });
   test("rejects freeform tools before an unsupported provider adapter runs", () => {
     expect(() => lowerAnthropicRequest(anthropicRequest({
       tools: [{

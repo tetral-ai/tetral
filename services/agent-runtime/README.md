@@ -196,6 +196,10 @@ Invariants a replacement must preserve:
 
 - `ProviderRequest.tools[]` carries definitions only — no route kind, RPC names,
   formatter identity, permission policy, sandbox binding, or credentials.
+- Runtime removes an unresolved Tool Call from inherited child-prefix context
+  before provider projection while retaining safe text and reasoning siblings.
+  A local in-progress request may retain its pending Tool Call; a terminal Tool
+  Result remains paired only by `modelToolCallId`.
 - Stream events echo the request identity and arrive well-formed: fragments in
   order, one terminal event, each tool call at most once per id; any violation
   closes the turn as a protocol error and discards uncommitted drafts.

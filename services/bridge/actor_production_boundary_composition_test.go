@@ -65,6 +65,12 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		t.Fatalf("authorize durable spawn source: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, spawnRequestID, spawnSourceID, "call_actor_production_spawn", "spawn_agent")
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
+		SET data_json='{"parts":[{"type":"text","text":"safe parent prefix text"},{"type":"tool_call","modelToolCallId":"call_actor_production_spawn","toolName":"spawn_agent","canonicalInput":{"task_name":"durable-child","agent_type":"worker","fork_turns":"all"}}]}'
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		sessionID, parentID, spawnRequestID); err != nil {
+		t.Fatalf("add safe parent prefix sibling: %v", err)
+	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_actor_production_spawn_end", 2, "span.model_request_end",
 		`{"type":"span.model_request_end","model_request_id":"`+spawnRequestID+`","is_error":false}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET model_request_id=$2
@@ -95,6 +101,20 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	if prefixParent != parentID || prefixBoundary != spawnSourceID || prefixEntries == "[]" {
 		t.Fatalf("subagent prefix parent/boundary/entries = %s/%s/%s", prefixParent, prefixBoundary, prefixEntries)
 	}
+	childScope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
+	firstLoaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope})
+	if err != nil {
+		t.Fatalf("cold-load child first provider context: %v", err)
+	}
+	prefixWires := runPendingPrefixProviderWireComposition(t, runRuntimeProviderComposition(t, firstLoaded.GetContextJson()))
+	if len(prefixWires) != 3 {
+		t.Fatalf("child first-request provider families = %d; want 3", len(prefixWires))
+	}
+	for _, wire := range prefixWires {
+		if wire.Pathname == "" || wire.SafeTextCount != 1 || wire.ToolCallCount != 0 {
+			t.Fatalf("child first-request provider wire = %+v", wire)
+		}
+	}
 
 	seedActorSourceEvent(t, admin, sessionID, parentID, mailSourceID, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"`+taskName+`","message":"`+mailContent+`"}}`)
@@ -109,7 +129,6 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	if err != nil || delivered.GetCommitted() == nil {
 		t.Fatalf("deliver inter-agent mail through generated gRPC = %#v/%v", delivered, err)
 	}
-	childScope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
 	loaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope})
 	if err != nil {
 		t.Fatalf("cold-load target-owned mail through generated gRPC = %#v/%v", loaded, err)
@@ -203,6 +222,38 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	if finalStatus != "idle" {
 		t.Fatalf("resumed child status = %s; want idle", finalStatus)
 	}
+}
+
+type pendingPrefixProviderWireComposition struct {
+	Family        string `json:"family"`
+	Pathname      string `json:"pathname"`
+	SafeTextCount int    `json:"safeTextCount"`
+	ToolCallCount int    `json:"toolCallCount"`
+}
+
+func runPendingPrefixProviderWireComposition(t *testing.T, requests []json.RawMessage) []pendingPrefixProviderWireComposition {
+	t.Helper()
+	input, err := json.Marshal(map[string]any{"requests": requests})
+	if err != nil {
+		t.Fatalf("encode pending-prefix provider requests: %v", err)
+	}
+	inputPath := t.TempDir() + "/pending-prefix-provider-requests.json"
+	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
+		t.Fatalf("write pending-prefix provider requests: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/provider-gateway/test/fixtures/pending-prefix-wire.ts", inputPath) //nolint:gosec // Fixed provider composition fixture and test-owned input.
+	command.Dir = "../gateway"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run pending-prefix provider wire composition: %v: %s", err, output)
+	}
+	var result []pendingPrefixProviderWireComposition
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode pending-prefix provider wire composition: %v: %s", err, output)
+	}
+	return result
 }
 
 func assertRuntimeDirectContextComposition(t *testing.T, contextJSON string) {

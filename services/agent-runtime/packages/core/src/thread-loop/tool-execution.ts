@@ -678,15 +678,13 @@ export function invalidToolCallFailure(
 	source: RuntimeProcessorSource,
 	toolName: string,
 ): RuntimeFailure {
+	const message = `disabled or unknown tool call: ${toolName}`;
 	const failure = toolContractFailure(
 		sessionId,
 		source,
-		`disabled or unknown tool call: ${toolName}`,
+		message,
 	);
-	return RuntimeFailureSchema.parse({
-		...failure,
-		message: "Tool is unavailable.",
-	});
+	return RuntimeFailureSchema.parse({ ...failure, message });
 }
 
 export function deniedToolCallFailure(

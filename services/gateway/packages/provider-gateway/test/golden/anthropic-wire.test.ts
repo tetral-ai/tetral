@@ -339,11 +339,11 @@ describe("multi-Tool captured provider wire composition", () => {
 				expect(providerContextPendingToolCallIds(afterFirstSettlement)).toEqual(
 					["call:shared", "call_gamma"],
 				);
-				const pendingRequest = multiToolHistoryRequest(scenario.request, [
+				const afterSecondSettlement = multiToolHistoryRequest(scenario.request, [
 					"call/shared",
 					"call:shared",
 				]);
-				expect(providerContextPendingToolCallIds(pendingRequest)).toEqual([
+				expect(providerContextPendingToolCallIds(afterSecondSettlement)).toEqual([
 					"call_gamma",
 				]);
 				const settledRequest = multiToolHistoryRequest(scenario.request, [
@@ -1969,7 +1969,9 @@ function assertCapturedMultiToolWire(
 	const pendingCallIds = originalCallIds.filter(
 		(id) => !expectedResultIds.includes(id),
 	);
-	expect(pendingCallIds).toEqual([]);
+	expect(wire.calls.filter((call) => !wire.results.some((result) => result.id === call.id)).map((call) => call.id)).toEqual(
+		pendingCallIds.map((id) => providerIdByOriginal.get(id)!),
+	);
 	assertCapturedToolMessageGrouping(family, body, expectedCallIds, wire.results.map((result) => result.id));
 }
 

@@ -36,9 +36,10 @@ export function toGatewayProviderContextSegments(
 	}
 	const calls = new Set<string>();
 	const results = new Set<string>();
+	const prefixPairedCallIds = pairedToolCallIds(inputs);
 	const context: ProviderContextEntry[] = [];
 	let entryCount = 0;
-	for (const input of inputs) {
+	for (const [segmentIndex, input] of inputs.entries()) {
 		if (!Array.isArray(input))
 			return { ok: false, error: runtimeInputError("schema") };
 		const seenSequences = new Set<number>();
@@ -57,7 +58,15 @@ export function toGatewayProviderContextSegments(
 			seenSequences.add(entry.messageSequence);
 			const content: ProviderContextItem[] = [];
 			for (const part of entry.parts) {
-				const projected = projectPart(entry, part, calls, results);
+				const projected = projectPart(
+					entry,
+					part,
+					calls,
+					results,
+					segmentIndex === inputs.length - 1 ||
+						(part.type === "tool_call" &&
+							prefixPairedCallIds.has(part.modelToolCallId)),
+				);
 				if (!projected.ok)
 					return { ok: false, error: runtimeInputError(projected.reason) };
 				content.push(...projected.content);
@@ -72,6 +81,21 @@ export function toGatewayProviderContextSegments(
 	return { ok: true, context };
 }
 
+function pairedToolCallIds(inputs: readonly unknown[]): ReadonlySet<string> {
+	const paired = new Set<string>();
+	for (const input of inputs) {
+		if (!Array.isArray(input)) continue;
+		for (const value of input) {
+			const parsed = RuntimeContextEntrySchema.safeParse(value);
+			if (!parsed.success) continue;
+			for (const part of parsed.data.parts) {
+				if (part.type === "tool_result") paired.add(part.modelToolCallId);
+			}
+		}
+	}
+	return paired;
+}
+
 type ContentProjection =
 	| { readonly ok: true; readonly content: readonly ProviderContextItem[] }
 	| { readonly ok: false; readonly reason: string };
@@ -81,6 +105,7 @@ function projectPart(
 	part: RuntimeContextPart,
 	calls: Set<string>,
 	results: Set<string>,
+	providerEligible: boolean,
 ): ContentProjection {
 	switch (part.type) {
 		case "text":
@@ -115,6 +140,7 @@ function projectPart(
 			) {
 				return { ok: false, reason: "conflicting_tool_call_pair" };
 			}
+			if (!providerEligible) return { ok: true, content: [] };
 			calls.add(part.modelToolCallId);
 			return {
 				ok: true,

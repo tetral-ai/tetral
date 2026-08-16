@@ -48,9 +48,10 @@ type bridgeLoadContextToolUse struct {
 }
 
 type bridgeLoadContextToolResult struct {
-	ModelToolCallID string `json:"modelToolCallId"`
-	ToolName        string `json:"toolName"`
-	Outcome         string `json:"outcome"`
+	ModelToolCallID string `json:"modelToolCallId,omitempty"`
+	ToolName        string `json:"toolName,omitempty"`
+	Outcome         string `json:"outcome,omitempty"`
+	RepairKey       string `json:"repairKey,omitempty"`
 }
 
 type bridgeLoadContextRepairFact struct {
@@ -517,9 +518,7 @@ func bridgeTurnToolResultFact(
 			payload.ModelToolCallID == "" || payload.ToolName == "" {
 			return nil, "", status.Error(codes.FailedPrecondition, "internal tool repair projection is malformed")
 		}
-		return &bridgeLoadContextToolResult{
-			ModelToolCallID: payload.ModelToolCallID, ToolName: payload.ToolName, Outcome: "error",
-		}, "", nil
+		return &bridgeLoadContextToolResult{RepairKey: runtimeWriteID.String}, "", nil
 	}
 	toolUseEventID, err := durableToolResultUseEventID(eventType, durableToolResultEventPayload{
 		ToolUseEventID: payload.ToolUseEventID,

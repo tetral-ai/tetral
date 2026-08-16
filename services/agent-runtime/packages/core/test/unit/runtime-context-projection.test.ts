@@ -127,6 +127,44 @@ describe("Runtime provider-context projection", () => {
 		]);
 	});
 
+	test("removes an unresolved parent Tool Call from a child prefix without dropping safe siblings", () => {
+		const result = toGatewayProviderContextSegments([
+			[
+				entry(1, "assistant", [
+					{ type: "text", text: "safe parent text" },
+					{
+						type: "reasoning",
+						text: "safe parent reasoning",
+						providerMetadata: { anthropic: { signature: "sig_parent" } },
+					},
+					toolCall("call-unresolved-spawn"),
+				]),
+			],
+			[entry(1, "user", [{ type: "text", text: "child task" }])],
+		]);
+
+		expect(result).toMatchObject({ ok: true });
+		if (!result.ok) return;
+		expect(result.context).toEqual([
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+				content: [
+					{ text: { text: "safe parent text" } },
+					{
+						reasoning: {
+							text: "safe parent reasoning",
+							metadataJson: '{"anthropic":{"signature":"sig_parent"}}',
+						},
+					},
+				],
+			},
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+				content: [{ text: { text: "child task" } }],
+			},
+		]);
+	});
+
 	test("preserves signed empty reasoning for provider replay", () => {
 		expect(
 			toGatewayProviderContext([

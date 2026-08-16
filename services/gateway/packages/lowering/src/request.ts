@@ -596,7 +596,7 @@ function lowerToolCall(
   providerToolCallIds: Set<string>,
 ): LoweredToolCallPart {
   if (toolCalls.has(tool.modelToolCallId)) {
-    throw new Error("gateway_protocol_error: provider Tool Call identity is duplicated");
+    throw invalidProviderToolContext("Provider Tool Call identity is duplicated.");
   }
   const sanitizedToolCallId = sanitizeText(tool.modelToolCallId);
   const toolCallId = rules.scrubToolCallIds
@@ -620,12 +620,12 @@ function lowerToolResult(
 ): LoweredToolResultPart {
   const call = toolCalls.get(result.modelToolCallId);
   if (call === undefined || toolResults.has(result.modelToolCallId)) {
-    throw new Error("gateway_protocol_error: provider Tool Result does not pair with exactly one prior Tool Call");
+    throw invalidProviderToolContext("Provider Tool Result does not pair with exactly one prior Tool Call.");
   }
   toolResults.add(result.modelToolCallId);
   const outcomeCount = Number(result.completed !== undefined) + Number(result.error !== undefined) + Number(result.cancelled !== undefined);
   if (outcomeCount !== 1) {
-    throw new Error("gateway_protocol_error: provider Tool Result must select exactly one outcome");
+    throw invalidProviderToolContext("Provider Tool Result must select exactly one outcome.");
   }
   return result.completed !== undefined
     ? {
@@ -1276,10 +1276,20 @@ function allocateProviderToolCallId(base: string, used: Set<string>): string {
 
 function registerProviderToolCallId(toolCallId: string, used: Set<string>): string {
   if (used.has(toolCallId)) {
-    throw new Error("gateway_protocol_error: provider Tool Call identities collide after text sanitation");
+    throw invalidProviderToolContext("Provider Tool Call identities collide after text sanitation.");
   }
   used.add(toolCallId);
   return toolCallId;
+}
+
+function invalidProviderToolContext(message: string): ProviderRequestLoweringError {
+  return new ProviderRequestLoweringError({
+    code: "provider_request_invalid",
+    message,
+    retryable: false,
+    fatal: true,
+    statusCode: 400,
+  });
 }
 
 function sanitizeText(value: string): string {

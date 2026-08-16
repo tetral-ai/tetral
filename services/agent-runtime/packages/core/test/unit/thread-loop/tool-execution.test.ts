@@ -2372,7 +2372,7 @@ describe("ThreadLoop", () => {
 				canonicalInput: {},
 				error: {
 					type: "runtime_invalid_sequence",
-					message: "Tool is unavailable.",
+					message: `disabled or unknown tool call: ${tc.absentTool}`,
 					retryable: false,
 				},
 			});

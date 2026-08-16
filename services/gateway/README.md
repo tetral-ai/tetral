@@ -172,7 +172,12 @@ it preserves the stated invariants and passes the named suites.
   normative; reordering changes wire bytes. Reasoning provenance metadata
   round-trips byte-exact so cold reloads do not downgrade reasoning. Usage
   raising splits by wire family (anthropic-wire vs openai-wire) — getting the
-  split wrong silently corrupts one family's usage. The seven-model set is closed.
+  split wrong silently corrupts one family's usage. One Runtime Assistant
+  context entry lowers to one provider Assistant message: ordered text,
+  reasoning, and concurrent Tool Calls stay grouped, while Tool Results use the
+  provider protocol's result messages. Provider-required Tool-call-ID scrubbing
+  is deterministic, one-to-one, and allocates collision suffixes without
+  splitting that Assistant message. The seven-model set is closed.
 - **Conformance.** `packages/lowering/test/unit/*-request.test.ts` (per-rule,
   table-driven), `stream.test.ts`, `usage.test.ts`, `errors.test.ts`,
   `rules-invariants.test.ts`; `packages/lowering/test/rules-coverage.test.ts`
