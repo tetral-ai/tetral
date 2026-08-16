@@ -300,7 +300,7 @@ describe("provider golden fixture provenance", () => {
 });
 
 describe("multi-Tool captured provider wire composition", () => {
-	test("preserves call identity through a pending call and out-of-order independent settlements", async () => {
+	test("preserves grouped call and result identity after independent durable settlements", async () => {
 		const scenarios: readonly {
 			readonly family: ProviderWireFamily;
 			readonly request: ProviderRequest;

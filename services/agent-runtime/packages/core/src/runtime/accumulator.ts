@@ -500,9 +500,6 @@ export class ProviderStreamAccumulator {
 							...(existing.state.status === "running"
 								? { input: existing.state.input }
 								: {}),
-							...(result.result.error === undefined
-								? {}
-								: { error: result.result.error }),
 						};
 			this.appendToolResultPart(existing.modelToolCallId, {
 				type: "tool_result",

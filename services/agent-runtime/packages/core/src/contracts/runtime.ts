@@ -556,10 +556,7 @@ export interface RuntimeInterruptToolResult {
 	readonly toolUseEventId: string;
 	readonly result:
 		| { readonly type: "error"; readonly error: RuntimeToolError }
-		| {
-				readonly type: "cancelled";
-				readonly error?: RuntimeToolError | undefined;
-		  };
+		| { readonly type: "cancelled" };
 }
 
 /** One self-contained invalid-tool repair committed before it enters hot history. */

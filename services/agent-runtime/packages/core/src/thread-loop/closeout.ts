@@ -293,12 +293,23 @@ export async function appendIdleEvent(
 		session.state.closeSettledRequiresActionRun(durableTurnId);
 		return { ok: true, eventId: validated.eventId };
 	}
+	const currentAction = session.state.threadTurnReduction().action;
+	const committedRequiresActionTargets =
+		stopReason.type === "requires_action" &&
+		currentAction.action === "finish_idle" &&
+		currentAction.stopReason.type === "requires_action"
+			? currentAction.stopReason.eventIds
+			: undefined;
 	session.state.applyThreadTurnFact({
 		fact: "finish_idle_committed",
 		eventId: validated.eventId,
 		stopReason:
 			stopReason.type === "requires_action"
-				? { type: "requires_action", eventIds: stopReason.event_ids }
+				? {
+						type: "requires_action",
+						eventIds:
+							committedRequiresActionTargets ?? stopReason.event_ids,
+					}
 				: stopReason.type === "retries_exhausted"
 					? {
 							type: "retries_exhausted",

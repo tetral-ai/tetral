@@ -2,6 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net"
 	"os"
@@ -241,17 +242,34 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write Request End: %v", err)
 	}
+	accepted, err := client.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope: scope, ToolUseEventId: toolUse.GetCommitted().GetEventId(),
+	})
+	if err != nil || accepted.GetCommitted() == nil {
+		t.Fatalf("accept missing-file Read for hot receipt proof: response=%#v err=%v", accepted, err)
+	}
+	markSandboxExecutionTerminalForHotReceiptProof(t, admin, scope, toolUse.GetCommitted().GetEventId(),
+		`{"status":"tool_error","error":{"kind":"not_found","message":"path does not exist"},"result":{}}`)
 	baseLoaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("LoadContext pending Tool state: %v", err)
 	}
 
-	const errorJSON = `{"type":"provider_tool_protocol_error","message":"Read failed","retryable":false}`
+	adapter := runRuntimeDurableToolErrorDeclaration(t, map[string]any{
+		"workspaceId": "default", "sessionId": "sesn_durable_error", "sessionThreadId": "sthr_durable_error",
+		"bindingId": "bind_durable_error", "bindingGeneration": 1, "targetPodUid": "pod_durable_error",
+		"modelRequestId": "mreq_durable_error", "modelToolCallId": "call_durable_error",
+		"toolUseEventId": toolUse.GetCommitted().GetEventId(),
+	})
+	if adapter.AdapterResult.Type != "error" || adapter.AdapterResult.Error.Message == "" ||
+		adapter.RuntimeSettlement.Type != "error" || adapter.ErrorJSON == "" {
+		t.Fatalf("ordinary missing-file Read adapter = %+v", adapter)
+	}
 	settled, err := client.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
 		scope,
 		&bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUse.GetCommitted().GetEventId(),
-			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: errorJSON}},
+			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: adapter.ErrorJSON}},
 		},
 	))
 	if err != nil {
@@ -284,7 +302,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if err := json.Unmarshal(result.Result.Error, &gotError); err != nil {
 		t.Fatalf("decode stored durable Tool error: %v", err)
 	}
-	if err := json.Unmarshal([]byte(errorJSON), &wantError); err != nil {
+	if err := json.Unmarshal([]byte(adapter.ErrorJSON), &wantError); err != nil {
 		t.Fatalf("decode expected durable Tool error: %v", err)
 	}
 	if result.Type != "tool_result" || result.ModelToolCallID != "call_durable_error" ||
@@ -314,10 +332,47 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		payload,
 		toolUse.GetCommitted().GetEventId(),
 		"call_durable_error",
-		map[string]any{"type": "error", "error": map[string]any{
-			"type": "runtime", "code": "provider_tool_protocol_error", "message": "Read failed", "retryable": false, "fatal": false,
-		}},
+		adapter.RuntimeSettlement,
 	)
+}
+
+type runtimeDurableToolErrorDeclaration struct {
+	ErrorJSON     string `json:"errorJson"`
+	AdapterResult struct {
+		Type  string `json:"type"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	} `json:"adapterResult"`
+	RuntimeSettlement struct {
+		Type  string         `json:"type"`
+		Error map[string]any `json:"error"`
+	} `json:"runtimeSettlement"`
+}
+
+func runRuntimeDurableToolErrorDeclaration(t *testing.T, input map[string]any) runtimeDurableToolErrorDeclaration {
+	t.Helper()
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("encode Runtime durable Tool error declaration: %v", err)
+	}
+	inputPath := t.TempDir() + "/runtime-durable-tool-error.json"
+	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
+		t.Fatalf("write Runtime durable Tool error declaration: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/durable-tool-error-declaration.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run Runtime durable Tool error declaration: %v: %s", err, output)
+	}
+	var result runtimeDurableToolErrorDeclaration
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode Runtime durable Tool error declaration: %v: %s", err, output)
+	}
+	return result
 }
 
 func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *testing.T) {
@@ -355,6 +410,14 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	}); err != nil {
 		t.Fatalf("write truncated Tool Request End: %v", err)
 	}
+	accepted, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope: scope, ToolUseEventId: toolUse.GetCommitted().GetEventId(),
+	})
+	if err != nil || accepted.GetCommitted() == nil {
+		t.Fatalf("accept truncated Read for hot receipt proof: response=%#v err=%v", accepted, err)
+	}
+	markSandboxExecutionTerminalForHotReceiptProof(t, admin, scope, toolUse.GetCommitted().GetEventId(),
+		`{"status":"success","result":{"content":"partial output","start_line":1,"returned_lines":1,"truncated":true,"line_truncations":0}}`)
 	baseLoaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("LoadContext pending truncated Tool: %v", err)
@@ -459,6 +522,14 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	}); err != nil {
 		t.Fatalf("seal cancelled Tool request: %v", err)
 	}
+	accepted, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope: scope, ToolUseEventId: toolUse.GetCommitted().GetEventId(),
+	})
+	if err != nil || accepted.GetCommitted() == nil {
+		t.Fatalf("accept cancelled Read for hot receipt proof: response=%#v err=%v", accepted, err)
+	}
+	markSandboxExecutionTerminalForHotReceiptProof(t, admin, scope, toolUse.GetCommitted().GetEventId(),
+		`{"status":"cancelled","error":{"kind":"cancelled","message":"cancelled"},"result":{}}`)
 	baseLoaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("LoadContext pending cancelled Tool: %v", err)
@@ -598,13 +669,7 @@ func assertRuntimeHotColdToolComposition(
 		"contextJson":         coldContextJSON,
 		"providerComposition": true,
 		"hotScenario": map[string]any{
-			"baseContextJson": baseContextJSON,
-			"baseToolRouteView": map[string]any{
-				"routes": []map[string]any{{
-					"toolUseEventId": toolUseEventID,
-					"disposition":    "requires_user_action",
-				}},
-			},
+			"baseContextJson":          baseContextJSON,
 			"kind":                     "tool_settlement",
 			"assistantMessageSequence": assistantMessageSequence,
 			"toolUseEventId":           toolUseEventID,
@@ -651,6 +716,23 @@ func assertRuntimeHotColdToolComposition(
 		!reflect.DeepEqual(composed.ReducerAction, composed.Hot.ReducerAction) ||
 		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) || composed.Hot.ToolPart == nil {
 		t.Fatalf("Runtime hot/cold Tool composition diverged: %s", output)
+	}
+}
+
+func markSandboxExecutionTerminalForHotReceiptProof(
+	t *testing.T,
+	admin *sql.DB,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+	resultJSON string,
+) {
+	t.Helper()
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_tool_results
+		SET execution_state='terminal_unconsumed', result_json=$5, result_digest=$6, updated_at=now()
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+		resultJSON, sha256Hex(resultJSON)); err != nil {
+		t.Fatalf("record Sandbox terminal result for hot receipt proof: %v", err)
 	}
 }
 

@@ -6,7 +6,7 @@ import {
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderContextItem, ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { lowerProviderRequest, type ResolvedProviderRequestAttachment } from "../../src/request.js";
 import { classifyProviderStreamError, ProviderRequestLoweringError } from "../../src/errors.js";
 import { AnthropicOpus48Rules } from "../../src/rules/anthropic.js";
@@ -45,6 +45,53 @@ describe("anthropic request lowering", () => {
       statusCode: 400,
     });
   });
+
+	const invalidToolContexts: Array<{
+		readonly name: string;
+		readonly content: ProviderContextItem[];
+		readonly message: string;
+	}> = [
+		{
+			name: "duplicate Tool Call identity",
+			content: [
+				{ toolCall: { modelToolCallId: "call_duplicate", name: "Read", inputJson: "{}" } },
+				{ toolCall: { modelToolCallId: "call_duplicate", name: "Read", inputJson: "{}" } },
+			],
+			message: "Provider Tool Call identity is duplicated.",
+		},
+		{
+			name: "duplicate Tool Result",
+			content: [
+				{ toolCall: { modelToolCallId: "call_result", name: "Read", inputJson: "{}" } },
+				{ toolResult: { modelToolCallId: "call_result", completed: { outputJson: "{}" }, error: undefined, cancelled: undefined } },
+				{ toolResult: { modelToolCallId: "call_result", completed: { outputJson: "{}" }, error: undefined, cancelled: undefined } },
+			],
+			message: "Provider Tool Result does not pair with exactly one prior Tool Call.",
+		},
+		{
+			name: "multiple Tool Result outcomes",
+			content: [
+				{ toolCall: { modelToolCallId: "call_outcomes", name: "Read", inputJson: "{}" } },
+				{ toolResult: {
+					modelToolCallId: "call_outcomes",
+					completed: { outputJson: "{}" },
+					error: { errorJson: "{}" },
+					cancelled: undefined,
+				} },
+			],
+			message: "Provider Tool Result must select exactly one outcome.",
+		},
+	];
+	for (const scenario of invalidToolContexts) {
+		test(`rejects ${scenario.name} through the typed lowering boundary`, () => {
+			expect(() => lowerAnthropicRequest(anthropicRequest({
+				context: [{
+					role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+					content: scenario.content,
+				}],
+			}))).toThrow(scenario.message);
+		});
+	}
   test("rejects freeform tools before an unsupported provider adapter runs", () => {
     expect(() => lowerAnthropicRequest(anthropicRequest({
       tools: [{

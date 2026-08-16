@@ -253,6 +253,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 
 	test("a throwing cold-context logger cannot replace the parse rejection", async () => {
 		const bridge = new TypedBridge();
+		let loggerCalls = 0;
 		bridge.contextJson = JSON.stringify({
 			...durableContext(),
 			pendingAgentMail: "malformed",
@@ -261,6 +262,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			options(bridge, {
 				info: () => undefined,
 				error: () => {
+					loggerCalls += 1;
 					throw new Error("logger failure");
 				},
 			}),
@@ -269,6 +271,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			code: "schema_mismatch",
 			reason: "load context returned malformed direct durable facts",
 		});
+		expect(loggerCalls).toBe(1);
 	});
 
 	test("rejects retired snake-case cold aliases even beside valid camel-case fields", async () => {

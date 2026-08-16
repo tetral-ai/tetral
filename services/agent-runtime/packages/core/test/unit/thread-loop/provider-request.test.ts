@@ -2376,24 +2376,28 @@ describe("ThreadLoop", () => {
 		).toBe("applied");
 		const requests: LLMRequest[] = [];
 		const reducerFacts: string[] = [];
+		let runOpenWrites = 0;
 		const applyThreadTurnFact = session.state.applyThreadTurnFact.bind(session.state);
 		session.state.applyThreadTurnFact = (fact) => {
 			reducerFacts.push(fact.fact);
 			return applyThreadTurnFact(fact);
 		};
-		const writer = writerFrom((envelope) =>
-			envelope.event.type === "session.status_running"
-				? {
+		const writer = writerFrom((envelope) => {
+			if (envelope.event.type === "session.status_running") {
+				runOpenWrites += 1;
+				return {
 						ok: true,
 						eventId: durableTurnId,
 						type: "duplicate",
-					}
-				: {
+					};
+			}
+			return {
 						ok: true,
 						eventId: `bridge-${envelope.writeId}`,
 						type: "committed",
-					},
-		);
+					};
+		});
+		const loader = new QueuedContextLoader([], []);
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 					return yield* (yield* ThreadLoop.Service).run(
@@ -2402,7 +2406,7 @@ describe("ThreadLoop", () => {
 					);
 			}).pipe(
 				Effect.provide(
-					runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+					runtimeThreadLoopLayer(loader, {
 						writer,
 						llmService: llmService(
 							[
@@ -2419,8 +2423,89 @@ describe("ThreadLoop", () => {
 		);
 		expect(result).toMatchObject({ type: "completed" });
 		expect(requests).toHaveLength(1);
+		expect(runOpenWrites).toBe(1);
+		expect(loader.commitCalls).toHaveLength(1);
 		expect(reducerFacts.filter((fact) => fact === "run_opened")).toHaveLength(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
+	});
+
+	test("an unresolved Tool Call blocks the next provider request at the Runtime boundary", async () => {
+		const session = new ThreadRuntime("sesn_unresolved_tool_call");
+		const toolUseEventId = "event_tool_unresolved";
+		session.state.contextManager.replaceEntries([
+			RuntimeContextEntrySchema.parse({
+				messageSequence: 1,
+				contextKind: "assistant",
+				parts: [
+					{
+						type: "tool_call",
+						modelToolCallId: "call_unresolved",
+						toolName: "Read",
+						canonicalInput: { path: "README.md" },
+					},
+				],
+			}),
+		]);
+		session.state.markPersistentContextLoaded();
+		session.state.installThreadTurn(
+			{
+				pendingInputContextSequences: [],
+				request: {
+					modelRequestId: "request_unresolved_tool_call",
+					requestStartEventId: "event_start_unresolved_tool_call",
+					requestKind: "agent_provider_request",
+					contextThroughMessageSequence: 0,
+					requestEnd: {
+						eventId: "event_end_unresolved_tool_call",
+						isError: false,
+						rescheduled: false,
+					},
+					toolMembers: [
+						{
+							memberKind: "public_tool_use",
+							modelToolCallId: "call_unresolved",
+							toolUseEventId,
+							toolName: "Read",
+						},
+					],
+				},
+			},
+			{
+				routes: [{ toolUseEventId, disposition: "hot_execution" }],
+			},
+		);
+		let providerCalls = 0;
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+						installLoaderState: false,
+						onStream: () => {
+							providerCalls += 1;
+						},
+					}),
+				),
+			),
+		);
+
+		expect(result).toMatchObject({ type: "completed" });
+		expect(providerCalls).toBe(0);
+		expect(session.state.threadTurnReduction()).toMatchObject({
+			state: {
+				state: "waiting_for_tool_results",
+				modelRequestId: "request_unresolved_tool_call",
+			},
+			action: {
+				action: "await_tool_results",
+				modelRequestId: "request_unresolved_tool_call",
+				toolUseEventIds: [toolUseEventId],
+			},
+		});
 	});
 
 	test("prefix-only child Request Start stores durable message boundary zero", async () => {

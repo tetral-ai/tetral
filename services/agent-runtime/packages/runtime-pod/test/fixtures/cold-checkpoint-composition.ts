@@ -17,6 +17,7 @@ import {
 	sealAssistantDraft,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { ContextManager } from "@tetral/agent-runtime-core/src/session/context-manager.js";
+import { ThreadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { assembleProviderCallRequest } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import {
 	extractColdThreadToolRouteView,
@@ -24,8 +25,6 @@ import {
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import {
 	deriveThreadTurnDecision,
-	initializeThreadTurnReduction,
-	reduceThreadTurn,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
@@ -46,7 +45,6 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly pendingSandboxExecutions?: readonly unknown[];
 	readonly hotScenario?: {
 		readonly baseContextJson: string;
-		readonly baseToolRouteView?: unknown;
 		readonly kind:
 			| "accepted_input"
 			| "assistant_append"
@@ -136,23 +134,15 @@ let hot:
 if (input.hotScenario !== undefined) {
 	const scenario = input.hotScenario;
 	const base = await loadContext(scenario.baseContextJson);
-	const hotEntries = applyHotOperation(
-		base.contextEntries,
-		base.openRequestDraft,
-		scenario,
-	);
 	const baseCheckpoint = extractThreadTurnCheckpoint({
 		contextEntries: base.contextEntries,
 		facts: base.turnFacts,
 	});
-	const baseRoutes =
-		scenario.baseToolRouteView === undefined
-			? extractColdThreadToolRouteView({
-					checkpoint: baseCheckpoint,
-					pendingToolUses: (base.pendingToolUses ?? []) as never,
-					pendingSandboxExecutions: (base.pendingSandboxExecutions ?? []) as never,
-				})
-			: (scenario.baseToolRouteView as typeof toolRouteView);
+	const baseRoutes = extractColdThreadToolRouteView({
+		checkpoint: baseCheckpoint,
+		pendingToolUses: (base.pendingToolUses ?? []) as never,
+		pendingSandboxExecutions: (base.pendingSandboxExecutions ?? []) as never,
+	});
 	const hotSettlement =
 		scenario.kind === "tool_settlement"
 			? RuntimeToolSettlementDeclarationSchema.parse({
@@ -160,34 +150,53 @@ if (input.hotScenario !== undefined) {
 					outcome: scenario.settlement,
 				})
 			: undefined;
-	const hotCheckpoint =
-		hotSettlement !== undefined
-			? reduceThreadTurn(
-					initializeThreadTurnReduction(
-						baseCheckpoint,
-						baseRoutes,
-						[],
-						noActiveInput,
-					),
-					{
-						fact: "tool_result_committed",
-						toolUseEventId: hotSettlement.toolUseEventId,
-						outcome:
-							hotSettlement.outcome.type === "completed"
-								? "success"
-								: hotSettlement.outcome.type,
-					},
-					baseRoutes,
-					[],
-					noActiveInput,
-				).checkpoint
-			: extractThreadTurnCheckpoint({
+	let hotEntries: readonly RuntimeContextEntry[];
+	let hotCheckpoint;
+	if (hotSettlement !== undefined) {
+		if (
+			scenario.assistantMessageSequence === undefined ||
+			scenario.modelToolCallId === undefined
+		) {
+			throw new Error("Tool settlement hot receipt is incomplete");
+		}
+		const state = new ThreadState("composition_session");
+		state.contextManager.replaceEntries(base.contextEntries);
+		state.contextManager.installOpenRequestDraft(base.openRequestDraft);
+		state.installThreadTurn(baseCheckpoint, baseRoutes);
+		const resultPart = contextToolResultFromSettlement(
+			scenario.modelToolCallId,
+			hotSettlement.outcome,
+		);
+		state.contextManager.appendToolResult(
+			scenario.assistantMessageSequence,
+			scenario.modelToolCallId,
+			resultPart.result,
+		);
+		state.applyThreadTurnFact({
+			fact: "tool_result_committed",
+			toolUseEventId: hotSettlement.toolUseEventId,
+			outcome:
+				hotSettlement.outcome.type === "completed"
+					? "success"
+					: hotSettlement.outcome.type,
+		});
+		state.clearThreadToolRoute(hotSettlement.toolUseEventId);
+		hotEntries = state.contextManager.entries();
+		hotCheckpoint = state.threadTurnReduction().checkpoint;
+	} else {
+		hotEntries = applyHotOperation(
+			base.contextEntries,
+			base.openRequestDraft,
+			scenario,
+		);
+		hotCheckpoint = extractThreadTurnCheckpoint({
 					contextEntries: hotEntries,
 					facts:
 						scenario.turnFacts === undefined
 							? cold.turnFacts
 							: (scenario.turnFacts as typeof cold.turnFacts),
 				});
+	}
 	const hotRoutes = extractColdThreadToolRouteView({
 		checkpoint: hotCheckpoint,
 		pendingToolUses: (scenario.pendingToolUses ??

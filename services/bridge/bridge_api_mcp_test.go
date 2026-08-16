@@ -185,6 +185,7 @@ func TestPostgreSQLMCPErrorSettlementPreservesAnInFlightClaim(t *testing.T) {
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("mcp-in-flight-error-signing-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	claim, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
@@ -215,6 +216,35 @@ func TestPostgreSQLMCPErrorSettlementPreservesAnInFlightClaim(t *testing.T) {
 	}
 	if claimStatus != mcpClaimStatusInFlight || claimID.String != "claim_mcp_in_flight_error" || !lease.Valid {
 		t.Fatalf("MCP claim after error settlement = %q/%v/%v; want original in-flight lease", claimStatus, claimID, lease)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("load model-visible in-flight MCP error: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode model-visible in-flight MCP error: %v", err)
+	}
+	var parts []json.RawMessage
+	if len(payload.ContextEntries) == 1 {
+		parts = payload.ContextEntries[0].Parts
+	} else if payload.OpenRequestDraft != nil {
+		parts = payload.OpenRequestDraft.Parts
+	}
+	if len(parts) != 2 {
+		t.Fatalf("in-flight MCP error context = entries=%#v draft=%#v", payload.ContextEntries, payload.OpenRequestDraft)
+	}
+	var resultPart struct {
+		Result struct {
+			Type  string `json:"type"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(parts[1], &resultPart); err != nil ||
+		resultPart.Result.Type != "error" || resultPart.Result.Error.Message != "MCP tool execution is unavailable." {
+		t.Fatalf("model-visible in-flight MCP error = %#v err=%v", resultPart, err)
 	}
 }
 

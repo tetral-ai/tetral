@@ -257,6 +257,33 @@ describe("openai request lowering", () => {
     expect(Object.keys(lowered.tools)).toEqual(["tool_\uFFFD"]);
   });
 
+	test("rejects Tool Call identities that collide after text sanitation", () => {
+		let caught: unknown;
+		try {
+			lowerOpenAIRequest(openAIRequest({
+				context: [{
+					role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+					content: [
+						{ toolCall: { modelToolCallId: "call_\uD800", name: "Read", inputJson: "{}" } },
+						{ toolCall: { modelToolCallId: "call_\uFFFD", name: "Read", inputJson: "{}" } },
+					],
+				}],
+			}));
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(ProviderRequestLoweringError);
+		expect(classifyProviderStreamError(caught)).toMatchObject({
+			code: "provider_request_invalid",
+			retryable: false,
+			fatal: true,
+			statusCode: 400,
+		});
+		expect(String(caught)).toContain(
+			"Provider Tool Call identities collide after text sanitation.",
+		);
+	});
+
   test("openai-schema-lowering applies Codex-style schema lowering", () => {
     const lowered = lowerOpenAIRequest(openAIRequest({
       tools: [{
