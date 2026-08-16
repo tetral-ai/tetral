@@ -13,76 +13,74 @@ import {
 } from "../../../src/thread-loop/thread-turn-reducer.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
-const reducerHarness = (
-	activeInputView: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[3],
-) => ({
-	deriveThreadTurnDecision: (
-		checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
-		routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
-		acceptedInputIds: readonly string[] = [],
-	) =>
-		deriveThreadTurnDecisionWithActiveInput(
-			checkpoint,
-			routes,
-			acceptedInputIds,
-			activeInputView,
-		),
-	initializeThreadTurnReduction: (
-		checkpoint: Parameters<
-			typeof initializeThreadTurnReductionWithActiveInput
-		>[0],
-		routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
-		acceptedInputIds: readonly string[] = [],
-	) =>
-		initializeThreadTurnReductionWithActiveInput(
-			checkpoint,
-			routes,
-			acceptedInputIds,
-			activeInputView,
-		),
-	reduceThreadTurn: (
-		current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
-		fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
-		routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
-		acceptedInputIds: readonly string[] = [],
-	) =>
-		reduceThreadTurnWithActiveInput(
-			current,
-			fact,
-			routes,
-			acceptedInputIds,
-			activeInputView,
-		),
-	reconcileThreadTurnSeal: (
-		current: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[0],
-		routes: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[1],
-		acceptedInputIds: readonly string[] = [],
-	) =>
-		reconcileThreadTurnSealWithActiveInput(
-			current,
-			routes,
-			acceptedInputIds,
-			activeInputView,
-		),
-});
+type ActiveInputView = Parameters<
+	typeof deriveThreadTurnDecisionWithActiveInput
+>[3];
+const noPendingAttachments: ActiveInputView = { hasPendingAttachments: false };
 
-const {
-	deriveThreadTurnDecision,
-	initializeThreadTurnReduction,
-	reduceThreadTurn,
-	reconcileThreadTurnSeal,
-} = reducerHarness({ hasPendingAttachments: false });
+const deriveThreadTurnDecision = (
+	activeInputView: ActiveInputView,
+	checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
+	routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	deriveThreadTurnDecisionWithActiveInput(
+		checkpoint,
+		routes,
+		acceptedInputIds,
+		activeInputView,
+	);
+const initializeThreadTurnReduction = (
+	activeInputView: ActiveInputView,
+	checkpoint: Parameters<
+		typeof initializeThreadTurnReductionWithActiveInput
+	>[0],
+	routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	initializeThreadTurnReductionWithActiveInput(
+		checkpoint,
+		routes,
+		acceptedInputIds,
+		activeInputView,
+	);
+const reduceThreadTurn = (
+	activeInputView: ActiveInputView,
+	current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
+	fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
+	routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	reduceThreadTurnWithActiveInput(
+		current,
+		fact,
+		routes,
+		acceptedInputIds,
+		activeInputView,
+	);
+const reconcileThreadTurnSeal = (
+	activeInputView: ActiveInputView,
+	current: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[0],
+	routes: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	reconcileThreadTurnSealWithActiveInput(
+		current,
+		routes,
+		acceptedInputIds,
+		activeInputView,
+	);
 
 describe("Thread-turn reducer", () => {
 	test("derives idle and plural committed-input readiness", () => {
 		expect(
-			deriveThreadTurnDecision({ pendingInputContextSequences: [] }, noRoutes),
+			deriveThreadTurnDecision(noPendingAttachments, { pendingInputContextSequences: [] }, noRoutes),
 		).toEqual({
 			state: { state: "idle" },
 			action: { action: "await_input" },
 		});
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				{
 					pendingInputContextSequences: [1, 2],
 				},
@@ -196,7 +194,7 @@ describe("Thread-turn reducer", () => {
 		];
 
 		for (const testCase of cases) {
-			const decision = deriveThreadTurnDecision(
+			const decision = deriveThreadTurnDecision(noPendingAttachments,
 				testCase.checkpoint,
 				testCase.routes,
 				["rin_first", "rin_second"],
@@ -211,7 +209,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a committed-input result advances the same reducer to request preparation", () => {
-		const selected = initializeThreadTurnReduction(
+		const selected = initializeThreadTurnReduction(noPendingAttachments,
 			{ executionRunId: "run_input", pendingInputContextSequences: [] },
 			noRoutes,
 			["rin_input"],
@@ -221,7 +219,7 @@ describe("Thread-turn reducer", () => {
 			runtimeInputId: "rin_input",
 		});
 
-		const applied = reduceThreadTurn(
+		const applied = reduceThreadTurn(noPendingAttachments,
 			selected,
 			{
 				fact: "inputs_committed",
@@ -238,7 +236,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("an attachment-only input advances without inventing a context sequence", () => {
-		const selected = initializeThreadTurnReduction(
+		const selected = initializeThreadTurnReduction(noPendingAttachments,
 			{ executionRunId: "run_attachment", pendingInputContextSequences: [] },
 			noRoutes,
 			["rin_attachment"],
@@ -264,7 +262,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a sibling accepted input is committed before an attachment-only request advances", () => {
-		const selected = initializeThreadTurnReduction(
+		const selected = initializeThreadTurnReduction(noPendingAttachments,
 			{ executionRunId: "run_siblings", pendingInputContextSequences: [] },
 			noRoutes,
 			["rin_attachment", "rin_text"],
@@ -307,7 +305,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a replayed committed-input result preserves one pending durable context sequence", () => {
-		const cold = initializeThreadTurnReduction(
+		const cold = initializeThreadTurnReduction(noPendingAttachments,
 			{
 				executionRunId: "run_reloaded",
 				pendingInputContextSequences: [1],
@@ -315,7 +313,7 @@ describe("Thread-turn reducer", () => {
 			noRoutes,
 		);
 
-		const replayed = reduceThreadTurn(
+		const replayed = reduceThreadTurn(noPendingAttachments,
 			cold,
 			{
 				fact: "inputs_committed",
@@ -333,7 +331,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a durable run-open fact clears a prior final closeout before new input is committed", () => {
-		const closed = initializeThreadTurnReduction(
+		const closed = initializeThreadTurnReduction(noPendingAttachments,
 			{
 				pendingInputContextSequences: [],
 				request: {
@@ -361,7 +359,7 @@ describe("Thread-turn reducer", () => {
 			},
 			noRoutes,
 		);
-		const opened = reduceThreadTurn(
+		const opened = reduceThreadTurn(noPendingAttachments,
 			closed,
 			{
 				fact: "run_opened",
@@ -374,7 +372,7 @@ describe("Thread-turn reducer", () => {
 			pendingInputContextSequences: [],
 		});
 		expect(
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				opened,
 				{
 					fact: "inputs_committed",
@@ -390,13 +388,13 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a duplicate run-open fact preserves the action already derived for that run", () => {
-		const initial = initializeThreadTurnReduction(
+		const initial = initializeThreadTurnReduction(noPendingAttachments,
 			{
 				pendingInputContextSequences: [],
 			},
 			noRoutes,
 		);
-		const opened = reduceThreadTurn(
+		const opened = reduceThreadTurn(noPendingAttachments,
 			initial,
 			{
 				fact: "run_opened",
@@ -409,7 +407,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "finish_idle", stopReason: { type: "end_turn" } },
 		});
 
-		const replayed = reduceThreadTurn(
+		const replayed = reduceThreadTurn(noPendingAttachments,
 			opened,
 			{
 				fact: "run_opened",
@@ -423,7 +421,7 @@ describe("Thread-turn reducer", () => {
 		});
 
 		expect(
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				replayed,
 				{
 					fact: "finish_idle_committed",
@@ -439,7 +437,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a confirmation run-open preserves the sealed requires-action request", () => {
-		const waiting = initializeThreadTurnReduction(
+		const waiting = initializeThreadTurnReduction(noPendingAttachments,
 			{
 				...sealedCheckpoint([
 					{
@@ -463,7 +461,7 @@ describe("Thread-turn reducer", () => {
 				],
 			},
 		);
-		const opened = reduceThreadTurn(
+		const opened = reduceThreadTurn(noPendingAttachments,
 			waiting,
 			{
 				fact: "run_opened",
@@ -494,7 +492,7 @@ describe("Thread-turn reducer", () => {
 				},
 			],
 		};
-		const waiting = initializeThreadTurnReduction(
+		const waiting = initializeThreadTurnReduction(noPendingAttachments,
 			sealedCheckpoint([
 				{
 					memberKind: "public_tool_use",
@@ -505,7 +503,7 @@ describe("Thread-turn reducer", () => {
 			]),
 			routes,
 		);
-		const opened = reduceThreadTurn(
+		const opened = reduceThreadTurn(noPendingAttachments,
 			waiting,
 			{
 				fact: "run_opened",
@@ -537,13 +535,13 @@ describe("Thread-turn reducer", () => {
 					terminalResult: { outcome: "success" },
 				},
 			]);
-		const ready = initializeThreadTurnReduction(recoveredCheckpoint, noRoutes);
+		const ready = initializeThreadTurnReduction(noPendingAttachments, recoveredCheckpoint, noRoutes);
 		expect(ready).toMatchObject({
 			state: { state: "ready_to_request" },
 			action: { action: "prepare_next_request" },
 		});
 
-		const opened = reduceThreadTurn(
+		const opened = reduceThreadTurn(noPendingAttachments,
 			ready,
 			{
 				fact: "run_opened",
@@ -562,14 +560,14 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("starts one prepared provider request only on first local Request Start ACK application", () => {
-		const initial = initializeThreadTurnReduction(
+		const initial = initializeThreadTurnReduction(noPendingAttachments,
 			{
 				executionRunId: "run_1",
 				pendingInputContextSequences: [1, 2],
 			},
 			noRoutes,
 		);
-		const started = reduceThreadTurn(
+		const started = reduceThreadTurn(noPendingAttachments,
 			initial,
 			{
 				fact: "request_started",
@@ -592,7 +590,7 @@ describe("Thread-turn reducer", () => {
 		});
 
 		expect(
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				started,
 				{
 					fact: "request_started",
@@ -612,7 +610,7 @@ describe("Thread-turn reducer", () => {
 
 	test("keeps streaming Tool Use and early Tool Result inside an open request", () => {
 		const opened = openRequest();
-		const toolUse = reduceThreadTurn(
+		const toolUse = reduceThreadTurn(noPendingAttachments,
 			opened,
 			{
 				fact: "tool_use_committed",
@@ -628,7 +626,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "dispatch_tool_use", toolUseEventId: "event_tool_1" },
 		});
 
-		const result = reduceThreadTurn(
+		const result = reduceThreadTurn(noPendingAttachments,
 			toolUse,
 			{
 				fact: "tool_result_committed",
@@ -647,7 +645,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "await_request_end", modelRequestId: "request_1" },
 		});
 
-		const replayedResult = reduceThreadTurn(
+		const replayedResult = reduceThreadTurn(noPendingAttachments,
 			result,
 			{
 				fact: "tool_result_committed",
@@ -658,7 +656,7 @@ describe("Thread-turn reducer", () => {
 		);
 		expect(replayedResult).toEqual({ ...result, action: { action: "none" } });
 		expect(() =>
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				result,
 				{
 					fact: "tool_result_committed",
@@ -670,7 +668,7 @@ describe("Thread-turn reducer", () => {
 		).toThrow("conflicting terminal Tool Result");
 
 		expect(
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				toolUse,
 				{
 					fact: "tool_use_committed",
@@ -689,7 +687,7 @@ describe("Thread-turn reducer", () => {
 
 	test("makes Request End an explicit seal before continuing", () => {
 		const withTerminalTool = terminalToolRequest();
-		const sealed = reduceThreadTurn(
+		const sealed = reduceThreadTurn(noPendingAttachments,
 			withTerminalTool,
 			{
 				fact: "request_ended",
@@ -705,7 +703,7 @@ describe("Thread-turn reducer", () => {
 			state: { state: "request_sealed", modelRequestId: "request_1" },
 			action: { action: "reconcile_request_seal", modelRequestId: "request_1" },
 		});
-		expect(reconcileThreadTurnSeal(sealed, noRoutes)).toMatchObject({
+		expect(reconcileThreadTurnSeal(noPendingAttachments, sealed, noRoutes)).toMatchObject({
 			state: { state: "ready_to_request" },
 			action: { action: "prepare_next_request" },
 		});
@@ -726,7 +724,7 @@ describe("Thread-turn reducer", () => {
 				{ toolUseEventId: "event_tool_4", disposition: "hot_execution" },
 			],
 		};
-		reduction = reconcileThreadTurnSeal(reduction, routes);
+		reduction = reconcileThreadTurnSeal(noPendingAttachments, reduction, routes);
 		expect(reduction).toMatchObject({
 			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
 			action: {
@@ -745,7 +743,7 @@ describe("Thread-turn reducer", () => {
 			"event_tool_2",
 			"event_tool_3",
 		].entries()) {
-			reduction = reduceThreadTurn(
+			reduction = reduceThreadTurn(noPendingAttachments,
 				reduction,
 				{
 					fact: "tool_result_committed",
@@ -758,7 +756,7 @@ describe("Thread-turn reducer", () => {
 			expect(reduction.action.action).toBe("await_tool_results");
 		}
 
-		reduction = reduceThreadTurn(
+		reduction = reduceThreadTurn(noPendingAttachments,
 			reduction,
 			{
 				fact: "tool_result_committed",
@@ -775,12 +773,12 @@ describe("Thread-turn reducer", () => {
 
 	test("distinguishes empty-seal completion from later committed input", () => {
 		const emptySeal = sealedCheckpoint([]);
-		expect(deriveThreadTurnDecision(emptySeal, noRoutes)).toEqual({
+		expect(deriveThreadTurnDecision(noPendingAttachments, emptySeal, noRoutes)).toEqual({
 			state: { state: "ready_to_finish" },
 			action: { action: "finish_idle", stopReason: { type: "end_turn" } },
 		});
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				{
 					...emptySeal,
 					pendingInputContextSequences: [3],
@@ -792,8 +790,8 @@ describe("Thread-turn reducer", () => {
 			action: { action: "prepare_next_request" },
 		});
 
-		const readyToFinish = initializeThreadTurnReduction(emptySeal, noRoutes);
-		const finished = reduceThreadTurn(
+		const readyToFinish = initializeThreadTurnReduction(noPendingAttachments, emptySeal, noRoutes);
+		const finished = reduceThreadTurn(noPendingAttachments,
 			readyToFinish,
 			{
 				fact: "finish_idle_committed",
@@ -813,7 +811,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a final idle closeout keeps pre-request committed input dormant until a later run opens", () => {
-		const closed = initializeThreadTurnReduction(
+		const closed = initializeThreadTurnReduction(noPendingAttachments,
 			{
 				pendingInputContextSequences: [1],
 				idleCloseout: {
@@ -828,7 +826,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "await_input" },
 		});
 
-		const reopened = reduceThreadTurn(
+		const reopened = reduceThreadTurn(noPendingAttachments,
 			closed,
 			{
 				fact: "run_opened",
@@ -847,7 +845,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("a later run discards the request closed by an idle interruption", () => {
-		const interrupted = initializeThreadTurnReduction(
+		const interrupted = initializeThreadTurnReduction(noPendingAttachments,
 			{
 				pendingInputContextSequences: [1],
 				interruptEventId: "event_interrupt_idle",
@@ -878,7 +876,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "await_input" },
 		});
 
-		const reopened = reduceThreadTurn(
+		const reopened = reduceThreadTurn(noPendingAttachments,
 			interrupted,
 			{
 				fact: "run_opened",
@@ -899,7 +897,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("rejects end-turn closeout while a sealed tool continuation is ready", () => {
-		const ready = initializeThreadTurnReduction(
+		const ready = initializeThreadTurnReduction(noPendingAttachments,
 			sealedCheckpoint([
 				{
 					memberKind: "public_tool_use",
@@ -916,7 +914,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "prepare_next_request" },
 		});
 		expect(() =>
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				ready,
 				{
 					fact: "finish_idle_committed",
@@ -929,7 +927,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("treats internal invalid-tool repair as a terminal synthetic member", () => {
-		const repaired = reduceThreadTurn(
+		const repaired = reduceThreadTurn(noPendingAttachments,
 			openRequest(),
 			{
 				fact: "internal_tool_repair_committed",
@@ -945,7 +943,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "await_request_end", modelRequestId: "request_1" },
 		});
 
-		const sealed = reduceThreadTurn(
+		const sealed = reduceThreadTurn(noPendingAttachments,
 			repaired,
 			{
 				fact: "request_ended",
@@ -956,7 +954,7 @@ describe("Thread-turn reducer", () => {
 			},
 			noRoutes,
 		);
-		expect(reconcileThreadTurnSeal(sealed, noRoutes)).toMatchObject({
+		expect(reconcileThreadTurnSeal(noPendingAttachments, sealed, noRoutes)).toMatchObject({
 			state: { state: "ready_to_request" },
 			action: { action: "prepare_next_request" },
 		});
@@ -989,7 +987,7 @@ describe("Thread-turn reducer", () => {
 				},
 			],
 		};
-		expect(deriveThreadTurnDecision(checkpoint, coldRoutes)).toEqual({
+		expect(deriveThreadTurnDecision(noPendingAttachments, checkpoint, coldRoutes)).toEqual({
 			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
 			action: {
 				action: "resume_tool_routes",
@@ -998,7 +996,7 @@ describe("Thread-turn reducer", () => {
 			},
 		});
 		expect(
-			deriveThreadTurnDecision(checkpoint, {
+			deriveThreadTurnDecision(noPendingAttachments, checkpoint, {
 				routes: [
 					{ toolUseEventId: "event_tool_1", disposition: "hot_execution" },
 					{ toolUseEventId: "event_tool_2", disposition: "hot_execution" },
@@ -1028,7 +1026,7 @@ describe("Thread-turn reducer", () => {
 				{ toolUseEventId: "event_tool_1", disposition: "requires_user_action" },
 			],
 		};
-		const waiting = initializeThreadTurnReduction(checkpoint, routes);
+		const waiting = initializeThreadTurnReduction(noPendingAttachments, checkpoint, routes);
 		expect(waiting).toMatchObject({
 			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
 			action: {
@@ -1037,7 +1035,7 @@ describe("Thread-turn reducer", () => {
 			},
 		});
 
-		const idleReceipt = reduceThreadTurn(
+		const idleReceipt = reduceThreadTurn(noPendingAttachments,
 			waiting,
 			{
 				fact: "finish_idle_committed",
@@ -1080,7 +1078,7 @@ describe("Thread-turn reducer", () => {
 				},
 			],
 		};
-		expect(deriveThreadTurnDecision(checkpoint, routes)).toEqual({
+		expect(deriveThreadTurnDecision(noPendingAttachments, checkpoint, routes)).toEqual({
 			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
 			action: {
 				action: "await_tool_results",
@@ -1088,9 +1086,9 @@ describe("Thread-turn reducer", () => {
 				toolUseEventIds: ["event_tool_running", "event_tool_approval"],
 			},
 		});
-		const waiting = initializeThreadTurnReduction(checkpoint, routes);
+		const waiting = initializeThreadTurnReduction(noPendingAttachments, checkpoint, routes);
 		expect(() =>
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				waiting,
 				{
 					fact: "finish_idle_committed",
@@ -1121,9 +1119,9 @@ describe("Thread-turn reducer", () => {
 				{ toolUseEventId: "event_tool_1", disposition: "requires_user_action" },
 			],
 		};
-		const waiting = initializeThreadTurnReduction(checkpoint, routes);
+		const waiting = initializeThreadTurnReduction(noPendingAttachments, checkpoint, routes);
 		expect(() =>
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				waiting,
 				{
 					fact: "finish_idle_committed",
@@ -1138,7 +1136,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("records an interrupt-prioritized Tool Use ACK without dispatching its side effect", () => {
-		const interrupted = reduceThreadTurn(
+		const interrupted = reduceThreadTurn(noPendingAttachments,
 			openRequest(),
 			{
 				fact: "interrupt_committed",
@@ -1146,7 +1144,7 @@ describe("Thread-turn reducer", () => {
 			},
 			noRoutes,
 		);
-		const lateToolUse = reduceThreadTurn(
+		const lateToolUse = reduceThreadTurn(noPendingAttachments,
 			interrupted,
 			{
 				fact: "tool_use_committed",
@@ -1166,7 +1164,7 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("makes retries-exhausted FinishIdle hot reduction reconstructible", () => {
-		const sealed = reduceThreadTurn(
+		const sealed = reduceThreadTurn(noPendingAttachments,
 			openRequest(),
 			{
 				fact: "request_ended",
@@ -1178,7 +1176,7 @@ describe("Thread-turn reducer", () => {
 			},
 			noRoutes,
 		);
-		const finished = reduceThreadTurn(
+		const finished = reduceThreadTurn(noPendingAttachments,
 			sealed,
 			{
 				fact: "finish_idle_committed",
@@ -1200,7 +1198,7 @@ describe("Thread-turn reducer", () => {
 		});
 		expect(finished.checkpoint.executionRunId).toBeUndefined();
 		expect(finished.checkpoint.request).toBeUndefined();
-		expect(deriveThreadTurnDecision(finished.checkpoint, noRoutes)).toEqual({
+		expect(deriveThreadTurnDecision(noPendingAttachments, finished.checkpoint, noRoutes)).toEqual({
 			state: finished.state,
 			action: finished.action,
 		});
@@ -1208,7 +1206,7 @@ describe("Thread-turn reducer", () => {
 
 	test("routes compaction, reviewer, retry, interrupt, and terminal closeout before ordinary continuation", () => {
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				sealedCheckpoint([], "compaction_summary"),
 				noRoutes,
 			),
@@ -1220,7 +1218,7 @@ describe("Thread-turn reducer", () => {
 			},
 		});
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				sealedCheckpoint([], "approval_reviewer"),
 				noRoutes,
 			),
@@ -1233,7 +1231,7 @@ describe("Thread-turn reducer", () => {
 			"approval_reviewer",
 		] as const) {
 			expect(
-				deriveThreadTurnDecision(
+				deriveThreadTurnDecision(noPendingAttachments,
 					sealedCheckpoint([], requestKind, {
 						isError: true,
 						rescheduled: false,
@@ -1250,7 +1248,7 @@ describe("Thread-turn reducer", () => {
 			});
 		}
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				sealedCheckpoint([], "agent_provider_request", {
 					isError: true,
 					rescheduled: true,
@@ -1265,7 +1263,7 @@ describe("Thread-turn reducer", () => {
 			},
 		});
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				{
 					...sealedCheckpoint([]),
 					interruptEventId: "event_interrupt",
@@ -1277,7 +1275,7 @@ describe("Thread-turn reducer", () => {
 			action: { action: "close_interrupted", modelRequestId: "request_1" },
 		});
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				{
 					...sealedCheckpoint([]),
 					terminalCloseout: {
@@ -1321,13 +1319,13 @@ describe("Thread-turn reducer", () => {
 				pendingInputContextSequences: [1],
 			},
 		]) {
-			expect(deriveThreadTurnDecision(checkpoint, noRoutes)).toEqual({
+			expect(deriveThreadTurnDecision(noPendingAttachments, checkpoint, noRoutes)).toEqual({
 				state: { state: "ready_to_request" },
 				action: { action: "prepare_next_request" },
 			});
 		}
 		expect(
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				sealedCheckpoint([], "approval_reviewer"),
 				noRoutes,
 			),
@@ -1339,7 +1337,7 @@ describe("Thread-turn reducer", () => {
 
 	test("fails closed for orphan results, post-seal Tool Uses, and missing sealed routes", () => {
 		expect(() =>
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				openRequest(),
 				{
 					fact: "tool_result_committed",
@@ -1350,12 +1348,12 @@ describe("Thread-turn reducer", () => {
 			),
 		).toThrow(ThreadTurnContractError);
 
-		const sealed = initializeThreadTurnReduction(
+		const sealed = initializeThreadTurnReduction(noPendingAttachments,
 			sealedCheckpoint([]),
 			noRoutes,
 		);
 		expect(() =>
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				sealed,
 				{
 					fact: "tool_use_committed",
@@ -1369,7 +1367,7 @@ describe("Thread-turn reducer", () => {
 		).toThrow("cannot append Tool Use after Request End");
 
 		expect(() =>
-			deriveThreadTurnDecision(
+			deriveThreadTurnDecision(noPendingAttachments,
 				sealedCheckpoint([
 					{
 						memberKind: "public_tool_use",
@@ -1385,7 +1383,7 @@ describe("Thread-turn reducer", () => {
 });
 
 function openRequest() {
-	return initializeThreadTurnReduction(
+	return initializeThreadTurnReduction(noPendingAttachments,
 		{
 			executionRunId: "run_1",
 			pendingInputContextSequences: [],
@@ -1402,7 +1400,7 @@ function openRequest() {
 }
 
 function terminalToolRequest() {
-	const withTool = reduceThreadTurn(
+	const withTool = reduceThreadTurn(noPendingAttachments,
 		openRequest(),
 		{
 			fact: "tool_use_committed",
@@ -1413,7 +1411,7 @@ function terminalToolRequest() {
 		},
 		noRoutes,
 	);
-	return reduceThreadTurn(
+	return reduceThreadTurn(noPendingAttachments,
 		withTool,
 		{
 			fact: "tool_result_committed",
@@ -1427,7 +1425,7 @@ function terminalToolRequest() {
 function sealRequestWithTools(tools: readonly (readonly [string, string])[]) {
 	let reduction = openRequest();
 	for (const [toolUseEventId, modelToolCallId] of tools) {
-		reduction = reduceThreadTurn(
+		reduction = reduceThreadTurn(noPendingAttachments,
 			reduction,
 			{
 				fact: "tool_use_committed",
@@ -1439,7 +1437,7 @@ function sealRequestWithTools(tools: readonly (readonly [string, string])[]) {
 			noRoutes,
 		);
 	}
-	return reduceThreadTurn(
+	return reduceThreadTurn(noPendingAttachments,
 		reduction,
 		{
 			fact: "request_ended",

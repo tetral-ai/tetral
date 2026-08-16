@@ -2369,6 +2369,10 @@ describe("ThreadLoop", () => {
 	test("an existing durable run-open receipt preserves the accepted-input action", async () => {
 		const session = new ThreadRuntime("sesn_duplicate_run_open");
 		const durableTurnId = "sevt_duplicate_run_open";
+		session.state.installThreadTurn(
+			{ executionRunId: durableTurnId, pendingInputContextSequences: [] },
+			{ routes: [] },
+		);
 		expect(
 			session.state.enqueueAcceptedInput(
 				acceptedInput("rin_duplicate_run_open", session.sessionId),
@@ -2420,7 +2424,7 @@ describe("ThreadLoop", () => {
 		expect(requests).toHaveLength(1);
 		expect(runOpenWrites).toBe(0);
 		expect(loader.commitCalls).toHaveLength(1);
-		expect(reducerFacts.filter((fact) => fact === "run_opened")).toHaveLength(1);
+		expect(reducerFacts.filter((fact) => fact === "run_opened")).toHaveLength(0);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
 	});
 

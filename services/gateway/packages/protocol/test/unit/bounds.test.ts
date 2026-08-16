@@ -81,6 +81,36 @@ describe("Gateway protocol bounds", () => {
 		});
 	});
 
+	test("rejects non-text user context before the lowering boundary", () => {
+		const base = validProviderRequest();
+		for (const content of [
+			[{ reasoning: { text: "private", metadataJson: "{}" } }],
+			[{
+				toolCall: {
+					modelToolCallId: "call_user",
+					name: "Read",
+					inputJson: "{}",
+				},
+			}],
+			[{
+				toolResult: {
+					modelToolCallId: "call_user",
+					completed: { outputJson: "{}" },
+				},
+			}],
+		]) {
+			expectInvalid(
+				validateProviderRequest({
+					...base,
+					context: [{
+						role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+						content,
+					}],
+				}),
+			);
+		}
+	});
+
 	test("admits exactly one bounded function or freeform tool declaration arm", () => {
 		const base = validProviderRequest();
 		const tool = base.tools[0]!;

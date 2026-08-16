@@ -31,7 +31,6 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly pendingSandboxExecutions?: readonly unknown[];
 	readonly hotScenario?: {
 		readonly baseContextJson: string;
-		readonly kind: "tool_settlement";
 		readonly assistantMessageSequence?: number;
 		readonly toolUseEventId?: string;
 		readonly modelToolCallId?: string;

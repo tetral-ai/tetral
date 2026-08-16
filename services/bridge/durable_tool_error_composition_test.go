@@ -674,7 +674,6 @@ func assertRuntimeHotColdToolComposition(
 		"providerComposition": true,
 		"hotScenario": map[string]any{
 			"baseContextJson":          baseContextJSON,
-			"kind":                     "tool_settlement",
 			"assistantMessageSequence": assistantMessageSequence,
 			"toolUseEventId":           toolUseEventID,
 			"modelToolCallId":          modelToolCallID,

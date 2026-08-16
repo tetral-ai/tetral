@@ -1891,6 +1891,7 @@ describe("Runtime core host production assembly", () => {
 	test("cold settled requires-action closeout opens exactly one successor run", async () => {
 		const providerRequests: string[] = [];
 		const appended: SessionEvent[] = [];
+		let settlementCalls = 0;
 		const hosts = await buildRuntimeCoreHosts({
 			maxLocalSessions: 4,
 			now: () => "2026-06-16T00:00:00.000Z",
@@ -1960,10 +1961,16 @@ describe("Runtime core host production assembly", () => {
 					}),
 				},
 				threadLoop: {
-					sessionEventWriter: writerFrom((envelope) => {
-						appended.push(envelope.event);
-						return successfulEventAppend(envelope);
-					}),
+					sessionEventWriter: {
+						...writerFrom((envelope) => {
+							appended.push(envelope.event);
+							return successfulEventAppend(envelope);
+						}),
+						settleToolResult: async () => {
+							settlementCalls += 1;
+							return { ok: true, result: { type: "committed" } };
+						},
+					},
 					providerCallRuntime: {
 						...DefaultProviderCallRuntimeConfig,
 						timeoutMs: 1_000,
@@ -2001,6 +2008,7 @@ describe("Runtime core host production assembly", () => {
 				"successor run after cold settled closeout",
 			);
 			expect(providerRequests).not.toContain("mreq_settled_idle");
+			expect(settlementCalls).toBe(0);
 			expect(
 				appended.filter((event) => event.type === "session.status_running"),
 			).toHaveLength(1);

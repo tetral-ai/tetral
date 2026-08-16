@@ -11,53 +11,51 @@ import {
 import { toGatewayProviderContext } from "../../../src/runtime/context-projection.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
-const reducerHarness = (
-	activeInputView: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[3],
-) => ({
-	deriveThreadTurnDecision: (
-		checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
-		routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
-		acceptedInputIds: readonly string[] = [],
-	) =>
-		deriveThreadTurnDecisionWithActiveInput(
-			checkpoint,
-			routes,
-			acceptedInputIds,
-			activeInputView,
-		),
-	initializeThreadTurnReduction: (
-		checkpoint: Parameters<
-			typeof initializeThreadTurnReductionWithActiveInput
-		>[0],
-		routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
-		acceptedInputIds: readonly string[] = [],
-	) =>
-		initializeThreadTurnReductionWithActiveInput(
-			checkpoint,
-			routes,
-			acceptedInputIds,
-			activeInputView,
-		),
-	reduceThreadTurn: (
-		current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
-		fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
-		routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
-		acceptedInputIds: readonly string[] = [],
-	) =>
-		reduceThreadTurnWithActiveInput(
-			current,
-			fact,
-			routes,
-			acceptedInputIds,
-			activeInputView,
-		),
-});
+type ActiveInputView = Parameters<
+	typeof deriveThreadTurnDecisionWithActiveInput
+>[3];
+const noPendingAttachments: ActiveInputView = { hasPendingAttachments: false };
 
-const {
-	deriveThreadTurnDecision,
-	initializeThreadTurnReduction,
-	reduceThreadTurn,
-} = reducerHarness({ hasPendingAttachments: false });
+const deriveThreadTurnDecision = (
+	activeInputView: ActiveInputView,
+	checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
+	routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	deriveThreadTurnDecisionWithActiveInput(
+		checkpoint,
+		routes,
+		acceptedInputIds,
+		activeInputView,
+	);
+const initializeThreadTurnReduction = (
+	activeInputView: ActiveInputView,
+	checkpoint: Parameters<
+		typeof initializeThreadTurnReductionWithActiveInput
+	>[0],
+	routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	initializeThreadTurnReductionWithActiveInput(
+		checkpoint,
+		routes,
+		acceptedInputIds,
+		activeInputView,
+	);
+const reduceThreadTurn = (
+	activeInputView: ActiveInputView,
+	current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
+	fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
+	routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	reduceThreadTurnWithActiveInput(
+		current,
+		fact,
+		routes,
+		acceptedInputIds,
+		activeInputView,
+	);
 
 describe("Thread-turn semantic characterization", () => {
 	test("a pending durable Tool Call is valid context but cannot start the next provider request", () => {
@@ -72,7 +70,7 @@ describe("Thread-turn semantic characterization", () => {
 			}],
 		}])).toMatchObject({ ok: true });
 
-		const pending = initializeThreadTurnReduction(
+		const pending = initializeThreadTurnReduction(noPendingAttachments,
 			sealedRequest([pendingTool("tool_pending", "call_pending", "Read")]),
 			{ routes: [{ toolUseEventId: "tool_pending", disposition: "hot_execution" }] },
 		);
@@ -81,7 +79,7 @@ describe("Thread-turn semantic characterization", () => {
 			action: { action: "await_tool_results", toolUseEventIds: ["tool_pending"] },
 		});
 
-		const terminal = reduceThreadTurn(
+		const terminal = reduceThreadTurn(noPendingAttachments,
 			pending,
 			{ fact: "tool_result_committed", toolUseEventId: "tool_pending", outcome: "success" },
 			noRoutes,
@@ -284,7 +282,7 @@ describe("Thread-turn semantic characterization", () => {
 
 		for (const scenario of cases) {
 			expect(
-				deriveThreadTurnDecision(
+				deriveThreadTurnDecision(noPendingAttachments,
 					scenario.checkpoint,
 					scenario.routes ?? noRoutes,
 					scenario.acceptedInputIds ?? [],
@@ -301,7 +299,7 @@ describe("Thread-turn semantic characterization", () => {
 				{ toolUseEventId: "tool_b", disposition: "hot_execution" },
 			],
 		};
-		const initial = initializeThreadTurnReduction(
+		const initial = initializeThreadTurnReduction(noPendingAttachments,
 			sealedRequest([
 				pendingTool("tool_a", "call_a", "Read"),
 				pendingTool("tool_b", "call_b", "Grep"),
@@ -309,7 +307,7 @@ describe("Thread-turn semantic characterization", () => {
 			routes,
 		);
 
-		const settledSecond = reduceThreadTurn(
+		const settledSecond = reduceThreadTurn(noPendingAttachments,
 			initial,
 			{
 				fact: "tool_result_committed",
@@ -327,7 +325,7 @@ describe("Thread-turn semantic characterization", () => {
 			},
 		});
 
-		const interruptedBeforeLastSettlement = reduceThreadTurn(
+		const interruptedBeforeLastSettlement = reduceThreadTurn(noPendingAttachments,
 			settledSecond,
 			{
 				fact: "interrupt_committed",
@@ -339,7 +337,7 @@ describe("Thread-turn semantic characterization", () => {
 			action: { action: "close_interrupted", modelRequestId: "request" },
 		});
 
-		const lastSettlementAfterInterrupt = reduceThreadTurn(
+		const lastSettlementAfterInterrupt = reduceThreadTurn(noPendingAttachments,
 			interruptedBeforeLastSettlement,
 			{
 				fact: "tool_result_committed",
@@ -353,7 +351,7 @@ describe("Thread-turn semantic characterization", () => {
 			action: { action: "close_interrupted", modelRequestId: "request" },
 		});
 
-		const allSettledBeforeInterrupt = reduceThreadTurn(
+		const allSettledBeforeInterrupt = reduceThreadTurn(noPendingAttachments,
 			settledSecond,
 			{
 				fact: "tool_result_committed",
@@ -367,7 +365,7 @@ describe("Thread-turn semantic characterization", () => {
 			action: { action: "prepare_next_request" },
 		});
 		expect(
-			reduceThreadTurn(
+			reduceThreadTurn(noPendingAttachments,
 				allSettledBeforeInterrupt,
 				{
 					fact: "interrupt_committed",
