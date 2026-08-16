@@ -1207,6 +1207,7 @@ export class ThreadState {
 		>;
 		this.#activeAttachmentRide = undefined;
 		this.#pendingAttachments = [];
+		this.refreshActiveInputView();
 		this.#threadProcessor = undefined;
 		this.#lastRequestUsage = undefined;
 		this.#lastRequestModelLimits = undefined;

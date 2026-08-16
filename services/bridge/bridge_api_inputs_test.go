@@ -251,6 +251,50 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsReturnsFirstTurnFileAttachmentDelta
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreCommitInputsKeepsTextAndAttachmentFromOneInput(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_bridge_commit_mixed_media"
+		threadID  = "thr_bridge_commit_mixed_media"
+		eventID   = "evt_bridge_commit_mixed_media"
+		fileID    = "file_bridge_commit_mixed_media"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_commit_mixed_media", 1, "pod_bridge_commit_mixed_media")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
+		`{"content":[{"type":"text","text":"inspect this image"},{"type":"image","source":{"type":"file","file_id":"file_bridge_commit_mixed_media"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_commit_mixed_media", "messages",
+		`["evt_bridge_commit_mixed_media"]`, "accepted", "bind_bridge_commit_mixed_media", "pod_bridge_commit_mixed_media", 1, 1)
+	attachmentStore := blob.NewFakeBlobStore()
+	seedBridgeAPIFileAttachment(t, admin, attachmentStore, fileID, "mixed.png", "image/png", "mixed")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-commit-mixed-media-key-32")
+	scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_commit_mixed_media", 1, "pod_bridge_commit_mixed_media")
+	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_commit_mixed_media",
+	})
+	if err != nil {
+		t.Fatalf("CommitInputs mixed media: %v", err)
+	}
+	application := response.GetCommitted().GetContext()
+	if len(application.GetAssignedContextSequences()) != 1 || len(application.GetPendingAttachmentJson()) != 1 {
+		t.Fatalf("mixed input receipt = %#v; want one text sequence and one attachment", application)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("LoadContext mixed media: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode mixed media context: %v", err)
+	}
+	if len(payload.ContextEntries) != 1 || len(payload.PendingAttachments) != 1 ||
+		payload.PendingAttachments[0].Origin.FileBacked == nil || payload.PendingAttachments[0].Origin.FileBacked.FileID != fileID {
+		t.Fatalf("mixed input cold context = entries %#v attachments %#v", payload.ContextEntries, payload.PendingAttachments)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreCommitInputsFencesRuntimeInboxBinding(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_commit_fence", "thr_bridge_commit_fence")

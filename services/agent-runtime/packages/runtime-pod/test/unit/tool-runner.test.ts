@@ -3599,6 +3599,13 @@ describe("RuntimePodToolRunner", () => {
 		).not.toThrow();
 		const argumentGuards = [
 			{
+				name: "pending attachment",
+				routeView: { routes: [] },
+				pendingToolUses: [],
+				pendingSandboxExecutions: [],
+				hasPendingAttachments: true,
+			},
+			{
 				name: "route view retains a route",
 				routeView: {
 					routes: [
@@ -3610,12 +3617,14 @@ describe("RuntimePodToolRunner", () => {
 				},
 				pendingToolUses: [],
 				pendingSandboxExecutions: [],
+				hasPendingAttachments: false,
 			},
 			{
 				name: "pending Tool Use outside the route view",
 				routeView: { routes: [] },
 				pendingToolUses: [{ toolUseEventId: "sevt_guard_pending_tool" }],
 				pendingSandboxExecutions: [],
+				hasPendingAttachments: false,
 			},
 			{
 				name: "pending Sandbox execution outside the route view",
@@ -3624,6 +3633,7 @@ describe("RuntimePodToolRunner", () => {
 				pendingSandboxExecutions: [
 					{ toolUseEventId: "sevt_guard_pending_sandbox" },
 				],
+				hasPendingAttachments: false,
 			},
 		];
 		for (const guard of argumentGuards) {
@@ -3634,10 +3644,52 @@ describe("RuntimePodToolRunner", () => {
 						guard.routeView,
 						guard.pendingToolUses,
 						guard.pendingSandboxExecutions,
-						false,
+						guard.hasPendingAttachments,
 					),
 				guard.name,
 			).toThrow("closed Thread resume requires a quiescent durable checkpoint");
+		}
+
+		const pendingAttachmentHosts = await buildResumeTestHosts(async () => ({
+			contextEntries: [],
+			thread: closedThread,
+			pendingToolUses: [],
+			pendingSandboxExecutions: [],
+			pendingAttachments: [
+				{
+					fileBacked: {
+						sourceEventId: "sevt_closed_resume_attachment",
+						fileId: "file_closed_resume_attachment",
+					},
+					mime: "image/png",
+					filename: "resume.png",
+				},
+			],
+			turnFacts: emptyResumeTurnFacts,
+			runtimeBindingToken: "runtime-binding-token-pending-attachment",
+		}));
+		const pendingAttachmentBridge = new RecordingBridgeClient();
+		pendingAttachmentBridge.childStatus = "closed_for_runtime";
+		try {
+			expect(
+				await makeRunner({
+					bridge: pendingAttachmentBridge,
+					subAgentHost: pendingAttachmentHosts.subAgentRunHost,
+				}).runTool(toolRequest("resume_agent", { task_name: "worker" })),
+			).toMatchObject({
+				type: "error",
+				error: { message: expect.stringContaining("context preload failed") },
+			});
+			expect(pendingAttachmentBridge.markChildThreadActiveRequests).toHaveLength(
+				0,
+			);
+			expect(
+				await pendingAttachmentHosts.subAgentRunHost.inspectThread(
+					resumeChildControl(),
+				),
+			).toMatchObject({ ok: true, observed: false });
+		} finally {
+			await pendingAttachmentHosts.close();
 		}
 
 		const hosts = await buildResumeTestHosts(async () => ({

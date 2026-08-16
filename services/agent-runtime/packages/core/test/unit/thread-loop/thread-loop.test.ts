@@ -2065,6 +2065,13 @@ describe("ThreadState", () => {
 
 	test("clear removes pending attachments", () => {
 		const state = new ThreadState("sesn_clear");
+		state.installThreadTurn(
+			{
+				executionRunId: "run_clear",
+				pendingInputContextSequences: [],
+			},
+			{ routes: [] },
+		);
 		state.addPendingAttachments([
 			{
 				transient: {
@@ -2078,9 +2085,16 @@ describe("ThreadState", () => {
 				filename: "image.png",
 			},
 		]);
+		expect(state.threadTurnReduction().action).toEqual({
+			action: "prepare_next_request",
+		});
 		state.clear();
 
 		expect(state.pendingAttachments()).toEqual([]);
+		expect(state.threadTurnReduction()).toMatchObject({
+			state: { state: "ready_to_finish" },
+			action: { action: "finish_idle" },
+		});
 	});
 
 	test("generic failure cleanup preserves accepted custody until a durable handoff", () => {

@@ -697,15 +697,32 @@ func loadThreadPendingAgentMailTx(
 	return pending, rows.Err()
 }
 
+// A file-backed attachment becomes cold-load eligible only through one
+// committed messages Inbox row. Event processing alone is not authority: the
+// delivery-exhaustion path also marks its source events processed. Request End
+// consumption is the independent terminal relation that removes eligibility.
 const loadThreadPendingFileAttachmentsSQL = `WITH media_events AS MATERIALIZED (
-		SELECT event_id, sequence AS event_sequence, payload_json
-		  FROM session_events
-		 WHERE workspace_id = $1
-		   AND session_id = $2
-		   AND session_thread_id = $3
-		   AND type = 'user.message'
-		   AND processed_at IS NOT NULL
-		   AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'
+		SELECT event.event_id, event.sequence AS event_sequence, event.payload_json
+		  FROM session_events event
+		  JOIN LATERAL (
+		      SELECT COUNT(*) AS custody_count,
+		             COUNT(*) FILTER (
+		                 WHERE inbox.input_kind = 'messages'
+		                   AND inbox.status = 'committed'
+		             ) AS committed_message_count
+		        FROM session_runtime_inbox inbox
+		       WHERE inbox.workspace_id = event.workspace_id
+		         AND inbox.session_id = event.session_id
+		         AND inbox.session_thread_id = event.session_thread_id
+		         AND inbox.event_ids_json::jsonb @> jsonb_build_array(event.event_id)
+		  ) authority
+		    ON authority.custody_count = 1
+		   AND authority.committed_message_count = 1
+		 WHERE event.workspace_id = $1
+		   AND event.session_id = $2
+		   AND event.session_thread_id = $3
+		   AND event.type = 'user.message'
+		   AND event.payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'
 	),
 	ordered_pairs AS (
 		SELECT e.event_id,

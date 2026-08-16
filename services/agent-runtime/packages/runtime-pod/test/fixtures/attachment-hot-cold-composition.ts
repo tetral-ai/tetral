@@ -25,8 +25,9 @@ if (inputPath === undefined) {
 
 const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly acceptedInput: RuntimeAcceptedInputState;
-	readonly commitInputsResponse: unknown;
+	readonly commitInputsResponse?: unknown;
 	readonly coldContextJson: string;
+	readonly coldOnly?: boolean;
 };
 
 const bridgeClient = {
@@ -57,27 +58,32 @@ const loader = new BridgeAPIContextLoader({
 	client: bridgeClient,
 	metadataFactory: async () => new Metadata(),
 });
-const hotCommitResult = await loader.commitAcceptedInput(input.acceptedInput);
-const hotContextLoader: TestContextLoader = {
-	buildContext: async () => [],
-	loadPendingInput: async () => ({ type: "empty" }),
-	commitAcceptedInput: async () => hotCommitResult,
-};
-
-const hot = new ThreadRuntime({
-	workspaceId: input.acceptedInput.workspaceId,
-	sessionId: input.acceptedInput.sessionId,
-	sessionThreadId: input.acceptedInput.sessionThreadId,
-	bindingId: input.acceptedInput.bindingId,
-	bindingGeneration: input.acceptedInput.bindingGeneration,
-	targetPodUid: input.acceptedInput.targetPodUid,
-	runtimeBindingToken: "attachment-composition-binding-token",
-});
-hot.state.markPersistentContextLoaded();
-if (hot.state.enqueueAcceptedInput(input.acceptedInput) !== "applied") {
-	throw new Error("hot attachment input was not admitted");
+let hotRequests: readonly LLMRequest[] | undefined;
+if (!input.coldOnly) {
+	if (input.commitInputsResponse === undefined) {
+		throw new Error("hot attachment composition input is incomplete");
+	}
+	const hotCommitResult = await loader.commitAcceptedInput(input.acceptedInput);
+	const hotContextLoader: TestContextLoader = {
+		buildContext: async () => [],
+		loadPendingInput: async () => ({ type: "empty" }),
+		commitAcceptedInput: async () => hotCommitResult,
+	};
+	const hot = new ThreadRuntime({
+		workspaceId: input.acceptedInput.workspaceId,
+		sessionId: input.acceptedInput.sessionId,
+		sessionThreadId: input.acceptedInput.sessionThreadId,
+		bindingId: input.acceptedInput.bindingId,
+		bindingGeneration: input.acceptedInput.bindingGeneration,
+		targetPodUid: input.acceptedInput.targetPodUid,
+		runtimeBindingToken: "attachment-composition-binding-token",
+	});
+	hot.state.markPersistentContextLoaded();
+	if (hot.state.enqueueAcceptedInput(input.acceptedInput) !== "applied") {
+		throw new Error("hot attachment input was not admitted");
+	}
+	hotRequests = await runAndCapture("hot", hot, hotContextLoader);
 }
-const hotRequests = await runAndCapture("hot", hot, hotContextLoader);
 
 const loaded = await loader.loadThreadContext({
 	workspaceId: input.acceptedInput.workspaceId,
@@ -87,11 +93,6 @@ const loaded = await loader.loadThreadContext({
 	bindingGeneration: input.acceptedInput.bindingGeneration,
 	targetPodUid: input.acceptedInput.targetPodUid,
 });
-if (loaded.pendingAttachments?.length !== 2) {
-	throw new Error(
-		`cold attachment count is ${loaded.pendingAttachments?.length ?? 0}`,
-	);
-}
 const checkpoint = extractThreadTurnCheckpoint({
 	contextEntries: loaded.contextEntries,
 	facts: loaded.turnFacts,
@@ -123,7 +124,7 @@ const coldRequests = await runAndCapture(
 
 process.stdout.write(
 	JSON.stringify({
-		hot: requestProjection(hotRequests),
+		...(hotRequests === undefined ? {} : { hot: requestProjection(hotRequests) }),
 		cold: requestProjection(coldRequests),
 	}),
 );

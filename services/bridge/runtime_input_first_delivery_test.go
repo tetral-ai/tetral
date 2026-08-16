@@ -161,6 +161,37 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	}
 	assertAttachmentHotColdComposition(t, accepted, committed, loaded.GetContextJson())
 	assertAttachmentOnlyRuntimeInputFixture(t, accepted, committed)
+
+	consumedFiles := make([]*bridgev1.FileAttachmentPair, 0, len(application.GetPendingAttachmentJson()))
+	for _, raw := range application.GetPendingAttachmentJson() {
+		var attachment bridgeLoadContextPendingAttachment
+		if err := json.Unmarshal([]byte(raw), &attachment); err != nil || attachment.Origin.FileBacked == nil {
+			t.Fatalf("decode committed file attachment %q: %v", raw, err)
+		}
+		consumedFiles = append(consumedFiles, &bridgev1.FileAttachmentPair{
+			SourceEventId: attachment.Origin.FileBacked.SourceEventID,
+			FileId:        attachment.Origin.FileBacked.FileID,
+		})
+	}
+	seedBridgeAPIRequestStart(t, apiStore, scope, "rwrite_attachment_consumed_start", "mreq_attachment_consumed", "agent_provider_request", 0)
+	if _, err := apiStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_attachment_consumed_end", ModelRequestId: "mreq_attachment_consumed",
+		FinishReason: "stop", UsageJson: `{}`, ConsumedFileAttachments: consumedFiles,
+	}); err != nil {
+		t.Fatalf("settle attachment-consuming request: %v", err)
+	}
+	consumedLoad, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("cold load after attachment consumption: %v", err)
+	}
+	var consumedContext bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(consumedLoad.GetContextJson()), &consumedContext); err != nil {
+		t.Fatalf("decode cold context after attachment consumption: %v", err)
+	}
+	if len(consumedContext.PendingAttachments) != 0 {
+		t.Fatalf("consumed attachment cold load = %#v; want no pending media", consumedContext.PendingAttachments)
+	}
+	assertColdAttachmentRequestCount(t, accepted, consumedLoad.GetContextJson(), 0)
 }
 
 func assertAttachmentHotColdComposition(
@@ -216,6 +247,53 @@ func assertAttachmentHotColdComposition(
 		len(composed.Hot.Context) != 0 || len(composed.Cold.Context) != 0 ||
 		len(composed.Hot.Attachments) != 2 || !reflect.DeepEqual(composed.Hot, composed.Cold) {
 		t.Fatalf("attachment hot/cold composition = hot %#v cold %#v; want one identical attachment-only request", composed.Hot, composed.Cold)
+	}
+}
+
+func assertColdAttachmentRequestCount(
+	t *testing.T,
+	accepted *agentruntimev1.AcceptInputRequest,
+	coldContextJSON string,
+	want int,
+) {
+	t.Helper()
+	input := map[string]any{
+		"acceptedInput": map[string]any{
+			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
+			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
+			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(),
+			"runtimeInputId": accepted.GetRuntimeInputId(), "inputOrder": accepted.GetInputOrder(),
+			"kind": "messages", "contentJson": accepted.GetMessagesJson(),
+		},
+		"coldContextJson": coldContextJSON,
+		"coldOnly":        true,
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("encode cold attachment composition: %v", err)
+	}
+	inputPath := t.TempDir() + "/attachment-cold.json"
+	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
+		t.Fatalf("write cold attachment composition: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/attachment-hot-cold-composition.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run cold attachment composition: %v: %s", err, output)
+	}
+	var composed struct {
+		Cold struct {
+			RequestCount int `json:"requestCount"`
+		} `json:"cold"`
+	}
+	if err := json.Unmarshal(output, &composed); err != nil {
+		t.Fatalf("decode cold attachment composition: %v: %s", err, output)
+	}
+	if composed.Cold.RequestCount != want {
+		t.Fatalf("cold attachment Provider requests = %d; want %d", composed.Cold.RequestCount, want)
 	}
 }
 
@@ -280,12 +358,20 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtime)
-	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	attachmentStore := blob.NewFakeBlobStore()
+	seedBridgeAPIFileAttachment(t, admin, attachmentStore, "file_first_queued_exhaustion", "exhausted.png", "image/png", "exhausted")
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(
+		client,
+		sessionevent.WithFileAttachmentValidator(enginefiles.NewPostgreSQLStore(client, attachmentStore)),
+	))
 	appended, err := eventService.AppendClientEvents(
 		context.Background(), workspace.DefaultID, sessionID, "idem_first_queued_exhaustion",
 		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
-			Type:    sessionevent.EventTypeUserMessage,
-			Content: []sessionevent.ContentBlock{{Type: sessionevent.ContentBlockTypeText, Text: "exhaust before claim"}},
+			Type: sessionevent.EventTypeUserMessage,
+			Content: []sessionevent.ContentBlock{{
+				Type:   sessionevent.ContentBlockTypeImage,
+				Source: &sessionevent.ContentSource{Type: sessionevent.ContentSourceTypeFile, FileID: "file_first_queued_exhaustion"},
+			}},
 		}}},
 	)
 	if err != nil || len(appended.Data) != 1 {
@@ -354,4 +440,31 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 		record["finalization.disposition"] != "rejected:runtime_delivery_exhausted" {
 		t.Fatalf("Runtime delivery attempt log = %#v; want bounded attempt and finalization evidence", record)
 	}
+
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
+		SET status='closed_for_runtime', updated_at=now()
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("close Thread after terminal media delivery: %v", err)
+	}
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 2, podUID)
+	apiStore := NewPostgreSQLBridgeAPIStore(client)
+	apiStore.RuntimeBindingTokenHMACKey = []byte("attachment-terminal-cold-load-key-32")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
+	loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("cold load terminal media input: %v", err)
+	}
+	var terminalContext bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &terminalContext); err != nil {
+		t.Fatalf("decode terminal media cold context: %v", err)
+	}
+	if len(terminalContext.PendingAttachments) != 0 {
+		t.Fatalf("terminal media cold load = %#v; want no pending attachments", terminalContext.PendingAttachments)
+	}
+	assertColdAttachmentRequestCount(t, &agentruntimev1.AcceptInputRequest{
+		WorkspaceId: "default", SessionId: sessionID, SessionThreadId: threadID,
+		BindingId: bindingID, BindingGeneration: 2, TargetPodUid: podUID,
+		RuntimeInputId: runtimeInputID,
+		Content:        &agentruntimev1.AcceptInputRequest_MessagesJson{MessagesJson: `{"messages":[{"parts":[]}]}`},
+	}, loaded.GetContextJson(), 0)
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -186,7 +187,7 @@ func TestPostgreSQLBridgeAPIStoreReadsBoundedOffsetFileAttachmentChunks(t *testi
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProcessedUnconsumedFileAttachments(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreLoadContextDerivesCommittedUnconsumedFileAttachments(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_file_pending"
@@ -222,6 +223,10 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProcessedUnconsumedFileAttach
 		  AND event_id IN ('sevt_file_pending_first', 'sevt_file_pending_later')`, sessionID, threadID); err != nil {
 		t.Fatalf("mark attachment inputs processed: %v", err)
 	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_first", "messages",
+		`["sevt_file_pending_first"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 1, 1)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_later", "messages",
+		`["sevt_file_pending_later"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 3, 3)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 0)
 	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_file_pending_end", ModelRequestId: "mreq_file_pending",
@@ -285,7 +290,70 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProcessedUnconsumedFileAttach
 	}
 }
 
-func TestPendingFileAttachmentQueryUsesMediaBoundedProcessedEventLookups(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreLoadContextRequiresUnambiguousCommittedMessageCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_bridge_file_authority"
+		threadID  = "thr_bridge_file_authority"
+		bindingID = "bind_bridge_file_authority"
+		podUID    = "pod_bridge_file_authority"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-file-authority-token-key")
+
+	type custodyCase struct {
+		name      string
+		sequence  int64
+		status    string
+		inputKind string
+	}
+	cases := []custodyCase{
+		{name: "committed", sequence: 1, status: "committed", inputKind: "messages"},
+		{name: "dead_lettered", sequence: 2, status: "dead_lettered", inputKind: "messages"},
+		{name: "cancelled", sequence: 3, status: "cancelled", inputKind: "messages"},
+		{name: "rejected", sequence: 4, status: "committed", inputKind: "rejection"},
+		{name: "conflicting", sequence: 5, status: "committed", inputKind: "messages"},
+		{name: "missing", sequence: 6},
+	}
+	attachmentStore := blob.NewFakeBlobStore()
+	for _, testCase := range cases {
+		eventID := "sevt_file_authority_" + testCase.name
+		fileID := "file_authority_" + testCase.name
+		seedBridgeAPIFileAttachment(t, admin, attachmentStore, fileID, testCase.name+".png", "image/png", testCase.name)
+		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, testCase.sequence, "user.message",
+			`{"content":[{"type":"image","source":{"type":"file","file_id":"`+fileID+`"}}]}`)
+		if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET processed_at=now()
+			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, eventID); err != nil {
+			t.Fatalf("mark %s event processed: %v", testCase.name, err)
+		}
+		if testCase.status != "" {
+			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_"+testCase.name,
+				testCase.inputKind, `[`+strconv.Quote(eventID)+`]`, testCase.status, bindingID, podUID,
+				testCase.sequence, testCase.sequence)
+		}
+	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_conflict",
+		"rejection", `["sevt_file_authority_conflicting"]`, "committed", bindingID, podUID, 5, 5)
+
+	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+	})
+	if err != nil {
+		t.Fatalf("LoadContext attachment authority: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode attachment authority context: %v", err)
+	}
+	if len(payload.PendingAttachments) != 1 || payload.PendingAttachments[0].Origin.FileBacked == nil ||
+		payload.PendingAttachments[0].Origin.FileBacked.FileID != "file_authority_committed" {
+		t.Fatalf("pending attachments = %#v; want only unambiguous committed message custody", payload.PendingAttachments)
+	}
+}
+
+func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *testing.T) {
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_file_plan"
@@ -301,6 +369,8 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedProcessedEventLookups(t *test
 		sessionID, threadID, eventID); err != nil {
 		t.Fatalf("mark media input processed: %v", err)
 	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_plan_media", "messages",
+		`["sevt_bridge_file_plan_media"]`, "committed", "bind_bridge_file_plan", "pod_bridge_file_plan", 1, 1)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
