@@ -530,18 +530,6 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 		t.Fatalf("seed MCP pod-loss events: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseEventID, "call_mcp_pod_loss", "spawn_agent")
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_messages
-		    SET data_json = jsonb_set(
-		      data_json::jsonb,
-		      '{parts,0,toolEvent}',
-		      '{"kind":"mcp","mcpServerName":"github"}'::jsonb
-		    )::text
-		  WHERE workspace_id = 'default' AND session_id = $1 AND message_id = $2`,
-		sessionID, "msg_"+toolUseEventID,
-	); err != nil {
-		t.Fatalf("stamp MCP tool projection: %v", err)
-	}
 	binding := runtimeBindingForDelivery{BindingID: "bind_mcp_pod_loss", BindingGeneration: 1, PodUID: "pod_mcp_pod_loss"}
 	repaired, err := runRuntimePodLostRepairTransaction(
 		context.Background(), runtime, sessionID, binding, time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),

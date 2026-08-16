@@ -1738,7 +1738,7 @@ func settleRuntimeTerminalToolPartTx(
 	if tool.ModelRequestID != toolUse.ModelRequestID || tool.ModelToolCallID != toolUse.ModelToolCallID {
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Tool repair identity is inconsistent")
 	}
-	resultValue := map[string]any{"type": "completed", "output": map[string]any{"text": terminal.Message, "truncated": false}}
+	resultValue := map[string]any{"type": "completed", "output": map[string]any{"text": terminal.Message}}
 	if !terminal.Success {
 		resultValue = map[string]any{"type": "error", "error": map[string]any{
 			"type": terminal.ErrorType, "message": terminal.Message, "retryable": terminal.Retryable,
