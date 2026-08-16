@@ -893,7 +893,7 @@ func TestPostgreSQLMCPMediaCommitRaceCleansTheDefinitiveReplayBlob(t *testing.T)
 	}
 	deletes := blobStore.Deletes()
 	if len(deletes) != 1 || deletes[0] == durablePointer ||
-		!(deletes[0] == putKeys[0] || deletes[0] == putKeys[1]) {
+		deletes[0] != putKeys[0] && deletes[0] != putKeys[1] {
 		t.Fatalf("MCP media replay cleanup = puts %v deletes %v durable %q", putKeys, deletes, durablePointer)
 	}
 	if blobStore.Has(deletes[0]) {
