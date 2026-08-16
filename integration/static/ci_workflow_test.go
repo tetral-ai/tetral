@@ -473,11 +473,16 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 	}
 	script := string(scriptBody)
 	for _, token := range []string{
+		"docker build --tag",
+		"Dockerfile.sandbox",
+		"docker image inspect",
 		"docker run --rm",
 		"--user 0:0",
 		"ghcr.io/tetral-ai/mirror/golang:1.25.12",
 		`test "$(id -u)" -eq 0`,
 		"go test ./internal/sandbox/helper",
+		"CGO_ENABLED=0 go test -c",
+		"TETRAL_TEST_HELPER_BINARY=/usr/local/bin/sandbox",
 		"TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop",
 		"--- SKIP:",
 	} {
@@ -523,7 +528,8 @@ func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
 		"--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)",
 		"--- PASS: TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
 		"--- PASS: TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
-		"--- PASS: TestRunReadUsesRuntimeProcessIdentityAndEnvironment (0.01s)",
+		"--- PASS: TestBuiltHelperFileToolUsesRuntimeIdentity (0.01s)",
+		"--- PASS: TestRuntimeAdapterReadUsesRuntimeProcessIdentityAndEnvironment (0.01s)",
 	}, "\n") + "\n")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("helper privilege output guard rejected a passing proof: %v\n%s", err, output)

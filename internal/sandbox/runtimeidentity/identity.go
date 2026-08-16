@@ -1,4 +1,4 @@
-// Package runtimeidentity owns the fixed Linux identity used for every Agent
+// Package runtimeidentity owns the named Linux identity used for every Agent
 // Tool effect inside a prepared Sandbox. The Driver uses it while preparing
 // runtime-owned paths and Git configuration; the root Helper uses it after
 // opening the protected Tool payload and before dispatching the Tool.
@@ -10,8 +10,6 @@ const (
 	User  = "daytona"
 	Home  = "/home/daytona"
 	Shell = "/bin/bash"
-	UID   = 1000
-	GID   = 1000
 )
 
 // IsReservedEnvironmentKey reports whether a Tool command must receive the

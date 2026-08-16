@@ -257,7 +257,7 @@ func TestDropPrivilegesForToolSwitchesRootHelperToRuntimeUser(t *testing.T) {
 		if path != "/workspace" {
 			t.Fatalf("stat runtime root = %q; want workspace root", path)
 		}
-		return runtimeIdentity{uid: 1000, gid: 1000}, nil
+		return runtimeIdentity{uid: 4242, gid: 4343}, nil
 	}
 	var calls []string
 	clearRuntimeGroups = func() error {
@@ -280,7 +280,7 @@ func TestDropPrivilegesForToolSwitchesRootHelperToRuntimeUser(t *testing.T) {
 	if toolErr := dropPrivilegesForTool("/workspace"); toolErr != nil {
 		t.Fatalf("dropPrivilegesForTool error = %+v", toolErr)
 	}
-	if strings.Join(calls, ",") != "groups:clear,gid:1000,uid:1000,env:normalize" {
+	if strings.Join(calls, ",") != "groups:clear,gid:4343,uid:4242,env:normalize" {
 		t.Fatalf("drop calls = %v; want groups, gid, uid, then runtime environment", calls)
 	}
 }
@@ -302,7 +302,7 @@ func TestDropPrivilegesForToolFailsClosedWhenRuntimeEnvironmentCannotBeNormalize
 	})
 	currentEUID = func() int { return 0 }
 	statRuntimeIdentity = func(string) (runtimeIdentity, error) {
-		return runtimeIdentity{uid: 1000, gid: 1000}, nil
+		return runtimeIdentity{uid: 4242, gid: 4343}, nil
 	}
 	clearRuntimeGroups = func() error { return nil }
 	setRuntimeGID = func(int) error { return nil }
@@ -330,7 +330,7 @@ func TestDropPrivilegesForToolFailsClosedWhenSupplementaryGroupsCannotBeCleared(
 	})
 	currentEUID = func() int { return 0 }
 	statRuntimeIdentity = func(string) (runtimeIdentity, error) {
-		return runtimeIdentity{uid: 1000, gid: 1000}, nil
+		return runtimeIdentity{uid: 4242, gid: 4343}, nil
 	}
 	clearRuntimeGroups = func() error { return errors.New("setgroups denied") }
 	setRuntimeGID = func(int) error { t.Fatal("setgid ran after setgroups failure"); return nil }
@@ -426,15 +426,42 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 }
 
 func TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration(t *testing.T) {
-	bin := productionIdentityFixture(t)
-	installProductionIdentityGitConfig(t)
+	bin, identity := productionIdentityFixture(t)
+	installProductionIdentityGitConfig(t, identity)
 	payloadPath := writeCLIPayload(t, productionIdentityPayload("evt_runtime_identity_foreground", false, ""))
 
 	envelope := runRootShapedHelper(t, bin, "exec", payloadPath)
-	assertProductionIdentityOutput(t, envelope)
+	assertProductionIdentityOutput(t, envelope, identity)
 }
 
-func TestRunReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
+func TestBuiltHelperFileToolUsesRuntimeIdentity(t *testing.T) {
+	bin, identity := productionIdentityFixture(t)
+	targetPath := "/workspace/helper-identity.txt"
+	t.Cleanup(func() { _ = os.Remove(targetPath) })
+	payloadPath := writeCLIPayload(t, protocol.Payload{
+		SchemaVersion:  protocol.SchemaVersion,
+		Tool:           "write",
+		ToolUseEventID: "evt_helper_identity_file",
+		WorkspaceRoot:  "/workspace",
+		Roots:          []protocol.Root{{Path: "/workspace", Mode: protocol.RootModeReadWrite}},
+		Limits:         protocol.Limits{VisibleBytes: 256 * 1024, VisibleLines: 2000},
+		Input:          json.RawMessage(`{"path":"helper-identity.txt","content":"runtime identity\n"}`),
+	})
+	envelope := runRootShapedHelper(t, bin, "write", payloadPath)
+	if envelope.Status != protocol.ToolStatusSuccess {
+		t.Fatalf("file Tool envelope = %+v; want success", envelope)
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("stat file Tool output: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != identity.uid || int(stat.Gid) != identity.gid {
+		t.Fatalf("file Tool output owner = %v; want observed image account %d/%d", info.Sys(), identity.uid, identity.gid)
+	}
+}
+
+func TestRuntimeAdapterReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
 	if os.Getenv("TETRAL_FILE_IDENTITY_CHILD") == "1" {
 		var envelope bytes.Buffer
 		observation := struct {
@@ -466,12 +493,13 @@ func TestRunReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
 		os.Exit(0)
 	}
 
-	_ = productionIdentityFixture(t)
+	_, identity := productionIdentityFixture(t)
 	probePath := "/workspace/file-identity.txt"
+	t.Cleanup(func() { _ = os.Remove(probePath) })
 	if err := os.WriteFile(probePath, []byte("runtime file identity\n"), 0o600); err != nil {
 		t.Fatalf("write file identity probe: %v", err)
 	}
-	if err := os.Chown(probePath, 1000, 1000); err != nil {
+	if err := os.Chown(probePath, identity.uid, identity.gid); err != nil {
 		t.Fatalf("chown file identity probe: %v", err)
 	}
 	payloadPath := writeCLIPayload(t, protocol.Payload{
@@ -483,7 +511,7 @@ func TestRunReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
 		Limits:         protocol.Limits{VisibleBytes: 256 * 1024, VisibleLines: 2000},
 		Input:          json.RawMessage(`{"path":"file-identity.txt"}`),
 	})
-	command := exec.Command(os.Args[0], "-test.run=^TestRunReadUsesRuntimeProcessIdentityAndEnvironment$")
+	command := exec.Command(os.Args[0], "-test.run=^TestRuntimeAdapterReadUsesRuntimeProcessIdentityAndEnvironment$")
 	command.Env = append(rootShapedHelperEnvironment("read"),
 		"TETRAL_FILE_IDENTITY_CHILD=1",
 		"TETRAL_FILE_IDENTITY_PAYLOAD="+payloadPath,
@@ -509,8 +537,8 @@ func TestRunReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
 	if observation.Code != 0 || envelope.Status != protocol.ToolStatusSuccess {
 		t.Fatalf("file identity read code=%d envelope=%+v", observation.Code, envelope)
 	}
-	if observation.UID != 1000 || observation.GID != 1000 {
-		t.Fatalf("file identity uid/gid = %d/%d; want 1000/1000", observation.UID, observation.GID)
+	if observation.UID != identity.uid || observation.GID != identity.gid {
+		t.Fatalf("file identity uid/gid = %d/%d; want observed image account %d/%d", observation.UID, observation.GID, identity.uid, identity.gid)
 	}
 	wantEnv := map[string]string{
 		"HOME": runtimeidentity.Home, "USER": runtimeidentity.User, "LOGNAME": runtimeidentity.User,
@@ -522,8 +550,8 @@ func TestRunReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
 }
 
 func TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration(t *testing.T) {
-	bin := productionIdentityFixture(t)
-	installProductionIdentityGitConfig(t)
+	bin, identity := productionIdentityFixture(t)
+	installProductionIdentityGitConfig(t, identity)
 	taskID := "task_runtime_identity_detached"
 	payloadPath := writeCLIPayload(t, productionIdentityPayload("evt_runtime_identity_detached", true, taskID))
 
@@ -548,7 +576,7 @@ func TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration(t *testin
 		if pollEnvelope.Status == protocol.ToolStatusRunning {
 			continue
 		}
-		assertProductionIdentityText(t, result.ExitCode, detachedStdout.String())
+		assertProductionIdentityText(t, result.ExitCode, detachedStdout.String(), identity)
 		return
 	}
 	t.Fatal("detached identity command did not reach terminal state")
@@ -556,7 +584,12 @@ func TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration(t *testin
 
 const productionIdentityCommand = `identity_output=$(printf 'uid=%s\ngid=%s\nHOME=%s\nUSER=%s\nLOGNAME=%s\nshell=%s\nSUDO_USER=%s\nSUDO_UID=%s\nSUDO_GID=%s\nSUDO_COMMAND=%s\nORDINARY=%s\nTERM=%s\nNO_COLOR=%s\nPAGER=%s\nGIT_PAGER=%s\nurl=' "$(id -u)" "$(id -g)" "$HOME" "$USER" "$LOGNAME" "$(getent passwd "$USER" | cut -d: -f7)" "${SUDO_USER-unset}" "${SUDO_UID-unset}" "${SUDO_GID-unset}" "${SUDO_COMMAND-unset}" "$ORDINARY" "$TERM" "$NO_COLOR" "$PAGER" "$GIT_PAGER"; git ls-remote --get-url https://github.com/acme/repo.git); printf '%s\n' "$identity_output"`
 
-func productionIdentityFixture(t *testing.T) string {
+type observedRuntimeIdentity struct {
+	uid int
+	gid int
+}
+
+func productionIdentityFixture(t *testing.T) (string, observedRuntimeIdentity) {
 	t.Helper()
 	if os.Geteuid() != 0 || os.Getenv("TETRAL_RUN_ROOT_IDENTITY_TESTS") != "1" {
 		t.Skip("production-shaped runtime identity proof requires an isolated root test environment")
@@ -568,9 +601,21 @@ func productionIdentityFixture(t *testing.T) string {
 	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 { //nolint:gosec // opt-in root test reads only its harness-provided Helper binary.
 		t.Fatalf("helper binary %q is not executable: %v", bin, err)
 	}
-	runtimeAccount, err := user.LookupId(strconv.Itoa(runtimeidentity.UID))
+	runtimeAccount, err := user.Lookup(runtimeidentity.User)
 	if err != nil {
 		t.Fatalf("lookup runtime passwd entry: %v", err)
+	}
+	uid, err := strconv.Atoi(runtimeAccount.Uid)
+	if err != nil {
+		t.Fatalf("parse runtime uid %q: %v", runtimeAccount.Uid, err)
+	}
+	gid, err := strconv.Atoi(runtimeAccount.Gid)
+	if err != nil {
+		t.Fatalf("parse runtime gid %q: %v", runtimeAccount.Gid, err)
+	}
+	identity := observedRuntimeIdentity{uid: uid, gid: gid}
+	if identity.uid == 0 || identity.gid == 0 {
+		t.Fatalf("runtime image account resolved to root identity %d/%d", identity.uid, identity.gid)
 	}
 	if runtimeAccount.Username != runtimeidentity.User || runtimeAccount.HomeDir != runtimeidentity.Home {
 		t.Fatalf("runtime passwd identity = %s/%s; want %s/%s", runtimeAccount.Username, runtimeAccount.HomeDir, runtimeidentity.User, runtimeidentity.Home)
@@ -579,39 +624,25 @@ func productionIdentityFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read runtime passwd database: %v", err)
 	}
+	wantPasswdEntry := fmt.Sprintf("%s:x:%d:%d:", runtimeidentity.User, identity.uid, identity.gid)
 	wantPasswdSuffix := ":" + runtimeidentity.Home + ":" + runtimeidentity.Shell
-	if !strings.Contains(string(passwdBody), runtimeidentity.User+":x:"+strconv.Itoa(runtimeidentity.UID)+":"+strconv.Itoa(runtimeidentity.GID)+":") ||
-		!strings.Contains(string(passwdBody), wantPasswdSuffix) {
-		t.Fatalf("runtime passwd entry does not carry uid/gid/home/shell %d/%d/%s/%s", runtimeidentity.UID, runtimeidentity.GID, runtimeidentity.Home, runtimeidentity.Shell)
+	if !strings.Contains(string(passwdBody), wantPasswdEntry) || !strings.Contains(string(passwdBody), wantPasswdSuffix) {
+		t.Fatalf("runtime passwd entry does not carry observed uid/gid/home/shell %d/%d/%s/%s", identity.uid, identity.gid, runtimeidentity.Home, runtimeidentity.Shell)
 	}
 	for _, path := range []string{runtimeidentity.Home, "/workspace", "/tmp/tetral-runtime"} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("isolated identity fixture path %s already exists: %v", path, err)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat real image identity path %s: %v", path, err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int(stat.Uid) != identity.uid || int(stat.Gid) != identity.gid {
+			t.Fatalf("real image identity path %s owner = %v; want observed account %d/%d", path, info.Sys(), identity.uid, identity.gid)
 		}
 	}
-	if err := os.MkdirAll(runtimeidentity.Home, 0o755); err != nil {
-		t.Fatalf("create runtime home: %v", err)
-	}
-	if err := os.MkdirAll("/workspace", 0o755); err != nil {
-		t.Fatalf("create workspace: %v", err)
-	}
-	if err := os.MkdirAll("/tmp/tetral-runtime", 0o700); err != nil {
-		t.Fatalf("create runtime root: %v", err)
-	}
-	for _, path := range []string{runtimeidentity.Home, "/workspace", "/tmp/tetral-runtime"} {
-		if err := os.Chown(path, runtimeidentity.UID, runtimeidentity.GID); err != nil {
-			t.Fatalf("chown %s to runtime identity: %v", path, err)
-		}
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll("/tmp/tetral-runtime")
-		_ = os.RemoveAll("/workspace")
-		_ = os.RemoveAll(runtimeidentity.Home)
-	})
-	return bin
+	return bin, identity
 }
 
-func installProductionIdentityGitConfig(t *testing.T) {
+func installProductionIdentityGitConfig(t *testing.T, identity observedRuntimeIdentity) {
 	t.Helper()
 	for _, args := range [][]string{
 		{"config", "--global", "url.https://git.tetral.test/github.com/.insteadOf", "https://github.com/"},
@@ -620,7 +651,7 @@ func installProductionIdentityGitConfig(t *testing.T) {
 		command := exec.Command("git", args...)
 		command.Dir = runtimeidentity.Home
 		command.Env = []string{"HOME=" + runtimeidentity.Home, "PATH=" + os.Getenv("PATH")}
-		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(runtimeidentity.UID), Gid: uint32(runtimeidentity.GID)}}
+		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(identity.uid), Gid: uint32(identity.gid)}}
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("install runtime git config: %v\n%s", err, string(output))
 		}
@@ -675,8 +706,8 @@ func rootShapedHelperEnvironment(tool string) []string {
 		"USER=root",
 		"LOGNAME=root",
 		"SUDO_USER=daytona",
-		"SUDO_UID=1000",
-		"SUDO_GID=1000",
+		"SUDO_UID=4242",
+		"SUDO_GID=4242",
 		"SUDO_COMMAND=/usr/local/bin/sandbox " + tool,
 		"ORDINARY=inherited-value",
 		"TERM=inherited-term",
@@ -698,13 +729,13 @@ func mapsEqual(left, right map[string]string) bool {
 	return true
 }
 
-func assertProductionIdentityOutput(t *testing.T, envelope protocol.Envelope) {
+func assertProductionIdentityOutput(t *testing.T, envelope protocol.Envelope, identity observedRuntimeIdentity) {
 	t.Helper()
 	if envelope.Status != protocol.ToolStatusSuccess {
 		t.Fatalf("identity envelope = %+v; want success", envelope)
 	}
 	result := decodeProductionIdentityResult(t, envelope)
-	assertProductionIdentityText(t, result.ExitCode, result.Stdout.Text)
+	assertProductionIdentityText(t, result.ExitCode, result.Stdout.Text, identity)
 }
 
 type productionIdentityResult struct {
@@ -723,12 +754,12 @@ func decodeProductionIdentityResult(t *testing.T, envelope protocol.Envelope) pr
 	return result
 }
 
-func assertProductionIdentityText(t *testing.T, exitCode *int, stdout string) {
+func assertProductionIdentityText(t *testing.T, exitCode *int, stdout string, identity observedRuntimeIdentity) {
 	t.Helper()
 	want := fmt.Sprintf(
 		"uid=%d\ngid=%d\nHOME=%s\nUSER=%s\nLOGNAME=%s\nshell=%s\nSUDO_USER=unset\nSUDO_UID=unset\nSUDO_GID=unset\nSUDO_COMMAND=unset\nORDINARY=tool-value\nTERM=dumb\nNO_COLOR=1\nPAGER=cat\nGIT_PAGER=cat\nurl=https://git.tetral.test/github.com/acme/repo.git\n",
-		runtimeidentity.UID,
-		runtimeidentity.GID,
+		identity.uid,
+		identity.gid,
 		runtimeidentity.Home,
 		runtimeidentity.User,
 		runtimeidentity.User,
