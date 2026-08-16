@@ -1933,44 +1933,6 @@ describe("ThreadState", () => {
 		);
 	});
 
-	test("keeps a full active ride separate from attachments queued for the next request", () => {
-		const state = new ThreadState("sesn_attachment_rides");
-		const activeRide = Array.from(
-			{ length: MaxProviderAttachments },
-			(_, index) => ({
-				transient: {
-					attachmentRef: `att_active_${index}`,
-					sourcePath: `/tmp/active-${index}.png`,
-					pageRange: "",
-					detail: "auto" as const,
-				},
-				fileBacked: undefined,
-				mime: "image/png",
-				filename: `active-${index}.png`,
-			}),
-		);
-		const nextRide = {
-			transient: {
-				attachmentRef: "att_next",
-				sourcePath: "/tmp/next.png",
-				pageRange: "",
-				detail: "auto" as const,
-			},
-			fileBacked: undefined,
-			mime: "image/png",
-			filename: "next.png",
-		};
-
-		state.addPendingAttachments(activeRide);
-		expect(state.beginPendingAttachmentRide()).toEqual(activeRide);
-		state.addPendingAttachments([nextRide]);
-		state.reconcilePendingAttachments([...activeRide, nextRide]);
-		expect(state.pendingAttachments()).toEqual([...activeRide, nextRide]);
-
-		state.settlePendingAttachmentRide();
-		expect(state.beginPendingAttachmentRide()).toEqual([nextRide]);
-	});
-
 	test("agent-mail delivery identity deduplicates only while its active consumer owns it", () => {
 		const state = new ThreadState("sesn_agent_mail_dedup");
 		const mail = {

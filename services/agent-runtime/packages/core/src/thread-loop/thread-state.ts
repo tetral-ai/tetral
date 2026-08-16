@@ -25,8 +25,8 @@
  *   | settled | consumed by a settled request-end    | settlePendingAttachmentRide | terminal for that media   |
  *   Error request-ends and reschedules never settle the ride. Once an isError=false
  *   request-end acknowledges, the ride is settled even if later tool-join closeout
- *   returns an interrupted turn result. reconcilePendingAttachments preserves the
- *   unsettled active ride and separately rebuilds attachments queued for the next ride.
+ *   returns an interrupted turn result. Attachments admitted during a ride remain
+ *   queued separately for the next request.
  *
  * INVARIANTS:
  *   - One-ride media: file-backed user media and tool-result transient attachments
@@ -889,39 +889,6 @@ export class ThreadState {
 		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
-	reconcilePendingAttachments(
-		attachments: readonly RuntimeProviderAttachment[],
-	): void {
-		if (this.#activeAttachmentRide === undefined) {
-			this.replacePendingAttachments(attachments);
-			return;
-		}
-		const activeByOrigin = Object.create(null) as Record<
-			string,
-			number | undefined
-		>;
-		for (const attachment of this.#activeAttachmentRide) {
-			const identity = providerRequestAttachmentIdentity(attachment);
-			activeByOrigin[identity] = (activeByOrigin[identity] ?? 0) + 1;
-		}
-		const nextRide = attachments.filter((attachment) => {
-			const identity = providerRequestAttachmentIdentity(attachment);
-			const remaining = activeByOrigin[identity] ?? 0;
-			if (remaining === 0) {
-				return true;
-			}
-			activeByOrigin[identity] = remaining - 1;
-			return false;
-		});
-		this.#pendingAttachments = [];
-		this.#pendingAttachments.push(
-			...nextRide
-				.slice(0, MaxProviderAttachments)
-				.map(cloneRuntimeProviderAttachment),
-		);
-		this.refreshActiveInputView();
-	}
-
 	private hasPendingAttachments(): boolean {
 		return (
 			(this.#activeAttachmentRide?.length ?? 0) > 0 ||
@@ -1205,22 +1172,6 @@ function cloneRuntimeProviderAttachment(
 				transient: undefined,
 				fileBacked: { ...attachment.fileBacked },
 			};
-}
-
-function providerRequestAttachmentIdentity(
-	attachment: RuntimeProviderAttachment,
-): string {
-	if (attachment.transient !== undefined) {
-		return JSON.stringify(["transient", attachment.transient.attachmentRef]);
-	}
-	if (attachment.fileBacked !== undefined) {
-		return JSON.stringify([
-			"file",
-			attachment.fileBacked.sourceEventId,
-			attachment.fileBacked.fileId,
-		]);
-	}
-	return JSON.stringify(["invalid", attachment]);
 }
 
 function sameAcceptedInput(

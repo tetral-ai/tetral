@@ -70,6 +70,42 @@ func TestMigrateSchemaCreatesSessionMCPManifestsShapeAndRLS(t *testing.T) {
 	assertSessionMCPManifestsSchemaShapeAndRLS(t, db, schema)
 }
 
+func TestMigrateSchemaOwnsAttachmentAuthorityInboxIndex(t *testing.T) {
+	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
+	ctx := context.Background()
+	if err := storage.MigrateSchema(ctx, db); err != nil {
+		t.Fatalf("MigrateSchema: %v", err)
+	}
+	assertAttachmentAuthorityInboxIndex(t, db)
+
+	if _, err := db.ExecContext(ctx, `DROP INDEX session_runtime_inbox_attachment_authority_lookup`); err != nil {
+		t.Fatalf("drop attachment authority Inbox index: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM tetral_schema_migrations WHERE version = 1`); err != nil {
+		t.Fatalf("clear disposable baseline stamp: %v", err)
+	}
+	if err := storage.MigrateSchema(ctx, db); err != nil {
+		t.Fatalf("reseed disposable baseline: %v", err)
+	}
+	assertAttachmentAuthorityInboxIndex(t, db)
+}
+
+func assertAttachmentAuthorityInboxIndex(t testing.TB, db *sql.DB) {
+	t.Helper()
+	var definition string
+	if err := db.QueryRow(`SELECT indexdef FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'session_runtime_inbox'
+		  AND indexname = 'session_runtime_inbox_attachment_authority_lookup'`).Scan(&definition); err != nil {
+		t.Fatalf("read attachment authority Inbox index: %v", err)
+	}
+	for _, fragment := range []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "INCLUDE (input_kind, status, event_ids_json)"} {
+		if !strings.Contains(definition, fragment) {
+			t.Fatalf("attachment authority Inbox index = %q; missing %q", definition, fragment)
+		}
+	}
+}
+
 func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
@@ -128,7 +164,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "a397c82147bc124459aff8102d24521355efe3bb60b240d8799f2184351ff0a3"
+	const want = "fdf8e627300014175be000dc8e5175f70ad4ab2a394783c73864eaaa9a0676b7"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}

@@ -1668,6 +1668,7 @@ END $$`
 	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
+	createPostgreSQLSessionRuntimeInboxAttachmentIndex      = `CREATE INDEX IF NOT EXISTS session_runtime_inbox_attachment_authority_lookup ON session_runtime_inbox(workspace_id, session_id, session_thread_id, runtime_input_id) INCLUDE (input_kind, status, event_ids_json)`
 	createPostgreSQLSessionEventsAgentMailDeliveryIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_agent_mail_delivery ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
@@ -1939,6 +1940,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_messages_model_request_unique", createPostgreSQLSessionMessagesModelRequestIndex},
 		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
 		{"index_session_file_attachment_consumptions_pending", createPostgreSQLSessionFileAttachmentPendingIndex},
+		{"index_session_runtime_inbox_attachment_authority", createPostgreSQLSessionRuntimeInboxAttachmentIndex},
 		{"index_session_events_agent_mail_delivery", createPostgreSQLSessionEventsAgentMailDeliveryIndex},
 		{"index_session_pending_tool_uses_status", createPostgreSQLPendingToolUsesStatusIndex},
 		{"index_session_background_tasks_status", createPostgreSQLBackgroundTasksStatusIndex},

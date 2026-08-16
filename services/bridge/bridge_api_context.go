@@ -701,23 +701,33 @@ func loadThreadPendingAgentMailTx(
 // committed messages Inbox row. Event processing alone is not authority: the
 // delivery-exhaustion path also marks its source events processed. Request End
 // consumption is the independent terminal relation that removes eligibility.
-const loadThreadPendingFileAttachmentsSQL = `WITH media_events AS MATERIALIZED (
+// The thread-scoped covering index feeds one materialized Inbox pass; media
+// event count must not multiply authority-history scans.
+const loadThreadPendingFileAttachmentsSQL = `WITH scoped_inbox_events AS MATERIALIZED (
+		SELECT DISTINCT inbox.runtime_input_id,
+		       event_ref.event_id,
+		       inbox.input_kind,
+		       inbox.status
+		  FROM session_runtime_inbox inbox
+		 CROSS JOIN LATERAL jsonb_array_elements_text(inbox.event_ids_json::jsonb)
+		      AS event_ref(event_id)
+		 WHERE inbox.workspace_id = $1
+		   AND inbox.session_id = $2
+		   AND inbox.session_thread_id = $3
+	),
+	attachment_authority AS MATERIALIZED (
+		SELECT event_id
+		  FROM scoped_inbox_events
+		 GROUP BY event_id
+		HAVING COUNT(*) = 1
+		   AND COUNT(*) FILTER (
+		           WHERE input_kind = 'messages'
+		             AND status = 'committed'
+		       ) = 1
+	),
+	media_events AS MATERIALIZED (
 		SELECT event.event_id, event.sequence AS event_sequence, event.payload_json
 		  FROM session_events event
-		  JOIN LATERAL (
-		      SELECT COUNT(*) AS custody_count,
-		             COUNT(*) FILTER (
-		                 WHERE inbox.input_kind = 'messages'
-		                   AND inbox.status = 'committed'
-		             ) AS committed_message_count
-		        FROM session_runtime_inbox inbox
-		       WHERE inbox.workspace_id = event.workspace_id
-		         AND inbox.session_id = event.session_id
-		         AND inbox.session_thread_id = event.session_thread_id
-		         AND inbox.event_ids_json::jsonb @> jsonb_build_array(event.event_id)
-		  ) authority
-		    ON authority.custody_count = 1
-		   AND authority.committed_message_count = 1
 		 WHERE event.workspace_id = $1
 		   AND event.session_id = $2
 		   AND event.session_thread_id = $3
@@ -736,6 +746,8 @@ const loadThreadPendingFileAttachmentsSQL = `WITH media_events AS MATERIALIZED (
 		           ORDER BY block.position ASC
 		       ) AS pair_rank
 		  FROM media_events e
+		  JOIN attachment_authority authority
+		    ON authority.event_id = e.event_id
 		  CROSS JOIN LATERAL jsonb_array_elements(e.payload_json::jsonb->'content')
 		       WITH ORDINALITY AS block(value, position)
 		   LEFT JOIN files f

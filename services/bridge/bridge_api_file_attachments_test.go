@@ -356,11 +356,13 @@ func TestPostgreSQLBridgeAPIStoreLoadContextRequiresUnambiguousCommittedMessageC
 func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *testing.T) {
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID = "sesn_bridge_file_plan"
-		threadID  = "thr_bridge_file_plan"
-		eventID   = "sevt_bridge_file_plan_media"
+		sessionID     = "sesn_bridge_file_plan"
+		threadID      = "thr_bridge_file_plan"
+		otherThreadID = "thr_bridge_file_plan_other"
+		eventID       = "sevt_bridge_file_plan_media"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, otherThreadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_file_plan"}}]}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -371,6 +373,59 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *te
 	}
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_plan_media", "messages",
 		`["sevt_bridge_file_plan_media"]`, "committed", "bind_bridge_file_plan", "pod_bridge_file_plan", 1, 1)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, binding_id,
+		binding_generation, target_pod_uid, created_at, updated_at, committed_at
+	)
+	SELECT 'default', $1, $2, 'rin_bridge_file_plan_history_' || value::text,
+	       'messages', jsonb_build_array('sevt_unrelated_' || value::text)::text,
+	       value + 100, value + 100, 'committed', 'bind_bridge_file_plan', 1,
+	       'pod_bridge_file_plan', '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 1000) AS value`, sessionID, threadID); err != nil {
+		t.Fatalf("seed unrelated Inbox history: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, binding_id,
+		binding_generation, target_pod_uid, created_at, updated_at, committed_at
+	)
+	SELECT 'default', $1, $2, 'rin_bridge_file_plan_other_' || value::text,
+	       'messages', jsonb_build_array('sevt_other_' || value::text)::text,
+	       value, value, 'committed', 'bind_bridge_file_plan', 1,
+	       'pod_bridge_file_plan', '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 10000) AS value`, sessionID, otherThreadID); err != nil {
+		t.Fatalf("seed other-Thread Inbox history: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type,
+		payload_json, visibility, session_visible, processed_at, created_at, updated_at
+	)
+	SELECT 'default', $1, $2, 'sevt_bridge_file_plan_media_' || value::text,
+	       value + 1, 'user.message',
+	       jsonb_build_object('content', jsonb_build_array(jsonb_build_object(
+	           'type', 'image', 'source', jsonb_build_object(
+	               'type', 'file', 'file_id', 'file_bridge_file_plan_' || value::text))))::text,
+	       'public', TRUE, '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 31) AS value`, sessionID, threadID); err != nil {
+		t.Fatalf("seed additional media events: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, binding_id,
+		binding_generation, target_pod_uid, created_at, updated_at, committed_at
+	)
+	SELECT 'default', $1, $2, 'rin_bridge_file_plan_media_' || value::text,
+	       'messages', jsonb_build_array('sevt_bridge_file_plan_media_' || value::text)::text,
+	       value + 1, value + 1, 'committed', 'bind_bridge_file_plan', 1,
+	       'pod_bridge_file_plan', '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 31) AS value`, sessionID, threadID); err != nil {
+		t.Fatalf("seed additional media Inbox authority: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
@@ -378,7 +433,7 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *te
 		)
 		SELECT 'default', $1, $2,
 		       'sevt_bridge_file_plan_' || value::text,
-		       value + 1,
+		       value + 1000,
 		       'user.message',
 		       '{"content":[{"type":"text","text":"non-media"}]}',
 		       'public',
@@ -391,7 +446,7 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *te
 	); err != nil {
 		t.Fatalf("seed non-media events: %v", err)
 	}
-	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events`); err != nil {
+	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events; ANALYZE session_runtime_inbox`); err != nil {
 		t.Fatalf("analyze media query tables: %v", err)
 	}
 	rows, err := admin.QueryContext(context.Background(),
@@ -419,6 +474,15 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *te
 	}
 	if strings.Contains(plan, "Seq Scan on session_events") {
 		t.Fatalf("pending file query scans non-media session events:\n%s", plan)
+	}
+	if !strings.Contains(plan, "session_runtime_inbox_attachment_authority_lookup") {
+		t.Fatalf("pending file query does not narrow Inbox authority by thread:\n%s", plan)
+	}
+	if strings.Contains(plan, "Seq Scan on session_runtime_inbox") {
+		t.Fatalf("pending file query scans unrelated Inbox history:\n%s", plan)
+	}
+	if strings.Contains(plan, "session_runtime_inbox inbox (actual rows=1.00 loops=32)") {
+		t.Fatalf("pending file query repeats the Inbox authority scan per media event:\n%s", plan)
 	}
 }
 
