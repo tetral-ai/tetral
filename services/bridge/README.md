@@ -356,7 +356,15 @@ and active lifecycle facts directly from durable rows.
   mail-without-Inbox, or Inbox-without-Queue birth state. Completion replay
   joins the same durable identities; delivery never scans the event ledger to
   reconstruct custody. Delivery targets the bound pod directly, never a
-  load-balanced service. Initial MCP manifest listing
+  load-balanced service. A leased interrupt is an exclusive Session-partition
+  delivery barrier: later inputs still commit their Event, Inbox, and Queue
+  custody, but no later job is leased until the interrupt's atomic Request End,
+  Tool settlements, and receipt are durable and its Queue job is acknowledged.
+  Runtime acceptance alone never acknowledges an interrupt. Exact receipt
+  replay acknowledges without another Runtime call; a 30-second interrupt send
+  timeout remains outcome-unknown and retains the same barrier and attempt
+  identity until receipt replay or proven binding-loss handoff lets the
+  replacement owner settle it. Initial MCP manifest listing
   similarly uses a fixed 180-second per-call deadline. This accommodates the
   connector's credential, reconnect, and list budgets while bounding the
   single-threaded Job Runner sweep to 180 seconds per stalled workspace; it

@@ -2005,7 +2005,7 @@ describe("ThreadLoop", () => {
 			await Effect.runPromise(Fiber.interrupt(runFiber));
 		}
 	});
-	test("interrupt snapshot joins an in-flight pre-fence CommitInputs and remains the last closeout input", async () => {
+	test("interrupt closeout joins an in-flight pre-fence CommitInputs before atomic Request End", async () => {
 		const preCommitStarted = deferred<void>();
 		const releasePreCommit = deferred<void>();
 		const order: string[] = [];
@@ -2094,9 +2094,8 @@ describe("ThreadLoop", () => {
 					"sesn_1",
 					interruptCommand,
 					async (declaration) => {
-						// Bridge serializes both declarations under the Session lock. The
-						// preflight may start concurrently, but its durable result cannot
-						// overtake the accepted input already holding that lock.
+						// A production Request End returns the interrupt receipt from its
+						// atomic Bridge transaction, so this fallback must remain unused.
 						await releasePreCommit.promise;
 						order.push("commit:interrupt");
 						return buildRuntimeControlCommitResult(
@@ -2127,10 +2126,11 @@ describe("ThreadLoop", () => {
 			});
 			await Effect.runPromise(manager.waitThread(interruptCommand, 1000));
 			expect(commitCalls).toEqual(["rin_pre_fence", "rin_post_fence"]);
+			expect(order).not.toContain("commit:interrupt");
 			expect(order.indexOf("commit:pre:end")).toBeLessThan(
-				order.indexOf("commit:interrupt"),
+				order.indexOf("event:span.model_request_end"),
 			);
-			expect(order.indexOf("commit:interrupt")).toBeLessThan(
+			expect(order.indexOf("event:span.model_request_end")).toBeLessThan(
 				order.indexOf("event:session.status_idle"),
 			);
 			expect(order.indexOf("event:session.status_idle")).toBeLessThan(

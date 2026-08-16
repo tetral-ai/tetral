@@ -391,14 +391,6 @@ export interface Interface {
 /** Read access to the reducer-owned active durable turn identity. */
 export interface ThreadLoopRunCustody {
 	readonly activeTurnId: (session: ThreadRuntime) => string | undefined;
-	/** Signals that the active run identity is durable and reducer-visible. */
-	readonly durableTurnOpened: (session: ThreadRuntime, eventId: string) => void;
-	/** Publishes a Runtime-owned boundary that joins in-flight durable operations
-	 * before an interrupt preflight can take its durable snapshot. */
-	readonly durableOperationsOwnedBy: (
-		active: () => boolean,
-		runAtIdleBoundary: <T>(operation: () => Promise<T>) => Promise<T>,
-	) => void;
 }
 
 /** Provides the thread-loop Effect service consumed by SessionManager. */
@@ -424,42 +416,18 @@ class HotDurableOperationOwner {
 	#fenced = false;
 	#active = 0;
 	#waiters: Array<() => void> = [];
-	#idleBoundaryJobs: Array<() => Promise<void>> = [];
-	#idleBoundaryDrain: Promise<void> | undefined;
-
-	#startIdleBoundaryDrain(): void {
-		if (
-			this.#active !== 0 ||
-			this.#idleBoundaryDrain !== undefined ||
-			this.#idleBoundaryJobs.length === 0
-		) {
-			return;
-		}
-		this.#idleBoundaryDrain = (async () => {
-			while (this.#active === 0) {
-				const job = this.#idleBoundaryJobs.shift();
-				if (job === undefined) {
-					return;
-				}
-				await job();
-			}
-		})().finally(() => {
-			this.#idleBoundaryDrain = undefined;
-			this.#startIdleBoundaryDrain();
-		});
-	}
 
 	fence(): void {
 		this.#fenced = true;
 	}
 
-	begin(allowAfterFence = false): () => Promise<void> {
+	begin(allowAfterFence = false): () => void {
 		if (this.#fenced && !allowAfterFence) {
 			throw new HotDurableOperationFenced();
 		}
 		this.#active += 1;
 		let finished = false;
-		return async () => {
+		return () => {
 			if (finished) {
 				return;
 			}
@@ -468,53 +436,24 @@ class HotDurableOperationOwner {
 			if (this.#active !== 0) {
 				return;
 			}
-			this.#startIdleBoundaryDrain();
-			const notifyIdle = () => {
-				const waiters = this.#waiters;
-				this.#waiters = [];
-				for (const resolve of waiters) {
-					resolve();
-				}
-			};
-			const idleBoundaryDrain = this.#idleBoundaryDrain;
-			if (idleBoundaryDrain === undefined) {
-				notifyIdle();
-			} else {
-				await idleBoundaryDrain.then(notifyIdle, notifyIdle);
+			const waiters = this.#waiters;
+			this.#waiters = [];
+			for (const resolve of waiters) {
+				resolve();
 			}
 		};
-	}
-
-	async beginAtIdleBoundary(
-		allowAfterFence = false,
-	): Promise<() => Promise<void>> {
-		await this.#idleBoundaryDrain;
-		return this.begin(allowAfterFence);
 	}
 
 	async run<T>(
 		operation: () => Promise<T>,
 		allowAfterFence = false,
 	): Promise<T> {
-		const finish = await this.beginAtIdleBoundary(allowAfterFence);
+		const finish = this.begin(allowAfterFence);
 		try {
 			return await operation();
 		} finally {
-			await finish();
+			finish();
 		}
-	}
-
-	async runAtIdleBoundary<T>(operation: () => Promise<T>): Promise<T> {
-		return await new Promise<T>((resolve, reject) => {
-			this.#idleBoundaryJobs.push(async () => {
-				try {
-					resolve(await operation());
-				} catch (error) {
-					reject(error);
-				}
-			});
-			this.#startIdleBoundaryDrain();
-		});
 	}
 
 	active(): boolean {
@@ -535,9 +474,9 @@ function ownHotDurableEffect<A, E, R>(
 	allowAfterFence = false,
 ): Effect.Effect<A, E, R> {
 	return Effect.acquireUseRelease(
-		Effect.promise(() => owner.beginAtIdleBoundary(allowAfterFence)),
+		Effect.sync(() => owner.begin(allowAfterFence)),
 		() => effect,
-		(finish) => Effect.promise(finish),
+		(finish) => Effect.sync(finish),
 	);
 }
 
@@ -1604,7 +1543,6 @@ function runThreadLoopEffect(
 				const runtimeResult = yield* coordinateProviderTurnEffect(
 					session,
 					options,
-					custody,
 					requestForAttempt,
 					runtimeAttachmentsForAttempt,
 					turnRetryCounters,
@@ -3000,7 +2938,6 @@ function compactionFailureWithRetryStatus(
 function coordinateProviderTurnEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
-	custody: ThreadLoopRunCustody,
 	request: LLMRequest,
 	carriedAttachments: readonly RuntimeProviderAttachment[],
 	turnRetryCounters: { providerAttempts: number; compactionAttempts: number },
@@ -3011,17 +2948,13 @@ function coordinateProviderTurnEffect(
 	executionPolicy: Readonly<ThreadLoopRuntimePolicy>,
 ): Effect.Effect<ProviderTurnResult, unknown> {
 	const durableOperations = new HotDurableOperationOwner();
-	custody.durableOperationsOwnedBy(
-		() => durableOperations.active(),
-		(operation) => durableOperations.runAtIdleBoundary(operation),
-	);
 	const providerRequestWriteController = new AbortController();
 	const processorOperationWriteController = new AbortController();
 	let settlementWriteController: AbortController | undefined;
 	let releaseSettlementRawOperationOwner: (() => void) | undefined;
 	const releaseProcessorRawOperationOwner = ownRuntimeDeclarationRawOperations(
 		processorOperationWriteController.signal,
-		() => durableOperations.beginAtIdleBoundary(true),
+		() => durableOperations.begin(true),
 	);
 	const abortProviderRequestWrites = (): void => {
 		durableOperations.fence();
@@ -3059,7 +2992,7 @@ function coordinateProviderTurnEffect(
 			settlementWriteController = new AbortController();
 			releaseSettlementRawOperationOwner = ownRuntimeDeclarationRawOperations(
 				settlementWriteController.signal,
-				() => durableOperations.beginAtIdleBoundary(true),
+				() => durableOperations.begin(true),
 			);
 		};
 		const endSettlementWrites = (): void => {
@@ -4020,14 +3953,10 @@ function resumeRecoveredToolJobsEffect(
 	custody: ThreadLoopRunCustody,
 ): Effect.Effect<PendingApprovalResumeResult, unknown> {
 	const durableOperations = new HotDurableOperationOwner();
-	custody.durableOperationsOwnedBy(
-		() => durableOperations.active(),
-		(operation) => durableOperations.runAtIdleBoundary(operation),
-	);
 	const settlementWriteController = new AbortController();
 	const releaseSettlementRawOperationOwner = ownRuntimeDeclarationRawOperations(
 		settlementWriteController.signal,
-		() => durableOperations.beginAtIdleBoundary(true),
+		() => durableOperations.begin(true),
 	);
 	let activeSettlementFibers: readonly Fiber.Fiber<
 		PendingApprovalToolSettlementResult,
@@ -6794,7 +6723,6 @@ async function appendRunningEvent(
 				eventId: existingDurableTurnId,
 			});
 		}
-		custody.durableTurnOpened(session, existingDurableTurnId);
 		return { ok: true, type: "duplicate", eventId: existingDurableTurnId };
 	}
 	const writeId = runtimeTurnOpenWriteId({
@@ -6829,7 +6757,6 @@ async function appendRunningEvent(
 			eventId: result.eventId,
 		});
 	}
-	custody.durableTurnOpened(session, result.eventId);
 	return result;
 }
 

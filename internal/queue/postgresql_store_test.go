@@ -659,6 +659,113 @@ func TestPostgreSQLStoreLeaseCandidateWindowKeepsInterruptException(t *testing.T
 	}
 }
 
+func TestPostgreSQLStoreInterruptRetryRemainsSessionBarrierThroughExhaustion(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	store := NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), RetryPolicy{
+		BaseDelay: time.Minute, MaxDelay: time.Minute, MaxAttempts: 2,
+		RandomInt64: func(bound int64) int64 { return bound - 1 },
+	})
+	ctx := context.Background()
+	ws := workspace.ID("ws_interrupt_retry_barrier")
+	sessionID := "sesn_interrupt_retry_barrier"
+	threadID := "thrd_interrupt_retry_barrier"
+	now := time.Date(2026, 7, 1, 12, 47, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_intbar", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_interrupt_barrier"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_interrupt_barrier", "interrupt_control", 1, 1),
+		Priority:    100, MaxAttempts: 2, Now: now,
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_msgafter", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_message_after_interrupt"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_message_after_interrupt", "messages", 2, 2), Priority: 200, Now: now.Add(time.Second),
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_sibling_after", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_sibling_after_interrupt"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_interrupt_barrier_sibling", "rin_sibling_after_interrupt", "messages", 3, 3), Priority: 300, Now: now.Add(2 * time.Second),
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_int2", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_second_interrupt"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_second_interrupt", "interrupt_control", 4, 4),
+		Priority:    400, MaxAttempts: 2, Now: now.Add(3 * time.Second),
+	})
+
+	first := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-a", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(4 * time.Second)})
+	if first.ID != interrupt.ID || first.AttemptCount != 1 {
+		t.Fatalf("first lease = %s attempt=%d; want interrupt attempt 1", first.ID, first.AttemptCount)
+	}
+	if ok, err := store.Retry(ctx, RetryRequest{WorkspaceID: ws, JobID: first.ID, LeaseToken: first.LeaseToken, ErrorKind: "runtime_transport_error", Now: now.Add(4 * time.Second)}); err != nil || !ok {
+		t.Fatalf("Retry first interrupt = (%v,%v); want true,nil", ok, err)
+	}
+	if leased, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-b", MaxJobs: 3, LeaseDuration: time.Minute, Now: now.Add(5 * time.Second)}); err != nil || len(leased) != 0 {
+		t.Fatalf("leases during interrupt backoff = %+v err=%v; want none", leased, err)
+	}
+
+	second := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-b", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(2 * time.Minute)})
+	if second.ID != interrupt.ID || second.AttemptCount != 2 {
+		t.Fatalf("second lease = %s attempt=%d; want same interrupt attempt 2", second.ID, second.AttemptCount)
+	}
+	if ok, err := store.Retry(ctx, RetryRequest{WorkspaceID: ws, JobID: second.ID, LeaseToken: second.LeaseToken, ErrorKind: "interrupt_closeout_pending", Now: now.Add(2*time.Minute + time.Second)}); err != nil || !ok {
+		t.Fatalf("Retry final interrupt = (%v,%v); want retained barrier", ok, err)
+	}
+	if leased, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-c", MaxJobs: 3, LeaseDuration: time.Minute, Now: now.Add(10 * time.Minute)}); err != nil || len(leased) != 0 {
+		t.Fatalf("leases after interrupt attempt exhaustion = %+v err=%v; want none", leased, err)
+	}
+	var status string
+	var attempts int
+	if err := admin.QueryRowContext(ctx, `SELECT status, attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read retained interrupt barrier: %v", err)
+	}
+	if status != StatusPending || attempts != 2 {
+		t.Fatalf("retained interrupt = %s attempt=%d; want pending attempt=2", status, attempts)
+	}
+}
+
+func TestPostgreSQLStoreExpiredFinalInterruptLeaseReclaimsAsBarrier(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_interrupt_reclaim_barrier")
+	sessionID := "sesn_interrupt_reclaim_barrier"
+	now := time.Date(2026, 7, 1, 12, 48, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_reclaim_int", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_reclaim_int"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_reclaim", "rin_reclaim_int", "interrupt_control", 1, 1),
+		Priority:    100, MaxAttempts: 1, Now: now,
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_reclaim_msg", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_reclaim_msg"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_reclaim", "rin_reclaim_msg", "messages", 2, 2), Now: now.Add(time.Second),
+	})
+	leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-old", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second)})
+	if leased.ID != interrupt.ID || leased.AttemptCount != 1 {
+		t.Fatalf("final interrupt lease = %s attempt=%d; want interrupt attempt 1", leased.ID, leased.AttemptCount)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID); err != nil {
+		t.Fatalf("expire interrupt lease: %v", err)
+	}
+	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws}); err != nil || reclaimed != 1 {
+		t.Fatalf("ReclaimExpiredLeases = %d/%v; want 1/nil", reclaimed, err)
+	}
+	if candidates, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-new", MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(3 * time.Minute)}); err != nil || len(candidates) != 0 {
+		t.Fatalf("post-reclaim leases = %+v/%v; want exhausted interrupt barrier and no message gap", candidates, err)
+	}
+	var status string
+	var attempts int
+	if err := admin.QueryRowContext(ctx, `SELECT status, attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read reclaimed interrupt: %v", err)
+	}
+	if status != StatusPending || attempts != 1 {
+		t.Fatalf("reclaimed interrupt = %s attempt=%d; want pending attempt=1", status, attempts)
+	}
+}
+
 func TestPostgreSQLStoreDatabaseAssignsPartitionSequence(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ws := workspace.ID("ws_queue_partition_sequence")

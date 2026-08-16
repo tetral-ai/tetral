@@ -322,9 +322,10 @@ type runtimePodLostAcceptedInput struct {
 }
 
 // handOffLostRuntimeAcceptedInputsTx is the sole transition from proven-lost
-// Runtime custody back to Queue custody. It preserves an active original job
-// and its attempt lineage; only an already-acknowledged delivery receives a new
-// job, in durable Inbox creation order.
+// Runtime custody back to Queue custody. It preserves the original job and its
+// attempt lineage. A delivering interrupt receives its final attempt back only
+// after this proven-loss fence; only already-acknowledged delivery receives a
+// new job, in durable Inbox creation order.
 func handOffLostRuntimeAcceptedInputsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -407,13 +408,33 @@ func handOffLostRuntimeAcceptedInputsTx(
 			if !input.QueueJobID.Valid {
 				return 0, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "delivering runtime input has no active queue custody", retryable: false}
 			}
-			continue
+			if input.InputKind != "interrupt_control" {
+				continue
+			}
 		}
-		if input.InboxStatus != "accepted" {
+		if input.InboxStatus != "accepted" && input.InboxStatus != "delivering" {
 			continue
 		}
 		if input.QueueJobID.Valid {
-			if input.QueueStatus.String == queue.StatusLeased {
+			if input.InboxStatus == "delivering" {
+				if _, err := tx.Exec(ctx,
+					`UPDATE queue_jobs
+					    SET status = 'pending', available_at = $3,
+					        attempt_count = CASE
+					            WHEN max_attempts > 0 AND attempt_count >= max_attempts
+					            THEN GREATEST(attempt_count - 1, 0)
+					            ELSE attempt_count
+					        END,
+					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
+					        updated_at = $3
+					  WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'leased')`,
+					workspaceID,
+					input.QueueJobID.String,
+					now,
+				); err != nil {
+					return 0, err
+				}
+			} else if input.QueueStatus.String == queue.StatusLeased {
 				if _, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
 					    SET status = 'pending', available_at = $3,
@@ -441,7 +462,7 @@ func handOffLostRuntimeAcceptedInputsTx(
 			    SET status = 'queued', binding_id = NULL, binding_generation = NULL,
 			        target_pod_uid = NULL, updated_at = $3
 			  WHERE workspace_id = $1 AND runtime_input_id = $2
-			    AND status = 'accepted'
+			    AND status IN ('delivering', 'accepted')
 			    AND binding_id = $4 AND binding_generation = $5 AND target_pod_uid = $6`,
 			workspaceID,
 			input.RuntimeInputID,

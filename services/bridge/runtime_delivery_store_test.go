@@ -2132,8 +2132,9 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_control_delivery", "bind_bridge_control_delivery", 1, "pod_uid_control_delivery")
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_interrupt_control", 1, "user.interrupt", `{}`)
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_confirmation_control", 2, "user.tool_confirmation", `{"tool_use_id":"sevt_tool_control","result":"deny","deny_message":"not now"}`)
+	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope("sesn_bridge_control_delivery", "thr_bridge_control_delivery", "bind_bridge_control_delivery", 1, "pod_uid_control_delivery"), "sevt_control_delivery_run")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_interrupt_control", 2, "user.interrupt", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_confirmation_control", 3, "user.tool_confirmation", `{"tool_use_id":"sevt_tool_control","result":"deny","deny_message":"not now"}`)
 
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
@@ -2147,10 +2148,10 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 		SessionThreadID: "thr_bridge_control_delivery",
 		RuntimeInputID:  "rin_bridge_interrupt",
 		EventIDs:        []string{"sevt_interrupt_control"},
-		SequenceFrom:    1,
-		SequenceTo:      1,
+		SequenceFrom:    2,
+		SequenceTo:      2,
 		InputKind:       "interrupt_control",
-		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_interrupt","event_ids":["sevt_interrupt_control"],"sequence_from":1,"sequence_to":1,"input_kind":"interrupt_control"}`,
+		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_interrupt","event_ids":["sevt_interrupt_control"],"sequence_from":2,"sequence_to":2,"input_kind":"interrupt_control"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
 	interrupt, err := store.PrepareRuntimeCommand(context.Background(), interruptJob)
@@ -2158,7 +2159,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 		t.Fatalf("PrepareRuntimeCommand interrupt: %v", err)
 	}
 	if interrupt.Interrupt == nil || interrupt.Interrupt.GetRuntimeInputId() != interruptJob.RuntimeInputID ||
-		interrupt.Interrupt.GetInputOrder() != 1 || interrupt.Interrupt.GetOrigin() != agentruntimev1.InterruptOrigin_INTERRUPT_ORIGIN_USER {
+		interrupt.Interrupt.GetInputOrder() != 2 || interrupt.Interrupt.GetOrigin() != agentruntimev1.InterruptOrigin_INTERRUPT_ORIGIN_USER {
 		t.Fatalf("interrupt runtime request = %#v; want typed user interrupt", interrupt.Interrupt)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -2188,10 +2189,10 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 		SessionThreadID: "thr_bridge_control_delivery",
 		RuntimeInputID:  "rin_bridge_confirmation",
 		EventIDs:        []string{"sevt_confirmation_control"},
-		SequenceFrom:    2,
-		SequenceTo:      2,
+		SequenceFrom:    3,
+		SequenceTo:      3,
 		InputKind:       "tool_confirmation",
-		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_confirmation","event_ids":["sevt_confirmation_control"],"sequence_from":2,"sequence_to":2,"input_kind":"tool_confirmation"}`,
+		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_confirmation","event_ids":["sevt_confirmation_control"],"sequence_from":3,"sequence_to":3,"input_kind":"tool_confirmation"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, confirmationJob)
 	confirmation, err := store.PrepareRuntimeCommand(context.Background(), confirmationJob)
@@ -2217,22 +2218,23 @@ func TestPostgreSQLRuntimeDeliveryStoreAbsorbsCommittedInterruptReplayBeforeRunt
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 1, "user.interrupt", `{}`)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEventID, 2, "user.message", `{"content":[{"type":"text","text":"new turn"}]}`)
+	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence"), "sevt_interrupt_replay_run")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 2, "user.interrupt", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEventID, 3, "user.message", `{"content":[{"type":"text","text":"new turn"}]}`)
 
 	interruptJob := RuntimeJob{
 		JobID: "qjob_bridge_interrupt_replay_fence", LeaseToken: "lease_bridge_interrupt_replay_fence", Kind: queue.KindRuntimeInput,
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
 		RuntimeInputID: "rin_bridge_interrupt_replay_fence", EventIDs: []string{interruptEventID},
-		SequenceFrom: 1, SequenceTo: 1, InputKind: "interrupt_control",
-		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_fence","event_ids":["sevt_bridge_interrupt_replay_fence"],"sequence_from":1,"sequence_to":1,"input_kind":"interrupt_control"}`,
+		SequenceFrom: 2, SequenceTo: 2, InputKind: "interrupt_control",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_fence","event_ids":["sevt_bridge_interrupt_replay_fence"],"sequence_from":2,"sequence_to":2,"input_kind":"interrupt_control"}`,
 	}
 	messageJob := RuntimeJob{
 		JobID: "qjob_bridge_interrupt_replay_successor", LeaseToken: "lease_bridge_interrupt_replay_successor", Kind: queue.KindRuntimeInput,
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
 		RuntimeInputID: "rin_bridge_interrupt_replay_successor", EventIDs: []string{messageEventID},
-		SequenceFrom: 2, SequenceTo: 2, InputKind: "messages",
-		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_successor","event_ids":["sevt_bridge_interrupt_replay_successor"],"sequence_from":2,"sequence_to":2,"input_kind":"messages"}`,
+		SequenceFrom: 3, SequenceTo: 3, InputKind: "messages",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_successor","event_ids":["sevt_bridge_interrupt_replay_successor"],"sequence_from":3,"sequence_to":3,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
 	seedRuntimeInboxBirthForJob(t, admin, messageJob)

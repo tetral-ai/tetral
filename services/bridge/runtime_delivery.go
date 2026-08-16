@@ -69,7 +69,13 @@ type RuntimeCommandSender interface {
 	CleanupSession(context.Context, RuntimePodTarget, *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error)
 }
 
-const initialMCPManifestListTimeout = 180 * time.Second
+const (
+	initialMCPManifestListTimeout = 180 * time.Second
+	// PostgreSQL-backed atomic interrupt closeout completed below 40 ms in the
+	// repeated production-boundary proof. Thirty seconds preserves a wide
+	// storage and scheduling margin while bounding a connected, silent Pod.
+	runtimeInterruptDeliveryTimeout = 30 * time.Second
+)
 
 type RuntimeCommandPlan struct {
 	StaleAccepted     bool
@@ -119,7 +125,9 @@ func (p RuntimeCommandPlan) send(ctx context.Context, sender RuntimeCommandSende
 		response, err := sender.AcceptTaskNotification(ctx, p.Target, p.AcceptTask)
 		return runtimeResultFromAcceptTask(response), err
 	case p.Interrupt != nil:
-		response, err := sender.Interrupt(ctx, p.Target, p.Interrupt)
+		interruptCtx, cancel := context.WithTimeout(ctx, runtimeInterruptDeliveryTimeout)
+		defer cancel()
+		response, err := sender.Interrupt(interruptCtx, p.Target, p.Interrupt)
 		return runtimeResultFromInterrupt(response), err
 	case p.ToolConfirmation != nil:
 		response, err := sender.ResolveToolConfirmation(ctx, p.Target, p.ToolConfirmation)
@@ -402,6 +410,21 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	}
 	if converted {
 		return d.DeliverRuntimeJob(ctx, job)
+	}
+	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" &&
+		(result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
+		replayer, ok := d.Store.(RuntimeDeliveryFinalizationReplayer)
+		if !ok {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "interrupt_closeout_unavailable", ErrorMessage: "interrupt closeout receipt is unavailable"}, nil
+		}
+		replayed, found, replayErr := replayer.ReplayRuntimeDeliveryFinalization(ctx, job)
+		if replayErr != nil {
+			return runtimeDeliveryResultWithAttemptedBinding(runtimeDeliveryResultFromPrepareError(replayErr), plan.AttemptedBinding), nil
+		}
+		if !found {
+			return runtimeDeliveryResultWithAttemptedBinding(RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "interrupt_closeout_pending", ErrorMessage: "interrupt closeout receipt is not committed"}, plan.AttemptedBinding), nil
+		}
+		return replayed, nil
 	}
 	if job.Kind == queue.KindRuntimeInput && (result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
 		queueLeaseSettled, err := d.Store.MarkRuntimeInputAccepted(ctx, job, plan.AttemptedBinding)

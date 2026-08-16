@@ -72,12 +72,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		}
 		evidence.Kind = "canonicality"
 		evidence.Kind = "transaction"
-		if inputKind == "interrupt_control" {
-			supersededInterrupt, err = interruptInputSupersededByRunTx(ctx, tx, request)
-			if err != nil {
-				return err
-			}
-		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -102,9 +96,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 			return err
 		}
-		if supersededInterrupt {
-			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
-			return err
+		if inputKind == "interrupt_control" {
+			supersededInterrupt, err = interruptInputSupersededByRunTx(ctx, tx, request)
+			if err != nil {
+				return err
+			}
+			if supersededInterrupt {
+				observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+				return err
+			}
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -155,7 +155,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	)
 	if inputKind == "interrupt_control" && typedResult != nil {
 		event := "thread_interrupt_completed"
-		if !observation.Current || supersededInterrupt {
+		if !observation.Current {
 			event = "thread_interrupt_stale"
 		}
 		s.logCommittedThreadInterrupt(ctx, request, event, len(typedResult.interruptToolResults), time.Since(logStartedAt).Milliseconds())
@@ -171,33 +171,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	}}, nil
 }
 
-// An interrupt is scoped to the run that was current when its ordered input was
-// admitted. A later run-open fact supersedes an uncommitted interrupt; a committed
-// receipt also becomes a no-op once its durable turn has closed. Both cases must
-// terminate before Runtime mutates resident state.
+// The Runtime-local input-order fence calls CommitInputs only when its current
+// Run is newer than the interrupt. A durable later run-open confirms that the
+// command is superseded. Existing receipts are read before this check so an
+// exact replay always returns its original closeout result.
 func interruptInputSupersededByRunTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.CommitInputsRequest,
 ) (bool, error) {
-	if _, replay, err := readBridgeDeclarationOperationTx(
-		ctx,
-		tx,
-		request.GetScope(),
-		bridgeOpCommitInputs,
-		"interrupt_control",
-		request.GetRuntimeInputId(),
-	); err != nil {
-		return false, err
-	} else if replay {
-		openTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
-		if err != nil {
-			return false, err
-		}
-		if openTurnID == nil {
-			return true, nil
-		}
-	}
 	var superseded bool
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (

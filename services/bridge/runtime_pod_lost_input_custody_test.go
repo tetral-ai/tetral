@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -288,6 +291,124 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 				t.Fatalf("repeated handoff = %d; want idempotent zero", second)
 			}
 		})
+	}
+}
+
+func TestPostgreSQLRuntimePodLossTransfersExhaustedInterruptBarrierToReplacement(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_lost_interrupt_barrier"
+		threadID       = "thr_lost_interrupt_barrier"
+		runtimeInputID = "rin_lost_interrupt_barrier"
+		eventID        = "evt_lost_interrupt_barrier"
+		oldBindingID   = "bind_lost_interrupt_old"
+		oldPodUID      = "pod_lost_interrupt_old"
+		jobID          = "qjob_lost_interrupt"
+	)
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["evt_lost_interrupt_barrier"]`, "delivering", oldBindingID, oldPodUID, 1, 1)
+
+	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), queue.RetryPolicy{
+		BaseDelay: time.Second, MaxDelay: time.Second, MaxAttempts: 2,
+		RandomInt64: func(bound int64) int64 { return bound - 1 },
+	})
+	request, err := lostRuntimeInputEnqueueRequest("default", sessionID, runtimePodLostAcceptedInput{
+		SessionThreadID: threadID, RuntimeInputID: runtimeInputID, InputKind: "interrupt_control",
+		EventIDsJSON: `["evt_lost_interrupt_barrier"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
+	}, now)
+	if err != nil {
+		t.Fatalf("build interrupt Queue request: %v", err)
+	}
+	request.ID = jobID
+	request.MaxAttempts = 2
+	if _, err := queueStore.Enqueue(context.Background(), request); err != nil {
+		t.Fatalf("enqueue interrupt barrier: %v", err)
+	}
+	leaseRequest := queue.LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-old", MaxJobs: 1, LeaseDuration: time.Minute, Now: now}
+	first := mustLeaseBridgeQueueJob(t, queueStore, leaseRequest)
+	if ok, err := queueStore.Retry(context.Background(), queue.RetryRequest{WorkspaceID: workspace.DefaultID, JobID: jobID, LeaseToken: first.LeaseToken, ErrorKind: "runtime_transport_error", Now: now.Add(time.Second)}); err != nil || !ok {
+		t.Fatalf("retry first interrupt attempt = %t/%v", ok, err)
+	}
+	leaseRequest.Now = now.Add(3 * time.Second)
+	second := mustLeaseBridgeQueueJob(t, queueStore, leaseRequest)
+	if second.AttemptCount != 2 {
+		t.Fatalf("second interrupt attempt = %d; want 2", second.AttemptCount)
+	}
+	if ok, err := queueStore.Retry(context.Background(), queue.RetryRequest{WorkspaceID: workspace.DefaultID, JobID: jobID, LeaseToken: second.LeaseToken, ErrorKind: "interrupt_closeout_pending", Now: now.Add(4 * time.Second)}); err != nil || !ok {
+		t.Fatalf("retain exhausted interrupt = %t/%v", ok, err)
+	}
+
+	if handedOff := handOffLostRuntimeInputsForTest(t, runtime, sessionID, oldBindingID, oldPodUID, now.Add(5*time.Second)); handedOff != 1 {
+		t.Fatalf("proven-loss handoff = %d; want 1", handedOff)
+	}
+	var inboxStatus, queueStatus string
+	var attempts, lineage int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3)`,
+		runtimeInputID, jobID, request.DedupeKey).Scan(&inboxStatus, &queueStatus, &attempts, &lineage); err != nil {
+		t.Fatalf("read replacement handoff: %v", err)
+	}
+	if inboxStatus != "queued" || queueStatus != queue.StatusPending || attempts != 1 || lineage != 1 {
+		t.Fatalf("replacement handoff = inbox:%s queue:%s attempts:%d lineage:%d; want queued/pending/1/1", inboxStatus, queueStatus, attempts, lineage)
+	}
+
+	const (
+		newBindingID = "bind_lost_interrupt_new"
+		newPodUID    = "pod_lost_interrupt_new"
+	)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
+		SET binding_id=$2, binding_generation=2, agent_runtime_pod_uid=$3
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID, newPodUID); err != nil {
+		t.Fatalf("install replacement binding: %v", err)
+	}
+	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	lateOld, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID), RuntimeInputId: runtimeInputID,
+	})
+	if status.Code(err) != codes.FailedPrecondition || lateOld != nil {
+		t.Fatalf("late old-Pod interrupt write = %#v/%v; want rejected binding fence", lateOld, err)
+	}
+	leaseRequest.LeaseOwner = "bridge-new"
+	leaseRequest.Now = now.Add(6 * time.Second)
+	replacement := mustLeaseBridgeQueueJob(t, queueStore, leaseRequest)
+	if replacement.ID != jobID || replacement.AttemptCount != 2 {
+		t.Fatalf("replacement lease = %s attempt=%d; want same identity at attempt 2", replacement.ID, replacement.AttemptCount)
+	}
+	replacementJob, err := DecodeRuntimeJob(queueJobProto(replacement))
+	if err != nil {
+		t.Fatalf("decode replacement interrupt: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
+		BindingID: newBindingID, BindingGeneration: 2, Namespace: "engine", PodName: "runtime-new", PodUID: newPodUID, PodIP: "127.0.0.2",
+	}}
+	sender := &durableInterruptFenceSender{recordingRuntimeCommandSender: &recordingRuntimeCommandSender{}, store: apiStore}
+	result, err := (RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}).DeliverRuntimeJob(context.Background(), replacementJob)
+	if err != nil || result.Status != RuntimeDeliveryDuplicate || len(sender.requests) != 1 || sender.stale {
+		t.Fatalf("replacement idle settlement = %#v/%v sends=%d stale=%t; want one replacement Runtime call and committed receipt", result, err, len(sender.requests), sender.stale)
+	}
+	var receipts int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND operation='commit_inputs' AND source_kind='interrupt_control' AND idempotency_key=$3`,
+		sessionID, threadID, runtimeInputID).Scan(&receipts); err != nil || receipts != 1 {
+		t.Fatalf("replacement interrupt receipts = %d/%v; want one", receipts, err)
+	}
+	if ok, err := queueStore.Ack(context.Background(), queue.AckRequest{WorkspaceID: workspace.DefaultID, JobID: jobID, LeaseToken: replacement.LeaseToken, Now: now.Add(7 * time.Second)}); err != nil || !ok {
+		t.Fatalf("ACK replacement receipt = %t/%v", ok, err)
+	}
+	var finalQueueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, jobID).Scan(&finalQueueStatus); err != nil {
+		t.Fatalf("read replacement Queue status: %v", err)
+	}
+	if got := finalQueueStatus; got != queue.StatusAcknowledged {
+		t.Fatalf("replacement Queue status = %s; want acknowledged", got)
 	}
 }
 
@@ -716,4 +837,13 @@ func handOffLostRuntimeInputsForTest(t *testing.T, runtime *sql.DB, sessionID st
 		t.Fatalf("hand off lost Runtime inputs: %v", err)
 	}
 	return handedOff
+}
+
+func mustLeaseBridgeQueueJob(t *testing.T, store *queue.PostgreSQLQueueStore, request queue.LeaseRequest) *queue.Job {
+	t.Helper()
+	jobs, err := store.Lease(context.Background(), request)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("lease Queue job = %#v/%v; want exactly one", jobs, err)
+	}
+	return jobs[0]
 }

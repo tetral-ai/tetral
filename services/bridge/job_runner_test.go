@@ -654,6 +654,58 @@ func TestJobRunnerInterruptReplayStillCancelsSiblingMessagesFirst(t *testing.T) 
 	}
 }
 
+func TestJobRunnerInterruptFinalAttemptPreservesBarrierWithoutReceipt(t *testing.T) {
+	job := runtimeInterruptQueueJob()
+	job.AttemptCount = 3
+	job.MaxAttempts = 3
+	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{job}}
+	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{
+		Status: RuntimeDeliveryRejected, ErrorKind: "control_busy",
+	}}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(deliverer.finalizations) != 0 {
+		t.Fatalf("interrupt finalizations = %#v; want no exhaustion disposition without receipt", deliverer.finalizations)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{
+		"cancel:sesn_1:thr_1:9",
+		"retry:qjob_interrupt:control_busy",
+	}) {
+		t.Fatalf("queue transitions = %v; want final-attempt interrupt retained by Retry", queueClient.transitions)
+	}
+}
+
+func TestJobRunnerLostInterruptResponseReplaysReceiptBeforeAck(t *testing.T) {
+	steps := []string{}
+	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{runtimeInterruptQueueJob()}, steps: &steps}
+	deliverer := &recordingDeliverer{
+		err:                      errors.New("runtime response lost"),
+		replayResult:             RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted},
+		replayFoundAfterDelivery: true,
+		steps:                    &steps,
+	}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(steps, []string{
+		"cancel",
+		"replay:qjob_interrupt",
+		"deliver:qjob_interrupt",
+		"replay:qjob_interrupt",
+		"ack:qjob_interrupt",
+	}) {
+		t.Fatalf("steps = %v; want post-transport receipt replay before ACK", steps)
+	}
+	if len(deliverer.jobs) != 1 || len(deliverer.replayJobs) != 2 {
+		t.Fatalf("deliveries/replays = %d/%d; want 1/2", len(deliverer.jobs), len(deliverer.replayJobs))
+	}
+}
+
 func TestJobRunnerHandlesRuntimeConfigAndCleanupAsSeparateQueueKinds(t *testing.T) {
 	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{
 		{ //nolint:gosec // Test lease token fixture, not a secret.
@@ -1419,24 +1471,25 @@ func (c *recordingQueueClient) Cancel(_ context.Context, request *queuev1.Cancel
 }
 
 type recordingDeliverer struct {
-	result             RuntimeDeliveryResult
-	err                error
-	jobs               []RuntimeJob
-	podLossRepairErr   error
-	podLossRepairCount int
-	podLossRepairCalls int
-	podLossRepair      func(context.Context, string) (int, error)
-	finalizeResult     RuntimeDeliveryResult
-	finalizeErr        error
-	finalizations      []recordedRuntimeFinalization
-	steps              *[]string
-	phaseSteps         *[]string
-	replayResult       RuntimeDeliveryResult
-	replayFound        bool
-	replayErr          error
-	replayJobs         []RuntimeJob
-	sealedAttempt      string
-	sealErr            error
+	result                   RuntimeDeliveryResult
+	err                      error
+	jobs                     []RuntimeJob
+	podLossRepairErr         error
+	podLossRepairCount       int
+	podLossRepairCalls       int
+	podLossRepair            func(context.Context, string) (int, error)
+	finalizeResult           RuntimeDeliveryResult
+	finalizeErr              error
+	finalizations            []recordedRuntimeFinalization
+	steps                    *[]string
+	phaseSteps               *[]string
+	replayResult             RuntimeDeliveryResult
+	replayFound              bool
+	replayErr                error
+	replayJobs               []RuntimeJob
+	replayFoundAfterDelivery bool
+	sealedAttempt            string
+	sealErr                  error
 }
 
 type recordedRuntimeFinalization struct {
@@ -1510,7 +1563,8 @@ func (d *recordingDeliverer) ReplayRuntimeDeliveryFinalization(_ context.Context
 	if d.steps != nil {
 		*d.steps = append(*d.steps, "replay:"+job.JobID)
 	}
-	return d.replayResult, d.replayFound, d.replayErr
+	found := d.replayFound || (d.replayFoundAfterDelivery && len(d.jobs) > 0)
+	return d.replayResult, found, d.replayErr
 }
 
 type pollFailingQueueClient struct {

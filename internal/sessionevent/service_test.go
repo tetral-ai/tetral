@@ -758,6 +758,87 @@ func TestAppendClientEventsWritesIdempotencyAndRuntimeInputQueueJobsAtomically(t
 	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
 }
 
+func TestAppendClientEventsRemainsDurableBehindLeasedInterruptBarrier(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	ctx := context.Background()
+	const sessionID = "sesn_event_interrupt_barrier"
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
+	service := newSessionEventServiceForTest(runtime)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+
+	interrupt, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_interrupt_barrier", AppendRequest{
+		Events: []IncomingEvent{{Type: EventTypeUserInterrupt}},
+	})
+	if err != nil || len(interrupt.Data) != 1 {
+		t.Fatalf("append interrupt = %#v/%v; want one durable event", interrupt, err)
+	}
+	leased := mustLeaseSessionEventJob(t, queueStore, sessionID, "bridge-interrupt")
+	if runtimeInputKindFromQueueJob(t, leased) != RuntimeInputKindInterruptControl {
+		t.Fatalf("first leased input = %s; want interrupt", runtimeInputKindFromQueueJob(t, leased))
+	}
+
+	message, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_message_behind_interrupt", messageAppendRequest("after interrupt"))
+	if err != nil || len(message.Data) != 1 {
+		t.Fatalf("append message behind interrupt = %#v/%v; want one durable event", message, err)
+	}
+	jobs := readSessionEventQueueJobs(t, admin, sessionID)
+	if len(jobs) != 2 {
+		t.Fatalf("durable jobs behind interrupt = %#v; want interrupt and message", jobs)
+	}
+	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
+	if got, err := queueStore.Lease(ctx, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-blocked",
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	}); err != nil || len(got) != 0 {
+		t.Fatalf("lease behind active interrupt = %#v/%v; want none", got, err)
+	}
+	if acknowledged, err := queueStore.Ack(ctx, queue.AckRequest{
+		WorkspaceID: workspace.DefaultID, JobID: leased.ID, LeaseToken: leased.LeaseToken,
+	}); err != nil || !acknowledged {
+		t.Fatalf("ack interrupt barrier = %t/%v; want true/nil", acknowledged, err)
+	}
+	follower := mustLeaseSessionEventJob(t, queueStore, sessionID, "bridge-follower")
+	if runtimeInputKindFromQueueJob(t, follower) != RuntimeInputKindMessages {
+		t.Fatalf("follower leased input = %s; want messages", runtimeInputKindFromQueueJob(t, follower))
+	}
+	if acknowledged, err := queueStore.Ack(ctx, queue.AckRequest{
+		WorkspaceID: workspace.DefaultID, JobID: follower.ID, LeaseToken: follower.LeaseToken,
+	}); err != nil || !acknowledged {
+		t.Fatalf("ack message follower = %t/%v; want true/nil", acknowledged, err)
+	}
+	if got, err := queueStore.Lease(ctx, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-no-duplicate",
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	}); err != nil || len(got) != 0 {
+		t.Fatalf("lease after follower ACK = %#v/%v; want no duplicate", got, err)
+	}
+}
+
+func mustLeaseSessionEventJob(t testing.TB, store *queue.PostgreSQLQueueStore, sessionID string, owner string) *queue.Job {
+	t.Helper()
+	jobs, err := store.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID:   workspace.DefaultID,
+		Kinds:         []string{queue.KindRuntimeInput},
+		LeaseOwner:    owner,
+		MaxJobs:       1,
+		LeaseDuration: time.Minute,
+	})
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("lease Session input for %s = %#v/%v; want one", sessionID, jobs, err)
+	}
+	return jobs[0]
+}
+
+func runtimeInputKindFromQueueJob(t testing.TB, job *queue.Job) string {
+	t.Helper()
+	var payload runtimeInputQueuePayload
+	if err := json.Unmarshal(job.PayloadJSON, &payload); err != nil {
+		t.Fatalf("decode Runtime input Queue payload: %v", err)
+	}
+	return payload.InputKind
+}
+
 func TestAppendClientEventsProducesContiguousRuntimeInputRanges(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	const sessionID = "sesn_event_contiguous_runtime_input"

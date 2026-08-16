@@ -633,8 +633,6 @@ function testRunCustody(): ThreadLoop.ThreadLoopRunCustody {
 	return {
 		activeTurnId: (session) =>
 			session.state.threadTurnReduction().checkpoint.executionRunId,
-		durableTurnOpened: () => {},
-		durableOperationsOwnedBy: () => {},
 	};
 }
 

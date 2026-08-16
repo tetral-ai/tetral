@@ -291,6 +291,17 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		return deliverErr
 	}
 	if deliverErr != nil {
+		if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" {
+			replayer := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
+			replayed, found, replayErr := replayer.ReplayRuntimeDeliveryFinalization(ctx, job)
+			if replayErr != nil {
+				return replayErr
+			}
+			if found {
+				r.logRuntimeJobAttempt(job, "runtime_transport_error", "durable_replay")
+				return r.applyRuntimeDeliveryResult(ctx, job, replayed)
+			}
+		}
 		preparationKind := runtimeJobPreparationErrorKind(deliverErr)
 		attemptedBindingID := result.AttemptedBindingID
 		attemptedBindingGeneration := result.AttemptedBindingGeneration
@@ -308,7 +319,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 			return r.deferRuntimeConfig(ctx, job)
 		}
-		if runtimeJobFinalAttempt(job) {
+		if runtimeJobFinalAttempt(job) && job.InputKind != "interrupt_control" {
 			finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 			if err != nil {
 				if invalidRuntimeJobPayload(err) {
@@ -335,6 +346,12 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 	if shouldDeferRuntimeConfigResult(job, result) {
 		r.logRuntimeJobAttempt(job, "none", "deferred")
 		return r.deferRuntimeConfig(ctx, job)
+	}
+	// An interrupt without a durable receipt remains an outcome-unknown Session
+	// partition barrier. Queue.Retry preserves that custody even when Runtime
+	// returned a nominally terminal rejection; only receipt replay may ACK it.
+	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" && result.Status == RuntimeDeliveryRejected {
+		result.Retryable = true
 	}
 	preparationKind := "none"
 	if result.ErrorKind != "" {
@@ -466,6 +483,9 @@ func runtimeDeliveryRequiresFinalization(job RuntimeJob, result RuntimeDeliveryR
 		return false
 	}
 	if job.Kind == queue.KindRuntimeInput {
+		if job.InputKind == "interrupt_control" {
+			return false
+		}
 		return !result.Retryable || runtimeJobFinalAttempt(job)
 	}
 	return isMCPManifestRuntimeJob(job) && runtimeJobFinalAttempt(job)

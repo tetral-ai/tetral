@@ -2376,7 +2376,6 @@ describe("ThreadLoop", () => {
 		).toBe("applied");
 		const requests: LLMRequest[] = [];
 		const reducerFacts: string[] = [];
-		const durableTurnSignals: string[] = [];
 		let runOpenWrites = 0;
 		const applyThreadTurnFact = session.state.applyThreadTurnFact.bind(session.state);
 		session.state.applyThreadTurnFact = (fact) => {
@@ -2395,9 +2394,6 @@ describe("ThreadLoop", () => {
 		});
 		const custody = {
 			activeTurnId: () => durableTurnId,
-			durableTurnOpened: (_session: ThreadRuntime, eventId: string) =>
-				durableTurnSignals.push(eventId),
-			durableOperationsOwnedBy: () => {},
 		};
 		const loader = new QueuedContextLoader([], []);
 		const result = await Effect.runPromise(
@@ -2423,7 +2419,6 @@ describe("ThreadLoop", () => {
 		expect(result).toMatchObject({ type: "completed" });
 		expect(requests).toHaveLength(1);
 		expect(runOpenWrites).toBe(0);
-		expect(durableTurnSignals).toEqual([durableTurnId]);
 		expect(loader.commitCalls).toHaveLength(1);
 		expect(reducerFacts.filter((fact) => fact === "run_opened")).toHaveLength(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();

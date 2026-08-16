@@ -3281,7 +3281,7 @@ describe("ThreadLoop", () => {
 		).toHaveLength(1);
 		expect(contextToolStatus(session)).toBe("completed");
 	});
-	test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bound before repair and snapshot", async () => {
+	test("interrupt joins a pre-fence agent.tool_use Bridge ACK before atomic Request End", async () => {
 		const loader = new QueuedContextLoader([], []);
 		const toolUseAppendStarted = deferred<void>();
 		const releaseToolUseAppend = deferred<void>();
@@ -3448,10 +3448,8 @@ describe("ThreadLoop", () => {
 				observed: true,
 				hasPendingApprovalToolJobs: false,
 			});
-			expect(interruptCommitStarted).toBe(true);
-			expect(order.indexOf("tool-use-append:ack")).toBeLessThan(
-				order.indexOf("commit:interrupt"),
-			);
+			expect(interruptCommitStarted).toBe(false);
+			expect(order).not.toContain("commit:interrupt");
 			expect(order.indexOf("tool-use-append:ack")).toBeLessThan(
 				order.indexOf("event:span.model_request_end"),
 			);
@@ -3465,7 +3463,7 @@ describe("ThreadLoop", () => {
 			await Effect.runPromise(Scope.close(scope, Exit.void));
 		}
 	});
-	test("interrupt joins a raw CommitInternalToolRepair ACK before snapshot and permits no late durable repair", async () => {
+	test("interrupt joins a raw CommitInternalToolRepair ACK before atomic Request End", async () => {
 		const loader = new QueuedContextLoader([], []);
 		const repairStarted = deferred<void>();
 		const releaseRepair = deferred<void>();
@@ -3625,10 +3623,8 @@ describe("ThreadLoop", () => {
 			expect(
 				order.filter((entry) => entry === "store:internal-tool-repair"),
 			).toHaveLength(1);
-			expect(interruptCommitStarted).toBe(true);
-			expect(order.indexOf("repair:ack")).toBeLessThan(
-				order.indexOf("commit:interrupt"),
-			);
+			expect(interruptCommitStarted).toBe(false);
+			expect(order).not.toContain("commit:interrupt");
 			expect(order.indexOf("repair:ack")).toBeLessThan(
 				order.indexOf("event:span.model_request_end"),
 			);

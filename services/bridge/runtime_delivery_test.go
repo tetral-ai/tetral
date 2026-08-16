@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
@@ -167,7 +168,7 @@ func TestRuntimePodDirectDelivererRevalidatesAndSendsFirstInterruptOnce(t *testi
 	store := &recordingRuntimeDeliveryStore{plan: RuntimeCommandPlan{
 		Target:    RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090},
 		Interrupt: request,
-	}}
+	}, replayFound: true, replayResult: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	job := runtimeInputRuntimeJob()
 	job.RuntimeInputID = request.GetRuntimeInputId()
@@ -183,8 +184,54 @@ func TestRuntimePodDirectDelivererRevalidatesAndSendsFirstInterruptOnce(t *testi
 	if len(sender.requests) != 1 || sender.requests[0] != request {
 		t.Fatalf("first interrupt Runtime requests = %#v; want one exact command", sender.requests)
 	}
-	if len(store.acceptedJobs) != 1 {
-		t.Fatalf("first interrupt accepted writes = %#v; want one", store.acceptedJobs)
+	if len(store.acceptedJobs) != 0 || len(store.replayJobs) != 1 {
+		t.Fatalf("first interrupt accepted writes/replays = %d/%d; want 0/1 after durable closeout", len(store.acceptedJobs), len(store.replayJobs))
+	}
+}
+
+func TestRuntimePodDirectDelivererDoesNotSettleInterruptOnRuntimeAcceptanceAlone(t *testing.T) {
+	request := &agentruntimev1.InterruptRequest{
+		WorkspaceId: "ws_bridge", SessionId: "sesn_1", SessionThreadId: "thr_1",
+		RuntimeInputId: "rin_interrupt_pending", InputOrder: 1,
+	}
+	store := &recordingRuntimeDeliveryStore{plan: RuntimeCommandPlan{
+		Target:    RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090},
+		Interrupt: request,
+	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	job := runtimeInputRuntimeJob()
+	job.RuntimeInputID = request.GetRuntimeInputId()
+	job.InputKind = "interrupt_control"
+
+	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+	if err != nil {
+		t.Fatalf("DeliverRuntimeJob: %v", err)
+	}
+	if result.Status != RuntimeDeliveryRejected || !result.Retryable || result.ErrorKind != "interrupt_closeout_pending" {
+		t.Fatalf("delivery result = %#v; want outcome-unknown closeout retry", result)
+	}
+	if len(sender.requests) != 1 || len(store.acceptedJobs) != 0 || len(store.replayJobs) != 1 {
+		t.Fatalf("Runtime sends/accepted writes/receipt reads = %d/%d/%d; want 1/0/1", len(sender.requests), len(store.acceptedJobs), len(store.replayJobs))
+	}
+}
+
+func TestRuntimeCommandPlanBoundsOnlyInterruptDeliveryWait(t *testing.T) {
+	request := &agentruntimev1.InterruptRequest{
+		WorkspaceId: "ws_bridge", SessionId: "sesn_timeout", SessionThreadId: "thr_timeout",
+		RuntimeInputId: "rin_timeout", InputOrder: 1,
+	}
+	sender := &recordingRuntimeCommandSender{observeInterruptDeadline: true}
+	started := time.Now()
+	_, err := (RuntimeCommandPlan{Target: RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090}, Interrupt: request}).send(context.Background(), sender)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("interrupt send error = %v; want deadline exceeded", err)
+	}
+	remaining := sender.interruptDeadline.Sub(started)
+	if remaining < runtimeInterruptDeliveryTimeout-time.Second || remaining > runtimeInterruptDeliveryTimeout+time.Second {
+		t.Fatalf("interrupt deadline = %s; want %s bound", remaining, runtimeInterruptDeliveryTimeout)
+	}
+	if len(sender.requests) != 1 || sender.requests[0] != request {
+		t.Fatalf("bounded interrupt requests = %#v; want one exact command", sender.requests)
 	}
 }
 
@@ -217,10 +264,18 @@ func TestBackgroundTaskProcessTerminalStatusFactsRemainDistinct(t *testing.T) {
 }
 
 func TestRuntimePodDirectDelivererStaleAcceptedSkipsRuntimeCommand(t *testing.T) {
-	store := &recordingRuntimeDeliveryStore{plan: RuntimeCommandPlan{StaleAccepted: true}}
+	store := &recordingRuntimeDeliveryStore{plan: RuntimeCommandPlan{
+		StaleAccepted: true,
+		Target:        RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090},
+		Interrupt: &agentruntimev1.InterruptRequest{
+			WorkspaceId: "ws_bridge", SessionId: "sesn_1", SessionThreadId: "thr_1", RuntimeInputId: "rin_1",
+		},
+	}}
 	sender := &recordingRuntimeCommandSender{}
+	job := runtimeInputRuntimeJob()
+	job.InputKind = "interrupt_control"
 
-	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), runtimeInputRuntimeJob())
+	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil {
 		t.Fatalf("DeliverRuntimeJob: %v", err)
 	}
@@ -559,6 +614,15 @@ type recordingRuntimeDeliveryStore struct {
 	rejectedResults  []RuntimeDeliveryResult
 	cleanupJobs      []RuntimeJob
 	convertRejection bool
+	replayFound      bool
+	replayResult     RuntimeDeliveryResult
+	replayErr        error
+	replayJobs       []RuntimeJob
+}
+
+func (s *recordingRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
+	s.replayJobs = append(s.replayJobs, job)
+	return s.replayResult, s.replayFound, s.replayErr
 }
 
 func (s *recordingRuntimeDeliveryStore) PrepareRuntimeCommand(_ context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
@@ -591,11 +655,13 @@ func (s *recordingRuntimeDeliveryStore) FinalizeRuntimeCleanup(_ context.Context
 }
 
 type recordingRuntimeCommandSender struct {
-	result   RuntimeDeliveryResult
-	results  []RuntimeDeliveryResult
-	err      error
-	targets  []RuntimePodTarget
-	requests []proto.Message
+	result                   RuntimeDeliveryResult
+	results                  []RuntimeDeliveryResult
+	err                      error
+	targets                  []RuntimePodTarget
+	requests                 []proto.Message
+	observeInterruptDeadline bool
+	interruptDeadline        time.Time
 }
 
 type countingRuntimeCommandTokenSource struct {
@@ -660,7 +726,17 @@ func (s *recordingRuntimeCommandSender) AcceptTaskNotification(_ context.Context
 	}
 	return &agentruntimev1.AcceptTaskNotificationResponse{Outcome: &agentruntimev1.AcceptTaskNotificationResponse_Accepted{Accepted: &agentruntimev1.AcceptTaskNotificationAccepted{}}}, nil
 }
-func (s *recordingRuntimeCommandSender) Interrupt(_ context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
+func (s *recordingRuntimeCommandSender) Interrupt(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
+	if s.observeInterruptDeadline {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, errors.New("interrupt context has no deadline")
+		}
+		s.interruptDeadline = deadline
+		s.targets = append(s.targets, target)
+		s.requests = append(s.requests, request)
+		return nil, context.DeadlineExceeded
+	}
 	result, err := s.record(target, request)
 	if err != nil || result.Status == "" {
 		return nil, err

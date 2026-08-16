@@ -30,12 +30,13 @@ func TestPostgreSQLRuntimeDeliveryStoreKeepsBindingChangeRetryableDuringInterrup
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_interrupt_old", 1, "pod_interrupt_old")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
+	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, "bind_interrupt_old", 1, "pod_interrupt_old"), "evt_interrupt_binding_run")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 2, "user.interrupt", `{}`)
 	job := RuntimeJob{
 		JobID: "qjob_interrupt_binding_change", LeaseToken: "lease_interrupt_binding_change", Kind: queue.KindRuntimeInput,
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
-		RuntimeInputID: interruptID, EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1, InputKind: "interrupt_control",
-		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_interrupt_binding_change","session_thread_id":"thr_interrupt_binding_change","runtime_input_id":"rin_interrupt_binding_change","event_ids":["sevt_interrupt_binding_change"],"sequence_from":1,"sequence_to":1,"input_kind":"interrupt_control"}`,
+		RuntimeInputID: interruptID, EventIDs: []string{eventID}, SequenceFrom: 2, SequenceTo: 2, InputKind: "interrupt_control",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_interrupt_binding_change","session_thread_id":"thr_interrupt_binding_change","runtime_input_id":"rin_interrupt_binding_change","event_ids":["sevt_interrupt_binding_change"],"sequence_from":2,"sequence_to":2,"input_kind":"interrupt_control"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
 	resolver := &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
@@ -318,13 +319,13 @@ func TestRuntimeFinalCommitFenceRejectsSettlementAfterPreSendRevalidation(t *tes
 	select {
 	case outcome := <-done:
 		if outcome.err != nil || outcome.result.Status != RuntimeDeliveryDuplicate {
-			t.Fatalf("final-fence delivery = %#v/%v; want duplicate", outcome.result, outcome.err)
+			t.Fatalf("final-fence delivery = %#v/%v; want exact duplicate", outcome.result, outcome.err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("final-fence delivery did not finish")
 	}
-	if len(sender.requests) != 1 || !sender.stale {
-		t.Fatalf("final Runtime fence = requests %#v stale %v; want one sent command rejected by CommitInputs", sender.requests, sender.stale)
+	if len(sender.requests) != 1 || sender.stale {
+		t.Fatalf("final Runtime fence = requests %#v stale %v; want one sent command joined to the exact committed receipt", sender.requests, sender.stale)
 	}
 }
 
@@ -417,10 +418,10 @@ func (s *durableInterruptFenceSender) Interrupt(
 	if err != nil {
 		return nil, err
 	}
-	if committed.GetStale() == nil {
-		return nil, status.Error(codes.Internal, "interrupt durable fence unexpectedly committed")
+	if committed.GetCommitted() == nil && committed.GetStale() == nil {
+		return nil, status.Error(codes.Internal, "interrupt durable fence returned no closed result")
 	}
-	s.stale = true
+	s.stale = committed.GetStale() != nil
 	return &agentruntimev1.InterruptResponse{
 		Outcome: &agentruntimev1.InterruptResponse_Duplicate{
 			Duplicate: &agentruntimev1.InterruptDuplicate{},
