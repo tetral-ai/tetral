@@ -451,6 +451,16 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write cancelled Tool Use: response=%#v err=%v", toolUse, err)
 	}
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_durable_cancel_end", ModelRequestId: modelRequestID,
+		FinishReason: "tool-calls", UsageJson: `{}`,
+	}); err != nil {
+		t.Fatalf("seal cancelled Tool request: %v", err)
+	}
+	baseLoaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("LoadContext pending cancelled Tool: %v", err)
+	}
 	const cancellationError = `{"type":"runtime_shutdown","message":"internal cancellation detail","retryable":false}`
 	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
@@ -494,9 +504,24 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		t.Fatalf("LoadContext cancelled Tool: %v", err)
 	}
 	var payload bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || payload.OpenRequestDraft == nil || len(payload.OpenRequestDraft.Parts) != 2 || string(payload.OpenRequestDraft.Parts[1]) != string(parts[1]) {
-		t.Fatalf("cold cancellation context diverged: draft=%#v err=%v", payload.OpenRequestDraft, err)
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 2 || string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
+		t.Fatalf("cold cancellation context diverged: entries=%#v err=%v", payload.ContextEntries, err)
 	}
+	assertRuntimeHotColdToolComposition(
+		t,
+		baseLoaded.GetContextJson(),
+		loaded.GetContextJson(),
+		toolUse.GetCommitted().GetAssignedMessageSequence(),
+		payload,
+		"call_durable_cancel",
+		map[string]any{
+			"type": "cancelled",
+			"error": map[string]any{
+				"type": "runtime", "code": "unknown", "message": "internal cancellation detail",
+				"retryable": false, "fatal": false,
+			},
+		},
+	)
 }
 
 func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {

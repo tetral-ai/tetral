@@ -249,7 +249,16 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		bridge.commitInputsResponse = {
 			committed: {
 				interrupt: {
-					interruptToolResults: [{ toolUseEventId: "tool_1", cancelled: {} }],
+					interruptToolResults: [{
+						toolUseEventId: "tool_1",
+						cancelled: {
+							errorJson: JSON.stringify({
+								type: "runtime_shutdown",
+								message: "internal cancellation detail",
+								retryable: false,
+							}),
+						},
+					}],
 				},
 			},
 		};

@@ -120,7 +120,7 @@ export type RuntimeControlInputCommitResult =
 	| { readonly ok: true; readonly joined: true }
 	| {
 			readonly ok: true;
-			readonly type: "committed" | "duplicate";
+			readonly type: "committed";
 			readonly assignedContextSequences: readonly number[];
 			readonly pendingAttachments: readonly RuntimeProviderAttachment[];
 			readonly interruptToolResults: readonly RuntimeInterruptToolResult[];

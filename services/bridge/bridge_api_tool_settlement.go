@@ -140,7 +140,7 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 		if err := applyToolEventBookkeepingTx(ctx, tx, request.GetScope(), eventID, resultEventType, payloadJSON, projection, now); err != nil {
 			return err
 		}
-		if resultEventType == "agent.mcp_tool_result" {
+		if resultEventType == "agent.mcp_tool_result" && settlement.GetCompleted() != nil {
 			stagedMCPResult, err = consumeStagedMCPResultTx(ctx, tx, request.GetScope(), resultEventType, payloadJSON, now)
 			if err != nil {
 				return err

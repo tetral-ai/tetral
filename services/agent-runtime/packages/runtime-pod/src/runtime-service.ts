@@ -294,7 +294,7 @@ export interface RuntimeControlInputCommitter {
 		| { readonly ok: true; readonly type: "stale" }
 		| {
 				readonly ok: true;
-				readonly type: "committed" | "duplicate";
+				readonly type: "committed";
 				readonly assignedContextSequences: readonly number[];
 				readonly pendingAttachments: readonly RuntimeProviderAttachment[];
 				readonly interruptToolResults: readonly RuntimeInterruptToolResult[];

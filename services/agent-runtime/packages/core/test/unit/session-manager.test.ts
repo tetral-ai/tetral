@@ -3409,9 +3409,7 @@ describe("SessionManager", () => {
 						"tool_confirmation",
 						declaration,
 					);
-					return confirmationCommits === 1
-						? result
-						: { ...result, type: "duplicate" as const };
+					return result;
 				};
 				expect(
 					await Effect.runPromise(

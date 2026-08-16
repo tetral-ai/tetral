@@ -2507,16 +2507,12 @@ function parseInterruptToolResults(
 				},
 			};
 		}
-		const error =
-			value.cancelled?.errorJson === undefined
-				? undefined
-				: RuntimeToolErrorSchema.parse(JSON.parse(value.cancelled.errorJson));
+		if (value.cancelled?.errorJson !== undefined) {
+			RuntimeToolErrorSchema.parse(JSON.parse(value.cancelled.errorJson));
+		}
 		return {
 			toolUseEventId: value.toolUseEventId,
-			result: {
-				type: "cancelled" as const,
-				...(error === undefined ? {} : { error }),
-			},
+			result: { type: "cancelled" as const },
 		};
 	});
 	if (

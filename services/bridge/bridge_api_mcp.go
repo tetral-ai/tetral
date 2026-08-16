@@ -321,6 +321,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 	}
 	now := s.now()
 	commitOutcomeUnknown := false
+	cleanupReplayedBlob := false
 	err = s.withScopeTxAndCleanup(ctx, request.GetScope(), "agentruntimebridge.commit_mcp_tool_result", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
 			ctx,
@@ -339,9 +340,11 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			return err
 		}
 		if replayed {
-			// The deterministic blob pointer may already be referenced by the
-			// committed replay. Never delete it after observing durable success.
-			blobStored = false
+			// This invocation generated its attachment after preflight. A concurrent
+			// commit won the durable identity, so only the attachment named by the
+			// replay response remains authoritative.
+			cleanupReplayedBlob = attachment != nil &&
+				response.GetDuplicate().GetAttachmentRef() != attachment.GetAttachmentRef()
 			return nil
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -410,6 +413,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 			cleanupBlob()
 		}
 		return nil, err
+	}
+	if cleanupReplayedBlob {
+		cleanupBlob()
+		return response, nil
 	}
 	blobStored = false
 	return response, nil

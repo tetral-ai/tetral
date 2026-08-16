@@ -1857,7 +1857,6 @@ export function layer(
 										}
 										if (
 											"type" in replay &&
-											replay.type === "duplicate" &&
 											replay.assignedContextSequences.length > 0 &&
 											replay.assignedContextSequences.every(
 												(sequence) =>

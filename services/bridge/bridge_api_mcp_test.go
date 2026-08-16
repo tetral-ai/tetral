@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -170,6 +171,50 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 		if strings.Contains(string(output), forbidden) || strings.Contains(loaded.GetContextJson(), forbidden) {
 			t.Fatalf("MCP failure surface exposed %q", forbidden)
 		}
+	}
+}
+
+func TestPostgreSQLMCPErrorSettlementPreservesAnInFlightClaim(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_in_flight_error"
+		threadID  = "thr_mcp_in_flight_error"
+		bindingID = "bind_mcp_in_flight_error"
+		podUID    = "pod_mcp_in_flight_error"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	claim, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_in_flight_error",
+	})
+	if err != nil || claim.GetAcquired() == nil {
+		t.Fatalf("claim MCP execution = %#v/%v; want acquired", claim, err)
+	}
+
+	const errorJSON = `{"type":"runtime_invalid_sequence","message":"MCP tool execution is unavailable.","retryable":false}`
+	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUseEventID,
+		Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
+			ErrorJson: errorJSON,
+		}},
+	}))
+	if err != nil || settled.GetCommitted() == nil {
+		t.Fatalf("settle model-visible MCP error = %#v/%v; want committed", settled, err)
+	}
+
+	var claimStatus string
+	var claimID, lease sql.NullString
+	if err := admin.QueryRowContext(context.Background(), `SELECT mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID).Scan(&claimStatus, &claimID, &lease); err != nil {
+		t.Fatalf("read MCP claim after error settlement: %v", err)
+	}
+	if claimStatus != mcpClaimStatusInFlight || claimID.String != "claim_mcp_in_flight_error" || !lease.Valid {
+		t.Fatalf("MCP claim after error settlement = %q/%v/%v; want original in-flight lease", claimStatus, claimID, lease)
 	}
 }
 
@@ -748,6 +793,120 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	}
 	if durableResultAfterReplay != storedResult {
 		t.Fatalf("durable MCP result changed during replay = %q; want %q", durableResultAfterReplay, storedResult)
+	}
+}
+
+type commitBarrierBlobStore struct {
+	*blob.FakeBlobStore
+	puts    chan string
+	release chan struct{}
+}
+
+func (s *commitBarrierBlobStore) Put(ctx context.Context, key string, content io.Reader, size int64) error {
+	if err := s.FakeBlobStore.Put(ctx, key, content, size); err != nil {
+		return err
+	}
+	s.puts <- key
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.release:
+		return nil
+	}
+}
+
+func TestPostgreSQLMCPMediaCommitRaceCleansTheDefinitiveReplayBlob(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_media_commit_race"
+		threadID  = "thr_mcp_media_commit_race"
+		bindingID = "bind_mcp_media_commit_race"
+		podUID    = "pod_mcp_media_commit_race"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	blobStore := &commitBarrierBlobStore{
+		FakeBlobStore: blob.NewFakeBlobStore(),
+		puts:          make(chan string, 2),
+		release:       make(chan struct{}),
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.AttachmentBlobStore = blobStore
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	claimID := "claim_mcp_media_commit_race"
+	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+	})
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("claim MCP media execution = %#v/%v", claimed, err)
+	}
+	request := &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+		ResultJson:  `{"response":{"status":1,"result_text":"[MCP attachment: plot.png]","attachments":[{"mime":"image/png","size_bytes":3,"suggested_filename":"plot.png"}]},"content_items":1,"refresh_triggered":false}`,
+		InlineMedia: []*bridgev1.McpInlineMedia{{Data: []byte{1, 2, 3}, Mime: "image/png", SuggestedFilename: "plot.png"}},
+	}
+	type commitResult struct {
+		response *bridgev1.CommitMcpToolResultResponse
+		err      error
+	}
+	results := make(chan commitResult, 2)
+	for range 2 {
+		go func() {
+			response, err := store.CommitMcpToolResult(context.Background(), proto.Clone(request).(*bridgev1.CommitMcpToolResultRequest))
+			results <- commitResult{response: response, err: err}
+		}()
+	}
+	putKeys := []string{<-blobStore.puts, <-blobStore.puts}
+	close(blobStore.release)
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("racing MCP media commits failed: %v / %v", first.err, second.err)
+	}
+	responses := []*bridgev1.CommitMcpToolResultResponse{first.response, second.response}
+	var durableRef string
+	var committed, duplicate int
+	for _, response := range responses {
+		switch {
+		case response.GetCommitted() != nil:
+			committed++
+			durableRef = response.GetCommitted().GetAttachmentRef()
+		case response.GetDuplicate() != nil:
+			duplicate++
+			if durableRef == "" {
+				durableRef = response.GetDuplicate().GetAttachmentRef()
+			}
+		default:
+			t.Fatalf("racing MCP media response = %#v", response)
+		}
+	}
+	if committed != 1 || duplicate != 1 || durableRef == "" ||
+		first.response.GetCommitted().GetAttachmentRef() != "" && first.response.GetCommitted().GetAttachmentRef() != durableRef ||
+		second.response.GetCommitted().GetAttachmentRef() != "" && second.response.GetCommitted().GetAttachmentRef() != durableRef ||
+		first.response.GetDuplicate().GetAttachmentRef() != "" && first.response.GetDuplicate().GetAttachmentRef() != durableRef ||
+		second.response.GetDuplicate().GetAttachmentRef() != "" && second.response.GetDuplicate().GetAttachmentRef() != durableRef {
+		t.Fatalf("racing MCP media outcomes = %#v / %#v; want one shared committed ref", first.response, second.response)
+	}
+	durablePointer := transientAttachmentBlobPointer(scope, durableRef)
+	if !blobStore.Has(durablePointer) {
+		t.Fatalf("durable MCP media blob %q is absent", durablePointer)
+	}
+	deletes := blobStore.Deletes()
+	if len(deletes) != 1 || deletes[0] == durablePointer ||
+		!(deletes[0] == putKeys[0] || deletes[0] == putKeys[1]) {
+		t.Fatalf("MCP media replay cleanup = puts %v deletes %v durable %q", putKeys, deletes, durablePointer)
+	}
+	if blobStore.Has(deletes[0]) {
+		t.Fatalf("definitive replay blob %q was not removed", deletes[0])
+	}
+	var attachmentCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_transient_attachments
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND source_tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID).Scan(&attachmentCount); err != nil {
+		t.Fatalf("count durable MCP media attachments: %v", err)
+	}
+	if attachmentCount != 1 {
+		t.Fatalf("durable MCP media attachment rows = %d; want 1", attachmentCount)
 	}
 }
 

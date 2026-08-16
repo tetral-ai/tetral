@@ -335,12 +335,21 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "evt_bridge_generated_confirm", 3, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"`+toolUseEventID+`","result":"allow"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "tool_confirmation", `["evt_bridge_generated_confirm"]`, "accepted", "bind_bridge_generated_confirm", "pod_uid_generated_confirm", 3, 3)
 
-	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+	request := &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm"),
 		RuntimeInputId: "rin_bridge_generated_confirm",
-	})
+	}
+	response, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitInputs generated confirmation: %v", err)
+	}
+	replay, err := store.CommitInputs(context.Background(), proto.Clone(request).(*bridgev1.CommitInputsRequest))
+	if err != nil {
+		t.Fatalf("CommitInputs generated confirmation lost-ACK replay: %v", err)
+	}
+	if response.GetCommitted() == nil || replay.GetCommitted() == nil ||
+		!proto.Equal(response.GetCommitted().GetContext(), replay.GetCommitted().GetContext()) {
+		t.Fatalf("generated confirmation replay = %#v / %#v; want identical committed context", response, replay)
 	}
 	var pendingStatus string
 	var decision sql.NullString
@@ -359,6 +368,15 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		pendingStatus != "resolving" || !decision.Valid || decision.String != "allow" || resolvedAt.Valid {
 		t.Fatalf("generated confirmation outcome=%#v pending=%q decision=%v resolved=%v; want committed/resolving/allow/unresolved",
 			response, pendingStatus, decision, resolvedAt.Valid)
+	}
+	var confirmationMessages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages
+		WHERE workspace_id='default' AND session_id='sesn_bridge_generated_confirm'
+		  AND session_thread_id='thr_bridge_generated_confirm' AND source_event_id='evt_bridge_generated_confirm'`).Scan(&confirmationMessages); err != nil {
+		t.Fatalf("count generated confirmation context: %v", err)
+	}
+	if confirmationMessages != 1 {
+		t.Fatalf("generated confirmation context facts = %d; want exactly one", confirmationMessages)
 	}
 }
 
