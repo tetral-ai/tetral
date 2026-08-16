@@ -458,6 +458,7 @@ export class Service extends Context.Service<Service, Interface>()(
 // UPDATE-WITH: services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts
 interface ThreadRunSlot {
 	readonly runId: number;
+	readonly inputOrder: number | undefined;
 	ownerFiber: Fiber.Fiber<ThreadLoop.ThreadLoopRunResult, unknown> | undefined;
 	readonly doneDeferred: Deferred.Deferred<
 		ThreadLoop.ThreadLoopRunResult,
@@ -999,8 +1000,14 @@ export function layer(
 						}
 						const runScope = yield* Scope.make();
 						const runId = allocateRunId();
+						const acceptedInput =
+							threadEntry.runtimeThread.state.peekAcceptedInput();
 						const runSlot: ThreadRunSlot = {
 							runId,
+							inputOrder:
+								acceptedInput !== undefined && "inputOrder" in acceptedInput
+									? acceptedInput.inputOrder
+									: undefined,
 							ownerFiber: undefined,
 							doneDeferred: yield* Deferred.make<
 								ThreadLoop.ThreadLoopRunResult,
@@ -1649,32 +1656,34 @@ export function layer(
 								if (runSlot.stopping) {
 									return { type: "conflict" as const };
 								}
-								const declaration = { inputKind: "interrupt" as const };
-								const committed = yield* Effect.promise(() =>
-									commitInput(declaration),
-								);
-								if (!committed.ok) {
-									return { type: "failed" as const, committed };
+								if (
+									runSlot.inputOrder !== undefined &&
+									command.inputOrder < runSlot.inputOrder
+								) {
+									const committed = yield* Effect.promise(() =>
+										commitInput({ inputKind: "interrupt" }),
+									);
+									if (!committed.ok) {
+										return { type: "failed" as const, committed };
+									}
+									if ("stale" in committed || "joined" in committed) {
+										return { type: "stale" as const };
+									}
+									interruptCommitResult = committed;
 								}
-								if ("stale" in committed || "joined" in committed) {
-									return { type: "stale" as const };
-								}
-								interruptCommitResult = committed;
 								threadEntry.bridgeScope = command;
 								const result =
 									threadEntry.runtimeThread.state.beginUserInterrupt(
 										command,
-										async () => committed,
+										async (declaration) => {
+											interruptCommitResult ??= await commitInput(declaration);
+											return interruptCommitResult;
+										},
 										() => {
 											interruptCloseoutCompleted = true;
 										},
 									);
 								if (result === "applied") {
-									threadEntry.runtimeThread.state.recordJoinedUserInterruptResult(
-										command.runtimeInputId,
-										committed,
-										declaration,
-									);
 									runSlot.stopping = true;
 									threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
 										command.inputOrder,

@@ -1720,7 +1720,12 @@ describe("SessionManager", () => {
 			sessionManagerLayer(threadLoop),
 			async (manager) => {
 				expect(
-					await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_stale_interrupt"))),
+					await Effect.runPromise(
+						manager.acceptInput({
+							...acceptedInput("sesn_stale_interrupt"),
+							inputOrder: 10,
+						}),
+					),
 				).toMatchObject({ ok: true, started: true });
 				await waitForInterruptRecordingRuns(threadLoop, 1);
 				const session = threadLoop.runs[0]?.session;

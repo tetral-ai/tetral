@@ -1373,7 +1373,9 @@ describe("ThreadLoop", () => {
 		const llm: LLMServiceInterface = {
 			stream(request) {
 				capturedRequests.push(request);
-				session.state.addPendingAttachments([lateAttachment]);
+				if (capturedRequests.length === 1) {
+					session.state.addPendingAttachments([lateAttachment]);
+				}
 				return Stream.fromIterable([
 					{ type: "text-start", id: "text-1" },
 					{ type: "text-delta", id: "text-1", text_delta: "done" },
@@ -1420,11 +1422,14 @@ describe("ThreadLoop", () => {
 			),
 		);
 		expect(result).toMatchObject({ type: "completed" });
-		expect(capturedRequests).toHaveLength(1);
+		expect(capturedRequests).toHaveLength(2);
 		expect(capturedRequests[0]?.attachments).toEqual(
 			providerAttachmentsForTest(initialRide),
 		);
-		expect(requestEndEnvelopes).toHaveLength(1);
+		expect(capturedRequests[1]?.attachments).toEqual(
+			providerAttachmentsForTest([lateAttachment]),
+		);
+		expect(requestEndEnvelopes).toHaveLength(2);
 		expect(requestEndEnvelopes[0]?.consumedAttachmentRefs).toEqual([
 			"att_1",
 			...Array.from({ length: 30 }, (_, index) => `att_fill_${index}`),
@@ -1435,7 +1440,9 @@ describe("ThreadLoop", () => {
 				fileId: "file_1",
 			},
 		]);
-		expect(session.state.pendingAttachments()).toEqual([lateAttachment]);
+		expect(requestEndEnvelopes[1]?.consumedAttachmentRefs).toEqual(["att_late"]);
+		expect(requestEndEnvelopes[1]?.consumedFileAttachments).toBeUndefined();
+		expect(session.state.pendingAttachments()).toEqual([]);
 	});
 	test("runtime layer caps pending attachments", async () => {
 		const session = new ThreadRuntime("sesn_1");
