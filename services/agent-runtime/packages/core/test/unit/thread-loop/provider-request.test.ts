@@ -2397,6 +2397,7 @@ describe("ThreadLoop", () => {
 			activeTurnId: () => durableTurnId,
 			durableTurnOpened: (_session: ThreadRuntime, eventId: string) =>
 				durableTurnSignals.push(eventId),
+			durableOperationsOwnedBy: () => {},
 		};
 		const loader = new QueuedContextLoader([], []);
 		const result = await Effect.runPromise(

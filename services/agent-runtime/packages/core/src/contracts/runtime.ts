@@ -1396,7 +1396,7 @@ export type RuntimeDeclarationOperationControls = z.infer<
 	typeof RuntimeDeclarationOperationControlsSchema
 >;
 
-type RuntimeDeclarationRawOperationStart = () => () => void;
+type RuntimeDeclarationRawOperationStart = () => Promise<() => Promise<void>>;
 const RuntimeDeclarationRawOperationOwners = new WeakMap<
 	AbortSignal,
 	RuntimeDeclarationRawOperationStart
@@ -1784,14 +1784,14 @@ async function withBoundedStoreOperation<
 		.then(async (elapsed) =>
 			elapsed ? { kind: "timeout" as const } : await pendingForever(),
 		);
-	const finishOwnedRawOperation = RuntimeDeclarationRawOperationOwners.get(
+	const finishOwnedRawOperation = await RuntimeDeclarationRawOperationOwners.get(
 		controls.signal,
 	)?.();
 	let rawOperation: Promise<T>;
 	try {
 		rawOperation = operation(operationControls);
 	} catch (error) {
-		finishOwnedRawOperation?.();
+		await finishOwnedRawOperation?.();
 		throw error;
 	}
 	const operationPromise = rawOperation
@@ -1799,7 +1799,7 @@ async function withBoundedStoreOperation<
 			(value) => ({ kind: "value" as const, value }),
 			(error: unknown) => ({ kind: "error" as const, error }),
 		)
-		.finally(() => finishOwnedRawOperation?.());
+		.finally(async () => await finishOwnedRawOperation?.());
 
 	try {
 		const result = await Promise.race([

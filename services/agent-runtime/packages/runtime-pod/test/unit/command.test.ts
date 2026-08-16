@@ -1076,7 +1076,7 @@ describe("Runtime Pod command entrypoint", () => {
 				tokenReviewRequests[0],
 			);
 
-			expect(accepted).toEqual({ accepted: {} });
+			expect(accepted).toEqual({ duplicate: {} });
 			expect(controlCommits).toEqual([
 				expect.objectContaining({
 					inputKind: "interrupt_control",

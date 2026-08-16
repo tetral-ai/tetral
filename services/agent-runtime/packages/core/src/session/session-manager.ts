@@ -461,6 +461,9 @@ interface ThreadRunSlot {
 	readonly runId: number;
 	readonly durableTurnReady: Promise<boolean>;
 	readonly markDurableTurnReady: (opened: boolean) => void;
+	readonly runAtDurableOperationsIdle: <T>(
+		operation: () => Promise<T>,
+	) => Promise<T>;
 	ownerFiber: Fiber.Fiber<ThreadLoop.ThreadLoopRunResult, unknown> | undefined;
 	readonly doneDeferred: Deferred.Deferred<
 		ThreadLoop.ThreadLoopRunResult,
@@ -1006,10 +1009,25 @@ export function layer(
 						const durableTurnReady = new Promise<boolean>((resolve) => {
 							markDurableTurnReady = resolve;
 						});
+						const durableOperationOwners: Array<{
+							readonly active: () => boolean;
+							readonly runAtIdleBoundary: <T>(
+								operation: () => Promise<T>,
+							) => Promise<T>;
+						}> = [];
 						const runSlot: ThreadRunSlot = {
 							runId,
 							durableTurnReady,
 							markDurableTurnReady,
+							runAtDurableOperationsIdle: (operation) => {
+								const owner =
+									[...durableOperationOwners].reverse().find((candidate) =>
+										candidate.active(),
+									) ?? durableOperationOwners.at(-1);
+								return owner === undefined
+									? operation()
+									: owner.runAtIdleBoundary(operation);
+							},
 							ownerFiber: undefined,
 							doneDeferred: yield* Deferred.make<
 								ThreadLoop.ThreadLoopRunResult,
@@ -1033,6 +1051,9 @@ export function layer(
 							activeTurnId: (session) =>
 								session.state.threadTurnReduction().checkpoint.executionRunId,
 							durableTurnOpened: () => runSlot.markDurableTurnReady(true),
+							durableOperationsOwnedBy: (active, runAtIdleBoundary) => {
+								durableOperationOwners.push({ active, runAtIdleBoundary });
+							},
 						};
 						const run = threadLoop.run(threadEntry.runtimeThread, custody).pipe(
 							Scope.provide(runScope),
@@ -1078,6 +1099,7 @@ export function layer(
 					activeTurnId: (session) =>
 						session.state.threadTurnReduction().checkpoint.executionRunId,
 					durableTurnOpened: () => {},
+					durableOperationsOwnedBy: () => {},
 				};
 				const attempt = threadLoop.closeFailedRun(
 					threadEntry.runtimeThread,
@@ -1652,26 +1674,6 @@ export function layer(
 					threadEntry.runtimeThread.updateIdentity(controlIdentity(command));
 					const runSlot = threadEntry.runSlot;
 					if (runSlot?.ownerFiber !== undefined) {
-						const durableTurnOpened = yield* Effect.promise(
-							() => runSlot.durableTurnReady,
-						);
-						if (!durableTurnOpened) {
-							yield* awaitRunSlot(runSlot);
-							if (
-								sessions
-									.get(commandSessionKey(command))
-									?.threads.get(command.sessionThreadId) !== threadEntry
-							) {
-								return { ok: false, sessionId, reason: "control_busy" };
-							}
-							return yield* interruptControl(sessionId, command, commitInput);
-						}
-						if (
-							threadEntry.runSlot !== runSlot ||
-							runSlot.ownerFiber === undefined
-						) {
-							return yield* interruptControl(sessionId, command, commitInput);
-						}
 						let interruptCommitResult:
 							| Awaited<ReturnType<RuntimeControlInputCommit>>
 							| undefined;
@@ -1679,45 +1681,67 @@ export function layer(
 						const admission = yield* submitThreadCommand(
 							threadEntry,
 							Effect.gen(function* () {
-								if (runSlot.stopping) {
-									return { type: "conflict" as const };
-								}
-								const committed = yield* Effect.promise(() =>
-									commitInput({ inputKind: "interrupt" }),
+								const durableTurnOpened = yield* Effect.promise(
+									() => runSlot.durableTurnReady,
 								);
-								if (!committed.ok) {
-									return { type: "failed" as const, committed };
+								if (
+									!durableTurnOpened ||
+									threadEntry.runSlot !== runSlot ||
+									runSlot.ownerFiber === undefined
+								) {
+									return { type: "run_changed" as const };
 								}
-								if ("stale" in committed || "joined" in committed) {
-									return {
-										type: "stale" as const,
-										stale: "stale" in committed,
-									};
-								}
-								interruptCommitResult = committed;
-								threadEntry.bridgeScope = command;
-								const result =
-									threadEntry.runtimeThread.state.beginUserInterrupt(
-										command,
-										async (declaration) => {
-											interruptCommitResult ??= await commitInput(declaration);
-											return interruptCommitResult;
-										},
-										() => {
-											interruptCloseoutCompleted = true;
-										},
-									);
-								if (result === "applied") {
-									runSlot.stopping = true;
-									threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
-										command.inputOrder,
-										command.origin === "user",
-									);
-								}
-								return { type: result };
+								return yield* Effect.promise(() =>
+									runSlot.runAtDurableOperationsIdle(async () => {
+										if (
+											threadEntry.runSlot !== runSlot ||
+											runSlot.ownerFiber === undefined
+										) {
+											return { type: "run_changed" as const };
+										}
+										if (runSlot.stopping) {
+											return { type: "conflict" as const };
+										}
+										const committed = await commitInput({ inputKind: "interrupt" });
+										if (!committed.ok) {
+											return { type: "failed" as const, committed };
+										}
+										if ("stale" in committed || "joined" in committed) {
+											return {
+												type: "stale" as const,
+												stale: "stale" in committed,
+											};
+										}
+										interruptCommitResult = committed;
+										threadEntry.bridgeScope = command;
+										const result =
+											threadEntry.runtimeThread.state.beginUserInterrupt(
+												command,
+												async (declaration) => {
+													interruptCommitResult ??= await commitInput(declaration);
+													return interruptCommitResult;
+												},
+												() => {
+													interruptCloseoutCompleted = true;
+												},
+											);
+										if (result === "applied") {
+											runSlot.stopping = true;
+											threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
+												command.inputOrder,
+												command.origin === "user",
+											);
+										}
+										return { type: result };
+									}),
+								);
 							}),
 							{ type: "conflict" as const },
 						);
+						if (admission.type === "run_changed") {
+							yield* awaitRunSlot(runSlot);
+							return yield* interruptControl(sessionId, command, commitInput);
+						}
 						if (admission.type === "failed") {
 							return {
 								ok: false,

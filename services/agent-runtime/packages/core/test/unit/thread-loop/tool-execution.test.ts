@@ -3448,7 +3448,10 @@ describe("ThreadLoop", () => {
 				observed: true,
 				hasPendingApprovalToolJobs: false,
 			});
-			expect(interruptCommitStarted).toBe(false);
+			expect(interruptCommitStarted).toBe(true);
+			expect(order.indexOf("tool-use-append:ack")).toBeLessThan(
+				order.indexOf("commit:interrupt"),
+			);
 			expect(order.indexOf("tool-use-append:ack")).toBeLessThan(
 				order.indexOf("event:span.model_request_end"),
 			);
@@ -3622,7 +3625,10 @@ describe("ThreadLoop", () => {
 			expect(
 				order.filter((entry) => entry === "store:internal-tool-repair"),
 			).toHaveLength(1);
-			expect(interruptCommitStarted).toBe(false);
+			expect(interruptCommitStarted).toBe(true);
+			expect(order.indexOf("repair:ack")).toBeLessThan(
+				order.indexOf("commit:interrupt"),
+			);
 			expect(order.indexOf("repair:ack")).toBeLessThan(
 				order.indexOf("event:span.model_request_end"),
 			);
@@ -4541,7 +4547,10 @@ describe("ThreadLoop", () => {
 				observedRouteSignal = request.abortSignal;
 				request.abortSignal.addEventListener(
 					"abort",
-					() => abortObserved.resolve(),
+					() => {
+						order.push("route:abort");
+						abortObserved.resolve();
+					},
 					{ once: true },
 				);
 				routeStarted.resolve();
@@ -4618,7 +4627,9 @@ describe("ThreadLoop", () => {
 			expect(interruptSettled).toBe(false);
 			expect(providerCalls).toBe(1);
 			expect(commitCalls).toEqual(["rin_non_cooperative_route"]);
-			expect(order).not.toContain("commit:interrupt");
+			expect(order.indexOf("commit:interrupt")).toBeLessThan(
+				order.indexOf("route:abort"),
+			);
 			expect(
 				await Effect.runPromise(manager.waitThread(interruptCommand, 0)),
 			).toMatchObject({ ok: true, timedOut: true });
