@@ -2366,7 +2366,7 @@ describe("ThreadLoop", () => {
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
 	});
 
-	test("an acknowledged run-open replay preserves the accepted-input action", async () => {
+	test("an existing durable run-open receipt preserves the accepted-input action", async () => {
 		const session = new ThreadRuntime("sesn_duplicate_run_open");
 		const durableTurnId = "sevt_duplicate_run_open";
 		expect(
@@ -2376,6 +2376,7 @@ describe("ThreadLoop", () => {
 		).toBe("applied");
 		const requests: LLMRequest[] = [];
 		const reducerFacts: string[] = [];
+		const durableTurnSignals: string[] = [];
 		let runOpenWrites = 0;
 		const applyThreadTurnFact = session.state.applyThreadTurnFact.bind(session.state);
 		session.state.applyThreadTurnFact = (fact) => {
@@ -2385,25 +2386,22 @@ describe("ThreadLoop", () => {
 		const writer = writerFrom((envelope) => {
 			if (envelope.event.type === "session.status_running") {
 				runOpenWrites += 1;
-				return {
-						ok: true,
-						eventId: durableTurnId,
-						type: "duplicate",
-					};
 			}
 			return {
-						ok: true,
-						eventId: `bridge-${envelope.writeId}`,
-						type: "committed",
-					};
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+			};
 		});
+		const custody = {
+			activeTurnId: () => durableTurnId,
+			durableTurnOpened: (_session: ThreadRuntime, eventId: string) =>
+				durableTurnSignals.push(eventId),
+		};
 		const loader = new QueuedContextLoader([], []);
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
-					return yield* (yield* ThreadLoop.Service).run(
-						session,
-						testRunCustody(),
-					);
+					return yield* (yield* ThreadLoop.Service).run(session, custody);
 			}).pipe(
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
@@ -2423,7 +2421,8 @@ describe("ThreadLoop", () => {
 		);
 		expect(result).toMatchObject({ type: "completed" });
 		expect(requests).toHaveLength(1);
-		expect(runOpenWrites).toBe(1);
+		expect(runOpenWrites).toBe(0);
+		expect(durableTurnSignals).toEqual([durableTurnId]);
 		expect(loader.commitCalls).toHaveLength(1);
 		expect(reducerFacts.filter((fact) => fact === "run_opened")).toHaveLength(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();

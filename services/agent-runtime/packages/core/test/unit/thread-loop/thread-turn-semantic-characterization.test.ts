@@ -11,45 +11,53 @@ import {
 import { toGatewayProviderContext } from "../../../src/runtime/context-projection.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
-const noActiveInput = { hasPendingAttachments: false } as const;
+const reducerHarness = (
+	activeInputView: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[3],
+) => ({
+	deriveThreadTurnDecision: (
+		checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
+		routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
+		acceptedInputIds: readonly string[] = [],
+	) =>
+		deriveThreadTurnDecisionWithActiveInput(
+			checkpoint,
+			routes,
+			acceptedInputIds,
+			activeInputView,
+		),
+	initializeThreadTurnReduction: (
+		checkpoint: Parameters<
+			typeof initializeThreadTurnReductionWithActiveInput
+		>[0],
+		routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
+		acceptedInputIds: readonly string[] = [],
+	) =>
+		initializeThreadTurnReductionWithActiveInput(
+			checkpoint,
+			routes,
+			acceptedInputIds,
+			activeInputView,
+		),
+	reduceThreadTurn: (
+		current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
+		fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
+		routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
+		acceptedInputIds: readonly string[] = [],
+	) =>
+		reduceThreadTurnWithActiveInput(
+			current,
+			fact,
+			routes,
+			acceptedInputIds,
+			activeInputView,
+		),
+});
 
-const deriveThreadTurnDecision = (
-	checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
-	routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	deriveThreadTurnDecisionWithActiveInput(
-		checkpoint,
-		routes,
-		acceptedInputIds,
-		noActiveInput,
-	);
-
-const initializeThreadTurnReduction = (
-	checkpoint: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[0],
-	routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	initializeThreadTurnReductionWithActiveInput(
-		checkpoint,
-		routes,
-		acceptedInputIds,
-		noActiveInput,
-	);
-
-const reduceThreadTurn = (
-	current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
-	fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
-	routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	reduceThreadTurnWithActiveInput(
-		current,
-		fact,
-		routes,
-		acceptedInputIds,
-		noActiveInput,
-	);
+const {
+	deriveThreadTurnDecision,
+	initializeThreadTurnReduction,
+	reduceThreadTurn,
+} = reducerHarness({ hasPendingAttachments: false });
 
 describe("Thread-turn semantic characterization", () => {
 	test("a pending durable Tool Call is valid context but cannot start the next provider request", () => {

@@ -95,6 +95,58 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(streamCalls).toBe(0);
   });
 
+  test("rejects an unpaired Tool Result at the provider client boundary", async () => {
+    let providerFactoryCalls = 0;
+    let streamCalls = 0;
+    const registry = new ProviderClientRegistry({
+      anthropicProviderFactory: () => {
+        providerFactoryCalls += 1;
+        return (modelId) => ({ provider: "anthropic", modelId });
+      },
+      streamText: () => {
+        streamCalls += 1;
+        return streamTextResult([finishPart()]);
+      },
+    });
+    const request = anthropicRequest({
+      context: [
+        {
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            {
+              toolResult: {
+                modelToolCallId: "call_without_owner",
+                completed: { outputJson: "{}" },
+                error: undefined,
+                cancelled: undefined,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    let caught: unknown;
+    try {
+      await collectEvents(
+        registry.stream({ request, credential: platformAnthropicCredential() }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      providerError: {
+        code: "provider_request_invalid",
+        retryable: false,
+        fatal: true,
+        statusCode: 400,
+      },
+    });
+    expect(providerFactoryCalls).toBe(0);
+    expect(streamCalls).toBe(0);
+  });
+
   test("lowers approval reviewer output schema and reports route-effective model limits", async () => {
     const calls: GatewayStreamTextInput[] = [];
     const request = anthropicRequest({

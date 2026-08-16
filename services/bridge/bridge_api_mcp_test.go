@@ -174,7 +174,7 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	}
 }
 
-func TestPostgreSQLMCPErrorSettlementPreservesAnInFlightClaim(t *testing.T) {
+func TestPostgreSQLMCPErrorSettlementPreservesAnActiveClaim(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_mcp_in_flight_error"
@@ -195,7 +195,7 @@ func TestPostgreSQLMCPErrorSettlementPreservesAnInFlightClaim(t *testing.T) {
 		t.Fatalf("claim MCP execution = %#v/%v; want acquired", claim, err)
 	}
 
-	const errorJSON = `{"type":"runtime_invalid_sequence","message":"MCP tool execution is unavailable.","retryable":false}`
+	const errorJSON = `{"type":"runtime_invalid_sequence","message":"durable MCP error settlement","retryable":false}`
 	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUseEventID,
 		Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
@@ -243,8 +243,8 @@ func TestPostgreSQLMCPErrorSettlementPreservesAnInFlightClaim(t *testing.T) {
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(parts[1], &resultPart); err != nil ||
-		resultPart.Result.Type != "error" || resultPart.Result.Error.Message != "MCP tool execution is unavailable." {
-		t.Fatalf("model-visible in-flight MCP error = %#v err=%v", resultPart, err)
+		resultPart.Result.Type != "error" || resultPart.Result.Error.Message != "durable MCP error settlement" {
+		t.Fatalf("model-visible MCP error settlement = %#v err=%v", resultPart, err)
 	}
 }
 

@@ -247,6 +247,20 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				"session.id": "sesn_1",
 				"thread.id": "thrd_1",
 			});
+			expect(Object.keys(records[0]!).sort()).toEqual(
+				[
+					"component",
+					"event",
+					"event.kind",
+					"message",
+					"operation",
+					"phase",
+					"reason",
+					"session.id",
+					"thread.id",
+					"workspace.id",
+				].sort(),
+			);
 			expect(JSON.stringify(records)).not.toContain(canary);
 		}
 	});

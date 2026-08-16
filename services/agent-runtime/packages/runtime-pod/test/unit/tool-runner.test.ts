@@ -2123,12 +2123,18 @@ describe("RuntimePodToolRunner", () => {
 		for (const testCase of [
 			{
 				errorKind: McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT,
+				message:
+					"The MCP tool execution is still in progress. Check the external service before retrying.",
 			},
 			{
 				errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
+				message:
+					"The MCP tool may have completed, but its result could not be confirmed. Check the external service before retrying.",
 			},
 			{
 				errorKind: McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT,
+				message:
+					"The MCP tool request conflicts with an existing execution. Check the external service before retrying.",
 			},
 		]) {
 			const mcp = new RecordingMcpConnectorClient();
@@ -2148,9 +2154,7 @@ describe("RuntimePodToolRunner", () => {
 				type: "error",
 				error: {
 					retryable: false,
-					message: expect.stringContaining(
-						"Check the external service before retrying.",
-					),
+					message: testCase.message,
 				},
 			});
 			expect(repeated).toEqual(first);

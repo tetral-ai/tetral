@@ -13,57 +13,65 @@ import {
 } from "../../../src/thread-loop/thread-turn-reducer.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
-const noActiveInput = { hasPendingAttachments: false } as const;
+const reducerHarness = (
+	activeInputView: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[3],
+) => ({
+	deriveThreadTurnDecision: (
+		checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
+		routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
+		acceptedInputIds: readonly string[] = [],
+	) =>
+		deriveThreadTurnDecisionWithActiveInput(
+			checkpoint,
+			routes,
+			acceptedInputIds,
+			activeInputView,
+		),
+	initializeThreadTurnReduction: (
+		checkpoint: Parameters<
+			typeof initializeThreadTurnReductionWithActiveInput
+		>[0],
+		routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
+		acceptedInputIds: readonly string[] = [],
+	) =>
+		initializeThreadTurnReductionWithActiveInput(
+			checkpoint,
+			routes,
+			acceptedInputIds,
+			activeInputView,
+		),
+	reduceThreadTurn: (
+		current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
+		fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
+		routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
+		acceptedInputIds: readonly string[] = [],
+	) =>
+		reduceThreadTurnWithActiveInput(
+			current,
+			fact,
+			routes,
+			acceptedInputIds,
+			activeInputView,
+		),
+	reconcileThreadTurnSeal: (
+		current: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[0],
+		routes: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[1],
+		acceptedInputIds: readonly string[] = [],
+	) =>
+		reconcileThreadTurnSealWithActiveInput(
+			current,
+			routes,
+			acceptedInputIds,
+			activeInputView,
+		),
+});
 
-const deriveThreadTurnDecision = (
-	checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
-	routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	deriveThreadTurnDecisionWithActiveInput(
-		checkpoint,
-		routes,
-		acceptedInputIds,
-		noActiveInput,
-	);
-
-const initializeThreadTurnReduction = (
-	checkpoint: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[0],
-	routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	initializeThreadTurnReductionWithActiveInput(
-		checkpoint,
-		routes,
-		acceptedInputIds,
-		noActiveInput,
-	);
-
-const reduceThreadTurn = (
-	current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
-	fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
-	routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	reduceThreadTurnWithActiveInput(
-		current,
-		fact,
-		routes,
-		acceptedInputIds,
-		noActiveInput,
-	);
-
-const reconcileThreadTurnSeal = (
-	current: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[0],
-	routes: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	reconcileThreadTurnSealWithActiveInput(
-		current,
-		routes,
-		acceptedInputIds,
-		noActiveInput,
-	);
+const {
+	deriveThreadTurnDecision,
+	initializeThreadTurnReduction,
+	reduceThreadTurn,
+	reconcileThreadTurnSeal,
+} = reducerHarness({ hasPendingAttachments: false });
 
 describe("Thread-turn reducer", () => {
 	test("derives idle and plural committed-input readiness", () => {

@@ -17,12 +17,12 @@ import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 const inputPath = process.argv[2];
 if (inputPath === undefined) throw new Error("durable Tool error declaration input path is required");
 const input = JSON.parse(await readFile(inputPath, "utf8")) as {
-  readonly workspaceId: string;
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly bindingId: string;
-  readonly bindingGeneration: number;
-  readonly targetPodUid: string;
+	readonly workspaceId: string;
+	readonly sessionId: string;
+	readonly sessionThreadId: string;
+	readonly bindingId: string;
+	readonly bindingGeneration: number;
+	readonly targetPodUid: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
 	readonly toolUseEventId: string;
@@ -57,14 +57,14 @@ const client = {
 		return { cancel() {} };
 	},
 	settleToolResult: (
-    request: SettleToolResultRequest,
-    _metadata: Metadata,
-    _options: CallOptions,
-    callback: (error: Error | null, response: unknown) => void,
-  ) => {
-    captured = request;
-    callback(null, { committed: {} });
-    return { cancel() {} };
+		request: SettleToolResultRequest,
+		_metadata: Metadata,
+		_options: CallOptions,
+		callback: (error: Error | null, response: unknown) => void,
+	) => {
+		captured = request;
+		callback(null, { committed: {} });
+		return { cancel() {} };
 	},
 } as unknown as AgentRuntimeBridgeServiceClient;
 const entry = lookupToolEntry(createToolCatalog({ family: "claude" }), "Read");
@@ -101,22 +101,22 @@ if (result.type !== "error") {
 }
 const outcome = runtimeToolSettlement(result);
 const writer = new BridgeAPIEventWriter({
-  address: "bridge.test:9090",
-  tokenPath: "/var/run/token",
-  client,
-  metadataFactory: async () => new Metadata(),
+	address: "bridge.test:9090",
+	tokenPath: "/var/run/token",
+	client,
+	metadataFactory: async () => new Metadata(),
 });
 const attempt = await writer.settleToolResult({
-  workspaceId: input.workspaceId,
-  sessionId: input.sessionId,
-  sessionThreadId: input.sessionThreadId,
-  bindingId: input.bindingId,
-  bindingGeneration: input.bindingGeneration,
-  targetPodUid: input.targetPodUid,
-  settlement: { toolUseEventId: input.toolUseEventId, outcome },
+	workspaceId: input.workspaceId,
+	sessionId: input.sessionId,
+	sessionThreadId: input.sessionThreadId,
+	bindingId: input.bindingId,
+	bindingGeneration: input.bindingGeneration,
+	targetPodUid: input.targetPodUid,
+	settlement: { toolUseEventId: input.toolUseEventId, outcome },
 });
 if (!attempt.ok || attempt.result.type !== "committed" || captured?.settlement?.error === undefined) {
-  throw new Error("Runtime Bridge adapter did not declare a Tool error settlement");
+	throw new Error("Runtime Bridge adapter did not declare a Tool error settlement");
 }
 
 process.stdout.write(JSON.stringify({

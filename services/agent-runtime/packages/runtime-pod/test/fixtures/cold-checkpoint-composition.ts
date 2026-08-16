@@ -1,20 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import type { RuntimeContextEntry } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import {
-	RuntimeAssistantContextAppendSchema,
-	RuntimeContextEntrySchema,
-	RuntimeToolSettlementDeclarationSchema,
-} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { RuntimeToolSettlementDeclarationSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { internalToolRepairKey } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { toGatewayProviderContextSegments } from "@tetral/agent-runtime-core/src/runtime/context-projection.js";
-import {
-	applyAcceptedInputResult,
-	applyAssistantAppendResult,
-	applyInternalToolRepairResult,
-	internalToolRepairContext,
-	sealAssistantDraft,
-} from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { applyCommittedRecoveredToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import { assembleProviderCallRequest } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
@@ -31,8 +20,6 @@ import { GatewayProviderRules } from "../../../../../gateway/packages/lowering/s
 import { validateProviderRequest } from "../../../../../gateway/packages/protocol/src/bounds.js";
 import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
 
-const noActiveInput = { hasPendingAttachments: false } as const;
-
 const inputPath = process.argv[2];
 if (inputPath === undefined)
 	throw new Error("cold checkpoint composition input path is required");
@@ -44,31 +31,11 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly pendingSandboxExecutions?: readonly unknown[];
 	readonly hotScenario?: {
 		readonly baseContextJson: string;
-		readonly kind:
-			| "accepted_input"
-			| "assistant_append"
-			| "tool_settlement"
-			| "internal_repair"
-			| "compaction";
-		readonly declaredDrafts?: readonly unknown[];
-		readonly append?: unknown;
-		readonly result?: {
-			readonly assignedContextSequences?: readonly number[];
-			readonly messageSequence?: number;
-			readonly createdToolUseEventIds?: readonly string[];
-			readonly assignedMessageSequence?: number;
-			readonly checkpointMessageSequence?: number;
-		};
-		readonly modelRequestId?: string;
+		readonly kind: "tool_settlement";
 		readonly assistantMessageSequence?: number;
 		readonly toolUseEventId?: string;
 		readonly modelToolCallId?: string;
-		readonly toolName?: string;
-		readonly canonicalInput?: unknown;
-		readonly error?: unknown;
 		readonly settlement?: unknown;
-		readonly compactedThroughMessageSequence?: number;
-		readonly turnFacts?: unknown;
 		readonly pendingToolUses?: readonly unknown[];
 		readonly pendingSandboxExecutions?: readonly unknown[];
 	};
@@ -106,6 +73,9 @@ const loadContext = async (contextJson: string) => {
 };
 
 const cold = await loadContext(input.contextJson);
+const coldActiveInputView = {
+	hasPendingAttachments: (cold.pendingAttachments?.length ?? 0) > 0,
+};
 const checkpoint = extractThreadTurnCheckpoint({
 	contextEntries: cold.contextEntries,
 	facts: cold.turnFacts,
@@ -133,6 +103,9 @@ let hot:
 if (input.hotScenario !== undefined) {
 	const scenario = input.hotScenario;
 	const base = await loadContext(scenario.baseContextJson);
+	const hotActiveInputView = {
+		hasPendingAttachments: (base.pendingAttachments?.length ?? 0) > 0,
+	};
 	const baseCheckpoint = extractThreadTurnCheckpoint({
 		contextEntries: base.contextEntries,
 		facts: base.turnFacts,
@@ -142,54 +115,34 @@ if (input.hotScenario !== undefined) {
 		pendingToolUses: (base.pendingToolUses ?? []) as never,
 		pendingSandboxExecutions: (base.pendingSandboxExecutions ?? []) as never,
 	});
-	const hotSettlement =
-		scenario.kind === "tool_settlement"
-			? RuntimeToolSettlementDeclarationSchema.parse({
-					toolUseEventId: scenario.toolUseEventId,
-					outcome: scenario.settlement,
-				})
-			: undefined;
-	let hotEntries: readonly RuntimeContextEntry[];
-	let hotCheckpoint;
-	if (hotSettlement !== undefined) {
-		if (
-			scenario.assistantMessageSequence === undefined ||
-			scenario.modelToolCallId === undefined
-		) {
-			throw new Error("Tool settlement hot receipt is incomplete");
-		}
-		const runtime = new ThreadRuntime("composition_session");
-		runtime.state.contextManager.replaceEntries(base.contextEntries);
-		runtime.state.contextManager.installOpenRequestDraft(base.openRequestDraft);
-		runtime.state.installThreadTurn(baseCheckpoint, baseRoutes);
-		const applied = applyCommittedRecoveredToolSettlement(
-			runtime,
-			{
-				toolUseEventId: hotSettlement.toolUseEventId,
-				assistantMessageSequence: scenario.assistantMessageSequence,
-				modelToolCallId: scenario.modelToolCallId,
-			},
-			hotSettlement.outcome,
-		);
-		if (applied.type !== "settled") {
-			throw new Error(`Tool settlement hot receipt failed: ${applied.type}`);
-		}
-		hotEntries = runtime.state.contextManager.entries();
-		hotCheckpoint = runtime.state.threadTurnReduction().checkpoint;
-	} else {
-		hotEntries = applyHotOperation(
-			base.contextEntries,
-			base.openRequestDraft,
-			scenario,
-		);
-		hotCheckpoint = extractThreadTurnCheckpoint({
-					contextEntries: hotEntries,
-					facts:
-						scenario.turnFacts === undefined
-							? cold.turnFacts
-							: (scenario.turnFacts as typeof cold.turnFacts),
-				});
+	const hotSettlement = RuntimeToolSettlementDeclarationSchema.parse({
+		toolUseEventId: scenario.toolUseEventId,
+		outcome: scenario.settlement,
+	});
+	if (
+		scenario.assistantMessageSequence === undefined ||
+		scenario.modelToolCallId === undefined
+	) {
+		throw new Error("Tool settlement hot receipt is incomplete");
 	}
+	const runtime = new ThreadRuntime("composition_session");
+	runtime.state.contextManager.replaceEntries(base.contextEntries);
+	runtime.state.contextManager.installOpenRequestDraft(base.openRequestDraft);
+	runtime.state.installThreadTurn(baseCheckpoint, baseRoutes);
+	const applied = applyCommittedRecoveredToolSettlement(
+		runtime,
+		{
+			toolUseEventId: hotSettlement.toolUseEventId,
+			assistantMessageSequence: scenario.assistantMessageSequence,
+			modelToolCallId: scenario.modelToolCallId,
+		},
+		hotSettlement.outcome,
+	);
+	if (applied.type !== "settled") {
+		throw new Error(`Tool settlement hot receipt failed: ${applied.type}`);
+	}
+	const hotEntries = runtime.state.contextManager.entries();
+	const hotCheckpoint = runtime.state.threadTurnReduction().checkpoint;
 	const hotRoutes = extractColdThreadToolRouteView({
 		checkpoint: hotCheckpoint,
 		pendingToolUses: (scenario.pendingToolUses ??
@@ -218,7 +171,7 @@ if (input.hotScenario !== undefined) {
 			hotCheckpoint,
 			hotRoutes,
 			[],
-			noActiveInput,
+			hotActiveInputView,
 		).action,
 		...(toolPart === undefined ? {} : { toolPart }),
 		...(input.providerComposition === true
@@ -240,7 +193,7 @@ process.stdout.write(
 			checkpoint,
 			toolRouteView,
 			[],
-			noActiveInput,
+			coldActiveInputView,
 		).action,
 		derivedRepairKeys: (checkpoint.request?.toolMembers ?? []).flatMap(
 			(member) =>
@@ -265,125 +218,6 @@ process.stdout.write(
 		...(hot === undefined ? {} : { hot }),
 	}),
 );
-
-function applyHotOperation(
-	base: readonly RuntimeContextEntry[],
-	baseOpenRequestDraft: Awaited<
-		ReturnType<typeof loadContext>
-	>["openRequestDraft"],
-	scenario: NonNullable<typeof input.hotScenario>,
-): readonly RuntimeContextEntry[] {
-	switch (scenario.kind) {
-		case "accepted_input": {
-			if (
-				scenario.declaredDrafts === undefined ||
-				scenario.result?.assignedContextSequences === undefined
-			) {
-				throw new Error("accepted-input hot scenario is incomplete");
-			}
-			const drafts = scenario.declaredDrafts.map((draft) => {
-				if (typeof draft !== "object" || draft === null || Array.isArray(draft))
-					throw new Error("accepted-input draft is malformed");
-				const value = draft as {
-					readonly contextKind?: unknown;
-					readonly parts?: unknown;
-				};
-				const entry = RuntimeContextEntrySchema.parse({
-					messageSequence: 1,
-					contextKind: value.contextKind,
-					parts: value.parts,
-				});
-				return { contextKind: entry.contextKind, parts: entry.parts };
-			});
-			return [
-				...base,
-				...applyAcceptedInputResult(
-					drafts,
-					scenario.result.assignedContextSequences,
-				),
-			];
-		}
-		case "assistant_append": {
-			if (
-				scenario.modelRequestId === undefined ||
-				scenario.append === undefined ||
-				scenario.result?.messageSequence === undefined ||
-				scenario.result.createdToolUseEventIds === undefined
-			) {
-				throw new Error("Assistant append hot scenario is incomplete");
-			}
-			const append = RuntimeAssistantContextAppendSchema.parse(scenario.append);
-			const applied = applyAssistantAppendResult({
-				modelRequestId: scenario.modelRequestId,
-				append,
-				result: {
-					messageSequence: scenario.result.messageSequence,
-					createdToolUseEventIds: scenario.result.createdToolUseEventIds,
-				},
-			});
-			return [...base, sealAssistantDraft(applied.draft)];
-		}
-		case "tool_settlement": {
-			throw new Error("Tool settlement must use the production hot receipt owner");
-		}
-		case "internal_repair": {
-			if (
-				scenario.modelToolCallId === undefined ||
-				scenario.toolName === undefined ||
-				scenario.canonicalInput === undefined ||
-				scenario.error === undefined ||
-				scenario.result?.assignedMessageSequence === undefined
-			) {
-				throw new Error("internal-repair hot scenario is incomplete");
-			}
-			const draft = internalToolRepairContext({
-				modelToolCallId: scenario.modelToolCallId,
-				toolName: scenario.toolName,
-				canonicalInput: scenario.canonicalInput as never,
-				error: scenario.error as never,
-			});
-			return [
-				...base,
-				sealAssistantDraft(
-					applyInternalToolRepairResult({
-						modelRequestId:
-							scenario.modelRequestId ??
-							baseOpenRequestDraft?.modelRequestId ??
-							"composition_internal_repair",
-						existingDraft: baseOpenRequestDraft,
-						assignedMessageSequence: scenario.result.assignedMessageSequence,
-						context: draft,
-					}),
-				),
-			];
-		}
-		case "compaction": {
-			if (
-				scenario.declaredDrafts?.length !== 1 ||
-				scenario.result?.checkpointMessageSequence === undefined ||
-				scenario.compactedThroughMessageSequence === undefined
-			) {
-				throw new Error("compaction hot scenario is incomplete");
-			}
-			const draft = scenario.declaredDrafts[0] as {
-				readonly contextKind?: unknown;
-				readonly parts?: unknown;
-			};
-			const checkpointEntry = RuntimeContextEntrySchema.parse({
-				messageSequence: scenario.result.checkpointMessageSequence,
-				contextKind: draft.contextKind,
-				parts: draft.parts,
-			});
-			return [
-				checkpointEntry,
-				...base.filter(
-					(entry) =>
-						entry.messageSequence > scenario.compactedThroughMessageSequence!,
-				),
-			];
-		}
-	}
-}
 
 function composeProviderRequests(
 	entries: readonly RuntimeContextEntry[],
