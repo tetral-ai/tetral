@@ -1185,13 +1185,15 @@ function runThreadLoopEffect(
 									: undefined,
 							);
 							const makesRequestReady =
+								(contextEntries.length > 0 ||
+									declaration.result.pendingAttachments.length > 0) &&
 								(declaration.result.type === "committed" ||
 									newlyResidentContextEntries.length > 0 ||
 									resumesPendingInput) &&
 								(acceptedInput.kind === "messages" ||
 									acceptedInput.kind === "approval_review" ||
 									acceptedInput.kind === "inter_agent_message");
-							if (makesRequestReady && contextEntries.length > 0) {
+							if (makesRequestReady) {
 								session.state.applyThreadTurnFact({
 									fact: "inputs_committed",
 									eventId: acceptedInput.runtimeInputId,
@@ -1309,10 +1311,14 @@ function runThreadLoopEffect(
 				const providerContextMessages =
 					session.state.contextManager.providerEntrySegments();
 				let currentModel = session.state.currentModel();
+				const hasPendingAttachments =
+					session.state.pendingAttachments().length > 0;
 				const projected = providerContextMessages.every(
 					(segment) => segment.length === 0,
 				)
-					? undefined
+					? hasPendingAttachments
+						? { ok: true as const, context: [] }
+						: undefined
 					: toGatewayProviderContextSegments(providerContextMessages);
 				if (projected !== undefined && !projected.ok) {
 					session.state.clear();
@@ -1349,7 +1355,10 @@ function runThreadLoopEffect(
 							: { failureEventId: terminalAppend.failureEventId }),
 					};
 				}
-				if (projected === undefined || projected.context.length === 0) {
+				if (
+					projected === undefined ||
+					(projected.context.length === 0 && !hasPendingAttachments)
+				) {
 					return yield* nonAbandonablePromise(() =>
 						completeRun(session, options, custody),
 					);

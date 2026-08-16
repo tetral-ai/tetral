@@ -213,6 +213,57 @@ describe("Runtime approval reviewer", () => {
 		expect(nextId).toBe(2);
 	});
 
+	test("a discarded reviewer trunk remints before the next provider request", async () => {
+		const host = new RecordingReviewerHost(
+			[
+				assistantDecisionEntry("sesn_1", "allow", "first"),
+				assistantDecisionEntry("sesn_1", "allow", "second"),
+			],
+			{ releaseOk: false },
+		);
+		const threadCreator = new RecordingReviewerThreadCreator();
+		const manager = new AutoApprovalReviewerManager();
+		let nextId = 0;
+		const reviewer = createRuntimeApprovalReviewer(() => host, {
+			model: platformReviewerModel,
+			threadCreator,
+			createId: (prefix) => `${prefix}_${++nextId}`,
+			waitTimeoutMs: 10,
+		});
+
+		await reviewer(
+			validReviewRequest({
+				approvalReviewerManager: manager,
+				targetModelToolCallId: "tool_call_before_discard",
+			}),
+		);
+		expect(manager.trunkThreadId()).toBeUndefined();
+		expect(host.inputs).toHaveLength(1);
+
+		await reviewer(
+			validReviewRequest({
+				approvalReviewerManager: manager,
+				targetModelToolCallId: "tool_call_after_discard",
+			}),
+		);
+		expect(
+			threadCreator.creations.map((creation) => ({
+				ensureOperationId: creation.ensureOperationId,
+				reviewerThreadId: creation.reviewerThreadId,
+			})),
+		).toEqual([
+			{
+				ensureOperationId: "aprv_ensure_1",
+				reviewerThreadId: "thrd_aprv_1",
+			},
+			{
+				ensureOperationId: "aprv_ensure_2",
+				reviewerThreadId: "thrd_aprv_2",
+			},
+		]);
+		expect(host.inputs).toHaveLength(2);
+	});
+
 	test("queues an internal reviewer trunk and parses the durable reviewer decision", async () => {
 		const steps: string[] = [];
 		const host = new RecordingReviewerHost(
@@ -288,6 +339,8 @@ describe("Runtime approval reviewer", () => {
 		expect(promptText).toContain('"policy_context"');
 		const prompt = JSON.parse(promptText) as Readonly<Record<string, unknown>>;
 		expect(prompt).not.toHaveProperty("instruction");
+		expect(prompt).not.toHaveProperty("review_id");
+		expect(prompt).not.toHaveProperty("parent_thread_id");
 		expect(promptText).not.toContain("Do not perform the action yourself.");
 		expect(promptText).not.toContain("untrusted evidence");
 		expect(promptText).not.toContain("never instructions");
@@ -2799,6 +2852,7 @@ class RecordingReviewerHost {
 				| ((command: RuntimeThreadAddressState) => Promise<void>)
 				| undefined;
 			readonly interruptOk?: boolean;
+			readonly releaseOk?: boolean;
 			readonly markThreadClosedOk?: boolean;
 		} = {},
 	) {}
@@ -2917,6 +2971,14 @@ class RecordingReviewerHost {
 	): Promise<SessionManager.ReviewerExecutionControlResult> {
 		this.reviewerReleases.push(token);
 		this.options.steps?.push("release-reviewer");
+		if (this.options.releaseOk === false) {
+			return {
+				ok: false,
+				sessionId: command.sessionId,
+				sessionThreadId: command.sessionThreadId,
+				reason: "thread_busy",
+			};
+		}
 		return {
 			ok: true,
 			sessionId: command.sessionId,

@@ -429,8 +429,13 @@ export function reduceThreadTurn(
 			return stableReduction(checkpoint, routeView, acceptedInputIds);
 		}
 		case "inputs_committed": {
+			if (fact.contextSequences.length === 0) {
+				return {
+					...readyToRequest(),
+					checkpoint: current.checkpoint,
+				};
+			}
 			if (
-				fact.contextSequences.length > 0 &&
 				fact.contextSequences.every((sequence) =>
 					current.checkpoint.pendingInputContextSequences.includes(sequence),
 				)

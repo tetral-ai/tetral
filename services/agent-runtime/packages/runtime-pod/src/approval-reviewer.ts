@@ -780,7 +780,6 @@ function approvalReviewInput(
 		promptText: [
 			approvalReviewPromptText(
 				request,
-				reviewId,
 				reviewerModel,
 				assets,
 				parentTranscriptFeed,
@@ -800,7 +799,6 @@ function approvalReviewInput(
 
 function approvalReviewPromptText(
 	request: RuntimeApprovalReviewRequest,
-	reviewId: string,
 	reviewerModel: RuntimeModelRef,
 	assets: ApprovalReviewerAssets,
 	parentTranscriptFeed: readonly RuntimeContextEntry[],
@@ -809,8 +807,6 @@ function approvalReviewPromptText(
 	const text = JSON.stringify(
 		{
 			output_schema: JSON.parse(assets.outputSchemaJson) as RuntimeJsonValue,
-			review_id: reviewId,
-			parent_thread_id: request.sessionThreadId,
 			target_model_tool_call_id: request.targetModelToolCallId,
 			target_tool_name: request.targetToolName,
 			action_json: request.actionJson,

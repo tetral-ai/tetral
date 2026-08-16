@@ -422,7 +422,7 @@ function parseAcceptedMessageContent(
 	const content = parsed as { readonly messages?: unknown };
 	if (!Array.isArray(content.messages))
 		throw new Error("accepted input payload has no content");
-	return content.messages.map((message) => {
+	return content.messages.flatMap((message): RuntimeContextDraft[] => {
 		if (
 			typeof message !== "object" ||
 			message === null ||
@@ -446,7 +446,9 @@ function parseAcceptedMessageContent(
 					: [];
 			},
 		);
-		return { contextKind: "user" as const, parts };
+		return parts.length === 0
+			? []
+			: [{ contextKind: "user" as const, parts }];
 	});
 }
 

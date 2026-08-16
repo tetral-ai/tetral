@@ -5,18 +5,23 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	enginefiles "github.com/tetral-ai/tetral/internal/files"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
@@ -33,7 +38,13 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 
 	client := dbconnect.NewClientForTesting(runtime)
-	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	attachmentStore := blob.NewFakeBlobStore()
+	seedBridgeAPIFileAttachment(t, admin, attachmentStore, "file_first_queued_image", "image.png", "image/png", "image")
+	seedBridgeAPIFileAttachment(t, admin, attachmentStore, "file_first_queued_document", "notes.txt", "text/plain", "document")
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(
+		client,
+		sessionevent.WithFileAttachmentValidator(enginefiles.NewPostgreSQLStore(client, attachmentStore)),
+	))
 	appended, err := eventService.AppendClientEvents(
 		context.Background(),
 		workspace.DefaultID,
@@ -41,10 +52,10 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 		"idem_first_queued_delivery",
 		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
 			Type: sessionevent.EventTypeUserMessage,
-			Content: []sessionevent.ContentBlock{{
-				Type: sessionevent.ContentBlockTypeText,
-				Text: "start the first turn",
-			}},
+			Content: []sessionevent.ContentBlock{
+				{Type: sessionevent.ContentBlockTypeImage, Source: &sessionevent.ContentSource{Type: sessionevent.ContentSourceTypeFile, FileID: "file_first_queued_image"}},
+				{Type: sessionevent.ContentBlockTypeDocument, Source: &sessionevent.ContentSource{Type: sessionevent.ContentSourceTypeFile, FileID: "file_first_queued_document"}},
+			},
 		}}},
 	)
 	if err != nil || len(appended.Data) != 1 {
@@ -123,6 +134,70 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	}
 	if finalInboxStatus != "accepted" || finalQueueStatus != queue.StatusAcknowledged {
 		t.Fatalf("delivered custody = Inbox %q / Queue %q; want accepted / acknowledged", finalInboxStatus, finalQueueStatus)
+	}
+
+	apiStore := NewPostgreSQLBridgeAPIStore(client)
+	apiStore.AttachmentBlobStore = attachmentStore
+	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		RuntimeInputId: runtimeInputID,
+	})
+	if err != nil {
+		t.Fatalf("commit delivered attachment input: %v", err)
+	}
+	application := committed.GetCommitted().GetContext()
+	if len(application.GetAssignedContextSequences()) != 0 || len(application.GetPendingAttachmentJson()) != 2 {
+		t.Fatalf("attachment receipt = %#v; want zero text sequences and two attachments", application)
+	}
+	assertAttachmentOnlyRuntimeInputFixture(t, accepted, committed)
+}
+
+func assertAttachmentOnlyRuntimeInputFixture(t *testing.T, accepted *agentruntimev1.AcceptInputRequest, committed *bridgev1.CommitInputsResponse) {
+	t.Helper()
+	pendingAttachmentJSON := append([]string(nil), committed.GetCommitted().GetContext().GetPendingAttachmentJson()...)
+	for index, raw := range pendingAttachmentJSON {
+		var attachment map[string]any
+		if err := json.Unmarshal([]byte(raw), &attachment); err != nil {
+			t.Fatalf("decode produced attachment %d: %v", index, err)
+		}
+		origin := attachment["origin"].(map[string]any)
+		fileBacked := origin["fileBacked"].(map[string]any)
+		fileBacked["sourceEventId"] = "sevt_attachment_input"
+		normalized, err := json.Marshal(attachment)
+		if err != nil {
+			t.Fatalf("normalize produced attachment %d: %v", index, err)
+		}
+		pendingAttachmentJSON[index] = string(normalized)
+	}
+	actualJSON, err := json.Marshal(map[string]any{
+		"acceptInput": map[string]any{
+			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
+			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
+			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(),
+			"runtimeInputId": "rin_attachment_input", "inputOrder": accepted.GetInputOrder(),
+			"messagesJson": accepted.GetMessagesJson(),
+		},
+		"commitInputs": map[string]any{"committed": map[string]any{"context": map[string]any{
+			"assignedContextSequences": committed.GetCommitted().GetContext().GetAssignedContextSequences(),
+			"pendingAttachmentJson":    pendingAttachmentJSON,
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("marshal produced attachment fixture: %v", err)
+	}
+	fixtureJSON, err := os.ReadFile(filepath.Join(repoRootFromBridgeTest(t), "testdata", "attachment-only-runtime-input.json"))
+	if err != nil {
+		t.Fatalf("read attachment Runtime input fixture: %v", err)
+	}
+	var actual, expected any
+	if err := json.Unmarshal(actualJSON, &actual); err != nil {
+		t.Fatalf("decode produced attachment fixture: %v", err)
+	}
+	if err := json.Unmarshal(fixtureJSON, &expected); err != nil {
+		t.Fatalf("decode checked-in attachment fixture: %v", err)
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("attachment Runtime input fixture = %s; want %s", actualJSON, fixtureJSON)
 	}
 }
 

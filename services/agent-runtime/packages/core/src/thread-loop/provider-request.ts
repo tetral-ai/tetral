@@ -731,7 +731,8 @@ export function assembleProviderCallRequest(
 	const systemInstructions = input.runtime.systemInstructions.trim();
 	if (
 		(!compactionRequest && systemInstructions.length === 0) ||
-		input.providerContext.length === 0 ||
+		(input.providerContext.length === 0 &&
+			(input.runtime.attachments?.length ?? 0) === 0) ||
 		input.identity.runtimeBindingToken.length === 0 ||
 		input.identity.bindingGeneration <= 0
 	) {

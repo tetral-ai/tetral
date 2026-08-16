@@ -323,7 +323,12 @@ describe("ThreadLoop", () => {
 
 	test("first accepted turn rides the file attachments returned by CommitInputs", async () => {
 		const session = new ThreadRuntime("sesn_first_turn_media");
-		const input = acceptedInput("rin_first_turn_media", session.sessionId);
+		const input = {
+			...acceptedInput("rin_first_turn_media", session.sessionId),
+			contentJson: JSON.stringify({
+				messages: [{ parts: [] }],
+			}),
+		};
 		session.state.enqueueAcceptedInput(input);
 		const attachment = {
 			transient: undefined,
@@ -359,6 +364,7 @@ describe("ThreadLoop", () => {
 		);
 		expect(result).toMatchObject({ type: "completed" });
 		expect(requests).toHaveLength(1);
+		expect(requests[0]?.context).toEqual([]);
 		expect(requests[0]?.attachments).toEqual(
 			providerAttachmentsForTest([attachment]),
 		);

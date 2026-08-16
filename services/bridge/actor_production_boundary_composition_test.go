@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -156,33 +155,31 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	interruptInputErr := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id,event_ids_json,sequence_from,sequence_to FROM session_runtime_inbox
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND input_kind='interrupt_control'
 		ORDER BY created_at DESC LIMIT 1`, sessionID, childID).Scan(&interruptInputID, &interruptEventIDsJSON, &interruptSequenceFrom, &interruptSequenceTo)
-	if interruptInputErr != nil && !errors.Is(interruptInputErr, sql.ErrNoRows) {
+	if interruptInputErr != nil {
 		t.Fatalf("read admitted child interrupt input: %v", interruptInputErr)
 	}
-	if interruptInputErr == nil {
-		var interruptEventIDs []string
-		if err := json.Unmarshal([]byte(interruptEventIDsJSON), &interruptEventIDs); err != nil {
-			t.Fatalf("decode admitted child interrupt event IDs: %v", err)
-		}
-		deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
-			BindingID: bindingID, BindingGeneration: 1, Namespace: "engine", PodName: "runtime-actor-production",
-			PodUID: podUID, PodIP: "127.0.0.1",
-		}}
-		plan, prepareErr := deliveryStore.PrepareRuntimeCommand(context.Background(), RuntimeJob{
-			Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childID,
-			RuntimeInputID: interruptInputID, InputKind: "interrupt_control", EventIDs: interruptEventIDs,
-			SequenceFrom: interruptSequenceFrom, SequenceTo: interruptSequenceTo,
-		})
-		if prepareErr != nil || plan.Interrupt == nil {
-			t.Fatalf("prepare admitted child interrupt through production delivery store = %#v/%v", plan, prepareErr)
-		}
-		committedInterrupt, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope: childScope, RuntimeInputId: interruptInputID,
-		})
-		if err != nil || committedInterrupt.GetCommitted().GetInterrupt() == nil {
-			t.Fatalf("commit child interrupt through generated gRPC = %#v/%v", committedInterrupt, err)
-		}
+	var interruptEventIDs []string
+	if err := json.Unmarshal([]byte(interruptEventIDsJSON), &interruptEventIDs); err != nil {
+		t.Fatalf("decode admitted child interrupt event IDs: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
+		BindingID: bindingID, BindingGeneration: 1, Namespace: "engine", PodName: "runtime-actor-production",
+		PodUID: podUID, PodIP: "127.0.0.1",
+	}}
+	plan, prepareErr := deliveryStore.PrepareRuntimeCommand(context.Background(), RuntimeJob{
+		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childID,
+		RuntimeInputID: interruptInputID, InputKind: "interrupt_control", EventIDs: interruptEventIDs,
+		SequenceFrom: interruptSequenceFrom, SequenceTo: interruptSequenceTo,
+	})
+	if prepareErr != nil || plan.Interrupt == nil {
+		t.Fatalf("prepare admitted child interrupt through production delivery store = %#v/%v", plan, prepareErr)
+	}
+	committedInterrupt, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: childScope, RuntimeInputId: interruptInputID,
+	})
+	if err != nil || committedInterrupt.GetCommitted().GetInterrupt() == nil {
+		t.Fatalf("commit child interrupt through generated gRPC = %#v/%v", committedInterrupt, err)
 	}
 	awaited, err := client.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: parentScope, ControlOperationId: controlID})
 	if err != nil || len(awaited.GetCompleted().GetTargets()) != 1 {

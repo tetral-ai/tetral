@@ -178,6 +178,30 @@ describe("Thread-turn reducer", () => {
 		});
 	});
 
+	test("an attachment-only input advances without inventing a context sequence", () => {
+		const selected = initializeThreadTurnReduction(
+			{ executionRunId: "run_attachment", pendingInputContextSequences: [] },
+			noRoutes,
+			["rin_attachment"],
+		);
+
+		const applied = reduceThreadTurn(
+			selected,
+			{
+				fact: "inputs_committed",
+				eventId: "event_attachment_committed",
+				contextSequences: [],
+			},
+			noRoutes,
+		);
+
+		expect(applied).toMatchObject({
+			checkpoint: { pendingInputContextSequences: [] },
+			state: { state: "ready_to_request" },
+			action: { action: "prepare_next_request" },
+		});
+	});
+
 	test("a replayed committed-input result preserves one pending durable context sequence", () => {
 		const cold = initializeThreadTurnReduction(
 			{

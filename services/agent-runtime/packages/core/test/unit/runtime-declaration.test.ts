@@ -98,6 +98,20 @@ describe("Runtime context declaration applicators", () => {
 		);
 	});
 
+	test("attachment-only accepted input declares no text context", () => {
+		const input = messageInput(JSON.stringify({
+			messages: [{
+				parts: [
+					{ type: "image", source: { type: "file", file_id: "file_image" } },
+					{ type: "document", source: { type: "file", file_id: "file_document" } },
+				],
+			}],
+		}));
+		const drafts = acceptedInputContextDrafts(input);
+		expect(drafts).toEqual([]);
+		expect(applyAcceptedInputResult(drafts, [])).toEqual([]);
+	});
+
 	test("Assistant append remains an open draft until Request End seals it", () => {
 		const append = assistantAppendFromDraftParts([
 			{ type: "text", text: "working", truncated: false },

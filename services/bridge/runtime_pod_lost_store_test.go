@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -113,11 +114,10 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		"Write",
 	)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json = jsonb_insert(data_json::jsonb, '{parts,0}',
-			'{"type":"text","text":"partial output must not survive Pod loss"}'::jsonb)::text
+		SET data_json = '{"parts":[{"type":"text","text":"committed text survives Pod loss"},{"type":"reasoning","text":"committed reasoning survives Pod loss","providerMetadata":{"anthropic":{"signature":"sig_pod_loss"}}},{"type":"tool_call","modelToolCallId":"tool-call-settled-before-pod-loss","toolName":"Read","canonicalInput":{"file_path":"src/b.ts"}},{"type":"tool_result","modelToolCallId":"tool-call-settled-before-pod-loss","result":{"type":"completed","output":{"text":"already durable"}}},{"type":"tool_call","modelToolCallId":"tool-call-pod-loss","toolName":"Write","canonicalInput":{"file_path":"src/a.ts"}}]}'
 		WHERE workspace_id='default' AND session_id='sesn_bridge_pod_loss'
 		  AND session_thread_id='thr_bridge_pod_loss' AND model_request_id='mrq_pod_loss'`); err != nil {
-		t.Fatalf("seed partial Pod-loss Assistant output: %v", err)
+		t.Fatalf("seed committed Pod-loss Assistant output: %v", err)
 	}
 	attachmentStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	attachmentStore.AttachmentBlobStore = blob.NewFakeBlobStore()
@@ -386,8 +386,10 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if err != nil {
 		t.Fatalf("LoadContext after Pod-loss repair: %v", err)
 	}
-	if strings.Contains(loaded.GetContextJson(), "partial output must not survive Pod loss") {
-		t.Fatalf("Pod-loss cold context exposed failed partial output: %s", loaded.GetContextJson())
+	for _, preserved := range []string{"committed text survives Pod loss", "committed reasoning survives Pod loss", "sig_pod_loss"} {
+		if !strings.Contains(loaded.GetContextJson(), preserved) {
+			t.Fatalf("Pod-loss cold context omitted %q: %s", preserved, loaded.GetContextJson())
+		}
 	}
 	var coldPayload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &coldPayload); err != nil {
@@ -395,13 +397,32 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	}
 	foundRepair := false
 	for _, entry := range coldPayload.ContextEntries {
-		if entry.ContextKind != "assistant" || len(entry.Parts) != 2 {
+		if entry.ContextKind != "assistant" || len(entry.Parts) != 6 {
 			continue
 		}
-		if strings.Contains(string(entry.Parts[0]), `"modelToolCallId":"tool-call-pod-loss"`) &&
-			strings.Contains(string(entry.Parts[1]), `"modelToolCallId":"tool-call-pod-loss"`) {
-			foundRepair = true
+		gotParts := make([]any, 0, len(entry.Parts))
+		for _, raw := range entry.Parts {
+			var part any
+			if err := json.Unmarshal(raw, &part); err != nil {
+				t.Fatalf("decode repaired Assistant part: %v", err)
+			}
+			gotParts = append(gotParts, part)
 		}
+		var wantParts []any
+		if err := json.Unmarshal([]byte(`[
+			{"type":"text","text":"committed text survives Pod loss"},
+			{"type":"reasoning","text":"committed reasoning survives Pod loss","providerMetadata":{"anthropic":{"signature":"sig_pod_loss"}}},
+			{"type":"tool_call","modelToolCallId":"tool-call-settled-before-pod-loss","toolName":"Read","canonicalInput":{"file_path":"src/b.ts"}},
+			{"type":"tool_result","modelToolCallId":"tool-call-settled-before-pod-loss","result":{"type":"completed","output":{"text":"already durable"}}},
+			{"type":"tool_call","modelToolCallId":"tool-call-pod-loss","toolName":"Write","canonicalInput":{"file_path":"src/a.ts"}},
+			{"type":"tool_result","modelToolCallId":"tool-call-pod-loss","result":{"type":"error","error":{"type":"runtime_pod_lost","message":"Tool result unavailable because the runtime pod was lost.","retryable":false}}}
+		]`), &wantParts); err != nil {
+			t.Fatalf("decode expected Pod-loss parts: %v", err)
+		}
+		if !reflect.DeepEqual(gotParts, wantParts) {
+			t.Fatalf("Pod-loss repaired parts = %#v; want exact retained prefix plus one terminal result %#v", gotParts, wantParts)
+		}
+		foundRepair = true
 	}
 	if !foundRepair {
 		t.Fatalf("Pod-loss cold context omitted repaired Tool pair: %#v", coldPayload.ContextEntries)
@@ -581,12 +602,19 @@ func assertPodLossDurableToolErrorContext(t *testing.T, raw, modelToolCallID str
 		t.Fatalf("decode repaired Tool context: %v", err)
 	}
 	parts, ok := stored["parts"].([]any)
-	if !ok || len(parts) != 2 {
-		t.Fatalf("repaired Tool context parts = %#v; want call and result", stored["parts"])
+	if !ok {
+		t.Fatalf("repaired Tool context parts = %#v; want an array", stored["parts"])
 	}
-	resultPart, ok := parts[1].(map[string]any)
-	if !ok || len(resultPart) != 3 || resultPart["type"] != "tool_result" || resultPart["modelToolCallId"] != modelToolCallID {
-		t.Fatalf("repaired Tool result = %#v; want exact narrow result identity", parts[1])
+	var resultPart map[string]any
+	for _, candidate := range parts {
+		part, candidateOK := candidate.(map[string]any)
+		if candidateOK && part["type"] == "tool_result" && part["modelToolCallId"] == modelToolCallID {
+			resultPart = part
+			break
+		}
+	}
+	if resultPart == nil || len(resultPart) != 3 || resultPart["type"] != "tool_result" || resultPart["modelToolCallId"] != modelToolCallID {
+		t.Fatalf("repaired Tool result = %#v; want exact narrow result identity", resultPart)
 	}
 	outcome, ok := resultPart["result"].(map[string]any)
 	if !ok || len(outcome) != 2 || outcome["type"] != "error" {

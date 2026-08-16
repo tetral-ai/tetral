@@ -112,9 +112,10 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	return repaired, handedOff, nil
 }
 
-// retainRuntimePodLostToolPairsTx rebuilds provider-visible repair context
-// from immutable Tool Use and separate Tool Result events. Conversation JSON
-// is an output projection here; it is never consulted as settlement authority.
+// retainRuntimePodLostToolPairsTx preserves the committed Assistant projection
+// and appends only Tool facts missing from it. Immutable Tool events authorize
+// additions; existing conversation parts are never settlement authority and
+// are never discarded during repair.
 func retainRuntimePodLostToolPairsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -122,6 +123,39 @@ func retainRuntimePodLostToolPairsTx(
 	sessionID string,
 	start runtimeOpenRequestStart,
 ) error {
+	var existingDataJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT data_json FROM session_messages
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		    AND model_request_id=$4 AND kind='assistant'
+		  FOR UPDATE`,
+		workspaceID, sessionID, start.SessionThreadID, start.ModelRequestID,
+	).Scan(&existingDataJSON); dbconnect.IsNoRows(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	existingParts, err := decodeStoredRuntimeContextParts(existingDataJSON)
+	if err != nil {
+		return err
+	}
+	retained := make([]map[string]any, 0, len(existingParts))
+	seenCalls := make(map[string]struct{})
+	seenResults := make(map[string]struct{})
+	for _, raw := range existingParts {
+		var part map[string]any
+		if err := json.Unmarshal(raw, &part); err != nil {
+			return status.Error(codes.FailedPrecondition, "durable context part is malformed")
+		}
+		retained = append(retained, part)
+		modelToolCallID, _ := part["modelToolCallId"].(string)
+		switch part["type"] {
+		case "tool_call":
+			seenCalls[modelToolCallID] = struct{}{}
+		case "tool_result":
+			seenResults[modelToolCallID] = struct{}{}
+		}
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT type, payload_json, projection_json
 		   FROM session_events
@@ -135,7 +169,6 @@ func retainRuntimePodLostToolPairsTx(
 		return err
 	}
 	defer func() { _ = rows.Close() }()
-	retained := make([]map[string]any, 0)
 	for rows.Next() {
 		var eventType, payloadJSON, projectionJSON string
 		if err := rows.Scan(&eventType, &payloadJSON, &projectionJSON); err != nil {
@@ -147,7 +180,11 @@ func retainRuntimePodLostToolPairsTx(
 			if err != nil {
 				return err
 			}
-			retained = append(retained, call)
+			modelToolCallID, _ := call["modelToolCallId"].(string)
+			if _, exists := seenCalls[modelToolCallID]; !exists {
+				retained = append(retained, call)
+				seenCalls[modelToolCallID] = struct{}{}
+			}
 		case "agent.tool_result", "agent.mcp_tool_result":
 			var payload struct {
 				RepairKind string `json:"repair_kind"`
@@ -160,13 +197,21 @@ func retainRuntimePodLostToolPairsTx(
 				if err != nil {
 					return err
 				}
-				retained = append(retained, call)
+				modelToolCallID, _ := call["modelToolCallId"].(string)
+				if _, exists := seenCalls[modelToolCallID]; !exists {
+					retained = append(retained, call)
+					seenCalls[modelToolCallID] = struct{}{}
+				}
 			}
 			result, err := runtimeToolResultPartFromProjection(projectionJSON)
 			if err != nil {
 				return err
 			}
-			retained = append(retained, result)
+			modelToolCallID, _ := result["modelToolCallId"].(string)
+			if _, exists := seenResults[modelToolCallID]; !exists {
+				retained = append(retained, result)
+				seenResults[modelToolCallID] = struct{}{}
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {

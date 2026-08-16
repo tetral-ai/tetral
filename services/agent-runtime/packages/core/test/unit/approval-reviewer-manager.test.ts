@@ -17,6 +17,18 @@ describe("AutoApprovalReviewerManager", () => {
 		expect(nextId).toBe(2);
 	});
 
+	test("discarding a trunk also discards its ensure identity", () => {
+		let nextId = 0;
+		const createId = (prefix: string): string => `${prefix}_${++nextId}`;
+		const manager = new AutoApprovalReviewerManager();
+		expect(manager.trunkEnsureOperationId(createId)).toBe("aprv_ensure_1");
+		expect(manager.installTrunkThreadId("thrd_reviewer_1")).toBe(true);
+		manager.discardTrunk("thrd_reviewer_1");
+		expect(manager.trunkThreadId()).toBeUndefined();
+		expect(manager.trunkEnsureOperationId(createId)).toBe("aprv_ensure_2");
+		expect(manager.installTrunkThreadId("thrd_reviewer_2")).toBe(true);
+	});
+
 	test("prefers the trunk and routes overlapping reviews to sidecars", () => {
 		const manager = new AutoApprovalReviewerManager();
 

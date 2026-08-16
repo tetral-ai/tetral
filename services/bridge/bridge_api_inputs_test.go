@@ -196,16 +196,18 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsReturnsFirstTurnFileAttachmentDelta
 		threadID       = "thr_bridge_commit_media"
 		runtimeInputID = "rin_bridge_commit_media"
 		eventID        = "evt_bridge_commit_media"
-		fileID         = "file_bridge_commit_media"
+		imageFileID    = "file_bridge_commit_media_image"
+		documentFileID = "file_bridge_commit_media_document"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_commit_media", 1, "pod_uid_commit_media")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
-		`{"content":[{"type":"text","text":"inspect"},{"type":"image","source":{"type":"file","file_id":"file_bridge_commit_media"}}]}`)
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_commit_media_image"}},{"type":"document","source":{"type":"file","file_id":"file_bridge_commit_media_document"}}]}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages",
 		`["evt_bridge_commit_media"]`, "accepted", "bind_bridge_commit_media", "pod_uid_commit_media", 1, 1)
 	attachmentStore := blob.NewFakeBlobStore()
-	seedBridgeAPIFileAttachment(t, admin, attachmentStore, fileID, "image.png", "image/png", "image")
+	seedBridgeAPIFileAttachment(t, admin, attachmentStore, imageFileID, "image.png", "image/png", "image")
+	seedBridgeAPIFileAttachment(t, admin, attachmentStore, documentFileID, "report.pdf", "application/pdf", "document")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
@@ -215,20 +217,37 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsReturnsFirstTurnFileAttachmentDelta
 	if err != nil {
 		t.Fatalf("CommitInputs media: %v", err)
 	}
-	delta := response.GetCommitted().GetContext().GetPendingAttachmentJson()
-	if len(delta) != 1 {
-		t.Fatalf("attachment delta = %#v; want one first-turn file reference", delta)
+	contextApplication := response.GetCommitted().GetContext()
+	if len(contextApplication.GetAssignedContextSequences()) != 0 {
+		t.Fatalf("attachment-only assigned context = %v; want none", contextApplication.GetAssignedContextSequences())
 	}
-	var attachment bridgeLoadContextPendingAttachment
-	if err := json.Unmarshal([]byte(delta[0]), &attachment); err != nil {
-		t.Fatalf("decode attachment delta: %v", err)
+	delta := contextApplication.GetPendingAttachmentJson()
+	if len(delta) != 2 {
+		t.Fatalf("attachment delta = %#v; want image and document references", delta)
 	}
-	if attachment.Origin.FileBacked == nil ||
-		attachment.Origin.FileBacked.SourceEventID != eventID ||
-		attachment.Origin.FileBacked.FileID != fileID ||
-		attachment.Mime != "image/png" ||
-		attachment.Filename != "image.png" {
-		t.Fatalf("attachment delta = %#v; want committed media reference and metadata", attachment)
+	attachments := make(map[string]bridgeLoadContextPendingAttachment)
+	for _, raw := range delta {
+		var attachment bridgeLoadContextPendingAttachment
+		if err := json.Unmarshal([]byte(raw), &attachment); err != nil {
+			t.Fatalf("decode attachment delta: %v", err)
+		}
+		if attachment.Origin.FileBacked == nil || attachment.Origin.FileBacked.SourceEventID != eventID {
+			t.Fatalf("attachment delta = %#v; want source event identity", attachment)
+		}
+		attachments[attachment.Origin.FileBacked.FileID] = attachment
+	}
+	if attachments[imageFileID].Mime != "image/png" || attachments[imageFileID].Filename != "image.png" ||
+		attachments[documentFileID].Mime != "application/pdf" || attachments[documentFileID].Filename != "report.pdf" {
+		t.Fatalf("attachment delta = %#v; want committed image and document metadata", attachments)
+	}
+	var userMessages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND source_event_id=$3`,
+		sessionID, threadID, eventID).Scan(&userMessages); err != nil {
+		t.Fatalf("count attachment-only context messages: %v", err)
+	}
+	if userMessages != 0 {
+		t.Fatalf("attachment-only context messages = %d; want none", userMessages)
 	}
 }
 

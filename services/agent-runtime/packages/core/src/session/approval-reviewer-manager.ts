@@ -199,6 +199,7 @@ export class AutoApprovalReviewerManager {
 		if (this.#trunkThreadId !== reviewerThreadId) {
 			return;
 		}
+		this.#trunkEnsureOperationId = undefined;
 		this.#trunkThreadId = undefined;
 		this.#feedCursor = undefined;
 	}
