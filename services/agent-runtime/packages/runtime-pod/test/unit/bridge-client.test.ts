@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { CallOptions } from "@grpc/grpc-js";
-import { Metadata } from "@grpc/grpc-js";
+import { Metadata, status } from "@grpc/grpc-js";
 import type {
 	RuntimeInternalToolRepairCommit,
 	SessionEventEnvelope,
@@ -423,6 +423,27 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				{ toolUseEventId: "tool_1", result: { type: "cancelled" } },
 			],
 		});
+	});
+
+	test("retries an outcome-unknown interrupt with the same durable identity", async () => {
+		const bridge = new TypedBridge();
+		const committer = new BridgeAPIControlInputCommitter(options(bridge));
+		bridge.commitInputsFailures.push(
+			Object.assign(new Error("response lost"), { code: status.UNKNOWN }),
+		);
+		bridge.commitInputsResponse = {
+			committed: { interrupt: { interruptToolResults: [] } },
+		};
+		await expect(
+			committer.commitControlInput({
+				scope: controlScope("rin_interrupt_lost_response"),
+				inputKind: "interrupt_control",
+			}),
+		).resolves.toMatchObject({ ok: true, type: "committed" });
+		expect(bridge.commitInputsRequests).toHaveLength(2);
+		expect(bridge.commitInputsRequests[0]).toEqual(
+			bridge.commitInputsRequests[1],
+		);
 	});
 
 	test("rejects zero, multiple, and method-mismatched CommitInputs result arms", async () => {
@@ -889,6 +910,7 @@ class TypedBridge {
 	readonly loadContextRequests: LoadContextRequest[] = [];
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
+	readonly commitInputsFailures: Array<Error & { readonly code?: number }> = [];
 	readonly taskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
 	readonly writeEventRequests: WriteEventRequest[] = [];
 	readonly toolSettlementRequests: SettleToolResultRequest[] = [];
@@ -960,6 +982,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.commitInputsRequests.push(request);
+				const failure = this.commitInputsFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, this.commitInputsResponse);
 				return grpcCall();
 			},

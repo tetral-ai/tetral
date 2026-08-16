@@ -172,13 +172,32 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 }
 
 // An interrupt is scoped to the run that was current when its ordered input was
-// admitted. Once a later run-open fact exists, replaying its durable receipt can
-// only target a successor and must terminate before Runtime mutates resident state.
+// admitted. A later run-open fact supersedes an uncommitted interrupt; a committed
+// receipt also becomes a no-op once its durable turn has closed. Both cases must
+// terminate before Runtime mutates resident state.
 func interruptInputSupersededByRunTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.CommitInputsRequest,
 ) (bool, error) {
+	if _, replay, err := readBridgeDeclarationOperationTx(
+		ctx,
+		tx,
+		request.GetScope(),
+		bridgeOpCommitInputs,
+		"interrupt_control",
+		request.GetRuntimeInputId(),
+	); err != nil {
+		return false, err
+	} else if replay {
+		openTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		if err != nil {
+			return false, err
+		}
+		if openTurnID == nil {
+			return true, nil
+		}
+	}
 	var superseded bool
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (

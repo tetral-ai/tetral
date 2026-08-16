@@ -442,12 +442,13 @@ export class Service extends Context.Service<Service, Interface>()(
 //   | doneDeferred         | joiners await this; completed when the run settles            |
 //   | scope                | run scope, closed on finish or direct lifecycle cancellation |
 //   | stopping             | an interrupt is unwinding this run                            |
+//   | durableTurnReady     | Bridge has committed and Runtime has applied run_opened       |
 //
 // wake/interrupt transitions:
 //   | trigger        | run_slot empty            | active (stopping=false)          | active (stopping=true)        |
 //   | -------------- | ------------------------- | -------------------------------- | ----------------------------- |
 //   | wake/new input | start run_slot(wake)      | install reducer-visible fact     | install reducer-visible fact  |
-//   | interrupt      | fiber no-op (nothing runs)| stopping=true, signal closeout   | already stopping              |
+//   | interrupt      | preflight, then idle no-op| preflight, stopping=true, unwind | already stopping              |
 //
 // On owner exit SessionManager clears the old slot, reduces the latest
 // ThreadProcessor projection, and starts at most one successor for an active action.
@@ -458,7 +459,8 @@ export class Service extends Context.Service<Service, Interface>()(
 // UPDATE-WITH: services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts
 interface ThreadRunSlot {
 	readonly runId: number;
-	readonly inputOrder: number | undefined;
+	readonly durableTurnReady: Promise<boolean>;
+	readonly markDurableTurnReady: (opened: boolean) => void;
 	ownerFiber: Fiber.Fiber<ThreadLoop.ThreadLoopRunResult, unknown> | undefined;
 	readonly doneDeferred: Deferred.Deferred<
 		ThreadLoop.ThreadLoopRunResult,
@@ -1000,14 +1002,14 @@ export function layer(
 						}
 						const runScope = yield* Scope.make();
 						const runId = allocateRunId();
-						const acceptedInput =
-							threadEntry.runtimeThread.state.peekAcceptedInput();
+						let markDurableTurnReady = (_opened: boolean): void => {};
+						const durableTurnReady = new Promise<boolean>((resolve) => {
+							markDurableTurnReady = resolve;
+						});
 						const runSlot: ThreadRunSlot = {
 							runId,
-							inputOrder:
-								acceptedInput !== undefined && "inputOrder" in acceptedInput
-									? acceptedInput.inputOrder
-									: undefined,
+							durableTurnReady,
+							markDurableTurnReady,
 							ownerFiber: undefined,
 							doneDeferred: yield* Deferred.make<
 								ThreadLoop.ThreadLoopRunResult,
@@ -1030,12 +1032,14 @@ export function layer(
 						const custody: ThreadLoop.ThreadLoopRunCustody = {
 							activeTurnId: (session) =>
 								session.state.threadTurnReduction().checkpoint.executionRunId,
+							durableTurnOpened: () => runSlot.markDurableTurnReady(true),
 						};
 						const run = threadLoop.run(threadEntry.runtimeThread, custody).pipe(
 							Scope.provide(runScope),
-							Effect.onExit((exit) =>
-								finishThreadRun(sessionEntry, threadEntry, runSlot, exit),
-							),
+							Effect.onExit((exit) => {
+								runSlot.markDurableTurnReady(false);
+								return finishThreadRun(sessionEntry, threadEntry, runSlot, exit);
+							}),
 						);
 						const fiber = yield* Effect.forkIn(run, runScope);
 						runSlot.ownerFiber = fiber;
@@ -1073,6 +1077,7 @@ export function layer(
 				const custody: ThreadLoop.ThreadLoopRunCustody = {
 					activeTurnId: (session) =>
 						session.state.threadTurnReduction().checkpoint.executionRunId,
+					durableTurnOpened: () => {},
 				};
 				const attempt = threadLoop.closeFailedRun(
 					threadEntry.runtimeThread,
@@ -1479,9 +1484,29 @@ export function layer(
 			): Effect.Effect<InterruptControlResult> =>
 				Effect.gen(function* () {
 					const threadEntry = threadResult.threadEntry;
+					const declaration = { inputKind: "interrupt" as const };
+					const committed = yield* Effect.promise(() => commitInput(declaration));
+					if (!committed.ok) {
+						return {
+							ok: false,
+							sessionId,
+							reason: "context_load_failed",
+						} as const;
+					}
+					if ("stale" in committed || "joined" in committed) {
+						return {
+							ok: true,
+							sessionId,
+							created: false,
+							interrupted: false,
+							idleInterrupt: true,
+							duplicate: true,
+							...("stale" in committed ? { stale: true as const } : {}),
+						} as const;
+					}
 					const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
 						command,
-						commitInput,
+						async () => committed,
 					);
 					if (admitted === "conflict") {
 						return { ok: false, sessionId, reason: "control_busy" } as const;
@@ -1492,21 +1517,12 @@ export function layer(
 							command.origin === "user",
 						);
 					}
-					const declaration = { inputKind: "interrupt" as const };
 					const application = yield* Effect.promise(() =>
 						threadEntry.runtimeThread.state.commitUserInterruptInput(
 							declaration,
 						),
 					);
-					const committed = application.result;
-					if (!committed.ok) {
-						return {
-							ok: false,
-							sessionId,
-							reason: "context_load_failed",
-						} as const;
-					}
-					if ("type" in committed) {
+					if ("type" in application.result) {
 						try {
 							const pendingTools = [
 								...threadEntry.runtimeThread.state.pendingApprovalToolJobs(),
@@ -1518,16 +1534,16 @@ export function layer(
 									assistantMessageSequence: pending.assistantMessageSequence,
 									modelToolCallId: pending.toolPart.modelToolCallId,
 								})),
-								committed.interruptToolResults,
+								application.result.interruptToolResults,
 							);
 							threadEntry.runtimeThread.state.addPendingAttachments(
-								committed.pendingAttachments,
+								application.result.pendingAttachments,
 							);
 							threadEntry.runtimeThread.state.applyThreadTurnFact({
 								fact: "interrupt_committed",
 								eventId: command.runtimeInputId,
 							});
-							for (const cancellation of committed.interruptToolResults) {
+							for (const cancellation of application.result.interruptToolResults) {
 								if (
 									threadEntry.runtimeThread.state
 										.pendingApprovalToolJobs()
@@ -1545,7 +1561,7 @@ export function layer(
 									cancellation.toolUseEventId,
 								);
 							}
-							for (const toolUseEventId of committed.interruptToolResults.map(
+							for (const toolUseEventId of application.result.interruptToolResults.map(
 								(result) => result.toolUseEventId,
 							)) {
 								threadEntry.runtimeThread.state.removePendingSandboxExecutionJob(
@@ -1572,16 +1588,6 @@ export function layer(
 					// interrupt result has been applied, so a later accepted input can
 					// become the sole follow-up run without racing the control commit.
 					threadEntry.runtimeThread.state.finishThreadRunProjection();
-					if ("stale" in committed) {
-						return {
-							ok: true,
-							sessionId,
-							created: false,
-							interrupted: false,
-							idleInterrupt: true,
-							stale: true,
-						} as const;
-					}
 					return {
 						ok: true,
 						sessionId,
@@ -1646,6 +1652,26 @@ export function layer(
 					threadEntry.runtimeThread.updateIdentity(controlIdentity(command));
 					const runSlot = threadEntry.runSlot;
 					if (runSlot?.ownerFiber !== undefined) {
+						const durableTurnOpened = yield* Effect.promise(
+							() => runSlot.durableTurnReady,
+						);
+						if (!durableTurnOpened) {
+							yield* awaitRunSlot(runSlot);
+							if (
+								sessions
+									.get(commandSessionKey(command))
+									?.threads.get(command.sessionThreadId) !== threadEntry
+							) {
+								return { ok: false, sessionId, reason: "control_busy" };
+							}
+							return yield* interruptControl(sessionId, command, commitInput);
+						}
+						if (
+							threadEntry.runSlot !== runSlot ||
+							runSlot.ownerFiber === undefined
+						) {
+							return yield* interruptControl(sessionId, command, commitInput);
+						}
 						let interruptCommitResult:
 							| Awaited<ReturnType<RuntimeControlInputCommit>>
 							| undefined;
@@ -1656,21 +1682,19 @@ export function layer(
 								if (runSlot.stopping) {
 									return { type: "conflict" as const };
 								}
-								if (
-									runSlot.inputOrder !== undefined &&
-									command.inputOrder < runSlot.inputOrder
-								) {
-									const committed = yield* Effect.promise(() =>
-										commitInput({ inputKind: "interrupt" }),
-									);
-									if (!committed.ok) {
-										return { type: "failed" as const, committed };
-									}
-									if ("stale" in committed || "joined" in committed) {
-										return { type: "stale" as const };
-									}
-									interruptCommitResult = committed;
+								const committed = yield* Effect.promise(() =>
+									commitInput({ inputKind: "interrupt" }),
+								);
+								if (!committed.ok) {
+									return { type: "failed" as const, committed };
 								}
+								if ("stale" in committed || "joined" in committed) {
+									return {
+										type: "stale" as const,
+										stale: "stale" in committed,
+									};
+								}
+								interruptCommitResult = committed;
 								threadEntry.bridgeScope = command;
 								const result =
 									threadEntry.runtimeThread.state.beginUserInterrupt(
@@ -1710,7 +1734,8 @@ export function layer(
 								created: false,
 								interrupted: false,
 								idleInterrupt: false,
-								stale: true,
+								duplicate: true,
+								...(admission.stale ? { stale: true as const } : {}),
 							};
 						}
 						if (admission.type === "conflict") {

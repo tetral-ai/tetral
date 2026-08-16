@@ -318,6 +318,8 @@ function makeControlledThreadLoop(
 					() =>
 						new Promise<ThreadLoop.ThreadLoopRunResult>((resolve) => {
 							const session = args[0];
+							const custody = args[1] as ThreadLoop.ThreadLoopRunCustody;
+							custody.durableTurnOpened(session, `turn_${runs.length + 1}`);
 							runs.push({
 								sessionId: session.sessionId,
 								session,
@@ -389,8 +391,9 @@ function makeInterruptRecordingThreadLoop(): InterruptRecordingThreadLoop {
 	const layer = Layer.succeed(
 		ThreadLoop.Service,
 		threadLoopService({
-			run: (session) =>
+			run: (session, custody) =>
 				Effect.sync(() => {
+					custody.durableTurnOpened(session, `turn_${runs.length + 1}`);
 					runs.push({ sessionId: session.sessionId, session });
 				}).pipe(
 					Effect.andThen(Effect.never),
@@ -432,8 +435,9 @@ function makeInterruptCleanupThreadLoop(): InterruptCleanupThreadLoop {
 	const layer = Layer.succeed(
 		ThreadLoop.Service,
 		threadLoopService({
-			run: (session) => {
+			run: (session, custody) => {
 				const runIndex = runs.length;
+				custody.durableTurnOpened(session, `turn_${runIndex + 1}`);
 				if (runIndex === 0) {
 					return Effect.sync(() => {
 						runs.push({
@@ -1750,10 +1754,227 @@ describe("SessionManager", () => {
 					created: false,
 					interrupted: false,
 					idleInterrupt: false,
+					duplicate: true,
 					stale: true,
 				});
 				expect(threadLoop.interruptions).toEqual([]);
 				expect(session.state.userInterruptRequested()).toBe(false);
+			},
+		);
+	});
+
+	test("interrupt preflight waits until the successor run-open fact is durable", async () => {
+		let resolveRunStarted = (): void => {};
+		const runStarted = new Promise<void>((resolve) => {
+			resolveRunStarted = resolve;
+		});
+		let openDurableTurn: (() => void) | undefined;
+		let session: ThreadRuntime.ThreadRuntime | undefined;
+		const threadLoop = {
+			layer: Layer.succeed(
+				ThreadLoop.Service,
+				threadLoopService({
+					run: (active, custody) =>
+						Effect.sync(() => {
+							session = active;
+							openDurableTurn = () =>
+								custody.durableTurnOpened(active, "evt_delayed_run_open");
+							resolveRunStarted();
+						}).pipe(Effect.andThen(Effect.never)),
+				}),
+			),
+		};
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				await Effect.runPromise(
+					manager.acceptInput(
+						acceptedInput("sesn_delayed_run_open", "rin_successor"),
+					),
+				);
+				await runStarted;
+				let commits = 0;
+				let admissions = 0;
+				const begin = session!.state.beginUserInterrupt.bind(session!.state);
+				session!.state.beginUserInterrupt = (...args) => {
+					admissions += 1;
+					return begin(...args);
+				};
+				const command = {
+					...threadControl("sesn_delayed_run_open"),
+					runtimeInputId: "rin_old_interrupt",
+					inputOrder: 9,
+				};
+				const result = Effect.runPromise(
+					manager.interruptControl("sesn_delayed_run_open", command, async () => {
+						commits += 1;
+						return { ok: true, stale: true } as const;
+					}),
+				);
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				expect(commits).toBe(0);
+				expect(admissions).toBe(0);
+				openDurableTurn?.();
+				await expect(result).resolves.toMatchObject({
+					ok: true,
+					duplicate: true,
+					stale: true,
+				});
+				expect(commits).toBe(1);
+				expect(admissions).toBe(0);
+			},
+		);
+	});
+
+	test("durable preflight protects input-order-less attachment and reviewer runs", async () => {
+		for (const runKind of ["attachment", "reviewer"] as const) {
+			const sessionId = `sesn_stale_${runKind}_run`;
+			const threadId = `thrd_stale_${runKind}_run`;
+			const threadLoop = makeInterruptRecordingThreadLoop();
+			await withSessionManager(
+				sessionManagerLayer(threadLoop),
+				async (manager) => {
+					if (runKind === "reviewer") {
+						expect(
+							await Effect.runPromise(
+								manager.acceptInput(
+									approvalReviewInput(
+										sessionId,
+										"rin_reviewer_successor",
+										threadId,
+										"thrd_reviewer_parent",
+									),
+								),
+							),
+						).toMatchObject({ ok: true, started: true });
+					} else {
+						expect(
+							await Effect.runPromise(
+								manager.preloadThread({
+								...threadControl(sessionId, "rin_preload", threadId),
+								runtimeBindingToken: "runtime-binding-token",
+								contextEntries: [],
+								pendingAttachments: [
+									{
+										transient: undefined,
+										fileBacked: {
+											sourceEventId: "sevt_attachment_successor",
+											fileId: "file_attachment_successor",
+										},
+										mime: "image/png",
+										filename: "attachment.png",
+									},
+								],
+								thread: {
+									role: "main",
+									visibility: "public",
+									agentType: "general",
+									status: "idle",
+								},
+							}),
+							),
+						).toMatchObject({ ok: true, applied: true });
+					}
+					await waitForInterruptRecordingRuns(threadLoop, 1);
+					const session = threadLoop.runs[0]!.session;
+					let hotAdmissions = 0;
+					const begin = session.state.beginUserInterrupt.bind(session.state);
+					session.state.beginUserInterrupt = (...args) => {
+						hotAdmissions += 1;
+						return begin(...args);
+					};
+					const interrupt = {
+						...threadControl(sessionId, "rin_old_interrupt", threadId),
+						inputOrder: 1,
+					};
+					expect(
+						await Effect.runPromise(
+							manager.interruptControl(sessionId, interrupt, async () => ({
+							ok: true,
+							stale: true,
+							})),
+						),
+					).toMatchObject({
+						ok: true,
+						interrupted: false,
+						duplicate: true,
+						stale: true,
+					});
+					expect(hotAdmissions).toBe(0);
+					expect(threadLoop.interruptions).toEqual([]);
+				},
+			);
+		}
+	});
+
+	test("a newer interrupt is not rejected by the successor fence", async () => {
+		const sessionId = "sesn_new_interrupt_successor_fence";
+		const threadId = "thrd_new_interrupt_successor_fence";
+		const threadLoop = makeInterruptRecordingThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				await Effect.runPromise(
+					manager.acceptInput(
+						acceptedInput(sessionId, "rin_new_interrupt_owner", threadId),
+					),
+				);
+				await waitForInterruptRecordingRuns(threadLoop, 1);
+				const interrupt = {
+					...threadControl(sessionId, "rin_new_interrupt", threadId),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							testControlCommit(interrupt),
+						),
+					),
+				).toMatchObject({ ok: true, interrupted: true });
+				expect(threadLoop.interruptions).toHaveLength(1);
+			},
+		);
+	});
+
+	test("concurrent idle interrupt replay preflights twice but mutates once", async () => {
+		const sessionId = "sesn_concurrent_idle_interrupt";
+		const threadId = "thrd_concurrent_idle_interrupt";
+		const threadLoop = makeInterruptRecordingThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				await Effect.runPromise(
+					manager.preloadThread({
+						...threadControl(sessionId, "rin_preload", threadId),
+						runtimeBindingToken: "runtime-binding-token",
+						contextEntries: [],
+					}),
+				);
+				const interrupt = {
+					...threadControl(sessionId, "rin_concurrent_idle", threadId),
+					inputOrder: 3,
+				};
+				let commits = 0;
+				const commit = async (declaration: RuntimeControlInputDeclaration) => {
+					commits += 1;
+					return commits === 1
+						? buildRuntimeControlCommitResult("interrupt", declaration)
+						: ({ ok: true, stale: true } as const);
+				};
+				const [first, replay] = await Promise.all([
+					Effect.runPromise(manager.interruptControl(sessionId, interrupt, commit)),
+					Effect.runPromise(manager.interruptControl(sessionId, interrupt, commit)),
+				]);
+				expect(first).toMatchObject({ ok: true, idleInterrupt: true });
+				expect(replay).toMatchObject({
+					ok: true,
+					idleInterrupt: true,
+					duplicate: true,
+					stale: true,
+				});
+				expect(commits).toBe(2);
 			},
 		);
 	});

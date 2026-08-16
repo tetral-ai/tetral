@@ -391,6 +391,8 @@ export interface Interface {
 /** Read access to the reducer-owned active durable turn identity. */
 export interface ThreadLoopRunCustody {
 	readonly activeTurnId: (session: ThreadRuntime) => string | undefined;
+	/** Signals that the active run identity is durable and reducer-visible. */
+	readonly durableTurnOpened: (session: ThreadRuntime, eventId: string) => void;
 }
 
 /** Provides the thread-loop Effect service consumed by SessionManager. */
@@ -6723,6 +6725,7 @@ async function appendRunningEvent(
 				eventId: existingDurableTurnId,
 			});
 		}
+		custody.durableTurnOpened(session, existingDurableTurnId);
 		return { ok: true, type: "duplicate", eventId: existingDurableTurnId };
 	}
 	const writeId = runtimeTurnOpenWriteId({
@@ -6757,6 +6760,7 @@ async function appendRunningEvent(
 			eventId: result.eventId,
 		});
 	}
+	custody.durableTurnOpened(session, result.eventId);
 	return result;
 }
 

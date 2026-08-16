@@ -649,6 +649,19 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 				plan = RuntimeCommandPlan{StaleAccepted: true}
 				return nil
 			}
+			if job.InputKind == "interrupt_control" {
+				superseded, err := interruptRuntimeInputSupersededByRunTx(ctx, tx, job)
+				if err != nil {
+					return err
+				}
+				if superseded {
+					if err := cancelSupersededRuntimeInboxTx(ctx, tx, job, now); err != nil {
+						return err
+					}
+					plan = RuntimeCommandPlan{StaleAccepted: true}
+					return nil
+				}
+			}
 			if job.InputKind == "messages" {
 				fence, err := messageInterruptFenceStatusTx(ctx, tx, job)
 				if err != nil {
@@ -2914,6 +2927,37 @@ func allRuntimeInputEventsProcessedTx(ctx context.Context, tx *dbconnect.Tx, job
 	return total == len(job.EventIDs) && processed == len(job.EventIDs), nil
 }
 
+// Interrupt delivery is fenced by the durable run identity, not by a hot Pod
+// observation. Once a later run has opened, the older control input can only
+// address a successor and is acknowledged without transport.
+func interruptRuntimeInputSupersededByRunTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
+	if job.InputKind != "interrupt_control" {
+		return false, nil
+	}
+	var superseded bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_runtime_inbox i
+			  JOIN session_events e
+			    ON e.workspace_id = i.workspace_id
+			   AND e.session_id = i.session_id
+			   AND e.session_thread_id = i.session_thread_id
+			 WHERE i.workspace_id = $1
+			   AND i.session_id = $2
+			   AND i.session_thread_id = $3
+			   AND i.runtime_input_id = $4
+			   AND e.type IN ('session.status_running', 'session.thread_status_running')
+			   AND e.sequence > i.sequence_to
+		)`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.SessionThreadID,
+		job.RuntimeInputID,
+	).Scan(&superseded)
+	return superseded, err
+}
+
 type messageInterruptFenceStatus string
 
 const (
@@ -3112,15 +3156,36 @@ func claimRuntimeInboxDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job Runt
 		return err
 	}
 	if !rowsAffected(result) {
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_runtime_inbox
-			WHERE workspace_id=$1 AND runtime_input_id=$2)`, job.WorkspaceID, job.RuntimeInputID).Scan(&exists); err != nil {
+		var statusValue string
+		var payloadMatches, bindingMatches bool
+		if err := tx.QueryRow(ctx, `SELECT status,
+			input_kind=$3
+			  AND rejection_reason_code IS NOT DISTINCT FROM $4
+			  AND event_ids_json=$5
+			  AND sequence_from IS NOT DISTINCT FROM $6
+			  AND sequence_to IS NOT DISTINCT FROM $7,
+			COALESCE(binding_id=$8 AND binding_generation=$9 AND target_pod_uid=$10, false)
+			FROM session_runtime_inbox
+			WHERE workspace_id=$1 AND runtime_input_id=$2`,
+			job.WorkspaceID,
+			job.RuntimeInputID,
+			job.InputKind,
+			sql.NullString{String: job.RejectionReasonCode, Valid: job.RejectionReasonCode != ""},
+			string(events),
+			sql.NullInt64{Int64: job.SequenceFrom, Valid: job.SequenceFrom > 0},
+			sql.NullInt64{Int64: job.SequenceTo, Valid: job.SequenceTo > 0},
+			binding.BindingID,
+			binding.BindingGeneration,
+			binding.PodUID,
+		).Scan(&statusValue, &payloadMatches, &bindingMatches); dbconnect.IsNoRows(err) {
+			return runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "runtime input has no producer custody", retryable: false}
+		} else if err != nil {
 			return err
 		}
-		if exists {
-			return runtimeDeliveryPrepareError{kind: "runtime_inbox_payload_conflict", message: "runtime input replay conflicts with producer custody", retryable: false}
+		if job.InputKind == "interrupt_control" && statusValue == "delivering" && payloadMatches && !bindingMatches {
+			return runtimeDeliveryPrepareError{kind: "runtime_inbox_binding_changed", message: "runtime input binding changed during delivery", retryable: true}
 		}
-		return runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "runtime input has no producer custody", retryable: false}
+		return runtimeDeliveryPrepareError{kind: "runtime_inbox_payload_conflict", message: "runtime input replay conflicts with producer custody", retryable: false}
 	}
 	return nil
 }

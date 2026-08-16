@@ -2069,7 +2069,7 @@ describe("ThreadLoop", () => {
 				storeOperationTimeoutMs: 1000,
 			},
 			session,
-			{ activeTurnId: () => durableTurnId },
+			{ activeTurnId: () => durableTurnId, durableTurnOpened: () => {} },
 			{ type: "requires_action", event_ids: [toolUseEventId] },
 		);
 		await finishIdleStarted.promise;
@@ -2170,7 +2170,7 @@ describe("ThreadLoop", () => {
 				storeOperationTimeoutMs: 1000,
 			},
 			session,
-			{ activeTurnId: () => durableTurnId },
+			{ activeTurnId: () => durableTurnId, durableTurnOpened: () => {} },
 			{
 				type: "requires_action",
 				event_ids: [settledToolUseEventId, pendingToolUseEventId],
@@ -2293,6 +2293,10 @@ describe("ThreadLoop", () => {
 					"sesn_1",
 					interruptCommand,
 					async (declaration) => {
+						// Bridge serializes both declarations under the Session lock. The
+						// preflight may start concurrently, but its durable result cannot
+						// overtake the accepted input already holding that lock.
+						await releasePreCommit.promise;
 						order.push("commit:interrupt");
 						return buildRuntimeControlCommitResult(
 							interruptCommand,
@@ -2303,17 +2307,19 @@ describe("ThreadLoop", () => {
 				),
 			);
 			await flushMicrotasks(50);
-			await Effect.runPromise(
+			const postFence = Effect.runPromise(
 				manager.acceptInput({
 					...acceptedInput("rin_post_fence"),
 					inputOrder: 10,
 				}),
 			);
+			await flushMicrotasks(50);
 			expect(order).toEqual([
 				"event:session.status_running",
 				"commit:pre:start",
 			]);
 			releasePreCommit.resolve();
+			await postFence;
 			await expect(interrupt).resolves.toMatchObject({
 				ok: true,
 				interrupted: true,
