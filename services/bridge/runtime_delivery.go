@@ -335,6 +335,22 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	if plan.StaleAccepted {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
 	}
+	// Interrupt preparation and transport are separated by Queue scheduling and
+	// network work. Re-read the durable Inbox immediately before transport so a
+	// Request End that joined this interrupt while the lease stayed live wins
+	// before the command can address a successor hot run.
+	if plan.Interrupt != nil {
+		plan, err = d.Store.PrepareRuntimeCommand(ctx, job)
+		if err != nil {
+			return runtimeDeliveryResultFromPrepareError(err), nil
+		}
+		if plan.SettledAccepted {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
+		}
+		if plan.StaleAccepted {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
+		}
+	}
 	if (job.Kind == queue.KindCleanupSession || job.Kind == queue.KindSessionDeleteCleanup) && plan.CleanupTargetGone {
 		finalizer, ok := d.Store.(RuntimeCleanupFinalizer)
 		if !ok {

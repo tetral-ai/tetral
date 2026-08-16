@@ -159,6 +159,35 @@ func TestRuntimePodDirectDelivererSendsPreparedRuntimeCommand(t *testing.T) {
 	}
 }
 
+func TestRuntimePodDirectDelivererRevalidatesAndSendsFirstInterruptOnce(t *testing.T) {
+	request := &agentruntimev1.InterruptRequest{
+		WorkspaceId: "ws_bridge", SessionId: "sesn_1", SessionThreadId: "thr_1",
+		RuntimeInputId: "rin_interrupt_1", InputOrder: 1,
+	}
+	store := &recordingRuntimeDeliveryStore{plan: RuntimeCommandPlan{
+		Target:    RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090},
+		Interrupt: request,
+	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	job := runtimeInputRuntimeJob()
+	job.RuntimeInputID = request.GetRuntimeInputId()
+	job.InputKind = "interrupt_control"
+
+	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+	if err != nil || result.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("DeliverRuntimeJob first interrupt = %#v/%v; want accepted", result, err)
+	}
+	if len(store.jobs) != 2 {
+		t.Fatalf("interrupt durable preparations = %d; want initial preparation and pre-send revalidation", len(store.jobs))
+	}
+	if len(sender.requests) != 1 || sender.requests[0] != request {
+		t.Fatalf("first interrupt Runtime requests = %#v; want one exact command", sender.requests)
+	}
+	if len(store.acceptedJobs) != 1 {
+		t.Fatalf("first interrupt accepted writes = %#v; want one", store.acceptedJobs)
+	}
+}
+
 func TestBackgroundTaskProcessTerminalStatusFactsRemainDistinct(t *testing.T) {
 	t.Parallel()
 
