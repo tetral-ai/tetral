@@ -7,8 +7,11 @@ package runtimeidentity
 import "os"
 
 const (
-	User = "daytona"
-	Home = "/home/daytona"
+	User  = "daytona"
+	Home  = "/home/daytona"
+	Shell = "/bin/bash"
+	UID   = 1000
+	GID   = 1000
 )
 
 // IsReservedEnvironmentKey reports whether a Tool command must receive the

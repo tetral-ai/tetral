@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -553,7 +554,7 @@ func TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration(t *testin
 	t.Fatal("detached identity command did not reach terminal state")
 }
 
-const productionIdentityCommand = `identity_output=$(printf 'uid=%s\ngid=%s\nHOME=%s\nUSER=%s\nLOGNAME=%s\nSUDO_USER=%s\nSUDO_UID=%s\nSUDO_GID=%s\nSUDO_COMMAND=%s\nORDINARY=%s\nTERM=%s\nNO_COLOR=%s\nPAGER=%s\nGIT_PAGER=%s\nurl=' "$(id -u)" "$(id -g)" "$HOME" "$USER" "$LOGNAME" "${SUDO_USER-unset}" "${SUDO_UID-unset}" "${SUDO_GID-unset}" "${SUDO_COMMAND-unset}" "$ORDINARY" "$TERM" "$NO_COLOR" "$PAGER" "$GIT_PAGER"; git ls-remote --get-url https://github.com/acme/repo.git); printf '%s\n' "$identity_output"`
+const productionIdentityCommand = `identity_output=$(printf 'uid=%s\ngid=%s\nHOME=%s\nUSER=%s\nLOGNAME=%s\nshell=%s\nSUDO_USER=%s\nSUDO_UID=%s\nSUDO_GID=%s\nSUDO_COMMAND=%s\nORDINARY=%s\nTERM=%s\nNO_COLOR=%s\nPAGER=%s\nGIT_PAGER=%s\nurl=' "$(id -u)" "$(id -g)" "$HOME" "$USER" "$LOGNAME" "$(getent passwd "$USER" | cut -d: -f7)" "${SUDO_USER-unset}" "${SUDO_UID-unset}" "${SUDO_GID-unset}" "${SUDO_COMMAND-unset}" "$ORDINARY" "$TERM" "$NO_COLOR" "$PAGER" "$GIT_PAGER"; git ls-remote --get-url https://github.com/acme/repo.git); printf '%s\n' "$identity_output"`
 
 func productionIdentityFixture(t *testing.T) string {
 	t.Helper()
@@ -567,19 +568,28 @@ func productionIdentityFixture(t *testing.T) string {
 	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 { //nolint:gosec // opt-in root test reads only its harness-provided Helper binary.
 		t.Fatalf("helper binary %q is not executable: %v", bin, err)
 	}
-	runtimeAccount, err := user.LookupId("1000")
+	runtimeAccount, err := user.LookupId(strconv.Itoa(runtimeidentity.UID))
 	if err != nil {
 		t.Fatalf("lookup runtime passwd entry: %v", err)
 	}
 	if runtimeAccount.Username != runtimeidentity.User || runtimeAccount.HomeDir != runtimeidentity.Home {
 		t.Fatalf("runtime passwd identity = %s/%s; want %s/%s", runtimeAccount.Username, runtimeAccount.HomeDir, runtimeidentity.User, runtimeidentity.Home)
 	}
-	for _, path := range []string{"/home/daytona", "/workspace", "/tmp/tetral-runtime"} {
+	passwdBody, err := os.ReadFile("/etc/passwd") //nolint:gosec // Isolated identity fixture reads its container account database.
+	if err != nil {
+		t.Fatalf("read runtime passwd database: %v", err)
+	}
+	wantPasswdSuffix := ":" + runtimeidentity.Home + ":" + runtimeidentity.Shell
+	if !strings.Contains(string(passwdBody), runtimeidentity.User+":x:"+strconv.Itoa(runtimeidentity.UID)+":"+strconv.Itoa(runtimeidentity.GID)+":") ||
+		!strings.Contains(string(passwdBody), wantPasswdSuffix) {
+		t.Fatalf("runtime passwd entry does not carry uid/gid/home/shell %d/%d/%s/%s", runtimeidentity.UID, runtimeidentity.GID, runtimeidentity.Home, runtimeidentity.Shell)
+	}
+	for _, path := range []string{runtimeidentity.Home, "/workspace", "/tmp/tetral-runtime"} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("isolated identity fixture path %s already exists: %v", path, err)
 		}
 	}
-	if err := os.MkdirAll("/home/daytona", 0o755); err != nil {
+	if err := os.MkdirAll(runtimeidentity.Home, 0o755); err != nil {
 		t.Fatalf("create runtime home: %v", err)
 	}
 	if err := os.MkdirAll("/workspace", 0o755); err != nil {
@@ -588,15 +598,15 @@ func productionIdentityFixture(t *testing.T) string {
 	if err := os.MkdirAll("/tmp/tetral-runtime", 0o700); err != nil {
 		t.Fatalf("create runtime root: %v", err)
 	}
-	for _, path := range []string{"/home/daytona", "/workspace", "/tmp/tetral-runtime"} {
-		if err := os.Chown(path, 1000, 1000); err != nil {
+	for _, path := range []string{runtimeidentity.Home, "/workspace", "/tmp/tetral-runtime"} {
+		if err := os.Chown(path, runtimeidentity.UID, runtimeidentity.GID); err != nil {
 			t.Fatalf("chown %s to runtime identity: %v", path, err)
 		}
 	}
 	t.Cleanup(func() {
 		_ = os.RemoveAll("/tmp/tetral-runtime")
 		_ = os.RemoveAll("/workspace")
-		_ = os.RemoveAll("/home/daytona")
+		_ = os.RemoveAll(runtimeidentity.Home)
 	})
 	return bin
 }
@@ -608,9 +618,9 @@ func installProductionIdentityGitConfig(t *testing.T) {
 		{"config", "--global", "http.https://git.tetral.test/.extraHeader", "X-Tetral-Git-Ticket: synthetic-test-ticket"},
 	} {
 		command := exec.Command("git", args...)
-		command.Dir = "/home/daytona"
-		command.Env = []string{"HOME=/home/daytona", "PATH=" + os.Getenv("PATH")}
-		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000}}
+		command.Dir = runtimeidentity.Home
+		command.Env = []string{"HOME=" + runtimeidentity.Home, "PATH=" + os.Getenv("PATH")}
+		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(runtimeidentity.UID), Gid: uint32(runtimeidentity.GID)}}
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("install runtime git config: %v\n%s", err, string(output))
 		}
@@ -715,7 +725,15 @@ func decodeProductionIdentityResult(t *testing.T, envelope protocol.Envelope) pr
 
 func assertProductionIdentityText(t *testing.T, exitCode *int, stdout string) {
 	t.Helper()
-	want := "uid=1000\ngid=1000\nHOME=/home/daytona\nUSER=daytona\nLOGNAME=daytona\nSUDO_USER=unset\nSUDO_UID=unset\nSUDO_GID=unset\nSUDO_COMMAND=unset\nORDINARY=tool-value\nTERM=dumb\nNO_COLOR=1\nPAGER=cat\nGIT_PAGER=cat\nurl=https://git.tetral.test/github.com/acme/repo.git\n"
+	want := fmt.Sprintf(
+		"uid=%d\ngid=%d\nHOME=%s\nUSER=%s\nLOGNAME=%s\nshell=%s\nSUDO_USER=unset\nSUDO_UID=unset\nSUDO_GID=unset\nSUDO_COMMAND=unset\nORDINARY=tool-value\nTERM=dumb\nNO_COLOR=1\nPAGER=cat\nGIT_PAGER=cat\nurl=https://git.tetral.test/github.com/acme/repo.git\n",
+		runtimeidentity.UID,
+		runtimeidentity.GID,
+		runtimeidentity.Home,
+		runtimeidentity.User,
+		runtimeidentity.User,
+		runtimeidentity.Shell,
+	)
 	if exitCode == nil || *exitCode != 0 || stdout != want {
 		t.Fatalf("identity result exit=%v stdout=%q; want exit 0 and %q", exitCode, stdout, want)
 	}
