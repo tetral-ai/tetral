@@ -33,6 +33,8 @@ import { GatewayProviderRules } from "../../../../../gateway/packages/lowering/s
 import { validateProviderRequest } from "../../../../../gateway/packages/protocol/src/bounds.js";
 import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
 
+const noActiveInput = { hasPendingAttachments: false } as const;
+
 const inputPath = process.argv[2];
 if (inputPath === undefined)
 	throw new Error("cold checkpoint composition input path is required");
@@ -161,7 +163,12 @@ if (input.hotScenario !== undefined) {
 	const hotCheckpoint =
 		hotSettlement !== undefined
 			? reduceThreadTurn(
-					initializeThreadTurnReduction(baseCheckpoint, baseRoutes),
+					initializeThreadTurnReduction(
+						baseCheckpoint,
+						baseRoutes,
+						[],
+						noActiveInput,
+					),
 					{
 						fact: "tool_result_committed",
 						toolUseEventId: hotSettlement.toolUseEventId,
@@ -171,6 +178,8 @@ if (input.hotScenario !== undefined) {
 								: hotSettlement.outcome.type,
 					},
 					baseRoutes,
+					[],
+					noActiveInput,
 				).checkpoint
 			: extractThreadTurnCheckpoint({
 					contextEntries: hotEntries,
@@ -203,7 +212,12 @@ if (input.hotScenario !== undefined) {
 	hot = {
 		checkpoint: hotCheckpoint,
 		toolRouteView: hotRoutes,
-		reducerAction: deriveThreadTurnDecision(hotCheckpoint, hotRoutes).action,
+		reducerAction: deriveThreadTurnDecision(
+			hotCheckpoint,
+			hotRoutes,
+			[],
+			noActiveInput,
+		).action,
 		...(toolPart === undefined ? {} : { toolPart }),
 		...(input.providerComposition === true
 			? {
@@ -220,7 +234,12 @@ process.stdout.write(
 	JSON.stringify({
 		checkpoint,
 		toolRouteView,
-		reducerAction: deriveThreadTurnDecision(checkpoint, toolRouteView).action,
+		reducerAction: deriveThreadTurnDecision(
+			checkpoint,
+			toolRouteView,
+			[],
+			noActiveInput,
+		).action,
 		derivedRepairKeys: (checkpoint.request?.toolMembers ?? []).flatMap(
 			(member) =>
 				member.memberKind === "internal_tool_repair"

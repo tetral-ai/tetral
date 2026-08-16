@@ -5,14 +5,65 @@ import type {
 } from "../../../src/thread-loop/thread-turn-checkpoint.js";
 import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
 import {
-	deriveThreadTurnDecision,
-	initializeThreadTurnReduction,
-	reconcileThreadTurnSeal,
-	reduceThreadTurn,
+	deriveThreadTurnDecision as deriveThreadTurnDecisionWithActiveInput,
+	initializeThreadTurnReduction as initializeThreadTurnReductionWithActiveInput,
+	reconcileThreadTurnSeal as reconcileThreadTurnSealWithActiveInput,
+	reduceThreadTurn as reduceThreadTurnWithActiveInput,
 	ThreadTurnContractError,
 } from "../../../src/thread-loop/thread-turn-reducer.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
+const noActiveInput = { hasPendingAttachments: false } as const;
+
+const deriveThreadTurnDecision = (
+	checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
+	routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	deriveThreadTurnDecisionWithActiveInput(
+		checkpoint,
+		routes,
+		acceptedInputIds,
+		noActiveInput,
+	);
+
+const initializeThreadTurnReduction = (
+	checkpoint: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[0],
+	routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	initializeThreadTurnReductionWithActiveInput(
+		checkpoint,
+		routes,
+		acceptedInputIds,
+		noActiveInput,
+	);
+
+const reduceThreadTurn = (
+	current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
+	fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
+	routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	reduceThreadTurnWithActiveInput(
+		current,
+		fact,
+		routes,
+		acceptedInputIds,
+		noActiveInput,
+	);
+
+const reconcileThreadTurnSeal = (
+	current: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[0],
+	routes: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[1],
+	acceptedInputIds: readonly string[] = [],
+) =>
+	reconcileThreadTurnSealWithActiveInput(
+		current,
+		routes,
+		acceptedInputIds,
+		noActiveInput,
+	);
 
 describe("Thread-turn reducer", () => {
 	test("derives idle and plural committed-input readiness", () => {
@@ -185,7 +236,7 @@ describe("Thread-turn reducer", () => {
 			["rin_attachment"],
 		);
 
-		const applied = reduceThreadTurn(
+		const applied = reduceThreadTurnWithActiveInput(
 			selected,
 			{
 				fact: "inputs_committed",
@@ -193,9 +244,54 @@ describe("Thread-turn reducer", () => {
 				contextSequences: [],
 			},
 			noRoutes,
+			[],
+			{ hasPendingAttachments: true },
 		);
 
 		expect(applied).toMatchObject({
+			checkpoint: { pendingInputContextSequences: [] },
+			state: { state: "ready_to_request" },
+			action: { action: "prepare_next_request" },
+		});
+	});
+
+	test("a sibling accepted input is committed before an attachment-only request advances", () => {
+		const selected = initializeThreadTurnReduction(
+			{ executionRunId: "run_siblings", pendingInputContextSequences: [] },
+			noRoutes,
+			["rin_attachment", "rin_text"],
+		);
+
+		const applied = reduceThreadTurnWithActiveInput(
+			selected,
+			{
+				fact: "inputs_committed",
+				eventId: "event_attachment_committed",
+				contextSequences: [],
+			},
+			noRoutes,
+			["rin_text"],
+			{ hasPendingAttachments: true },
+		);
+
+		expect(applied).toMatchObject({
+			checkpoint: { pendingInputContextSequences: [] },
+			action: {
+				action: "commit_accepted_input",
+				runtimeInputId: "rin_text",
+			},
+		});
+	});
+
+	test("a cold attachment-only run prepares a request from its active-input view", () => {
+		const recovered = initializeThreadTurnReductionWithActiveInput(
+			{ executionRunId: "run_recovered", pendingInputContextSequences: [] },
+			noRoutes,
+			[],
+			{ hasPendingAttachments: true },
+		);
+
+		expect(recovered).toMatchObject({
 			checkpoint: { pendingInputContextSequences: [] },
 			state: { state: "ready_to_request" },
 			action: { action: "prepare_next_request" },

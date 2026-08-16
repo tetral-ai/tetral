@@ -233,6 +233,7 @@ export async function buildRuntimeCoreHosts(
 									turnToolRouteView,
 									context.pendingToolUses ?? [],
 									context.pendingSandboxExecutions ?? [],
+									(context.pendingAttachments?.length ?? 0) > 0,
 								);
 							}
 						} catch (error) {
@@ -486,8 +487,11 @@ export function validateClosedThreadResumeCheckpoint(
 	routeView: ThreadToolRouteView,
 	pendingToolUses: readonly unknown[],
 	pendingSandboxExecutions: readonly unknown[],
+	hasPendingAttachments: boolean,
 ): void {
-	const decision = deriveThreadTurnDecision(checkpoint, routeView);
+	const decision = deriveThreadTurnDecision(checkpoint, routeView, [], {
+		hasPendingAttachments,
+	});
 	const incompleteToolUse =
 		checkpoint.request?.toolMembers.some(
 			(member) =>

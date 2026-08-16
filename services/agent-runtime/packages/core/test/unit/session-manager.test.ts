@@ -2869,19 +2869,16 @@ describe("SessionManager", () => {
 					applied: true,
 				});
 
-				expect(
-					await Effect.runPromise(
-						manager.startTestRunThroughAcceptedInput("sesn_cold_attachments"),
-					),
-				).toMatchObject({
-					ok: true,
-					sessionId: "sesn_cold_attachments",
-					created: false,
-					started: true,
-				});
 				await waitForRuns(threadLoop, 1);
 				expect(threadLoop.runs[0]?.session.state.pendingAttachments()).toEqual(
 					pendingAttachments,
+				);
+				expect(threadLoop.runs[0]?.session.state.threadTurnReduction()).toMatchObject(
+					{
+						checkpoint: { pendingInputContextSequences: [] },
+						state: { state: "ready_to_request" },
+						action: { action: "prepare_next_request" },
+					},
 				);
 				threadLoop.runs[0]?.release();
 			},

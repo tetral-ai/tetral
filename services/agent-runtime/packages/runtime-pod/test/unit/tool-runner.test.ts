@@ -3543,6 +3543,7 @@ describe("RuntimePodToolRunner", () => {
 						routeView,
 						testCase.context.pendingToolUses,
 						testCase.context.pendingSandboxExecutions,
+						false,
 					),
 				testCase.name,
 			).toThrow("closed Thread resume requires a quiescent durable checkpoint");
@@ -3593,6 +3594,7 @@ describe("RuntimePodToolRunner", () => {
 				{ routes: [] },
 				[],
 				[],
+				false,
 			),
 		).not.toThrow();
 		const argumentGuards = [
@@ -3632,6 +3634,7 @@ describe("RuntimePodToolRunner", () => {
 						guard.routeView,
 						guard.pendingToolUses,
 						guard.pendingSandboxExecutions,
+						false,
 					),
 				guard.name,
 			).toThrow("closed Thread resume requires a quiescent durable checkpoint");
@@ -3914,7 +3917,9 @@ function resumeCheckpointTrippedDisjuncts(
 	pendingToolUses: readonly unknown[],
 	pendingSandboxExecutions: readonly unknown[],
 ): readonly string[] {
-	const decision = deriveThreadTurnDecision(checkpoint, routeView);
+	const decision = deriveThreadTurnDecision(checkpoint, routeView, [], {
+		hasPendingAttachments: false,
+	});
 	const incompleteToolUse =
 		checkpoint.request?.toolMembers.some(
 			(member) =>

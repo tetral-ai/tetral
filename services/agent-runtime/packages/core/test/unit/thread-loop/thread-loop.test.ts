@@ -1803,6 +1803,67 @@ describe("ThreadState", () => {
 		);
 	});
 
+	test("derives attachment readiness from ThreadState without adding Message context", () => {
+		const attachment = {
+			transient: undefined,
+			fileBacked: {
+				sourceEventId: "sevt_attachment_state",
+				fileId: "file_attachment_state",
+			},
+			mime: "image/png",
+			filename: "attachment.png",
+		};
+		const hot = new ThreadState("sesn_attachment_hot");
+		hot.installThreadTurn(
+			{
+				executionRunId: "run_attachment_hot",
+				pendingInputContextSequences: [],
+			},
+			{ routes: [] },
+		);
+		hot.enqueueAcceptedInput(
+			acceptedInput("rin_attachment_hot", "sesn_attachment_hot"),
+		);
+		hot.enqueueAcceptedInput(
+			acceptedInput("rin_sibling_hot", "sesn_attachment_hot"),
+		);
+		hot.addPendingAttachments([attachment]);
+		hot.acknowledgeAcceptedInput("rin_attachment_hot");
+
+		expect(
+			hot.applyThreadTurnFact({
+				fact: "inputs_committed",
+				eventId: "sevt_attachment_committed",
+				contextSequences: [],
+			}).action,
+		).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: "rin_sibling_hot",
+		});
+		expect(hot.threadTurnReduction().checkpoint).toEqual({
+			executionRunId: "run_attachment_hot",
+			pendingInputContextSequences: [],
+		});
+
+		const cold = new ThreadState("sesn_attachment_cold");
+		cold.installThreadTurn(
+			{
+				executionRunId: "run_attachment_cold",
+				pendingInputContextSequences: [],
+			},
+			{ routes: [] },
+		);
+		cold.replacePendingAttachments([attachment]);
+		expect(cold.threadTurnReduction()).toMatchObject({
+			checkpoint: {
+				executionRunId: "run_attachment_cold",
+				pendingInputContextSequences: [],
+			},
+			state: { state: "ready_to_request" },
+			action: { action: "prepare_next_request" },
+		});
+	});
+
 	test("keeps a full active ride separate from attachments queued for the next request", () => {
 		const state = new ThreadState("sesn_attachment_rides");
 		const activeRide = Array.from(

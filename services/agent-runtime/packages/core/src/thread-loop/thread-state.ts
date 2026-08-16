@@ -69,6 +69,7 @@ import type {
 	ThreadTurnCheckpoint,
 } from "./thread-turn-checkpoint.js";
 import type {
+	ThreadActiveInputView,
 	ThreadTurnFact,
 	ThreadTurnReduction,
 } from "./thread-turn-reducer.js";
@@ -363,6 +364,7 @@ export interface RuntimeConfigPatchState extends RuntimeConfigurationPatch {
 export class ThreadProcessor {
 	#reduction: ThreadTurnReduction;
 	#toolRoutes: ThreadToolRouteView;
+	#activeInputView: ThreadActiveInputView;
 	#acceptedInputs: RuntimeAcceptedInputState[] = [];
 	#committingAcceptedInputId: string | undefined;
 	#acceptedInputBlockedUntilRunExit = false;
@@ -370,9 +372,16 @@ export class ThreadProcessor {
 	constructor(
 		checkpoint: ThreadTurnCheckpoint,
 		toolRoutes: ThreadToolRouteView,
+		activeInputView: ThreadActiveInputView,
 	) {
 		this.#toolRoutes = toolRoutes;
-		this.#reduction = initializeThreadTurnReduction(checkpoint, toolRoutes, []);
+		this.#activeInputView = activeInputView;
+		this.#reduction = initializeThreadTurnReduction(
+			checkpoint,
+			toolRoutes,
+			[],
+			activeInputView,
+		);
 	}
 
 	get checkpoint(): ThreadTurnCheckpoint {
@@ -391,6 +400,7 @@ export class ThreadProcessor {
 			fact,
 			this.#toolRoutes,
 			this.acceptedInputIds(),
+			this.#activeInputView,
 		);
 		const currentToolUseEventIds = new Set(
 			this.#reduction.checkpoint.request?.toolMembers.flatMap((member) =>
@@ -410,6 +420,7 @@ export class ThreadProcessor {
 			this.#reduction,
 			this.#toolRoutes,
 			this.acceptedInputIds(),
+			this.#activeInputView,
 		);
 		return this.#reduction;
 	}
@@ -419,6 +430,7 @@ export class ThreadProcessor {
 			this.#reduction,
 			this.#toolRoutes,
 			this.acceptedInputIds(),
+			this.#activeInputView,
 		);
 		return this.#reduction;
 	}
@@ -442,8 +454,14 @@ export class ThreadProcessor {
 			checkpoint,
 			this.#toolRoutes,
 			this.acceptedInputIds(),
+			this.#activeInputView,
 		);
 		return this.#reduction;
+	}
+
+	setActiveInputView(activeInputView: ThreadActiveInputView): void {
+		this.#activeInputView = activeInputView;
+		this.refreshDecision();
 	}
 
 	recordRoute(
@@ -573,6 +591,7 @@ export class ThreadProcessor {
 				this.#reduction.checkpoint,
 				this.#toolRoutes,
 				this.acceptedInputIds(),
+				this.#activeInputView,
 			),
 		};
 	}
@@ -638,6 +657,7 @@ export class ThreadState {
 		this.#threadProcessor = new ThreadProcessor(
 			checkpoint ?? { pendingInputContextSequences: [] },
 			routeView ?? { routes: [] },
+			this.activeInputView(),
 		);
 	}
 
@@ -846,6 +866,7 @@ export class ThreadState {
 	addPendingAttachments(
 		attachments: readonly RuntimeProviderAttachment[],
 	): void {
+		const hadPendingAttachments = this.hasPendingAttachments();
 		const available = Math.max(
 			0,
 			MaxProviderAttachments - this.#pendingAttachments.length,
@@ -853,6 +874,7 @@ export class ThreadState {
 		this.#pendingAttachments.push(
 			...attachments.slice(0, available).map(cloneRuntimeProviderAttachment),
 		);
+		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
 	pendingAttachments(): readonly RuntimeProviderAttachment[] {
@@ -876,15 +898,24 @@ export class ThreadState {
 	}
 
 	settlePendingAttachmentRide(): void {
+		const hadPendingAttachments = this.hasPendingAttachments();
 		this.#activeAttachmentRide = undefined;
+		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
 	replacePendingAttachments(
 		attachments: readonly RuntimeProviderAttachment[],
 	): void {
+		const hadPendingAttachments = this.hasPendingAttachments();
 		this.#activeAttachmentRide = undefined;
 		this.#pendingAttachments = [];
-		this.addPendingAttachments(attachments);
+		const available = Math.min(attachments.length, MaxProviderAttachments);
+		this.#pendingAttachments.push(
+			...attachments
+				.slice(0, available)
+				.map(cloneRuntimeProviderAttachment),
+		);
+		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
 	reconcilePendingAttachments(
@@ -912,7 +943,33 @@ export class ThreadState {
 			return false;
 		});
 		this.#pendingAttachments = [];
-		this.addPendingAttachments(nextRide);
+		this.#pendingAttachments.push(
+			...nextRide
+				.slice(0, MaxProviderAttachments)
+				.map(cloneRuntimeProviderAttachment),
+		);
+		this.refreshActiveInputView();
+	}
+
+	private hasPendingAttachments(): boolean {
+		return (
+			(this.#activeAttachmentRide?.length ?? 0) > 0 ||
+			this.#pendingAttachments.length > 0
+		);
+	}
+
+	private activeInputView(): ThreadActiveInputView {
+		return { hasPendingAttachments: this.hasPendingAttachments() };
+	}
+
+	private refreshActiveInputViewIfChanged(previous: boolean): void {
+		if (previous !== this.hasPendingAttachments()) {
+			this.refreshActiveInputView();
+		}
+	}
+
+	private refreshActiveInputView(): void {
+		this.#threadProcessor?.setActiveInputView(this.activeInputView());
 	}
 
 	recordLastRequestCompletion(
