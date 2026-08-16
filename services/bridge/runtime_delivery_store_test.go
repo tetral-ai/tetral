@@ -2207,6 +2207,73 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 	}
 }
 
+func TestPostgreSQLRuntimeDeliveryStoreAbsorbsCommittedInterruptReplayBeforeRuntime(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID        = "sesn_bridge_interrupt_replay_fence"
+		threadID         = "thr_bridge_interrupt_replay_fence"
+		interruptEventID = "sevt_bridge_interrupt_replay_fence"
+		messageEventID   = "sevt_bridge_interrupt_replay_successor"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 1, "user.interrupt", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEventID, 2, "user.message", `{"content":[{"type":"text","text":"new turn"}]}`)
+
+	interruptJob := RuntimeJob{
+		JobID: "qjob_bridge_interrupt_replay_fence", LeaseToken: "lease_bridge_interrupt_replay_fence", Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_bridge_interrupt_replay_fence", EventIDs: []string{interruptEventID},
+		SequenceFrom: 1, SequenceTo: 1, InputKind: "interrupt_control",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_fence","event_ids":["sevt_bridge_interrupt_replay_fence"],"sequence_from":1,"sequence_to":1,"input_kind":"interrupt_control"}`,
+	}
+	messageJob := RuntimeJob{
+		JobID: "qjob_bridge_interrupt_replay_successor", LeaseToken: "lease_bridge_interrupt_replay_successor", Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_bridge_interrupt_replay_successor", EventIDs: []string{messageEventID},
+		SequenceFrom: 2, SequenceTo: 2, InputKind: "messages",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_successor","event_ids":["sevt_bridge_interrupt_replay_successor"],"sequence_from":2,"sequence_to":2,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
+	seedRuntimeInboxBirthForJob(t, admin, messageJob)
+
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
+	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	interruptPlan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), interruptJob)
+	if err != nil || interruptPlan.Interrupt == nil {
+		t.Fatalf("prepare initial interrupt = %#v, %v; want Runtime interrupt", interruptPlan, err)
+	}
+	if committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: runtimeScopeFromAttempt(interruptJob, interruptPlan.AttemptedBinding), RuntimeInputId: interruptJob.RuntimeInputID,
+	}); err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("commit initial interrupt = %#v, %v; want durable interrupt receipt", committed, err)
+	}
+
+	messagePlan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), messageJob)
+	if err != nil || messagePlan.AcceptInput == nil {
+		t.Fatalf("prepare successor input = %#v, %v; want newer Runtime input", messagePlan, err)
+	}
+	if committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: runtimeScopeFromAttempt(messageJob, messagePlan.AttemptedBinding), RuntimeInputId: messageJob.RuntimeInputID,
+	}); err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("commit successor input = %#v, %v; want durable successor context", committed, err)
+	}
+
+	// Reconstruct the delivery owner to model a fresh process after Pod loss. The
+	// committed interrupt's processed source event must terminate the replay
+	// before any Runtime command can be assembled or sent to the successor run.
+	freshStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	replayed, err := (RuntimePodDirectDeliverer{Store: freshStore, Sender: sender}).DeliverRuntimeJob(context.Background(), interruptJob)
+	if err != nil || replayed.Status != RuntimeDeliveryDuplicate {
+		t.Fatalf("replay committed interrupt = %#v, %v; want duplicate at durable ingress", replayed, err)
+	}
+	if len(sender.requests) != 0 {
+		t.Fatalf("replay emitted Runtime commands = %#v; want none", sender.requests)
+	}
+}
+
 func TestPostgreSQLRuntimeDeliveryStoreAppliesProcessedInterruptFence(t *testing.T) {
 	t.Run("agent-origin processed interrupt supersedes old messages", func(t *testing.T) {
 		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)

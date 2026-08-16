@@ -1472,20 +1472,6 @@ export function layer(
 			): Effect.Effect<InterruptControlResult> =>
 				Effect.gen(function* () {
 					const threadEntry = threadResult.threadEntry;
-					if (
-						threadEntry.runtimeThread.state.userInterruptCloseoutCompleted(
-							command.runtimeInputId,
-						)
-					) {
-						return {
-							ok: true,
-							sessionId,
-							created: false,
-							interrupted: false,
-							idleInterrupt: true,
-							duplicate: true,
-						} as const;
-					}
 					const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
 						command,
 						commitInput,
@@ -1651,20 +1637,6 @@ export function layer(
 						return result;
 					}
 					threadEntry.runtimeThread.updateIdentity(controlIdentity(command));
-					if (
-						threadEntry.runtimeThread.state.userInterruptCloseoutCompleted(
-							command.runtimeInputId,
-						)
-					) {
-						return {
-							ok: true,
-							sessionId,
-							created: false,
-							interrupted: false,
-							idleInterrupt: true,
-							duplicate: true,
-						};
-					}
 					const runSlot = threadEntry.runSlot;
 					if (runSlot?.ownerFiber !== undefined) {
 						let interruptCommitResult:
@@ -1755,12 +1727,7 @@ export function layer(
 								stale: true,
 							};
 						}
-						if (
-							!interruptCloseoutCompleted &&
-							!threadEntry.runtimeThread.state.userInterruptCloseoutCompleted(
-								command.runtimeInputId,
-							)
-						) {
+						if (!interruptCloseoutCompleted) {
 							return { ok: false, sessionId, reason: "control_busy" };
 						}
 						return {

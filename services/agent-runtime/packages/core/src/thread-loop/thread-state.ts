@@ -618,7 +618,6 @@ export class ThreadState {
 				readonly result: RuntimeControlInputCommitResult;
 		  }
 		| undefined;
-	#lastCompletedUserInterruptId: string | undefined;
 
 	constructor(sessionId: string) {
 		this.contextManager = new ContextManager(sessionId);
@@ -1114,12 +1113,7 @@ export class ThreadState {
 			return;
 		}
 		this.#userInterrupt.completeCloseout();
-		this.#lastCompletedUserInterruptId = runtimeInputId;
 		this.#userInterrupt = undefined;
-	}
-
-	userInterruptCloseoutCompleted(runtimeInputId: string): boolean {
-		return this.#lastCompletedUserInterruptId === runtimeInputId;
 	}
 
 	clear(): void {
@@ -1165,7 +1159,6 @@ export class ThreadState {
 		this.#cooperativeCancelRequested = false;
 		this.#userInterrupt = undefined;
 		this.#lastUserInterruptCommit = undefined;
-		this.#lastCompletedUserInterruptId = undefined;
 	}
 }
 

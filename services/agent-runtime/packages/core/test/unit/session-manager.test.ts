@@ -1714,7 +1714,7 @@ describe("SessionManager", () => {
 		);
 	});
 
-	test("interruptControl cancels an active run and deduplicates a later idle interrupt", async () => {
+	test("interruptControl cancels active work and settles later idle tools", async () => {
 		const threadLoop = makeInterruptRecordingThreadLoop();
 		await withSessionManager(
 			sessionManagerLayer(threadLoop),
@@ -1950,174 +1950,10 @@ describe("SessionManager", () => {
 					state: { state: "idle" },
 					action: { action: "await_input" },
 				});
-				expect(
-					await Effect.runPromise(
-						manager.interruptControl(
-							"sesn_1",
-							idleInterrupt,
-							async (declaration) => {
-								idleInterruptCommits += 1;
-								return buildRuntimeControlCommitResult(
-									"interrupt",
-									declaration,
-								);
-							},
-						),
-					),
-				).toEqual({
-					ok: true,
-					sessionId: "sesn_1",
-					created: false,
-					interrupted: false,
-					idleInterrupt: true,
-					duplicate: true,
-				});
 				expect(idleInterruptCommits).toBe(1);
 				expect(session.state.contextManager.entries()).toHaveLength(2);
 				expect(threadLoop.runs).toHaveLength(1);
 				expect(threadLoop.interruptions).toHaveLength(1);
-			},
-		);
-	});
-
-	test("an old interrupt replay cannot interrupt a newer active run", async () => {
-		const threadLoop = makeInterruptRecordingThreadLoop();
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				const sessionId = "sesn_old_interrupt_replay";
-				expect(
-					await Effect.runPromise(
-						manager.acceptInput(acceptedInput(sessionId)),
-					),
-				).toMatchObject({ ok: true, started: true });
-				await waitForInterruptRecordingRuns(threadLoop, 1);
-				const oldInterrupt = {
-					...threadControl(sessionId),
-					runtimeInputId: "rin_old_interrupt_replay",
-					inputOrder: 9,
-				};
-				expect(
-					await Effect.runPromise(
-						manager.interruptControl(
-							sessionId,
-							oldInterrupt,
-							testControlCommit(oldInterrupt),
-						),
-					),
-				).toMatchObject({ ok: true, interrupted: true });
-
-				expect(
-					await Effect.runPromise(
-						manager.acceptInput(
-							acceptedInput("rin_new_run_after_interrupt", sessionId),
-						),
-					),
-				).toMatchObject({ ok: true, started: true });
-				await waitForInterruptRecordingRuns(threadLoop, 2);
-				const currentState = threadLoop.runs[1]!.session.state;
-				let interruptAdmissions = 0;
-				const beginUserInterrupt = currentState.beginUserInterrupt.bind(currentState);
-				currentState.beginUserInterrupt = (...args) => {
-					interruptAdmissions += 1;
-					return beginUserInterrupt(...args);
-				};
-				expect(
-					await Effect.runPromise(
-						manager.interruptControl(
-							sessionId,
-							oldInterrupt,
-							testControlCommit(oldInterrupt),
-						),
-					),
-				).toEqual({
-					ok: true,
-					sessionId,
-					created: false,
-					interrupted: false,
-					idleInterrupt: true,
-					duplicate: true,
-				});
-				expect(interruptAdmissions).toBe(0);
-				expect(threadLoop.interruptions).toHaveLength(1);
-				expect(threadLoop.runs).toHaveLength(2);
-			},
-		);
-	});
-
-	test("concurrent idle interrupt replay commits one frozen declaration", async () => {
-		const threadLoop = makeInterruptRecordingThreadLoop();
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				const sessionId = "sesn_concurrent_idle_interrupt";
-				const threadId = "thrd_concurrent_idle_interrupt";
-				const preload = threadControl(
-					sessionId,
-					"rin_preload_concurrent_idle_interrupt",
-					threadId,
-				);
-				expect(
-					await Effect.runPromise(
-						manager.preloadThread({
-							...preload,
-							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
-						}),
-					),
-				).toMatchObject({ ok: true, applied: true });
-
-				let releaseFirstCommit: (() => void) | undefined;
-				const firstCommitGate = new Promise<void>((resolve) => {
-					releaseFirstCommit = resolve;
-				});
-				let firstCommitStarted: (() => void) | undefined;
-				const firstCommitStart = new Promise<void>((resolve) => {
-					firstCommitStarted = resolve;
-				});
-				let commitCount = 0;
-				const interrupt = {
-					...threadControl(
-						sessionId,
-						"rin_concurrent_idle_interrupt",
-						threadId,
-					),
-					inputOrder: 11,
-				};
-				const commit = async (declaration: RuntimeControlInputDeclaration) => {
-					commitCount += 1;
-					firstCommitStarted?.();
-					await firstCommitGate;
-					return buildRuntimeControlCommitResult("interrupt", declaration);
-				};
-
-				const first = Effect.runPromise(
-					manager.interruptControl(sessionId, interrupt, commit),
-				);
-				await firstCommitStart;
-				const second = Effect.runPromise(
-					manager.interruptControl(sessionId, interrupt, commit),
-				);
-				releaseFirstCommit?.();
-
-				expect(await Promise.all([first, second])).toEqual([
-					{
-						ok: true,
-						sessionId,
-						created: false,
-						interrupted: false,
-						idleInterrupt: true,
-					},
-					{
-						ok: true,
-						sessionId,
-						created: false,
-						interrupted: false,
-						idleInterrupt: true,
-						duplicate: true,
-					},
-				]);
-				expect(commitCount).toBe(1);
 			},
 		);
 	});

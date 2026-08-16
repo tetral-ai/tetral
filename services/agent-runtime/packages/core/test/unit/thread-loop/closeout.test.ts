@@ -1995,9 +1995,7 @@ describe("ThreadLoop", () => {
 				Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause),
 			).toBe(true);
 			expect(commits).toBe(1);
-			expect(
-				session.state.userInterruptCloseoutCompleted(command.runtimeInputId),
-			).toBe(true);
+			expect(session.state.userInterruptRequested()).toBe(false);
 			expect(finishIdleWriteIds).toHaveLength(1);
 			expect(
 				appended.filter((event) => event.type === "session.error"),
