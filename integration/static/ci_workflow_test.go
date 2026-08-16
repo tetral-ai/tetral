@@ -475,10 +475,14 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 	for _, token := range []string{
 		"docker build --tag",
 		"Dockerfile.sandbox",
+		"TETRAL_HELPER_PROOF_BUILD_CONTEXT",
 		"docker image inspect",
 		"docker run --rm",
 		"--user 0:0",
 		"ghcr.io/tetral-ai/mirror/golang:1.25.12",
+		"sandbox-runtime-image:",
+		"TETRAL_TEST_RUNTIME_UID",
+		"TETRAL_TEST_RUNTIME_GID",
 		`test "$(id -u)" -eq 0`,
 		"go test ./internal/sandbox/helper",
 		"CGO_ENABLED=0 go test -c",
@@ -501,9 +505,6 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 			t.Fatalf("helper privilege script must not pull Go from shared third-party registry %q", thirdParty)
 		}
 	}
-	if got := strings.Count(script, "golang:1.25.12"); got != 1 {
-		t.Fatalf("helper privilege Go image reference count = %d; want only the GHCR mirror reference", got)
-	}
 	if regexp.MustCompile(`(?m)docker\s+login\b`).MatchString(script) {
 		t.Fatal("helper privilege script must use an anonymous pull for the public GHCR mirror")
 	}
@@ -525,11 +526,12 @@ func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
 
 	command = exec.Command("bash", script, "--verify-output")
 	command.Stdin = bytes.NewBufferString(strings.Join([]string{
+		"sandbox-runtime-image: user=daytona uid=1001 gid=1001 home=/home/daytona shell=/bin/bash env_home=/home/daytona",
 		"--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)",
 		"--- PASS: TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
 		"--- PASS: TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
 		"--- PASS: TestBuiltHelperFileToolUsesRuntimeIdentity (0.01s)",
-		"--- PASS: TestRuntimeAdapterReadUsesRuntimeProcessIdentityAndEnvironment (0.01s)",
+		"--- PASS: TestBuiltHelperReadUsesRuntimeProcessIdentityAndEnvironment (0.01s)",
 	}, "\n") + "\n")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("helper privilege output guard rejected a passing proof: %v\n%s", err, output)

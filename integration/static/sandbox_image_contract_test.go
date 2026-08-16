@@ -59,16 +59,43 @@ func TestSandboxImageRuntimeIdentityJoinRejectsAccountMutations(t *testing.T) {
 	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
 	finalAccount := "WORKDIR /workspace\nUSER daytona"
 	mutations := map[string]string{
-		"user":  strings.Replace(dockerfile, finalAccount, "RUN usermod --login runner daytona\nWORKDIR /workspace\nUSER runner", 1),
-		"home":  strings.Replace(dockerfile, finalAccount, "RUN usermod --home /srv/daytona daytona\n"+finalAccount, 1),
-		"shell": strings.Replace(dockerfile, finalAccount, "RUN usermod --shell /bin/sh daytona\n"+finalAccount, 1),
+		"user":       strings.Replace(dockerfile, finalAccount, "RUN usermod --login runner daytona\nWORKDIR /workspace\nUSER runner", 1),
+		"home":       strings.Replace(dockerfile, finalAccount, "RUN usermod --home /srv/daytona daytona\n"+finalAccount, 1),
+		"shell":      strings.Replace(dockerfile, finalAccount, "RUN usermod --shell /bin/sh daytona\n"+finalAccount, 1),
+		"final_user": strings.Replace(dockerfile, "USER daytona\nCMD", "USER root\nCMD", 1),
 	}
 	for name, mutated := range mutations {
 		t.Run(name, func(t *testing.T) {
+			if mutated == dockerfile {
+				t.Fatalf("%s mutation did not alter Dockerfile.sandbox", name)
+			}
 			if err := assertSandboxRuntimeIdentity(mutated); err == nil {
 				t.Fatalf("%s mutation preserved the Sandbox runtime identity join", name)
 			}
 		})
+	}
+}
+
+func TestSandboxImageRuntimeIdentityIgnoresMatchingBuilderAccount(t *testing.T) {
+	engineRoot := finalArchitectureEngineRoot(t)
+	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
+	mutated := strings.Replace(
+		dockerfile,
+		"RUN useradd --create-home --shell /bin/bash daytona",
+		"RUN useradd --create-home --shell /bin/sh runner",
+		1,
+	)
+	mutated = strings.Replace(
+		mutated,
+		"WORKDIR /src",
+		"RUN useradd --create-home --shell /bin/bash daytona\nWORKDIR /src",
+		1,
+	)
+	if mutated == dockerfile {
+		t.Fatal("builder-stage mutation did not alter Dockerfile.sandbox")
+	}
+	if err := assertSandboxRuntimeIdentity(mutated); err == nil {
+		t.Fatal("matching builder-stage account satisfied the final-stage identity contract")
 	}
 }
 
@@ -93,14 +120,17 @@ func assertSandboxRuntimeIdentity(dockerfile string) error {
 	return nil
 }
 
-// effectiveSandboxRuntimeAccount follows the final USER instruction through
-// account creation, replacement, and later usermod changes in recipe order. It
-// accepts account commands anywhere in a logical RUN instruction, matching the
-// effective image recipe instead of pinning one source line.
+// effectiveSandboxRuntimeAccount evaluates only the last Dockerfile stage. The
+// release publishes that stage, so builder-stage accounts cannot authorize the
+// runtime identity selected by its final USER instruction.
 func effectiveSandboxRuntimeAccount(dockerfile string) (sandboxImageAccount, error) {
 	accounts := map[string]sandboxImageAccount{}
 	finalUser := ""
-	for _, instruction := range dockerfileLogicalInstructions(dockerfile) {
+	instructions, err := finalDockerfileStageInstructions(dockerfile)
+	if err != nil {
+		return sandboxImageAccount{}, err
+	}
+	for _, instruction := range instructions {
 		fields := strings.Fields(instruction)
 		if len(fields) < 2 {
 			continue
@@ -165,19 +195,19 @@ func parseUseraddAccount(fields []string, start int) (sandboxImageAccount, int, 
 			index++
 			continue
 		}
-		if token == "&&" || token == "||" || token == "|" {
+		if token == "&&" {
 			break
 		}
 		switch token {
-		case "--create-home", "-m":
+		case "--create-home":
 			createHome = true
-		case "--shell", "-s":
+		case "--shell":
 			index++
 			if index >= len(fields) {
 				return sandboxImageAccount{}, index, errors.New("Sandbox useradd shell option has no value")
 			}
 			account.shell = strings.Trim(fields[index], " ;")
-		case "--home-dir", "-d":
+		case "--home-dir":
 			index++
 			if index >= len(fields) {
 				return sandboxImageAccount{}, index, errors.New("Sandbox useradd home option has no value")
@@ -216,23 +246,23 @@ func parseUsermodAccount(fields []string, start int) (sandboxAccountMutation, in
 			index++
 			continue
 		}
-		if token == "&&" || token == "||" || token == "|" {
+		if token == "&&" {
 			break
 		}
 		switch token {
-		case "--login", "-l":
+		case "--login":
 			index++
 			if index >= len(fields) {
 				return sandboxAccountMutation{}, index, errors.New("Sandbox usermod login option has no value")
 			}
 			mutation.rename = strings.Trim(fields[index], " ;")
-		case "--home", "--home-dir", "-d":
+		case "--home":
 			index++
 			if index >= len(fields) {
 				return sandboxAccountMutation{}, index, errors.New("Sandbox usermod home option has no value")
 			}
 			mutation.home = strings.Trim(fields[index], " ;")
-		case "--shell", "-s":
+		case "--shell":
 			index++
 			if index >= len(fields) {
 				return sandboxAccountMutation{}, index, errors.New("Sandbox usermod shell option has no value")
@@ -250,6 +280,26 @@ func parseUsermodAccount(fields []string, start int) (sandboxAccountMutation, in
 		return sandboxAccountMutation{}, index, errors.New("Sandbox usermod has no target account")
 	}
 	return mutation, index, nil
+}
+
+func finalDockerfileStageInstructions(dockerfile string) ([]string, error) {
+	var finalStage []string
+	sawStage := false
+	for _, instruction := range dockerfileLogicalInstructions(dockerfile) {
+		fields := strings.Fields(instruction)
+		if len(fields) > 0 && strings.EqualFold(fields[0], "FROM") {
+			sawStage = true
+			finalStage = nil
+			continue
+		}
+		if sawStage {
+			finalStage = append(finalStage, instruction)
+		}
+	}
+	if !sawStage {
+		return nil, errors.New("Dockerfile.sandbox has no image stage")
+	}
+	return finalStage, nil
 }
 
 func dockerfileLogicalInstructions(dockerfile string) []string {

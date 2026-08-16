@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -461,7 +460,7 @@ func TestBuiltHelperFileToolUsesRuntimeIdentity(t *testing.T) {
 	}
 }
 
-func TestRuntimeAdapterReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
+func TestBuiltHelperReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
 	if os.Getenv("TETRAL_FILE_IDENTITY_CHILD") == "1" {
 		var envelope bytes.Buffer
 		observation := struct {
@@ -511,7 +510,7 @@ func TestRuntimeAdapterReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T
 		Limits:         protocol.Limits{VisibleBytes: 256 * 1024, VisibleLines: 2000},
 		Input:          json.RawMessage(`{"path":"file-identity.txt"}`),
 	})
-	command := exec.Command(os.Args[0], "-test.run=^TestRuntimeAdapterReadUsesRuntimeProcessIdentityAndEnvironment$")
+	command := exec.Command(os.Args[0], "-test.run=^TestBuiltHelperReadUsesRuntimeProcessIdentityAndEnvironment$")
 	command.Env = append(rootShapedHelperEnvironment("read"),
 		"TETRAL_FILE_IDENTITY_CHILD=1",
 		"TETRAL_FILE_IDENTITY_PAYLOAD="+payloadPath,
@@ -585,8 +584,11 @@ func TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration(t *testin
 const productionIdentityCommand = `identity_output=$(printf 'uid=%s\ngid=%s\nHOME=%s\nUSER=%s\nLOGNAME=%s\nshell=%s\nSUDO_USER=%s\nSUDO_UID=%s\nSUDO_GID=%s\nSUDO_COMMAND=%s\nORDINARY=%s\nTERM=%s\nNO_COLOR=%s\nPAGER=%s\nGIT_PAGER=%s\nurl=' "$(id -u)" "$(id -g)" "$HOME" "$USER" "$LOGNAME" "$(getent passwd "$USER" | cut -d: -f7)" "${SUDO_USER-unset}" "${SUDO_UID-unset}" "${SUDO_GID-unset}" "${SUDO_COMMAND-unset}" "$ORDINARY" "$TERM" "$NO_COLOR" "$PAGER" "$GIT_PAGER"; git ls-remote --get-url https://github.com/acme/repo.git); printf '%s\n' "$identity_output"`
 
 type observedRuntimeIdentity struct {
-	uid int
-	gid int
+	uid   int
+	gid   int
+	user  string
+	home  string
+	shell string
 }
 
 func productionIdentityFixture(t *testing.T) (string, observedRuntimeIdentity) {
@@ -601,33 +603,41 @@ func productionIdentityFixture(t *testing.T) (string, observedRuntimeIdentity) {
 	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 { //nolint:gosec // opt-in root test reads only its harness-provided Helper binary.
 		t.Fatalf("helper binary %q is not executable: %v", bin, err)
 	}
-	runtimeAccount, err := user.Lookup(runtimeidentity.User)
+	passwdOutput, err := exec.Command("getent", "passwd", runtimeidentity.User).Output()
 	if err != nil {
-		t.Fatalf("lookup runtime passwd entry: %v", err)
+		t.Fatalf("read runtime passwd entry: %v", err)
 	}
-	uid, err := strconv.Atoi(runtimeAccount.Uid)
+	passwdFields := strings.Split(strings.TrimSpace(string(passwdOutput)), ":")
+	if len(passwdFields) != 7 {
+		t.Fatalf("runtime passwd output has %d fields; want 7: %q", len(passwdFields), passwdOutput)
+	}
+	uid, err := strconv.Atoi(passwdFields[2])
 	if err != nil {
-		t.Fatalf("parse runtime uid %q: %v", runtimeAccount.Uid, err)
+		t.Fatalf("parse runtime uid %q: %v", passwdFields[2], err)
 	}
-	gid, err := strconv.Atoi(runtimeAccount.Gid)
+	gid, err := strconv.Atoi(passwdFields[3])
 	if err != nil {
-		t.Fatalf("parse runtime gid %q: %v", runtimeAccount.Gid, err)
+		t.Fatalf("parse runtime gid %q: %v", passwdFields[3], err)
 	}
-	identity := observedRuntimeIdentity{uid: uid, gid: gid}
+	identity := observedRuntimeIdentity{
+		uid: uid, gid: gid, user: passwdFields[0], home: passwdFields[5], shell: passwdFields[6],
+	}
 	if identity.uid == 0 || identity.gid == 0 {
 		t.Fatalf("runtime image account resolved to root identity %d/%d", identity.uid, identity.gid)
 	}
-	if runtimeAccount.Username != runtimeidentity.User || runtimeAccount.HomeDir != runtimeidentity.Home {
-		t.Fatalf("runtime passwd identity = %s/%s; want %s/%s", runtimeAccount.Username, runtimeAccount.HomeDir, runtimeidentity.User, runtimeidentity.Home)
+	if identity.user != runtimeidentity.User || identity.home != runtimeidentity.Home || identity.shell != runtimeidentity.Shell {
+		t.Fatalf("runtime passwd identity = %s/%s/%s; want %s/%s/%s", identity.user, identity.home, identity.shell, runtimeidentity.User, runtimeidentity.Home, runtimeidentity.Shell)
 	}
-	passwdBody, err := os.ReadFile("/etc/passwd") //nolint:gosec // Isolated identity fixture reads its container account database.
+	wantUID, err := strconv.Atoi(os.Getenv("TETRAL_TEST_RUNTIME_UID"))
 	if err != nil {
-		t.Fatalf("read runtime passwd database: %v", err)
+		t.Fatalf("parse observed image-process uid: %v", err)
 	}
-	wantPasswdEntry := fmt.Sprintf("%s:x:%d:%d:", runtimeidentity.User, identity.uid, identity.gid)
-	wantPasswdSuffix := ":" + runtimeidentity.Home + ":" + runtimeidentity.Shell
-	if !strings.Contains(string(passwdBody), wantPasswdEntry) || !strings.Contains(string(passwdBody), wantPasswdSuffix) {
-		t.Fatalf("runtime passwd entry does not carry observed uid/gid/home/shell %d/%d/%s/%s", identity.uid, identity.gid, runtimeidentity.Home, runtimeidentity.Shell)
+	wantGID, err := strconv.Atoi(os.Getenv("TETRAL_TEST_RUNTIME_GID"))
+	if err != nil {
+		t.Fatalf("parse observed image-process gid: %v", err)
+	}
+	if identity.uid != wantUID || identity.gid != wantGID {
+		t.Fatalf("runtime passwd uid/gid = %d/%d; want built-process observation %d/%d", identity.uid, identity.gid, wantUID, wantGID)
 	}
 	for _, path := range []string{runtimeidentity.Home, "/workspace", "/tmp/tetral-runtime"} {
 		info, err := os.Stat(path)

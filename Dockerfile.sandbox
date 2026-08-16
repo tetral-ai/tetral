@@ -16,7 +16,10 @@
 #   fuse_conf       /etc/fuse.conf contains user_allow_other
 #   capture_procfd  /proc/self/fd reopen self-test (kernel, not packaging)
 
-FROM golang:1.25.12-alpine AS helper
+ARG SANDBOX_HELPER_BASE_IMAGE=golang:1.25.12-alpine
+ARG SANDBOX_RUNTIME_BASE_IMAGE=ubuntu:24.04
+
+FROM ${SANDBOX_HELPER_BASE_IMAGE} AS helper
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -25,7 +28,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/sandbox ./internal/sandbox/helper/cmd/sandbox
 
-FROM ubuntu:24.04
+FROM ${SANDBOX_RUNTIME_BASE_IMAGE}
 
 # Tool execution runs arbitrary user commands, so this image keeps a real
 # distribution: a shell, coreutils, and the package manager's own dependency
