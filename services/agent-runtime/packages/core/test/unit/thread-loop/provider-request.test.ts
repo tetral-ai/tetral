@@ -2299,6 +2299,130 @@ describe("ThreadLoop", () => {
 		expect(committedNotification).toBeDefined();
 	});
 
+	test("a consumed task notification redelivery does not reopen provider work", async () => {
+		const session = new ThreadRuntime("sesn_task_notification_redelivery");
+		const notification = taskNotificationInput(
+			"rin_task_notification_redelivery",
+			"task_notification_redelivery",
+			"sevt_task_notification_redelivery",
+			"completed",
+			JSON.stringify({
+				status: "completed",
+				text: "already consumed task result",
+			}),
+			session.sessionId,
+		);
+		expect(session.state.enqueueAcceptedInput(notification)).toBe("applied");
+		const loader = new QueuedContextLoader(
+			[
+				runtimeNotificationMessage(
+					"msg_task_notification",
+					notification.notificationJson,
+					1,
+				),
+			],
+			[],
+			[(input: RuntimeAcceptedInputState) =>
+				acceptedInputCommitResult(input, "duplicate", 1)],
+		);
+		let providerCalls = 0;
+		const appended: SessionEvent[] = [];
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						writer: writerFrom((envelope) => {
+							appended.push(envelope.event);
+							return {
+								ok: true,
+								eventId: "sevt_consumed_task_running",
+								type: "duplicate",
+							};
+						}),
+						llmService: {
+							stream() {
+								providerCalls++;
+								return Stream.empty;
+							},
+						},
+					}),
+				),
+			),
+		);
+		expect(result).toMatchObject({ type: "completed" });
+		expect(providerCalls).toBe(0);
+		expect(
+			appended.filter((event) => event.type === "span.model_request_start"),
+		).toEqual([]);
+		expect(
+			session.state.threadTurnReduction().checkpoint.pendingInputContextSequences,
+		).toEqual([]);
+		expect(session.state.contextManager.entries()).toHaveLength(1);
+		expect(session.state.peekAcceptedInput()).toBeUndefined();
+	});
+
+	test("an acknowledged run-open replay preserves the accepted-input action", async () => {
+		const session = new ThreadRuntime("sesn_duplicate_run_open");
+		const durableTurnId = "sevt_duplicate_run_open";
+		expect(
+			session.state.enqueueAcceptedInput(
+				acceptedInput("rin_duplicate_run_open", session.sessionId),
+			),
+		).toBe("applied");
+		const requests: LLMRequest[] = [];
+		const reducerFacts: string[] = [];
+		const applyThreadTurnFact = session.state.applyThreadTurnFact.bind(session.state);
+		session.state.applyThreadTurnFact = (fact) => {
+			reducerFacts.push(fact.fact);
+			return applyThreadTurnFact(fact);
+		};
+		const writer = writerFrom((envelope) =>
+			envelope.event.type === "session.status_running"
+				? {
+						ok: true,
+						eventId: durableTurnId,
+						type: "duplicate",
+					}
+				: {
+						ok: true,
+						eventId: `bridge-${envelope.writeId}`,
+						type: "committed",
+					},
+		);
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+					return yield* (yield* ThreadLoop.Service).run(
+						session,
+						testRunCustody(),
+					);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+						writer,
+						llmService: llmService(
+							[
+								{ type: "text-start", id: "answer" },
+								{ type: "text-delta", id: "answer", text_delta: "done" },
+								{ type: "text-end", id: "answer" },
+								{ type: "finish", finishReason: "stop" },
+							],
+							(request) => requests.push(request),
+						),
+					}),
+				),
+			),
+		);
+		expect(result).toMatchObject({ type: "completed" });
+		expect(requests).toHaveLength(1);
+		expect(reducerFacts.filter((fact) => fact === "run_opened")).toHaveLength(1);
+		expect(session.state.peekAcceptedInput()).toBeUndefined();
+	});
+
 	test("prefix-only child Request Start stores durable message boundary zero", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const prefixMessage = userMessage(

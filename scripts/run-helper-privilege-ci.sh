@@ -15,7 +15,8 @@ verify_output() {
   fi
 	for test_name in \
 		TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration \
-		TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration; do
+		TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration \
+		TestRunReadUsesRuntimeProcessIdentityAndEnvironment; do
 		if ! grep -Fq -- "--- PASS: ${test_name}" <<<"$output"; then
 			echo "sandbox-helper runtime identity proof ${test_name} did not report PASS" >&2
 			return 1
@@ -40,6 +41,8 @@ output="$(docker run --rm \
   ghcr.io/tetral-ai/mirror/golang:1.25.12 \
   sh -ceu '
     test "$(id -u)" -eq 0
+    printf "%s\n" "daytona:x:1000:1000:Tetral runtime:/home/daytona:/bin/sh" >> /etc/passwd
+    printf "%s\n" "daytona:x:1000:" >> /etc/group
     go test ./internal/sandbox/helper -run "^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$" -count=1 -v
     # Main stderr redirection creates this exact disposable-container path; the
     # next proof requires a production-shaped runtime root created from zero.
@@ -48,7 +51,7 @@ output="$(docker run --rm \
     TETRAL_RUN_ROOT_IDENTITY_TESTS=1 \
       TETRAL_TEST_HELPER_BINARY=/tmp/tetral-runtime-identity-helper \
       go test ./internal/sandbox/helper/internal/cli \
-        -run "^TestBuiltHelper(Foreground|Detached)ExecUsesRuntimeIdentityAndGitConfiguration$" \
+        -run "^Test(BuiltHelper(Foreground|Detached)ExecUsesRuntimeIdentityAndGitConfiguration|RunReadUsesRuntimeProcessIdentityAndEnvironment)$" \
         -count=1 -v
   ' 2>&1)"
 status=$?

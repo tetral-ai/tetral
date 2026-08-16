@@ -22,7 +22,11 @@ import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+import {
+	deriveThreadTurnDecision,
+	initializeThreadTurnReduction,
+	reduceThreadTurn,
+} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
 import { GatewayProviderRules } from "../../../../../gateway/packages/lowering/src/rules/index.js";
@@ -40,6 +44,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly pendingSandboxExecutions?: readonly unknown[];
 	readonly hotScenario?: {
 		readonly baseContextJson: string;
+		readonly baseToolRouteView?: unknown;
 		readonly kind:
 			| "accepted_input"
 			| "assistant_append"
@@ -57,6 +62,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 		};
 		readonly modelRequestId?: string;
 		readonly assistantMessageSequence?: number;
+		readonly toolUseEventId?: string;
 		readonly modelToolCallId?: string;
 		readonly toolName?: string;
 		readonly canonicalInput?: unknown;
@@ -133,14 +139,46 @@ if (input.hotScenario !== undefined) {
 		base.openRequestDraft,
 		scenario,
 	);
-	const hotFacts =
-		scenario.turnFacts === undefined
-			? cold.turnFacts
-			: (scenario.turnFacts as typeof cold.turnFacts);
-	const hotCheckpoint = extractThreadTurnCheckpoint({
-		contextEntries: hotEntries,
-		facts: hotFacts,
+	const baseCheckpoint = extractThreadTurnCheckpoint({
+		contextEntries: base.contextEntries,
+		facts: base.turnFacts,
 	});
+	const baseRoutes =
+		scenario.baseToolRouteView === undefined
+			? extractColdThreadToolRouteView({
+					checkpoint: baseCheckpoint,
+					pendingToolUses: (base.pendingToolUses ?? []) as never,
+					pendingSandboxExecutions: (base.pendingSandboxExecutions ?? []) as never,
+				})
+			: (scenario.baseToolRouteView as typeof toolRouteView);
+	const hotSettlement =
+		scenario.kind === "tool_settlement"
+			? RuntimeToolSettlementDeclarationSchema.parse({
+					toolUseEventId: scenario.toolUseEventId,
+					outcome: scenario.settlement,
+				})
+			: undefined;
+	const hotCheckpoint =
+		hotSettlement !== undefined
+			? reduceThreadTurn(
+					initializeThreadTurnReduction(baseCheckpoint, baseRoutes),
+					{
+						fact: "tool_result_committed",
+						toolUseEventId: hotSettlement.toolUseEventId,
+						outcome:
+							hotSettlement.outcome.type === "completed"
+								? "success"
+								: hotSettlement.outcome.type,
+					},
+					baseRoutes,
+				).checkpoint
+			: extractThreadTurnCheckpoint({
+					contextEntries: hotEntries,
+					facts:
+						scenario.turnFacts === undefined
+							? cold.turnFacts
+							: (scenario.turnFacts as typeof cold.turnFacts),
+				});
 	const hotRoutes = extractColdThreadToolRouteView({
 		checkpoint: hotCheckpoint,
 		pendingToolUses: (scenario.pendingToolUses ??
@@ -273,7 +311,7 @@ function applyHotOperation(
 				throw new Error("Tool settlement hot scenario is incomplete");
 			}
 			const declaration = RuntimeToolSettlementDeclarationSchema.parse({
-				toolUseEventId: "composition_tool",
+				toolUseEventId: scenario.toolUseEventId,
 				outcome: scenario.settlement,
 			});
 			const contextOwner = new ContextManager("composition_session", base);

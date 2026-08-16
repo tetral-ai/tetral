@@ -1783,6 +1783,235 @@ describe("Runtime core host production assembly", () => {
 		}
 	});
 
+	test("LoadContext excludes request facts superseded by the current run", async () => {
+		const providerRequests: string[] = [];
+		const appended: SessionEvent[] = [];
+		const hosts = await buildRuntimeCoreHosts({
+			maxLocalSessions: 4,
+			now: () => "2026-06-16T00:00:00.000Z",
+			...testCoreDependencies({
+				contextLoader: {
+					loadThreadContext: async () => ({
+						contextEntries: [],
+						turnFacts: {
+							events: [
+								{
+									eventId: "sevt_superseded_run",
+									eventSequence: 1,
+									type: "session.status_running" as const,
+								},
+								{
+									eventId: "sevt_superseded_start",
+									eventSequence: 2,
+									type: "span.model_request_start" as const,
+									modelRequestId: "mreq_superseded",
+									requestStart: {
+										requestKind: "agent_provider_request" as const,
+										contextThroughMessageSequence: 0,
+									},
+								},
+								{
+									eventId: "sevt_superseded_tool",
+									eventSequence: 3,
+									type: "agent.tool_use" as const,
+									modelRequestId: "mreq_superseded",
+									toolUse: {
+										modelToolCallId: "call_superseded",
+										toolName: "Write",
+									},
+								},
+								{
+									eventId: "sevt_current_run",
+									eventSequence: 4,
+									type: "session.status_running" as const,
+								},
+							],
+							internalRepairs: [],
+						},
+						durableTurnId: "sevt_current_run",
+						runtimeBindingToken: "runtime-binding-token-current-run",
+					}),
+				},
+				threadLoop: {
+					sessionEventWriter: writerFrom((envelope) => {
+						appended.push(envelope.event);
+						return successfulEventAppend(envelope);
+					}),
+					providerCallRuntime: {
+						...DefaultProviderCallRuntimeConfig,
+						timeoutMs: 1_000,
+					},
+					runtimePolicy: () => ({}),
+					llmService: {
+						stream: (request) => {
+							providerRequests.push(request.modelRequestId);
+							return Stream.fromIterable([
+								{ type: "text-start" as const, id: "current" },
+								{
+									type: "text-delta" as const,
+									id: "current",
+									text_delta: "current response",
+								},
+								{ type: "text-end" as const, id: "current" },
+								{ type: "finish" as const, finishReason: "stop" as const },
+							]);
+						},
+					},
+				},
+			}),
+		});
+		try {
+			const scope = commandScope("sesn_superseded_request_facts");
+			expect(
+				await hosts.commandRunHost.handleAcceptInput(
+					{
+						...acceptedInput(scope.sessionId),
+						contentJson: JSON.stringify({
+							messages: [
+								{ parts: [{ type: "text", text: "new current input" }] },
+							],
+						}),
+					},
+				),
+			).toMatchObject({ ok: true, started: true });
+			await waitUntil(
+				() => providerRequests.length === 1,
+				"current request after LoadContext projection",
+			);
+			expect(providerRequests).toHaveLength(1);
+			expect(providerRequests).not.toContain("mreq_superseded");
+			expect(
+				appended.filter((event) => event.type === "session.error"),
+			).toEqual([]);
+		} finally {
+			await hosts.close();
+		}
+	});
+
+	test("cold settled requires-action closeout opens exactly one successor run", async () => {
+		const providerRequests: string[] = [];
+		const appended: SessionEvent[] = [];
+		const hosts = await buildRuntimeCoreHosts({
+			maxLocalSessions: 4,
+			now: () => "2026-06-16T00:00:00.000Z",
+			...testCoreDependencies({
+				contextLoader: {
+					loadThreadContext: async () => ({
+						contextEntries: [],
+						turnFacts: {
+							events: [
+								{
+									eventId: "sevt_settled_idle_run",
+									eventSequence: 1,
+									type: "session.status_running" as const,
+								},
+								{
+									eventId: "sevt_settled_idle_start",
+									eventSequence: 2,
+									type: "span.model_request_start" as const,
+									modelRequestId: "mreq_settled_idle",
+									requestStart: {
+										requestKind: "agent_provider_request" as const,
+										contextThroughMessageSequence: 0,
+									},
+								},
+								{
+									eventId: "sevt_settled_idle_tool",
+									eventSequence: 3,
+									type: "agent.tool_use" as const,
+									modelRequestId: "mreq_settled_idle",
+									toolUse: {
+										modelToolCallId: "call_settled_idle",
+										toolName: "Write",
+									},
+								},
+								{
+									eventId: "sevt_settled_idle_end",
+									eventSequence: 4,
+									type: "span.model_request_end" as const,
+									modelRequestId: "mreq_settled_idle",
+									requestEnd: {
+										requestStartEventId: "sevt_settled_idle_start",
+										isError: false,
+										rescheduled: false,
+									},
+								},
+								{
+									eventId: "sevt_settled_idle_result",
+									eventSequence: 5,
+									type: "agent.tool_result" as const,
+									modelRequestId: "mreq_settled_idle",
+									toolResult: {
+										modelToolCallId: "call_settled_idle",
+										toolName: "Write",
+										outcome: "completed" as const,
+									},
+								},
+								{
+									eventId: "sevt_settled_idle_closeout",
+									eventSequence: 6,
+									type: "session.status_idle" as const,
+									idle: { stopReason: "requires_action" },
+								},
+							],
+							internalRepairs: [],
+						},
+						runtimeBindingToken: "runtime-binding-token-settled-idle",
+					}),
+				},
+				threadLoop: {
+					sessionEventWriter: writerFrom((envelope) => {
+						appended.push(envelope.event);
+						return successfulEventAppend(envelope);
+					}),
+					providerCallRuntime: {
+						...DefaultProviderCallRuntimeConfig,
+						timeoutMs: 1_000,
+					},
+					runtimePolicy: () => ({}),
+					llmService: {
+						stream: (request) => {
+							providerRequests.push(request.modelRequestId);
+							return Stream.fromIterable([
+								{ type: "text-start" as const, id: "successor" },
+								{
+									type: "text-delta" as const,
+									id: "successor",
+									text_delta: "successor response",
+								},
+								{ type: "text-end" as const, id: "successor" },
+								{ type: "finish" as const, finishReason: "stop" as const },
+							]);
+						},
+					},
+				},
+			}),
+		});
+		try {
+			const scope = commandScope("sesn_settled_idle_cold");
+			expect(
+				await hosts.commandRunHost.handleAcceptInput(
+					acceptedInput(scope.sessionId),
+				),
+			).toMatchObject({ ok: true, started: true });
+			await waitUntil(
+				() =>
+					appended.filter((event) => event.type === "session.status_running")
+						.length === 1,
+				"successor run after cold settled closeout",
+			);
+			expect(providerRequests).not.toContain("mreq_settled_idle");
+			expect(
+				appended.filter((event) => event.type === "session.status_running"),
+			).toHaveLength(1);
+			expect(
+				appended.filter((event) => event.type === "session.error"),
+			).toEqual([]);
+		} finally {
+			await hosts.close();
+		}
+	});
+
 	test("task notification cold-loads thread context before hot settlement", async () => {
 		const observations: string[] = [];
 		const committedEntry = textContextEntry(

@@ -1980,6 +1980,71 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("an old interrupt replay cannot interrupt a newer active run", async () => {
+		const threadLoop = makeInterruptRecordingThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				const sessionId = "sesn_old_interrupt_replay";
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(acceptedInput(sessionId)),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForInterruptRecordingRuns(threadLoop, 1);
+				const oldInterrupt = {
+					...threadControl(sessionId),
+					runtimeInputId: "rin_old_interrupt_replay",
+					inputOrder: 9,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							oldInterrupt,
+							testControlCommit(oldInterrupt),
+						),
+					),
+				).toMatchObject({ ok: true, interrupted: true });
+
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput("rin_new_run_after_interrupt", sessionId),
+						),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForInterruptRecordingRuns(threadLoop, 2);
+				const currentState = threadLoop.runs[1]!.session.state;
+				let interruptAdmissions = 0;
+				const beginUserInterrupt = currentState.beginUserInterrupt.bind(currentState);
+				currentState.beginUserInterrupt = (...args) => {
+					interruptAdmissions += 1;
+					return beginUserInterrupt(...args);
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							oldInterrupt,
+							testControlCommit(oldInterrupt),
+						),
+					),
+				).toEqual({
+					ok: true,
+					sessionId,
+					created: false,
+					interrupted: false,
+					idleInterrupt: true,
+					duplicate: true,
+				});
+				expect(interruptAdmissions).toBe(0);
+				expect(threadLoop.interruptions).toHaveLength(1);
+				expect(threadLoop.runs).toHaveLength(2);
+			},
+		);
+	});
+
 	test("concurrent idle interrupt replay commits one frozen declaration", async () => {
 		const threadLoop = makeInterruptRecordingThreadLoop();
 		await withSessionManager(

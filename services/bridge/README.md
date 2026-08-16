@@ -307,8 +307,9 @@ and active lifecycle facts directly from durable rows.
   unanchored reasoning/step suffix before sealing the request. Runtime declares
   the ordered parts; Bridge assigns durable message and event identities,
   sequences, and timestamps. Completed
-  conversation results contain only the final provider-visible text; truncation
-  and cancellation diagnostics remain on their owning Tool Event/operation.
+  conversation results contain only the final provider-visible text. A durable
+  cancelled result is exactly `{type:"cancelled"}`; truncation and cancellation
+  diagnostics remain on their owning Tool Event/operation.
   The settlement
   response does not return any of those facts; Runtime applies its immutable
   request after a committed or duplicate result.
@@ -418,7 +419,7 @@ and active lifecycle facts directly from durable rows.
   execution remains unconsumed, so expiry cannot race ahead of Tool Result
   adoption.
 - **Conformance.** `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`,
-  `mcp_collision_split_test.go`, `command_read_claim_test.go`,
+  `mcp_collision_split_test.go`, `mcp_connector_production_composition_test.go`,
   `TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly`.
 
 ### Resource roots snapshot and credential-expiry readiness gate
@@ -497,7 +498,7 @@ never deletes durable history.
 | `bridge_api_settlement_test.go` | `WriteRequestEnd` / `FinishIdle` / `CommitRuntimeTermination`, single-terminal-end serialization, reschedule ceiling, best-effort capture gate |
 | `bridge_api_children_test.go` | Child create/resolve/mark lifecycle and thread-context-prefix checkpoint |
 | Sandbox execution store/runner suites and Runtime Pod tool-runner tests | Sandbox acceptance/result-wait separation, exact replay identity, result custody, and durable memory behavior |
-| `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`, `command_read_claim_test.go` | Background-command follow-ups and stdin write-sequence dedupe |
+| `bridge_api_tasks_test.go` | Background-task creation, follow-up projection, and idempotent result commit |
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
 | `closeout_sentinel_test.go` | `scope_superseded` stale mapping and precise `closeout_unrepairable` status typing |

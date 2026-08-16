@@ -176,8 +176,11 @@ it preserves the stated invariants and passes the named suites.
   context entry lowers to one provider Assistant message: ordered text,
   reasoning, and concurrent Tool Calls stay grouped, while Tool Results use the
   provider protocol's result messages. Provider-required Tool-call-ID scrubbing
-  is deterministic, one-to-one, and allocates collision suffixes without
-  splitting that Assistant message. The seven-model set is closed.
+  is deterministic and one-to-one. Anthropic collisions retain the first
+  scrubbed ID, then allocate `_2`, `_3`, and later decimal suffixes while
+  truncating the base as needed to keep the 128-character limit; this never
+  splits the Assistant message. Tool cancellation lowers only the exact
+  `{type:"cancelled"}` conversation result. The seven-model set is closed.
 - **Conformance.** `packages/lowering/test/unit/*-request.test.ts` (per-rule,
   table-driven), `stream.test.ts`, `usage.test.ts`, `errors.test.ts`,
   `rules-invariants.test.ts`; `packages/lowering/test/rules-coverage.test.ts`

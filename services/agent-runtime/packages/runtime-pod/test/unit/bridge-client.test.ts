@@ -127,6 +127,150 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		});
 	});
 
+	test("classifies every cold-context parse boundary without logging payloads", async () => {
+		const canary = "COLD_CONTEXT_SECRET_CANARY";
+		const cases: ReadonlyArray<{
+			readonly phase: RuntimePodLogRecord["phase"];
+			readonly reason: RuntimePodLogRecord["reason"];
+			readonly context: () => string;
+		}> = [
+			{
+				phase: "context_json_parse",
+				reason: "invalid_context_json",
+				context: () => `{"${canary}"`,
+			},
+			{
+				phase: "context_envelope_parse",
+				reason: "invalid_context_envelope_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), unexpected: canary }),
+			},
+			{
+				phase: "durable_context_parse",
+				reason: "invalid_durable_context_shape",
+				context: () =>
+					JSON.stringify({
+						...durableContext(),
+						contextEntries: [{ canary }],
+					}),
+			},
+			{
+				phase: "open_request_draft_parse",
+				reason: "invalid_open_request_draft_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), openRequestDraft: canary }),
+			},
+			{
+				phase: "turn_facts_parse",
+				reason: "invalid_turn_facts_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), turnFacts: { events: canary } }),
+			},
+			{
+				phase: "thread_context_prefix_parse",
+				reason: "invalid_thread_context_prefix_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), threadContextPrefix: canary }),
+			},
+			{
+				phase: "thread_metadata_parse",
+				reason: "invalid_thread_metadata_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), thread: { role: canary } }),
+			},
+			{
+				phase: "runtime_config_parse",
+				reason: "invalid_runtime_config_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), runtimeConfig: canary }),
+			},
+			{
+				phase: "mcp_manifests_parse",
+				reason: "invalid_mcp_manifests_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), mcpManifests: canary }),
+			},
+			{
+				phase: "pending_tool_uses_parse",
+				reason: "invalid_pending_tool_uses_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), pendingToolUses: canary }),
+			},
+			{
+				phase: "pending_sandbox_executions_parse",
+				reason: "invalid_pending_sandbox_executions_shape",
+				context: () =>
+					JSON.stringify({
+						...durableContext(),
+						pendingSandboxExecutions: canary,
+					}),
+			},
+			{
+				phase: "pending_attachments_parse",
+				reason: "invalid_pending_attachments_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), pendingAttachments: canary }),
+			},
+			{
+				phase: "pending_agent_mail_parse",
+				reason: "invalid_pending_agent_mail_shape",
+				context: () =>
+					JSON.stringify({ ...durableContext(), pendingAgentMail: canary }),
+			},
+		];
+		for (const testCase of cases) {
+			const bridge = new TypedBridge();
+			const records: RuntimePodLogRecord[] = [];
+			bridge.contextJson = testCase.context();
+			const loader = new BridgeAPIContextLoader(
+				options(bridge, {
+					info: (record) => records.push(record),
+					error: (record) => records.push(record),
+				}),
+			);
+			let rejected = false;
+			try {
+				await loader.loadThreadContext(threadScope());
+			} catch (error) {
+				rejected = true;
+				expect(error).toMatchObject({ code: "schema_mismatch" });
+			}
+			if (!rejected) {
+				throw new Error(`${testCase.phase} unexpectedly accepted its canary`);
+			}
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({
+				event: "runtime_context_load_parse_failed",
+				phase: testCase.phase,
+				reason: testCase.reason,
+				"workspace.id": "wksp_1",
+				"session.id": "sesn_1",
+				"thread.id": "thrd_1",
+			});
+			expect(JSON.stringify(records)).not.toContain(canary);
+		}
+	});
+
+	test("a throwing cold-context logger cannot replace the parse rejection", async () => {
+		const bridge = new TypedBridge();
+		bridge.contextJson = JSON.stringify({
+			...durableContext(),
+			pendingAgentMail: "malformed",
+		});
+		const loader = new BridgeAPIContextLoader(
+			options(bridge, {
+				info: () => undefined,
+				error: () => {
+					throw new Error("logger failure");
+				},
+			}),
+		);
+		await expect(loader.loadThreadContext(threadScope())).rejects.toMatchObject({
+			code: "schema_mismatch",
+			reason: "load context returned malformed direct durable facts",
+		});
+	});
+
 	test("rejects retired snake-case cold aliases even beside valid camel-case fields", async () => {
 		const validRuntimeConfig = {
 			configGeneration: 2,

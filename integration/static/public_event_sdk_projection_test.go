@@ -128,6 +128,18 @@ func bridgePublicWriteEventTypes(t *testing.T, engineRoot string) map[string]str
 	if len(eventTypes) == 0 {
 		t.Fatal("Bridge write-event producer source selected no public event types")
 	}
+	for eventType, sourcePath := range map[string]string{
+		"agent.tool_result":             "services/bridge/bridge_api_tool_settlement.go",
+		"agent.mcp_tool_result":         "services/bridge/bridge_api_tool_settlement.go",
+		"agent.thread_message_sent":     "services/bridge/completion_mail.go",
+		"agent.thread_message_received": "services/bridge/completion_mail.go",
+	} {
+		dedicatedSource := finalArchitectureReadText(t, filepath.Join(engineRoot, sourcePath))
+		if !strings.Contains(dedicatedSource, strconv.Quote(eventType)) {
+			t.Fatalf("Bridge dedicated producer %s is missing public event %q", sourcePath, eventType)
+		}
+		eventTypes[eventType] = struct{}{}
+	}
 	return eventTypes
 }
 

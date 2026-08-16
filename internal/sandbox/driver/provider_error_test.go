@@ -58,6 +58,7 @@ To increase concurrency limits, upgrade your organization's Tier by visiting htt
 		{name: "zero", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 0GiB."},
 		{name: "overflow", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 18446744073709551616GiB."},
 		{name: "unsupported unit", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 30GB."},
+		{name: "same-line suffix", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 30GiB. trailing detail"},
 		{name: "non create", stage: sandbox.StageStatus, message: liveResponse},
 	}
 	for _, test := range tests {

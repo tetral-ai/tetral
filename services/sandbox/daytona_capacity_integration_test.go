@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +37,33 @@ import (
 const daytonaDiskCapacityResponse = `Total disk limit exceeded. Maximum allowed: 30GiB.
 Consider archiving your unused Sandboxes to free up available storage.
 To increase concurrency limits, upgrade your organization's Tier by visiting https://app.daytona.io/dashboard/limits.`
+
+func findDaytonaCapacityLogRecord(t *testing.T, encoded []byte, key string, value any) map[string]any {
+	t.Helper()
+	for _, line := range bytes.Split(encoded, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode Daytona capacity log: %v\n%s", err, line)
+		}
+		if record[key] == value {
+			return record
+		}
+	}
+	t.Fatalf("Daytona capacity log has no record with %s=%v: %s", key, value, encoded)
+	return nil
+}
+
+func assertDaytonaCapacityLogFields(t *testing.T, record map[string]any, want map[string]any) {
+	t.Helper()
+	for key, value := range want {
+		if record[key] != value {
+			t.Fatalf("Daytona capacity log %s=%v; want %v in %#v", key, record[key], value, record)
+		}
+	}
+}
 
 func TestDaytonaAdapterExposesCreateCapacityAsProvedNotStarted(t *testing.T) {
 	sdkClient := &scriptedDaytonaLifecycleClient{createErrors: []error{
@@ -89,20 +115,18 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 			t.Fatalf("Daytona Create calls = %d; want one rejected submission", harness.sdk.createCalls)
 		}
 		harness.assertQueue(t, queue.StatusPending, 1, "quota_exceeded")
-		if got := harness.logs.String(); !strings.Contains(got, `"operation":"sandbox.provider.create"`) ||
-			!strings.Contains(got, `"provider.name":"daytona"`) ||
-			!strings.Contains(got, `"provider.status_code":400`) ||
-			!strings.Contains(got, `"error.code":"quota_exceeded"`) ||
-			!strings.Contains(got, `"error.message_safe":"sandbox provider capacity is unavailable"`) ||
-			!strings.Contains(got, `"event":"sandbox_activation_attempt_completed"`) ||
-			!strings.Contains(got, `"outcome":"retry"`) ||
-			!strings.Contains(got, `"queue.attempt.count":1`) ||
-			!strings.Contains(got, `"queue.attempt.max":`+strconv.Itoa(sandboxActivationMaxAttempts)) ||
-			!strings.Contains(got, `"session.id":"sesn_execution_store"`) ||
-			!strings.Contains(got, `"operation.id":"`+harness.operationID+`"`) ||
-			!strings.Contains(got, `"job.id":"`+harness.queueJobID+`"`) {
-			t.Fatalf("quota provider completion log = %s", got)
-		}
+		providerRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "operation", "sandbox.provider.create")
+		assertDaytonaCapacityLogFields(t, providerRecord, map[string]any{
+			"provider.name": "daytona", "provider.status_code": float64(400),
+			"error.code": "quota_exceeded", "error.message_safe": "sandbox provider capacity is unavailable",
+		})
+		attemptRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "event", "sandbox_activation_attempt_completed")
+		assertDaytonaCapacityLogFields(t, attemptRecord, map[string]any{
+			"provider.name": "daytona", "outcome": "retry", "error.code": "quota_exceeded",
+			"error.message_safe":  "sandbox activation will be retried",
+			"queue.attempt.count": float64(1), "queue.attempt.max": float64(sandboxActivationMaxAttempts),
+			"session.id": "sesn_execution_store", "operation.id": harness.operationID, "job.id": harness.queueJobID,
+		})
 		for _, forbidden := range daytonaCapacityForbiddenDetails() {
 			if strings.Contains(harness.logs.String(), forbidden) {
 				t.Fatalf("provider completion log exposed %q: %s", forbidden, harness.logs.String())
@@ -196,6 +220,7 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 		harness := newDaytonaActivationHarness(t, errorsByAttempt)
 		sharedWaiter := harness.attachSharedActivationWaiter(t)
 		otherWaiter := harness.attachOtherActivationWaiter(t)
+		harness.deferOperationQueueJob(t, otherWaiter.operationID)
 
 		for attempt := 1; attempt <= sandboxActivationMaxAttempts; attempt++ {
 			if attempt > 1 {
@@ -238,8 +263,6 @@ type daytonaActivationHarness struct {
 	toolUseEventID  string
 	modelRequestID  string
 	modelToolCallID string
-	inputJSON       string
-	inputHash       string
 }
 
 func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaActivationHarness {
@@ -343,7 +366,7 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 		queueJobID: identity.queueJobID, operationID: identity.operationID,
 		sdk: sdkClient, logs: logs, bridgeStore: bridgeStore, bridgeScope: bridgeScope,
 		toolUseEventID: toolUseEventID, modelRequestID: modelRequestID,
-		modelToolCallID: modelToolCallID, inputJSON: inputJSON, inputHash: inputHash,
+		modelToolCallID: modelToolCallID,
 		runner: &SandboxActivationJobRunner{
 			Queue:     sandboxProductionQueueClient(t, queue.NewPostgreSQLStore(client)),
 			Store:     NewPostgreSQLSandboxLifecycleStore(client, &fixedSandboxResourceSource{}, 30*time.Minute),
@@ -370,6 +393,21 @@ func (h *daytonaActivationHarness) makeQueueJobAvailable(t *testing.T) {
 	if _, err := h.admin.Exec(`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second'
 		WHERE workspace_id='ws_execution_store' AND id=$1 AND status='pending'`, h.queueJobID); err != nil {
 		t.Fatalf("make activation Queue job available: %v", err)
+	}
+}
+
+func (h *daytonaActivationHarness) deferOperationQueueJob(t *testing.T, operationID string) {
+	t.Helper()
+	result, err := h.admin.Exec(`UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
+		WHERE workspace_id='ws_execution_store' AND id=(
+			SELECT queue_job_id FROM sandbox_lifecycle_operations
+			WHERE workspace_id='ws_execution_store' AND operation_id=$1
+		) AND status='pending'`, operationID)
+	if err != nil {
+		t.Fatalf("defer competing activation Queue job: %v", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("defer competing activation Queue job affected=%d err=%v", affected, err)
 	}
 }
 

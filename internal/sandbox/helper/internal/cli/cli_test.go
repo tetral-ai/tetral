@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/health"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
+	"github.com/tetral-ai/tetral/internal/sandbox/runtimeidentity"
 )
 
 func TestMainKeepsStderrDiagnosticsOutOfStdout(t *testing.T) {
@@ -431,6 +433,93 @@ func TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration(t *test
 	assertProductionIdentityOutput(t, envelope)
 }
 
+func TestRunReadUsesRuntimeProcessIdentityAndEnvironment(t *testing.T) {
+	if os.Getenv("TETRAL_FILE_IDENTITY_CHILD") == "1" {
+		var envelope bytes.Buffer
+		observation := struct {
+			Code     int               `json:"code"`
+			UID      int               `json:"uid"`
+			GID      int               `json:"gid"`
+			Env      map[string]string `json:"env"`
+			Envelope json.RawMessage   `json:"envelope"`
+		}{
+			Code: runRead(&envelope, os.Getenv("TETRAL_FILE_IDENTITY_PAYLOAD")),
+			UID:  os.Geteuid(),
+			GID:  os.Getegid(),
+			Env: map[string]string{
+				"HOME":         os.Getenv("HOME"),
+				"USER":         os.Getenv("USER"),
+				"LOGNAME":      os.Getenv("LOGNAME"),
+				"SUDO_USER":    os.Getenv("SUDO_USER"),
+				"SUDO_UID":     os.Getenv("SUDO_UID"),
+				"SUDO_GID":     os.Getenv("SUDO_GID"),
+				"SUDO_COMMAND": os.Getenv("SUDO_COMMAND"),
+			},
+			Envelope: append(json.RawMessage(nil), envelope.Bytes()...),
+		}
+		encoded, err := json.Marshal(observation)
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = os.Stdout.Write(encoded)
+		os.Exit(0)
+	}
+
+	_ = productionIdentityFixture(t)
+	probePath := "/workspace/file-identity.txt"
+	if err := os.WriteFile(probePath, []byte("runtime file identity\n"), 0o600); err != nil {
+		t.Fatalf("write file identity probe: %v", err)
+	}
+	if err := os.Chown(probePath, 1000, 1000); err != nil {
+		t.Fatalf("chown file identity probe: %v", err)
+	}
+	payloadPath := writeCLIPayload(t, protocol.Payload{
+		SchemaVersion:  protocol.SchemaVersion,
+		Tool:           "read",
+		ToolUseEventID: "evt_runtime_identity_file",
+		WorkspaceRoot:  "/workspace",
+		Roots:          []protocol.Root{{Path: "/workspace", Mode: protocol.RootModeReadWrite}},
+		Limits:         protocol.Limits{VisibleBytes: 256 * 1024, VisibleLines: 2000},
+		Input:          json.RawMessage(`{"path":"file-identity.txt"}`),
+	})
+	command := exec.Command(os.Args[0], "-test.run=^TestRunReadUsesRuntimeProcessIdentityAndEnvironment$")
+	command.Env = append(rootShapedHelperEnvironment("read"),
+		"TETRAL_FILE_IDENTITY_CHILD=1",
+		"TETRAL_FILE_IDENTITY_PAYLOAD="+payloadPath,
+	)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("run file identity child: %v\n%s", err, string(output))
+	}
+	var observation struct {
+		Code     int               `json:"code"`
+		UID      int               `json:"uid"`
+		GID      int               `json:"gid"`
+		Env      map[string]string `json:"env"`
+		Envelope json.RawMessage   `json:"envelope"`
+	}
+	if err := json.Unmarshal(output, &observation); err != nil {
+		t.Fatalf("decode file identity observation: %v\n%s", err, string(output))
+	}
+	var envelope protocol.Envelope
+	if err := json.Unmarshal(observation.Envelope, &envelope); err != nil {
+		t.Fatalf("decode file identity envelope: %v", err)
+	}
+	if observation.Code != 0 || envelope.Status != protocol.ToolStatusSuccess {
+		t.Fatalf("file identity read code=%d envelope=%+v", observation.Code, envelope)
+	}
+	if observation.UID != 1000 || observation.GID != 1000 {
+		t.Fatalf("file identity uid/gid = %d/%d; want 1000/1000", observation.UID, observation.GID)
+	}
+	wantEnv := map[string]string{
+		"HOME": runtimeidentity.Home, "USER": runtimeidentity.User, "LOGNAME": runtimeidentity.User,
+		"SUDO_USER": "", "SUDO_UID": "", "SUDO_GID": "", "SUDO_COMMAND": "",
+	}
+	if !mapsEqual(observation.Env, wantEnv) {
+		t.Fatalf("file identity environment = %#v; want %#v", observation.Env, wantEnv)
+	}
+}
+
 func TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration(t *testing.T) {
 	bin := productionIdentityFixture(t)
 	installProductionIdentityGitConfig(t)
@@ -477,6 +566,13 @@ func productionIdentityFixture(t *testing.T) string {
 	}
 	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 { //nolint:gosec // opt-in root test reads only its harness-provided Helper binary.
 		t.Fatalf("helper binary %q is not executable: %v", bin, err)
+	}
+	runtimeAccount, err := user.LookupId("1000")
+	if err != nil {
+		t.Fatalf("lookup runtime passwd entry: %v", err)
+	}
+	if runtimeAccount.Username != runtimeidentity.User || runtimeAccount.HomeDir != runtimeidentity.Home {
+		t.Fatalf("runtime passwd identity = %s/%s; want %s/%s", runtimeAccount.Username, runtimeAccount.HomeDir, runtimeidentity.User, runtimeidentity.Home)
 	}
 	for _, path := range []string{"/home/daytona", "/workspace", "/tmp/tetral-runtime"} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -554,7 +650,16 @@ func productionIdentityPayload(eventID string, detached bool, taskID string) pro
 func runRootShapedHelper(t *testing.T, bin string, tool string, payloadPath string) protocol.Envelope {
 	t.Helper()
 	command := exec.Command(bin, tool, "--payload", payloadPath)
-	command.Env = []string{
+	command.Env = rootShapedHelperEnvironment(tool)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("root-shaped %s helper: %v\n%s", tool, err, string(output))
+	}
+	return decodeSingleEnvelope(t, output)
+}
+
+func rootShapedHelperEnvironment(tool string) []string {
+	return []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=/root",
 		"USER=root",
@@ -569,11 +674,18 @@ func runRootShapedHelper(t *testing.T, bin string, tool string, payloadPath stri
 		"PAGER=inherited-pager",
 		"GIT_PAGER=inherited-git-pager",
 	}
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("root-shaped %s helper: %v\n%s", tool, err, string(output))
+}
+
+func mapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
 	}
-	return decodeSingleEnvelope(t, output)
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func assertProductionIdentityOutput(t *testing.T, envelope protocol.Envelope) {

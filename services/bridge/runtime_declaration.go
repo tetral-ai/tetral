@@ -624,11 +624,10 @@ func commitWriteRequestEndContextTx(
 	); err != nil {
 		return requestEndDurableFacts{}, err
 	}
-	checkpoint, err := insertRuntimeContextEntryTx(
+	checkpoint, err := insertCompactionContextEntryTx(
 		ctx,
 		tx,
 		request.GetScope(),
-		"agent.thread_context_compacted",
 		compactionEventID,
 		nil,
 		request.GetCompactionContext(),
@@ -1034,37 +1033,19 @@ func lockThreadMutationOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *brid
 	return err
 }
 
-func runtimeContextKindForSource(sourceKind string) (string, bool) {
-	switch sourceKind {
-	case "messages", "tool_confirmation", "approval_review", "agent_mail":
-		return "user", true
-	case "rejection":
-		return "assistant", true
-	case "task_notification", "completion_mail":
-		return "runtime_notification", true
-	case "agent.thread_context_compacted":
-		return "compaction", true
-	case "internal_tool_repair", "termination":
-		return "assistant", true
-	default:
-		return "", false
-	}
-}
-
-func insertRuntimeContextEntryTx(
+func insertCompactionContextEntryTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	sourceKind string,
 	sourceEventID string,
 	modelRequestID *string,
 	delta *bridgev1.RuntimeContextDelta,
 	now time.Time,
 ) (durableContextWrite, error) {
-	contextKind, ok := runtimeContextKindForSource(sourceKind)
-	if !ok || delta == nil {
+	if delta == nil {
 		return durableContextWrite{}, status.Error(codes.InvalidArgument, "runtime context create identity is invalid")
 	}
+	const contextKind = "compaction"
 	parts, err := canonicalRuntimeContextParts(delta)
 	if err != nil {
 		return durableContextWrite{}, err

@@ -1095,16 +1095,18 @@ function runThreadLoopEffect(
 								),
 							);
 						}
-						session.state.applyThreadTurnFact({
-							fact: "inputs_committed",
-							eventId: acceptedInput.runtimeInputId,
-							contextSequences: [committedEntry.messageSequence],
-						});
 						session.state.acknowledgeAcceptedInput(
 							acceptedInput.runtimeInputId,
 						);
-						session.state.setProviderOutputSchemaJson(undefined);
-						acceptedContextCommitted = true;
+						if (notification === "applied") {
+							session.state.applyThreadTurnFact({
+								fact: "inputs_committed",
+								eventId: acceptedInput.runtimeInputId,
+								contextSequences: [committedEntry.messageSequence],
+							});
+							session.state.setProviderOutputSchemaJson(undefined);
+							acceptedContextCommitted = true;
+						}
 					} else {
 						// CommitInputs and its typed result application form one local ownership boundary:
 						// interruption may observe either the queued input or the applied result,
@@ -6690,10 +6692,15 @@ async function appendRunningEvent(
 > {
 	const existingDurableTurnId = custody.activeTurnId(session);
 	if (existingDurableTurnId !== undefined) {
-		session.state.applyThreadTurnFact({
-			fact: "run_opened",
-			eventId: existingDurableTurnId,
-		});
+		if (
+			session.state.threadTurnReduction().checkpoint.executionRunId !==
+			existingDurableTurnId
+		) {
+			session.state.applyThreadTurnFact({
+				fact: "run_opened",
+				eventId: existingDurableTurnId,
+			});
+		}
 		return { ok: true, type: "duplicate", eventId: existingDurableTurnId };
 	}
 	const writeId = runtimeTurnOpenWriteId({
@@ -6719,10 +6726,15 @@ async function appendRunningEvent(
 			}),
 		};
 	}
-	session.state.applyThreadTurnFact({
-		fact: "run_opened",
-		eventId: result.eventId,
-	});
+	if (
+		session.state.threadTurnReduction().checkpoint.executionRunId !==
+		result.eventId
+	) {
+		session.state.applyThreadTurnFact({
+			fact: "run_opened",
+			eventId: result.eventId,
+		});
+	}
 	return result;
 }
 

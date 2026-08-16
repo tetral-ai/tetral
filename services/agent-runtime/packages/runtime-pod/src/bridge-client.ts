@@ -2342,7 +2342,7 @@ function parseContextLoadPhase<T>(
 	logger: RuntimePodLogger | undefined,
 	input: RuntimeThreadAddressState,
 	phase: RuntimeContextLoadParsePhase,
-	reason: RuntimeContextLoadParseReason | (() => RuntimeContextLoadParseReason),
+	reason: RuntimeContextLoadParseReason,
 	parse: () => T,
 ): T {
 	try {
@@ -2352,7 +2352,7 @@ function parseContextLoadPhase<T>(
 			logger,
 			input,
 			phase,
-			typeof reason === "function" ? reason() : reason,
+			reason,
 		);
 		throw error;
 	}
@@ -2718,13 +2718,14 @@ function runtimeConfigPatchFromContextPayload(
 	payload: Record<string, unknown>,
 	input: RuntimeThreadAddressState,
 ): RuntimeConfigPatchState | undefined {
-	const runtimeConfig = recordField(payload, "runtimeConfig");
-	if (runtimeConfig === undefined) {
+	const runtimeConfigValue = payload.runtimeConfig;
+	if (runtimeConfigValue === undefined) {
 		return undefined;
 	}
-	if (!isRecord(runtimeConfig)) {
+	if (!isRecord(runtimeConfigValue)) {
 		throw new Error("load context runtimeConfig is malformed");
 	}
+	const runtimeConfig = runtimeConfigValue;
 	assertOnlyKeys(
 		runtimeConfig,
 		[

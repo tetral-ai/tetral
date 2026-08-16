@@ -312,6 +312,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		loaded.GetContextJson(),
 		toolUse.GetCommitted().GetAssignedMessageSequence(),
 		payload,
+		toolUse.GetCommitted().GetEventId(),
 		"call_durable_error",
 		map[string]any{"type": "error", "error": map[string]any{
 			"type": "runtime", "code": "provider_tool_protocol_error", "message": "Read failed", "retryable": false, "fatal": false,
@@ -422,6 +423,7 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 		loaded.GetContextJson(),
 		toolUse.GetCommitted().GetAssignedMessageSequence(),
 		payload,
+		toolUse.GetCommitted().GetEventId(),
 		modelToolCallID,
 		map[string]any{"type": "completed", "output": map[string]any{"text": originalText, "truncated": true}},
 	)
@@ -513,6 +515,7 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		loaded.GetContextJson(),
 		toolUse.GetCommitted().GetAssignedMessageSequence(),
 		payload,
+		toolUse.GetCommitted().GetEventId(),
 		"call_durable_cancel",
 		map[string]any{
 			"type": "cancelled",
@@ -586,6 +589,7 @@ func assertRuntimeHotColdToolComposition(
 	coldContextJSON string,
 	assistantMessageSequence int64,
 	coldPayload bridgeLoadContextPayload,
+	toolUseEventID string,
 	modelToolCallID string,
 	settlement any,
 ) {
@@ -594,9 +598,16 @@ func assertRuntimeHotColdToolComposition(
 		"contextJson":         coldContextJSON,
 		"providerComposition": true,
 		"hotScenario": map[string]any{
-			"baseContextJson":          baseContextJSON,
+			"baseContextJson": baseContextJSON,
+			"baseToolRouteView": map[string]any{
+				"routes": []map[string]any{{
+					"toolUseEventId": toolUseEventID,
+					"disposition":    "requires_user_action",
+				}},
+			},
 			"kind":                     "tool_settlement",
 			"assistantMessageSequence": assistantMessageSequence,
+			"toolUseEventId":           toolUseEventID,
 			"modelToolCallId":          modelToolCallID,
 			"settlement":               settlement,
 			"turnFacts":                coldPayload.TurnFacts,

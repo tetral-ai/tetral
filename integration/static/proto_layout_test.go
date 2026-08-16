@@ -252,6 +252,15 @@ func TestGatewayServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	for _, retired := range []string{
 		"optional string tool_use_event_id = 3;",
 		"string source_tool_use_event_id",
+		"enum RuntimeMessageRole",
+		"enum RuntimeToolPartState",
+		"message RuntimeMessage {",
+		"message RuntimePart {",
+		"message RuntimeTextPart {",
+		"message RuntimeReasoningPart {",
+		"message RuntimeToolPart {",
+		"repeated RuntimeMessage messages = 13;",
+		"string output_or_error_json",
 	} {
 		if strings.Contains(text, retired) {
 			t.Fatalf("Gateway provider carrier retained Runtime-owned member %q", retired)

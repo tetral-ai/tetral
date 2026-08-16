@@ -286,6 +286,13 @@ export async function appendIdleEvent(
 	if (!validated.ok) {
 		return { ok: false, error: runtimeFailureFromEventWriter(validated.error) };
 	}
+	if (
+		stopReason.type === "requires_action" &&
+		requiresActionTargetsAreAlreadySettled(session, stopReason.event_ids)
+	) {
+		session.state.closeSettledRequiresActionRun(durableTurnId);
+		return { ok: true, eventId: validated.eventId };
+	}
 	session.state.applyThreadTurnFact({
 		fact: "finish_idle_committed",
 		eventId: validated.eventId,
@@ -301,6 +308,24 @@ export async function appendIdleEvent(
 					: { type: "end_turn", ...(failedRun ? { failedRun: true } : {}) },
 	});
 	return { ok: true, eventId: validated.eventId };
+}
+
+function requiresActionTargetsAreAlreadySettled(
+	session: ThreadRuntime,
+	toolUseEventIds: readonly string[],
+): boolean {
+	const members = session.state.threadTurnReduction().checkpoint.request?.toolMembers;
+	if (members === undefined || toolUseEventIds.length === 0) {
+		return false;
+	}
+	return toolUseEventIds.every((toolUseEventId) =>
+		members.some(
+			(member) =>
+				member.memberKind === "public_tool_use" &&
+				member.toolUseEventId === toolUseEventId &&
+				member.terminalResult !== undefined,
+		),
+	);
 }
 
 export async function closeFailedRunDurably(

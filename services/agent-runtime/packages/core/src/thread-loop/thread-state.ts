@@ -423,6 +423,29 @@ export class ThreadProcessor {
 		return this.#reduction;
 	}
 
+	/** Mirrors the cold checkpoint after a durable idle ACK races terminal Tool settlement. */
+	closeSettledRequiresActionRun(durableTurnId: string): ThreadTurnReduction {
+		if (
+			this.#reduction.checkpoint.executionRunId !== durableTurnId ||
+			this.#reduction.action.action !== "prepare_next_request"
+		) {
+			return this.#reduction;
+		}
+		const checkpoint: ThreadTurnCheckpoint = {
+			pendingInputContextSequences:
+				this.#reduction.checkpoint.pendingInputContextSequences,
+			...(this.#reduction.checkpoint.request === undefined
+				? {}
+				: { request: this.#reduction.checkpoint.request }),
+		};
+		this.#reduction = initializeThreadTurnReduction(
+			checkpoint,
+			this.#toolRoutes,
+			this.acceptedInputIds(),
+		);
+		return this.#reduction;
+	}
+
 	recordRoute(
 		toolUseEventId: string,
 		disposition: ThreadToolRouteView["routes"][number]["disposition"],
@@ -639,6 +662,11 @@ export class ThreadState {
 	consumeThreadTurnEdge(): ThreadTurnReduction {
 		this.threadTurnReduction();
 		return this.#threadProcessor!.consumeEdge();
+	}
+
+	closeSettledRequiresActionRun(durableTurnId: string): ThreadTurnReduction {
+		this.threadTurnReduction();
+		return this.#threadProcessor!.closeSettledRequiresActionRun(durableTurnId);
 	}
 
 	recordThreadToolRoute(

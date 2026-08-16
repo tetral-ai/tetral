@@ -32,6 +32,7 @@ import type {
 } from "../../../src/llm/llm-service.js";
 import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import * as SessionManager from "../../../src/session/session-manager.js";
+import { appendIdleEvent } from "../../../src/thread-loop/closeout.js";
 import { assembleProviderCallRequest } from "../../../src/thread-loop/provider-request.js";
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
@@ -2005,6 +2006,100 @@ describe("ThreadLoop", () => {
 			releaseFinishIdle.resolve();
 			await Effect.runPromise(Fiber.interrupt(runFiber));
 		}
+	});
+	test("a requires-action ACK is absorbed when its Tool settles in flight", async () => {
+		const session = new ThreadRuntime("sesn_settled_requires_action_ack");
+		const durableTurnId = "sevt_settled_requires_action_run";
+		const toolUseEventId = "sevt_settled_requires_action_tool";
+		session.state.installThreadTurn(
+			{
+				executionRunId: durableTurnId,
+				pendingInputContextSequences: [],
+				request: {
+					modelRequestId: "mreq_settled_requires_action",
+					requestStartEventId: "sevt_settled_requires_action_start",
+					requestKind: "agent_provider_request",
+					contextThroughMessageSequence: 0,
+					requestEnd: {
+						eventId: "sevt_settled_requires_action_end",
+						isError: false,
+						rescheduled: false,
+					},
+					toolMembers: [
+						{
+							memberKind: "public_tool_use",
+							modelToolCallId: "call_settled_requires_action",
+							toolUseEventId,
+							toolName: "Write",
+						},
+					],
+				},
+			},
+			{
+				routes: [{ toolUseEventId, disposition: "requires_user_action" }],
+			},
+		);
+		expect(session.state.threadTurnReduction().action).toMatchObject({
+			action: "finish_idle",
+			stopReason: { type: "requires_action" },
+		});
+		const finishIdleStarted = deferred<void>();
+		const releaseFinishIdle = deferred<void>();
+		const baseWriter = writerFrom((envelope) => ({
+			ok: true,
+			eventId: `bridge-${envelope.writeId}`,
+			type: "committed",
+		}));
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			finishIdle: async (envelope) => {
+				finishIdleStarted.resolve();
+				await releaseFinishIdle.promise;
+				return withFinishIdleResultForTest(envelope, {
+					ok: true,
+					eventId: "sevt_settled_requires_action_idle",
+					type: "committed",
+				});
+			},
+		};
+		const idle = appendIdleEvent(
+			{
+				internalToolRepairStore: new ThreadLoopRuntimeStore([]),
+				sessionEventWriter: writer,
+				runtime: threadLoopRuntime(),
+				llmService: { stream: () => Stream.empty },
+				storeOperationTimeoutMs: 1000,
+			},
+			session,
+			{ activeTurnId: () => durableTurnId },
+			{ type: "requires_action", event_ids: [toolUseEventId] },
+		);
+		await finishIdleStarted.promise;
+		session.state.applyThreadTurnFact({
+			fact: "tool_result_committed",
+			toolUseEventId,
+			outcome: "success",
+		});
+		session.state.clearThreadToolRoute(toolUseEventId);
+		releaseFinishIdle.resolve();
+		expect(await idle).toEqual({
+			ok: true,
+			eventId: "sevt_settled_requires_action_idle",
+		});
+		expect(session.state.threadTurnReduction()).toMatchObject({
+			checkpoint: {
+				request: {
+					toolMembers: [{ terminalResult: { outcome: "success" } }],
+				},
+			},
+			action: { action: "prepare_next_request" },
+		});
+		expect(
+			session.state.threadTurnReduction().checkpoint.executionRunId,
+		).toBeUndefined();
+		expect(
+			session.state.threadTurnReduction().checkpoint.idleCloseout,
+		).toBeUndefined();
 	});
 	test("interrupt snapshot joins an in-flight pre-fence CommitInputs and remains the last closeout input", async () => {
 		const preCommitStarted = deferred<void>();
