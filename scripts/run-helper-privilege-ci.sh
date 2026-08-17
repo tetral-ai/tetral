@@ -17,6 +17,10 @@ verify_output() {
     echo "sandbox-helper proof did not report the real runtime image identity" >&2
     return 1
   fi
+  if ! grep -Eq -- '^sandbox-runtime-base: release=ubuntu:24\.04 proof=([^[:space:]]*/)?ubuntu:24\.04 id=ubuntu version=24\.04$' <<<"$output"; then
+    echo "sandbox-helper proof did not report the release runtime base" >&2
+    return 1
+  fi
 	for test_name in \
 		TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration \
 		TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration \
@@ -36,6 +40,7 @@ fi
 
 engine_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_context="${TETRAL_HELPER_PROOF_BUILD_CONTEXT:-$engine_root}"
+runtime_base_image="${TETRAL_HELPER_PROOF_RUNTIME_BASE_IMAGE:-ghcr.io/tetral-ai/mirror/ubuntu:24.04}"
 proof_dir="$(mktemp -d)"
 image_tag="tetral-helper-identity-proof:${$}"
 cleanup() {
@@ -44,9 +49,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+release_runtime_base="$(sed -n 's/^ARG SANDBOX_RUNTIME_BASE_IMAGE=//p' "$build_context/Dockerfile.sandbox")"
+if [[ "$release_runtime_base" != "ubuntu:24.04" || "${runtime_base_image##*/}" != "$release_runtime_base" ]]; then
+  echo "Sandbox proof runtime base does not match the release Dockerfile: release=$release_runtime_base proof=$runtime_base_image" >&2
+  exit 1
+fi
+runtime_base_identity="$(docker run --rm --entrypoint /bin/sh "$runtime_base_image" -ceu '
+  . /etc/os-release
+  printf "id=%s version=%s" "$ID" "$VERSION_ID"
+')"
+if [[ "$runtime_base_identity" != "id=ubuntu version=24.04" ]]; then
+  echo "Sandbox proof runtime base is not Ubuntu 24.04: $runtime_base_identity" >&2
+  exit 1
+fi
+runtime_base_proof="sandbox-runtime-base: release=$release_runtime_base proof=$runtime_base_image $runtime_base_identity"
+
 docker build --tag "$image_tag" \
   --build-arg SANDBOX_HELPER_BASE_IMAGE=ghcr.io/tetral-ai/mirror/golang:1.25.12 \
-  --build-arg SANDBOX_RUNTIME_BASE_IMAGE=ghcr.io/tetral-ai/mirror/golang:1.25.12 \
+  --build-arg SANDBOX_RUNTIME_BASE_IMAGE="$runtime_base_image" \
   --file "$build_context/Dockerfile.sandbox" "$build_context"
 if [[ "$(docker image inspect --format '{{.Config.User}}' "$image_tag")" != "daytona" ]]; then
   echo "Sandbox image does not select the daytona runtime account" >&2
@@ -72,6 +92,7 @@ runtime_gid="${BASH_REMATCH[2]}"
 set +e
 # Tetral's public GHCR mirror avoids anonymous third-party registry limits on shared runner IPs.
 output="$({
+  printf '%s\n' "$runtime_base_proof"
   printf '%s\n' "$image_identity"
   docker run --rm \
     --user 0:0 \

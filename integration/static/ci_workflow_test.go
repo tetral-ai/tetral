@@ -476,10 +476,15 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 		"docker build --tag",
 		"Dockerfile.sandbox",
 		"TETRAL_HELPER_PROOF_BUILD_CONTEXT",
+		"TETRAL_HELPER_PROOF_RUNTIME_BASE_IMAGE",
 		"docker image inspect",
 		"docker run --rm",
 		"--user 0:0",
 		"ghcr.io/tetral-ai/mirror/golang:1.25.12",
+		"ghcr.io/tetral-ai/mirror/ubuntu:24.04",
+		"release_runtime_base",
+		"id=ubuntu version=24.04",
+		"sandbox-runtime-base:",
 		"sandbox-runtime-image:",
 		"TETRAL_TEST_RUNTIME_UID",
 		"TETRAL_TEST_RUNTIME_GID",
@@ -500,6 +505,8 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 	for _, thirdParty := range []string{
 		"public.ecr.aws/docker/library/golang:1.25.12",
 		"docker.io/library/golang:1.25.12",
+		"public.ecr.aws/docker/library/ubuntu:24.04",
+		"docker.io/library/ubuntu:24.04",
 	} {
 		if strings.Contains(script, thirdParty) {
 			t.Fatalf("helper privilege script must not pull Go from shared third-party registry %q", thirdParty)
@@ -507,6 +514,9 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 	}
 	if regexp.MustCompile(`(?m)docker\s+login\b`).MatchString(script) {
 		t.Fatal("helper privilege script must use an anonymous pull for the public GHCR mirror")
+	}
+	if strings.Contains(script, "SANDBOX_RUNTIME_BASE_IMAGE=ghcr.io/tetral-ai/mirror/golang") {
+		t.Fatal("helper privilege script substitutes the Go builder image for the Sandbox runtime base")
 	}
 }
 
@@ -526,6 +536,7 @@ func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
 
 	command = exec.Command("bash", script, "--verify-output")
 	command.Stdin = bytes.NewBufferString(strings.Join([]string{
+		"sandbox-runtime-base: release=ubuntu:24.04 proof=ghcr.io/tetral-ai/mirror/ubuntu:24.04 id=ubuntu version=24.04",
 		"sandbox-runtime-image: user=daytona uid=1001 gid=1001 home=/home/daytona shell=/bin/bash env_home=/home/daytona",
 		"--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)",
 		"--- PASS: TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
@@ -582,6 +593,9 @@ permissions:
 		`          - primary: public.ecr.aws/docker/library/golang:1.25.12
             fallback: docker.io/library/golang:1.25.12
             target: ghcr.io/tetral-ai/mirror/golang:1.25.12`,
+		`          - primary: public.ecr.aws/docker/library/ubuntu:24.04
+            fallback: docker.io/library/ubuntu:24.04
+            target: ghcr.io/tetral-ai/mirror/ubuntu:24.04`,
 		`          - primary: public.ecr.aws/docker/library/postgres:18-alpine
             fallback: docker.io/library/postgres:18-alpine
             target: ghcr.io/tetral-ai/mirror/postgres:18-alpine`,

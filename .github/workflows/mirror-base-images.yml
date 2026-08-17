@@ -22,6 +22,9 @@ jobs:
           - primary: public.ecr.aws/docker/library/golang:1.25.12
             fallback: docker.io/library/golang:1.25.12
             target: ghcr.io/tetral-ai/mirror/golang:1.25.12
+          - primary: public.ecr.aws/docker/library/ubuntu:24.04
+            fallback: docker.io/library/ubuntu:24.04
+            target: ghcr.io/tetral-ai/mirror/ubuntu:24.04
           - primary: public.ecr.aws/docker/library/postgres:18-alpine
             fallback: docker.io/library/postgres:18-alpine
             target: ghcr.io/tetral-ai/mirror/postgres:18-alpine

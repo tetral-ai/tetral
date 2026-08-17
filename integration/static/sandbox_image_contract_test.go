@@ -49,9 +49,50 @@ func TestSandboxImageInstallsUpstreamRclone(t *testing.T) {
 func TestSandboxImageRuntimeIdentityMatchesEngineContract(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
+	if err := assertSandboxReleaseRuntimeBase(dockerfile); err != nil {
+		t.Fatal(err)
+	}
 	if err := assertSandboxRuntimeIdentity(dockerfile); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestSandboxImageProofRejectsReleaseRuntimeBaseSubstitution(t *testing.T) {
+	engineRoot := finalArchitectureEngineRoot(t)
+	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
+	mutated := strings.Replace(dockerfile,
+		"ARG SANDBOX_RUNTIME_BASE_IMAGE=ubuntu:24.04",
+		"ARG SANDBOX_RUNTIME_BASE_IMAGE=golang:1.25.12",
+		1,
+	)
+	if mutated == dockerfile {
+		t.Fatal("runtime-base mutation did not alter Dockerfile.sandbox")
+	}
+	if err := assertSandboxReleaseRuntimeBase(mutated); err == nil {
+		t.Fatal("runtime-base substitution preserved the release-image proof")
+	}
+}
+
+func assertSandboxReleaseRuntimeBase(dockerfile string) error {
+	const (
+		defaultInstruction = "ARG SANDBOX_RUNTIME_BASE_IMAGE=ubuntu:24.04"
+		finalInstruction   = "FROM ${SANDBOX_RUNTIME_BASE_IMAGE}"
+	)
+	defaultCount := 0
+	lastFrom := ""
+	for _, instruction := range dockerfileLogicalInstructions(dockerfile) {
+		if instruction == defaultInstruction {
+			defaultCount++
+		}
+		fields := strings.Fields(instruction)
+		if len(fields) > 0 && strings.EqualFold(fields[0], "FROM") {
+			lastFrom = instruction
+		}
+	}
+	if defaultCount != 1 || lastFrom != finalInstruction {
+		return fmt.Errorf("Sandbox release runtime base must be the single Ubuntu 24.04 default consumed by the final image stage")
+	}
+	return nil
 }
 
 func TestSandboxImageRuntimeIdentityJoinRejectsAccountMutations(t *testing.T) {
