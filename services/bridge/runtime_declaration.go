@@ -117,6 +117,7 @@ func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputK
 func writeEventDeclarationDigest(
 	request *bridgev1.WriteEventRequest,
 	payloadJSON string,
+	consumedFileJSON string,
 ) (string, error) {
 	payloadJSON = stripInternalProviderFields(payloadJSON)
 	assistantDelta, err := canonicalRuntimeContextDelta(request.GetAssistantContextDelta())
@@ -134,6 +135,7 @@ func writeEventDeclarationDigest(
 	if request.GetEventType() == "span.model_request_start" {
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
 		declaration["request_kind"] = nullableDeclarationString(request.GetRequestKind())
+		declaration["consumed_file_attachments"] = json.RawMessage(consumedFileJSON)
 	}
 	raw, err := marshalRuntimeDeclarationObjectWithRawField(declaration, "payload", payloadJSON)
 	if err != nil {
@@ -152,7 +154,6 @@ func writeRequestEndDeclarationDigest(
 	finishReason string,
 	usageJSON string,
 	consumedTransientJSON string,
-	consumedFileJSON string,
 ) (string, error) {
 	trailingDelta, err := canonicalRuntimeContextDelta(request.GetTrailingContextDelta())
 	if err != nil {
@@ -200,7 +201,6 @@ func writeRequestEndDeclarationDigest(
 		"compaction_context":                 compactionContext,
 		"compaction_event_payload":           compactionEventPayload,
 		"consumed_attachment_refs":           json.RawMessage(consumedTransientJSON),
-		"consumed_file_attachments":          json.RawMessage(consumedFileJSON),
 		"error_kind":                         nullableDeclarationString(request.GetErrorKind()),
 		"finish_reason":                      finishReason,
 		"interrupt_settlement":               interruptSettlement,

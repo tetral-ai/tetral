@@ -5046,6 +5046,7 @@ type WriteEventRequest struct {
 	AssistantContextDelta         *RuntimeContextDelta   `protobuf:"bytes,10,opt,name=assistant_context_delta,json=assistantContextDelta,proto3" json:"assistant_context_delta,omitempty"`
 	ContextThroughMessageSequence *int64                 `protobuf:"varint,13,opt,name=context_through_message_sequence,json=contextThroughMessageSequence,proto3,oneof" json:"context_through_message_sequence,omitempty"`
 	RequestKind                   string                 `protobuf:"bytes,14,opt,name=request_kind,json=requestKind,proto3" json:"request_kind,omitempty"`
+	ConsumedFileAttachments       []*FileAttachmentPair  `protobuf:"bytes,16,rep,name=consumed_file_attachments,json=consumedFileAttachments,proto3" json:"consumed_file_attachments,omitempty"`
 	unknownFields                 protoimpl.UnknownFields
 	sizeCache                     protoimpl.SizeCache
 }
@@ -5141,6 +5142,13 @@ func (x *WriteEventRequest) GetRequestKind() string {
 		return x.RequestKind
 	}
 	return ""
+}
+
+func (x *WriteEventRequest) GetConsumedFileAttachments() []*FileAttachmentPair {
+	if x != nil {
+		return x.ConsumedFileAttachments
+	}
+	return nil
 }
 
 type ServerToolUseUsage struct {
@@ -5718,7 +5726,6 @@ type WriteRequestEndRequest struct {
 	ErrorKind                       string                         `protobuf:"bytes,8,opt,name=error_kind,json=errorKind,proto3" json:"error_kind,omitempty"`
 	ConsumedAttachmentRefs          []string                       `protobuf:"bytes,9,rep,name=consumed_attachment_refs,json=consumedAttachmentRefs,proto3" json:"consumed_attachment_refs,omitempty"`
 	Reschedule                      *RequestEndReschedule          `protobuf:"bytes,11,opt,name=reschedule,proto3" json:"reschedule,omitempty"`
-	ConsumedFileAttachments         []*FileAttachmentPair          `protobuf:"bytes,13,rep,name=consumed_file_attachments,json=consumedFileAttachments,proto3" json:"consumed_file_attachments,omitempty"`
 	TrailingContextDelta            *RuntimeContextDelta           `protobuf:"bytes,14,opt,name=trailing_context_delta,json=trailingContextDelta,proto3" json:"trailing_context_delta,omitempty"`
 	PrefixConsumption               *PrefixConsumptionDraft        `protobuf:"bytes,15,opt,name=prefix_consumption,json=prefixConsumption,proto3" json:"prefix_consumption,omitempty"`
 	CompactedThroughMessageSequence *int64                         `protobuf:"varint,16,opt,name=compacted_through_message_sequence,json=compactedThroughMessageSequence,proto3,oneof" json:"compacted_through_message_sequence,omitempty"`
@@ -5818,13 +5825,6 @@ func (x *WriteRequestEndRequest) GetConsumedAttachmentRefs() []string {
 func (x *WriteRequestEndRequest) GetReschedule() *RequestEndReschedule {
 	if x != nil {
 		return x.Reschedule
-	}
-	return nil
-}
-
-func (x *WriteRequestEndRequest) GetConsumedFileAttachments() []*FileAttachmentPair {
-	if x != nil {
-		return x.ConsumedFileAttachments
 	}
 	return nil
 }
@@ -11847,7 +11847,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x1fReadFileAttachmentChunkResponse\x12\x14\n" +
 	"\x04data\x18\x01 \x01(\fH\x00R\x04data\x12G\n" +
 	"\brejected\x18\x02 \x01(\v2).tetral.bridge.v1.FileAttachmentRejectionH\x00R\brejectedB\t\n" +
-	"\aoutcome\"\xf6\x04\n" +
+	"\aoutcome\"\xd8\x05\n" +
 	"\x11WriteEventRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12(\n" +
 	"\x10runtime_write_id\x18\x02 \x01(\tR\x0eruntimeWriteId\x12(\n" +
@@ -11859,7 +11859,8 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x17assistant_context_delta\x18\n" +
 	" \x01(\v2%.tetral.bridge.v1.RuntimeContextDeltaR\x15assistantContextDelta\x12L\n" +
 	" context_through_message_sequence\x18\r \x01(\x03H\x00R\x1dcontextThroughMessageSequence\x88\x01\x01\x12!\n" +
-	"\frequest_kind\x18\x0e \x01(\tR\vrequestKindB#\n" +
+	"\frequest_kind\x18\x0e \x01(\tR\vrequestKind\x12`\n" +
+	"\x19consumed_file_attachments\x18\x10 \x03(\v2$.tetral.bridge.v1.FileAttachmentPairR\x17consumedFileAttachmentsB#\n" +
 	"!_context_through_message_sequenceJ\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"J\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\x0f\x10\x10R\x0fserver_tool_useR\x1amcp_materialization_handleR\x15sandbox_result_digestR\x0ftool_settlement\"r\n" +
 	"\x12ServerToolUseUsage\x12.\n" +
@@ -11893,7 +11894,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\aoutcome\"\x15\n" +
 	"\x13ToolResultCommitted\"\x15\n" +
 	"\x13ToolResultDuplicate\"\x11\n" +
-	"\x0fToolResultStale\"\xee\b\n" +
+	"\x0fToolResultStale\"\xad\b\n" +
 	"\x16WriteRequestEndRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12(\n" +
 	"\x10runtime_write_id\x18\x02 \x01(\tR\x0eruntimeWriteId\x12(\n" +
@@ -11907,8 +11908,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x18consumed_attachment_refs\x18\t \x03(\tR\x16consumedAttachmentRefs\x12F\n" +
 	"\n" +
 	"reschedule\x18\v \x01(\v2&.tetral.bridge.v1.RequestEndRescheduleR\n" +
-	"reschedule\x12`\n" +
-	"\x19consumed_file_attachments\x18\r \x03(\v2$.tetral.bridge.v1.FileAttachmentPairR\x17consumedFileAttachments\x12[\n" +
+	"reschedule\x12[\n" +
 	"\x16trailing_context_delta\x18\x0e \x01(\v2%.tetral.bridge.v1.RuntimeContextDeltaR\x14trailingContextDelta\x12W\n" +
 	"\x12prefix_consumption\x18\x0f \x01(\v2(.tetral.bridge.v1.PrefixConsumptionDraftR\x11prefixConsumption\x12P\n" +
 	"\"compacted_through_message_sequence\x18\x10 \x01(\x03H\x00R\x1fcompactedThroughMessageSequence\x88\x01\x01\x12A\n" +
@@ -11916,7 +11916,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x14interrupt_settlement\x18\x12 \x01(\v2/.tetral.bridge.v1.RequestEndInterruptSettlementR\x13interruptSettlement\x12T\n" +
 	"\x12compaction_context\x18\x13 \x01(\v2%.tetral.bridge.v1.RuntimeContextDeltaR\x11compactionContextB%\n" +
 	"#_compacted_through_message_sequenceJ\x04\b\x06\x10\aJ\x04\b\n" +
-	"\x10\vJ\x04\b\f\x10\rR\x1cmodel_request_start_event_idR\frequest_kind\"I\n" +
+	"\x10\vJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eR\x1cmodel_request_start_event_idR\frequest_kindR\x19consumed_file_attachments\"I\n" +
 	"\x1dRequestEndInterruptSettlement\x12(\n" +
 	"\x10runtime_input_id\x18\x01 \x01(\tR\x0eruntimeInputId\"\xfc\x01\n" +
 	"\x17WriteRequestEndResponse\x12J\n" +
@@ -12595,17 +12595,17 @@ var file_tetral_bridge_v1_bridge_proto_depIdxs = []int32{
 	80,  // 68: tetral.bridge.v1.ReadFileAttachmentChunkResponse.rejected:type_name -> tetral.bridge.v1.FileAttachmentRejection
 	21,  // 69: tetral.bridge.v1.WriteEventRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
 	6,   // 70: tetral.bridge.v1.WriteEventRequest.assistant_context_delta:type_name -> tetral.bridge.v1.RuntimeContextDelta
-	88,  // 71: tetral.bridge.v1.WriteEventResponse.committed:type_name -> tetral.bridge.v1.WriteEventCommitted
-	89,  // 72: tetral.bridge.v1.WriteEventResponse.duplicate:type_name -> tetral.bridge.v1.WriteEventDuplicate
-	90,  // 73: tetral.bridge.v1.WriteEventResponse.stale:type_name -> tetral.bridge.v1.WriteEventStale
-	21,  // 74: tetral.bridge.v1.SettleToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	15,  // 75: tetral.bridge.v1.SettleToolResultRequest.settlement:type_name -> tetral.bridge.v1.RuntimeToolSettlement
-	93,  // 76: tetral.bridge.v1.SettleToolResultResponse.committed:type_name -> tetral.bridge.v1.ToolResultCommitted
-	94,  // 77: tetral.bridge.v1.SettleToolResultResponse.duplicate:type_name -> tetral.bridge.v1.ToolResultDuplicate
-	95,  // 78: tetral.bridge.v1.SettleToolResultResponse.stale:type_name -> tetral.bridge.v1.ToolResultStale
-	21,  // 79: tetral.bridge.v1.WriteRequestEndRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	105, // 80: tetral.bridge.v1.WriteRequestEndRequest.reschedule:type_name -> tetral.bridge.v1.RequestEndReschedule
-	77,  // 81: tetral.bridge.v1.WriteRequestEndRequest.consumed_file_attachments:type_name -> tetral.bridge.v1.FileAttachmentPair
+	77,  // 71: tetral.bridge.v1.WriteEventRequest.consumed_file_attachments:type_name -> tetral.bridge.v1.FileAttachmentPair
+	88,  // 72: tetral.bridge.v1.WriteEventResponse.committed:type_name -> tetral.bridge.v1.WriteEventCommitted
+	89,  // 73: tetral.bridge.v1.WriteEventResponse.duplicate:type_name -> tetral.bridge.v1.WriteEventDuplicate
+	90,  // 74: tetral.bridge.v1.WriteEventResponse.stale:type_name -> tetral.bridge.v1.WriteEventStale
+	21,  // 75: tetral.bridge.v1.SettleToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	15,  // 76: tetral.bridge.v1.SettleToolResultRequest.settlement:type_name -> tetral.bridge.v1.RuntimeToolSettlement
+	93,  // 77: tetral.bridge.v1.SettleToolResultResponse.committed:type_name -> tetral.bridge.v1.ToolResultCommitted
+	94,  // 78: tetral.bridge.v1.SettleToolResultResponse.duplicate:type_name -> tetral.bridge.v1.ToolResultDuplicate
+	95,  // 79: tetral.bridge.v1.SettleToolResultResponse.stale:type_name -> tetral.bridge.v1.ToolResultStale
+	21,  // 80: tetral.bridge.v1.WriteRequestEndRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	105, // 81: tetral.bridge.v1.WriteRequestEndRequest.reschedule:type_name -> tetral.bridge.v1.RequestEndReschedule
 	6,   // 82: tetral.bridge.v1.WriteRequestEndRequest.trailing_context_delta:type_name -> tetral.bridge.v1.RuntimeContextDelta
 	19,  // 83: tetral.bridge.v1.WriteRequestEndRequest.prefix_consumption:type_name -> tetral.bridge.v1.PrefixConsumptionDraft
 	97,  // 84: tetral.bridge.v1.WriteRequestEndRequest.interrupt_settlement:type_name -> tetral.bridge.v1.RequestEndInterruptSettlement

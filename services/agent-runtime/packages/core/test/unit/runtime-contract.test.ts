@@ -526,7 +526,7 @@ describe("runtime boundary contracts", () => {
 		).toBe(false);
 	});
 
-	test("request-end attachment settlement is combined-bounded and absent on reschedule", () => {
+	test("Request Start file consumption and Request End transient settlement are disjoint and bounded", () => {
 		const base = {
 			...writerBinding(),
 			workspaceId: "workspace-1",
@@ -537,7 +537,7 @@ describe("runtime boundary contracts", () => {
 			isError: false,
 			finishReason: "stop" as const,
 		};
-		const fileAttachments = Array.from({ length: 16 }, (_, index) => ({
+		const fileAttachments = Array.from({ length: 32 }, (_, index) => ({
 			sourceEventId: `sevt_file_${index}`,
 			fileId: `file_${index}`,
 		}));
@@ -545,28 +545,38 @@ describe("runtime boundary contracts", () => {
 			SessionEventWriterRequestEndEnvelopeSchema.safeParse({
 				...base,
 				consumedAttachmentRefs: Array.from(
-					{ length: 16 },
+					{ length: 32 },
 					(_, index) => `att_${index}`,
 				),
-				consumedFileAttachments: fileAttachments,
 			}).success,
 		).toBe(true);
 		expect(
 			SessionEventWriterRequestEndEnvelopeSchema.safeParse({
 				...base,
-				consumedAttachmentRefs: Array.from(
-					{ length: 17 },
-					(_, index) => `att_${index}`,
-				),
 				consumedFileAttachments: fileAttachments,
 			}).success,
 		).toBe(false);
 		expect(
-			SessionEventWriterRequestEndEnvelopeSchema.safeParse({
-				...base,
-				isError: true,
-				errorKind: "provider_error",
-				reschedule: { attempt: 1, deadline: createdAt, backoffMs: 1 },
+			SessionEventEnvelopeSchema.safeParse({
+				...writerBinding(),
+				workspaceId: "workspace-1",
+				sessionId: "sesn_1",
+				sessionThreadId: "thr_1",
+				writeId: "rwrite_start_attachments",
+				event: { type: "span.model_request_start", model_request_id: "mreq_attachments" },
+				contextThroughMessageSequence: 0,
+				requestKind: "agent_provider_request",
+				consumedFileAttachments: fileAttachments,
+			}).success,
+		).toBe(true);
+		expect(
+			SessionEventEnvelopeSchema.safeParse({
+				...writerBinding(),
+				workspaceId: "workspace-1",
+				sessionId: "sesn_1",
+				sessionThreadId: "thr_1",
+				writeId: "rwrite_non_start_attachments",
+				event: { type: "session.status_running" },
 				consumedFileAttachments: [fileAttachments[0]!],
 			}).success,
 		).toBe(false);

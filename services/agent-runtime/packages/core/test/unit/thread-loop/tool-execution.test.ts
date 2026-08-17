@@ -1318,6 +1318,7 @@ describe("ThreadLoop", () => {
 	test("served request consumes its exact mixed-origin ride and preserves attachments appended in flight", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
+		const requestStartEnvelopes: SessionEventEnvelope[] = [];
 		const transientAttachment = {
 			transient: {
 				attachmentRef: "att_1",
@@ -1384,12 +1385,17 @@ describe("ThreadLoop", () => {
 				]);
 			},
 		};
-		const baseWriter = writerFrom((envelope) => ({
-			ok: true,
-			eventId: `bridge-${envelope.writeId}`,
-			type: "committed",
-			eventSequence: 1,
-		}));
+		const baseWriter = writerFrom((envelope) => {
+			if (envelope.event.type === "span.model_request_start") {
+				requestStartEnvelopes.push(envelope);
+			}
+			return {
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+				eventSequence: 1,
+			};
+		});
 		const writer: SessionEventWriter = {
 			...baseWriter,
 			writeRequestEnd: async (envelope) => {
@@ -1434,14 +1440,14 @@ describe("ThreadLoop", () => {
 			"att_1",
 			...Array.from({ length: 30 }, (_, index) => `att_fill_${index}`),
 		]);
-		expect(requestEndEnvelopes[0]?.consumedFileAttachments).toEqual([
+		expect(requestStartEnvelopes[0]?.consumedFileAttachments).toEqual([
 			{
 				sourceEventId: "sevt_user_file",
 				fileId: "file_1",
 			},
 		]);
 		expect(requestEndEnvelopes[1]?.consumedAttachmentRefs).toEqual(["att_late"]);
-		expect(requestEndEnvelopes[1]?.consumedFileAttachments).toBeUndefined();
+		expect(requestStartEnvelopes[1]?.consumedFileAttachments ?? []).toEqual([]);
 		expect(session.state.pendingAttachments()).toEqual([]);
 	});
 	test("runtime layer caps pending attachments", async () => {
@@ -1898,9 +1904,13 @@ describe("ThreadLoop", () => {
 			},
 		};
 		const appendedEvents: SessionEvent[] = [];
+		const requestStartEnvelopes: SessionEventEnvelope[] = [];
 		const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
 		const baseWriter = writerFrom((envelope) => {
 			appendedEvents.push(envelope.event);
+			if (envelope.event.type === "span.model_request_start") {
+				requestStartEnvelopes.push(envelope);
+			}
 			return {
 				ok: true,
 				eventId: `bridge-${envelope.writeId}`,
@@ -1959,14 +1969,14 @@ describe("ThreadLoop", () => {
 			reschedule: { attempt: 1 },
 		});
 		expect(requestEndEnvelopes[0]?.consumedAttachmentRefs ?? []).toEqual([]);
-		expect(requestEndEnvelopes[0]?.consumedFileAttachments ?? []).toEqual([]);
 		expect(requestEndEnvelopes[1]?.consumedAttachmentRefs).toEqual(["att_1"]);
-		expect(requestEndEnvelopes[1]?.consumedFileAttachments).toEqual([
+		expect(requestStartEnvelopes[0]?.consumedFileAttachments).toEqual([
 			{
 				sourceEventId: "sevt_file_message_1",
 				fileId: "file_1",
 			},
 		]);
+		expect(requestStartEnvelopes[1]?.consumedFileAttachments ?? []).toEqual([]);
 		expect(
 			appendedEvents.filter((event) => event.type === "session.error"),
 		).toEqual([
@@ -4871,6 +4881,7 @@ describe("ThreadLoop", () => {
 						userMessage("user-rehydrated-approved", 1, "resume approved tools"),
 						loadedMessage,
 					],
+					activeRunInputOrder: 8,
 					pendingToolUses,
 					turnCheckpoint: {
 						pendingInputContextSequences: [],

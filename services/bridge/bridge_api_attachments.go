@@ -686,16 +686,20 @@ func validateFileAttachmentConsumptionsTx(
 	for _, pair := range pairs {
 		var eventType, payloadJSON string
 		err := tx.QueryRow(ctx,
-			`SELECT type, payload_json
-			   FROM session_events
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4`,
+			`SELECT event.type, event.payload_json
+			   FROM session_events event
+			   JOIN files file
+			     ON file.workspace_id = event.workspace_id
+			    AND file.file_id = $5
+			  WHERE event.workspace_id = $1
+			    AND event.session_id = $2
+			    AND event.session_thread_id = $3
+			    AND event.event_id = $4`,
 			scope.GetWorkspaceId(),
 			scope.GetSessionId(),
 			scope.GetSessionThreadId(),
 			pair.GetSourceEventId(),
+			pair.GetFileId(),
 		).Scan(&eventType, &payloadJSON)
 		if dbconnect.IsNoRows(err) {
 			return status.Error(codes.InvalidArgument, "consumed file attachment source event is invalid")
@@ -723,19 +727,19 @@ func insertFileAttachmentConsumptionsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	requestEndEventID string,
+	requestStartEventID string,
 	pairs []*bridgev1.FileAttachmentPair,
 ) error {
 	for _, pair := range pairs {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_file_attachment_consumptions (
 				workspace_id, session_id, session_thread_id,
-				request_end_event_id, source_event_id, file_id
+				request_start_event_id, source_event_id, file_id
 			) VALUES ($1, $2, $3, $4, $5, $6)`,
 			scope.GetWorkspaceId(),
 			scope.GetSessionId(),
 			scope.GetSessionThreadId(),
-			requestEndEventID,
+			requestStartEventID,
 			pair.GetSourceEventId(),
 			pair.GetFileId(),
 		); err != nil {

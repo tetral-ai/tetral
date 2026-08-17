@@ -523,6 +523,7 @@ message WriteEventRequest {
   string request_kind = 14;
   reserved 15;
   reserved "tool_settlement";
+  repeated FileAttachmentPair consumed_file_attachments = 16;
 }
 
 message ServerToolUseUsage {
@@ -587,7 +588,8 @@ message WriteRequestEndRequest {
   reserved "request_kind";
   RequestEndReschedule reschedule = 11;
   reserved 12;
-  repeated FileAttachmentPair consumed_file_attachments = 13;
+  reserved 13;
+  reserved "consumed_file_attachments";
   RuntimeContextDelta trailing_context_delta = 14;
   PrefixConsumptionDraft prefix_consumption = 15;
   optional int64 compacted_through_message_sequence = 16;

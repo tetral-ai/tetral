@@ -14,6 +14,7 @@ import {
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import type {
 	SessionEvent,
+	SessionEventEnvelope,
 	SessionEventWriter,
 	SessionEventWriterRequestEndEnvelope,
 } from "../../../src/contracts/runtime.js";
@@ -1085,9 +1086,13 @@ describe("ThreadLoop", () => {
 			requests,
 		);
 		const appended: SessionEvent[] = [];
+		const requestStarts: SessionEventEnvelope[] = [];
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
 		const baseWriter = writerFrom((envelope) => {
 			appended.push(envelope.event);
+			if (envelope.event.type === "span.model_request_start") {
+				requestStarts.push(envelope);
+			}
 			return {
 				ok: true,
 				eventId: `bridge-${envelope.writeId}`,
@@ -1123,7 +1128,11 @@ describe("ThreadLoop", () => {
 		expect(requests).toHaveLength(2);
 		expect(requests.map((request) => request.attachments)).toEqual([
 			[pendingFileAttachment],
-			[pendingFileAttachment],
+			[],
+		]);
+		expect(requestStarts.map((start) => start.consumedFileAttachments ?? [])).toEqual([
+			[{ sourceEventId: "sevt_retry_file", fileId: "file_retry" }],
+			[],
 		]);
 		expect(JSON.stringify(requests[1]?.context)).toContain(
 			"retry this request",
@@ -1135,15 +1144,8 @@ describe("ThreadLoop", () => {
 		expect(JSON.stringify(requests[1]?.context)).not.toContain(failedDraft);
 		expect(requestEnds).toHaveLength(2);
 		expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
-		expect(requestEnds[0]?.consumedFileAttachments ?? []).toEqual([]);
 		expect(requestEnds[0]?.trailingContextAppend).toBeUndefined();
 		expect(requestEnds[1]?.reschedule).toBeUndefined();
-		expect(requestEnds[1]?.consumedFileAttachments).toEqual([
-			{
-				sourceEventId: "sevt_retry_file",
-				fileId: "file_retry",
-			},
-		]);
 		expect(requestEnds[1]?.trailingContextAppend).toBeUndefined();
 		expect(
 			requestEnds.filter(
@@ -2201,14 +2203,15 @@ describe("ThreadLoop", () => {
 		});
 		expect(requestEnds[0]?.trailingContextAppend).toBeUndefined();
 		expect(requestEnds[0]?.consumedAttachmentRefs ?? []).toEqual([]);
-		expect(requestEnds[0]?.consumedFileAttachments ?? []).toEqual([]);
 		expect(
 			session.state.contextManager
 				.entries()
 				.flatMap((message) => message.parts)
 				.some((part) => part.type === "reasoning"),
 		).toBe(false);
-		expect(session.state.pendingAttachments()).toEqual(attachments);
+		expect(session.state.pendingAttachments()).toEqual([
+			attachments[0]!,
+		]);
 	});
 	test("task notification commits after the running receipt and reaches the provider once", async () => {
 		const session = new ThreadRuntime("sesn_task_notification_turn");

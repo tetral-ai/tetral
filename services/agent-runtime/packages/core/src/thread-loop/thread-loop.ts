@@ -3143,6 +3143,16 @@ function coordinateProviderTurnEffect(
 				{
 					contextThroughMessageSequence: requestContextAnchorSequence,
 					requestKind: runtimeProviderStreamKindFromRequest(request),
+					consumedFileAttachments: request.attachments.flatMap((attachment) =>
+						attachment.fileBacked === undefined
+							? []
+							: [
+									{
+										sourceEventId: attachment.fileBacked.sourceEventId,
+										fileId: attachment.fileBacked.fileId,
+									},
+								],
+					),
 				},
 			),
 		);
@@ -3182,6 +3192,7 @@ function coordinateProviderTurnEffect(
 				"event_write_failed",
 			);
 		}
+		session.state.consumeFileBackedAttachmentRide();
 		if (
 			session.state.runtimeShutdownRequested() ||
 			session.state.userInterruptRequested() ||
@@ -6395,16 +6406,6 @@ async function appendModelRequestEndEvent(
 			? []
 			: [attachment.transient.attachmentRef],
 	);
-	const consumedFileAttachments = servedAttachments.flatMap((attachment) =>
-		attachment.fileBacked === undefined
-			? []
-			: [
-					{
-						sourceEventId: attachment.fileBacked.sourceEventId,
-						fileId: attachment.fileBacked.fileId,
-					},
-				],
-	);
 	const envelope: SessionEventWriterRequestEndEnvelope = {
 		workspaceId: session.identity.workspaceId,
 		sessionId: session.sessionId,
@@ -6421,7 +6422,6 @@ async function appendModelRequestEndEvent(
 		...(consumedAttachmentRefs.length > 0
 			? { consumedAttachmentRefs: [...consumedAttachmentRefs] }
 			: {}),
-		...(consumedFileAttachments.length > 0 ? { consumedFileAttachments } : {}),
 		...(reschedule !== undefined ? { reschedule } : {}),
 		...(trailingContextAppend === undefined ? {} : { trailingContextAppend }),
 		...(compaction === undefined
@@ -6629,6 +6629,9 @@ async function appendEvent(
 			| "agent_provider_request"
 			| "compaction_summary"
 			| "approval_reviewer";
+		readonly consumedFileAttachments?:
+			| SessionEventEnvelope["consumedFileAttachments"]
+			| undefined;
 	},
 ): Promise<SessionEventWriterAppendResult> {
 	const writeId = options.runtime.createId("event_write");
@@ -6684,6 +6687,9 @@ async function appendRetriedEvent(
 			| "agent_provider_request"
 			| "compaction_summary"
 			| "approval_reviewer";
+		readonly consumedFileAttachments?:
+			| SessionEventEnvelope["consumedFileAttachments"]
+			| undefined;
 	},
 ): Promise<SessionEventWriterAppendResult> {
 	const writeId = options.runtime.createId("event_write");
@@ -6775,6 +6781,9 @@ async function appendEventWithRetry(
 			| "agent_provider_request"
 			| "compaction_summary"
 			| "approval_reviewer";
+		readonly consumedFileAttachments?:
+			| SessionEventEnvelope["consumedFileAttachments"]
+			| undefined;
 	},
 ): Promise<SessionEventWriterAppendResult> {
 	let lastFailure: SessionEventWriterAppendResult | undefined;
@@ -6832,6 +6841,9 @@ async function appendEventWithWriteId(
 			| "agent_provider_request"
 			| "compaction_summary"
 			| "approval_reviewer";
+		readonly consumedFileAttachments?:
+			| SessionEventEnvelope["consumedFileAttachments"]
+			| undefined;
 	},
 ): Promise<SessionEventWriterAppendResult> {
 	const startedAt = options.runtime.monotonicMs();

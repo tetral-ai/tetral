@@ -508,6 +508,7 @@ func seedBridgeAPIRequestStart(
 	modelRequestID string,
 	requestKind string,
 	messageBoundary int64,
+	consumedFileAttachments ...*bridgev1.FileAttachmentPair,
 ) *bridgev1.WriteEventResponse {
 	t.Helper()
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
@@ -518,6 +519,7 @@ func seedBridgeAPIRequestStart(
 		PayloadJson:                   fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, modelRequestID),
 		ContextThroughMessageSequence: bridgeAPIInt64(messageBoundary),
 		RequestKind:                   requestKind,
+		ConsumedFileAttachments:       consumedFileAttachments,
 	})
 	if err != nil {
 		t.Fatalf("seed request start: %v", err)

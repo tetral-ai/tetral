@@ -177,10 +177,10 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 			FileId:        attachment.Origin.FileBacked.FileID,
 		})
 	}
-	seedBridgeAPIRequestStart(t, apiStore, scope, "rwrite_attachment_consumed_start", "mreq_attachment_consumed", "agent_provider_request", 0)
+	seedBridgeAPIRequestStart(t, apiStore, scope, "rwrite_attachment_consumed_start", "mreq_attachment_consumed", "agent_provider_request", 0, consumedFiles...)
 	if _, err := apiStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_consumed_end", ModelRequestId: "mreq_attachment_consumed",
-		FinishReason: "stop", UsageJson: `{}`, ConsumedFileAttachments: consumedFiles,
+		FinishReason: "stop", UsageJson: `{}`,
 	}); err != nil {
 		t.Fatalf("settle attachment-consuming request: %v", err)
 	}

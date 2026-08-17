@@ -228,11 +228,12 @@ Invariants a replacement must preserve:
   (`core/src/thread-loop/thread-state.ts`). Runtime admits at most that many
   attachments into a pending request ride; it does not synthesize model-only
   advisory messages for attachments outside the ride.
-- Attachment consumption is settled-output-only: the pending media rides the
-  request and is consumed only when that request end settles. A failed,
-  interrupted, or rescheduled request consumes nothing, and the same media
-  re-rides the next attempt (a rescheduled request end cannot consume
-  attachments).
+- File-backed attachment consumption is declared by exact source Event/file
+  pairs and becomes durable in the Request Start transaction before Provider
+  dispatch. It is therefore at-most-once across error, reschedule, and pod loss.
+  Transient tool-result media remains hot-owned and is consumed only by a
+  successful Request End. Attachments admitted during an active ride wait for
+  the next request.
 
 Conformance tests: `core/test/unit/llm-service.test.ts`,
 `core/test/unit/thread-loop/provider-request.test.ts`,

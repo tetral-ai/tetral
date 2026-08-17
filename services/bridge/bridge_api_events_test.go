@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -49,11 +50,16 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	store.AttachmentBlobStore = blob.NewFakeBlobStore()
+	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_start_facts", "start.png", "image/png", "start")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_start_facts", 1, "user.message",
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_start_facts"}}]}`)
 
 	startRequest := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_start", ModelRequestId: "mreq_facts",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
 		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: "sevt_start_facts", FileId: "file_start_facts"}},
 	}
 	first, err := store.WriteEvent(context.Background(), startRequest)
 	if err != nil {
@@ -68,6 +74,18 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	}
 	if second.GetDuplicate() == nil || second.GetDuplicate().GetEventId() != first.GetCommitted().GetEventId() {
 		t.Fatalf("duplicate result = %#v; first = %#v", second, first)
+	}
+	var startRows, consumptionRows int
+	var consumedAtStart string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_file_attachment_consumptions WHERE workspace_id='default' AND session_id=$1),
+		(SELECT request_start_event_id FROM session_file_attachment_consumptions WHERE workspace_id='default' AND session_id=$1)`, sessionID).
+		Scan(&startRows, &consumptionRows, &consumedAtStart); err != nil {
+		t.Fatalf("read Request Start consumption replay: %v", err)
+	}
+	if startRows != 1 || consumptionRows != 1 || consumedAtStart != first.GetCommitted().GetEventId() {
+		t.Fatalf("Request Start replay facts = starts %d consumptions %d owner %q", startRows, consumptionRows, consumedAtStart)
 	}
 
 	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
@@ -91,6 +109,50 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	}
 	if len(durable) != 1 || durable["parts"] == nil {
 		t.Fatalf("stored context contains non-context fields: %#v", durable)
+	}
+}
+
+func TestWriteEventRequestStartConsumptionRollsBackEventAndRelationTogether(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_start_consumption_rollback"
+		threadID  = "thr_start_consumption_rollback"
+		bindingID = "bind_start_consumption_rollback"
+		podUID    = "pod_start_consumption_rollback"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.AttachmentBlobStore = blob.NewFakeBlobStore()
+	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_start_rollback", "rollback.png", "image/png", "rollback")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_start_rollback", 1, "user.message",
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_start_rollback"}}]}`)
+	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_start_consumption() RETURNS trigger
+		LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected consumption failure'; END $$;
+		CREATE TRIGGER fail_start_consumption BEFORE INSERT ON session_file_attachment_consumptions
+		FOR EACH ROW EXECUTE FUNCTION fail_start_consumption()`); err != nil {
+		t.Fatalf("install atomic rollback fault: %v", err)
+	}
+	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_start_rollback",
+		ModelRequestId: "mreq_start_rollback", EventType: "span.model_request_start",
+		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
+		RequestKind:             requestKindAgentProviderRequest,
+		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: "sevt_start_rollback", FileId: "file_start_rollback"}},
+	})
+	if err == nil || response != nil {
+		t.Fatalf("faulted Request Start = %#v/%v; want transaction failure", response, err)
+	}
+	var starts, consumptions, operations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_file_attachment_consumptions WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND idempotency_key='rwrite_start_rollback')`, sessionID).
+		Scan(&starts, &consumptions, &operations); err != nil {
+		t.Fatalf("read atomic rollback facts: %v", err)
+	}
+	if starts != 0 || consumptions != 0 || operations != 0 {
+		t.Fatalf("faulted Request Start facts = starts %d consumptions %d operations %d; want zero", starts, consumptions, operations)
 	}
 }
 

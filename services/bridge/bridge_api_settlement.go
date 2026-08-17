@@ -167,11 +167,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	consumedFileAttachments, err := normalizeConsumedFileAttachments(request.GetConsumedFileAttachments())
-	if err != nil {
-		return nil, err
-	}
-	if len(consumedTransientAttachments.Refs)+len(consumedFileAttachments.Pairs) > MaxProviderRequestAttachments {
+	if len(consumedTransientAttachments.Refs) > MaxProviderRequestAttachments {
 		return nil, status.Error(codes.InvalidArgument, "too many consumed attachments")
 	}
 	usageJSON := defaultString(request.GetUsageJson(), "{}")
@@ -189,7 +185,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	}
 	requestKind := requestStart.RequestKind
 	if requestKind == requestKindCompactionSummary &&
-		(len(consumedTransientAttachments.Refs) > 0 || len(consumedFileAttachments.Pairs) > 0) {
+		len(consumedTransientAttachments.Refs) > 0 {
 		return nil, status.Error(codes.InvalidArgument, "compaction request end cannot consume attachments")
 	}
 	reschedule, err := normalizeRequestEndReschedule(request, requestKind)
@@ -213,7 +209,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		finishReason,
 		usageJSON,
 		consumedTransientAttachments.CanonicalJSON,
-		consumedFileAttachments.CanonicalJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -303,9 +298,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if err != nil {
 			return err
 		}
-		if err := validateFileAttachmentConsumptionsTx(ctx, tx, request.GetScope(), consumedFileAttachments.Pairs); err != nil {
-			return err
-		}
 		if !request.GetIsError() && len(activeTransientAttachmentRefs) > 0 {
 			if err := markTransientAttachmentsConsumedTx(ctx, tx, request.GetScope(), activeTransientAttachmentRefs, now); err != nil {
 				return err
@@ -338,17 +330,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		}
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
 			return err
-		}
-		if !request.GetIsError() && len(consumedFileAttachments.Pairs) > 0 {
-			if err := insertFileAttachmentConsumptionsTx(
-				ctx,
-				tx,
-				request.GetScope(),
-				eventID,
-				consumedFileAttachments.Pairs,
-			); err != nil {
-				return err
-			}
 		}
 		usageResult, err := tx.Exec(ctx,
 			`INSERT INTO request_usage_details (

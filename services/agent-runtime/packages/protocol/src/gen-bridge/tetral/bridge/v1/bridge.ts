@@ -709,6 +709,7 @@ export interface WriteEventRequest {
   assistantContextDelta: RuntimeContextDelta | undefined;
   contextThroughMessageSequence?: number | undefined;
   requestKind: string;
+  consumedFileAttachments: FileAttachmentPair[];
 }
 
 export interface ServerToolUseUsage {
@@ -767,7 +768,6 @@ export interface WriteRequestEndRequest {
   errorKind: string;
   consumedAttachmentRefs: string[];
   reschedule: RequestEndReschedule | undefined;
-  consumedFileAttachments: FileAttachmentPair[];
   trailingContextDelta: RuntimeContextDelta | undefined;
   prefixConsumption: PrefixConsumptionDraft | undefined;
   compactedThroughMessageSequence?: number | undefined;
@@ -7838,6 +7838,7 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     assistantContextDelta: undefined,
     contextThroughMessageSequence: undefined,
     requestKind: "",
+    consumedFileAttachments: [],
   };
 }
 
@@ -7869,6 +7870,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.requestKind !== "") {
       writer.uint32(114).string(message.requestKind);
+    }
+    for (const v of message.consumedFileAttachments) {
+      FileAttachmentPair.encode(v!, writer.uint32(130).fork()).join();
     }
     return writer;
   },
@@ -7952,6 +7956,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.requestKind = reader.string();
           continue;
         }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.consumedFileAttachments.push(FileAttachmentPair.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8004,6 +8016,11 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.request_kind)
         ? globalThis.String(object.request_kind)
         : "",
+      consumedFileAttachments: globalThis.Array.isArray(object?.consumedFileAttachments)
+        ? object.consumedFileAttachments.map((e: any) => FileAttachmentPair.fromJSON(e))
+        : globalThis.Array.isArray(object?.consumed_file_attachments)
+        ? object.consumed_file_attachments.map((e: any) => FileAttachmentPair.fromJSON(e))
+        : [],
     };
   },
 
@@ -8036,6 +8053,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.requestKind !== "") {
       obj.requestKind = message.requestKind;
     }
+    if (message.consumedFileAttachments?.length) {
+      obj.consumedFileAttachments = message.consumedFileAttachments.map((e) => FileAttachmentPair.toJSON(e));
+    }
     return obj;
   },
 
@@ -8058,6 +8078,8 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : undefined;
     message.contextThroughMessageSequence = object.contextThroughMessageSequence ?? undefined;
     message.requestKind = object.requestKind ?? "";
+    message.consumedFileAttachments = object.consumedFileAttachments?.map((e) => FileAttachmentPair.fromPartial(e)) ||
+      [];
     return message;
   },
 };
@@ -8813,7 +8835,6 @@ function createBaseWriteRequestEndRequest(): WriteRequestEndRequest {
     errorKind: "",
     consumedAttachmentRefs: [],
     reschedule: undefined,
-    consumedFileAttachments: [],
     trailingContextDelta: undefined,
     prefixConsumption: undefined,
     compactedThroughMessageSequence: undefined,
@@ -8851,9 +8872,6 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     }
     if (message.reschedule !== undefined) {
       RequestEndReschedule.encode(message.reschedule, writer.uint32(90).fork()).join();
-    }
-    for (const v of message.consumedFileAttachments) {
-      FileAttachmentPair.encode(v!, writer.uint32(106).fork()).join();
     }
     if (message.trailingContextDelta !== undefined) {
       RuntimeContextDelta.encode(message.trailingContextDelta, writer.uint32(114).fork()).join();
@@ -8955,14 +8973,6 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
           message.reschedule = RequestEndReschedule.decode(reader, reader.uint32());
           continue;
         }
-        case 13: {
-          if (tag !== 106) {
-            break;
-          }
-
-          message.consumedFileAttachments.push(FileAttachmentPair.decode(reader, reader.uint32()));
-          continue;
-        }
         case 14: {
           if (tag !== 114) {
             break;
@@ -9059,11 +9069,6 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
         ? object.consumed_attachment_refs.map((e: any) => globalThis.String(e))
         : [],
       reschedule: isSet(object.reschedule) ? RequestEndReschedule.fromJSON(object.reschedule) : undefined,
-      consumedFileAttachments: globalThis.Array.isArray(object?.consumedFileAttachments)
-        ? object.consumedFileAttachments.map((e: any) => FileAttachmentPair.fromJSON(e))
-        : globalThis.Array.isArray(object?.consumed_file_attachments)
-        ? object.consumed_file_attachments.map((e: any) => FileAttachmentPair.fromJSON(e))
-        : [],
       trailingContextDelta: isSet(object.trailingContextDelta)
         ? RuntimeContextDelta.fromJSON(object.trailingContextDelta)
         : isSet(object.trailing_context_delta)
@@ -9126,9 +9131,6 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     if (message.reschedule !== undefined) {
       obj.reschedule = RequestEndReschedule.toJSON(message.reschedule);
     }
-    if (message.consumedFileAttachments?.length) {
-      obj.consumedFileAttachments = message.consumedFileAttachments.map((e) => FileAttachmentPair.toJSON(e));
-    }
     if (message.trailingContextDelta !== undefined) {
       obj.trailingContextDelta = RuntimeContextDelta.toJSON(message.trailingContextDelta);
     }
@@ -9168,8 +9170,6 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     message.reschedule = (object.reschedule !== undefined && object.reschedule !== null)
       ? RequestEndReschedule.fromPartial(object.reschedule)
       : undefined;
-    message.consumedFileAttachments = object.consumedFileAttachments?.map((e) => FileAttachmentPair.fromPartial(e)) ||
-      [];
     message.trailingContextDelta = (object.trailingContextDelta !== undefined && object.trailingContextDelta !== null)
       ? RuntimeContextDelta.fromPartial(object.trailingContextDelta)
       : undefined;

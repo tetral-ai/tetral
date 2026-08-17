@@ -22,21 +22,17 @@
  *   | pending | media queued for the next request    | addPendingAttachments       | pending -> riding         |
  *   | riding  | media attached to the active request | beginPendingAttachmentRide  | riding -> settled;        |
  *   |         |                                      |                             | riding retained on retry  |
- *   | settled | consumed by a settled request-end    | settlePendingAttachmentRide | terminal for that media   |
- *   Error request-ends and reschedules never settle the ride. Once an isError=false
- *   request-end acknowledges, the ride is settled even if later tool-join closeout
- *   returns an interrupted turn result. Attachments admitted during a ride remain
- *   queued separately for the next request.
+ *   | riding  | file media commits at Request Start  | consumeFileBackedAttachmentRide | transient remains |
+ *   | settled | transient consumed by request-end    | settlePendingAttachmentRide | terminal for that media   |
+ *   A durable Request Start consumes only the exact file-backed pairs before Provider
+ *   dispatch. Error request-ends retain transient media for retry. Attachments admitted
+ *   during a ride remain queued separately for the next request.
  *
  * INVARIANTS:
- *   - One-ride media: file-backed user media and tool-result transient attachments
- *     ride provider requests within a turn until the turn commits settled model
- *     output. Error request-ends and reschedules consume nothing: surviving media
- *     re-rides, while rejected origins remain active but stay excluded from same-
- *     turn reassembly. A successful request-end consumes the cumulative carried
- *     and rejected origin set even if later tool-join closeout reports interruption;
- *     once a settled request-end records it, later turns keep only the text projection
- *     (context-projection.ts).
+ *   - One-ride media: file-backed user media becomes at-most-once at durable Request
+ *     Start, while tool-result transient media remains on the ride until successful
+ *     Request End. Rejected origins stay excluded from same-turn reassembly. Later
+ *     turns keep only durable context projection (context-projection.ts).
  *   - The approval-reviewer model is platform runtime config: clients never choose it,
  *     Runtime Core sets it on the provider invocation, and Gateway injects credentials but
  *     never chooses or replaces it.
@@ -600,6 +596,7 @@ export class ThreadState {
 		RuntimePendingSandboxExecutionJobState | undefined
 	>;
 	#activeAttachmentRide: RuntimeProviderAttachment[] | undefined;
+	#fileBackedRideConsumed = false;
 	#pendingAttachments: RuntimeProviderAttachment[] = [];
 	#threadProcessor: ThreadProcessor | undefined;
 	#lastRequestUsage: RuntimeUsage | undefined;
@@ -864,15 +861,29 @@ export class ThreadState {
 		) {
 			this.#activeAttachmentRide = this.#pendingAttachments;
 			this.#pendingAttachments = [];
+			this.#fileBackedRideConsumed = false;
 		}
 		return (this.#activeAttachmentRide ?? []).map(
 			cloneRuntimeProviderAttachment,
 		);
 	}
 
+	consumeFileBackedAttachmentRide(): void {
+		if (this.#activeAttachmentRide !== undefined) {
+			const before = this.#activeAttachmentRide.length;
+			this.#activeAttachmentRide = this.#activeAttachmentRide.filter(
+				(attachment) => attachment.fileBacked === undefined,
+			);
+			this.#fileBackedRideConsumed ||=
+				this.#activeAttachmentRide.length !== before;
+		}
+	}
+
 	settlePendingAttachmentRide(): void {
-		const hadPendingAttachments = this.hasPendingAttachments();
+		const hadPendingAttachments =
+			this.hasPendingAttachments() || this.#fileBackedRideConsumed;
 		this.#activeAttachmentRide = undefined;
+		this.#fileBackedRideConsumed = false;
 		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
@@ -881,6 +892,7 @@ export class ThreadState {
 	): void {
 		const hadPendingAttachments = this.hasPendingAttachments();
 		this.#activeAttachmentRide = undefined;
+		this.#fileBackedRideConsumed = false;
 		this.#pendingAttachments = [];
 		const available = Math.min(attachments.length, MaxProviderAttachments);
 		this.#pendingAttachments.push(
@@ -1146,6 +1158,7 @@ export class ThreadState {
 			RuntimePendingSandboxExecutionJobState | undefined
 		>;
 		this.#activeAttachmentRide = undefined;
+		this.#fileBackedRideConsumed = false;
 		this.#pendingAttachments = [];
 		this.refreshActiveInputView();
 		this.#threadProcessor = undefined;

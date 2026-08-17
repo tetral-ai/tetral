@@ -227,29 +227,15 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesCommittedUnconsumedFileAttach
 		`["sevt_file_pending_first"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 1, 1)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_later", "messages",
 		`["sevt_file_pending_later"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 3, 3)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 0, &bridgev1.FileAttachmentPair{
+		SourceEventId: "sevt_file_pending_first", FileId: "file_pending_consumed",
+	})
 	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_file_pending_end", ModelRequestId: "mreq_file_pending",
 		FinishReason: "stop", UsageJson: `{}`,
 	})
 	if err != nil {
 		t.Fatalf("seed request end: %v", err)
-	}
-	var requestEndEventID string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT event_id FROM session_events
-		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
-		    AND model_request_id = 'mreq_file_pending' AND type = 'span.model_request_end'`,
-		sessionID, threadID,
-	).Scan(&requestEndEventID); err != nil {
-		t.Fatalf("read request end event: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_file_attachment_consumptions (
-			workspace_id, session_id, session_thread_id, request_end_event_id, source_event_id, file_id
-		) VALUES ('default', $1, $2, $3, 'sevt_file_pending_first', 'file_pending_consumed')`,
-		sessionID, threadID, requestEndEventID); err != nil {
-		t.Fatalf("seed consumed file attachment: %v", err)
 	}
 
 	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
@@ -450,39 +436,63 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *te
 		t.Fatalf("analyze media query tables: %v", err)
 	}
 	rows, err := admin.QueryContext(context.Background(),
-		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) "+loadThreadPendingFileAttachmentsSQL,
+		"EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) "+loadThreadPendingFileAttachmentsSQL,
 		"default", sessionID, threadID,
 	)
 	if err != nil {
 		t.Fatalf("explain pending file query: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var planLines []string
+	var planJSON string
 	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
+		if err := rows.Scan(&planJSON); err != nil {
 			t.Fatalf("scan pending file query plan: %v", err)
 		}
-		planLines = append(planLines, line)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("pending file query plan rows: %v", err)
 	}
-	plan := strings.Join(planLines, "\n")
-	if !strings.Contains(plan, "session_events_pending_media_lookup") {
-		t.Fatalf("pending file query does not use the media lookup index:\n%s", plan)
+	var documents []struct {
+		Plan map[string]any `json:"Plan"`
 	}
-	if strings.Contains(plan, "Seq Scan on session_events") {
-		t.Fatalf("pending file query scans non-media session events:\n%s", plan)
+	if err := json.Unmarshal([]byte(planJSON), &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("decode pending file query plan = %v/%s", err, planJSON)
 	}
-	if !strings.Contains(plan, "session_runtime_inbox_attachment_authority_lookup") {
-		t.Fatalf("pending file query does not narrow Inbox authority by thread:\n%s", plan)
+	var mediaIndex, inboxIndex bool
+	var inboxLoops float64
+	var inboxSeqScan bool
+	sharedHitBlocks, _ := documents[0].Plan["Shared Hit Blocks"].(float64)
+	sharedReadBlocks, _ := documents[0].Plan["Shared Read Blocks"].(float64)
+	sharedBlocks := sharedHitBlocks + sharedReadBlocks
+	walkPostgreSQLPlan(documents[0].Plan, func(node map[string]any) {
+		relation, _ := node["Relation Name"].(string)
+		index, _ := node["Index Name"].(string)
+		nodeType, _ := node["Node Type"].(string)
+		if index == "session_events_pending_media_lookup" {
+			mediaIndex = true
+		}
+		if index == "session_runtime_inbox_attachment_authority_lookup" {
+			inboxIndex = true
+			inboxLoops, _ = node["Actual Loops"].(float64)
+		}
+		if relation == "session_runtime_inbox" && nodeType == "Seq Scan" {
+			inboxSeqScan = true
+		}
+	})
+	if !mediaIndex || !inboxIndex || inboxSeqScan || inboxLoops != 1 || sharedBlocks > 2000 {
+		t.Fatalf("pending file plan facts = mediaIndex:%t inboxIndex:%t inboxSeq:%t inboxLoops:%.0f sharedBlocks:%.0f\n%s",
+			mediaIndex, inboxIndex, inboxSeqScan, inboxLoops, sharedBlocks, planJSON)
 	}
-	if strings.Contains(plan, "Seq Scan on session_runtime_inbox") {
-		t.Fatalf("pending file query scans unrelated Inbox history:\n%s", plan)
-	}
-	if strings.Contains(plan, "session_runtime_inbox inbox (actual rows=1.00 loops=32)") {
-		t.Fatalf("pending file query repeats the Inbox authority scan per media event:\n%s", plan)
+}
+
+func walkPostgreSQLPlan(node map[string]any, visit func(map[string]any)) {
+	visit(node)
+	children, _ := node["Plans"].([]any)
+	for _, child := range children {
+		childNode, _ := child.(map[string]any)
+		if childNode != nil {
+			walkPostgreSQLPlan(childNode, visit)
+		}
 	}
 }
 

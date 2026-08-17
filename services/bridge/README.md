@@ -330,6 +330,11 @@ and active lifecycle facts directly from durable rows.
   durable append boundary, but Tool membership is not a separate survival
   rule. Pod loss remains stricter: an abandoned open draft is excluded unless
   reconciliation completes the exact Tool Call/Result repair pair.
+- **File attachment boundary.** A provider Request Start privately declares
+  the exact file-backed `(source Event, file)` ride. Bridge writes those
+  consumption rows atomically with the Start Event, so a lost ACK replays one
+  receipt and a later error, reschedule, or pod loss cannot make that file ride
+  appear pending again. Request End retains only transient attachment settlement.
 - **Conformance.** `bridge_api_events_test.go` drives PostgreSQL `WriteEvent`
   and `WriteRequestEnd` to prove ordered durable members, deterministic replay,
   global Tool Call identity, target-only Tool settlement, and exact/one-over

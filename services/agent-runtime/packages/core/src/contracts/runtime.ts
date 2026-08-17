@@ -975,6 +975,15 @@ export const SessionEventEnvelopeSchema = z
 				"approval_reviewer",
 			])
 			.optional(),
+		consumedFileAttachments: z
+			.array(
+				z.strictObject({
+					sourceEventId: SanitizedIdentifierSchema,
+					fileId: SanitizedIdentifierSchema,
+				}),
+			)
+			.max(32)
+			.optional(),
 	})
 	.superRefine((envelope, context) => {
 		const memberEvent =
@@ -1021,7 +1030,8 @@ export const SessionEventEnvelopeSchema = z
 			}
 		} else if (
 			envelope.contextThroughMessageSequence !== undefined ||
-			envelope.requestKind !== undefined
+			envelope.requestKind !== undefined ||
+			envelope.consumedFileAttachments !== undefined
 		) {
 			context.addIssue({
 				code: "custom",
@@ -1061,15 +1071,6 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z
 		finishReason: RuntimeFinishReasonSchema,
 		usage: RuntimeUsageSchema.optional(),
 		consumedAttachmentRefs: z.array(SanitizedIdentifierSchema).optional(),
-		consumedFileAttachments: z
-			.array(
-				z.strictObject({
-					sourceEventId: SanitizedIdentifierSchema,
-					fileId: SanitizedIdentifierSchema,
-				}),
-			)
-			.max(32)
-			.optional(),
 		reschedule: z
 			.strictObject({
 				attempt: z.number().int().positive(),
@@ -1119,8 +1120,7 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z
 	})
 	.superRefine((envelope, context) => {
 		const consumedAttachmentCount =
-			(envelope.consumedAttachmentRefs?.length ?? 0) +
-			(envelope.consumedFileAttachments?.length ?? 0);
+			envelope.consumedAttachmentRefs?.length ?? 0;
 		if (consumedAttachmentCount > 32) {
 			context.addIssue({
 				code: "custom",

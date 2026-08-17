@@ -1053,6 +1053,12 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				sessionVisible: false,
 				contextThroughMessageSequence: envelope.contextThroughMessageSequence,
 				requestKind: envelope.requestKind ?? "",
+				consumedFileAttachments: (envelope.consumedFileAttachments ?? []).map(
+					(attachment) => ({
+						sourceEventId: attachment.sourceEventId,
+						fileId: attachment.fileId,
+					}),
+				),
 				assistantContextDelta:
 					envelope.assistantContextAppend === undefined
 						? undefined
@@ -1198,12 +1204,6 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				isError: envelope.isError,
 				errorKind: envelope.errorKind ?? "",
 				consumedAttachmentRefs: [...(envelope.consumedAttachmentRefs ?? [])],
-				consumedFileAttachments: (envelope.consumedFileAttachments ?? []).map(
-					(attachment) => ({
-						sourceEventId: attachment.sourceEventId,
-						fileId: attachment.fileId,
-					}),
-				),
 				reschedule:
 					envelope.reschedule === undefined
 						? undefined

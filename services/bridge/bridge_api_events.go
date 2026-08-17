@@ -53,6 +53,13 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	if err != nil {
 		return nil, err
 	}
+	consumedFileAttachments, err := normalizeConsumedFileAttachments(request.GetConsumedFileAttachments())
+	if err != nil {
+		return nil, err
+	}
+	if requestStart == nil && len(consumedFileAttachments.Pairs) > 0 {
+		return nil, status.Error(codes.InvalidArgument, "file attachment consumption requires a model request start")
+	}
 	if !json.Valid([]byte(request.GetPayloadJson())) {
 		evidence.Kind = "schema"
 		return nil, status.Error(codes.InvalidArgument, "event payload must be JSON")
@@ -72,6 +79,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	declarationDigest, err := writeEventDeclarationDigest(
 		request,
 		payloadJSON,
+		consumedFileAttachments.CanonicalJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -142,6 +150,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			if err := verifyRequestStartMessageBoundaryTx(ctx, tx, request.GetScope(), requestStart.ContextThroughMessageSequence); err != nil {
 				return err
 			}
+			if err := validateFileAttachmentConsumptionsTx(ctx, tx, request.GetScope(), consumedFileAttachments.Pairs); err != nil {
+				return err
+			}
 		}
 		eventType := operationSourceKind
 		eventPayloadJSON := payloadJSON
@@ -204,6 +215,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			now,
 		); err != nil {
 			return err
+		}
+		if requestStart != nil && len(consumedFileAttachments.Pairs) > 0 {
+			if err := insertFileAttachmentConsumptionsTx(ctx, tx, request.GetScope(), eventID, consumedFileAttachments.Pairs); err != nil {
+				return err
+			}
 		}
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
 			return err

@@ -412,19 +412,19 @@ const (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
 		session_thread_id TEXT NOT NULL,
-		request_end_event_id TEXT NOT NULL,
+		request_start_event_id TEXT NOT NULL,
 		source_event_id TEXT NOT NULL,
 		file_id TEXT NOT NULL,
 		UNIQUE (
 			workspace_id, session_id, session_thread_id,
-			request_end_event_id, source_event_id, file_id
+			request_start_event_id, source_event_id, file_id
 		),
 		FOREIGN KEY (workspace_id, session_id)
 			REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, session_id, session_thread_id)
 			REFERENCES session_threads(workspace_id, session_id, id),
 		FOREIGN KEY (
-			workspace_id, session_id, session_thread_id, request_end_event_id
+			workspace_id, session_id, session_thread_id, request_start_event_id
 		) REFERENCES session_events(
 			workspace_id, session_id, session_thread_id, event_id
 		),
@@ -1668,7 +1668,7 @@ END $$`
 	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
-	createPostgreSQLSessionRuntimeInboxAttachmentIndex      = `CREATE INDEX IF NOT EXISTS session_runtime_inbox_attachment_authority_lookup ON session_runtime_inbox(workspace_id, session_id, session_thread_id, runtime_input_id) INCLUDE (input_kind, status, event_ids_json)`
+	createPostgreSQLSessionRuntimeInboxAttachmentIndex      = `CREATE INDEX IF NOT EXISTS session_runtime_inbox_attachment_authority_lookup ON session_runtime_inbox(workspace_id, session_id, session_thread_id, runtime_input_id) INCLUDE (input_kind, status)`
 	createPostgreSQLSessionEventsAgentMailDeliveryIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_agent_mail_delivery ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`

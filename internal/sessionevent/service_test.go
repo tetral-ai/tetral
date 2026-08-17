@@ -867,6 +867,39 @@ func TestAppendClientEventsProducesContiguousRuntimeInputRanges(t *testing.T) {
 	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
 }
 
+func TestAppendClientEventsBirthsOneMaximumReferenceRuntimeInput(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	const sessionID = "sesn_event_maximum_runtime_input"
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
+	limits := DefaultLimits()
+	limits.MaxEventsPerRequest = queue.MaxRuntimeInputEventRefsPerJob
+	service := newSessionEventServiceForTest(runtime, WithLimits(limits))
+	events := make([]IncomingEvent, queue.MaxRuntimeInputEventRefsPerJob)
+	for index := range events {
+		events[index] = IncomingEvent{Type: EventTypeUserMessage, Content: []TextContentBlock{{
+			Type: ContentBlockTypeText, Text: fmt.Sprintf("message-%03d", index),
+		}}}
+	}
+	result, err := service.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, "idem_maximum_runtime_input", AppendRequest{Events: events})
+	if err != nil {
+		t.Fatalf("AppendClientEvents maximum Runtime input: %v", err)
+	}
+	jobs := readSessionEventQueueJobs(t, admin, sessionID)
+	if len(result.Data) != queue.MaxRuntimeInputEventRefsPerJob || len(jobs) != 1 {
+		t.Fatalf("maximum Runtime input birth = events %d jobs %d; want %d/1", len(result.Data), len(jobs), queue.MaxRuntimeInputEventRefsPerJob)
+	}
+	wantIDs := make([]string, len(result.Data))
+	for index, event := range result.Data {
+		if !strings.HasPrefix(event.ID, IDPrefix) {
+			t.Fatalf("event %d id = %q; want production %q prefix", index, event.ID, IDPrefix)
+		}
+		wantIDs[index] = event.ID
+	}
+	assertRuntimeInputQueueJob(t, jobs[0], RuntimeInputKindMessages, 0, wantIDs, result.Data[0].Sequence, result.Data[len(result.Data)-1].Sequence)
+	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
+}
+
 func TestRuntimeInputSegmentsBreakAcrossNonRuntimeSequenceGaps(t *testing.T) {
 	segments := runtimeInputSegments([]*Event{
 		{ID: "evt_first", ThreadID: "thr_contiguous", Sequence: 1, Type: EventTypeUserMessage},
