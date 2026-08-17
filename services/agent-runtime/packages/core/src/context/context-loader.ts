@@ -84,7 +84,8 @@ export type AcceptedInputCommitResult =
 				| "task_notification_message_invalid"
 				| "task_notification_payload_mismatch";
 	  }
-	| { readonly type: "stale_custody" };
+	| { readonly type: "stale_custody" }
+	| { readonly type: "barrier_stale_custody" };
 
 /** Durable pending tool-use state reconstructed during a cold thread load. */
 export interface RuntimeLoadedPendingToolUse {

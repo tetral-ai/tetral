@@ -45,74 +45,6 @@ func TestValidateApprovalReviewTextBounds(t *testing.T) {
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreInterruptReplayFollowsDurableTurnAuthority(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_interrupt_turn_authority"
-		threadID  = "thr_interrupt_turn_authority"
-		bindingID = "bind_interrupt_turn_authority"
-		podUID    = "pod_interrupt_turn_authority"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIOpenDurableTurn(t, admin, scope, "evt_interrupt_turn_open")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_old", 2, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_interrupt_old", "interrupt_control",
-		`["evt_interrupt_old"]`, "accepted", bindingID, podUID, 2, 2)
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	oldRequest := &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: "rin_interrupt_old"}
-	first, err := store.CommitInputs(context.Background(), oldRequest)
-	if err != nil || first.GetCommitted() == nil {
-		t.Fatalf("first interrupt commit = %#v/%v; want committed", first, err)
-	}
-	openReplay, err := store.CommitInputs(context.Background(), oldRequest)
-	if err != nil || openReplay.GetCommitted() == nil {
-		t.Fatalf("open-turn lost-response replay = %#v/%v; want identical committed receipt", openReplay, err)
-	}
-
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_turn_idle", 3, "session.status_idle", `{"type":"session.status_idle"}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='idle'
-		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
-		t.Fatalf("settle durable interrupt turn: %v", err)
-	}
-	settledReplay, err := store.CommitInputs(context.Background(), oldRequest)
-	if err != nil || settledReplay.GetCommitted() == nil {
-		t.Fatalf("settled interrupt replay = %#v/%v; want original committed receipt", settledReplay, err)
-	}
-
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_new", 4, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_interrupt_new", "interrupt_control",
-		`["evt_interrupt_new"]`, "accepted", bindingID, podUID, 4, 4)
-	newer, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_interrupt_new",
-	})
-	if err != nil || newer.GetCommitted() == nil {
-		t.Fatalf("newer idle interrupt = %#v/%v; want committed", newer, err)
-	}
-
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_pre_successor", 5, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_interrupt_pre_successor", "interrupt_control",
-		`["evt_interrupt_pre_successor"]`, "accepted", bindingID, podUID, 5, 5)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_successor_open", 6, "session.status_running", `{"type":"session.status_running"}`)
-	oldSuccessor, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_interrupt_pre_successor",
-	})
-	if err != nil || oldSuccessor.GetStale() == nil {
-		t.Fatalf("pre-successor interrupt = %#v/%v; want stale", oldSuccessor, err)
-	}
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_post_successor", 7, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_interrupt_post_successor", "interrupt_control",
-		`["evt_interrupt_post_successor"]`, "accepted", bindingID, podUID, 7, 7)
-	postSuccessor, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_interrupt_post_successor",
-	})
-	if err != nil || postSuccessor.GetCommitted() == nil {
-		t.Fatalf("post-successor interrupt = %#v/%v; want committed", postSuccessor, err)
-	}
-}
-
 func TestPostgreSQLWriteRequestEndAtomicallyCommitsActiveRunInterrupt(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -138,10 +70,16 @@ func TestPostgreSQLWriteRequestEndAtomicallyCommitsActiveRunInterrupt(t *testing
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_atomic_active_interrupt", interruptSequence, "user.interrupt", `{}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
 		`["evt_atomic_active_interrupt"]`, "accepted", bindingID, podUID, interruptSequence, interruptSequence)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, interruptID, "interrupt_control", "evt_atomic_active_interrupt", interruptSequence, queue.DefaultMaxAttempts, time.Now().UTC())
+	interruptLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "atomic-active-interrupt",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
 	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_atomic_active_end", ModelRequestId: modelRequestID,
 		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
-		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{RuntimeInputId: interruptID},
+		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease)},
 	})
 	if err != nil || ended.GetCommitted() == nil {
 		t.Fatalf("atomically close active request and interrupt = %#v/%v; want committed", ended, err)

@@ -49,8 +49,9 @@ describe("method-specific Runtime ingress bounds", () => {
     expect(validateAcceptTaskNotificationRequest({ ...scope, runtimeInputId: "task:t1", inputOrder: 0, notificationJson: "{}" })).toEqual({ ok: true });
     expectInvalid(validateAcceptTaskNotificationRequest({ ...scope, runtimeInputId: "task:t1", inputOrder: -1, notificationJson: "{}" }));
 
-    expect(validateInterruptRequest({ ...scope, runtimeInputId: "rin_interrupt", inputOrder: 2, origin: InterruptOrigin.INTERRUPT_ORIGIN_USER })).toEqual({ ok: true });
-    expectInvalid(validateInterruptRequest({ ...scope, runtimeInputId: "rin_interrupt", inputOrder: 0, origin: InterruptOrigin.INTERRUPT_ORIGIN_USER }));
+    const interrupt = { ...scope, runtimeInputId: "rin_interrupt", origin: InterruptOrigin.INTERRUPT_ORIGIN_USER, interruptLeaseRef: { jobId: "qjob_interrupt", leaseToken: "lease_interrupt", partitionKey: "session:wksp_1:sesn_1", dedupeKey: "runtime_input:wksp_1:sesn_1:rin_interrupt" } };
+    expect(validateInterruptRequest(interrupt)).toEqual({ ok: true });
+    expectInvalid(validateInterruptRequest({ ...interrupt, interruptLeaseRef: undefined }));
 
     expect(validateResolveToolConfirmationRequest({ ...scope, runtimeInputId: "rin_confirm", toolUseEventId: "sevt_tool", decision: ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_DENY, denyMessage: "no" })).toEqual({ ok: true });
     expectInvalid(validateResolveToolConfirmationRequest({ ...scope, runtimeInputId: "rin_confirm", toolUseEventId: "", decision: ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_ALLOW }));

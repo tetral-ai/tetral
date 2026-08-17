@@ -173,6 +173,9 @@ func runtimeResultFromAcceptInput(response *agentruntimev1.AcceptInputResponse) 
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
 	}
 	if rejected := response.GetRejected(); rejected != nil {
+		if rejected.GetReason() == agentruntimev1.AcceptInputFailure_ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
+		}
 		return rejectedRuntimeResponse(runtimeFailureKind(rejected.GetReason().String()), rejected.GetRetryable())
 	}
 	return invalidRuntimeResponse()
@@ -189,6 +192,9 @@ func runtimeResultFromAcceptAgentMail(response *agentruntimev1.AcceptAgentMailRe
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
 	}
 	if rejected := response.GetRejected(); rejected != nil {
+		if rejected.GetReason() == agentruntimev1.AcceptAgentMailFailure_ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
+		}
 		return rejectedRuntimeResponse(runtimeFailureKind(rejected.GetReason().String()), rejected.GetRetryable())
 	}
 	return invalidRuntimeResponse()
@@ -205,6 +211,9 @@ func runtimeResultFromAcceptTask(response *agentruntimev1.AcceptTaskNotification
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
 	}
 	if rejected := response.GetRejected(); rejected != nil {
+		if rejected.GetReason() == agentruntimev1.AcceptTaskNotificationFailure_ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
+		}
 		return rejectedRuntimeResponse(runtimeFailureKind(rejected.GetReason().String()), rejected.GetRetryable())
 	}
 	return invalidRuntimeResponse()
@@ -233,10 +242,16 @@ func runtimeResultFromToolConfirmation(response *agentruntimev1.ResolveToolConfi
 	if response.GetAccepted() != nil {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
 	}
-	if response.GetDuplicate() != nil || response.GetStale() != nil {
+	if response.GetDuplicate() != nil {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
+	}
+	if response.GetStale() != nil {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
 	}
 	if rejected := response.GetRejected(); rejected != nil {
+		if rejected.GetReason() == agentruntimev1.ResolveToolConfirmationFailure_RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
+		}
 		return rejectedRuntimeResponse(runtimeFailureKind(rejected.GetReason().String()), rejected.GetRetryable())
 	}
 	return invalidRuntimeResponse()
@@ -345,22 +360,6 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	}
 	if plan.StaleAccepted {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
-	}
-	// Interrupt preparation and transport are separated by Queue scheduling and
-	// network work. Re-read the durable Inbox immediately before transport so a
-	// Request End that joined this interrupt while the lease stayed live wins
-	// before the command can address a successor hot run.
-	if plan.Interrupt != nil {
-		plan, err = d.Store.PrepareRuntimeCommand(ctx, job)
-		if err != nil {
-			return runtimeDeliveryResultFromPrepareError(err), nil
-		}
-		if plan.SettledAccepted {
-			return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
-		}
-		if plan.StaleAccepted {
-			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
-		}
 	}
 	if (job.Kind == queue.KindCleanupSession || job.Kind == queue.KindSessionDeleteCleanup) && plan.CleanupTargetGone {
 		finalizer, ok := d.Store.(RuntimeCleanupFinalizer)
@@ -642,17 +641,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 			return nil
 		}
 		if job.Kind == queue.KindRuntimeInput && job.InputKind == "task_notification" {
-			superseded, err := taskNotificationSupersededByProcessedAgentInterruptTx(ctx, tx, job)
-			if err != nil {
-				return err
-			}
-			if superseded {
-				if err := cancelSupersededRuntimeInboxTx(ctx, tx, job, now); err != nil {
-					return err
-				}
-				plan = RuntimeCommandPlan{StaleAccepted: true}
-				return nil
-			}
 			taskPlan, taskCommandPlan, err := s.prepareTaskNotificationCommandTx(ctx, tx, job, port, now)
 			if err != nil {
 				var initialMCP runtimeInitialMCPManifestRequiredError
@@ -674,35 +662,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 			if stale {
 				plan = RuntimeCommandPlan{StaleAccepted: true}
 				return nil
-			}
-			if job.InputKind == "interrupt_control" {
-				superseded, err := interruptRuntimeInputSupersededByRunTx(ctx, tx, job)
-				if err != nil {
-					return err
-				}
-				if superseded {
-					if err := cancelSupersededRuntimeInboxTx(ctx, tx, job, now); err != nil {
-						return err
-					}
-					plan = RuntimeCommandPlan{StaleAccepted: true}
-					return nil
-				}
-			}
-			if job.InputKind == "messages" {
-				fence, err := messageInterruptFenceStatusTx(ctx, tx, job)
-				if err != nil {
-					return err
-				}
-				switch fence {
-				case messageInterruptFenceAllSuperseded:
-					if err := cancelSupersededRuntimeInboxTx(ctx, tx, job, now); err != nil {
-						return err
-					}
-					plan = RuntimeCommandPlan{StaleAccepted: true}
-					return nil
-				case messageInterruptFenceMixed:
-					return runtimeDeliveryPrepareError{kind: "runtime_input_superseded_by_interrupt", message: "message runtime input mixes superseded and deliverable events", retryable: false}
-				}
 			}
 			if err := requireInitialMCPManifestReadyTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 				return err
@@ -939,10 +898,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 		return s.finalizeMCPManifestDelivery(ctx, job, result)
 	}
 	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" || job.RuntimeInputID == "" ||
-		(job.InputKind == "interrupt_control" && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) {
+		((job.InputKind == "interrupt_control" || result.Status == RuntimeDeliveryBarrierStale) && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) {
 		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime delivery finalization identity is incomplete", retryable: false}
 	}
-	if result.Status != RuntimeDeliveryRejected {
+	if result.Status != RuntimeDeliveryRejected && result.Status != RuntimeDeliveryBarrierStale {
 		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_response", message: "runtime delivery finalization requires a rejected result", retryable: false}
 	}
 	now := storage.Now()
@@ -962,6 +921,23 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			finalized = replayed
 			return nil
 		}
+		if result.Status == RuntimeDeliveryBarrierStale {
+			active, err := queue.CancelLeasedRuntimeInputCustodyTx(ctx, tx, queue.CancelLeasedRuntimeInputRequest{
+				Lease: queue.ExactLeaseRequest{
+					WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+					Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+				},
+				SessionID: job.SessionID, RuntimeInputID: job.RuntimeInputID, InputKind: job.InputKind, Now: now,
+			})
+			if err != nil {
+				return err
+			}
+			finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale, QueueLeaseSettled: true}
+			if !active {
+				finalized.Status = RuntimeDeliveryDuplicate
+			}
+			return nil
+		}
 		if job.InputKind == "interrupt_control" {
 			active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
 				WorkspaceID: workspace.ID(job.WorkspaceID),
@@ -977,7 +953,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
 				return nil
 			}
-			finalized, err = finalizeInterruptDeliveryExhaustionTx(ctx, tx, job, now)
+			finalized, err = finalizeInterruptDeliveryExhaustionTx(withInterruptCloseout(ctx, job.RuntimeInputID), tx, job, now)
 			return err
 		}
 		if err := validateRuntimeFinalizationBindingTx(ctx, tx, job, result); err != nil {
@@ -1515,8 +1491,10 @@ func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, 
 	switch inbox.status {
 	case "dead_lettered":
 		return runtimeDeliveryExhaustedResult(), true, nil
-	case "committed", "cancelled":
+	case "committed":
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
+	case "cancelled":
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}, true, nil
 	case "queued", "delivering", "accepted":
 		return RuntimeDeliveryResult{}, false, nil
 	default:
@@ -2163,7 +2141,15 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 		if content.Origin == "agent" {
 			origin = agentruntimev1.InterruptOrigin_INTERRUPT_ORIGIN_AGENT
 		}
-		plan.Interrupt = &agentruntimev1.InterruptRequest{WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID, BindingId: binding.BindingID, BindingGeneration: generation, TargetPodUid: podUID, RuntimeInputId: runtimeInputID, InputOrder: job.SequenceTo, Origin: origin}
+		plan.Interrupt = &agentruntimev1.InterruptRequest{
+			WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID,
+			BindingId: binding.BindingID, BindingGeneration: generation, TargetPodUid: podUID,
+			RuntimeInputId: runtimeInputID, Origin: origin,
+			InterruptLeaseRef: &agentruntimev1.InterruptLeaseRef{
+				JobId: job.JobID, LeaseToken: job.LeaseToken,
+				PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+			},
+		}
 	case "tool_confirmation":
 		var content struct {
 			ToolUseEventID string  `json:"tool_use_event_id"`
@@ -3122,159 +3108,6 @@ func allRuntimeInputEventsProcessedTx(ctx context.Context, tx *dbconnect.Tx, job
 		return false, err
 	}
 	return total == len(job.EventIDs) && processed == len(job.EventIDs), nil
-}
-
-// Interrupt delivery is fenced by the durable run identity, not by a hot Pod
-// observation. Once a later run has opened, the older control input can only
-// address a successor and is acknowledged without transport.
-func interruptRuntimeInputSupersededByRunTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
-	if job.InputKind != "interrupt_control" {
-		return false, nil
-	}
-	var superseded bool
-	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM session_runtime_inbox i
-			  JOIN session_events e
-			    ON e.workspace_id = i.workspace_id
-			   AND e.session_id = i.session_id
-			   AND e.session_thread_id = i.session_thread_id
-			 WHERE i.workspace_id = $1
-			   AND i.session_id = $2
-			   AND i.session_thread_id = $3
-			   AND i.runtime_input_id = $4
-			   AND e.type IN ('session.status_running', 'session.thread_status_running')
-			   AND e.sequence > i.sequence_to
-		)`,
-		job.WorkspaceID,
-		job.SessionID,
-		job.SessionThreadID,
-		job.RuntimeInputID,
-	).Scan(&superseded)
-	return superseded, err
-}
-
-type messageInterruptFenceStatus string
-
-const (
-	messageInterruptFenceNone          messageInterruptFenceStatus = ""
-	messageInterruptFenceAllSuperseded messageInterruptFenceStatus = "all_superseded"
-	messageInterruptFenceMixed         messageInterruptFenceStatus = "mixed"
-)
-
-func messageInterruptFenceStatusTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (messageInterruptFenceStatus, error) {
-	if job.InputKind != "messages" || len(job.EventIDs) == 0 {
-		return messageInterruptFenceNone, nil
-	}
-	fence, ok, err := latestProcessedInterruptFenceTx(ctx, tx, job)
-	if err != nil || !ok {
-		return messageInterruptFenceNone, err
-	}
-	placeholders := make([]string, 0, len(job.EventIDs))
-	args := []any{job.WorkspaceID, job.SessionID, job.SessionThreadID, fence.sequence}
-	for index, eventID := range job.EventIDs {
-		placeholders = append(placeholders, "$"+strconv.Itoa(index+5))
-		args = append(args, eventID)
-	}
-	row := tx.QueryRow(ctx,
-		`SELECT count(*),
-		        count(*) FILTER (
-		          WHERE type = 'user.message'
-		            AND processed_at IS NULL
-		            AND sequence < $4
-		        ),
-		        count(*) FILTER (
-		          WHERE type = 'user.message'
-		            AND processed_at IS NULL
-		            AND sequence >= $4
-		        )
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND event_id IN (`+strings.Join(placeholders, ", ")+`)`,
-		args...,
-	)
-	var total int
-	var superseded int
-	var deliverable int
-	if err := row.Scan(&total, &superseded, &deliverable); err != nil {
-		return messageInterruptFenceNone, err
-	}
-	if total != len(job.EventIDs) {
-		return messageInterruptFenceNone, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "message runtime input references missing events", retryable: false}
-	}
-	if superseded == 0 {
-		return messageInterruptFenceNone, nil
-	}
-	if deliverable > 0 {
-		return messageInterruptFenceMixed, nil
-	}
-	return messageInterruptFenceAllSuperseded, nil
-}
-
-type processedInterruptFence struct {
-	sequence int64
-}
-
-func latestProcessedInterruptFenceTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (processedInterruptFence, bool, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT sequence
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND type IN ('user.interrupt', $4)
-		    AND processed_at IS NOT NULL
-		  ORDER BY sequence DESC
-		  LIMIT 1`,
-		job.WorkspaceID,
-		job.SessionID,
-		job.SessionThreadID,
-		childInterruptRequestedEventType,
-	)
-	var fence processedInterruptFence
-	if err := row.Scan(&fence.sequence); dbconnect.IsNoRows(err) {
-		return processedInterruptFence{}, false, nil
-	} else if err != nil {
-		return processedInterruptFence{}, false, err
-	}
-	return fence, true, nil
-}
-
-// taskNotificationSupersededByProcessedAgentInterruptTx mirrors the hot
-// accepted-input fence: user interrupts preserve queued task notifications,
-// while an agent-origin interrupt drops notifications that were already in
-// the Inbox when that interrupt was processed.
-func taskNotificationSupersededByProcessedAgentInterruptTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
-	if job.InputKind != "task_notification" {
-		return false, nil
-	}
-	var superseded bool
-	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		   SELECT 1
-		     FROM session_runtime_inbox inbox
-		     JOIN session_events interrupt
-		       ON interrupt.workspace_id = inbox.workspace_id
-		      AND interrupt.session_id = inbox.session_id
-		      AND interrupt.session_thread_id = inbox.session_thread_id
-		      AND interrupt.type = $4
-		      AND interrupt.processed_at IS NOT NULL
-		      AND interrupt.processed_at >= inbox.created_at
-		    WHERE inbox.workspace_id = $1
-		      AND inbox.session_id = $2
-		      AND inbox.runtime_input_id = $3
-		      AND inbox.input_kind = 'task_notification'
-		      AND inbox.status IN ('queued', 'delivering')
-		)`,
-		job.WorkspaceID,
-		job.SessionID,
-		job.RuntimeInputID,
-		childInterruptRequestedEventType,
-	).Scan(&superseded)
-	return superseded, err
 }
 
 func cancelSupersededRuntimeInboxTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) error {

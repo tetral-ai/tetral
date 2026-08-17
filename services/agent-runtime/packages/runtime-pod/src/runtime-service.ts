@@ -40,6 +40,7 @@ import type {
 	CleanupSessionResponse,
 	InterruptRequest,
 	InterruptResponse,
+	InterruptLeaseRef,
 	ResolveToolConfirmationRequest,
 	ResolveToolConfirmationResponse,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
@@ -129,7 +130,7 @@ export interface RuntimeTaskNotificationCommand extends RuntimeInputScope {
 }
 
 export interface RuntimeInterruptCommand extends RuntimeInputScope {
-	readonly inputOrder: number;
+	readonly interruptLeaseRef: InterruptLeaseRef;
 	readonly origin: "user" | "agent";
 }
 
@@ -170,7 +171,8 @@ export interface RuntimeSessionRunHost {
 				readonly reason:
 					| "local_session_capacity_exceeded"
 					| "control_conflict"
-					| "context_load_failed";
+					| "context_load_failed"
+					| "barrier_stale";
 				readonly retryable?: boolean | undefined;
 		  }
 	>;
@@ -188,7 +190,8 @@ export interface RuntimeSessionRunHost {
 				readonly reason:
 					| "local_session_capacity_exceeded"
 					| "thread_not_receivable"
-					| "context_load_failed";
+					| "context_load_failed"
+					| "barrier_stale";
 				readonly retryable?: boolean | undefined;
 		  }
 	>;
@@ -240,7 +243,8 @@ export interface RuntimeSessionRunHost {
 					| "local_session_capacity_exceeded"
 					| "control_busy"
 					| "control_conflict"
-					| "context_load_failed";
+					| "context_load_failed"
+					| "barrier_stale";
 		  }
 	>;
 	readonly handleTaskNotification: (
@@ -260,7 +264,8 @@ export interface RuntimeSessionRunHost {
 					| "local_session_capacity_exceeded"
 					| "control_busy"
 					| "control_conflict"
-					| "context_load_failed";
+					| "context_load_failed"
+					| "barrier_stale";
 		  }
 	>;
 	readonly handleRuntimeConfigPatch: (
@@ -290,8 +295,10 @@ export interface RuntimeControlInputCommitter {
 	readonly commitControlInput: (input: {
 		readonly scope: RuntimeInputScope;
 		readonly inputKind: "interrupt_control" | "tool_confirmation";
+		readonly interruptLeaseRef?: InterruptLeaseRef | undefined;
 	}) => Promise<
 		| { readonly ok: true; readonly type: "stale" }
+		| { readonly ok: true; readonly type: "barrier_stale" }
 		| {
 				readonly ok: true;
 				readonly type: "committed";
@@ -471,6 +478,12 @@ export class RuntimeControlService {
 					acceptInputCommand(request, scope),
 				);
 				if (!result.ok) {
+					if (result.reason === "barrier_stale") {
+						return acceptInputRejected(
+							AcceptInputFailure.ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
 					if (result.reason === "control_conflict") {
 						return acceptInputRejected(
 							AcceptInputFailure.ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT,
@@ -534,6 +547,12 @@ export class RuntimeControlService {
 					content: request.content,
 				});
 				if (!result.ok) {
+					if (result.reason === "barrier_stale") {
+						return acceptAgentMailRejected(
+							AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
 					if (result.reason === "local_session_capacity_exceeded") {
 						throw new GrpcStatusError(
 							status.RESOURCE_EXHAUSTED,
@@ -604,6 +623,12 @@ export class RuntimeControlService {
 					},
 				);
 				if (!result.ok) {
+					if (result.reason === "barrier_stale") {
+						return acceptTaskRejected(
+							AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
 					return acceptTaskRejected(
 						taskFailure(result.reason),
 						result.reason === "control_busy" ||
@@ -654,14 +679,18 @@ export class RuntimeControlService {
 					request.sessionId,
 					{
 						...scope,
-						inputOrder: request.inputOrder,
+						interruptLeaseRef: request.interruptLeaseRef!,
 						origin:
 							request.origin === InterruptOrigin.INTERRUPT_ORIGIN_AGENT
 								? "agent"
 								: "user",
 					},
 					async (declaration) => {
-						committed = await this.commitControlInput(scope, declaration);
+						committed = await this.commitControlInput(
+							scope,
+							declaration,
+							request.interruptLeaseRef,
+						);
 						return committed;
 					},
 				);
@@ -780,6 +809,16 @@ export class RuntimeControlService {
 					);
 				}
 				if ("stale" in result) {
+					if (
+						committed?.ok === true &&
+						"stale" in committed &&
+						committed.barrierStale === true
+					) {
+						return resolveToolRejected(
+							ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
 					return { stale: {} };
 				}
 				return result.applied ? { accepted: {} } : { duplicate: {} };
@@ -1125,6 +1164,7 @@ export class RuntimeControlService {
 	private async commitControlInput(
 		scope: RuntimeInputScope,
 		declaration: RuntimeControlInputDeclaration,
+		interruptLeaseRef?: InterruptLeaseRef,
 	): Promise<RuntimeControlInputCommitResult> {
 		if (this.options.controlInputCommitter === undefined) {
 			throw new GrpcStatusError(
@@ -1138,6 +1178,9 @@ export class RuntimeControlService {
 				declaration.inputKind === "interrupt"
 					? "interrupt_control"
 					: "tool_confirmation",
+			...(declaration.inputKind === "interrupt"
+				? { interruptLeaseRef }
+				: {}),
 		});
 		if (!result.ok) {
 			return {
@@ -1146,8 +1189,12 @@ export class RuntimeControlService {
 				errorCode: result.errorCode,
 			};
 		}
-		if (result.type === "stale") {
-			return { ok: true, stale: true };
+		if (result.type === "stale" || result.type === "barrier_stale") {
+			return {
+				ok: true,
+				stale: true,
+				...(result.type === "barrier_stale" ? { barrierStale: true } : {}),
+			};
 		}
 		return {
 			ok: true,

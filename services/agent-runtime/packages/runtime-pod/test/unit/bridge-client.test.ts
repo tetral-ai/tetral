@@ -405,6 +405,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			scope: expect.objectContaining({ sessionThreadId: "thrd_1" }),
 			runtimeInputId: "rin_confirm",
 			approvalReviewText: [],
+			interruptLeaseRef: undefined,
 		});
 
 		bridge.commitInputsResponse = {
@@ -458,6 +459,41 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		expect(bridge.commitInputsRequests[0]).toEqual(
 			bridge.commitInputsRequests[1],
 		);
+	});
+
+	test("keeps barrier-stale distinct from ordinary stale custody", async () => {
+		const bridge = new TypedBridge();
+		const committer = new BridgeAPIControlInputCommitter(options(bridge));
+		bridge.commitInputsResponse = { barrierStale: {} };
+		await expect(
+			committer.commitControlInput({
+				scope: controlScope("rin_barrier_control"),
+				inputKind: "tool_confirmation",
+			}),
+		).resolves.toEqual({ ok: true, type: "barrier_stale" });
+
+		const loader = new BridgeAPIContextLoader(options(bridge));
+		await expect(
+			loader.commitAcceptedInput({
+				...controlScope("rin_barrier_message"),
+				inputOrder: 3,
+				kind: "messages",
+				contentJson: '{"messages":[]}',
+			}),
+		).resolves.toEqual({ type: "barrier_stale_custody" });
+
+		bridge.taskNotificationResponse = { barrierStale: {} };
+		await expect(
+			loader.commitAcceptedInput({
+				...controlScope("rin_barrier_task"),
+				inputOrder: 4,
+				kind: "task_notification",
+				taskId: "task_barrier",
+				sourceToolUseEventId: "evt_tool_barrier",
+				status: "completed",
+				notificationJson: '{"status":"completed"}',
+			}),
+		).resolves.toEqual({ type: "barrier_stale_custody" });
 	});
 
 	test("rejects zero, multiple, and method-mismatched CommitInputs result arms", async () => {

@@ -133,6 +133,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		if requestStart != nil {
+			if err := requireSessionInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
+				return err
+			}
+		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
@@ -295,6 +300,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			now,
 		)
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Stale{Stale: &bridgev1.WriteEventStale{}}}, nil
+		}
 		return nil, err
 	}
 	if !validWriteEventDurableFacts(facts) {
@@ -842,6 +850,9 @@ func (s threadMutationScope) publicProjection(eventType string) (string, bool) {
 }
 
 func lockThreadMutationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {
+	if err := requireSessionMutationAllowedTx(ctx, tx, scope); err != nil {
+		return threadMutationScope{}, err
+	}
 	row := tx.QueryRow(ctx,
 		`SELECT visibility, role, status, task_name
 		   FROM session_threads

@@ -70,6 +70,9 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 			}
 			return nil
 		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
@@ -111,7 +114,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		created = true
 		return nil
 	}); err != nil {
-		if isScopeSupersededError(err) {
+		if isConversationMutationStaleError(err) {
 			return &bridgev1.AcceptSandboxExecutionResponse{Outcome: &bridgev1.AcceptSandboxExecutionResponse_Stale{Stale: &bridgev1.SandboxExecutionStale{}}}, nil
 		}
 		return nil, err
@@ -415,6 +418,9 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 			response = duplicateMemoryRunResponse(existing.ResultJSON)
 			return nil
 		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		resultJSON, err := applyMemoryToolTx(ctx, tx, request.GetScope(), memoryInput.Action, tool.InputJSON)
 		if err != nil {
 			return err
@@ -478,7 +484,7 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		response = committedMemoryRunResponse(resultJSON)
 		return nil
 	}); err != nil {
-		if isScopeSupersededError(err) {
+		if isConversationMutationStaleError(err) {
 			return &bridgev1.RunMemoryResponse{Outcome: &bridgev1.RunMemoryResponse_Stale{Stale: &bridgev1.MemoryRunStale{}}}, nil
 		}
 		return nil, err
@@ -607,6 +613,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			now,
 		)
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Stale{Stale: &bridgev1.CommitInternalToolRepairStale{}}}, nil
+		}
 		return nil, err
 	}
 	if facts.RepairEventID == "" || facts.AssignedMessageSequence <= 0 {

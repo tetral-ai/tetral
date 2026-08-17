@@ -64,8 +64,9 @@ func requestEndInterruptCommitRequest(
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement requires an interrupted terminal end")
 	}
 	interruptRequest := &bridgev1.CommitInputsRequest{
-		Scope:          request.GetScope(),
-		RuntimeInputId: settlement.GetRuntimeInputId(),
+		Scope:             request.GetScope(),
+		RuntimeInputId:    settlement.GetRuntimeInputId(),
+		InterruptLeaseRef: settlement.GetInterruptLeaseRef(),
 	}
 	if interruptRequest.GetRuntimeInputId() == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement is missing its runtime input")
@@ -220,6 +221,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		observation declarationApplicationObservation
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.write_request_end", func(tx *dbconnect.Tx) error {
+		mutationCtx := ctx
 		if err := lockRuntimeMutationSessionTx(
 			ctx,
 			tx,
@@ -272,7 +274,13 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if interruptRequest != nil {
+			if err := validateInterruptLeaseRefTx(ctx, tx, request.GetScope(), interruptRequest.GetRuntimeInputId(), interruptRequest.GetInterruptLeaseRef()); err != nil {
+				return err
+			}
+			mutationCtx = withInterruptCloseout(ctx, interruptRequest.GetRuntimeInputId())
+		}
+		if err := verifyRuntimeScopeTx(mutationCtx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if err := verifyModelRequestStartTx(ctx, tx, request.GetScope(), requestStart.EventID, request.GetModelRequestId(), requestKind); err != nil {
@@ -283,7 +291,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		} else if exists {
 			return status.Error(codes.AlreadyExists, "model request is already closed")
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		threadScope, err := lockThreadMutationTx(mutationCtx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
@@ -420,7 +428,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 				}
 			} else {
 				interruptResult, err = commitInputDeclarationTx(
-					ctx,
+					mutationCtx,
 					tx,
 					interruptRequest,
 					"interrupt_control",
@@ -470,6 +478,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 		return err
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Stale{Stale: &bridgev1.WriteRequestEndStale{}}}, nil
+		}
 		return nil, err
 	}
 	if err := validateRequestEndDurableFacts(facts); err != nil {
@@ -821,10 +832,16 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	now := s.now()
 	capture, err := s.ensureFinishIdleOutputCapture(ctx, request, sourceKind, key, declarationDigest, now)
 	if err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
+		}
 		return nil, err
 	}
 	capture, err = s.waitForFinishIdleOutputCapture(ctx, request.GetScope(), key, capture)
 	if err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
+		}
 		return nil, err
 	}
 	var (
@@ -1168,7 +1185,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			RuntimeWriteID: sql.NullString{String: request.GetRuntimeWriteId(), Valid: true}, ResultJSON: resultJSON, Now: now,
 		})
 	}); err != nil {
-		if isScopeSupersededError(err) {
+		if isConversationMutationStaleError(err) {
 			return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Stale{Stale: &bridgev1.RuntimeTerminationStale{}}}, nil
 		}
 		return nil, err

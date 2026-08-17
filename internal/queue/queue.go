@@ -316,6 +316,16 @@ type ExactLeaseRequest struct {
 	DedupeKey    string
 }
 
+// CancelLeasedRuntimeInputRequest identifies one exact live delivery whose
+// Runtime commit lost to the Session interrupt barrier.
+type CancelLeasedRuntimeInputRequest struct {
+	Lease          ExactLeaseRequest
+	SessionID      string
+	RuntimeInputID string
+	InputKind      string
+	Now            time.Time
+}
+
 // InterruptFenceRequest binds cancellation of message notifications to the
 // exact live interrupt lease that owns the fence.
 type InterruptFenceRequest struct {

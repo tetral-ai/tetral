@@ -162,7 +162,7 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 		outcome = "committed"
 		return nil
 	}); err != nil {
-		if isScopeSupersededError(err) {
+		if isConversationMutationStaleError(err) {
 			return toolSettlementStaleResponse(), nil
 		}
 		return nil, err

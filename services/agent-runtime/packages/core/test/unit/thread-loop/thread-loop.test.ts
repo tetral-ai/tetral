@@ -1978,7 +1978,7 @@ describe("ThreadState", () => {
 		} satisfies RuntimeAcceptedInputState;
 
 		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
-		state.discardQueuedAcceptedInputsBeforeFence(10, true);
+		state.discardQueuedAcceptedInputsForInterrupt(true);
 
 		expect(state.peekAcceptedInput()).toEqual(mail);
 		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");

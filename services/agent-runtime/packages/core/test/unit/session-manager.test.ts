@@ -200,8 +200,13 @@ function threadControl(
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
 		runtimeInputId,
-		inputOrder: 1,
 		origin: "user",
+		interruptLeaseRef: {
+			jobId: `qjob_${runtimeInputId}`,
+			leaseToken: `lease_${runtimeInputId}`,
+			partitionKey: `session:wksp_test:${sessionId}`,
+			dedupeKey: `runtime_input:wksp_test:${sessionId}:${runtimeInputId}`,
+		},
 	};
 }
 
@@ -1714,87 +1719,6 @@ describe("SessionManager", () => {
 		);
 	});
 
-	test("a stale durable interrupt commit cannot cancel its active successor", async () => {
-		const threadLoop = makeInterruptRecordingThreadLoop();
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				expect(
-					await Effect.runPromise(
-						manager.acceptInput({
-							...acceptedInput("sesn_stale_interrupt"),
-							inputOrder: 10,
-						}),
-					),
-				).toMatchObject({ ok: true, started: true });
-				await waitForInterruptRecordingRuns(threadLoop, 1);
-				const session = threadLoop.runs[0]?.session;
-				if (session === undefined) {
-					throw new Error("expected active successor session");
-				}
-				const command = {
-					...threadControl("sesn_stale_interrupt"),
-					runtimeInputId: "rin_stale_interrupt",
-					inputOrder: 9,
-				};
-				const result = await Effect.runPromise(
-					manager.interruptControl("sesn_stale_interrupt", command, async () => ({
-						ok: true,
-						stale: true,
-					})),
-				);
-
-				expect(result).toEqual({
-					ok: true,
-					sessionId: "sesn_stale_interrupt",
-					created: false,
-					interrupted: false,
-					idleInterrupt: false,
-					duplicate: true,
-					stale: true,
-				});
-				expect(threadLoop.interruptions).toEqual([]);
-				expect(session.state.userInterruptRequested()).toBe(false);
-				expect(
-					await Effect.runPromise(
-						manager.inspectThread(threadControl("sesn_stale_interrupt")),
-					),
-				).toMatchObject({ ok: true, observed: true, status: "running" });
-			},
-		);
-	});
-
-	test("a newer interrupt is not rejected by the successor fence", async () => {
-		const sessionId = "sesn_new_interrupt_successor_fence";
-		const threadId = "thrd_new_interrupt_successor_fence";
-		const threadLoop = makeInterruptRecordingThreadLoop();
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				await Effect.runPromise(
-					manager.acceptInput(
-						acceptedInput(sessionId, "rin_new_interrupt_owner", threadId),
-					),
-				);
-				await waitForInterruptRecordingRuns(threadLoop, 1);
-				const interrupt = {
-					...threadControl(sessionId, "rin_new_interrupt", threadId),
-					inputOrder: 2,
-				};
-				expect(
-					await Effect.runPromise(
-						manager.interruptControl(
-							sessionId,
-							interrupt,
-							testControlCommit(interrupt),
-						),
-					),
-				).toMatchObject({ ok: true, interrupted: true });
-				expect(threadLoop.interruptions).toHaveLength(1);
-			},
-		);
-	});
-
 	test("concurrent idle interrupt replay preflights twice but mutates once", async () => {
 		const sessionId = "sesn_concurrent_idle_interrupt";
 		const threadId = "thrd_concurrent_idle_interrupt";
@@ -2361,6 +2285,7 @@ describe("SessionManager", () => {
 					await Effect.runPromise(
 						manager.commitTaskNotification(sessionId, {
 							...threadControl(sessionId, "rin_task_notification_wake"),
+							inputOrder: 1,
 							taskId: "task_notification_wake",
 							sourceToolUseEventId: "sevt_task_notification_wake",
 							status: "completed",
@@ -2427,6 +2352,7 @@ describe("SessionManager", () => {
 								"task_notification:task_notification_resume",
 								threadId,
 							),
+							inputOrder: 1,
 							taskId: "task_notification_resume",
 							sourceToolUseEventId: "sevt_task_notification_resume",
 							status: "completed",
@@ -2707,6 +2633,7 @@ describe("SessionManager", () => {
 					await Effect.runPromise(
 						manager.commitTaskNotification("sesn_cold_background", {
 							...threadControl("sesn_cold_background", "rin_task_background"),
+							inputOrder: 1,
 							taskId: "task_cold_background",
 							sourceToolUseEventId: "sevt_tool_background",
 							status: "completed",
@@ -2983,61 +2910,6 @@ describe("SessionManager", () => {
 					},
 				);
 				threadLoop.runs[0]?.release();
-			},
-		);
-	});
-
-	test("a cold attachment-driven Run rejects an older interrupt before hot mutation", async () => {
-		const threadLoop = makeInterruptRecordingThreadLoop();
-		const sessionId = "sesn_cold_attachment_interrupt_fence";
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				expect(
-					await Effect.runPromise(
-						manager.preloadThread({
-							...threadControl(sessionId, "rin_preload_attachment_fence"),
-							runtimeBindingToken: "runtime-binding-token-attachment-fence",
-							activeRunInputOrder: 10,
-							contextEntries: [],
-							pendingAttachments: [
-								{
-									transient: undefined,
-									fileBacked: {
-										sourceEventId: "sevt_attachment_fence",
-										fileId: "file_attachment_fence",
-									},
-									mime: "application/pdf",
-									filename: "fence.pdf",
-								},
-							],
-						}),
-					),
-				).toMatchObject({ ok: true, applied: true });
-				await waitForInterruptRecordingRuns(threadLoop, 1);
-				const session = threadLoop.runs[0]!.session;
-				const command = {
-					...threadControl(sessionId, "rin_stale_attachment_interrupt"),
-					inputOrder: 9,
-				};
-				expect(
-					await Effect.runPromise(
-						manager.interruptControl(sessionId, command, async () => ({
-							ok: true,
-							stale: true,
-						})),
-					),
-				).toMatchObject({
-					ok: true,
-					interrupted: false,
-					duplicate: true,
-					stale: true,
-				});
-				expect(session.state.userInterruptRequested()).toBe(false);
-				expect(threadLoop.interruptions).toEqual([]);
-				expect(
-					await Effect.runPromise(manager.inspectThread(threadControl(sessionId))),
-				).toMatchObject({ ok: true, observed: true, status: "running" });
 			},
 		);
 	});
@@ -5174,6 +5046,7 @@ describe("SessionManager", () => {
 								"rin_cleanup_receipt_notification",
 								threadId,
 							),
+							inputOrder: 1,
 							taskId: "task_cleanup_receipt",
 							sourceToolUseEventId: "sevt_cleanup_receipt",
 							status: "completed",

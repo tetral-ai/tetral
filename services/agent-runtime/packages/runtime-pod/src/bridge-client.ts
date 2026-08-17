@@ -182,6 +182,7 @@ export class BridgeAPIControlInputCommitter
 			scope: bridgeScope(input.scope),
 			runtimeInputId: input.scope.runtimeInputId,
 			approvalReviewText: [],
+			interruptLeaseRef: input.interruptLeaseRef,
 		};
 		let response: CommitInputsResponse | undefined;
 		for (let attempt = 0; response === undefined; attempt += 1) {
@@ -204,7 +205,11 @@ export class BridgeAPIControlInputCommitter
 			}
 		}
 		if (
-			!exactlyOneDefined(response.committed, response.stale)
+			!exactlyOneDefined(
+				response.committed,
+				response.stale,
+				response.barrierStale,
+			)
 		) {
 			return {
 				ok: false as const,
@@ -215,6 +220,9 @@ export class BridgeAPIControlInputCommitter
 		}
 		if (response.stale !== undefined) {
 			return { ok: true as const, type: "stale" as const };
+		}
+		if (response.barrierStale !== undefined) {
+			return { ok: true as const, type: "barrier_stale" as const };
 		}
 		const result = response.committed;
 		if (result !== undefined) {
@@ -373,6 +381,7 @@ export class BridgeAPITaskNotificationCommitter {
 			!exactlyOneDefined(
 				response.committed,
 				response.stale,
+				response.barrierStale,
 				response.parked,
 				response.rejected,
 			)
@@ -407,6 +416,9 @@ export class BridgeAPITaskNotificationCommitter {
 		}
 		if (response.stale !== undefined) {
 			return { ok: true as const, stale: true as const };
+		}
+		if (response.barrierStale !== undefined) {
+			return { ok: true as const, barrierStale: true as const };
 		}
 		if (response.parked !== undefined) {
 			return { ok: true as const, deferred: true as const };
@@ -874,6 +886,9 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			if ("stale" in result) {
 				return { type: "stale_custody" };
 			}
+			if ("barrierStale" in result) {
+				return { type: "barrier_stale_custody" };
+			}
 			return {
 				type: result.type,
 				assignedContextSequences: result.assignedContextSequences,
@@ -886,6 +901,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		const request = {
 			scope,
 			runtimeInputId: input.runtimeInputId,
+			interruptLeaseRef: undefined,
 			approvalReviewText:
 				input.kind === "approval_review"
 					? [...(options?.approvalReviewText ?? input.promptText)]
@@ -911,13 +927,20 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			});
 		}
 		if (
-			!exactlyOneDefined(response.committed, response.stale)
+			!exactlyOneDefined(
+				response.committed,
+				response.stale,
+				response.barrierStale,
+			)
 		) {
 			throw normalizeContextLoaderError({
 				code: "schema_mismatch",
 				sessionId: input.sessionId,
 				reason: "commit inputs returned malformed outcome",
 			});
+		}
+		if (response.barrierStale !== undefined) {
+			return { type: "barrier_stale_custody" };
 		}
 		if (response.stale !== undefined) {
 			return { type: "stale_custody" };
@@ -1244,7 +1267,11 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				interruptSettlement:
 					envelope.interruptSettlement === undefined
 						? undefined
-						: { runtimeInputId: envelope.interruptSettlement.runtimeInputId },
+						: {
+								runtimeInputId: envelope.interruptSettlement.runtimeInputId,
+								interruptLeaseRef:
+									envelope.interruptSettlement.interruptLeaseRef,
+							},
 			};
 			const response = await writeRequestEnd(this.client, request, metadata);
 			if (

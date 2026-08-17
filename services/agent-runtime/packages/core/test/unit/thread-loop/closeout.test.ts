@@ -1200,7 +1200,7 @@ describe("ThreadLoop", () => {
 					runtimeThreadLoopLayer(loader, {
 						writer,
 						providerCallAssembler: async (input) => {
-							const command = acceptedInput("rin_stale_pre_provider_interrupt");
+							const command = interruptInput("rin_stale_pre_provider_interrupt");
 							session.state.beginUserInterrupt(command, async () => ({
 								ok: true,
 								stale: true,
@@ -2077,7 +2077,10 @@ describe("ThreadLoop", () => {
 				storeOperationTimeoutMs: 1000,
 			},
 			session,
-			{ activeTurnId: () => durableTurnId },
+			{
+				activeTurnId: () => durableTurnId,
+				interruptLeaseRef: () => undefined,
+			},
 			{
 				type: "requires_action",
 				event_ids: [settledToolUseEventId, pendingToolUseEventId],

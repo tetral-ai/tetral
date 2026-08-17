@@ -186,6 +186,14 @@ message CommitInputsRequest {
   reserved 3;
   reserved "disposition";
   repeated string approval_review_text = 4;
+  InterruptLeaseRef interrupt_lease_ref = 5;
+}
+
+message InterruptLeaseRef {
+  string job_id = 1;
+  string lease_token = 2;
+  string partition_key = 3;
+  string dedupe_key = 4;
 }
 
 message CommitInputsResponse {
@@ -194,8 +202,11 @@ message CommitInputsResponse {
   oneof outcome {
     CommitInputsCommitted committed = 1;
     CommitInputsStale stale = 3;
+    CommitInputsBarrierStale barrier_stale = 4;
   }
 }
+
+message CommitInputsBarrierStale {}
 
 message RuntimeInterruptToolFailed {
   string error_json = 1;
@@ -246,6 +257,7 @@ message CommitTaskNotificationResultResponse {
     CommitTaskNotificationResultStale stale = 3;
     CommitTaskNotificationResultParked parked = 4;
     CommitTaskNotificationResultRejected rejected = 5;
+    CommitTaskNotificationResultBarrierStale barrier_stale = 6;
   }
 }
 
@@ -255,6 +267,7 @@ message CommitTaskNotificationResultCommitted {
   repeated int64 assigned_context_sequences = 2;
 }
 message CommitTaskNotificationResultStale {}
+message CommitTaskNotificationResultBarrierStale {}
 message CommitTaskNotificationResultParked {}
 message CommitTaskNotificationResultRejected {
   TaskNotificationRejectionReason reason = 1;
@@ -600,6 +613,7 @@ message WriteRequestEndRequest {
 
 message RequestEndInterruptSettlement {
   string runtime_input_id = 1;
+  InterruptLeaseRef interrupt_lease_ref = 2;
 }
 
 message WriteRequestEndResponse {

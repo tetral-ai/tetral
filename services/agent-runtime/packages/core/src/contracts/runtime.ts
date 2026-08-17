@@ -1115,6 +1115,12 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z
 		interruptSettlement: z
 			.strictObject({
 				runtimeInputId: SanitizedIdentifierSchema,
+				interruptLeaseRef: z.strictObject({
+					jobId: SanitizedIdentifierSchema,
+					leaseToken: SanitizedIdentifierSchema,
+					partitionKey: SanitizedIdentifierSchema,
+					dedupeKey: SanitizedIdentifierSchema,
+				}),
 			})
 			.optional(),
 	})

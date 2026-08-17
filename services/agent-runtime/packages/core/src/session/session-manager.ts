@@ -56,6 +56,7 @@ import type {
 	RuntimeConfigPatchState,
 	RuntimeControlInputCommit,
 	RuntimeControlInputState,
+	RuntimeInterruptCommandState,
 	RuntimeTaskNotificationCommandState,
 	RuntimeThreadAddressState,
 	RuntimeThreadPreloadState,
@@ -95,8 +96,28 @@ type ThreadStatus = RuntimeThreadStatusState;
 /** Fenced interrupt command; active runs close in-run, while idle ingress commits directly. */
 export interface RuntimeInterruptControlCommand
 	extends RuntimeControlInputState {
-	readonly inputOrder: number;
 	readonly origin: "user" | "agent";
+	readonly interruptLeaseRef: {
+		readonly jobId: string;
+		readonly leaseToken: string;
+		readonly partitionKey: string;
+		readonly dedupeKey: string;
+	};
+}
+
+function interruptStateCommand(
+	command: RuntimeInterruptControlCommand,
+): RuntimeInterruptCommandState {
+	return {
+		workspaceId: command.workspaceId,
+		sessionId: command.sessionId,
+		sessionThreadId: command.sessionThreadId,
+		bindingId: command.bindingId,
+		bindingGeneration: command.bindingGeneration,
+		targetPodUid: command.targetPodUid,
+		runtimeInputId: command.runtimeInputId,
+		origin: command.origin,
+	};
 }
 
 /** Fenced command that releases one session's disposable hot state. */
@@ -458,7 +479,6 @@ export class Service extends Context.Service<Service, Interface>()(
 // UPDATE-WITH: services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts
 interface ThreadRunSlot {
 	readonly runId: number;
-	readonly inputOrder: number | undefined;
 	ownerFiber: Fiber.Fiber<ThreadLoop.ThreadLoopRunResult, unknown> | undefined;
 	readonly doneDeferred: Deferred.Deferred<
 		ThreadLoop.ThreadLoopRunResult,
@@ -485,9 +505,7 @@ interface ThreadEntry {
 	readonly statusSignal: ThreadRuntime.ThreadRuntime["state"];
 	readonly commandChannel: ThreadCommandChannel;
 	runSlot: ThreadRunSlot | undefined;
-	// Durable-order fence inherited by reducer-only successor Runs after the
-	// accepted input that opened the turn has left the hot input queue.
-	runInputOrder: number | undefined;
+	interruptLeaseRef: RuntimeInterruptControlCommand["interruptLeaseRef"] | undefined;
 	bridgeScope: RuntimeThreadAddressState | undefined;
 	lastCompletedReviewerExecutionToken: ReviewerExecutionToken | undefined;
 	readonly approvalReviewer: AutoApprovalReviewerManager | undefined;
@@ -738,7 +756,7 @@ export function layer(
 					statusSignal: runtimeThread.state,
 					commandChannel: Effect.runSync(makeThreadCommandChannel()),
 					runSlot: undefined,
-					runInputOrder: undefined,
+					interruptLeaseRef: undefined,
 					bridgeScope: undefined,
 					lastCompletedReviewerExecutionToken: undefined,
 					approvalReviewer,
@@ -1004,23 +1022,8 @@ export function layer(
 						}
 						const runScope = yield* Scope.make();
 						const runId = allocateRunId();
-						const acceptedInput =
-							threadEntry.runtimeThread.state.peekAcceptedInput();
-						const acceptedInputOrder =
-							acceptedInput !== undefined && "inputOrder" in acceptedInput
-								? acceptedInput.inputOrder
-								: undefined;
-						const inputOrder =
-							acceptedInputOrder === undefined
-								? threadEntry.runInputOrder
-								: Math.max(
-										acceptedInputOrder,
-										threadEntry.runInputOrder ?? acceptedInputOrder,
-									);
-						threadEntry.runInputOrder = inputOrder;
 						const runSlot: ThreadRunSlot = {
 							runId,
-							inputOrder,
 							ownerFiber: undefined,
 							doneDeferred: yield* Deferred.make<
 								ThreadLoop.ThreadLoopRunResult,
@@ -1043,6 +1046,11 @@ export function layer(
 						const custody: ThreadLoop.ThreadLoopRunCustody = {
 							activeTurnId: (session) =>
 								session.state.threadTurnReduction().checkpoint.executionRunId,
+							interruptLeaseRef: (runtimeInputId) =>
+								threadEntry.runtimeThread.state.userInterruptCommand()
+									?.runtimeInputId === runtimeInputId
+									? threadEntry.interruptLeaseRef
+									: undefined,
 						};
 						const run = threadLoop.run(threadEntry.runtimeThread, custody).pipe(
 							Scope.provide(runScope),
@@ -1086,6 +1094,11 @@ export function layer(
 				const custody: ThreadLoop.ThreadLoopRunCustody = {
 					activeTurnId: (session) =>
 						session.state.threadTurnReduction().checkpoint.executionRunId,
+					interruptLeaseRef: (runtimeInputId) =>
+						threadEntry.runtimeThread.state.userInterruptCommand()
+							?.runtimeInputId === runtimeInputId
+							? threadEntry.interruptLeaseRef
+							: undefined,
 				};
 				const attempt = threadLoop.closeFailedRun(
 					threadEntry.runtimeThread,
@@ -1400,12 +1413,6 @@ export function layer(
 									reason: "control_conflict",
 								} as const;
 							}
-							if ("inputOrder" in command) {
-								threadResult.threadEntry.runInputOrder = Math.max(
-									threadResult.threadEntry.runInputOrder ?? command.inputOrder,
-									command.inputOrder,
-								);
-							}
 							if (accepted === "duplicate") {
 								if (command.kind === "approval_review") {
 									return {
@@ -1519,15 +1526,14 @@ export function layer(
 						} as const;
 					}
 					const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
-						command,
+						interruptStateCommand(command),
 						async () => committed,
 					);
 					if (admitted === "conflict") {
 						return { ok: false, sessionId, reason: "control_busy" } as const;
 					}
 					if (admitted === "applied") {
-						threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
-							command.inputOrder,
+						threadEntry.runtimeThread.state.discardQueuedAcceptedInputsForInterrupt(
 							command.origin === "user",
 						);
 					}
@@ -1684,27 +1690,9 @@ export function layer(
 								) {
 									return { type: "conflict" as const };
 								}
-								if (runSlot.inputOrder === undefined) {
-									return { type: "unfenced" as const };
-								}
-								if (command.inputOrder < runSlot.inputOrder) {
-									const committed = yield* Effect.promise(() =>
-										commitInput({ inputKind: "interrupt" }),
-									);
-									if (!committed.ok) {
-										return { type: "failed" as const, committed };
-									}
-									if ("stale" in committed || "joined" in committed) {
-										return {
-											type: "stale" as const,
-											stale: "stale" in committed,
-										};
-									}
-									return { type: "stale" as const, stale: false };
-								}
 								threadEntry.bridgeScope = command;
 								const result = threadEntry.runtimeThread.state.beginUserInterrupt(
-									command,
+									interruptStateCommand(command),
 									async (declaration) => {
 										interruptCommitResult ??= await commitInput(declaration);
 										return interruptCommitResult;
@@ -1715,8 +1703,8 @@ export function layer(
 								);
 								if (result === "applied") {
 									runSlot.stopping = true;
-									threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
-										command.inputOrder,
+									threadEntry.interruptLeaseRef = command.interruptLeaseRef;
+									threadEntry.runtimeThread.state.discardQueuedAcceptedInputsForInterrupt(
 										command.origin === "user",
 									);
 								}
@@ -1724,35 +1712,6 @@ export function layer(
 							}),
 							{ type: "conflict" as const },
 						);
-						if (admission.type === "failed") {
-							return {
-								ok: false,
-								sessionId,
-								reason: "context_load_failed",
-								retryable: admission.committed.retryable,
-								errorCode: admission.committed.errorCode,
-							};
-						}
-						if (admission.type === "unfenced") {
-							return {
-								ok: false,
-								sessionId,
-								reason: "context_load_failed",
-								retryable: true,
-								errorCode: "runtime_run_fence_unavailable",
-							};
-						}
-						if (admission.type === "stale") {
-							return {
-								ok: true,
-								sessionId,
-								created: false,
-								interrupted: false,
-								idleInterrupt: false,
-								duplicate: true,
-								...(admission.stale ? { stale: true as const } : {}),
-							};
-						}
 						if (admission.type === "conflict") {
 							return { ok: false, sessionId, reason: "control_busy" };
 						}
@@ -1780,6 +1739,7 @@ export function layer(
 							};
 						}
 						if ("stale" in committed) {
+							threadEntry.interruptLeaseRef = undefined;
 							yield* discardThreadEntryForStaleCustody(
 								sessionEntry,
 								threadEntry,
@@ -1796,6 +1756,7 @@ export function layer(
 						if (!interruptCloseoutCompleted) {
 							return { ok: false, sessionId, reason: "control_busy" };
 						}
+						threadEntry.interruptLeaseRef = undefined;
 						return {
 							ok: true,
 							sessionId,
@@ -2311,7 +2272,6 @@ export function layer(
 						command.turnCheckpoint,
 						command.turnToolRouteView,
 					);
-					threadResult.threadEntry.runInputOrder = command.activeRunInputOrder;
 					threadResult.threadEntry.runtimeThread.state.markPersistentContextLoaded();
 					const observedSharedPatches = [
 						...(command.runtimeConfigPatch === undefined

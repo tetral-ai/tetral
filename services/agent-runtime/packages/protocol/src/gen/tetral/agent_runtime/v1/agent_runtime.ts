@@ -67,6 +67,7 @@ export enum AcceptInputFailure {
   ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT = 3,
   ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED = 4,
   ACCEPT_INPUT_FAILURE_REJECTED_INPUT = 5,
+  ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 6,
   UNRECOGNIZED = -1,
 }
 
@@ -90,6 +91,9 @@ export function acceptInputFailureFromJSON(object: any): AcceptInputFailure {
     case 5:
     case "ACCEPT_INPUT_FAILURE_REJECTED_INPUT":
       return AcceptInputFailure.ACCEPT_INPUT_FAILURE_REJECTED_INPUT;
+    case 6:
+    case "ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE":
+      return AcceptInputFailure.ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -111,6 +115,8 @@ export function acceptInputFailureToJSON(object: AcceptInputFailure): string {
       return "ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED";
     case AcceptInputFailure.ACCEPT_INPUT_FAILURE_REJECTED_INPUT:
       return "ACCEPT_INPUT_FAILURE_REJECTED_INPUT";
+    case AcceptInputFailure.ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE:
+      return "ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE";
     case AcceptInputFailure.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -124,6 +130,7 @@ export enum AcceptAgentMailFailure {
   ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT = 3,
   ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE = 4,
   ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED = 5,
+  ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 6,
   UNRECOGNIZED = -1,
 }
 
@@ -147,6 +154,9 @@ export function acceptAgentMailFailureFromJSON(object: any): AcceptAgentMailFail
     case 5:
     case "ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED":
       return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED;
+    case 6:
+    case "ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE":
+      return AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -168,6 +178,8 @@ export function acceptAgentMailFailureToJSON(object: AcceptAgentMailFailure): st
       return "ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE";
     case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED:
       return "ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED";
+    case AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE:
+      return "ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE";
     case AcceptAgentMailFailure.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -182,6 +194,7 @@ export enum AcceptTaskNotificationFailure {
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY = 4,
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT = 5,
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED = 6,
+  ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 7,
   UNRECOGNIZED = -1,
 }
 
@@ -208,6 +221,9 @@ export function acceptTaskNotificationFailureFromJSON(object: any): AcceptTaskNo
     case 6:
     case "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED":
       return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED;
+    case 7:
+    case "ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE":
+      return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -231,6 +247,8 @@ export function acceptTaskNotificationFailureToJSON(object: AcceptTaskNotificati
       return "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT";
     case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED:
       return "ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED";
+    case AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE:
+      return "ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE";
     case AcceptTaskNotificationFailure.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -393,6 +411,7 @@ export enum ResolveToolConfirmationFailure {
   RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED = 5,
   RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE = 6,
   RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED = 7,
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 8,
   UNRECOGNIZED = -1,
 }
 
@@ -422,6 +441,9 @@ export function resolveToolConfirmationFailureFromJSON(object: any): ResolveTool
     case 7:
     case "RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED":
       return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED;
+    case 8:
+    case "RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE":
+      return ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -447,6 +469,8 @@ export function resolveToolConfirmationFailureToJSON(object: ResolveToolConfirma
       return "RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE";
     case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED:
       return "RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED";
+    case ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE:
+      return "RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE";
     case ResolveToolConfirmationFailure.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -706,8 +730,15 @@ export interface InterruptRequest {
   bindingGeneration: number;
   targetPodUid: string;
   runtimeInputId: string;
-  inputOrder: number;
   origin: InterruptOrigin;
+  interruptLeaseRef: InterruptLeaseRef | undefined;
+}
+
+export interface InterruptLeaseRef {
+  jobId: string;
+  leaseToken: string;
+  partitionKey: string;
+  dedupeKey: string;
 }
 
 export interface InterruptResponse {
@@ -2400,8 +2431,8 @@ function createBaseInterruptRequest(): InterruptRequest {
     bindingGeneration: 0,
     targetPodUid: "",
     runtimeInputId: "",
-    inputOrder: 0,
     origin: 0,
+    interruptLeaseRef: undefined,
   };
 }
 
@@ -2428,11 +2459,11 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
     if (message.runtimeInputId !== "") {
       writer.uint32(58).string(message.runtimeInputId);
     }
-    if (message.inputOrder !== 0) {
-      writer.uint32(64).int64(message.inputOrder);
-    }
     if (message.origin !== 0) {
       writer.uint32(72).int32(message.origin);
+    }
+    if (message.interruptLeaseRef !== undefined) {
+      InterruptLeaseRef.encode(message.interruptLeaseRef, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -2500,20 +2531,20 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
           message.runtimeInputId = reader.string();
           continue;
         }
-        case 8: {
-          if (tag !== 64) {
-            break;
-          }
-
-          message.inputOrder = longToNumber(reader.int64());
-          continue;
-        }
         case 9: {
           if (tag !== 72) {
             break;
           }
 
           message.origin = reader.int32() as any;
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.interruptLeaseRef = InterruptLeaseRef.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -2562,12 +2593,12 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
         : isSet(object.runtime_input_id)
         ? globalThis.String(object.runtime_input_id)
         : "",
-      inputOrder: isSet(object.inputOrder)
-        ? globalThis.Number(object.inputOrder)
-        : isSet(object.input_order)
-        ? globalThis.Number(object.input_order)
-        : 0,
       origin: isSet(object.origin) ? interruptOriginFromJSON(object.origin) : 0,
+      interruptLeaseRef: isSet(object.interruptLeaseRef)
+        ? InterruptLeaseRef.fromJSON(object.interruptLeaseRef)
+        : isSet(object.interrupt_lease_ref)
+        ? InterruptLeaseRef.fromJSON(object.interrupt_lease_ref)
+        : undefined,
     };
   },
 
@@ -2594,11 +2625,11 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
     if (message.runtimeInputId !== "") {
       obj.runtimeInputId = message.runtimeInputId;
     }
-    if (message.inputOrder !== 0) {
-      obj.inputOrder = Math.round(message.inputOrder);
-    }
     if (message.origin !== 0) {
       obj.origin = interruptOriginToJSON(message.origin);
+    }
+    if (message.interruptLeaseRef !== undefined) {
+      obj.interruptLeaseRef = InterruptLeaseRef.toJSON(message.interruptLeaseRef);
     }
     return obj;
   },
@@ -2615,8 +2646,134 @@ export const InterruptRequest: MessageFns<InterruptRequest> = {
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.targetPodUid = object.targetPodUid ?? "";
     message.runtimeInputId = object.runtimeInputId ?? "";
-    message.inputOrder = object.inputOrder ?? 0;
     message.origin = object.origin ?? 0;
+    message.interruptLeaseRef = (object.interruptLeaseRef !== undefined && object.interruptLeaseRef !== null)
+      ? InterruptLeaseRef.fromPartial(object.interruptLeaseRef)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseInterruptLeaseRef(): InterruptLeaseRef {
+  return { jobId: "", leaseToken: "", partitionKey: "", dedupeKey: "" };
+}
+
+export const InterruptLeaseRef: MessageFns<InterruptLeaseRef> = {
+  encode(message: InterruptLeaseRef, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.jobId !== "") {
+      writer.uint32(10).string(message.jobId);
+    }
+    if (message.leaseToken !== "") {
+      writer.uint32(18).string(message.leaseToken);
+    }
+    if (message.partitionKey !== "") {
+      writer.uint32(26).string(message.partitionKey);
+    }
+    if (message.dedupeKey !== "") {
+      writer.uint32(34).string(message.dedupeKey);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptLeaseRef {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptLeaseRef();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.jobId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.leaseToken = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.partitionKey = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.dedupeKey = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InterruptLeaseRef {
+    return {
+      jobId: isSet(object.jobId)
+        ? globalThis.String(object.jobId)
+        : isSet(object.job_id)
+        ? globalThis.String(object.job_id)
+        : "",
+      leaseToken: isSet(object.leaseToken)
+        ? globalThis.String(object.leaseToken)
+        : isSet(object.lease_token)
+        ? globalThis.String(object.lease_token)
+        : "",
+      partitionKey: isSet(object.partitionKey)
+        ? globalThis.String(object.partitionKey)
+        : isSet(object.partition_key)
+        ? globalThis.String(object.partition_key)
+        : "",
+      dedupeKey: isSet(object.dedupeKey)
+        ? globalThis.String(object.dedupeKey)
+        : isSet(object.dedupe_key)
+        ? globalThis.String(object.dedupe_key)
+        : "",
+    };
+  },
+
+  toJSON(message: InterruptLeaseRef): unknown {
+    const obj: any = {};
+    if (message.jobId !== "") {
+      obj.jobId = message.jobId;
+    }
+    if (message.leaseToken !== "") {
+      obj.leaseToken = message.leaseToken;
+    }
+    if (message.partitionKey !== "") {
+      obj.partitionKey = message.partitionKey;
+    }
+    if (message.dedupeKey !== "") {
+      obj.dedupeKey = message.dedupeKey;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptLeaseRef>, I>>(base?: I): InterruptLeaseRef {
+    return InterruptLeaseRef.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptLeaseRef>, I>>(object: I): InterruptLeaseRef {
+    const message = createBaseInterruptLeaseRef();
+    message.jobId = object.jobId ?? "";
+    message.leaseToken = object.leaseToken ?? "";
+    message.partitionKey = object.partitionKey ?? "";
+    message.dedupeKey = object.dedupeKey ?? "";
     return message;
   },
 };

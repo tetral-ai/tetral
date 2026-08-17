@@ -3450,6 +3450,7 @@ describe("ThreadLoop", () => {
 			expect(requestEnds).toHaveLength(1);
 			expect(requestEnds[0]?.interruptSettlement).toEqual({
 				runtimeInputId: command.runtimeInputId,
+				interruptLeaseRef: command.interruptLeaseRef,
 			});
 			expect(
 				await Effect.runPromise(manager.inspectThread(command)),
@@ -4028,6 +4029,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(1);
 		expect(requestEnds[0]?.interruptSettlement).toEqual({
 			runtimeInputId: "rin_interrupt",
+			interruptLeaseRef: interruptCommand.interruptLeaseRef,
 		});
 		expect(closeoutOrder).not.toContain("commit:interrupt");
 		expect(closeoutOrder.indexOf("event:span.model_request_end")).toBeLessThan(
@@ -4881,7 +4883,6 @@ describe("ThreadLoop", () => {
 						userMessage("user-rehydrated-approved", 1, "resume approved tools"),
 						loadedMessage,
 					],
-					activeRunInputOrder: 8,
 					pendingToolUses,
 					turnCheckpoint: {
 						pendingInputContextSequences: [],

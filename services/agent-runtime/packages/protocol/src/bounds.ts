@@ -111,8 +111,11 @@ export function validateInterruptRequest(input: InterruptRequest): ValidationRes
   if (
     !scope.ok ||
     !validId(input.runtimeInputId) ||
-    !validInputOrder(input.inputOrder) ||
-    input.inputOrder <= 0 ||
+    input.interruptLeaseRef === undefined ||
+    !validId(input.interruptLeaseRef.jobId) ||
+    !validId(input.interruptLeaseRef.leaseToken) ||
+    !validId(input.interruptLeaseRef.partitionKey) ||
+    !validId(input.interruptLeaseRef.dedupeKey) ||
     (input.origin !== 1 && input.origin !== 2)
   ) {
     return invalidRequest();

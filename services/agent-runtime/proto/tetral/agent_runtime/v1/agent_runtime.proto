@@ -61,6 +61,7 @@ enum AcceptInputFailure {
   ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT = 3;
   ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED = 4;
   ACCEPT_INPUT_FAILURE_REJECTED_INPUT = 5;
+  ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 6;
 }
 
 message AcceptAgentMailRequest {
@@ -97,6 +98,7 @@ enum AcceptAgentMailFailure {
   ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT = 3;
   ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE = 4;
   ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED = 5;
+  ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 6;
 }
 
 message AcceptTaskNotificationRequest {
@@ -134,6 +136,7 @@ enum AcceptTaskNotificationFailure {
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY = 4;
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT = 5;
   ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED = 6;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 7;
 }
 
 message InterruptRequest {
@@ -144,8 +147,17 @@ message InterruptRequest {
   int64 binding_generation = 5;
   string target_pod_uid = 6;
   string runtime_input_id = 7;
-  int64 input_order = 8;
+  reserved 8;
+  reserved "input_order";
   InterruptOrigin origin = 9;
+  InterruptLeaseRef interrupt_lease_ref = 10;
+}
+
+message InterruptLeaseRef {
+  string job_id = 1;
+  string lease_token = 2;
+  string partition_key = 3;
+  string dedupe_key = 4;
 }
 
 enum InterruptOrigin {
@@ -225,6 +237,7 @@ enum ResolveToolConfirmationFailure {
   RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED = 5;
   RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE = 6;
   RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED = 7;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 8;
 }
 
 message ApplyRuntimeConfigRequest {

@@ -29,6 +29,15 @@ import (
 
 // This file owns shared Bridge API store test fixtures and assertions.
 
+func bridgeInterruptLeaseRef(job *queue.Job) *bridgev1.InterruptLeaseRef {
+	if job == nil {
+		return nil
+	}
+	return &bridgev1.InterruptLeaseRef{
+		JobId: job.ID, LeaseToken: job.LeaseToken, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+	}
+}
+
 func repoRootFromBridgeTest(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()

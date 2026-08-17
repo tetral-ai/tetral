@@ -91,6 +91,12 @@ function threadControl(
 	return {
 		...acceptedInputScope(sessionId, runtimeInputId),
 		origin: "user",
+		interruptLeaseRef: {
+			jobId: `qjob_${runtimeInputId}`,
+			leaseToken: `lease_${runtimeInputId}`,
+			partitionKey: `session:wksp_test:${sessionId}`,
+			dedupeKey: `runtime_input:wksp_test:${sessionId}:${runtimeInputId}`,
+		},
 	};
 }
 

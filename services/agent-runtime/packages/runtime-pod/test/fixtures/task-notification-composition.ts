@@ -48,6 +48,11 @@ const cleanupController = {
 } satisfies RuntimeCleanupController;
 
 let declaration: CommitTaskNotificationResultRequest | undefined;
+let acceptResult: unknown;
+let resolveAcceptResult: (() => void) | undefined;
+const acceptedRequest = new Promise<void>((resolve) => {
+	resolveAcceptResult = resolve;
+});
 let resolveCommitResult: ((value: unknown) => void) | undefined;
 const committedInput = new Promise<unknown>((resolve) => {
 	resolveCommitResult = resolve;
@@ -134,6 +139,20 @@ const contextLoader = {
 		bridgeLoader.refreshRuntimeBindingToken.bind(bridgeLoader),
 };
 let nextID = 0;
+const runtimeSleep = async (durationMs: number, signal: AbortSignal): Promise<boolean> => {
+	if (signal.aborted) return false;
+	return await new Promise<boolean>((resolve) => {
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", abort);
+			resolve(true);
+		}, durationMs);
+		const abort = () => {
+			clearTimeout(timer);
+			resolve(false);
+		};
+		signal.addEventListener("abort", abort, { once: true });
+	});
+};
 const hosts = await buildRuntimeCoreHosts({
 	maxLocalSessions: 2,
 	now: () => "2026-01-01T00:00:00.000Z",
@@ -145,7 +164,7 @@ const hosts = await buildRuntimeCoreHosts({
 			now: () => "2026-01-01T00:00:00.000Z",
 			monotonicMs: () => 0,
 			createId: (prefix) => `${prefix}_${++nextID}`,
-			sleep: async () => true,
+			sleep: runtimeSleep,
 		},
 		llmService: { stream: () => Stream.never },
 		storeOperationTimeoutMs: 100,
@@ -169,7 +188,15 @@ const service = new RuntimeControlService({
 			serviceAccount: { namespace: "engine", name: "bridge" },
 		}),
 	},
-	runHost: hosts.commandRunHost,
+	runHost: {
+		...hosts.commandRunHost,
+		handleTaskNotification: async (...args) => {
+			const result = await hosts.commandRunHost.handleTaskNotification(...args);
+			acceptResult = result;
+			resolveAcceptResult?.();
+			return result;
+		},
+	},
 	cleanupController,
 	logger: {
 		info: () => undefined,
@@ -215,7 +242,7 @@ try {
 			);
 		}
 	}
-	const commitResult = await committedInput;
+	const [commitResult] = await Promise.all([committedInput, acceptedRequest]);
 	if (declaration === undefined && input.bridgeAddress === undefined) {
 		throw new Error(
 			"resident ThreadLoop did not cross the Bridge declaration adapter",
@@ -224,14 +251,15 @@ try {
 	process.stdout.write(
 		JSON.stringify({
 			...(declaration !== undefined ? { declaration } : {}),
+			acceptResult,
 			commitResult,
 		}),
 	);
 } finally {
 	client.close();
 	generatedBridgeClient?.close();
-	await grpcServer.shutdown();
 	await hosts.shutdownActiveRuns();
+	await grpcServer.shutdown();
 	await hosts.close();
 }
 

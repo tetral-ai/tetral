@@ -90,6 +90,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			duplicate = true
 			return nil
 		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
@@ -224,6 +227,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			now,
 		)
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_BarrierStale{BarrierStale: &bridgev1.CommitTaskNotificationResultBarrierStale{}}}, nil
+		}
 		return nil, err
 	}
 	if outcome == "stale" {

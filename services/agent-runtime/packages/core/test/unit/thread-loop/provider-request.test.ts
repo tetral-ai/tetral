@@ -2401,6 +2401,7 @@ describe("ThreadLoop", () => {
 		});
 		const custody = {
 			activeTurnId: () => durableTurnId,
+			interruptLeaseRef: () => undefined,
 		};
 		const loader = new QueuedContextLoader([], []);
 		const result = await Effect.runPromise(

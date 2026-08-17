@@ -501,7 +501,7 @@ Previous anchored summary.
 	});
 	test("direct Effect interruption closes an ACKed compaction request before interruption finishes", async () => {
 		const active = await activeCompactionRun();
-		const interruptCommand = acceptedInput("rin_compaction_interrupt");
+		const interruptCommand = interruptInput("rin_compaction_interrupt");
 		active.session.state.beginUserInterrupt(
 			interruptCommand,
 			testControlCommit(interruptCommand),
@@ -589,10 +589,7 @@ Previous anchored summary.
 			interruptCommand,
 			testControlCommit(interruptCommand),
 		);
-		active.session.state.discardQueuedAcceptedInputsBeforeFence(
-			interruptCommand.inputOrder,
-			true,
-		);
+		active.session.state.discardQueuedAcceptedInputsForInterrupt(true);
 		const interrupt = Effect.runPromise(Fiber.interrupt(active.runFiber));
 		try {
 			await active.requestEndStarted.promise;
@@ -665,7 +662,7 @@ Previous anchored summary.
 		});
 		const metrics = new RecordingRuntimeMetrics();
 		const active = await activeCompactionRun(session, metrics);
-		const interruptCommand = acceptedInput("rin_reviewer_compaction_interrupt");
+		const interruptCommand = interruptInput("rin_reviewer_compaction_interrupt");
 		active.session.state.beginUserInterrupt(
 			interruptCommand,
 			testControlCommit(interruptCommand),
@@ -745,7 +742,7 @@ Previous anchored summary.
 	});
 	test("compaction cancellation reports event_write_failed when request-end is not ACKed", async () => {
 		const active = await activeCompactionRun();
-		const interruptCommand = acceptedInput("rin_compaction_unacked_interrupt");
+		const interruptCommand = interruptInput("rin_compaction_unacked_interrupt");
 		active.session.state.beginUserInterrupt(
 			interruptCommand,
 			testControlCommit(interruptCommand),

@@ -9,11 +9,15 @@
  */
 
 import type * as ContextLoader from "@tetral/agent-runtime-core/src/context/context-loader.js";
-import type { RuntimeLoadedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
+import type {
+	AcceptedInputCommitResult,
+	RuntimeLoadedAgentMail,
+} from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
 	SessionEvent,
 	SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { ContextLoaderErrorSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import type {
@@ -162,6 +166,31 @@ export interface RuntimeCoreHostsOptions {
 export async function buildRuntimeCoreHosts(
 	options: RuntimeCoreHostsOptions,
 ): Promise<RuntimeCoreHosts> {
+	const precommittedAcceptedInputs = new Map<
+		string,
+		AcceptedInputCommitResult
+	>();
+	const acceptedInputCommitKey = (input: RuntimeAcceptedInputState): string =>
+		`${input.workspaceId}\u0000${input.sessionId}\u0000${input.sessionThreadId}\u0000${input.runtimeInputId}`;
+	const runtimeContextLoader: ContextLoader.ContextLoader = {
+		...options.contextLoader,
+		...(options.contextLoader.commitAcceptedInput === undefined
+			? {}
+			: {
+					commitAcceptedInput: async (input, commitOptions) => {
+						const key = acceptedInputCommitKey(input);
+						const precommitted = precommittedAcceptedInputs.get(key);
+						if (precommitted !== undefined) {
+							precommittedAcceptedInputs.delete(key);
+							return precommitted;
+						}
+						return await options.contextLoader.commitAcceptedInput!(
+							input,
+							commitOptions,
+						);
+					},
+				}),
+	};
 	const reviewerFailureWriter = createSessionEventWriter({
 		append: (envelope) =>
 			options.threadLoop.sessionEventWriter.append(envelope),
@@ -183,7 +212,7 @@ export async function buildRuntimeCoreHosts(
 				}
 			: {}),
 		...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
-	}).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(options.contextLoader)));
+	}).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(runtimeContextLoader)));
 	const managerLayer = SessionManager.layer({
 		maxLocalSessions: options.maxLocalSessions,
 		maxConcurrentTools: options.maxConcurrentTools ?? 8,
@@ -242,14 +271,6 @@ export async function buildRuntimeCoreHosts(
 						}
 						return {
 							...command,
-							...(context.turnFacts.events.length === 0
-								? {}
-								: {
-										activeRunInputOrder:
-											context.turnFacts.events[
-												context.turnFacts.events.length - 1
-											]!.eventSequence,
-									}),
 							...(context.thread !== undefined
 								? { thread: context.thread }
 								: {}),
@@ -316,13 +337,72 @@ export async function buildRuntimeCoreHosts(
 			};
 		}),
 	);
+	const commitAcceptedBeforeHotAdmission = async (
+		input: RuntimeAcceptedInputState,
+	): Promise<"current" | "stale" | "barrier_stale"> => {
+		if (options.contextLoader.commitAcceptedInput === undefined) {
+			throw new Error("accepted input commit boundary is unavailable");
+		}
+		const committed = await ThreadLoop.commitAcceptedInputWithRetry(
+			options.contextLoader,
+			input,
+			options.threadLoop,
+			new AbortController().signal,
+		);
+		if (!committed.ok) throw committed.error;
+		const result = committed.result;
+		if (
+			result.type !== "stale_custody" &&
+			result.type !== "barrier_stale_custody"
+		) {
+			precommittedAcceptedInputs.set(acceptedInputCommitKey(input), result);
+		}
+		return result.type === "barrier_stale_custody"
+			? "barrier_stale"
+			: result.type === "stale_custody"
+				? "stale"
+				: "current";
+	};
+	const clearPrecommit = (input: RuntimeAcceptedInputState): void => {
+		precommittedAcceptedInputs.delete(acceptedInputCommitKey(input));
+	};
 	return {
 		commandRunHost: {
 			handleAcceptInput: async (command) => {
 				const acceptedInput = runtimeAcceptedInputFromCommand(command);
+				try {
+					const precommit = await commitAcceptedBeforeHotAdmission(acceptedInput);
+					if (precommit === "barrier_stale") {
+						return {
+							ok: false,
+							sessionId: command.sessionId,
+							reason: "barrier_stale",
+						} as const;
+					}
+					if (precommit === "stale") {
+						return {
+							ok: true,
+							sessionId: command.sessionId,
+							created: false,
+							duplicate: true,
+							started: false,
+						} as const;
+					}
+				} catch (error) {
+					const parsed = ContextLoaderErrorSchema.safeParse(error);
+					return {
+						ok: false,
+						sessionId: command.sessionId,
+						reason: "context_load_failed",
+						retryable: parsed.success ? parsed.data.retryable : true,
+					} as const;
+				}
 				const result = await Effect.runPromise(
 					host.handleAcceptInput(acceptedInput),
 				);
+				if (!result.ok || (result.duplicate === true && !result.started)) {
+					clearPrecommit(acceptedInput);
+				}
 				if (result.ok) {
 					return result;
 				}
@@ -342,10 +422,29 @@ export async function buildRuntimeCoreHosts(
 				};
 			},
 			handleAgentMail: async (command) => {
+				const acceptedInput = acceptedAgentMailCommand(command);
 				try {
+					const precommit = await commitAcceptedBeforeHotAdmission(acceptedInput);
+					if (precommit === "barrier_stale") {
+						return {
+							ok: false,
+							sessionId: command.sessionId,
+							reason: "barrier_stale",
+						} as const;
+					}
+					if (precommit === "stale") {
+						return {
+							ok: true,
+							sessionId: command.sessionId,
+							applied: false,
+						} as const;
+					}
 					const result = await Effect.runPromise(
-						host.handleAcceptInput(acceptedAgentMailCommand(command)),
+						host.handleAcceptInput(acceptedInput),
 					);
+					if (!result.ok || (result.duplicate === true && !result.started)) {
+						clearPrecommit(acceptedInput);
+					}
 					if (!result.ok) {
 						return {
 							ok: false,
@@ -369,6 +468,7 @@ export async function buildRuntimeCoreHosts(
 						applied: result.duplicate !== true || result.started,
 					};
 				} catch {
+					clearPrecommit(acceptedInput);
 					return {
 						ok: false,
 						sessionId: command.sessionId,
@@ -385,10 +485,42 @@ export async function buildRuntimeCoreHosts(
 				await Effect.runPromise(
 					host.handleToolConfirmation(sessionId, command, commit),
 				),
-			handleTaskNotification: async (sessionId, command) =>
-				await Effect.runPromise(
-					host.handleTaskNotification(sessionId, command),
-				),
+			handleTaskNotification: async (sessionId, command) => {
+				const acceptedInput = {
+					...command,
+					kind: "task_notification" as const,
+				};
+				try {
+					const precommit = await commitAcceptedBeforeHotAdmission(acceptedInput);
+					if (precommit === "barrier_stale") {
+						return {
+							ok: false,
+							sessionId,
+							reason: "barrier_stale",
+						} as const;
+					}
+					if (precommit === "stale") {
+						return {
+							ok: true,
+							sessionId,
+							created: false,
+							applied: false,
+						} as const;
+					}
+					const result = await Effect.runPromise(
+						host.handleTaskNotification(sessionId, command),
+					);
+					if (!result.ok || !result.applied) clearPrecommit(acceptedInput);
+					return result;
+				} catch {
+					clearPrecommit(acceptedInput);
+					return {
+						ok: false,
+						sessionId,
+						reason: "context_load_failed",
+					} as const;
+				}
+			},
 			handleRuntimeConfigPatch: async (sessionId, command) => {
 				return await Effect.runPromise(
 					host.handleRuntimeConfigPatch(sessionId, command),

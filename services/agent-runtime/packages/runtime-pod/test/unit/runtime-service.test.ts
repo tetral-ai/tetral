@@ -15,6 +15,7 @@ import {
 	ApplyRuntimeConfigFailure,
 	CleanupSessionReason,
 	InterruptOrigin,
+	ResolveToolConfirmationFailure,
 	ToolConfirmationDecision,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type { RuntimePodLogRecord } from "../../src/logger.js";
@@ -255,8 +256,8 @@ describe("RuntimeControlService method-specific ingress", () => {
 			status: "completed",
 		});
 		expect(fixture.host.interrupts[0]?.command).toMatchObject({
-			inputOrder: 10,
 			origin: "user",
+			interruptLeaseRef: interrupt().interruptLeaseRef,
 		});
 		expect(fixture.host.confirmations[0]?.command).toMatchObject({
 			toolUseEventId: "sevt_tool",
@@ -270,6 +271,31 @@ describe("RuntimeControlService method-specific ingress", () => {
 		expect(fixture.committer.commits[0]?.scope).toEqual(
 			inputScope({ runtimeInputId: "rin_interrupt" }),
 		);
+	});
+
+	test("reports Tool confirmation barrier-stale distinctly from ordinary stale", async () => {
+		const fixture = makeFixture();
+		fixture.committer.result = { ok: true, type: "barrier_stale" };
+		expect(
+			await fixture.service.resolveToolConfirmation(
+				toolConfirmation({ runtimeInputId: "rin_confirmation_barrier" }),
+				metadata(),
+			),
+		).toEqual({
+			rejected: {
+				reason:
+					ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+				retryable: false,
+			},
+		});
+
+		fixture.committer.result = { ok: true, type: "stale" };
+		expect(
+			await fixture.service.resolveToolConfirmation(
+				toolConfirmation({ runtimeInputId: "rin_confirmation_stale" }),
+				metadata(),
+			),
+		).toEqual({ stale: {} });
 	});
 
 	test("applies session and MCP config through explicit config identities", async () => {
@@ -556,8 +582,13 @@ function interrupt(
 ): InterruptRequest {
 	return {
 		...inputScope({ runtimeInputId: "rin_interrupt" }),
-		inputOrder: 10,
 		origin: InterruptOrigin.INTERRUPT_ORIGIN_USER,
+		interruptLeaseRef: {
+			jobId: "qjob_interrupt",
+			leaseToken: "lease_interrupt",
+			partitionKey: "session:wksp_test:sesn_test",
+			dedupeKey: "runtime_input:wksp_test:sesn_test:rin_interrupt",
+		},
 		...overrides,
 	};
 }
@@ -743,7 +774,16 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 		commit: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2],
 	) {
 		this.confirmations.push({ sessionId, command });
-		await commit({ inputKind: "tool_confirmation" });
+		const committed = await commit({ inputKind: "tool_confirmation" });
+		if (committed.ok && "stale" in committed) {
+			return {
+				ok: true as const,
+				sessionId,
+				created: false,
+				applied: false,
+				stale: true as const,
+			};
+		}
 		return { ok: true as const, sessionId, created: false, applied: true };
 	}
 	async handleRuntimeConfigPatch(
@@ -765,11 +805,20 @@ class RecordingCommitter implements RuntimeControlInputCommitter {
 	readonly commits: Array<
 		Parameters<RuntimeControlInputCommitter["commitControlInput"]>[0]
 	> = [];
+	result: Awaited<
+		ReturnType<RuntimeControlInputCommitter["commitControlInput"]>
+	> = {
+		ok: true,
+		type: "committed",
+		assignedContextSequences: [],
+		pendingAttachments: [],
+		interruptToolResults: [],
+	};
 	async commitControlInput(
 		input: Parameters<RuntimeControlInputCommitter["commitControlInput"]>[0],
 	) {
 		this.commits.push(input);
-		return { ok: true as const, type: "stale" as const };
+		return this.result;
 	}
 }
 

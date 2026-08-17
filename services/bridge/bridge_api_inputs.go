@@ -46,9 +46,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	var inputKind string
 	var declarationDigest string
 	var duplicate bool
-	var supersededInterrupt bool
 	var typedResult *commitInputsTypedResult
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
+		mutationCtx := ctx
 		// Serialize replay lookup before validating the current binding. A replacement
 		// binding may recover an ACK lost by its predecessor, while concurrent writers
 		// for the same session must still observe one committed operation.
@@ -97,19 +97,19 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			return err
 		}
 		if inputKind == "interrupt_control" {
-			supersededInterrupt, err = interruptInputSupersededByRunTx(ctx, tx, request)
-			if err != nil {
+			if err := validateInterruptLeaseRefTx(ctx, tx, request.GetScope(), key, request.GetInterruptLeaseRef()); err != nil {
 				return err
 			}
-			if supersededInterrupt {
-				observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
-				return err
-			}
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			mutationCtx = withInterruptCloseout(ctx, key)
+		} else if request.GetInterruptLeaseRef() != nil {
+			return status.Error(codes.InvalidArgument, "interrupt lease authority is not valid for ordinary input")
+		} else if err := requireSessionInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		if err := verifyRuntimeScopeTx(mutationCtx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		threadScope, err := lockThreadMutationTx(mutationCtx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
@@ -117,7 +117,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if inputKind == "approval_review" && (threadScope.role != "approval_reviewer" || threadScope.visibility != "internal") {
 			evidence.Kind = "lineage"
 		}
-		typedResult, err = commitInputDeclarationTx(ctx, tx, request, inputKind, key, now)
+		typedResult, err = commitInputDeclarationTx(mutationCtx, tx, request, inputKind, key, now)
 		if err != nil {
 			return err
 		}
@@ -141,6 +141,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 		return err
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_BarrierStale{BarrierStale: &bridgev1.CommitInputsBarrierStale{}}}, nil
+		}
 		return nil, err
 	}
 	logRuntimeDeclaration(
@@ -160,7 +163,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		}
 		s.logCommittedThreadInterrupt(ctx, request, event, len(typedResult.interruptToolResults), time.Since(logStartedAt).Milliseconds())
 	}
-	if !observation.Current || supersededInterrupt {
+	if !observation.Current {
 		return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Stale{Stale: &bridgev1.CommitInputsStale{}}}, nil
 	}
 	if typedResult == nil {
@@ -169,39 +172,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Committed{
 		Committed: commitInputsCommittedResult(inputKind, typedResult),
 	}}, nil
-}
-
-// The Runtime-local input-order fence calls CommitInputs only when its current
-// Run is newer than the interrupt. A durable later run-open confirms that the
-// command is superseded. Existing receipts are read before this check so an
-// exact replay always returns its original closeout result.
-func interruptInputSupersededByRunTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	request *bridgev1.CommitInputsRequest,
-) (bool, error) {
-	var superseded bool
-	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM session_runtime_inbox i
-			  JOIN session_events e
-			    ON e.workspace_id = i.workspace_id
-			   AND e.session_id = i.session_id
-			   AND e.session_thread_id = i.session_thread_id
-			 WHERE i.workspace_id = $1
-			   AND i.session_id = $2
-			   AND i.session_thread_id = $3
-			   AND i.runtime_input_id = $4
-			   AND e.type IN ('session.status_running', 'session.thread_status_running')
-			   AND e.sequence > i.sequence_to
-		)`,
-		request.GetScope().GetWorkspaceId(),
-		request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(),
-		request.GetRuntimeInputId(),
-	).Scan(&superseded)
-	return superseded, err
 }
 
 // validateApprovalReviewText bounds the only caller-authored CommitInputs

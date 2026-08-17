@@ -269,7 +269,7 @@ function rejectionInput(
 
 function interruptInput(
 	runtimeInputId: string,
-	inputOrder = 9,
+	_inputOrder = 9,
 	sessionId = "sesn_1",
 	origin: "user" | "agent" = "user",
 ): SessionManager.RuntimeInterruptControlCommand {
@@ -278,7 +278,16 @@ function interruptInput(
 		contentJson: _contentJson,
 		...scope
 	} = acceptedInput(runtimeInputId, sessionId);
-	return { ...scope, inputOrder, origin };
+	return {
+		...scope,
+		origin,
+		interruptLeaseRef: {
+			jobId: `qjob_${runtimeInputId}`,
+			leaseToken: `lease_${runtimeInputId}`,
+			partitionKey: `session:wksp_test:${sessionId}`,
+			dedupeKey: `runtime_input:wksp_test:${sessionId}:${runtimeInputId}`,
+		},
+	};
 }
 
 function installRecoveredToolTurn(
@@ -337,19 +346,17 @@ function beginTestUserInterrupt(
 	runtimeInputId: string,
 	onCommit: () => void = () => {},
 ): void {
-	const scope = {
-		...acceptedInput(runtimeInputId),
-		workspaceId: session.identity.workspaceId,
-		sessionThreadId: session.identity.sessionThreadId,
-		bindingId: session.identity.bindingId,
-		bindingGeneration: session.identity.bindingGeneration,
-		targetPodUid: session.identity.targetPodUid,
-		inputOrder: 9,
-	};
+	const {
+		kind: _kind,
+		contentJson: _contentJson,
+		inputOrder,
+		...address
+	} = acceptedInput(runtimeInputId);
+	const scope = { ...address, origin: "user" as const };
 	session.state.beginUserInterrupt(scope, async (declaration) => {
 		onCommit();
 		return buildRuntimeControlCommitResult(
-			scope,
+			{ ...scope, inputOrder },
 			"interrupt_control",
 			declaration,
 		);
@@ -633,6 +640,12 @@ function testRunCustody(): ThreadLoop.ThreadLoopRunCustody {
 	return {
 		activeTurnId: (session) =>
 			session.state.threadTurnReduction().checkpoint.executionRunId,
+		interruptLeaseRef: (runtimeInputId) => ({
+			jobId: `qjob_${runtimeInputId}`,
+			leaseToken: `lease_${runtimeInputId}`,
+			partitionKey: `session:wksp_test:sesn_1`,
+			dedupeKey: `runtime_input:wksp_test:sesn_1:${runtimeInputId}`,
+		}),
 	};
 }
 

@@ -20,6 +20,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func testRuntimeInterruptLeaseRef(runtimeInputID string) *agentruntimev1.InterruptLeaseRef {
+	return &agentruntimev1.InterruptLeaseRef{
+		JobId: "qjob_" + runtimeInputID, LeaseToken: "lease_" + runtimeInputID,
+		PartitionKey: "session:ws_bridge:sesn_1", DedupeKey: "runtime_input:ws_bridge:sesn_1:" + runtimeInputID,
+	}
+}
+
 func TestRuntimeConfigRebuildsPreserveDataBytesWithinCommandFuses(t *testing.T) {
 	buildInstalledPolicy := func(configCount int) string {
 		configs := make([]map[string]any, configCount)
@@ -160,10 +167,28 @@ func TestRuntimePodDirectDelivererSendsPreparedRuntimeCommand(t *testing.T) {
 	}
 }
 
-func TestRuntimePodDirectDelivererRevalidatesAndSendsFirstInterruptOnce(t *testing.T) {
+func TestRuntimeDeliveryMapsSessionBarrierStaleWithoutRetryOrAcceptance(t *testing.T) {
+	results := []RuntimeDeliveryResult{
+		runtimeResultFromAcceptInput(&agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Rejected{Rejected: &agentruntimev1.AcceptInputRejected{Reason: agentruntimev1.AcceptInputFailure_ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE}}}),
+		runtimeResultFromAcceptAgentMail(&agentruntimev1.AcceptAgentMailResponse{Outcome: &agentruntimev1.AcceptAgentMailResponse_Rejected{Rejected: &agentruntimev1.AcceptAgentMailRejected{Reason: agentruntimev1.AcceptAgentMailFailure_ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE}}}),
+		runtimeResultFromAcceptTask(&agentruntimev1.AcceptTaskNotificationResponse{Outcome: &agentruntimev1.AcceptTaskNotificationResponse_Rejected{Rejected: &agentruntimev1.AcceptTaskNotificationRejected{Reason: agentruntimev1.AcceptTaskNotificationFailure_ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE}}}),
+		runtimeResultFromToolConfirmation(&agentruntimev1.ResolveToolConfirmationResponse{Outcome: &agentruntimev1.ResolveToolConfirmationResponse_Rejected{Rejected: &agentruntimev1.ResolveToolConfirmationRejected{Reason: agentruntimev1.ResolveToolConfirmationFailure_RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE}}}),
+	}
+	for index, result := range results {
+		if result.Status != RuntimeDeliveryBarrierStale || result.Retryable {
+			t.Fatalf("barrier-stale result %d = %+v; want private nonretryable barrier stale", index, result)
+		}
+	}
+	ordinaryStale := runtimeResultFromToolConfirmation(&agentruntimev1.ResolveToolConfirmationResponse{Outcome: &agentruntimev1.ResolveToolConfirmationResponse_Stale{Stale: &agentruntimev1.ResolveToolConfirmationStale{}}})
+	if ordinaryStale.Status != RuntimeDeliveryDuplicate {
+		t.Fatalf("ordinary Tool confirmation stale = %+v; want duplicate settlement", ordinaryStale)
+	}
+}
+
+func TestRuntimePodDirectDelivererSendsFirstInterruptOnce(t *testing.T) {
 	request := &agentruntimev1.InterruptRequest{
 		WorkspaceId: "ws_bridge", SessionId: "sesn_1", SessionThreadId: "thr_1",
-		RuntimeInputId: "rin_interrupt_1", InputOrder: 1,
+		RuntimeInputId: "rin_interrupt_1", InterruptLeaseRef: testRuntimeInterruptLeaseRef("rin_interrupt_1"),
 	}
 	store := &recordingRuntimeDeliveryStore{plan: RuntimeCommandPlan{
 		Target:    RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090},
@@ -178,8 +203,8 @@ func TestRuntimePodDirectDelivererRevalidatesAndSendsFirstInterruptOnce(t *testi
 	if err != nil || result.Status != RuntimeDeliveryAccepted {
 		t.Fatalf("DeliverRuntimeJob first interrupt = %#v/%v; want accepted", result, err)
 	}
-	if len(store.jobs) != 2 {
-		t.Fatalf("interrupt durable preparations = %d; want initial preparation and pre-send revalidation", len(store.jobs))
+	if len(store.jobs) != 1 {
+		t.Fatalf("interrupt durable preparations = %d; want one owning preparation", len(store.jobs))
 	}
 	if len(sender.requests) != 1 || sender.requests[0] != request {
 		t.Fatalf("first interrupt Runtime requests = %#v; want one exact command", sender.requests)
@@ -192,7 +217,7 @@ func TestRuntimePodDirectDelivererRevalidatesAndSendsFirstInterruptOnce(t *testi
 func TestRuntimePodDirectDelivererDoesNotSettleInterruptOnRuntimeAcceptanceAlone(t *testing.T) {
 	request := &agentruntimev1.InterruptRequest{
 		WorkspaceId: "ws_bridge", SessionId: "sesn_1", SessionThreadId: "thr_1",
-		RuntimeInputId: "rin_interrupt_pending", InputOrder: 1,
+		RuntimeInputId: "rin_interrupt_pending", InterruptLeaseRef: testRuntimeInterruptLeaseRef("rin_interrupt_pending"),
 	}
 	store := &recordingRuntimeDeliveryStore{plan: RuntimeCommandPlan{
 		Target:    RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090},
@@ -218,7 +243,7 @@ func TestRuntimePodDirectDelivererDoesNotSettleInterruptOnRuntimeAcceptanceAlone
 func TestRuntimeCommandPlanBoundsOnlyInterruptDeliveryWait(t *testing.T) {
 	request := &agentruntimev1.InterruptRequest{
 		WorkspaceId: "ws_bridge", SessionId: "sesn_timeout", SessionThreadId: "thr_timeout",
-		RuntimeInputId: "rin_timeout", InputOrder: 1,
+		RuntimeInputId: "rin_timeout", InterruptLeaseRef: testRuntimeInterruptLeaseRef("rin_timeout"),
 	}
 	sender := &recordingRuntimeCommandSender{observeInterruptDeadline: true}
 	started := time.Now()
@@ -232,36 +257,6 @@ func TestRuntimeCommandPlanBoundsOnlyInterruptDeliveryWait(t *testing.T) {
 	}
 	if len(sender.requests) != 1 || sender.requests[0] != request {
 		t.Fatalf("bounded interrupt requests = %#v; want one exact command", sender.requests)
-	}
-}
-
-func TestRuntimePodDirectDelivererWaitsForSlowInterruptCloseoutReceiptInsideSingleBound(t *testing.T) {
-	request := &agentruntimev1.InterruptRequest{
-		WorkspaceId: "ws_bridge", SessionId: "sesn_slow_closeout", SessionThreadId: "thr_slow_closeout",
-		RuntimeInputId: "rin_slow_closeout", InputOrder: 1,
-	}
-	store := &recordingRuntimeDeliveryStore{
-		plan:        RuntimeCommandPlan{Target: RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090}, Interrupt: request},
-		replayFound: true, replayResult: RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate},
-	}
-	sender := &recordingRuntimeCommandSender{
-		result:         RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted},
-		interruptDelay: 75 * time.Millisecond,
-	}
-	job := runtimeInputRuntimeJob()
-	job.RuntimeInputID = request.GetRuntimeInputId()
-	job.InputKind = "interrupt_control"
-	started := time.Now()
-	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
-	elapsed := time.Since(started)
-	if err != nil || result.Status != RuntimeDeliveryDuplicate {
-		t.Fatalf("slow closeout delivery = %+v/%v; want durable receipt", result, err)
-	}
-	if elapsed < sender.interruptDelay || elapsed >= time.Second {
-		t.Fatalf("slow closeout elapsed = %s; want measured delay %s inside the 30s caller bound", elapsed, sender.interruptDelay)
-	}
-	if len(sender.requests) != 1 || len(store.replayJobs) != 1 {
-		t.Fatalf("slow closeout sends/replays = %d/%d; want one/one", len(sender.requests), len(store.replayJobs))
 	}
 }
 
@@ -692,7 +687,6 @@ type recordingRuntimeCommandSender struct {
 	requests                 []proto.Message
 	observeInterruptDeadline bool
 	interruptDeadline        time.Time
-	interruptDelay           time.Duration
 }
 
 type countingRuntimeCommandTokenSource struct {
@@ -767,13 +761,6 @@ func (s *recordingRuntimeCommandSender) Interrupt(ctx context.Context, target Ru
 		s.targets = append(s.targets, target)
 		s.requests = append(s.requests, request)
 		return nil, context.DeadlineExceeded
-	}
-	if s.interruptDelay > 0 {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(s.interruptDelay):
-		}
 	}
 	result, err := s.record(target, request)
 	if err != nil || result.Status == "" {

@@ -34,6 +34,7 @@ import (
 
 type taskNotificationRuntimeCompositionOutput struct {
 	Declaration  json.RawMessage `json:"declaration"`
+	AcceptResult json.RawMessage `json:"acceptResult"`
 	CommitResult json.RawMessage `json:"commitResult"`
 }
 
@@ -418,6 +419,13 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		t.Fatalf("deliver task notification through generated Runtime gRPC = active:%t err:%v", active, err)
 	}
 	composed := runningRuntime.wait(t)
+	var accepted struct {
+		OK      bool `json:"ok"`
+		Applied bool `json:"applied"`
+	}
+	if err := json.Unmarshal(composed.AcceptResult, &accepted); err != nil || !accepted.OK || !accepted.Applied {
+		t.Fatalf("Runtime task-notification acceptance = %s/%v; want applied", composed.AcceptResult, err)
+	}
 	if !bridgeServerStore.didDrop() {
 		t.Fatal("task notification composition did not exercise committed lost-ACK replay")
 	}

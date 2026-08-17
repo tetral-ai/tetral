@@ -43,6 +43,7 @@ type childControlCommand struct {
 }
 
 func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, request *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error) {
+	ctx = withInterruptBarrierBirth(ctx)
 	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" {
 		err := status.Error(codes.InvalidArgument, "child interrupt scope and source identity are required")
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "admit_child_interrupt", request.GetSourceToolUseEventId(), "validate", err)

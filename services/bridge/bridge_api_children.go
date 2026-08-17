@@ -66,6 +66,9 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 			response = &bridgev1.CreateSubagentThreadResponse{Outcome: &bridgev1.CreateSubagentThreadResponse_Duplicate{Duplicate: &bridgev1.CreateSubagentThreadDuplicate{ChildThreadId: result.ChildThreadID}}}
 			return nil
 		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
 		if err := requireOpenChildParentTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
@@ -119,6 +122,9 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 			response = &bridgev1.EnsureApprovalReviewerTrunkResponse{Outcome: &bridgev1.EnsureApprovalReviewerTrunkResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerTrunkDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
 		if err := requireOpenChildParentTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
@@ -168,6 +174,9 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 			response = &bridgev1.EnsureApprovalReviewerSidecarResponse{Outcome: &bridgev1.EnsureApprovalReviewerSidecarResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerSidecarDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
 		if err := requireOpenChildParentTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
@@ -195,6 +204,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 // later through CommitInputs; this operation owns only durable target,
 // idempotency, current binding, and accepted custody.
 func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context, request *bridgev1.AdmitApprovalReviewInputRequest) (response *bridgev1.AdmitApprovalReviewInputResponse, resultErr error) {
+	ctx = withInterruptBarrierBirth(ctx)
 	phase := "validate"
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "admit_approval_review_input", request.GetReviewId(), phase, resultErr)
@@ -346,6 +356,7 @@ func (s *PostgreSQLBridgeAPIStore) ListChildThreads(ctx context.Context, request
 }
 
 func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, request *bridgev1.DeliverInterAgentMailRequest) (response *bridgev1.DeliverInterAgentMailResponse, resultErr error) {
+	ctx = withInterruptBarrierBirth(ctx)
 	phase := "validate"
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "deliver_inter_agent_mail", request.GetDeliveryId(), phase, resultErr)
@@ -674,6 +685,9 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		}
 		return nil
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &closeChildLifecycleResult{stale: true}, nil
+		}
 		return nil, err
 	}
 	logRuntimeInputCustodyTransition(s.Logger, scope, "accepted_to_parked", custodyTransitions.parked)
@@ -896,6 +910,9 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		return nil
 	})
 	if err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.MarkChildThreadActiveResponse{Outcome: &bridgev1.MarkChildThreadActiveResponse_Stale{Stale: &bridgev1.MarkChildThreadActiveStale{}}}, nil
+		}
 		return nil, err
 	}
 	phase = "observe_application"

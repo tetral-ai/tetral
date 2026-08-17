@@ -1494,66 +1494,6 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationInterruptExemptionFollowsOrigin(t *testing.T) {
-	for _, test := range []struct {
-		name          string
-		suffix        string
-		interruptType string
-		wantStale     bool
-	}{
-		{name: "user interrupt preserves queued task", suffix: "user", interruptType: "user.interrupt", wantStale: false},
-		{name: "agent interrupt discards queued task", suffix: "agent", interruptType: childInterruptRequestedEventType, wantStale: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			sessionID := "sesn_task_interrupt_origin_" + test.suffix
-			threadID := "thr_task_interrupt_origin_" + test.suffix
-			taskID := "task_interrupt_origin_" + test.suffix
-			inputID := "task_notification:" + taskID
-			bindingID := "bind_task_interrupt_origin_" + test.suffix
-			podUID := "pod_task_interrupt_origin_" + test.suffix
-			sourceEventID := "sevt_task_interrupt_source_" + test.suffix
-			interruptEventID := "sevt_task_interrupt_" + test.suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, sourceEventID)
-			if _, err := admin.ExecContext(context.Background(), `UPDATE session_background_tasks
-				SET status='completed',terminal_result_json='{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}',terminal_result_digest='digest',terminal_at='2026-01-01T00:01:00Z'
-				WHERE workspace_id='default' AND session_id=$1 AND task_id=$2`, sessionID, taskID); err != nil {
-				t.Fatalf("seed terminal task: %v", err)
-			}
-			if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
-				workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,created_at,updated_at
-			) VALUES ('default',$1,$2,$3,'task_notification','[]','queued','2026-01-01T00:01:00Z','2026-01-01T00:01:00Z')`, sessionID, threadID, inputID); err != nil {
-				t.Fatalf("seed task Inbox: %v", err)
-			}
-			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 3, test.interruptType, `{}`)
-			if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET processed_at='2026-01-01T00:01:01Z'
-				WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, interruptEventID); err != nil {
-				t.Fatalf("mark interrupt processed: %v", err)
-			}
-			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 2, 0, time.UTC) }
-			store.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
-				BindingID: bindingID, BindingGeneration: 1, Namespace: "runtime", PodName: "pod",
-				PodUID: podUID, PodIP: "10.0.0.1",
-			}}
-			job := RuntimeJob{
-				JobID: "qjob_task_interrupt_origin_" + test.suffix, LeaseToken: "lease_task_interrupt_origin_" + test.suffix, Kind: queue.KindRuntimeInput,
-				WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID, RuntimeInputID: inputID,
-				InputKind: "task_notification", PayloadJSON: fmt.Sprintf(`{"workspace_id":"default","session_id":%q,"session_thread_id":%q,"runtime_input_id":%q,"event_ids":[],"input_kind":"task_notification"}`, sessionID, threadID, inputID),
-			}
-			plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-			if err != nil {
-				t.Fatalf("PrepareRuntimeCommand: %v", err)
-			}
-			if plan.StaleAccepted != test.wantStale || (plan.AcceptTask == nil) != test.wantStale {
-				t.Fatalf("plan = %+v; want stale=%t and matching task delivery", plan, test.wantStale)
-			}
-		})
-	}
-}
-
 func TestRuntimeConfigDeliveryRebuildsTheColdBootstrapAgentSettings(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -2143,6 +2083,8 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 		JobID:           "qjob_bridge_interrupt",
 		LeaseToken:      "lease_bridge_interrupt",
 		Kind:            queue.KindRuntimeInput,
+		PartitionKey:    queue.FormatSessionPartitionKey(workspace.DefaultID, "sesn_bridge_control_delivery"),
+		DedupeKey:       queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, "sesn_bridge_control_delivery", "rin_bridge_interrupt"),
 		WorkspaceID:     "default",
 		SessionID:       "sesn_bridge_control_delivery",
 		SessionThreadID: "thr_bridge_control_delivery",
@@ -2159,7 +2101,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 		t.Fatalf("PrepareRuntimeCommand interrupt: %v", err)
 	}
 	if interrupt.Interrupt == nil || interrupt.Interrupt.GetRuntimeInputId() != interruptJob.RuntimeInputID ||
-		interrupt.Interrupt.GetInputOrder() != 2 || interrupt.Interrupt.GetOrigin() != agentruntimev1.InterruptOrigin_INTERRUPT_ORIGIN_USER {
+		interrupt.Interrupt.GetInterruptLeaseRef().GetJobId() != interruptJob.JobID || interrupt.Interrupt.GetOrigin() != agentruntimev1.InterruptOrigin_INTERRUPT_ORIGIN_USER {
 		t.Fatalf("interrupt runtime request = %#v; want typed user interrupt", interrupt.Interrupt)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -2238,6 +2180,12 @@ func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(
 	}
 	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
 	seedRuntimeInboxBirthForJob(t, admin, messageJob)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+		SET status='delivering', binding_id=$2, binding_generation=1, target_pod_uid=$3
+		WHERE workspace_id='default' AND runtime_input_id=$1`,
+		messageJob.RuntimeInputID, "bind_bridge_interrupt_replay_fence", "pod_uid_interrupt_replay_fence"); err != nil {
+		t.Fatalf("seed preplanned follower Runtime authority: %v", err)
+	}
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueue := func(job RuntimeJob, maxAttempts int) {
@@ -2319,11 +2267,38 @@ func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(
 		WHERE workspace_id='default' AND id=$1`, interruptJob.JobID); err != nil {
 		t.Fatalf("make interrupt retry available: %v", err)
 	}
+	receiptLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "receipt-response-lost",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: sender.scope, RuntimeInputId: interruptJob.RuntimeInputID,
+		Scope: sender.scope, RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(receiptLease),
 	})
 	if err != nil || committed.GetCommitted() == nil {
 		t.Fatalf("commit late closeout before retry = %#v/%v", committed, err)
+	}
+	preAckFollower, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: sender.scope, RuntimeInputId: messageJob.RuntimeInputID,
+	})
+	if err != nil || preAckFollower.GetBarrierStale() == nil {
+		t.Fatalf("pre-ACK follower CommitInputs = %#v/%v; want delivery-barrier stale", preAckFollower, err)
+	}
+	var preACKMessages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&preACKMessages); err != nil {
+		t.Fatalf("count pre-ACK follower Messages: %v", err)
+	}
+	if preACKMessages != 0 {
+		t.Fatalf("pre-ACK follower Messages = %d; want 0", preACKMessages)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, receiptLease.ID); err != nil {
+		t.Fatalf("expire lost receipt response lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim lost receipt response lease = %d/%v", reclaimed, err)
 	}
 
 	if err := newRunner().RunOnce(context.Background()); err != nil {
@@ -2383,175 +2358,6 @@ func (s *receiptGatedInterruptSender) Interrupt(
 	return &agentruntimev1.InterruptResponse{
 		Outcome: &agentruntimev1.InterruptResponse_Accepted{Accepted: &agentruntimev1.InterruptAccepted{}},
 	}, nil
-}
-
-func TestPostgreSQLRuntimeDeliveryStoreAppliesProcessedInterruptFence(t *testing.T) {
-	t.Run("agent-origin processed interrupt supersedes old messages", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_agent_interrupt_fence", "thr_bridge_agent_interrupt_fence")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_agent_interrupt_fence", "thr_bridge_agent_interrupt_fence", "sevt_old_agent_fence_message", 1, "user.message", `{"content":[{"type":"text","text":"old"}]}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_agent_interrupt_fence", "thr_bridge_agent_interrupt_fence", "sevt_processed_agent_interrupt", 2, childInterruptRequestedEventType, `{}`)
-		if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET processed_at='2026-01-01T00:02:01Z'
-			WHERE workspace_id='default' AND session_id='sesn_bridge_agent_interrupt_fence' AND event_id='sevt_processed_agent_interrupt'`); err != nil {
-			t.Fatalf("mark agent interrupt processed: %v", err)
-		}
-		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 2, 0, time.UTC) }
-		job := RuntimeJob{
-			JobID: "qjob_agent_superseded_messages", LeaseToken: "lease_agent_superseded_messages", Kind: queue.KindRuntimeInput,
-			WorkspaceID: "default", SessionID: "sesn_bridge_agent_interrupt_fence", SessionThreadID: "thr_bridge_agent_interrupt_fence",
-			RuntimeInputID: "rin_agent_superseded_messages", EventIDs: []string{"sevt_old_agent_fence_message"},
-			SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
-			PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_agent_interrupt_fence","session_thread_id":"thr_bridge_agent_interrupt_fence","runtime_input_id":"rin_agent_superseded_messages","event_ids":["sevt_old_agent_fence_message"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
-		}
-		seedRuntimeInboxBirthForJob(t, admin, job)
-		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-		if err != nil || !plan.StaleAccepted || plan.hasCommand() {
-			t.Fatalf("agent-fenced plan = %+v err=%v; want stale accepted without Runtime request", plan, err)
-		}
-	})
-
-	t.Run("all superseded messages stale ack without inbox", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence", "sevt_old_message_1", 1, "user.message", `{"content":[{"type":"text","text":"old 1"}]}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence", "sevt_old_message_2", 2, "user.message", `{"content":[{"type":"text","text":"old 2"}]}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence", "sevt_processed_interrupt", 3, "user.interrupt", `{}`)
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_events
-			    SET processed_at = '2026-01-01T00:03:01Z'
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_interrupt_fence'
-			    AND event_id = 'sevt_processed_interrupt'`); err != nil {
-			t.Fatalf("mark interrupt processed: %v", err)
-		}
-		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 2, 0, time.UTC) }
-
-		job := RuntimeJob{
-			JobID:           "qjob_superseded_messages",
-			LeaseToken:      "lease_superseded_messages",
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     "default",
-			SessionID:       "sesn_bridge_interrupt_fence",
-			SessionThreadID: "thr_bridge_interrupt_fence",
-			RuntimeInputID:  "rin_superseded_messages",
-			EventIDs:        []string{"sevt_old_message_1", "sevt_old_message_2"},
-			SequenceFrom:    1,
-			SequenceTo:      2,
-			InputKind:       "messages",
-			PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_fence","session_thread_id":"thr_bridge_interrupt_fence","runtime_input_id":"rin_superseded_messages","event_ids":["sevt_old_message_1","sevt_old_message_2"],"sequence_from":1,"sequence_to":2,"input_kind":"messages"}`,
-		}
-		seedRuntimeInboxBirthForJob(t, admin, job)
-		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-		if err != nil {
-			t.Fatalf("PrepareRuntimeCommand superseded messages: %v", err)
-		}
-		if !plan.StaleAccepted || plan.hasCommand() {
-			t.Fatalf("superseded plan = %+v; want stale accepted without Runtime request", plan)
-		}
-		var inboxStatus string
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status
-			   FROM session_runtime_inbox
-			  WHERE workspace_id = 'default'
-			    AND runtime_input_id = 'rin_superseded_messages'`).Scan(&inboxStatus); err != nil {
-			t.Fatalf("read superseded inbox custody: %v", err)
-		}
-		if inboxStatus != "cancelled" {
-			t.Fatalf("superseded inbox status = %q; want cancelled", inboxStatus)
-		}
-	})
-
-	t.Run("mixed superseded and deliverable messages are fatal", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed", "sevt_old_message", 1, "user.message", `{"content":[{"type":"text","text":"old"}]}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed", "sevt_processed_interrupt", 3, "user.interrupt", `{}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed", "sevt_new_message", 4, "user.message", `{"content":[{"type":"text","text":"new"}]}`)
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_events
-			    SET processed_at = '2026-01-01T00:03:01Z'
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_interrupt_mixed'
-			    AND event_id = 'sevt_processed_interrupt'`); err != nil {
-			t.Fatalf("mark mixed interrupt processed: %v", err)
-		}
-		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 2, 0, time.UTC) }
-
-		_, err := store.PrepareRuntimeCommand(context.Background(), RuntimeJob{
-			JobID:           "qjob_mixed_messages",
-			LeaseToken:      "lease_mixed_messages",
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     "default",
-			SessionID:       "sesn_bridge_interrupt_mixed",
-			SessionThreadID: "thr_bridge_interrupt_mixed",
-			RuntimeInputID:  "rin_mixed_messages",
-			EventIDs:        []string{"sevt_old_message", "sevt_new_message"},
-			SequenceFrom:    1,
-			SequenceTo:      4,
-			InputKind:       "messages",
-			PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_mixed","session_thread_id":"thr_bridge_interrupt_mixed","runtime_input_id":"rin_mixed_messages","event_ids":["sevt_old_message","sevt_new_message"],"sequence_from":1,"sequence_to":4,"input_kind":"messages"}`,
-		})
-		var prepareErr runtimeDeliveryPrepareError
-		if !errors.As(err, &prepareErr) || prepareErr.kind != "runtime_input_superseded_by_interrupt" || prepareErr.retryable {
-			t.Fatalf("mixed messages err = %v; want nonretryable runtime_input_superseded_by_interrupt", err)
-		}
-	})
-
-	t.Run("post fence messages remain deliverable", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_interrupt_post_fence", "thr_bridge_interrupt_post_fence")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_interrupt_post_fence", "bind_bridge_interrupt_post_fence", 1, "pod_uid_interrupt_post_fence")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_post_fence", "thr_bridge_interrupt_post_fence", "sevt_processed_interrupt", 3, "user.interrupt", `{}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_post_fence", "thr_bridge_interrupt_post_fence", "sevt_new_message", 4, "user.message", `{"content":[{"type":"text","text":"new"}]}`)
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_events
-			    SET processed_at = '2026-01-01T00:03:01Z'
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_interrupt_post_fence'
-			    AND event_id = 'sevt_processed_interrupt'`); err != nil {
-			t.Fatalf("mark post-fence interrupt processed: %v", err)
-		}
-		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 2, 0, time.UTC) }
-
-		job := RuntimeJob{
-			JobID:           "qjob_post_fence_message",
-			LeaseToken:      "lease_post_fence_message",
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     "default",
-			SessionID:       "sesn_bridge_interrupt_post_fence",
-			SessionThreadID: "thr_bridge_interrupt_post_fence",
-			RuntimeInputID:  "rin_post_fence_message",
-			EventIDs:        []string{"sevt_new_message"},
-			SequenceFrom:    4,
-			SequenceTo:      4,
-			InputKind:       "messages",
-			PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_post_fence","session_thread_id":"thr_bridge_interrupt_post_fence","runtime_input_id":"rin_post_fence_message","event_ids":["sevt_new_message"],"sequence_from":4,"sequence_to":4,"input_kind":"messages"}`,
-		}
-		seedRuntimeInboxBirthForJob(t, admin, job)
-		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-		if err != nil {
-			t.Fatalf("PrepareRuntimeCommand post-fence messages: %v", err)
-		}
-		if plan.StaleAccepted || plan.AcceptInput == nil {
-			t.Fatalf("post-fence plan = %+v; want Runtime request", plan)
-		}
-		var inboxStatus string
-		var sequenceFrom int64
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status, sequence_from
-			   FROM session_runtime_inbox
-			  WHERE workspace_id = 'default'
-			    AND runtime_input_id = 'rin_post_fence_message'`).Scan(&inboxStatus, &sequenceFrom); err != nil {
-			t.Fatalf("read post-fence inbox: %v", err)
-		}
-		if inboxStatus != "delivering" || sequenceFrom != 4 {
-			t.Fatalf("post-fence inbox status=%q sequence_from=%d; want delivering/4", inboxStatus, sequenceFrom)
-		}
-	})
 }
 
 func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *testing.T) {

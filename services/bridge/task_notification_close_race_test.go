@@ -159,16 +159,29 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	).Scan(&controlRuntimeInputID); err != nil {
 		t.Fatalf("read frozen child-close control input: %v", err)
 	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
-		SET status='accepted',binding_id=$2,binding_generation=1,target_pod_uid=$3
-		WHERE workspace_id='default' AND runtime_input_id=$1`, controlRuntimeInputID, bindingID, podUID); err != nil {
-		t.Fatalf("accept child-close control: %v", err)
-	}
 	childScope := scopeForThread(parentScope, childID)
-	if _, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: childScope, RuntimeInputId: controlRuntimeInputID,
-	}); err != nil {
-		t.Fatalf("commit child-close control: %v", err)
+	commitAndACKControl := func(controlJob *queue.Job, ackAt time.Time) {
+		t.Helper()
+		if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+			SET status='accepted',binding_id=$2,binding_generation=1,target_pod_uid=$3
+			WHERE workspace_id='default' AND runtime_input_id=$1`, controlRuntimeInputID, bindingID, podUID); err != nil {
+			t.Fatalf("accept child-close control: %v", err)
+		}
+		response, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+			Scope: childScope, RuntimeInputId: controlRuntimeInputID,
+			InterruptLeaseRef: &bridgev1.InterruptLeaseRef{
+				JobId: controlJob.ID, LeaseToken: controlJob.LeaseToken,
+				PartitionKey: controlJob.PartitionKey, DedupeKey: controlJob.DedupeKey,
+			},
+		})
+		if err != nil || response.GetCommitted() == nil {
+			t.Fatalf("commit child-close control = %#v, %v; want committed", response, err)
+		}
+		if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
+			WorkspaceID: workspace.DefaultID, JobID: controlJob.ID, LeaseToken: controlJob.LeaseToken, Now: ackAt,
+		}); err != nil || !acked {
+			t.Fatalf("ACK committed child-close control = %t, %v; want true", acked, err)
+		}
 	}
 	awaitRequest := &bridgev1.AwaitChildInterruptRequest{
 		Scope: parentScope, ControlOperationId: controlOperationID,
@@ -199,11 +212,7 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 			t.Fatalf("take over close-race Queue work = %#v, %v; want one", takeover, err)
 		}
 		if takeover[0].ID != queued.ID {
-			if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
-				WorkspaceID: workspace.DefaultID, JobID: takeover[0].ID, LeaseToken: takeover[0].LeaseToken, Now: takeoverNow.Add(time.Second),
-			}); err != nil || !acked {
-				t.Fatalf("ACK overtaking committed child-close control = %t, %v; want true", acked, err)
-			}
+			commitAndACKControl(takeover[0], takeoverNow.Add(time.Second))
 			controlQueueSettled = true
 			takeover, err = queueStore.Lease(context.Background(), queue.LeaseRequest{
 				WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-task-close-takeover",
@@ -222,9 +231,6 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 			t.Fatalf("takeover prepare = %#v/%v; want parked Inbox and Queue ACK", takeoverPlan, err)
 		}
 	}
-	if _, err := apiStore.AwaitChildInterrupt(context.Background(), awaitRequest); err != nil {
-		t.Fatalf("await child-close control after notification quiescence: %v", err)
-	}
 
 	if !controlQueueSettled {
 		controlLease, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
@@ -234,11 +240,10 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 		if err != nil || len(controlLease) != 1 || controlLease[0].ID == queued.ID {
 			t.Fatalf("lease committed child-close control = %#v, %v; want control job", controlLease, err)
 		}
-		if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
-			WorkspaceID: workspace.DefaultID, JobID: controlLease[0].ID, LeaseToken: controlLease[0].LeaseToken, Now: now.Add(7*24*time.Hour + 4*time.Second),
-		}); err != nil || !acked {
-			t.Fatalf("ACK committed child-close control = %t, %v; want true", acked, err)
-		}
+		commitAndACKControl(controlLease[0], now.Add(7*24*time.Hour+4*time.Second))
+	}
+	if _, err := apiStore.AwaitChildInterrupt(context.Background(), awaitRequest); err != nil {
+		t.Fatalf("await child-close control after notification quiescence: %v", err)
 	}
 	closed, err := apiStore.CloseChildControl(context.Background(), closeRequest)
 	if err != nil || len(closed.GetCommitted().GetChildren()) == 0 {

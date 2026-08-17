@@ -1306,8 +1306,13 @@ function validInterrupt(
 		bindingGeneration: 42,
 		targetPodUid: "uid-a",
 		runtimeInputId: "rin_1",
-		inputOrder: 1,
 		origin: InterruptOrigin.INTERRUPT_ORIGIN_USER,
+		interruptLeaseRef: {
+			jobId: "qjob_interrupt",
+			leaseToken: "lease_interrupt",
+			partitionKey: "session:wksp_1:sesn_1",
+			dedupeKey: "runtime_input:wksp_1:sesn_1:rin_1",
+		},
 		...overrides,
 	};
 }

@@ -391,6 +391,16 @@ export interface Interface {
 /** Read access to the reducer-owned active durable turn identity. */
 export interface ThreadLoopRunCustody {
 	readonly activeTurnId: (session: ThreadRuntime) => string | undefined;
+	readonly interruptLeaseRef: (
+		runtimeInputId: string,
+	) =>
+		| {
+				readonly jobId: string;
+				readonly leaseToken: string;
+				readonly partitionKey: string;
+				readonly dedupeKey: string;
+		  }
+		| undefined;
 }
 
 /** Provides the thread-loop Effect service consumed by SessionManager. */
@@ -1016,7 +1026,7 @@ function runThreadLoopEffect(
 					session.state.beginAcceptedInputCommit(acceptedInput.runtimeInputId);
 					if (acceptedInput.kind === "task_notification") {
 						const declaration = yield* effectFromAbortablePromise((signal) =>
-							commitAcceptedInput(
+							commitAcceptedInputWithRetry(
 								contextLoader,
 								acceptedInput,
 								options,
@@ -1063,7 +1073,10 @@ function runThreadLoopEffect(
 							);
 							continue;
 						}
-						if (declaration.result.type === "stale_custody") {
+						if (
+							declaration.result.type === "stale_custody" ||
+							declaration.result.type === "barrier_stale_custody"
+						) {
 							session.state.clearAfterCustodyHandoff();
 							return { type: "interrupted", discardHotState: true };
 						}
@@ -1114,7 +1127,7 @@ function runThreadLoopEffect(
 						// never a durable write whose hot acknowledgement is still missing.
 						const committed = yield* Effect.gen(function* () {
 							const declaration = yield* effectFromAbortablePromise((signal) =>
-								commitAcceptedInput(
+								commitAcceptedInputWithRetry(
 									contextLoader,
 									acceptedInput,
 									options,
@@ -1138,7 +1151,10 @@ function runThreadLoopEffect(
 								}
 								return { type: "failed" as const, error: declaration.error };
 							}
-							if (declaration.result.type === "stale_custody") {
+							if (
+								declaration.result.type === "stale_custody" ||
+								declaration.result.type === "barrier_stale_custody"
+							) {
 								return { type: "stale_custody" as const };
 							}
 							if (
@@ -1442,9 +1458,10 @@ function runThreadLoopEffect(
 					highestMessageSequence(committedContext),
 				);
 				const compactionResult =
-					yield* coordinateCompactionBeforeProviderRequestEffect(
-						session,
-						options,
+						yield* coordinateCompactionBeforeProviderRequestEffect(
+							session,
+							options,
+							custody,
 						committedContext,
 						turnRetryCounters,
 						(pending) => {
@@ -1543,6 +1560,7 @@ function runThreadLoopEffect(
 				const runtimeResult = yield* coordinateProviderTurnEffect(
 					session,
 					options,
+					custody,
 					requestForAttempt,
 					runtimeAttachmentsForAttempt,
 					turnRetryCounters,
@@ -1582,6 +1600,7 @@ function runThreadLoopEffect(
 					const reactiveCompaction = yield* runCompactionSummaryEffect(
 						session,
 						options,
+						custody,
 						reactiveMessages,
 						compaction,
 						turnRetryCounters,
@@ -1818,7 +1837,7 @@ function waitForProviderRequestRescheduleEffect(
 	return wait;
 }
 
-async function commitAcceptedInput(
+export async function commitAcceptedInputWithRetry(
 	contextLoader: ContextLoaderInterface,
 	input: ReturnType<ThreadRuntime["state"]["peekAcceptedInput"]> extends infer T
 		? Exclude<T, undefined>
@@ -2091,6 +2110,7 @@ type CompactionAttemptResult =
 function coordinateCompactionBeforeProviderRequestEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
 	committedContext: readonly RuntimeContextEntry[],
 	turnRetryCounters: { providerAttempts: number; compactionAttempts: number },
 	setRetryWaitPending: (pending: boolean) => void,
@@ -2122,6 +2142,7 @@ function coordinateCompactionBeforeProviderRequestEffect(
 	return runCompactionSummaryEffect(
 		session,
 		options,
+		custody,
 		committedContext,
 		compaction,
 		turnRetryCounters,
@@ -2132,6 +2153,7 @@ function coordinateCompactionBeforeProviderRequestEffect(
 function runCompactionSummaryEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
 	messages: readonly RuntimeContextEntry[],
 	compaction: ThreadLoopCompactionOptions,
 	turnRetryCounters: { providerAttempts: number; compactionAttempts: number },
@@ -2173,6 +2195,7 @@ function runCompactionSummaryEffect(
 			const result = yield* runCompactionSummaryAttemptEffect(
 				session,
 				options,
+				custody,
 				currentModel,
 				messages,
 				compaction,
@@ -2208,6 +2231,7 @@ function runCompactionSummaryEffect(
 function runCompactionSummaryAttemptEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
 	currentModel: RuntimeModelRef,
 	messages: readonly RuntimeContextEntry[],
 	compaction: ThreadLoopCompactionOptions,
@@ -2350,6 +2374,7 @@ function runCompactionSummaryAttemptEffect(
 		return yield* runOwnedCompactionSummaryAttemptEffect(
 			session,
 			options,
+			custody,
 			currentModel,
 			messages,
 			prefix,
@@ -2363,6 +2388,7 @@ function runCompactionSummaryAttemptEffect(
 function runOwnedCompactionSummaryAttemptEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
 	currentModel: RuntimeModelRef,
 	messages: readonly RuntimeContextEntry[],
 	prefix: ThreadContextPrefix | undefined,
@@ -2474,6 +2500,7 @@ function runOwnedCompactionSummaryAttemptEffect(
 					return yield* closeStartedCompactionForUserInterruptEffect(
 						session,
 						options,
+						custody,
 						request,
 						startAppend.eventId,
 						undefined,
@@ -2487,6 +2514,7 @@ function runOwnedCompactionSummaryAttemptEffect(
 					return yield* closeStartedCompactionForUserInterruptEffect(
 						session,
 						options,
+						custody,
 						request,
 						startAppend.eventId,
 						undefined,
@@ -2558,6 +2586,21 @@ function runOwnedCompactionSummaryAttemptEffect(
 							}),
 						);
 					}
+					const interruptLeaseRef = custody.interruptLeaseRef(
+						interruptCommand.runtimeInputId,
+					);
+					if (interruptLeaseRef === undefined) {
+						return yield* failRequestCloseout(
+							normalizeRuntimeFailure({
+								type: "runtime",
+								code: "runtime_invalid_sequence",
+								retryable: false,
+								fatal: true,
+								reason: "runtime_contract_validation",
+								sessionId: session.sessionId,
+							}),
+						);
+					}
 					const end = yield* Effect.promise(() =>
 						appendModelRequestEndEvent(
 							options,
@@ -2575,6 +2618,7 @@ function runOwnedCompactionSummaryAttemptEffect(
 							undefined,
 							{
 								command: interruptCommand,
+								interruptLeaseRef,
 							},
 						),
 					);
@@ -2777,6 +2821,7 @@ function runOwnedCompactionSummaryAttemptEffect(
 function closeStartedCompactionForUserInterruptEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
 	request: LLMRequest,
 	modelRequestStartId: string,
 	usage: RuntimeUsage | undefined,
@@ -2784,6 +2829,19 @@ function closeStartedCompactionForUserInterruptEffect(
 	return Effect.gen(function* () {
 		const command = session.state.userInterruptCommand();
 		if (command === undefined) {
+			return yield* failRequestCloseout(
+				normalizeRuntimeFailure({
+					type: "runtime",
+					code: "runtime_invalid_sequence",
+					retryable: false,
+					fatal: true,
+					reason: "runtime_contract_validation",
+					sessionId: session.sessionId,
+				}),
+			);
+		}
+		const interruptLeaseRef = custody.interruptLeaseRef(command.runtimeInputId);
+		if (interruptLeaseRef === undefined) {
 			return yield* failRequestCloseout(
 				normalizeRuntimeFailure({
 					type: "runtime",
@@ -2812,6 +2870,7 @@ function closeStartedCompactionForUserInterruptEffect(
 				undefined,
 				{
 					command,
+					interruptLeaseRef,
 				},
 			),
 		);
@@ -2938,6 +2997,7 @@ function compactionFailureWithRetryStatus(
 function coordinateProviderTurnEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
 	request: LLMRequest,
 	carriedAttachments: readonly RuntimeProviderAttachment[],
 	turnRetryCounters: { providerAttempts: number; compactionAttempts: number },
@@ -3093,6 +3153,7 @@ function coordinateProviderTurnEffect(
 			return yield* settleRuntimeShutdownEffect(
 				session,
 				options,
+				custody,
 				processor,
 				source,
 				undefined,
@@ -3121,6 +3182,7 @@ function coordinateProviderTurnEffect(
 			return yield* settleRuntimeShutdownEffect(
 				session,
 				options,
+				custody,
 				processor,
 				source,
 				undefined,
@@ -3215,6 +3277,7 @@ function coordinateProviderTurnEffect(
 				: yield* settleRuntimeShutdownEffect(
 						session,
 						options,
+						custody,
 						processor,
 						source,
 						spanStartAppend.eventId,
@@ -3276,6 +3339,7 @@ function coordinateProviderTurnEffect(
 						: yield* settleRuntimeShutdownEffect(
 								session,
 								options,
+								custody,
 								processor,
 								source,
 								spanStartAppend.eventId,
@@ -3365,6 +3429,7 @@ function coordinateProviderTurnEffect(
 							: yield* settleRuntimeShutdownEffect(
 									session,
 									options,
+									custody,
 									processor,
 									source,
 									spanStartAppend.eventId,
@@ -3582,6 +3647,7 @@ function coordinateProviderTurnEffect(
 						: yield* settleRuntimeShutdownEffect(
 								session,
 								options,
+								custody,
 								processor,
 								source,
 								spanStartAppend.eventId,
@@ -5570,6 +5636,7 @@ function settleUnstartedUserInterruptEffect(
 function settleRuntimeShutdownEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
 	processor: ProviderStreamAccumulator,
 	source: RuntimeProcessorSource,
 	modelRequestStartId: string | undefined,
@@ -5607,6 +5674,21 @@ function settleRuntimeShutdownEffect(
 					}),
 				);
 			}
+			const interruptLeaseRef = custody.interruptLeaseRef(
+				command.runtimeInputId,
+			);
+			if (interruptLeaseRef === undefined) {
+				return yield* failRequestCloseout(
+					normalizeRuntimeFailure({
+						type: "runtime",
+						code: "runtime_invalid_sequence",
+						retryable: false,
+						fatal: true,
+						reason: "runtime_contract_validation",
+						sessionId: session.sessionId,
+					}),
+				);
+			}
 			try {
 				processor.prepareInterruptSettlement(command, failure);
 			} catch (error) {
@@ -5639,6 +5721,7 @@ function settleRuntimeShutdownEffect(
 					undefined,
 					{
 						command,
+						interruptLeaseRef,
 					},
 				),
 			);
@@ -6349,6 +6432,9 @@ async function appendModelRequestEndEvent(
 		readonly command: NonNullable<
 			ReturnType<ThreadRuntime["state"]["userInterruptCommand"]>
 		>;
+		readonly interruptLeaseRef: NonNullable<
+			SessionEventWriterRequestEndEnvelope["interruptSettlement"]
+		>["interruptLeaseRef"];
 	},
 ): Promise<
 	| {
@@ -6440,6 +6526,7 @@ async function appendModelRequestEndEvent(
 			: {
 					interruptSettlement: {
 						runtimeInputId: interrupt.command.runtimeInputId,
+						interruptLeaseRef: interrupt.interruptLeaseRef,
 					},
 				}),
 	};

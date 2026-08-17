@@ -853,6 +853,62 @@ describe("Runtime core host production assembly", () => {
 		}
 	});
 
+	test("barrier-stale accepted input stops before cold load, hot admission, and provider work", async () => {
+		let loads = 0;
+		let providerCalls = 0;
+		let writes = 0;
+		const hosts = await buildRuntimeCoreHosts({
+			maxLocalSessions: 4,
+			now: () => "2026-08-17T00:00:00.000Z",
+			...testCoreDependencies({
+				contextLoader: {
+					loadThreadContext: async () => {
+						loads += 1;
+						throw new Error("barrier-stale input must not load context");
+					},
+					commitAcceptedInput: async () => ({
+						type: "barrier_stale_custody",
+					}),
+				},
+				threadLoop: {
+					sessionEventWriter: writerFrom((envelope) => {
+						writes += 1;
+						return successfulEventAppend(envelope);
+					}),
+					llmService: {
+						stream: () => {
+							providerCalls += 1;
+							return Stream.empty;
+						},
+					},
+				},
+			}),
+		});
+		try {
+			await expect(
+				hosts.commandRunHost.handleAcceptInput(
+					acceptedInput("sesn_barrier_stale_preplanned"),
+				),
+			).resolves.toEqual({
+				ok: false,
+				sessionId: "sesn_barrier_stale_preplanned",
+				reason: "barrier_stale",
+			});
+			expect({ loads, providerCalls, writes }).toEqual({
+				loads: 0,
+				providerCalls: 0,
+				writes: 0,
+			});
+			expect(
+				await hosts.subAgentRunHost.inspectThread(
+					commandScope("sesn_barrier_stale_preplanned"),
+				),
+			).toMatchObject({ ok: true, observed: false });
+		} finally {
+			await hosts.close();
+		}
+	});
+
 	test("cold installation accepts target-owned pending mail in sent order before the triggering input", async () => {
 		const observations: string[] = [];
 		const descriptors = ["delivery_cold_1", "delivery_cold_2"].map(
@@ -897,7 +953,7 @@ describe("Runtime core host production assembly", () => {
 				ok: true,
 				sessionId: "sesn_cold_mail",
 			});
-			expect(observations).toEqual(["load"]);
+			expect(observations).toEqual(["commit:rin_1", "load"]);
 		} finally {
 			await hosts.close();
 		}
@@ -1202,8 +1258,13 @@ describe("Runtime core host production assembly", () => {
 			const interruptCommand = {
 				...scope,
 				runtimeInputId: "rin_interrupt_singleflight",
-				inputOrder: 1,
 				origin: "user" as const,
+				interruptLeaseRef: {
+					jobId: "qjob_interrupt_singleflight",
+					leaseToken: "lease_interrupt_singleflight",
+					partitionKey: "session:wksp_test:sesn_singleflight",
+					dedupeKey: "runtime_input:wksp_test:sesn_singleflight:rin_interrupt_singleflight",
+				},
 			};
 			const interrupt = hosts.commandRunHost.handleInterruptControl(
 				"sesn_singleflight",
@@ -1583,8 +1644,13 @@ describe("Runtime core host production assembly", () => {
 			const interruptCommand = {
 				...commandScope("sesn_interrupt_confirm"),
 				runtimeInputId: "rin_interrupt_before_confirm",
-				inputOrder: 2,
 				origin: "user" as const,
+				interruptLeaseRef: {
+					jobId: "qjob_interrupt_before_confirm",
+					leaseToken: "lease_interrupt_before_confirm",
+					partitionKey: "session:wksp_test:sesn_interrupt_confirm",
+					dedupeKey: "runtime_input:wksp_test:sesn_interrupt_confirm:rin_interrupt_before_confirm",
+				},
 			};
 			let committedDeclaration: RuntimeControlInputDeclaration | undefined;
 			const interrupt = await hosts.commandRunHost.handleInterruptControl(
@@ -2142,7 +2208,9 @@ function acceptedInput(sessionId: string) {
 		targetPodUid: "pod_1",
 		runtimeInputId: "rin_1",
 		inputOrder: 1,
-		contentJson: JSON.stringify({ text: "test input" }),
+		contentJson: JSON.stringify({
+			messages: [{ parts: [{ type: "text", text: "test input" }] }],
+		}),
 	};
 }
 

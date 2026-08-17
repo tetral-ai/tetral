@@ -499,6 +499,16 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			    AND candidate.available_at <= $2
 			    AND NOT EXISTS (
 			        SELECT 1
+			          FROM queue_jobs interrupt_barrier
+			         WHERE interrupt_barrier.workspace_id = candidate.workspace_id
+			           AND interrupt_barrier.partition_key = candidate.partition_key
+			           AND interrupt_barrier.status = 'leased'
+			           AND interrupt_barrier.kind = 'runtime_input'
+			           AND interrupt_barrier.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+			           AND interrupt_barrier.id <> candidate.id
+			    )
+			    AND NOT EXISTS (
+			        SELECT 1
 			          FROM queue_jobs pending
 			         WHERE pending.workspace_id = candidate.workspace_id
 			           AND pending.partition_key = candidate.partition_key
@@ -1256,28 +1266,108 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 	if cancelRequest.Now.IsZero() {
 		cancelRequest.Now = storage.Now()
 	}
-	result, err := tx.Exec(ctx,
-		`UPDATE queue_jobs
-		    SET status = 'cancelled',
-		        cancelled_at = $3,
-		        updated_at = $3
-		  WHERE workspace_id = $1
-		    AND partition_key = $2
-		    AND status = 'pending'
-		    AND kind = 'runtime_input'
-		    AND payload_json::jsonb ->> 'session_thread_id' = $4
-		    AND payload_json::jsonb ->> 'input_kind' = 'messages'
-		    AND (payload_json::jsonb ->> 'sequence_to')::bigint < $5`,
+	var cancelledQueue, cancelledInbox int
+	err = tx.QueryRow(ctx,
+		`WITH cancelled_queue AS (
+		   UPDATE queue_jobs
+		      SET status = 'cancelled',
+		          cancelled_at = $3,
+		          updated_at = $3
+		    WHERE workspace_id = $1
+		      AND partition_key = $2
+		      AND status = 'pending'
+		      AND kind = 'runtime_input'
+		      AND payload_json::jsonb ->> 'session_thread_id' = $4
+		      AND payload_json::jsonb ->> 'input_kind' = 'messages'
+		      AND (payload_json::jsonb ->> 'sequence_to')::bigint < $5
+		  RETURNING payload_json::jsonb ->> 'runtime_input_id' AS runtime_input_id
+		), cancelled_inbox AS (
+		   UPDATE session_runtime_inbox inbox
+		      SET status = 'cancelled', updated_at = $3
+		     FROM cancelled_queue queue
+		    WHERE inbox.workspace_id = $1
+		      AND inbox.session_id = $6
+		      AND inbox.session_thread_id = $4
+		      AND inbox.runtime_input_id = queue.runtime_input_id
+		      AND inbox.input_kind = 'messages'
+		      AND inbox.status = 'queued'
+		  RETURNING inbox.runtime_input_id
+		)
+		SELECT (SELECT count(*) FROM cancelled_queue),
+		       (SELECT count(*) FROM cancelled_inbox)`,
 		string(cancelRequest.WorkspaceID),
 		FormatSessionPartitionKey(cancelRequest.WorkspaceID, cancelRequest.SessionID),
 		cancelRequest.Now.UTC(),
 		cancelRequest.SessionThreadID,
 		cancelRequest.InterruptFenceSequence,
-	)
+		cancelRequest.SessionID,
+	).Scan(&cancelledQueue, &cancelledInbox)
 	if err != nil {
 		return false, 0, err
 	}
-	return true, affectedCount(result), nil
+	if cancelledQueue != cancelledInbox {
+		return false, 0, &IntegrityError{Message: "interrupt fence Queue and Inbox cancellation diverged"}
+	}
+	return true, cancelledQueue, nil
+}
+
+// CancelLeasedRuntimeInputCustodyTx atomically closes the exact Queue lease and
+// its matching active Inbox after Runtime reports barrier-stale. The source
+// Event remains audit-only.
+func CancelLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, request CancelLeasedRuntimeInputRequest) (bool, error) {
+	if request.Lease.Kind != KindRuntimeInput || request.SessionID == "" || request.RuntimeInputID == "" || request.InputKind == "" {
+		return false, &ValidationError{Message: "complete barrier-stale runtime input identity is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	active, err := AssertExactLeaseTx(ctx, tx, request.Lease)
+	if err != nil || !active {
+		return active, err
+	}
+	var payloadSessionID, payloadRuntimeInputID, payloadInputKind string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json::jsonb ->> 'session_id',
+		        payload_json::jsonb ->> 'runtime_input_id',
+		        payload_json::jsonb ->> 'input_kind'
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID,
+	).Scan(&payloadSessionID, &payloadRuntimeInputID, &payloadInputKind); err != nil {
+		return false, err
+	}
+	if payloadSessionID != request.SessionID || payloadRuntimeInputID != request.RuntimeInputID || payloadInputKind != request.InputKind {
+		return false, &IntegrityError{Message: "barrier-stale Queue payload does not match Inbox custody"}
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE session_runtime_inbox
+		    SET status='cancelled', updated_at=$4
+		  WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		    AND input_kind=$5 AND status IN ('queued','delivering','accepted')`,
+		string(request.Lease.WorkspaceID), request.SessionID, request.RuntimeInputID, request.Now.UTC(), request.InputKind,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !rowsAffected(result) {
+		return false, &IntegrityError{Message: "barrier-stale Inbox custody is not active"}
+	}
+	result, err = tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status='cancelled', cancelled_at=$4,
+		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		        updated_at=$4
+		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+		    AND status='leased' AND leased_until > clock_timestamp()`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID, request.Lease.LeaseToken, request.Now.UTC(),
+	)
+	if err != nil {
+		return false, err
+	}
+	if !rowsAffected(result) {
+		return false, &IntegrityError{Message: "barrier-stale Queue lease changed during cancellation"}
+	}
+	return true, nil
 }
 
 func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (bool, error) {

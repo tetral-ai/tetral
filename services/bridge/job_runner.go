@@ -120,9 +120,10 @@ type RuntimeJob struct {
 type RuntimeDeliveryStatus string
 
 const (
-	RuntimeDeliveryAccepted  RuntimeDeliveryStatus = "accepted"
-	RuntimeDeliveryDuplicate RuntimeDeliveryStatus = "duplicate"
-	RuntimeDeliveryRejected  RuntimeDeliveryStatus = "rejected"
+	RuntimeDeliveryAccepted     RuntimeDeliveryStatus = "accepted"
+	RuntimeDeliveryDuplicate    RuntimeDeliveryStatus = "duplicate"
+	RuntimeDeliveryRejected     RuntimeDeliveryStatus = "rejected"
+	RuntimeDeliveryBarrierStale RuntimeDeliveryStatus = "barrier_stale"
 )
 
 type RuntimeDeliveryResult struct {
@@ -488,6 +489,9 @@ func (r *JobRunner) finalizeRuntimeDelivery(ctx context.Context, job RuntimeJob,
 }
 
 func runtimeDeliveryRequiresFinalization(job RuntimeJob, result RuntimeDeliveryResult) bool {
+	if result.Status == RuntimeDeliveryBarrierStale {
+		return job.Kind == queue.KindRuntimeInput && job.InputKind != "interrupt_control"
+	}
 	if result.Status != RuntimeDeliveryRejected {
 		return false
 	}
@@ -586,6 +590,8 @@ func (r *JobRunner) applyRuntimeDeliveryResult(ctx context.Context, job RuntimeJ
 			ErrorKind:    errorKind,
 			ErrorMessage: errorMessage,
 		}))
+	case RuntimeDeliveryBarrierStale:
+		return errors.New("barrier-stale runtime delivery was not atomically finalized")
 	default:
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId:  job.WorkspaceID,

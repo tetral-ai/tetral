@@ -197,6 +197,7 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	commitRequest := &bridgev1.CommitInputsRequest{
 		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
+		InterruptLeaseRef: bridgeInterruptLeaseRef(leased),
 	}
 
 	blocker, err := admin.BeginTx(context.Background(), nil)
@@ -276,7 +277,7 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 		}
 		return
 	}
-	if receiptOutcome.err == nil || !terminationOutcome.finalized.QueueLeaseSettled || inboxStatus != "cancelled" || sessionStatus != "terminated" || bindings != 0 {
+	if receiptOutcome.err != nil || receiptOutcome.commit.GetBarrierStale() == nil || !terminationOutcome.finalized.QueueLeaseSettled || inboxStatus != "cancelled" || sessionStatus != "terminated" || bindings != 0 {
 		t.Fatalf("termination-first winner = commit %#v/%v final %+v Inbox %s Session %s bindings %d",
 			receiptOutcome.commit, receiptOutcome.err, terminationOutcome.finalized, inboxStatus, sessionStatus, bindings)
 	}

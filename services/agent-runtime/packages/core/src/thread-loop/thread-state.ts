@@ -108,12 +108,21 @@ export interface RuntimeControlInputState extends RuntimeThreadAddressState {
 	readonly runtimeInputId: string;
 }
 
+/** Interrupt identity retained by hot control state without Queue transport authority. */
+export interface RuntimeInterruptCommandState extends RuntimeControlInputState {
+	readonly origin: "user" | "agent";
+}
+
 export interface RuntimeControlInputDeclaration {
 	readonly inputKind: "interrupt" | "tool_confirmation";
 }
 
 export type RuntimeControlInputCommitResult =
-	| { readonly ok: true; readonly stale: true }
+	| {
+			readonly ok: true;
+			readonly stale: true;
+			readonly barrierStale?: true | undefined;
+	  }
 	| { readonly ok: true; readonly joined: true }
 	| {
 			readonly ok: true;
@@ -138,7 +147,7 @@ export interface RuntimeControlInputCommitApplication {
 }
 
 interface RuntimeUserInterruptState {
-	readonly command: RuntimeAcceptedInputScopeState;
+	readonly command: RuntimeInterruptCommandState;
 	readonly commitInput: RuntimeControlInputCommit;
 	readonly completeCloseout: () => void;
 	closeoutEligible: boolean;
@@ -238,8 +247,6 @@ export type RuntimeAcceptedInputState =
 /** Cold thread state loaded before a resident thread is allowed to serve commands. */
 export interface RuntimeThreadPreloadState extends RuntimeThreadAddressState {
 	readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
-	/** Latest durable event order participating in the active cold Run. */
-	readonly activeRunInputOrder?: number | undefined;
 	readonly contextEntries: readonly RuntimeContextEntry[];
 	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
 	readonly turnCheckpoint?: ThreadTurnCheckpoint | undefined;
@@ -528,16 +535,14 @@ export class ThreadProcessor {
 		}
 	}
 
-	discardAcceptedInputsBeforeFence(
-		interruptFenceSequence: number,
+	discardAcceptedInputsForInterrupt(
 		preserveTaskNotifications: boolean,
 	): void {
 		this.#acceptedInputs = this.#acceptedInputs.filter(
 			(input) =>
 				input.kind === "inter_agent_message" ||
 				(preserveTaskNotifications && input.kind === "task_notification") ||
-				input.runtimeInputId === this.#committingAcceptedInputId ||
-				input.inputOrder >= interruptFenceSequence,
+				input.runtimeInputId === this.#committingAcceptedInputId,
 		);
 		this.refreshDecision();
 	}
@@ -723,13 +728,11 @@ export class ThreadState {
 		this.#threadProcessor!.finishAcceptedInputCommit(runtimeInputId);
 	}
 
-	discardQueuedAcceptedInputsBeforeFence(
-		interruptFenceSequence: number,
+	discardQueuedAcceptedInputsForInterrupt(
 		preserveTaskNotifications: boolean,
 	): void {
 		this.threadTurnReduction();
-		this.#threadProcessor!.discardAcceptedInputsBeforeFence(
-			interruptFenceSequence,
+		this.#threadProcessor!.discardAcceptedInputsForInterrupt(
 			preserveTaskNotifications,
 		);
 	}
@@ -990,7 +993,7 @@ export class ThreadState {
 	}
 
 	beginUserInterrupt(
-		command: RuntimeAcceptedInputScopeState,
+		command: RuntimeInterruptCommandState,
 		commitInput: RuntimeControlInputCommit,
 		completeCloseout: () => void = () => {},
 	): "applied" | "duplicate" | "conflict" {
@@ -1019,7 +1022,7 @@ export class ThreadState {
 		return this.#userInterrupt !== undefined;
 	}
 
-	userInterruptCommand(): RuntimeAcceptedInputScopeState | undefined {
+	userInterruptCommand(): RuntimeInterruptCommandState | undefined {
 		return this.#userInterrupt?.command;
 	}
 

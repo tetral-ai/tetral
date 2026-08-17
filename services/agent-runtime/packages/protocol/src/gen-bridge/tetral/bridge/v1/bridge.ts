@@ -407,11 +407,23 @@ export interface CommitInputsRequest {
   scope: RuntimeScope | undefined;
   runtimeInputId: string;
   approvalReviewText: string[];
+  interruptLeaseRef: InterruptLeaseRef | undefined;
+}
+
+export interface InterruptLeaseRef {
+  jobId: string;
+  leaseToken: string;
+  partitionKey: string;
+  dedupeKey: string;
 }
 
 export interface CommitInputsResponse {
   committed?: CommitInputsCommitted | undefined;
   stale?: CommitInputsStale | undefined;
+  barrierStale?: CommitInputsBarrierStale | undefined;
+}
+
+export interface CommitInputsBarrierStale {
 }
 
 export interface RuntimeInterruptToolFailed {
@@ -455,6 +467,7 @@ export interface CommitTaskNotificationResultResponse {
   stale?: CommitTaskNotificationResultStale | undefined;
   parked?: CommitTaskNotificationResultParked | undefined;
   rejected?: CommitTaskNotificationResultRejected | undefined;
+  barrierStale?: CommitTaskNotificationResultBarrierStale | undefined;
 }
 
 export interface CommitTaskNotificationResultCommitted {
@@ -462,6 +475,9 @@ export interface CommitTaskNotificationResultCommitted {
 }
 
 export interface CommitTaskNotificationResultStale {
+}
+
+export interface CommitTaskNotificationResultBarrierStale {
 }
 
 export interface CommitTaskNotificationResultParked {
@@ -778,6 +794,7 @@ export interface WriteRequestEndRequest {
 
 export interface RequestEndInterruptSettlement {
   runtimeInputId: string;
+  interruptLeaseRef: InterruptLeaseRef | undefined;
 }
 
 export interface WriteRequestEndResponse {
@@ -2903,7 +2920,7 @@ export const RefreshRuntimeBindingTokenResponse: MessageFns<RefreshRuntimeBindin
 };
 
 function createBaseCommitInputsRequest(): CommitInputsRequest {
-  return { scope: undefined, runtimeInputId: "", approvalReviewText: [] };
+  return { scope: undefined, runtimeInputId: "", approvalReviewText: [], interruptLeaseRef: undefined };
 }
 
 export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
@@ -2916,6 +2933,9 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     }
     for (const v of message.approvalReviewText) {
       writer.uint32(34).string(v!);
+    }
+    if (message.interruptLeaseRef !== undefined) {
+      InterruptLeaseRef.encode(message.interruptLeaseRef, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -2951,6 +2971,14 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
           message.approvalReviewText.push(reader.string());
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.interruptLeaseRef = InterruptLeaseRef.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2973,6 +3001,11 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
         : globalThis.Array.isArray(object?.approval_review_text)
         ? object.approval_review_text.map((e: any) => globalThis.String(e))
         : [],
+      interruptLeaseRef: isSet(object.interruptLeaseRef)
+        ? InterruptLeaseRef.fromJSON(object.interruptLeaseRef)
+        : isSet(object.interrupt_lease_ref)
+        ? InterruptLeaseRef.fromJSON(object.interrupt_lease_ref)
+        : undefined,
     };
   },
 
@@ -2987,6 +3020,9 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     if (message.approvalReviewText?.length) {
       obj.approvalReviewText = message.approvalReviewText;
     }
+    if (message.interruptLeaseRef !== undefined) {
+      obj.interruptLeaseRef = InterruptLeaseRef.toJSON(message.interruptLeaseRef);
+    }
     return obj;
   },
 
@@ -3000,12 +3036,139 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
       : undefined;
     message.runtimeInputId = object.runtimeInputId ?? "";
     message.approvalReviewText = object.approvalReviewText?.map((e) => e) || [];
+    message.interruptLeaseRef = (object.interruptLeaseRef !== undefined && object.interruptLeaseRef !== null)
+      ? InterruptLeaseRef.fromPartial(object.interruptLeaseRef)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseInterruptLeaseRef(): InterruptLeaseRef {
+  return { jobId: "", leaseToken: "", partitionKey: "", dedupeKey: "" };
+}
+
+export const InterruptLeaseRef: MessageFns<InterruptLeaseRef> = {
+  encode(message: InterruptLeaseRef, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.jobId !== "") {
+      writer.uint32(10).string(message.jobId);
+    }
+    if (message.leaseToken !== "") {
+      writer.uint32(18).string(message.leaseToken);
+    }
+    if (message.partitionKey !== "") {
+      writer.uint32(26).string(message.partitionKey);
+    }
+    if (message.dedupeKey !== "") {
+      writer.uint32(34).string(message.dedupeKey);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptLeaseRef {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptLeaseRef();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.jobId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.leaseToken = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.partitionKey = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.dedupeKey = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InterruptLeaseRef {
+    return {
+      jobId: isSet(object.jobId)
+        ? globalThis.String(object.jobId)
+        : isSet(object.job_id)
+        ? globalThis.String(object.job_id)
+        : "",
+      leaseToken: isSet(object.leaseToken)
+        ? globalThis.String(object.leaseToken)
+        : isSet(object.lease_token)
+        ? globalThis.String(object.lease_token)
+        : "",
+      partitionKey: isSet(object.partitionKey)
+        ? globalThis.String(object.partitionKey)
+        : isSet(object.partition_key)
+        ? globalThis.String(object.partition_key)
+        : "",
+      dedupeKey: isSet(object.dedupeKey)
+        ? globalThis.String(object.dedupeKey)
+        : isSet(object.dedupe_key)
+        ? globalThis.String(object.dedupe_key)
+        : "",
+    };
+  },
+
+  toJSON(message: InterruptLeaseRef): unknown {
+    const obj: any = {};
+    if (message.jobId !== "") {
+      obj.jobId = message.jobId;
+    }
+    if (message.leaseToken !== "") {
+      obj.leaseToken = message.leaseToken;
+    }
+    if (message.partitionKey !== "") {
+      obj.partitionKey = message.partitionKey;
+    }
+    if (message.dedupeKey !== "") {
+      obj.dedupeKey = message.dedupeKey;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptLeaseRef>, I>>(base?: I): InterruptLeaseRef {
+    return InterruptLeaseRef.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptLeaseRef>, I>>(object: I): InterruptLeaseRef {
+    const message = createBaseInterruptLeaseRef();
+    message.jobId = object.jobId ?? "";
+    message.leaseToken = object.leaseToken ?? "";
+    message.partitionKey = object.partitionKey ?? "";
+    message.dedupeKey = object.dedupeKey ?? "";
     return message;
   },
 };
 
 function createBaseCommitInputsResponse(): CommitInputsResponse {
-  return { committed: undefined, stale: undefined };
+  return { committed: undefined, stale: undefined, barrierStale: undefined };
 }
 
 export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
@@ -3015,6 +3178,9 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
     }
     if (message.stale !== undefined) {
       CommitInputsStale.encode(message.stale, writer.uint32(26).fork()).join();
+    }
+    if (message.barrierStale !== undefined) {
+      CommitInputsBarrierStale.encode(message.barrierStale, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -3042,6 +3208,14 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
           message.stale = CommitInputsStale.decode(reader, reader.uint32());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.barrierStale = CommitInputsBarrierStale.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3055,6 +3229,11 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
     return {
       committed: isSet(object.committed) ? CommitInputsCommitted.fromJSON(object.committed) : undefined,
       stale: isSet(object.stale) ? CommitInputsStale.fromJSON(object.stale) : undefined,
+      barrierStale: isSet(object.barrierStale)
+        ? CommitInputsBarrierStale.fromJSON(object.barrierStale)
+        : isSet(object.barrier_stale)
+        ? CommitInputsBarrierStale.fromJSON(object.barrier_stale)
+        : undefined,
     };
   },
 
@@ -3065,6 +3244,9 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
     }
     if (message.stale !== undefined) {
       obj.stale = CommitInputsStale.toJSON(message.stale);
+    }
+    if (message.barrierStale !== undefined) {
+      obj.barrierStale = CommitInputsBarrierStale.toJSON(message.barrierStale);
     }
     return obj;
   },
@@ -3080,6 +3262,52 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
     message.stale = (object.stale !== undefined && object.stale !== null)
       ? CommitInputsStale.fromPartial(object.stale)
       : undefined;
+    message.barrierStale = (object.barrierStale !== undefined && object.barrierStale !== null)
+      ? CommitInputsBarrierStale.fromPartial(object.barrierStale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseCommitInputsBarrierStale(): CommitInputsBarrierStale {
+  return {};
+}
+
+export const CommitInputsBarrierStale: MessageFns<CommitInputsBarrierStale> = {
+  encode(_: CommitInputsBarrierStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommitInputsBarrierStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommitInputsBarrierStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CommitInputsBarrierStale {
+    return {};
+  },
+
+  toJSON(_: CommitInputsBarrierStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommitInputsBarrierStale>, I>>(base?: I): CommitInputsBarrierStale {
+    return CommitInputsBarrierStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommitInputsBarrierStale>, I>>(_: I): CommitInputsBarrierStale {
+    const message = createBaseCommitInputsBarrierStale();
     return message;
   },
 };
@@ -3691,7 +3919,7 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
 };
 
 function createBaseCommitTaskNotificationResultResponse(): CommitTaskNotificationResultResponse {
-  return { committed: undefined, stale: undefined, parked: undefined, rejected: undefined };
+  return { committed: undefined, stale: undefined, parked: undefined, rejected: undefined, barrierStale: undefined };
 }
 
 export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotificationResultResponse> = {
@@ -3707,6 +3935,9 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     }
     if (message.rejected !== undefined) {
       CommitTaskNotificationResultRejected.encode(message.rejected, writer.uint32(42).fork()).join();
+    }
+    if (message.barrierStale !== undefined) {
+      CommitTaskNotificationResultBarrierStale.encode(message.barrierStale, writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -3750,6 +3981,14 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
           message.rejected = CommitTaskNotificationResultRejected.decode(reader, reader.uint32());
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.barrierStale = CommitTaskNotificationResultBarrierStale.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3765,6 +4004,11 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
       stale: isSet(object.stale) ? CommitTaskNotificationResultStale.fromJSON(object.stale) : undefined,
       parked: isSet(object.parked) ? CommitTaskNotificationResultParked.fromJSON(object.parked) : undefined,
       rejected: isSet(object.rejected) ? CommitTaskNotificationResultRejected.fromJSON(object.rejected) : undefined,
+      barrierStale: isSet(object.barrierStale)
+        ? CommitTaskNotificationResultBarrierStale.fromJSON(object.barrierStale)
+        : isSet(object.barrier_stale)
+        ? CommitTaskNotificationResultBarrierStale.fromJSON(object.barrier_stale)
+        : undefined,
     };
   },
 
@@ -3781,6 +4025,9 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     }
     if (message.rejected !== undefined) {
       obj.rejected = CommitTaskNotificationResultRejected.toJSON(message.rejected);
+    }
+    if (message.barrierStale !== undefined) {
+      obj.barrierStale = CommitTaskNotificationResultBarrierStale.toJSON(message.barrierStale);
     }
     return obj;
   },
@@ -3805,6 +4052,9 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
       : undefined;
     message.rejected = (object.rejected !== undefined && object.rejected !== null)
       ? CommitTaskNotificationResultRejected.fromPartial(object.rejected)
+      : undefined;
+    message.barrierStale = (object.barrierStale !== undefined && object.barrierStale !== null)
+      ? CommitTaskNotificationResultBarrierStale.fromPartial(object.barrierStale)
       : undefined;
     return message;
   },
@@ -3933,6 +4183,53 @@ export const CommitTaskNotificationResultStale: MessageFns<CommitTaskNotificatio
     _: I,
   ): CommitTaskNotificationResultStale {
     const message = createBaseCommitTaskNotificationResultStale();
+    return message;
+  },
+};
+
+function createBaseCommitTaskNotificationResultBarrierStale(): CommitTaskNotificationResultBarrierStale {
+  return {};
+}
+
+export const CommitTaskNotificationResultBarrierStale: MessageFns<CommitTaskNotificationResultBarrierStale> = {
+  encode(_: CommitTaskNotificationResultBarrierStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CommitTaskNotificationResultBarrierStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCommitTaskNotificationResultBarrierStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CommitTaskNotificationResultBarrierStale {
+    return {};
+  },
+
+  toJSON(_: CommitTaskNotificationResultBarrierStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CommitTaskNotificationResultBarrierStale>, I>>(
+    base?: I,
+  ): CommitTaskNotificationResultBarrierStale {
+    return CommitTaskNotificationResultBarrierStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CommitTaskNotificationResultBarrierStale>, I>>(
+    _: I,
+  ): CommitTaskNotificationResultBarrierStale {
+    const message = createBaseCommitTaskNotificationResultBarrierStale();
     return message;
   },
 };
@@ -9189,13 +9486,16 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
 };
 
 function createBaseRequestEndInterruptSettlement(): RequestEndInterruptSettlement {
-  return { runtimeInputId: "" };
+  return { runtimeInputId: "", interruptLeaseRef: undefined };
 }
 
 export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettlement> = {
   encode(message: RequestEndInterruptSettlement, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.runtimeInputId !== "") {
       writer.uint32(10).string(message.runtimeInputId);
+    }
+    if (message.interruptLeaseRef !== undefined) {
+      InterruptLeaseRef.encode(message.interruptLeaseRef, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -9215,6 +9515,14 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
           message.runtimeInputId = reader.string();
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.interruptLeaseRef = InterruptLeaseRef.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9231,6 +9539,11 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
         : isSet(object.runtime_input_id)
         ? globalThis.String(object.runtime_input_id)
         : "",
+      interruptLeaseRef: isSet(object.interruptLeaseRef)
+        ? InterruptLeaseRef.fromJSON(object.interruptLeaseRef)
+        : isSet(object.interrupt_lease_ref)
+        ? InterruptLeaseRef.fromJSON(object.interrupt_lease_ref)
+        : undefined,
     };
   },
 
@@ -9238,6 +9551,9 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
     const obj: any = {};
     if (message.runtimeInputId !== "") {
       obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.interruptLeaseRef !== undefined) {
+      obj.interruptLeaseRef = InterruptLeaseRef.toJSON(message.interruptLeaseRef);
     }
     return obj;
   },
@@ -9250,6 +9566,9 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
   ): RequestEndInterruptSettlement {
     const message = createBaseRequestEndInterruptSettlement();
     message.runtimeInputId = object.runtimeInputId ?? "";
+    message.interruptLeaseRef = (object.interruptLeaseRef !== undefined && object.interruptLeaseRef !== null)
+      ? InterruptLeaseRef.fromPartial(object.interruptLeaseRef)
+      : undefined;
     return message;
   },
 };

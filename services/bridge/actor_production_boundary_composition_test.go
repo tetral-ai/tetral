@@ -18,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -162,13 +163,29 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	if err := json.Unmarshal([]byte(interruptEventIDsJSON), &interruptEventIDs); err != nil {
 		t.Fatalf("decode admitted child interrupt event IDs: %v", err)
 	}
+	var interruptQueueJob queue.Job
+	interruptQueueJob.LeaseToken = "qlt_actor_production_interrupt"
+	if err := admin.QueryRowContext(context.Background(), `UPDATE queue_jobs
+		SET status='leased',leased_by='actor-production',lease_token=$2,leased_at=clock_timestamp(),
+		    leased_until=clock_timestamp()+interval '1 minute',updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'
+		  AND dedupe_key=$1
+		RETURNING id,partition_key,dedupe_key`,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptInputID), interruptQueueJob.LeaseToken,
+	).Scan(&interruptQueueJob.ID, &interruptQueueJob.PartitionKey, &interruptQueueJob.DedupeKey); err != nil {
+		t.Fatalf("lease admitted child interrupt Queue authority: %v", err)
+	}
+	interruptQueueJob.WorkspaceID = workspace.DefaultID
+	interruptQueueJob.Kind = queue.KindRuntimeInput
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
 		BindingID: bindingID, BindingGeneration: 1, Namespace: "engine", PodName: "runtime-actor-production",
 		PodUID: podUID, PodIP: "127.0.0.1",
 	}}
 	plan, prepareErr := deliveryStore.PrepareRuntimeCommand(context.Background(), RuntimeJob{
-		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childID,
+		JobID: interruptQueueJob.ID, LeaseToken: interruptQueueJob.LeaseToken,
+		Kind: queue.KindRuntimeInput, PartitionKey: interruptQueueJob.PartitionKey, DedupeKey: interruptQueueJob.DedupeKey,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childID,
 		RuntimeInputID: interruptInputID, InputKind: "interrupt_control", EventIDs: interruptEventIDs,
 		SequenceFrom: interruptSequenceFrom, SequenceTo: interruptSequenceTo,
 	})
@@ -176,10 +193,16 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		t.Fatalf("prepare admitted child interrupt through production delivery store = %#v/%v", plan, prepareErr)
 	}
 	committedInterrupt, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: childScope, RuntimeInputId: interruptInputID,
+		Scope: childScope, RuntimeInputId: interruptInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(&interruptQueueJob),
 	})
 	if err != nil || committedInterrupt.GetCommitted().GetInterrupt() == nil {
 		t.Fatalf("commit child interrupt through generated gRPC = %#v/%v", committedInterrupt, err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
+		WorkspaceID: workspace.DefaultID, JobID: interruptQueueJob.ID, LeaseToken: interruptQueueJob.LeaseToken,
+	}); err != nil || !acked {
+		t.Fatalf("ACK admitted child interrupt Queue authority = %t/%v", acked, err)
 	}
 	awaited, err := client.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: parentScope, ControlOperationId: controlID})
 	if err != nil || len(awaited.GetCompleted().GetTargets()) != 1 {
