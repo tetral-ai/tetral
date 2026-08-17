@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -54,6 +55,8 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_start_facts", "start.png", "image/png", "start")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_start_facts", 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_start_facts"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_start_facts", "messages",
+		`["sevt_start_facts"]`, "committed", bindingID, podUID, 1, 1)
 
 	startRequest := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_start", ModelRequestId: "mreq_facts",
@@ -112,6 +115,109 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	}
 }
 
+func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleConsumption(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		seedInbox func(*testing.T, *sql.DB, string, string, string, string)
+	}{
+		{name: "missing"},
+		{name: "uncommitted", seedInbox: func(t *testing.T, admin *sql.DB, sessionID, threadID, bindingID, podUID string) {
+			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_uncommitted", "messages",
+				`["sevt_attachment_authority"]`, "accepted", bindingID, podUID, 1, 1)
+		}},
+		{name: "ambiguous", seedInbox: func(t *testing.T, admin *sql.DB, sessionID, threadID, bindingID, podUID string) {
+			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_committed", "messages",
+				`["sevt_attachment_authority"]`, "committed", bindingID, podUID, 1, 1)
+			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_conflict", "rejection",
+				`["sevt_attachment_authority"]`, "committed", bindingID, podUID, 1, 1)
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			const sessionID = "sesn_attachment_authority"
+			const threadID = "thr_attachment_authority"
+			const bindingID = "bind_attachment_authority"
+			const podUID = "pod_attachment_authority"
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+			store.AttachmentBlobStore = blob.NewFakeBlobStore()
+			seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_attachment_authority", "authority.png", "image/png", "authority")
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_attachment_authority", 1, "user.message",
+				`{"content":[{"type":"image","source":{"type":"file","file_id":"file_attachment_authority"}}]}`)
+			if testCase.seedInbox != nil {
+				testCase.seedInbox(t, admin, sessionID, threadID, bindingID, podUID)
+			}
+			response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+				Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_attachment_authority",
+				ModelRequestId: "mreq_attachment_authority", EventType: "span.model_request_start",
+				PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
+				RequestKind: requestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{
+					SourceEventId: "sevt_attachment_authority", FileId: "file_attachment_authority",
+				}},
+			})
+			if status.Code(err) != codes.InvalidArgument || response != nil {
+				t.Fatalf("unauthorized Request Start = %#v/%v; want InvalidArgument", response, err)
+			}
+		})
+	}
+
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const sessionID = "sesn_attachment_single_consumption"
+	const threadID = "thr_attachment_single_consumption"
+	const bindingID = "bind_attachment_single_consumption"
+	const podUID = "pod_attachment_single_consumption"
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.AttachmentBlobStore = blob.NewFakeBlobStore()
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_attachment_once", "once.png", "image/png", "once")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_attachment_once", 1, "user.message",
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_attachment_once"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_attachment_once", "messages",
+		`["sevt_attachment_once"]`, "committed", bindingID, podUID, 1, 1)
+	pair := &bridgev1.FileAttachmentPair{SourceEventId: "sevt_attachment_once", FileId: "file_attachment_once"}
+	first := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_first", ModelRequestId: "mreq_attachment_once_first",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
+	}
+	committed, err := store.WriteEvent(context.Background(), first)
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("first attachment consumption = %#v/%v", committed, err)
+	}
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_end", ModelRequestId: first.ModelRequestId,
+		FinishReason: "stop", UsageJson: `{}`,
+	}); err != nil {
+		t.Fatalf("close first attachment Request: %v", err)
+	}
+	replay, err := store.WriteEvent(context.Background(), first)
+	if err != nil || replay.GetDuplicate() == nil {
+		t.Fatalf("identical Request Start replay = %#v/%v; want duplicate", replay, err)
+	}
+	second, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_second", ModelRequestId: "mreq_attachment_once_second",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
+	})
+	if status.Code(err) != codes.AlreadyExists || second != nil {
+		t.Fatalf("second Request Start consumption = %#v/%v; want AlreadyExists", second, err)
+	}
+	var starts, consumptions int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_file_attachment_consumptions WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&starts, &consumptions); err != nil {
+		t.Fatalf("read single-consumption facts: %v", err)
+	}
+	if starts != 1 || consumptions != 1 {
+		t.Fatalf("single-consumption facts = starts %d consumptions %d; want 1/1", starts, consumptions)
+	}
+}
+
 func TestWriteEventRequestStartConsumptionRollsBackEventAndRelationTogether(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -127,6 +233,8 @@ func TestWriteEventRequestStartConsumptionRollsBackEventAndRelationTogether(t *t
 	seedBridgeAPIFileAttachment(t, admin, store.AttachmentBlobStore, "file_start_rollback", "rollback.png", "image/png", "rollback")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_start_rollback", 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_start_rollback"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_start_rollback", "messages",
+		`["sevt_start_rollback"]`, "committed", bindingID, podUID, 1, 1)
 	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_start_consumption() RETURNS trigger
 		LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected consumption failure'; END $$;
 		CREATE TRIGGER fail_start_consumption BEFORE INSERT ON session_file_attachment_consumptions

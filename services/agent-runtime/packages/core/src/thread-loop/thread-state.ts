@@ -840,12 +840,24 @@ export class ThreadState {
 		attachments: readonly RuntimeProviderAttachment[],
 	): void {
 		const hadPendingAttachments = this.hasPendingAttachments();
+		const existing = new Set(
+			[
+				...(this.#activeAttachmentRide ?? []),
+				...this.#pendingAttachments,
+			].map(runtimeProviderAttachmentIdentityKey),
+		);
+		const additions = attachments.filter((attachment) => {
+			const identity = runtimeProviderAttachmentIdentityKey(attachment);
+			if (existing.has(identity)) return false;
+			existing.add(identity);
+			return true;
+		});
 		const available = Math.max(
 			0,
 			MaxProviderAttachments - this.#pendingAttachments.length,
 		);
 		this.#pendingAttachments.push(
-			...attachments.slice(0, available).map(cloneRuntimeProviderAttachment),
+			...additions.slice(0, available).map(cloneRuntimeProviderAttachment),
 		);
 		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
@@ -1190,6 +1202,18 @@ function cloneRuntimeProviderAttachment(
 				transient: undefined,
 				fileBacked: { ...attachment.fileBacked },
 			};
+}
+
+function runtimeProviderAttachmentIdentityKey(
+	attachment: RuntimeProviderAttachment,
+): string {
+	return attachment.transient !== undefined
+		? JSON.stringify(["transient", attachment.transient.attachmentRef])
+		: JSON.stringify([
+				"file-backed",
+				attachment.fileBacked.sourceEventId,
+				attachment.fileBacked.fileId,
+			]);
 }
 
 function sameAcceptedInput(

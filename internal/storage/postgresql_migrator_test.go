@@ -167,7 +167,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "3735b610902bd8896799ded39602b32cd105c9a8f8adf6f0d7226a2f37cfbd9f"
+	const want = "eab41c9b4f0c0181f255f6a4b44325c3e22f17fadfa0b492db50607a4611241c"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -575,6 +575,16 @@ func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 	if !rowSecurity || !forceRowSecurity {
 		t.Fatalf("consumption RLS enabled/forced = %v/%v, want true/true", rowSecurity, forceRowSecurity)
 	}
+	var consumptionPairConstraint string
+	if err := db.QueryRowContext(ctx, `SELECT pg_get_constraintdef(oid)
+		FROM pg_constraint
+		WHERE conrelid = 'session_file_attachment_consumptions'::regclass
+		  AND conname = 'session_file_attachment_consumptions_source_file_key'`).Scan(&consumptionPairConstraint); err != nil {
+		t.Fatalf("read consumption source/file constraint: %v", err)
+	}
+	if consumptionPairConstraint != "UNIQUE (workspace_id, source_event_id, file_id)" {
+		t.Fatalf("consumption source/file constraint = %q", consumptionPairConstraint)
+	}
 	var mediaIndexDefinition string
 	if err := db.QueryRowContext(ctx, `SELECT indexdef
 		FROM pg_indexes
@@ -596,13 +606,13 @@ func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 	)`); err != nil {
 		t.Fatalf("seed media thread: %v", err)
 	}
-	for _, eventID := range []string{"sevt_source_media", "sevt_request_start_media"} {
+	for _, eventID := range []string{"sevt_source_media", "sevt_request_start_media", "sevt_request_start_media_second"} {
 		if _, err := db.ExecContext(ctx, `INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
 			payload_json, visibility, session_visible, created_at, updated_at
 		) VALUES (
 			'wksp_media', 'sesn_media', 'thr_media', $1,
-			CASE WHEN $1 = 'sevt_source_media' THEN 1 ELSE 2 END,
+			CASE $1 WHEN 'sevt_source_media' THEN 1 WHEN 'sevt_request_start_media' THEN 2 ELSE 3 END,
 			CASE WHEN $1 = 'sevt_source_media' THEN 'user.message' ELSE 'span.model_request_start' END,
 			'{}', 'public', true, '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z'
 		)`, eventID); err != nil {
@@ -634,7 +644,15 @@ func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 		t.Fatalf("insert media consumption: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, insertConsumption); err == nil {
-		t.Fatal("duplicate six-key media consumption was accepted")
+		t.Fatal("duplicate source/file media consumption was accepted")
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO session_file_attachment_consumptions (
+		workspace_id, session_id, session_thread_id, request_start_event_id, source_event_id, file_id
+	) VALUES (
+		'wksp_media', 'sesn_media', 'thr_media',
+		'sevt_request_start_media_second', 'sevt_source_media', 'file_media'
+	)`); err == nil {
+		t.Fatal("second Request Start consumed an existing source/file pair")
 	}
 	seedStorageSchemaSession(t, db, "wksp_media", "sesn_media_other")
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_threads (

@@ -1803,6 +1803,24 @@ describe("ThreadState", () => {
 		);
 	});
 
+	test("does not duplicate a file attachment installed by cold load before input commit", () => {
+		const state = new ThreadState("sesn_attachment_cold_commit_overlap");
+		const attachment = {
+			transient: undefined,
+			fileBacked: {
+				sourceEventId: "sevt_attachment_cold_commit_overlap",
+				fileId: "file_attachment_cold_commit_overlap",
+			},
+			mime: "image/png",
+			filename: "overlap.png",
+		};
+
+		state.replacePendingAttachments([attachment]);
+		state.addPendingAttachments([attachment]);
+
+		expect(state.pendingAttachments()).toEqual([attachment]);
+	});
+
 	test("derives attachment readiness from ThreadState without adding Message context", () => {
 		const attachment = {
 			transient: undefined,

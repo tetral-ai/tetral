@@ -685,12 +685,36 @@ func validateFileAttachmentConsumptionsTx(
 ) error {
 	for _, pair := range pairs {
 		var eventType, payloadJSON string
+		var authorityRows, committedMessageAuthorities int
+		var alreadyConsumed bool
 		err := tx.QueryRow(ctx,
-			`SELECT event.type, event.payload_json
+			`SELECT event.type,
+			        event.payload_json,
+			        authority.authority_rows,
+			        authority.committed_message_authorities,
+			        EXISTS (
+			          SELECT 1
+			            FROM session_file_attachment_consumptions consumption
+			           WHERE consumption.workspace_id = event.workspace_id
+			             AND consumption.source_event_id = event.event_id
+			             AND consumption.file_id = file.file_id
+			        )
 			   FROM session_events event
 			   JOIN files file
 			     ON file.workspace_id = event.workspace_id
 			    AND file.file_id = $5
+			  CROSS JOIN LATERAL (
+			    SELECT count(*)::int AS authority_rows,
+			           count(*) FILTER (
+			             WHERE inbox.input_kind = 'messages'
+			               AND inbox.status = 'committed'
+			           )::int AS committed_message_authorities
+			      FROM session_runtime_inbox inbox
+			     WHERE inbox.workspace_id = event.workspace_id
+			       AND inbox.session_id = event.session_id
+			       AND inbox.session_thread_id = event.session_thread_id
+			       AND inbox.event_ids_json::jsonb ? event.event_id
+			  ) authority
 			  WHERE event.workspace_id = $1
 			    AND event.session_id = $2
 			    AND event.session_thread_id = $3
@@ -700,7 +724,7 @@ func validateFileAttachmentConsumptionsTx(
 			scope.GetSessionThreadId(),
 			pair.GetSourceEventId(),
 			pair.GetFileId(),
-		).Scan(&eventType, &payloadJSON)
+		).Scan(&eventType, &payloadJSON, &authorityRows, &committedMessageAuthorities, &alreadyConsumed)
 		if dbconnect.IsNoRows(err) {
 			return status.Error(codes.InvalidArgument, "consumed file attachment source event is invalid")
 		}
@@ -710,8 +734,14 @@ func validateFileAttachmentConsumptionsTx(
 		if eventType != "user.message" {
 			return status.Error(codes.InvalidArgument, "consumed file attachment source event is invalid")
 		}
+		if authorityRows != 1 || committedMessageAuthorities != 1 {
+			return status.Error(codes.InvalidArgument, "consumed file attachment requires unique committed message authority")
+		}
 		if _, ok := fileAttachmentBlockType(payloadJSON, pair.GetFileId()); !ok {
 			return status.Error(codes.InvalidArgument, "consumed file attachment does not match its source event")
+		}
+		if alreadyConsumed {
+			return status.Error(codes.AlreadyExists, "file attachment was already consumed by a Request Start")
 		}
 	}
 	return nil

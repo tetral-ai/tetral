@@ -415,10 +415,8 @@ const (
 		request_start_event_id TEXT NOT NULL,
 		source_event_id TEXT NOT NULL,
 		file_id TEXT NOT NULL,
-		UNIQUE (
-			workspace_id, session_id, session_thread_id,
-			request_start_event_id, source_event_id, file_id
-		),
+		CONSTRAINT session_file_attachment_consumptions_source_file_key
+			UNIQUE (workspace_id, source_event_id, file_id),
 		FOREIGN KEY (workspace_id, session_id)
 			REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, session_id, session_thread_id)
