@@ -72,7 +72,7 @@ jobs:
             build_args: ''
           - image: sandbox
             dockerfile: Dockerfile.sandbox
-            build_args: SANDBOX_RUNTIME_BASE_IMAGE=ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9
+            build_args: ''
           - image: gateway
             dockerfile: services/gateway/Dockerfile
             build_args: ''
@@ -118,7 +118,6 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           VERSION: ${{ needs.version.outputs.version }}
           DIGEST: ${{ steps.build.outputs.digest }}
-          BUILD_ARGS: ${{ matrix.build_args }}
         run: |
           {
             echo "### $IMAGE"
@@ -126,9 +125,6 @@ jobs:
             echo '```'
             echo "$IMAGE:$VERSION"
             echo "$IMAGE@$DIGEST"
-            if [[ "$BUILD_ARGS" == SANDBOX_RUNTIME_BASE_IMAGE=* ]]; then
-              echo "runtime-base=${BUILD_ARGS#SANDBOX_RUNTIME_BASE_IMAGE=}"
-            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

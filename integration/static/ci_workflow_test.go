@@ -1,9 +1,7 @@
 package static
 
 import (
-	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -61,7 +59,7 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	// on a maintainer's machine and getting no checks at all.
 	engineCIJobs := []string{
 		"go-static:", "go-test:", "protocol:", "agent-runtime-ts:", "gateway-ts:",
-		"k8s-manifests:", "helm-chart:", "security:", "helper-privilege:", "external-smoke:",
+		"k8s-manifests:", "helm-chart:", "security:", "sandbox-local-image-smoke:", "external-smoke:",
 	}
 	for _, jobName := range engineCIJobs {
 		if !strings.Contains(workflowJobForStaticTest(t, text, jobName), "runs-on: ubuntu-latest") {
@@ -250,7 +248,7 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 		"gateway-ts:",
 		"k8s-manifests:",
 		"security:",
-		"helper-privilege:",
+		"sandbox-local-image-smoke:",
 		"external-smoke:",
 	}
 	for _, jobName := range requiredJobs {
@@ -436,7 +434,7 @@ func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
 	}
 }
 
-func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
+func TestEngineCIWorkflowRunsLocalSandboxImageSmoke(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	workflowPath := filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")
 	body, err := os.ReadFile(workflowPath) //nolint:gosec // repository-local workflow.
@@ -444,113 +442,18 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 		t.Fatalf("read workflow: %v", err)
 	}
 	workflow := string(body)
-	if count := strings.Count(workflow, "\n  helper-privilege:"); count != 1 {
-		t.Fatalf("helper-privilege job count = %d; want exactly one", count)
+	if count := strings.Count(workflow, "\n  sandbox-local-image-smoke:"); count != 1 {
+		t.Fatalf("sandbox-local-image-smoke job count = %d; want exactly one", count)
 	}
-	job := workflowJobForStaticTest(t, workflow, "helper-privilege:")
+	job := workflowJobForStaticTest(t, workflow, "sandbox-local-image-smoke:")
 	for _, token := range []string{
 		"runs-on: ubuntu-latest",
 		"persist-credentials: false",
-		"run: ./scripts/run-helper-privilege-ci.sh",
+		"run: ./scripts/run-sandbox-local-image-smoke.sh",
 	} {
 		if !strings.Contains(job, token) {
-			t.Fatalf("helper-privilege job missing %q; job was:\n%s", token, job)
+			t.Fatalf("sandbox-local-image-smoke job missing %q; job was:\n%s", token, job)
 		}
-	}
-	for _, forbidden := range []string{"go test ./...", "make test", "bun test", "TETRAL_TEST_DATABASE_URL"} {
-		if strings.Contains(job, forbidden) {
-			t.Fatalf("helper-privilege job widens root execution with %q", forbidden)
-		}
-	}
-	if regexp.MustCompile(`(?m)(docker\s+login\b|uses:\s*docker/login-action@)`).MatchString(job) {
-		t.Fatal("helper-privilege job must use an anonymous pull for the public GHCR mirror")
-	}
-
-	scriptPath := filepath.Join(engineRoot, "scripts", "run-helper-privilege-ci.sh")
-	scriptBody, err := os.ReadFile(scriptPath) //nolint:gosec // repository-local CI command.
-	if err != nil {
-		t.Fatalf("read helper privilege script: %v", err)
-	}
-	script := string(scriptBody)
-	for _, token := range []string{
-		"docker build --tag",
-		"Dockerfile.sandbox",
-		"TETRAL_HELPER_PROOF_BUILD_CONTEXT",
-		"TETRAL_HELPER_PROOF_RUNTIME_BASE_IMAGE",
-		"TETRAL_TEST_DAYTONA_IMAGE_CONTRACT",
-		"TETRAL_TEST_EXPECTED_IMAGE_ID",
-		"docker image inspect",
-		"docker run --rm",
-		"--user 0:0",
-		"ghcr.io/tetral-ai/mirror/golang:1.25.12",
-		"ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9",
-		"release_runtime_base",
-		"selected_digest",
-		"id=ubuntu version=24.04",
-		"sandbox-runtime-base:",
-		"sandbox-runtime-image:",
-		"TETRAL_TEST_RUNTIME_UID",
-		"TETRAL_TEST_RUNTIME_GID",
-		`test "$(id -u)" -eq 0`,
-		"go test ./internal/sandbox/helper",
-		"CGO_ENABLED=0 go test -c",
-		"TETRAL_TEST_HELPER_BINARY=/usr/local/bin/sandbox",
-		"TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop",
-		"--- SKIP:",
-	} {
-		if !strings.Contains(script, token) {
-			t.Fatalf("helper privilege script missing %q", token)
-		}
-	}
-	if strings.Contains(script, "go test ./...") {
-		t.Fatal("helper privilege script must not run the full suite as root")
-	}
-	for _, thirdParty := range []string{
-		"public.ecr.aws/docker/library/golang:1.25.12",
-		"docker.io/library/golang:1.25.12",
-		"public.ecr.aws/docker/library/ubuntu:24.04",
-		"docker.io/library/ubuntu:24.04",
-	} {
-		if strings.Contains(script, thirdParty) {
-			t.Fatalf("helper privilege script must not pull Go from shared third-party registry %q", thirdParty)
-		}
-	}
-	if regexp.MustCompile(`(?m)docker\s+login\b`).MatchString(script) {
-		t.Fatal("helper privilege script must use an anonymous pull for the public GHCR mirror")
-	}
-	if strings.Contains(script, "SANDBOX_RUNTIME_BASE_IMAGE=ghcr.io/tetral-ai/mirror/golang") {
-		t.Fatal("helper privilege script substitutes the Go builder image for the Sandbox runtime base")
-	}
-}
-
-func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
-	script := filepath.Join(finalArchitectureEngineRoot(t), "scripts", "run-helper-privilege-ci.sh")
-	command := exec.Command("bash", script, "--verify-output")
-	command.Stdin = bytes.NewBufferString("--- SKIP: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.00s)\n")
-	if err := command.Run(); err == nil {
-		t.Fatal("helper privilege output guard accepted a skipped proof")
-	}
-
-	command = exec.Command("bash", script, "--verify-output")
-	command.Stdin = bytes.NewBufferString("--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)\n")
-	if err := command.Run(); err == nil {
-		t.Fatal("helper privilege output guard accepted output without runtime identity proofs")
-	}
-
-	command = exec.Command("bash", script, "--verify-output")
-	command.Stdin = bytes.NewBufferString(strings.Join([]string{
-		"sandbox-runtime-base: release=ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9 proof=ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9 selected=sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9 id=ubuntu version=24.04",
-		"sandbox-runtime-image: user=daytona uid=1001 gid=1001 home=/home/daytona shell=/bin/bash env_home=/home/daytona",
-		"    daytona_image_contract_test.go:154: daytona-adapter-image: id=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa user=daytona uid=1001 gid=1001 home=/home/daytona shell=/bin/bash",
-		"--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)",
-		"--- PASS: TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
-		"--- PASS: TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
-		"--- PASS: TestBuiltHelperFileToolUsesRuntimeIdentity (0.01s)",
-		"--- PASS: TestBuiltHelperReadUsesRuntimeProcessIdentityAndEnvironment (0.01s)",
-		"--- PASS: TestDaytonaProductionAdaptersUseFinalImageIdentity (0.01s)",
-	}, "\n") + "\n")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("helper privilege output guard rejected a passing proof: %v\n%s", err, output)
 	}
 }
 

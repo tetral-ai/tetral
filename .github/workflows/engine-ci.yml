@@ -612,7 +612,7 @@ jobs:
       - name: Secret and redaction static guards
         run: go test ./integration/static -run 'Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log' -count=1
 
-  helper-privilege:
+  sandbox-local-image-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -622,8 +622,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Root sandbox-helper privilege continuity
-        run: ./scripts/run-helper-privilege-ci.sh
+      - name: Local Sandbox image smoke
+        run: ./scripts/run-sandbox-local-image-smoke.sh
 
   external-smoke:
     if: >-
