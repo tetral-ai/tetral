@@ -96,6 +96,78 @@ func TestPostgreSQLInterruptFinalizerLosingLeaseAfterReclaimWritesNothing(t *tes
 	}
 }
 
+func TestPostgreSQLJobRunnerLosingInterruptLeaseBeforeReplayCannotCancelMessages(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_interrupt_stale_runner"
+		threadID       = "thr_interrupt_stale_runner"
+		interruptID    = "rin_interrupt_stale_runner"
+		interruptEvent = "evt_interrupt_stale_runner"
+		messageID      = "rin_interrupt_stale_runner_message"
+		messageEvent   = "evt_interrupt_stale_runner_message"
+	)
+	now := time.Now().UTC().Add(-time.Minute)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEvent, 3, "user.message", `{"content":[{"type":"text","text":"before interrupt"}]}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: messageID, InputKind: "messages", EventIDs: []string{messageEvent}, SequenceFrom: 3, SequenceTo: 3,
+	})
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 4, "user.interrupt", `{"type":"user.interrupt"}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: interruptID, InputKind: "interrupt_control", EventIDs: []string{interruptEvent}, SequenceFrom: 4, SequenceTo: 4,
+	})
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	// The interrupt is enqueued first so it owns the first lease while the
+	// lower-sequence message remains a pending fence target.
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, interruptID, "interrupt_control", interruptEvent, 4, 3, now)
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, messageID, "messages", messageEvent, 3, queue.DefaultMaxAttempts, now.Add(time.Second))
+	first := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "stale-runner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now,
+	})
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, first.ID); err != nil {
+		t.Fatalf("expire stale JobRunner lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim stale JobRunner lease = %d/%v; want 1/nil", reclaimed, err)
+	}
+	current := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "current-runner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if current.ID != first.ID || current.LeaseToken == first.LeaseToken {
+		t.Fatalf("current interrupt lease = %s/%s; want reclaimed %s with a new token", current.ID, current.LeaseToken, first.ID)
+	}
+
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
+	runner := &JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer}
+	if err := runner.processRuntimeJob(context.Background(), queueJobProto(first), JobRunnerConfig{}); err != nil {
+		t.Fatalf("resume stale JobRunner: %v", err)
+	}
+	var messageQueueStatus, messageInboxStatus, interruptQueueStatus, currentToken string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$3)`,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, messageID), messageID, current.ID,
+	).Scan(&messageQueueStatus, &messageInboxStatus, &interruptQueueStatus, &currentToken); err != nil {
+		t.Fatalf("read stale JobRunner Queue facts: %v", err)
+	}
+	if messageQueueStatus != queue.StatusPending || messageInboxStatus != "queued" ||
+		interruptQueueStatus != queue.StatusLeased || currentToken != current.LeaseToken || deliverer.deliveries != 0 {
+		t.Fatalf("stale JobRunner mutated facts: message Queue/Inbox %s/%s interrupt %s/%s deliveries %d",
+			messageQueueStatus, messageInboxStatus, interruptQueueStatus, currentToken, deliverer.deliveries)
+	}
+}
+
 func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 	t.Helper()
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)

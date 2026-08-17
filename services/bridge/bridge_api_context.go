@@ -699,8 +699,9 @@ func loadThreadPendingAgentMailTx(
 
 // A file-backed attachment becomes cold-load eligible only through one
 // committed messages Inbox row. Event processing alone is not authority: the
-// delivery-exhaustion path also marks its source events processed. Request End
-// consumption is the independent terminal relation that removes eligibility.
+// delivery-exhaustion path also marks its source events processed. Request
+// Start consumption is the independent terminal relation that removes
+// eligibility before Provider work begins.
 // The thread-scoped covering index feeds one materialized Inbox pass; media
 // event count must not multiply authority-history scans.
 const loadThreadPendingFileAttachmentsSQL = `WITH scoped_inbox_events AS MATERIALIZED (

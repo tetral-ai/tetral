@@ -1211,6 +1211,75 @@ func AssertExactLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ExactLeas
 	return active, nil
 }
 
+// CancelInterruptFencedMessagesTx cancels pending message notifications only
+// while the complete interrupt Queue identity still owns a live lease. The
+// exact job row remains locked through the cancellation, so lease reclaim and
+// follower mutation have one durable winner.
+func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, request InterruptFenceRequest) (bool, int, error) {
+	if request.Lease.Kind != KindRuntimeInput {
+		return false, 0, &ValidationError{Message: "interrupt fence lease kind must be runtime_input"}
+	}
+	cancelRequest := CancelRequest{
+		WorkspaceID:            request.Lease.WorkspaceID,
+		SessionID:              request.SessionID,
+		SessionThreadID:        request.SessionThreadID,
+		InterruptFenceSequence: request.InterruptFenceSequence,
+		Now:                    request.Now,
+	}
+	if err := validateCancelRequest(cancelRequest); err != nil {
+		return false, 0, err
+	}
+	if request.Lease.PartitionKey != FormatSessionPartitionKey(request.Lease.WorkspaceID, request.SessionID) {
+		return false, 0, &IntegrityError{Message: "interrupt fence lease partition does not match Session"}
+	}
+	active, err := AssertExactLeaseTx(ctx, tx, request.Lease)
+	if err != nil || !active {
+		return active, 0, err
+	}
+	var payloadSessionID, payloadThreadID, payloadInputKind string
+	var payloadSequenceTo int64
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json::jsonb ->> 'session_id',
+		        payload_json::jsonb ->> 'session_thread_id',
+		        payload_json::jsonb ->> 'input_kind',
+		        (payload_json::jsonb ->> 'sequence_to')::bigint
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID,
+	).Scan(&payloadSessionID, &payloadThreadID, &payloadInputKind, &payloadSequenceTo); err != nil {
+		return false, 0, err
+	}
+	if payloadSessionID != request.SessionID || payloadThreadID != request.SessionThreadID ||
+		payloadInputKind != "interrupt_control" || payloadSequenceTo != request.InterruptFenceSequence {
+		return false, 0, &IntegrityError{Message: "interrupt fence lease payload does not match cancellation scope"}
+	}
+	if cancelRequest.Now.IsZero() {
+		cancelRequest.Now = storage.Now()
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status = 'cancelled',
+		        cancelled_at = $3,
+		        updated_at = $3
+		  WHERE workspace_id = $1
+		    AND partition_key = $2
+		    AND status = 'pending'
+		    AND kind = 'runtime_input'
+		    AND payload_json::jsonb ->> 'session_thread_id' = $4
+		    AND payload_json::jsonb ->> 'input_kind' = 'messages'
+		    AND (payload_json::jsonb ->> 'sequence_to')::bigint < $5`,
+		string(cancelRequest.WorkspaceID),
+		FormatSessionPartitionKey(cancelRequest.WorkspaceID, cancelRequest.SessionID),
+		cancelRequest.Now.UTC(),
+		cancelRequest.SessionThreadID,
+		cancelRequest.InterruptFenceSequence,
+	)
+	if err != nil {
+		return false, 0, err
+	}
+	return true, affectedCount(result), nil
+}
+
 func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (bool, error) {
 	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
 		return false, err

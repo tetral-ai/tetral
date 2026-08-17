@@ -1240,6 +1240,35 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 	var result RuntimeDeliveryResult
 	var found bool
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.replay_runtime_delivery_finalization", func(tx *dbconnect.Tx) error {
+		if job.InputKind == "interrupt_control" {
+			if job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" || job.SequenceTo <= 0 {
+				return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "interrupt delivery replay identity is incomplete", retryable: false}
+			}
+			// Replay is the first production step for every interrupt lease. Fence
+			// pending messages only after locking the Session and exact live Queue
+			// identity; a reclaimed worker returns a settled no-op before either
+			// Queue followers or Session receipt facts can change.
+			if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+				return err
+			}
+			active, _, err := queue.CancelInterruptFencedMessagesTx(ctx, tx, queue.InterruptFenceRequest{
+				Lease: queue.ExactLeaseRequest{
+					WorkspaceID: workspace.ID(job.WorkspaceID),
+					JobID:       job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
+					PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+				},
+				SessionID: job.SessionID, SessionThreadID: job.SessionThreadID,
+				InterruptFenceSequence: job.SequenceTo,
+			})
+			if err != nil {
+				return err
+			}
+			if !active {
+				result = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
+				found = true
+				return nil
+			}
+		}
 		var err error
 		result, found, err = replayRuntimeDeliveryFinalizationTx(ctx, tx, job)
 		return err

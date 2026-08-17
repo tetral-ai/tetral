@@ -246,19 +246,6 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}))
 	}
 	workCtx, stopHeartbeat := startJobRunnerHeartbeat(ctx, r.Queue, job, cfg)
-	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" {
-		if _, err := r.Queue.Cancel(workCtx, &queuev1.CancelRequest{
-			WorkspaceId:            job.WorkspaceID,
-			SessionId:              job.SessionID,
-			SessionThreadId:        job.SessionThreadID,
-			InterruptFenceSequence: job.SequenceTo,
-		}); err != nil {
-			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-				return heartbeatErr
-			}
-			return err
-		}
-	}
 	if job.Kind == queue.KindRuntimeInput {
 		replayer, ok := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
 		if !ok {

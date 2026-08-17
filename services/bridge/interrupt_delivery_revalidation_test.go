@@ -255,12 +255,6 @@ func TestRuntimeFinalCommitFenceRejectsSettlementAfterPreSendRevalidation(t *tes
 		t.Fatalf("allocate final-fence interrupt sequence: %v", err)
 	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, interruptSequence, "user.interrupt", `{}`)
-	job := RuntimeJob{
-		JobID: "qjob_interrupt_final_fence", LeaseToken: "lease_interrupt_final_fence", Kind: queue.KindRuntimeInput,
-		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
-		RuntimeInputID: interruptID, EventIDs: []string{interruptEventID}, SequenceFrom: interruptSequence,
-		SequenceTo: interruptSequence, InputKind: "interrupt_control",
-	}
 	payloadJSON, err := json.Marshal(map[string]any{
 		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
 		"runtime_input_id": interruptID, "event_ids": []string{interruptEventID},
@@ -269,8 +263,33 @@ func TestRuntimeFinalCommitFenceRejectsSettlementAfterPreSendRevalidation(t *tes
 	if err != nil {
 		t.Fatalf("encode final-fence interrupt payload: %v", err)
 	}
-	job.PayloadJSON = string(payloadJSON)
-	seedRuntimeInboxBirthForJob(t, admin, job)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: interruptID, EventIDs: []string{interruptEventID}, SequenceFrom: interruptSequence,
+		SequenceTo: interruptSequence, InputKind: "interrupt_control", PayloadJSON: string(payloadJSON),
+	})
+	now := time.Now().UTC()
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queued, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: "qjob_intr_final", WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
+		PayloadVersion: 1, PayloadJSON: payloadJSON, MaxAttempts: queue.DefaultMaxAttempts, AvailableAt: now, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue final-fence interrupt: %v", err)
+	}
+	leased := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "interrupt-final-fence",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now,
+	})
+	if leased.ID != queued.ID {
+		t.Fatalf("leased final-fence Queue job = %s; want %s", leased.ID, queued.ID)
+	}
+	job, err := DecodeRuntimeJob(queueJobProto(leased))
+	if err != nil {
+		t.Fatalf("decode final-fence interrupt lease: %v", err)
+	}
 	productionStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	productionStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
 		BindingID: bindingID, BindingGeneration: 1, Namespace: "engine", PodName: "runtime-interrupt-final-fence",

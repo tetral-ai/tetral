@@ -585,7 +585,7 @@ func TestJobRunnerDeadLettersInvalidPayloadBeforeDelivery(t *testing.T) {
 	}
 }
 
-func TestJobRunnerCancelsPendingMessagesBeforeInterruptDelivery(t *testing.T) {
+func TestJobRunnerReplaysBeforeInterruptDelivery(t *testing.T) {
 	steps := []string{}
 	queueClient := &recordingQueueClient{
 		leased: []*queuev1.QueueJob{runtimeInterruptQueueJob()},
@@ -605,22 +605,21 @@ func TestJobRunnerCancelsPendingMessagesBeforeInterruptDelivery(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if len(deliverer.jobs) != 1 || deliverer.jobs[0].InputKind != "interrupt_control" {
-		t.Fatalf("delivered jobs = %+v; want interrupt after queue cancel", deliverer.jobs)
+		t.Fatalf("delivered jobs = %+v; want interrupt after replay", deliverer.jobs)
 	}
-	if !reflect.DeepEqual(queueClient.transitions, []string{"cancel:sesn_1:thr_1:9", "ack:qjob_interrupt"}) {
-		t.Fatalf("queue transitions = %v; want cancel before ack", queueClient.transitions)
+	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_interrupt"}) {
+		t.Fatalf("queue transitions = %v; want ack after delivery", queueClient.transitions)
 	}
 	if !reflect.DeepEqual(steps, []string{
-		"cancel",
 		"replay:qjob_interrupt",
 		"deliver:qjob_interrupt",
 		"ack:qjob_interrupt",
 	}) {
-		t.Fatalf("steps = %v; want cancel before replay, delivery, settlement, and ack", steps)
+		t.Fatalf("steps = %v; want replay before delivery and ack", steps)
 	}
 }
 
-func TestJobRunnerInterruptReplayStillCancelsSiblingMessagesFirst(t *testing.T) {
+func TestJobRunnerInterruptReplaySkipsDelivery(t *testing.T) {
 	steps := []string{}
 	queueClient := &recordingQueueClient{
 		leased: []*queuev1.QueueJob{runtimeInterruptQueueJob()},
@@ -646,11 +645,10 @@ func TestJobRunnerInterruptReplayStillCancelsSiblingMessagesFirst(t *testing.T) 
 		t.Fatalf("delivered jobs = %+v; want stored finalization replay", deliverer.jobs)
 	}
 	if !reflect.DeepEqual(steps, []string{
-		"cancel",
 		"replay:qjob_interrupt",
 		"ack:qjob_interrupt",
 	}) {
-		t.Fatalf("steps = %v; want cancel before stored finalization replay", steps)
+		t.Fatalf("steps = %v; want stored finalization replay before ack", steps)
 	}
 }
 
@@ -670,10 +668,8 @@ func TestJobRunnerInterruptFinalAttemptTerminatesWithoutRuntimeDelivery(t *testi
 	if len(deliverer.jobs) != 0 || len(deliverer.replayJobs) != 1 || len(deliverer.finalizations) != 1 {
 		t.Fatalf("interrupt deliveries/replays/finalizations = %d/%d/%d; want 0/1/1", len(deliverer.jobs), len(deliverer.replayJobs), len(deliverer.finalizations))
 	}
-	if !reflect.DeepEqual(queueClient.transitions, []string{
-		"cancel:sesn_1:thr_1:9",
-	}) {
-		t.Fatalf("queue transitions = %v; want only the pre-delivery sibling cancellation", queueClient.transitions)
+	if len(queueClient.transitions) != 0 {
+		t.Fatalf("queue transitions = %v; want finalizer-owned Queue settlement", queueClient.transitions)
 	}
 }
 
@@ -692,7 +688,6 @@ func TestJobRunnerLostInterruptResponseReplaysReceiptBeforeAck(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if !reflect.DeepEqual(steps, []string{
-		"cancel",
 		"replay:qjob_interrupt",
 		"deliver:qjob_interrupt",
 		"replay:qjob_interrupt",

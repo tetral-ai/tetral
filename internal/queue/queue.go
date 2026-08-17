@@ -316,6 +316,16 @@ type ExactLeaseRequest struct {
 	DedupeKey    string
 }
 
+// InterruptFenceRequest binds cancellation of message notifications to the
+// exact live interrupt lease that owns the fence.
+type InterruptFenceRequest struct {
+	Lease                  ExactLeaseRequest
+	SessionID              string
+	SessionThreadID        string
+	InterruptFenceSequence int64
+	Now                    time.Time
+}
+
 type AckRequest struct {
 	WorkspaceID workspace.ID
 	JobID       string
