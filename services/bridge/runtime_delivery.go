@@ -71,9 +71,12 @@ type RuntimeCommandSender interface {
 
 const (
 	initialMCPManifestListTimeout = 180 * time.Second
-	// PostgreSQL-backed atomic interrupt closeout completed below 40 ms in the
-	// repeated production-boundary proof. Thirty seconds preserves a wide
-	// storage and scheduling margin while bounding a connected, silent Pod.
+	// The production closeout proof measures command admission, Tool Fiber
+	// cancellation/join, durable-operation drain, Tool Result and Request End
+	// persistence, and receipt return together. Thirty seconds is the one
+	// caller wait around that complete path; a non-abandonable closeout that
+	// finishes later converges through receipt replay or exact-lease terminal
+	// arbitration instead of acquiring another timer or Runtime attempt.
 	runtimeInterruptDeliveryTimeout = 30 * time.Second
 )
 
@@ -935,7 +938,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 	if isMCPManifestRuntimeJob(job) {
 		return s.finalizeMCPManifestDelivery(ctx, job, result)
 	}
-	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" || job.RuntimeInputID == "" {
+	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" || job.RuntimeInputID == "" ||
+		(job.InputKind == "interrupt_control" && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) {
 		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime delivery finalization identity is incomplete", retryable: false}
 	}
 	if result.Status != RuntimeDeliveryRejected {
@@ -959,6 +963,20 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			return nil
 		}
 		if job.InputKind == "interrupt_control" {
+			active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+				WorkspaceID: workspace.ID(job.WorkspaceID),
+				JobID:       job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
+				PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+			})
+			if err != nil {
+				return err
+			}
+			if !active {
+				// Authority loss is a successful no-op. QueueLeaseSettled tells the
+				// stale JobRunner not to attempt any transition with its old token.
+				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
+				return nil
+			}
 			finalized, err = finalizeInterruptDeliveryExhaustionTx(ctx, tx, job, now)
 			return err
 		}

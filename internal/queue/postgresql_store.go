@@ -1171,6 +1171,46 @@ func AssertActiveLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ActiveLe
 	return active, nil
 }
 
+// AssertExactLeaseTx locks and validates one complete Queue custody identity.
+// The database clock is sampled only after the row lock is acquired so a lease
+// that expires while waiting never authorizes the surrounding transaction.
+func AssertExactLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ExactLeaseRequest) (bool, error) {
+	if tx == nil {
+		return false, &ValidationError{Message: "queue transaction is required"}
+	}
+	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
+		return false, err
+	}
+	if request.Kind == "" || request.PartitionKey == "" || request.DedupeKey == "" {
+		return false, &ValidationError{Message: "complete queue lease identity is required"}
+	}
+	var leasedUntil time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT leased_until
+		   FROM queue_jobs
+		  WHERE workspace_id = $1
+		    AND id = $2
+		    AND lease_token = $3
+		    AND status = 'leased'
+		    AND kind = $4
+		    AND partition_key = $5
+		    AND dedupe_key = $6
+		  FOR UPDATE`,
+		string(request.WorkspaceID), request.JobID, request.LeaseToken,
+		request.Kind, request.PartitionKey, request.DedupeKey,
+	).Scan(&leasedUntil); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT $1::timestamptz > clock_timestamp()`, leasedUntil).Scan(&active); err != nil {
+		return false, err
+	}
+	return active, nil
+}
+
 func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (bool, error) {
 	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
 		return false, err

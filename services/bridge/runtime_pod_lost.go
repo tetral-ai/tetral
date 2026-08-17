@@ -420,11 +420,6 @@ func handOffLostRuntimeAcceptedInputsTx(
 				if _, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
 					    SET status = 'pending', available_at = $3,
-					        attempt_count = CASE
-					            WHEN max_attempts > 0 AND attempt_count >= max_attempts
-					            THEN GREATEST(attempt_count - 1, 0)
-					            ELSE attempt_count
-					        END,
 					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
 					        updated_at = $3
 					  WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'leased')`,

@@ -362,9 +362,12 @@ and active lifecycle facts directly from durable rows.
   Tool settlements, and receipt are durable and its Queue job is acknowledged.
   Runtime acceptance alone never acknowledges an interrupt. Exact receipt
   replay acknowledges without another Runtime call; a 30-second interrupt send
-  timeout remains outcome-unknown and retains the same barrier and attempt
-  identity until receipt replay or proven binding-loss handoff lets the
-  replacement owner settle it. Initial MCP manifest listing
+  timeout covers command admission through Tool cancellation/join, durable
+  closeout writes, and receipt return. A caller timeout remains outcome-unknown
+  and retains the same barrier and attempt identity. Proven pod loss may
+  transfer that identity only while attempts remain. At exhaustion, the exact
+  live Queue lease owner replays a receipt or terminalizes the Session without
+  sending the interrupt to a replacement Runtime. Initial MCP manifest listing
   similarly uses a fixed 180-second per-call deadline. This accommodates the
   connector's credential, reconnect, and list budgets while bounding the
   single-threaded Job Runner sweep to 180 seconds per stalled workspace; it

@@ -2258,7 +2258,9 @@ func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(
 			t.Fatalf("enqueue %s: %v", job.RuntimeInputID, err)
 		}
 	}
-	enqueue(interruptJob, queue.DefaultMaxAttempts)
+	// Three attempts keep the receipt-bearing retry below terminal exhaustion,
+	// so this proof distinguishes retry-start replay from final-attempt recovery.
+	enqueue(interruptJob, 3)
 	enqueue(messageJob, queue.DefaultMaxAttempts)
 
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
@@ -2317,9 +2319,15 @@ func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(
 		WHERE workspace_id='default' AND id=$1`, interruptJob.JobID); err != nil {
 		t.Fatalf("make interrupt retry available: %v", err)
 	}
+	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: sender.scope, RuntimeInputId: interruptJob.RuntimeInputID,
+	})
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("commit late closeout before retry = %#v/%v", committed, err)
+	}
 
 	if err := newRunner().RunOnce(context.Background()); err != nil {
-		t.Fatalf("run response-loss receipt replay: %v", err)
+		t.Fatalf("run retry-start receipt replay: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
@@ -2330,7 +2338,7 @@ func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(
 		t.Fatalf("read receipt-gated ACK: %v", err)
 	}
 	if interruptQueueStatus != queue.StatusAcknowledged || followerQueueStatus != queue.StatusPending ||
-		interruptInboxStatus != "committed" || sender.interruptCalls != 2 || len(sender.requests) != 2 {
+		interruptInboxStatus != "committed" || sender.interruptCalls != 1 || len(sender.requests) != 1 {
 		t.Fatalf("receipt replay facts = Queue %s follower %s Inbox %s interrupt calls/requests %d/%d",
 			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
 	}
@@ -2347,12 +2355,12 @@ func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(
 		t.Fatalf("read delivered follower: %v", err)
 	}
 	if followerQueueStatus != queue.StatusAcknowledged || followerInboxStatus != "accepted" ||
-		sender.interruptCalls != 2 || len(sender.requests) != 3 {
-		t.Fatalf("follower facts = Queue %s Inbox %s interrupt calls %d total requests %d; want acknowledged/accepted/2/3",
+		sender.interruptCalls != 1 || len(sender.requests) != 2 {
+		t.Fatalf("follower facts = Queue %s Inbox %s interrupt calls %d total requests %d; want acknowledged/accepted/1/2",
 			followerQueueStatus, followerInboxStatus, sender.interruptCalls, len(sender.requests))
 	}
-	if _, ok := sender.requests[2].(*agentruntimev1.AcceptInputRequest); !ok {
-		t.Fatalf("third Runtime request = %T; want exact follower AcceptInput", sender.requests[2])
+	if _, ok := sender.requests[1].(*agentruntimev1.AcceptInputRequest); !ok {
+		t.Fatalf("second Runtime request = %T; want exact follower AcceptInput", sender.requests[1])
 	}
 }
 
@@ -2372,21 +2380,9 @@ func (s *receiptGatedInterruptSender) Interrupt(
 	s.targets = append(s.targets, target)
 	s.requests = append(s.requests, request)
 	s.interruptCalls++
-	if s.interruptCalls == 1 {
-		return &agentruntimev1.InterruptResponse{
-			Outcome: &agentruntimev1.InterruptResponse_Accepted{Accepted: &agentruntimev1.InterruptAccepted{}},
-		}, nil
-	}
-	committed, err := s.store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: s.scope, RuntimeInputId: s.inputID,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if committed.GetCommitted() == nil {
-		return nil, errors.New("interrupt closeout receipt was not committed")
-	}
-	return nil, errors.New("runtime response lost after interrupt closeout")
+	return &agentruntimev1.InterruptResponse{
+		Outcome: &agentruntimev1.InterruptResponse_Accepted{Accepted: &agentruntimev1.InterruptAccepted{}},
+	}, nil
 }
 
 func TestPostgreSQLRuntimeDeliveryStoreAppliesProcessedInterruptFence(t *testing.T) {

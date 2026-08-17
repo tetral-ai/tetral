@@ -26,6 +26,76 @@ func TestPostgreSQLInterruptReceiptAndFinalExhaustionChooseOneSessionWinner(t *t
 	}
 }
 
+func TestPostgreSQLInterruptFinalizerLosingLeaseAfterReclaimWritesNothing(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_stale_finalizer"
+		threadID  = "thr_interrupt_stale_finalizer"
+		bindingID = "bind_interrupt_stale_finalizer"
+		podUID    = "pod_interrupt_stale_finalizer"
+		inputID   = "rin_interrupt_stale_finalizer"
+		eventID   = "evt_interrupt_stale_finalizer"
+	)
+	now := time.Now().UTC().Add(-time.Minute)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, 1, 1)
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, now)
+	first := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "stale-finalizer",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now,
+	})
+	staleJob, err := DecodeRuntimeJob(queueJobProto(first))
+	if err != nil {
+		t.Fatalf("decode stale interrupt lease: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, first.ID); err != nil {
+		t.Fatalf("expire first interrupt lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim first interrupt lease = %d/%v; want 1/nil", reclaimed, err)
+	}
+	current := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "current-finalizer",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if current.LeaseToken == first.LeaseToken {
+		t.Fatal("reclaimed interrupt lease reused its old token")
+	}
+
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	result, err := store.FinalizeRuntimeDelivery(context.Background(), staleJob, RuntimeDeliveryResult{
+		Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted",
+	})
+	if err != nil || !result.QueueLeaseSettled || result.Status != RuntimeDeliveryDuplicate {
+		t.Fatalf("stale finalizer result = %+v/%v; want successful authority-loss no-op", result, err)
+	}
+	var sessionStatus, inboxStatus, queueStatus, leaseToken string
+	var bindings, terminalEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('session.error','session.status_terminated'))`,
+		sessionID, inputID, current.ID,
+	).Scan(&sessionStatus, &inboxStatus, &queueStatus, &leaseToken, &bindings, &terminalEvents); err != nil {
+		t.Fatalf("read stale-finalizer facts: %v", err)
+	}
+	if sessionStatus != "idle" || inboxStatus != "accepted" || queueStatus != queue.StatusLeased ||
+		leaseToken != current.LeaseToken || bindings != 1 || terminalEvents != 0 {
+		t.Fatalf("stale finalizer mutated facts: Session %s Inbox %s Queue %s/%s bindings %d terminalEvents %d",
+			sessionStatus, inboxStatus, queueStatus, leaseToken, bindings, terminalEvents)
+	}
+}
+
 func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 	t.Helper()
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -41,10 +111,15 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, 1, 1)
-	job := RuntimeJob{
-		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
-		RuntimeInputID: inputID, EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
-		InputKind: "interrupt_control", AttemptCount: 1, MaxAttempts: 1,
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, time.Now().UTC().Add(-time.Minute))
+	leased := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "interrupt-race",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	job, err := DecodeRuntimeJob(queueJobProto(leased))
+	if err != nil {
+		t.Fatalf("decode interrupt race lease: %v", err)
 	}
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)

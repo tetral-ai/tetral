@@ -303,6 +303,19 @@ type ActiveLeaseRequest struct {
 	LeaseToken  string
 }
 
+// ExactLeaseRequest is the complete durable identity of one leased Queue job.
+// Business transactions use it after acquiring their owning locks so a stale
+// worker cannot act through a reclaimed row that happens to retain the same
+// business payload.
+type ExactLeaseRequest struct {
+	WorkspaceID  workspace.ID
+	JobID        string
+	LeaseToken   string
+	Kind         string
+	PartitionKey string
+	DedupeKey    string
+}
+
 type AckRequest struct {
 	WorkspaceID workspace.ID
 	JobID       string

@@ -2987,6 +2987,61 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("a cold attachment-driven Run rejects an older interrupt before hot mutation", async () => {
+		const threadLoop = makeInterruptRecordingThreadLoop();
+		const sessionId = "sesn_cold_attachment_interrupt_fence";
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.preloadThread({
+							...threadControl(sessionId, "rin_preload_attachment_fence"),
+							runtimeBindingToken: "runtime-binding-token-attachment-fence",
+							activeRunInputOrder: 10,
+							contextEntries: [],
+							pendingAttachments: [
+								{
+									transient: undefined,
+									fileBacked: {
+										sourceEventId: "sevt_attachment_fence",
+										fileId: "file_attachment_fence",
+									},
+									mime: "application/pdf",
+									filename: "fence.pdf",
+								},
+							],
+						}),
+					),
+				).toMatchObject({ ok: true, applied: true });
+				await waitForInterruptRecordingRuns(threadLoop, 1);
+				const session = threadLoop.runs[0]!.session;
+				const command = {
+					...threadControl(sessionId, "rin_stale_attachment_interrupt"),
+					inputOrder: 9,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(sessionId, command, async () => ({
+							ok: true,
+							stale: true,
+						})),
+					),
+				).toMatchObject({
+					ok: true,
+					interrupted: false,
+					duplicate: true,
+					stale: true,
+				});
+				expect(session.state.userInterruptRequested()).toBe(false);
+				expect(threadLoop.interruptions).toEqual([]);
+				expect(
+					await Effect.runPromise(manager.inspectThread(threadControl(sessionId))),
+				).toMatchObject({ ok: true, observed: true, status: "running" });
+			},
+		);
+	});
+
 	test("cold preload installs generation-fenced MCP manifests before pending MCP approval recovery", async () => {
 		const manifestsObservedDuringRecovery: Array<
 			ReturnType<ThreadRuntime.ThreadRuntime["configuration"]["patches"]>

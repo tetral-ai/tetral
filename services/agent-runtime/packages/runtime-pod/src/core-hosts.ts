@@ -242,6 +242,14 @@ export async function buildRuntimeCoreHosts(
 						}
 						return {
 							...command,
+							...(context.turnFacts.events.length === 0
+								? {}
+								: {
+										activeRunInputOrder:
+											context.turnFacts.events[
+												context.turnFacts.events.length - 1
+											]!.eventSequence,
+									}),
 							...(context.thread !== undefined
 								? { thread: context.thread }
 								: {}),

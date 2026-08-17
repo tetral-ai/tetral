@@ -235,6 +235,36 @@ func TestRuntimeCommandPlanBoundsOnlyInterruptDeliveryWait(t *testing.T) {
 	}
 }
 
+func TestRuntimePodDirectDelivererWaitsForSlowInterruptCloseoutReceiptInsideSingleBound(t *testing.T) {
+	request := &agentruntimev1.InterruptRequest{
+		WorkspaceId: "ws_bridge", SessionId: "sesn_slow_closeout", SessionThreadId: "thr_slow_closeout",
+		RuntimeInputId: "rin_slow_closeout", InputOrder: 1,
+	}
+	store := &recordingRuntimeDeliveryStore{
+		plan:        RuntimeCommandPlan{Target: RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090}, Interrupt: request},
+		replayFound: true, replayResult: RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate},
+	}
+	sender := &recordingRuntimeCommandSender{
+		result:         RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted},
+		interruptDelay: 75 * time.Millisecond,
+	}
+	job := runtimeInputRuntimeJob()
+	job.RuntimeInputID = request.GetRuntimeInputId()
+	job.InputKind = "interrupt_control"
+	started := time.Now()
+	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+	elapsed := time.Since(started)
+	if err != nil || result.Status != RuntimeDeliveryDuplicate {
+		t.Fatalf("slow closeout delivery = %+v/%v; want durable receipt", result, err)
+	}
+	if elapsed < sender.interruptDelay || elapsed >= time.Second {
+		t.Fatalf("slow closeout elapsed = %s; want measured delay %s inside the 30s caller bound", elapsed, sender.interruptDelay)
+	}
+	if len(sender.requests) != 1 || len(store.replayJobs) != 1 {
+		t.Fatalf("slow closeout sends/replays = %d/%d; want one/one", len(sender.requests), len(store.replayJobs))
+	}
+}
+
 func TestBackgroundTaskProcessTerminalStatusFactsRemainDistinct(t *testing.T) {
 	t.Parallel()
 
@@ -662,6 +692,7 @@ type recordingRuntimeCommandSender struct {
 	requests                 []proto.Message
 	observeInterruptDeadline bool
 	interruptDeadline        time.Time
+	interruptDelay           time.Duration
 }
 
 type countingRuntimeCommandTokenSource struct {
@@ -736,6 +767,13 @@ func (s *recordingRuntimeCommandSender) Interrupt(ctx context.Context, target Ru
 		s.targets = append(s.targets, target)
 		s.requests = append(s.requests, request)
 		return nil, context.DeadlineExceeded
+	}
+	if s.interruptDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(s.interruptDelay):
+		}
 	}
 	result, err := s.record(target, request)
 	if err != nil || result.Status == "" {

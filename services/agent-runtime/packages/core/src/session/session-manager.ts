@@ -485,6 +485,9 @@ interface ThreadEntry {
 	readonly statusSignal: ThreadRuntime.ThreadRuntime["state"];
 	readonly commandChannel: ThreadCommandChannel;
 	runSlot: ThreadRunSlot | undefined;
+	// Durable-order fence inherited by reducer-only successor Runs after the
+	// accepted input that opened the turn has left the hot input queue.
+	runInputOrder: number | undefined;
 	bridgeScope: RuntimeThreadAddressState | undefined;
 	lastCompletedReviewerExecutionToken: ReviewerExecutionToken | undefined;
 	readonly approvalReviewer: AutoApprovalReviewerManager | undefined;
@@ -735,6 +738,7 @@ export function layer(
 					statusSignal: runtimeThread.state,
 					commandChannel: Effect.runSync(makeThreadCommandChannel()),
 					runSlot: undefined,
+					runInputOrder: undefined,
 					bridgeScope: undefined,
 					lastCompletedReviewerExecutionToken: undefined,
 					approvalReviewer,
@@ -1002,12 +1006,21 @@ export function layer(
 						const runId = allocateRunId();
 						const acceptedInput =
 							threadEntry.runtimeThread.state.peekAcceptedInput();
+						const acceptedInputOrder =
+							acceptedInput !== undefined && "inputOrder" in acceptedInput
+								? acceptedInput.inputOrder
+								: undefined;
+						const inputOrder =
+							acceptedInputOrder === undefined
+								? threadEntry.runInputOrder
+								: Math.max(
+										acceptedInputOrder,
+										threadEntry.runInputOrder ?? acceptedInputOrder,
+									);
+						threadEntry.runInputOrder = inputOrder;
 						const runSlot: ThreadRunSlot = {
 							runId,
-							inputOrder:
-								acceptedInput !== undefined && "inputOrder" in acceptedInput
-									? acceptedInput.inputOrder
-									: undefined,
+							inputOrder,
 							ownerFiber: undefined,
 							doneDeferred: yield* Deferred.make<
 								ThreadLoop.ThreadLoopRunResult,
@@ -1387,6 +1400,12 @@ export function layer(
 									reason: "control_conflict",
 								} as const;
 							}
+							if ("inputOrder" in command) {
+								threadResult.threadEntry.runInputOrder = Math.max(
+									threadResult.threadEntry.runInputOrder ?? command.inputOrder,
+									command.inputOrder,
+								);
+							}
 							if (accepted === "duplicate") {
 								if (command.kind === "approval_review") {
 									return {
@@ -1665,10 +1684,10 @@ export function layer(
 								) {
 									return { type: "conflict" as const };
 								}
-								if (
-									runSlot.inputOrder !== undefined &&
-									command.inputOrder < runSlot.inputOrder
-								) {
+								if (runSlot.inputOrder === undefined) {
+									return { type: "unfenced" as const };
+								}
+								if (command.inputOrder < runSlot.inputOrder) {
 									const committed = yield* Effect.promise(() =>
 										commitInput({ inputKind: "interrupt" }),
 									);
@@ -1712,6 +1731,15 @@ export function layer(
 								reason: "context_load_failed",
 								retryable: admission.committed.retryable,
 								errorCode: admission.committed.errorCode,
+							};
+						}
+						if (admission.type === "unfenced") {
+							return {
+								ok: false,
+								sessionId,
+								reason: "context_load_failed",
+								retryable: true,
+								errorCode: "runtime_run_fence_unavailable",
 							};
 						}
 						if (admission.type === "stale") {
@@ -2283,6 +2311,7 @@ export function layer(
 						command.turnCheckpoint,
 						command.turnToolRouteView,
 					);
+					threadResult.threadEntry.runInputOrder = command.activeRunInputOrder;
 					threadResult.threadEntry.runtimeThread.state.markPersistentContextLoaded();
 					const observedSharedPatches = [
 						...(command.runtimeConfigPatch === undefined

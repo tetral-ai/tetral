@@ -96,6 +96,8 @@ type RuntimeJob struct {
 	JobID                 string
 	LeaseToken            string
 	Kind                  string
+	PartitionKey          string
+	DedupeKey             string
 	WorkspaceID           string
 	SessionID             string
 	SessionThreadID       string
@@ -660,6 +662,8 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		JobID:           queueJob.GetId(),
 		LeaseToken:      queueJob.GetLeaseToken(),
 		Kind:            queue.KindRuntimeInput,
+		PartitionKey:    queueJob.GetPartitionKey(),
+		DedupeKey:       queueJob.GetDedupeKey(),
 		WorkspaceID:     payload.WorkspaceID,
 		SessionID:       payload.SessionID,
 		SessionThreadID: payload.SessionThreadID,

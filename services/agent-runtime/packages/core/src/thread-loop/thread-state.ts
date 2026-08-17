@@ -242,6 +242,8 @@ export type RuntimeAcceptedInputState =
 /** Cold thread state loaded before a resident thread is allowed to serve commands. */
 export interface RuntimeThreadPreloadState extends RuntimeThreadAddressState {
 	readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
+	/** Latest durable event order participating in the active cold Run. */
+	readonly activeRunInputOrder?: number | undefined;
 	readonly contextEntries: readonly RuntimeContextEntry[];
 	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
 	readonly turnCheckpoint?: ThreadTurnCheckpoint | undefined;
