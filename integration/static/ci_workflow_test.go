@@ -477,12 +477,15 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 		"Dockerfile.sandbox",
 		"TETRAL_HELPER_PROOF_BUILD_CONTEXT",
 		"TETRAL_HELPER_PROOF_RUNTIME_BASE_IMAGE",
+		"TETRAL_TEST_DAYTONA_IMAGE_CONTRACT",
+		"TETRAL_TEST_EXPECTED_IMAGE_ID",
 		"docker image inspect",
 		"docker run --rm",
 		"--user 0:0",
 		"ghcr.io/tetral-ai/mirror/golang:1.25.12",
-		"ghcr.io/tetral-ai/mirror/ubuntu:24.04",
+		"ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9",
 		"release_runtime_base",
+		"selected_digest",
 		"id=ubuntu version=24.04",
 		"sandbox-runtime-base:",
 		"sandbox-runtime-image:",
@@ -536,13 +539,15 @@ func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
 
 	command = exec.Command("bash", script, "--verify-output")
 	command.Stdin = bytes.NewBufferString(strings.Join([]string{
-		"sandbox-runtime-base: release=ubuntu:24.04 proof=ghcr.io/tetral-ai/mirror/ubuntu:24.04 id=ubuntu version=24.04",
+		"sandbox-runtime-base: release=ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9 proof=ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9 selected=sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9 id=ubuntu version=24.04",
 		"sandbox-runtime-image: user=daytona uid=1001 gid=1001 home=/home/daytona shell=/bin/bash env_home=/home/daytona",
+		"    daytona_image_contract_test.go:154: daytona-adapter-image: id=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa user=daytona uid=1001 gid=1001 home=/home/daytona shell=/bin/bash",
 		"--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)",
 		"--- PASS: TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
 		"--- PASS: TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration (0.01s)",
 		"--- PASS: TestBuiltHelperFileToolUsesRuntimeIdentity (0.01s)",
 		"--- PASS: TestBuiltHelperReadUsesRuntimeProcessIdentityAndEnvironment (0.01s)",
+		"--- PASS: TestDaytonaProductionAdaptersUseFinalImageIdentity (0.01s)",
 	}, "\n") + "\n")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("helper privilege output guard rejected a passing proof: %v\n%s", err, output)

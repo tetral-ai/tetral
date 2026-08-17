@@ -2,6 +2,8 @@
 # Produces the root-run sandbox-helper privilege-continuity proof used by CI.
 set -euo pipefail
 
+sandbox_runtime_base_reference="ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9"
+
 verify_output() {
   local output
   output="$(cat)"
@@ -17,7 +19,12 @@ verify_output() {
     echo "sandbox-helper proof did not report the real runtime image identity" >&2
     return 1
   fi
-  if ! grep -Eq -- '^sandbox-runtime-base: release=ubuntu:24\.04 proof=([^[:space:]]*/)?ubuntu:24\.04 id=ubuntu version=24\.04$' <<<"$output"; then
+  if ! grep -Eq -- 'daytona-adapter-image: id=sha256:[0-9a-f]{64} user=daytona uid=[1-9][0-9]* gid=[1-9][0-9]* home=/home/daytona shell=/bin/bash' <<<"$output"; then
+    echo "sandbox-helper proof did not join Daytona adapters to the final image identity" >&2
+    return 1
+  fi
+  local selected_digest="${sandbox_runtime_base_reference##*@}"
+  if ! grep -Fxq -- "sandbox-runtime-base: release=$sandbox_runtime_base_reference proof=$sandbox_runtime_base_reference selected=$selected_digest id=ubuntu version=24.04" <<<"$output"; then
     echo "sandbox-helper proof did not report the release runtime base" >&2
     return 1
   fi
@@ -25,7 +32,8 @@ verify_output() {
 		TestBuiltHelperForegroundExecUsesRuntimeIdentityAndGitConfiguration \
 		TestBuiltHelperDetachedExecUsesRuntimeIdentityAndGitConfiguration \
 		TestBuiltHelperFileToolUsesRuntimeIdentity \
-		TestBuiltHelperReadUsesRuntimeProcessIdentityAndEnvironment; do
+		TestBuiltHelperReadUsesRuntimeProcessIdentityAndEnvironment \
+		TestDaytonaProductionAdaptersUseFinalImageIdentity; do
 		if ! grep -Fq -- "--- PASS: ${test_name}" <<<"$output"; then
 			echo "sandbox-helper runtime identity proof ${test_name} did not report PASS" >&2
 			return 1
@@ -40,7 +48,7 @@ fi
 
 engine_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_context="${TETRAL_HELPER_PROOF_BUILD_CONTEXT:-$engine_root}"
-runtime_base_image="${TETRAL_HELPER_PROOF_RUNTIME_BASE_IMAGE:-ghcr.io/tetral-ai/mirror/ubuntu:24.04}"
+runtime_base_image="${TETRAL_HELPER_PROOF_RUNTIME_BASE_IMAGE:-$sandbox_runtime_base_reference}"
 proof_dir="$(mktemp -d)"
 image_tag="tetral-helper-identity-proof:${$}"
 cleanup() {
@@ -49,9 +57,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-release_runtime_base="$(sed -n 's/^ARG SANDBOX_RUNTIME_BASE_IMAGE=//p' "$build_context/Dockerfile.sandbox")"
-if [[ "$release_runtime_base" != "ubuntu:24.04" || "${runtime_base_image##*/}" != "$release_runtime_base" ]]; then
+release_runtime_base="$(awk 'toupper($1) == "ARG" && $2 ~ /^SANDBOX_RUNTIME_BASE_IMAGE=/ { sub(/^[^=]*=/, "", $2); print $2 }' "$build_context/Dockerfile.sandbox")"
+if [[ "$runtime_base_image" != "$release_runtime_base" ]]; then
   echo "Sandbox proof runtime base does not match the release Dockerfile: release=$release_runtime_base proof=$runtime_base_image" >&2
+  exit 1
+fi
+selected_digest="${runtime_base_image##*@}"
+if [[ ! "$selected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Sandbox proof runtime base is not digest-pinned: $runtime_base_image" >&2
   exit 1
 fi
 runtime_base_identity="$(docker run --rm --entrypoint /bin/sh "$runtime_base_image" -ceu '
@@ -62,7 +75,12 @@ if [[ "$runtime_base_identity" != "id=ubuntu version=24.04" ]]; then
   echo "Sandbox proof runtime base is not Ubuntu 24.04: $runtime_base_identity" >&2
   exit 1
 fi
-runtime_base_proof="sandbox-runtime-base: release=$release_runtime_base proof=$runtime_base_image $runtime_base_identity"
+runtime_repo_digests="$(docker image inspect --format '{{join .RepoDigests " "}}' "$runtime_base_image")"
+if [[ " $runtime_repo_digests " != *"@$selected_digest "* ]]; then
+  echo "Sandbox proof pulled runtime base does not expose selected digest $selected_digest: $runtime_repo_digests" >&2
+  exit 1
+fi
+runtime_base_proof="sandbox-runtime-base: release=$release_runtime_base proof=$runtime_base_image selected=$selected_digest $runtime_base_identity"
 
 docker build --tag "$image_tag" \
   --build-arg SANDBOX_HELPER_BASE_IMAGE=ghcr.io/tetral-ai/mirror/golang:1.25.12 \
@@ -105,6 +123,7 @@ output="$({
       test "$(id -u)" -eq 0
       go test ./internal/sandbox/helper -run "^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$" -count=1 -v
       CGO_ENABLED=0 go test -c -o /proof/cli.test ./internal/sandbox/helper/internal/cli
+      CGO_ENABLED=0 go test -c -o /proof/driver.test ./internal/sandbox/driver
     '
   docker run --rm \
     --user 0:0 \
@@ -116,6 +135,16 @@ output="$({
     --entrypoint /proof/cli.test \
     "$image_tag" \
     -test.run '^Test(BuiltHelper(Foreground|Detached)ExecUsesRuntimeIdentityAndGitConfiguration|BuiltHelper(FileToolUsesRuntimeIdentity|ReadUsesRuntimeProcessIdentityAndEnvironment))$' \
+    -test.count=1 \
+    -test.v
+  docker run --rm \
+    --user 0:0 \
+    --env TETRAL_TEST_DAYTONA_IMAGE_CONTRACT=1 \
+    --env TETRAL_TEST_EXPECTED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$image_tag")" \
+    --entrypoint /proof/driver.test \
+    --volume "$proof_dir:/proof:ro" \
+    "$image_tag" \
+    -test.run '^TestDaytonaProductionAdaptersUseFinalImageIdentity$' \
     -test.count=1 \
     -test.v
 } 2>&1)"

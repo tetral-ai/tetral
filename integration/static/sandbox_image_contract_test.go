@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/sandbox/runtimeidentity"
 )
+
+const sandboxRuntimeBaseReference = "ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9"
 
 // The projection mount passes --vfs-cache-min-free-space, which Ubuntu's
 // rclone (v1.60.1) does not have. Building the sandbox image from the
@@ -49,7 +52,9 @@ func TestSandboxImageInstallsUpstreamRclone(t *testing.T) {
 func TestSandboxImageRuntimeIdentityMatchesEngineContract(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
-	if err := assertSandboxReleaseRuntimeBase(dockerfile); err != nil {
+	releaseWorkflow := finalArchitectureReadText(t, filepath.Join(engineRoot, ".github", "workflows", "engine-release.yml"))
+	proofScript := finalArchitectureReadText(t, filepath.Join(engineRoot, "scripts", "run-helper-privilege-ci.sh"))
+	if err := assertSandboxRuntimeBaseJoin(dockerfile, releaseWorkflow, proofScript); err != nil {
 		t.Fatal(err)
 	}
 	if err := assertSandboxRuntimeIdentity(dockerfile); err != nil {
@@ -61,8 +66,8 @@ func TestSandboxImageProofRejectsReleaseRuntimeBaseSubstitution(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
 	mutated := strings.Replace(dockerfile,
-		"ARG SANDBOX_RUNTIME_BASE_IMAGE=ubuntu:24.04",
-		"ARG SANDBOX_RUNTIME_BASE_IMAGE=golang:1.25.12",
+		"ARG SANDBOX_RUNTIME_BASE_IMAGE="+sandboxRuntimeBaseReference,
+		"ARG SANDBOX_RUNTIME_BASE_IMAGE=ghcr.io/tetral-ai/mirror/golang:1.25.12",
 		1,
 	)
 	if mutated == dockerfile {
@@ -74,23 +79,83 @@ func TestSandboxImageProofRejectsReleaseRuntimeBaseSubstitution(t *testing.T) {
 }
 
 func assertSandboxReleaseRuntimeBase(dockerfile string) error {
-	const (
-		defaultInstruction = "ARG SANDBOX_RUNTIME_BASE_IMAGE=ubuntu:24.04"
-		finalInstruction   = "FROM ${SANDBOX_RUNTIME_BASE_IMAGE}"
-	)
 	defaultCount := 0
 	lastFrom := ""
 	for _, instruction := range dockerfileLogicalInstructions(dockerfile) {
-		if instruction == defaultInstruction {
+		fields := strings.Fields(instruction)
+		if len(fields) == 2 && strings.EqualFold(fields[0], "ARG") && strings.HasPrefix(fields[1], "SANDBOX_RUNTIME_BASE_IMAGE=") {
+			if strings.TrimPrefix(fields[1], "SANDBOX_RUNTIME_BASE_IMAGE=") != sandboxRuntimeBaseReference {
+				return fmt.Errorf("Sandbox release runtime base is not the selected immutable Ubuntu reference")
+			}
 			defaultCount++
 		}
-		fields := strings.Fields(instruction)
 		if len(fields) > 0 && strings.EqualFold(fields[0], "FROM") {
 			lastFrom = instruction
 		}
 	}
-	if defaultCount != 1 || lastFrom != finalInstruction {
-		return fmt.Errorf("Sandbox release runtime base must be the single Ubuntu 24.04 default consumed by the final image stage")
+	if defaultCount != 1 || !strings.EqualFold(lastFrom, "FROM ${SANDBOX_RUNTIME_BASE_IMAGE}") {
+		return fmt.Errorf("Sandbox release runtime base must be the single immutable Ubuntu default consumed by the final image stage")
+	}
+	return nil
+}
+
+func TestSandboxRuntimeBaseJoinRejectsIndependentReleaseAndProofMutations(t *testing.T) {
+	engineRoot := finalArchitectureEngineRoot(t)
+	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
+	releaseWorkflow := finalArchitectureReadText(t, filepath.Join(engineRoot, ".github", "workflows", "engine-release.yml"))
+	proofScript := finalArchitectureReadText(t, filepath.Join(engineRoot, "scripts", "run-helper-privilege-ci.sh"))
+	wrongDigest := strings.Repeat("0", 64)
+	wrongReference := "ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:" + wrongDigest
+
+	mutations := map[string]struct {
+		dockerfile string
+		release    string
+		proof      string
+	}{
+		"same_name_wrong_digest": {
+			dockerfile: strings.Replace(dockerfile, sandboxRuntimeBaseReference, wrongReference, 1),
+			release:    releaseWorkflow,
+			proof:      proofScript,
+		},
+		"release_only": {
+			dockerfile: dockerfile,
+			release:    strings.Replace(releaseWorkflow, sandboxRuntimeBaseReference, wrongReference, 1),
+			proof:      proofScript,
+		},
+		"proof_only": {
+			dockerfile: dockerfile,
+			release:    releaseWorkflow,
+			proof:      strings.Replace(proofScript, sandboxRuntimeBaseReference, wrongReference, 1),
+		},
+	}
+	for name, mutation := range mutations {
+		t.Run(name, func(t *testing.T) {
+			if mutation.dockerfile == dockerfile && mutation.release == releaseWorkflow && mutation.proof == proofScript {
+				t.Fatal("mutation did not alter an owner")
+			}
+			if err := assertSandboxRuntimeBaseJoin(mutation.dockerfile, mutation.release, mutation.proof); err == nil {
+				t.Fatal("runtime-base owner mismatch preserved the digest join")
+			}
+		})
+	}
+}
+
+func assertSandboxRuntimeBaseJoin(dockerfile string, releaseWorkflow string, proofScript string) error {
+	if err := assertSandboxReleaseRuntimeBase(dockerfile); err != nil {
+		return err
+	}
+	releasePattern := regexp.MustCompile(`(?m)^\s*build_args:\s*SANDBOX_RUNTIME_BASE_IMAGE=([^\s]+)\s*$`)
+	releaseMatches := releasePattern.FindStringSubmatch(releaseWorkflow)
+	if len(releaseMatches) != 2 || releaseMatches[1] != sandboxRuntimeBaseReference {
+		return fmt.Errorf("engine-release Sandbox build does not consume the selected runtime-base reference")
+	}
+	if !strings.Contains(releaseWorkflow, `echo "runtime-base=${BUILD_ARGS#SANDBOX_RUNTIME_BASE_IMAGE=}"`) {
+		return fmt.Errorf("engine-release does not report the selected Sandbox runtime-base reference")
+	}
+	proofPattern := regexp.MustCompile(`(?m)^sandbox_runtime_base_reference="([^\"]+)"$`)
+	proofMatches := proofPattern.FindStringSubmatch(proofScript)
+	if len(proofMatches) != 2 || proofMatches[1] != sandboxRuntimeBaseReference {
+		return fmt.Errorf("Sandbox proof does not consume the selected runtime-base reference")
 	}
 	return nil
 }
@@ -100,10 +165,12 @@ func TestSandboxImageRuntimeIdentityJoinRejectsAccountMutations(t *testing.T) {
 	dockerfile := finalArchitectureReadText(t, filepath.Join(engineRoot, "Dockerfile.sandbox"))
 	finalAccount := "WORKDIR /workspace\nUSER daytona"
 	mutations := map[string]string{
-		"user":       strings.Replace(dockerfile, finalAccount, "RUN usermod --login runner daytona\nWORKDIR /workspace\nUSER runner", 1),
-		"home":       strings.Replace(dockerfile, finalAccount, "RUN usermod --home /srv/daytona daytona\n"+finalAccount, 1),
-		"shell":      strings.Replace(dockerfile, finalAccount, "RUN usermod --shell /bin/sh daytona\n"+finalAccount, 1),
-		"final_user": strings.Replace(dockerfile, "USER daytona\nCMD", "USER root\nCMD", 1),
+		"user":                 strings.Replace(dockerfile, finalAccount, "RUN usermod --login runner daytona\nWORKDIR /workspace\nUSER runner", 1),
+		"home":                 strings.Replace(dockerfile, finalAccount, "RUN usermod --home /srv/daytona daytona\n"+finalAccount, 1),
+		"shell":                strings.Replace(dockerfile, finalAccount, "RUN usermod --shell /bin/sh daytona\n"+finalAccount, 1),
+		"uppercase_final_user": strings.Replace(dockerfile, "USER daytona\nCMD", "USER root\nCMD", 1),
+		"lowercase_final_user": strings.Replace(dockerfile, "USER daytona\nCMD", "USER daytona\nuser root\nCMD", 1),
+		"lowercase_run":        strings.Replace(dockerfile, finalAccount, "run usermod --shell /bin/sh daytona\n"+finalAccount, 1),
 	}
 	for name, mutated := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -176,11 +243,11 @@ func effectiveSandboxRuntimeAccount(dockerfile string) (sandboxImageAccount, err
 		if len(fields) < 2 {
 			continue
 		}
-		if fields[0] == "USER" {
+		if strings.EqualFold(fields[0], "USER") {
 			finalUser = strings.SplitN(fields[1], ":", 2)[0]
 			continue
 		}
-		if fields[0] != "RUN" {
+		if !strings.EqualFold(fields[0], "RUN") {
 			continue
 		}
 		for index := 1; index < len(fields); index++ {
