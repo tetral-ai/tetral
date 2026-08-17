@@ -496,11 +496,6 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			  WHERE candidate.workspace_id = $1
 			    AND candidate.kind IN (` + kindPredicate + `)
 			    AND candidate.status = 'pending'
-			    AND NOT (
-			        candidate.kind = 'runtime_input'
-			        AND candidate.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
-			        AND candidate.attempt_count >= COALESCE(NULLIF(candidate.max_attempts, 0), $` + strconv.Itoa(4+len(request.Kinds)) + `)
-			    )
 			    AND candidate.available_at <= $2
 			    AND NOT EXISTS (
 			        SELECT 1
@@ -576,7 +571,6 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			request.Now,
 			request.MaxJobs * 8,
 		}, args...)
-		queryArgs = append(queryArgs, s.retryPolicy.MaxAttempts)
 		rows, err := tx.Query(ctx, query, queryArgs...)
 		if err != nil {
 			return err
@@ -647,6 +641,9 @@ type leaseCandidateRow struct {
 
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
 	leasedAt := request.Now
+	// A reclaimed interrupt at its attempt ceiling is leased only to recover
+	// JobRunner's receipt-or-Session-termination transaction. Its counter stays
+	// capped, so recovery cannot authorize another Runtime delivery attempt.
 	row := tx.QueryRow(ctx,
 		`UPDATE queue_jobs
 		    SET status = 'leased',
@@ -654,17 +651,17 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		        lease_token = $6,
 		        leased_at = clock_timestamp(),
 		        leased_until = clock_timestamp() + ($8::bigint * interval '1 millisecond'),
-		        attempt_count = attempt_count + 1,
+		        attempt_count = CASE
+		          WHEN $3 = 'runtime_input' AND $12 = 'interrupt_control'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          THEN attempt_count
+		          ELSE attempt_count + 1
+		        END,
 		        updated_at = clock_timestamp()
 		  WHERE workspace_id = $1
 		    AND id = $2
 		    AND kind = $3
 		    AND status = 'pending'
-		    AND NOT (
-		        $3 = 'runtime_input'
-		        AND $12 = 'interrupt_control'
-		        AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
-		    )
 		    AND available_at = $9
 		    AND queue_partition_sequence = $10
 		    AND NOT EXISTS (

@@ -958,6 +958,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			finalized = replayed
 			return nil
 		}
+		if job.InputKind == "interrupt_control" {
+			finalized, err = finalizeInterruptDeliveryExhaustionTx(ctx, tx, job, now)
+			return err
+		}
 		if err := validateRuntimeFinalizationBindingTx(ctx, tx, job, result); err != nil {
 			return err
 		}
@@ -1029,11 +1033,134 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
+	if finalized.QueueLeaseSettled {
+		return finalized, nil
+	}
 	if !result.Retryable && finalized.Status == RuntimeDeliveryRejected {
 		result.Retryable = false
 		return result, nil
 	}
 	return finalized, nil
+}
+
+func finalizeInterruptDeliveryExhaustionTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	now time.Time,
+) (RuntimeDeliveryResult, error) {
+	if !runtimeJobFinalAttempt(job) {
+		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{
+			kind: "runtime_inbox_status_invalid", message: "interrupt delivery attempts remain", retryable: true,
+		}
+	}
+	var inboxStatus string
+	var inboxBindingID, inboxPodUID sql.NullString
+	var inboxBindingGeneration sql.NullInt64
+	if err := tx.QueryRow(ctx,
+		`SELECT status, binding_id, binding_generation, target_pod_uid
+		   FROM session_runtime_inbox
+		  WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		  FOR UPDATE`,
+		job.WorkspaceID, job.SessionID, job.RuntimeInputID,
+	).Scan(&inboxStatus, &inboxBindingID, &inboxBindingGeneration, &inboxPodUID); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Inbox custody is missing")
+		}
+		return RuntimeDeliveryResult{}, err
+	}
+	if inboxStatus == "queued" {
+		if inboxBindingID.Valid || inboxBindingGeneration.Valid || inboxPodUID.Valid {
+			return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("queued interrupt Inbox has attempted binding custody")
+		}
+	} else if inboxStatus != "delivering" && inboxStatus != "accepted" {
+		return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Inbox custody is not terminalizable")
+	}
+
+	var bindingID, podUID sql.NullString
+	var bindingGeneration sql.NullInt64
+	err := tx.QueryRow(ctx,
+		`SELECT binding_id, binding_generation, agent_runtime_pod_uid
+		   FROM session_runtime_bindings
+		  WHERE workspace_id=$1 AND session_id=$2
+		  FOR UPDATE`,
+		job.WorkspaceID, job.SessionID,
+	).Scan(&bindingID, &bindingGeneration, &podUID)
+	if err != nil && !dbconnect.IsNoRows(err) {
+		return RuntimeDeliveryResult{}, err
+	}
+	if err == nil && inboxStatus != "queued" &&
+		(!inboxBindingID.Valid || inboxBindingID.String != bindingID.String ||
+			!inboxBindingGeneration.Valid || inboxBindingGeneration.Int64 != bindingGeneration.Int64 ||
+			!inboxPodUID.Valid || inboxPodUID.String != podUID.String) {
+		return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Inbox binding conflicts with the Session fence")
+	}
+
+	var mainThreadID string
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM session_threads
+		  WHERE workspace_id=$1 AND session_id=$2 AND role='main'
+		  FOR UPDATE`,
+		job.WorkspaceID, job.SessionID,
+	).Scan(&mainThreadID); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Session main Thread is missing")
+		}
+		return RuntimeDeliveryResult{}, err
+	}
+	scope := &bridgev1.RuntimeScope{
+		WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: mainThreadID,
+		Binding: &bridgev1.RuntimeBindingRef{
+			BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, TargetPodUid: podUID.String,
+		},
+	}
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	turnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	runtimeWriteID := stableRuntimeID("interrupt_delivery_exhausted", job.WorkspaceID, job.SessionID, job.RuntimeInputID)
+	if turnID != nil {
+		runtimeWriteID = *turnID
+	}
+	failure := runtimeTerminationFailure{
+		Type: "runtime", Code: "runtime_persistence_exhausted",
+		Message: "The session runtime could not complete the request.",
+		Reason:  "runtime_input_commit_exhausted", Retryable: false,
+	}
+	failure.RetryStatus.Type = "terminal"
+	failureJSON, err := marshalBridgeJSON(failure)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if _, _, err := settleRuntimeTerminationTx(
+		ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, true, now,
+	); err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2`,
+		job.WorkspaceID, job.SessionID,
+	); err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
+		        cleanup_job_id=NULL, binding_id=NULL, binding_generation=NULL, updated_at=$3
+		  WHERE workspace_id=$1 AND session_id=$2`,
+		job.WorkspaceID, job.SessionID, now,
+	); err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	return RuntimeDeliveryResult{
+		Status: RuntimeDeliveryRejected, Retryable: false,
+		ErrorKind: "runtime_delivery_exhausted", ErrorMessage: "runtime delivery attempts are exhausted",
+		QueueLeaseSettled: true,
+	}, nil
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) finalizeMCPManifestDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {

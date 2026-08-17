@@ -659,7 +659,7 @@ func TestPostgreSQLStoreLeaseCandidateWindowKeepsInterruptException(t *testing.T
 	}
 }
 
-func TestPostgreSQLStoreInterruptRetryRemainsSessionBarrierThroughExhaustion(t *testing.T) {
+func TestPostgreSQLStoreInterruptRetryRemainsSessionBarrierThroughFinalizationRecovery(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), RetryPolicy{
 		BaseDelay: time.Minute, MaxDelay: time.Minute, MaxAttempts: 2,
@@ -712,16 +712,17 @@ func TestPostgreSQLStoreInterruptRetryRemainsSessionBarrierThroughExhaustion(t *
 	if ok, err := store.Retry(ctx, RetryRequest{WorkspaceID: ws, JobID: second.ID, LeaseToken: second.LeaseToken, ErrorKind: "interrupt_closeout_pending", Now: now.Add(2*time.Minute + time.Second)}); err != nil || !ok {
 		t.Fatalf("Retry final interrupt = (%v,%v); want retained barrier", ok, err)
 	}
-	if leased, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-c", MaxJobs: 3, LeaseDuration: time.Minute, Now: now.Add(10 * time.Minute)}); err != nil || len(leased) != 0 {
-		t.Fatalf("leases after interrupt attempt exhaustion = %+v err=%v; want none", leased, err)
+	recovery := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-c", MaxJobs: 3, LeaseDuration: time.Minute, Now: now.Add(10 * time.Minute)})
+	if recovery.ID != interrupt.ID || recovery.AttemptCount != 2 {
+		t.Fatalf("finalization recovery lease = %s attempt=%d; want same interrupt capped at attempt 2", recovery.ID, recovery.AttemptCount)
 	}
 	var status string
 	var attempts int
 	if err := admin.QueryRowContext(ctx, `SELECT status, attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID).Scan(&status, &attempts); err != nil {
-		t.Fatalf("read retained interrupt barrier: %v", err)
+		t.Fatalf("read finalization recovery lease: %v", err)
 	}
-	if status != StatusPending || attempts != 2 {
-		t.Fatalf("retained interrupt = %s attempt=%d; want pending attempt=2", status, attempts)
+	if status != StatusLeased || attempts != 2 {
+		t.Fatalf("finalization recovery = %s attempt=%d; want leased attempt=2", status, attempts)
 	}
 }
 
@@ -753,16 +754,17 @@ func TestPostgreSQLStoreExpiredFinalInterruptLeaseReclaimsAsBarrier(t *testing.T
 	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases = %d/%v; want 1/nil", reclaimed, err)
 	}
-	if candidates, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-new", MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(3 * time.Minute)}); err != nil || len(candidates) != 0 {
-		t.Fatalf("post-reclaim leases = %+v/%v; want exhausted interrupt barrier and no message gap", candidates, err)
+	candidates, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-new", MaxJobs: 2, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(time.Minute)})
+	if err != nil || len(candidates) != 1 || candidates[0].ID != interrupt.ID {
+		t.Fatalf("post-reclaim leases = %+v/%v; want only exhausted interrupt finalization recovery", candidates, err)
 	}
 	var status string
 	var attempts int
 	if err := admin.QueryRowContext(ctx, `SELECT status, attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID).Scan(&status, &attempts); err != nil {
 		t.Fatalf("read reclaimed interrupt: %v", err)
 	}
-	if status != StatusPending || attempts != 1 {
-		t.Fatalf("reclaimed interrupt = %s attempt=%d; want pending attempt=1", status, attempts)
+	if status != StatusLeased || attempts != 1 {
+		t.Fatalf("reclaimed interrupt = %s attempt=%d; want re-leased capped attempt=1", status, attempts)
 	}
 }
 

@@ -1171,47 +1171,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if openDurableTurnID == nil || *openDurableTurnID != request.GetRuntimeWriteId() {
 			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime termination durable turn is not open"))
 		}
-		if err := closeRuntimeTerminationSpansTx(ctx, tx, request.GetScope(), failure, now); err != nil {
-			return err
-		}
-		if err := settleRuntimeTerminationDurableFactsTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, now); err != nil {
-			return err
-		}
-		orphanToolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, request.GetScope(), false)
+		result, custodyTransitions, err = settleRuntimeTerminationTx(
+			ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, failureJSON, false, now,
+		)
 		if err != nil {
 			return err
 		}
-		if len(orphanToolUses) != 0 {
-			return status.Error(codes.FailedPrecondition, "runtime termination has a live Tool use after derived settlement")
-		}
-		if threadScope.role == "main" {
-			if err := closeRuntimeTerminatedSessionSiblingsTx(ctx, tx, request.GetScope(), request.GetRuntimeWriteId(), now); err != nil {
-				return err
-			}
-		}
-		custodyTransitions, err = cancelRuntimeTerminationInputsTx(ctx, tx, request.GetScope(), threadScope.role == "main", now)
-		if err != nil {
-			return err
-		}
-		// Runtime termination removes every current-thread and, for the main
-		// thread, sibling Sandbox blocker before release readiness is evaluated
-		// once for the Session. Queue custody is assigned in this transaction.
-		releaseJobs, err := sandboxrelease.ReadyRequestsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), now, nil)
-		if err != nil {
-			return err
-		}
-		if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
-			return err
-		}
-		errorStamp, err := appendRuntimeTerminationErrorTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failureJSON, now)
-		if err != nil {
-			return err
-		}
-		statusStamp, err := appendRuntimeTerminatedStatusTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), now)
-		if err != nil {
-			return err
-		}
-		result = runtimeTerminationResult{FailureEventID: errorStamp.EventID, CloseoutEventID: statusStamp.EventID}
 		resultJSON, err := marshalBridgeJSON(result)
 		if err != nil {
 			return err
@@ -1237,6 +1202,67 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	return &bridgev1.CommitRuntimeTerminationResponse{Outcome: &bridgev1.CommitRuntimeTerminationResponse_Committed{Committed: &bridgev1.RuntimeTerminationCommitted{
 		FailureEventId: result.FailureEventID, CloseoutEventId: result.CloseoutEventID,
 	}}}, nil
+}
+
+// settleRuntimeTerminationTx is the Session termination owner shared by a
+// Runtime-declared terminal failure and Bridge's exhausted interrupt fence.
+// includeQueuedInputs is reserved for Session-wide exhaustion: it terminalizes
+// work that remained durably admitted behind the interrupt without projecting
+// those source Events into Messages.
+func settleRuntimeTerminationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	threadScope threadMutationScope,
+	runtimeWriteID string,
+	failure runtimeTerminationFailure,
+	failureJSON string,
+	includeQueuedInputs bool,
+	now time.Time,
+) (runtimeTerminationResult, runtimeTerminationCustodyTransitions, error) {
+	if err := closeRuntimeTerminationSpansTx(ctx, tx, scope, failure, now); err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	if err := settleRuntimeTerminationDurableFactsTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, now); err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	orphanToolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, scope, false)
+	if err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	if len(orphanToolUses) != 0 {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, status.Error(codes.FailedPrecondition, "runtime termination has a live Tool use after derived settlement")
+	}
+	if threadScope.role == "main" {
+		if err := closeRuntimeTerminatedSessionSiblingsTx(ctx, tx, scope, runtimeWriteID, now); err != nil {
+			return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+		}
+	}
+	transitions, err := cancelRuntimeTerminationInputsTx(ctx, tx, scope, threadScope.role == "main", includeQueuedInputs, now)
+	if err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	// Runtime termination removes every current-thread and, for the main
+	// thread, sibling Sandbox blocker before release readiness is evaluated
+	// once for the Session. Queue custody is assigned in this transaction.
+	releaseJobs, err := sandboxrelease.ReadyRequestsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now, nil)
+	if err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	errorStamp, err := appendRuntimeTerminationErrorTx(ctx, tx, scope, threadScope, runtimeWriteID, failureJSON, now)
+	if err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	statusStamp, err := appendRuntimeTerminatedStatusTx(ctx, tx, scope, threadScope, runtimeWriteID, now)
+	if err != nil {
+		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
+	}
+	return runtimeTerminationResult{
+		FailureEventID: errorStamp.EventID, CloseoutEventID: statusStamp.EventID,
+	}, transitions, nil
 }
 
 type requestEndDispositionResult struct {

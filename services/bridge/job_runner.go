@@ -282,6 +282,26 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			r.logRuntimeJobAttempt(job, "none", "durable_replay")
 			return r.applyRuntimeDeliveryResult(ctx, job, replayed)
 		}
+		if job.InputKind == "interrupt_control" && runtimeJobFinalAttempt(job) {
+			finalized, finalizeErr := r.finalizeRuntimeDelivery(workCtx, job, RuntimeDeliveryResult{
+				Status:       RuntimeDeliveryRejected,
+				Retryable:    false,
+				ErrorKind:    "runtime_delivery_exhausted",
+				ErrorMessage: "runtime delivery attempts are exhausted",
+			})
+			heartbeatErr := stopHeartbeat()
+			if heartbeatErr != nil && !finalized.QueueLeaseSettled {
+				return heartbeatErr
+			}
+			if finalizeErr != nil {
+				if invalidRuntimeJobPayload(finalizeErr) {
+					return r.deadLetterInvalidRuntimeJob(ctx, job)
+				}
+				return finalizeErr
+			}
+			r.logRuntimeJobAttempt(job, "none", runtimeJobFinalizationDisposition(finalized))
+			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
+		}
 	}
 	result, deliverErr := r.Deliverer.DeliverRuntimeJob(workCtx, job)
 	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil && !result.QueueLeaseSettled {
@@ -548,6 +568,9 @@ func startJobRunnerHeartbeat(ctx context.Context, client QueueClient, job Runtim
 }
 
 func (r *JobRunner) applyRuntimeDeliveryResult(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) error {
+	if result.QueueLeaseSettled {
+		return nil
+	}
 	switch result.Status {
 	case RuntimeDeliveryAccepted, RuntimeDeliveryDuplicate:
 		return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{

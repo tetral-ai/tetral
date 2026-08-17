@@ -496,6 +496,7 @@ func cancelRuntimeTerminationInputsTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	sessionWide bool,
+	includeQueued bool,
 	now time.Time,
 ) (runtimeTerminationCustodyTransitions, error) {
 	threadID := scope.GetSessionThreadId()
@@ -513,6 +514,7 @@ func cancelRuntimeTerminationInputsTx(
 		       AND inbox.input_kind <> 'approval_review'
 		       AND (
 		           inbox.status IN ('delivering', 'accepted')
+		           OR ($5 AND inbox.status IN ('queued', 'parked'))
 		           OR (inbox.input_kind = 'task_notification' AND inbox.status IN ('queued', 'parked'))
 		       )
 		     FOR UPDATE
@@ -542,6 +544,7 @@ func cancelRuntimeTerminationInputsTx(
 		scope.GetSessionId(),
 		threadID,
 		now,
+		includeQueued,
 	).Scan(&transitions.accepted, &transitions.parked)
 	return transitions, err
 }

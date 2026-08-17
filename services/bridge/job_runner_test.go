@@ -654,27 +654,26 @@ func TestJobRunnerInterruptReplayStillCancelsSiblingMessagesFirst(t *testing.T) 
 	}
 }
 
-func TestJobRunnerInterruptFinalAttemptPreservesBarrierWithoutReceipt(t *testing.T) {
+func TestJobRunnerInterruptFinalAttemptTerminatesWithoutRuntimeDelivery(t *testing.T) {
 	job := runtimeInterruptQueueJob()
 	job.AttemptCount = 3
 	job.MaxAttempts = 3
 	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{job}}
-	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{
-		Status: RuntimeDeliveryRejected, ErrorKind: "control_busy",
+	deliverer := &recordingDeliverer{finalizeResult: RuntimeDeliveryResult{
+		Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted", QueueLeaseSettled: true,
 	}}
 	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
 
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if len(deliverer.finalizations) != 0 {
-		t.Fatalf("interrupt finalizations = %#v; want no exhaustion disposition without receipt", deliverer.finalizations)
+	if len(deliverer.jobs) != 0 || len(deliverer.replayJobs) != 1 || len(deliverer.finalizations) != 1 {
+		t.Fatalf("interrupt deliveries/replays/finalizations = %d/%d/%d; want 0/1/1", len(deliverer.jobs), len(deliverer.replayJobs), len(deliverer.finalizations))
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{
 		"cancel:sesn_1:thr_1:9",
-		"retry:qjob_interrupt:control_busy",
 	}) {
-		t.Fatalf("queue transitions = %v; want final-attempt interrupt retained by Retry", queueClient.transitions)
+		t.Fatalf("queue transitions = %v; want only the pre-delivery sibling cancellation", queueClient.transitions)
 	}
 }
 
