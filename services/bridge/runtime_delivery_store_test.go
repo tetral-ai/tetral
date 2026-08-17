@@ -2079,21 +2079,15 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
 
-	interruptJob := RuntimeJob{
-		JobID:           "qjob_bridge_interrupt",
-		LeaseToken:      "lease_bridge_interrupt",
-		Kind:            queue.KindRuntimeInput,
-		PartitionKey:    queue.FormatSessionPartitionKey(workspace.DefaultID, "sesn_bridge_control_delivery"),
-		DedupeKey:       queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, "sesn_bridge_control_delivery", "rin_bridge_interrupt"),
-		WorkspaceID:     "default",
-		SessionID:       "sesn_bridge_control_delivery",
-		SessionThreadID: "thr_bridge_control_delivery",
-		RuntimeInputID:  "rin_bridge_interrupt",
-		EventIDs:        []string{"sevt_interrupt_control"},
-		SequenceFrom:    2,
-		SequenceTo:      2,
-		InputKind:       "interrupt_control",
-		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_interrupt","event_ids":["sevt_interrupt_control"],"sequence_from":2,"sequence_to":2,"input_kind":"interrupt_control"}`,
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "rin_bridge_interrupt", "interrupt_control", "sevt_interrupt_control", 2, 3, time.Now().UTC().Add(-time.Minute))
+	leasedInterrupt := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "control-payload-test",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	interruptJob, err := DecodeRuntimeJob(queueJobProto(leasedInterrupt))
+	if err != nil {
+		t.Fatalf("decode interrupt control lease: %v", err)
 	}
 	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
 	interrupt, err := store.PrepareRuntimeCommand(context.Background(), interruptJob)

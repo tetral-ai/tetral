@@ -168,6 +168,85 @@ func TestPostgreSQLJobRunnerLosingInterruptLeaseBeforeReplayCannotCancelMessages
 	}
 }
 
+func TestPostgreSQLInterruptLeaseLossAfterReplayStopsBeforePreparationAndSend(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_post_replay_lease_loss"
+		threadID  = "thr_interrupt_post_replay_lease_loss"
+		bindingID = "bind_interrupt_post_replay_lease_loss"
+		podUID    = "pod_interrupt_post_replay_lease_loss"
+		inputID   = "rin_interrupt_post_replay_lease_loss"
+		eventID   = "evt_interrupt_post_replay_lease_loss"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
+	})
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 3, time.Now().UTC().Add(-time.Minute))
+	first := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "post-replay-stale-runner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	job, err := DecodeRuntimeJob(queueJobProto(first))
+	if err != nil {
+		t.Fatalf("decode first interrupt lease: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	if replayed, found, err := deliveryStore.ReplayRuntimeDeliveryFinalization(context.Background(), job); err != nil || found {
+		t.Fatalf("successful pre-delivery replay = %+v/%v/%v; want no receipt", replayed, found, err)
+	}
+
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, first.ID); err != nil {
+		t.Fatalf("expire post-replay lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim post-replay lease = %d/%v; want 1/nil", reclaimed, err)
+	}
+	current := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "post-replay-current-runner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if current.ID != first.ID || current.LeaseToken == first.LeaseToken {
+		t.Fatalf("current interrupt lease = %s/%s; want reclaimed %s with a new token", current.ID, current.LeaseToken, first.ID)
+	}
+
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	result, err := (RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+	if err != nil {
+		t.Fatalf("deliver stale post-replay interrupt: %v", err)
+	}
+	if result.Status != RuntimeDeliveryDuplicate || !result.QueueLeaseSettled || len(sender.requests) != 0 {
+		t.Fatalf("stale post-replay delivery = %+v with %d Runtime calls; want settled duplicate and zero calls", result, len(sender.requests))
+	}
+
+	var inboxStatus, queueStatus, leaseToken string
+	var bindings, receipts, messages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$3),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$3
+		 AND operation IN ('commit_inputs','write_request_end') AND source_kind='interrupt_control' AND idempotency_key=$1 AND receipt_json <> ''),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3)`,
+		inputID, current.ID, sessionID,
+	).Scan(&inboxStatus, &queueStatus, &leaseToken, &bindings, &receipts, &messages); err != nil {
+		t.Fatalf("read post-replay stale-worker facts: %v", err)
+	}
+	if inboxStatus != "queued" || queueStatus != queue.StatusLeased || leaseToken != current.LeaseToken || bindings != 1 || receipts != 0 || messages != 0 {
+		t.Fatalf("post-replay stale worker mutated facts: Inbox %s Queue %s/%s bindings %d receipts %d messages %d",
+			inboxStatus, queueStatus, leaseToken, bindings, receipts, messages)
+	}
+}
+
 func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 	t.Helper()
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)

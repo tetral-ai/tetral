@@ -214,6 +214,36 @@ func TestRuntimePodDirectDelivererSendsFirstInterruptOnce(t *testing.T) {
 	}
 }
 
+func TestRuntimePodDirectDelivererRevalidatesInterruptLeaseAfterPreparation(t *testing.T) {
+	request := &agentruntimev1.InterruptRequest{
+		WorkspaceId: "ws_bridge", SessionId: "sesn_1", SessionThreadId: "thr_1",
+		RuntimeInputId: "rin_interrupt_lost_after_prepare", InterruptLeaseRef: testRuntimeInterruptLeaseRef("rin_interrupt_lost_after_prepare"),
+	}
+	store := &recordingRuntimeDeliveryStore{
+		plan: RuntimeCommandPlan{
+			Target:    RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090},
+			Interrupt: request,
+		},
+		interruptAuthorityLost: true,
+	}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	job := runtimeInputRuntimeJob()
+	job.RuntimeInputID = request.GetRuntimeInputId()
+	job.InputKind = "interrupt_control"
+
+	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+	if err != nil {
+		t.Fatalf("DeliverRuntimeJob after authority loss: %v", err)
+	}
+	if result.Status != RuntimeDeliveryDuplicate || !result.QueueLeaseSettled {
+		t.Fatalf("post-preparation authority loss = %+v; want settled duplicate", result)
+	}
+	if len(store.jobs) != 1 || len(sender.requests) != 0 || len(store.acceptedJobs) != 0 {
+		t.Fatalf("post-preparation authority loss preparations/sends/accepted writes = %d/%d/%d; want 1/0/0",
+			len(store.jobs), len(sender.requests), len(store.acceptedJobs))
+	}
+}
+
 func TestRuntimePodDirectDelivererDoesNotSettleInterruptOnRuntimeAcceptanceAlone(t *testing.T) {
 	request := &agentruntimev1.InterruptRequest{
 		WorkspaceId: "ws_bridge", SessionId: "sesn_1", SessionThreadId: "thr_1",
@@ -628,21 +658,22 @@ func cleanupRuntimeJob() RuntimeJob {
 }
 
 type recordingRuntimeDeliveryStore struct {
-	plan             RuntimeCommandPlan
-	rejectionPlan    *RuntimeCommandPlan
-	cleanupResult    RuntimeDeliveryResult
-	err              error
-	acceptedErr      error
-	jobs             []RuntimeJob
-	acceptedJobs     []RuntimeJob
-	rejectedJobs     []RuntimeJob
-	rejectedResults  []RuntimeDeliveryResult
-	cleanupJobs      []RuntimeJob
-	convertRejection bool
-	replayFound      bool
-	replayResult     RuntimeDeliveryResult
-	replayErr        error
-	replayJobs       []RuntimeJob
+	plan                   RuntimeCommandPlan
+	rejectionPlan          *RuntimeCommandPlan
+	cleanupResult          RuntimeDeliveryResult
+	err                    error
+	acceptedErr            error
+	jobs                   []RuntimeJob
+	acceptedJobs           []RuntimeJob
+	rejectedJobs           []RuntimeJob
+	rejectedResults        []RuntimeDeliveryResult
+	cleanupJobs            []RuntimeJob
+	convertRejection       bool
+	replayFound            bool
+	replayResult           RuntimeDeliveryResult
+	replayErr              error
+	replayJobs             []RuntimeJob
+	interruptAuthorityLost bool
 }
 
 func (s *recordingRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
@@ -656,6 +687,10 @@ func (s *recordingRuntimeDeliveryStore) PrepareRuntimeCommand(_ context.Context,
 		return *s.rejectionPlan, s.err
 	}
 	return s.plan, s.err
+}
+
+func (s *recordingRuntimeDeliveryStore) InterruptDeliveryAuthorityActive(_ context.Context, _ RuntimeJob) (bool, error) {
+	return !s.interruptAuthorityLost, nil
 }
 
 func (s *recordingRuntimeDeliveryStore) MarkRuntimeInputAccepted(_ context.Context, job RuntimeJob, _ RuntimeAttemptedBinding) (bool, error) {
