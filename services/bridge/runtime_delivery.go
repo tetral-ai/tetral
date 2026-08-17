@@ -3186,29 +3186,6 @@ func allRuntimeInputEventsProcessedTx(ctx context.Context, tx *dbconnect.Tx, job
 	return total == len(job.EventIDs) && processed == len(job.EventIDs), nil
 }
 
-func cancelSupersededRuntimeInboxTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) error {
-	result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='cancelled',updated_at=$4
-		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
-		  AND input_kind=$5 AND status IN ('queued','delivering')`,
-		job.WorkspaceID, job.SessionID, job.RuntimeInputID, now, job.InputKind)
-	if err != nil {
-		return err
-	}
-	if rowsAffected(result) {
-		return nil
-	}
-	var statusValue string
-	if err := tx.QueryRow(ctx, `SELECT status FROM session_runtime_inbox
-		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3`,
-		job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(&statusValue); err != nil {
-		return runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "superseded runtime input has no producer custody", retryable: false}
-	}
-	if statusValue == "cancelled" || statusValue == "committed" {
-		return nil
-	}
-	return runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "superseded runtime input custody is not cancellable", retryable: false}
-}
-
 // claimRuntimeInboxDeliveryTx binds producer-created Inbox custody to the
 // selected Runtime. session_runtime_inbox is never reconstructed from a Queue
 // payload; LoadContext also never projects it into context.

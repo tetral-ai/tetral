@@ -2,6 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -60,16 +61,16 @@ func activeSessionInterruptDeliveryBarrierTx(
 	for rows.Next() {
 		var runtimeInputID string
 		if err := rows.Scan(&runtimeInputID); err != nil {
-			rows.Close()
-			return false, err
+			return false, errors.Join(err, rows.Close())
 		}
 		interruptIDs = append(interruptIDs, runtimeInputID)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		return false, errors.Join(err, rows.Close())
+	}
+	if err := rows.Close(); err != nil {
 		return false, err
 	}
-	rows.Close()
 
 	for _, runtimeInputID := range interruptIDs {
 		dedupeKey := queue.FormatRuntimeInputDedupeKey(workspace.ID(workspaceID), sessionID, runtimeInputID)
@@ -166,7 +167,7 @@ func activeSessionInterruptBarrierTx(
 	if err != nil {
 		return sessionInterruptBarrier{}, false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var active sessionInterruptBarrier
 	for rows.Next() {
 		var runtimeInputID string
