@@ -2208,7 +2208,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreAbsorbsCommittedInterruptReplayBeforeRuntime(t *testing.T) {
+func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID        = "sesn_bridge_interrupt_replay_fence"
@@ -2223,14 +2223,14 @@ func TestPostgreSQLRuntimeDeliveryStoreAbsorbsCommittedInterruptReplayBeforeRunt
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEventID, 3, "user.message", `{"content":[{"type":"text","text":"new turn"}]}`)
 
 	interruptJob := RuntimeJob{
-		JobID: "qjob_bridge_interrupt_replay_fence", LeaseToken: "lease_bridge_interrupt_replay_fence", Kind: queue.KindRuntimeInput,
+		JobID: "qjob_int_replay", LeaseToken: "lease_bridge_interrupt_replay_fence", Kind: queue.KindRuntimeInput,
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
 		RuntimeInputID: "rin_bridge_interrupt_replay_fence", EventIDs: []string{interruptEventID},
 		SequenceFrom: 2, SequenceTo: 2, InputKind: "interrupt_control",
 		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_fence","event_ids":["sevt_bridge_interrupt_replay_fence"],"sequence_from":2,"sequence_to":2,"input_kind":"interrupt_control"}`,
 	}
 	messageJob := RuntimeJob{
-		JobID: "qjob_bridge_interrupt_replay_successor", LeaseToken: "lease_bridge_interrupt_replay_successor", Kind: queue.KindRuntimeInput,
+		JobID: "qjob_msg_replay", LeaseToken: "lease_bridge_interrupt_replay_successor", Kind: queue.KindRuntimeInput,
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
 		RuntimeInputID: "rin_bridge_interrupt_replay_successor", EventIDs: []string{messageEventID},
 		SequenceFrom: 3, SequenceTo: 3, InputKind: "messages",
@@ -2239,41 +2239,154 @@ func TestPostgreSQLRuntimeDeliveryStoreAbsorbsCommittedInterruptReplayBeforeRunt
 	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
 	seedRuntimeInboxBirthForJob(t, admin, messageJob)
 
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueue := func(job RuntimeJob, maxAttempts int) {
+		t.Helper()
+		if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+			ID: job.JobID, WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+			PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+			DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, job.RuntimeInputID),
+			PayloadVersion: 1, PayloadJSON: []byte(job.PayloadJSON), MaxAttempts: maxAttempts,
+			Priority: func() int {
+				if job.InputKind == "interrupt_control" {
+					return 100
+				}
+				return 0
+			}(),
+			Now: time.Now().UTC().Add(-time.Minute),
+		}); err != nil {
+			t.Fatalf("enqueue %s: %v", job.RuntimeInputID, err)
+		}
+	}
+	enqueue(interruptJob, queue.DefaultMaxAttempts)
+	enqueue(messageJob, queue.DefaultMaxAttempts)
+
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	interruptPlan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), interruptJob)
-	if err != nil || interruptPlan.Interrupt == nil {
-		t.Fatalf("prepare initial interrupt = %#v, %v; want Runtime interrupt", interruptPlan, err)
+	sender := &receiptGatedInterruptSender{
+		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
+		store:                         apiStore,
+		scope:                         bridgeAPIScope(sessionID, threadID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence"),
+		inputID:                       interruptJob.RuntimeInputID,
 	}
-	if committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: runtimeScopeFromAttempt(interruptJob, interruptPlan.AttemptedBinding), RuntimeInputId: interruptJob.RuntimeInputID,
-	}); err != nil || committed.GetCommitted() == nil {
-		t.Fatalf("commit initial interrupt = %#v, %v; want durable interrupt receipt", committed, err)
+	candidate := enginekubernetes.BindingCandidate{
+		Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0",
+		PodUID: "pod_uid_interrupt_replay_fence", PodIP: "10.0.0.10",
+	}
+	newRunner := func() *JobRunner {
+		freshStore := NewJobRunnerRuntimeDeliveryStore(
+			dbconnect.NewClientForTesting(runtime), nil, JobRunnerConfig{AgentRuntimeGRPCPort: 9090},
+			func() enginekubernetes.BindingVisibilitySnapshot {
+				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
+			},
+		)
+		freshStore.Clock = deliveryStore.Clock
+		return &JobRunner{
+			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+			Deliverer: RuntimePodDirectDeliverer{Store: freshStore, Sender: sender},
+			Config:    JobRunnerConfig{LeaseOwner: "interrupt-receipt-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		}
 	}
 
-	messagePlan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), messageJob)
-	if err != nil || messagePlan.AcceptInput == nil {
-		t.Fatalf("prepare successor input = %#v, %v; want newer Runtime input", messagePlan, err)
+	if err := newRunner().RunOnce(context.Background()); err != nil {
+		t.Fatalf("run hot-accepted interrupt without receipt: %v", err)
 	}
-	if committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: runtimeScopeFromAttempt(messageJob, messagePlan.AttemptedBinding), RuntimeInputId: messageJob.RuntimeInputID,
-	}); err != nil || committed.GetCommitted() == nil {
-		t.Fatalf("commit successor input = %#v, %v; want durable successor context", committed, err)
+	var interruptQueueStatus, followerQueueStatus, interruptInboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3)`,
+		interruptJob.JobID, messageJob.JobID, interruptJob.RuntimeInputID,
+	).Scan(&interruptQueueStatus, &followerQueueStatus, &interruptInboxStatus); err != nil {
+		t.Fatalf("read receipt-pending barrier: %v", err)
+	}
+	if interruptQueueStatus != queue.StatusPending || followerQueueStatus != queue.StatusPending ||
+		interruptInboxStatus != "delivering" || sender.interruptCalls != 1 || len(sender.requests) != 1 {
+		t.Fatalf("receipt-pending facts = Queue %s follower %s Inbox %s interrupt calls/requests %d/%d",
+			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
+	}
+	blockedFollowers, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "receipt-pending-follower-proof",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if err != nil || len(blockedFollowers) != 0 {
+		t.Fatalf("follower leases before interrupt receipt = %#v/%v; want none", blockedFollowers, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, interruptJob.JobID); err != nil {
+		t.Fatalf("make interrupt retry available: %v", err)
 	}
 
-	// Reconstruct the delivery owner to model a fresh process after Pod loss. The
-	// committed interrupt's processed source event must terminate the replay
-	// before any Runtime command can be assembled or sent to the successor run.
-	freshStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	replayed, err := (RuntimePodDirectDeliverer{Store: freshStore, Sender: sender}).DeliverRuntimeJob(context.Background(), interruptJob)
-	if err != nil || replayed.Status != RuntimeDeliveryDuplicate {
-		t.Fatalf("replay committed interrupt = %#v, %v; want duplicate at durable ingress", replayed, err)
+	if err := newRunner().RunOnce(context.Background()); err != nil {
+		t.Fatalf("run response-loss receipt replay: %v", err)
 	}
-	if len(sender.requests) != 0 {
-		t.Fatalf("replay emitted Runtime commands = %#v; want none", sender.requests)
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3)`,
+		interruptJob.JobID, messageJob.JobID, interruptJob.RuntimeInputID,
+	).Scan(&interruptQueueStatus, &followerQueueStatus, &interruptInboxStatus); err != nil {
+		t.Fatalf("read receipt-gated ACK: %v", err)
 	}
+	if interruptQueueStatus != queue.StatusAcknowledged || followerQueueStatus != queue.StatusPending ||
+		interruptInboxStatus != "committed" || sender.interruptCalls != 2 || len(sender.requests) != 2 {
+		t.Fatalf("receipt replay facts = Queue %s follower %s Inbox %s interrupt calls/requests %d/%d",
+			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
+	}
+
+	if err := newRunner().RunOnce(context.Background()); err != nil {
+		t.Fatalf("deliver receipt-released follower: %v", err)
+	}
+	var followerInboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		messageJob.JobID, messageJob.RuntimeInputID,
+	).Scan(&followerQueueStatus, &followerInboxStatus); err != nil {
+		t.Fatalf("read delivered follower: %v", err)
+	}
+	if followerQueueStatus != queue.StatusAcknowledged || followerInboxStatus != "accepted" ||
+		sender.interruptCalls != 2 || len(sender.requests) != 3 {
+		t.Fatalf("follower facts = Queue %s Inbox %s interrupt calls %d total requests %d; want acknowledged/accepted/2/3",
+			followerQueueStatus, followerInboxStatus, sender.interruptCalls, len(sender.requests))
+	}
+	if _, ok := sender.requests[2].(*agentruntimev1.AcceptInputRequest); !ok {
+		t.Fatalf("third Runtime request = %T; want exact follower AcceptInput", sender.requests[2])
+	}
+}
+
+type receiptGatedInterruptSender struct {
+	*recordingRuntimeCommandSender
+	store          *PostgreSQLBridgeAPIStore
+	scope          *bridgev1.RuntimeScope
+	inputID        string
+	interruptCalls int
+}
+
+func (s *receiptGatedInterruptSender) Interrupt(
+	_ context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.InterruptRequest,
+) (*agentruntimev1.InterruptResponse, error) {
+	s.targets = append(s.targets, target)
+	s.requests = append(s.requests, request)
+	s.interruptCalls++
+	if s.interruptCalls == 1 {
+		return &agentruntimev1.InterruptResponse{
+			Outcome: &agentruntimev1.InterruptResponse_Accepted{Accepted: &agentruntimev1.InterruptAccepted{}},
+		}, nil
+	}
+	committed, err := s.store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: s.scope, RuntimeInputId: s.inputID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if committed.GetCommitted() == nil {
+		return nil, errors.New("interrupt closeout receipt was not committed")
+	}
+	return nil, errors.New("runtime response lost after interrupt closeout")
 }
 
 func TestPostgreSQLRuntimeDeliveryStoreAppliesProcessedInterruptFence(t *testing.T) {
