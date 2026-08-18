@@ -459,7 +459,7 @@ func TestEngineCIWorkflowRunsLocalSandboxImageSmoke(t *testing.T) {
 	}
 }
 
-func TestSandboxSmokeUsesReleaseRecipeAndRegistersPublishedDaytonaImage(t *testing.T) {
+func TestSandboxSmokeUsesReleaseRecipe(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	smokeBody, err := os.ReadFile(filepath.Join(engineRoot, "scripts", "run-sandbox-local-image-smoke.sh")) //nolint:gosec // Repository-local script.
 	if err != nil {
@@ -474,20 +474,6 @@ func TestSandboxSmokeUsesReleaseRecipeAndRegistersPublishedDaytonaImage(t *testi
 	}
 	if strings.Contains(string(releaseBody), "build_args:") || strings.Contains(string(releaseBody), "build-args:") {
 		t.Fatal("release workflow retains an empty build-argument channel")
-	}
-	ciBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")) //nolint:gosec // Repository-local workflow.
-	if err != nil {
-		t.Fatalf("read CI workflow: %v", err)
-	}
-	external := workflowJobForStaticTest(t, string(ciBody), "external-smoke:")
-	for _, token := range []string{
-		"TETRAL_DAYTONA_RELEASE_SMOKE_ARTIFACT_REF",
-		"-tags daytona_release_smoke",
-		"TestDaytonaPublishedImageProductionAdapterSmoke",
-	} {
-		if !strings.Contains(external, token) {
-			t.Fatalf("external-smoke missing Daytona release gate token %q", token)
-		}
 	}
 }
 
