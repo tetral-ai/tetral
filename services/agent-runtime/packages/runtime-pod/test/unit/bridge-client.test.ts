@@ -23,17 +23,38 @@ import type {
 	WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
+	BridgeAPIApprovalReviewerThreadCreator,
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,
 	BridgeAPIEventWriter,
 	BridgeAPIInternalToolRepairCommitter,
 } from "../../src/bridge-client.js";
+import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
 import type {
 	RuntimePodLogger,
 	RuntimePodLogRecord,
 } from "../../src/logger.js";
 
 describe("Bridge operation-specific Runtime adapters", () => {
+	test("maps typed Reviewer admission stale without classifying it as malformed", async () => {
+		const bridge = new TypedBridge();
+		bridge.approvalAdmissionResponse = { stale: {} };
+		const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+
+		await expect(
+			creator.createApprovalReviewerThread({
+				request: threadScope() as ApprovalReviewerThreadCreation["request"],
+				reviewId: "arvw_stale_admission",
+				isTrunk: true,
+				ensureOperationId: "aprv_ensure_stale_admission",
+			}),
+		).resolves.toEqual({
+			ok: false,
+			message: "approval reviewer input admission is stale",
+			staleCustody: true,
+		});
+	});
+
 	test("loads sealed context and the open Request draft as direct durable facts", async () => {
 		const bridge = new TypedBridge();
 		const loader = new BridgeAPIContextLoader(options(bridge));
@@ -1001,9 +1022,31 @@ class TypedBridge {
 	terminationResponse: unknown = {
 		committed: { failureEventId: "failure_1", closeoutEventId: "closeout_1" },
 	};
+	approvalEnsureResponse: unknown = {
+		committed: { reviewerThreadId: "thrd_reviewer" },
+	};
+	approvalAdmissionResponse: unknown = {
+		committed: { runtimeInputId: "rin_reviewer" },
+	};
 
 	client(): AgentRuntimeBridgeServiceClient {
 		return {
+			ensureApprovalReviewerTrunk: (
+				_request: unknown,
+				_metadata: Metadata,
+				callback: Callback,
+			) => {
+				callback(null, this.approvalEnsureResponse);
+				return grpcCall();
+			},
+			admitApprovalReviewInput: (
+				_request: unknown,
+				_metadata: Metadata,
+				callback: Callback,
+			) => {
+				callback(null, this.approvalAdmissionResponse);
+				return grpcCall();
+			},
 			loadContext: (
 				request: LoadContextRequest,
 				_metadata: Metadata,

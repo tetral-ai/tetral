@@ -751,6 +751,7 @@ message AdmitApprovalReviewInputResponse {
   oneof outcome {
     AdmitApprovalReviewInputCommitted committed = 1;
     AdmitApprovalReviewInputDuplicate duplicate = 2;
+    AdmitApprovalReviewInputStale stale = 3;
   }
 }
 message AdmitApprovalReviewInputCommitted {
@@ -759,6 +760,7 @@ message AdmitApprovalReviewInputCommitted {
 message AdmitApprovalReviewInputDuplicate {
   string runtime_input_id = 1;
 }
+message AdmitApprovalReviewInputStale {}
 
 message ResolveChildThreadRequest {
   RuntimeScope scope = 1;

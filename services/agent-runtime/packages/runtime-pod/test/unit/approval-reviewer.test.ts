@@ -470,6 +470,40 @@ describe("Runtime approval reviewer", () => {
 		}
 	});
 
+	test("returns stale custody from Reviewer admission before provider or durable outcome work", async () => {
+		const host = new RecordingReviewerHost([
+			assistantDecisionEntry("sesn_1", "allow", "must not be consumed"),
+		]);
+		let admissions = 0;
+		const threadCreator = {
+			createApprovalReviewerThread: async () => {
+				admissions++;
+				return {
+					ok: false as const,
+					message: "approval reviewer input admission is stale",
+					staleCustody: true as const,
+				};
+			},
+			closeApprovalReviewerThread: async () => ({ ok: true as const }),
+		};
+		const manager = new AutoApprovalReviewerManager();
+		const reviewer = createRuntimeApprovalReviewer(() => host, {
+			model: platformReviewerModel,
+			threadCreator,
+		});
+		const request = validReviewRequest({ approvalReviewerManager: manager });
+
+		await expect(reviewer(request)).resolves.toEqual({ type: "stale_custody" });
+		await expect(reviewer(request)).resolves.toEqual({ type: "stale_custody" });
+		expect(admissions).toBe(2);
+		expect(host.inputs).toEqual([]);
+		expect(host.waits).toEqual([]);
+		expect(host.inspections).toEqual([]);
+		expect(host.decisions).toEqual([]);
+		expect(host.failures).toEqual([]);
+		expect(manager.ephemeralReviewIds()).toEqual([]);
+	});
+
 	test("a preload failure reaches a durable failure receipt before parent fallback", async () => {
 		const host = new RecordingReviewerHost(
 			[assistantDecisionEntry("sesn_1", "allow", "must not escape")],
@@ -1909,6 +1943,31 @@ describe("Runtime approval reviewer", () => {
 		]);
 	});
 
+	test("preserves a stale Reviewer decision outcome without claim or memoization", async () => {
+		const logger = new RecordingLogger();
+		const host = new RecordingReviewerHost(
+			[assistantDecisionEntry("sesn_1", "allow", "late result")],
+			{ decisionStale: true },
+		);
+		const manager = new AutoApprovalReviewerManager();
+		const reviewer = createRuntimeApprovalReviewer(() => host, {
+			model: platformReviewerModel,
+			threadCreator: new RecordingReviewerThreadCreator(),
+			waitTimeoutMs: 100,
+			logger,
+		});
+		const request = validReviewRequest({ approvalReviewerManager: manager });
+
+		await expect(reviewer(request)).resolves.toEqual({ type: "stale_custody" });
+		await expect(reviewer(request)).resolves.toEqual({ type: "stale_custody" });
+		expect(host.inputs).toHaveLength(2);
+		expect(host.decisions).toHaveLength(2);
+		expect(host.failures).toEqual([]);
+		expect(host.interruptions).toHaveLength(2);
+		expect(logger.records).toEqual([]);
+		expect(manager.ephemeralReviewIds()).toEqual([]);
+	});
+
 	test("records timeout approval_review.failure on the reviewer trunk", async () => {
 		const host = new RecordingReviewerHost([], { waitTimedOut: true });
 		const reviewer = createRuntimeApprovalReviewer(() => host, {
@@ -2243,6 +2302,27 @@ describe("Runtime approval reviewer", () => {
 				message: "approval reviewer decision outcome is invalid",
 			}),
 		]);
+	});
+
+	test("preserves a stale Reviewer failure outcome as stale custody", async () => {
+		const logger = new RecordingLogger();
+		const host = new RecordingReviewerHost([], {
+			failureCommitMode: "stale",
+		});
+		const reviewer = createRuntimeApprovalReviewer(() => host, {
+			model: platformReviewerModel,
+			threadCreator: new RecordingReviewerThreadCreator(),
+			waitTimeoutMs: 10,
+			logger,
+		});
+
+		await expect(reviewer(validReviewRequest())).resolves.toEqual({
+			type: "stale_custody",
+		});
+		expect(host.failures).toHaveLength(1);
+		expect(host.decisions).toEqual([]);
+		expect(host.interruptions).toHaveLength(1);
+		expect(logger.records).toEqual([]);
 	});
 
 	test("accepts duplicate failure receipts and preserves conflicting settlement", async () => {
@@ -2821,6 +2901,7 @@ class RecordingReviewerHost {
 		private readonly entries: readonly RuntimeContextEntry[],
 		private readonly options: {
 			readonly decisionAck?: boolean;
+			readonly decisionStale?: boolean;
 			readonly decisionGate?: (() => Promise<void>) | undefined;
 			readonly enqueueAccepted?:
 				| ((input: RuntimeAcceptedInputState) => boolean)
@@ -2833,7 +2914,12 @@ class RecordingReviewerHost {
 				input: RuntimeAcceptedInputState,
 				runId: number,
 			) => SessionManager.ReviewerExecutionToken | undefined;
-			readonly failureCommitMode?: "ok" | "duplicate" | "reject" | "unknown";
+			readonly failureCommitMode?:
+				| "ok"
+				| "duplicate"
+				| "reject"
+				| "unknown"
+				| "stale";
 			readonly failureGate?: (() => Promise<void>) | undefined;
 			readonly steps?: string[];
 			readonly waitOk?: boolean;
@@ -3134,6 +3220,9 @@ class RecordingReviewerHost {
 		this.decisionCommands.push(command);
 		this.decisions.push(event);
 		await this.options.decisionGate?.();
+		if (this.options.decisionStale === true) {
+			return { ok: true, type: "stale" };
+		}
 		if (this.options.decisionAck === false) {
 			return {
 				ok: false,
@@ -3158,6 +3247,9 @@ class RecordingReviewerHost {
 		this.failureCommands.push(command);
 		this.failures.push(event);
 		await this.options.failureGate?.();
+		if (this.options.failureCommitMode === "stale") {
+			return { ok: true, type: "stale" };
+		}
 		if (this.options.failureCommitMode === "reject") {
 			return {
 				ok: false,

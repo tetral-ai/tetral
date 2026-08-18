@@ -933,6 +933,7 @@ export interface AdmitApprovalReviewInputRequest {
 export interface AdmitApprovalReviewInputResponse {
   committed?: AdmitApprovalReviewInputCommitted | undefined;
   duplicate?: AdmitApprovalReviewInputDuplicate | undefined;
+  stale?: AdmitApprovalReviewInputStale | undefined;
 }
 
 export interface AdmitApprovalReviewInputCommitted {
@@ -941,6 +942,9 @@ export interface AdmitApprovalReviewInputCommitted {
 
 export interface AdmitApprovalReviewInputDuplicate {
   runtimeInputId: string;
+}
+
+export interface AdmitApprovalReviewInputStale {
 }
 
 export interface ResolveChildThreadRequest {
@@ -11820,7 +11824,7 @@ export const AdmitApprovalReviewInputRequest: MessageFns<AdmitApprovalReviewInpu
 };
 
 function createBaseAdmitApprovalReviewInputResponse(): AdmitApprovalReviewInputResponse {
-  return { committed: undefined, duplicate: undefined };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const AdmitApprovalReviewInputResponse: MessageFns<AdmitApprovalReviewInputResponse> = {
@@ -11830,6 +11834,9 @@ export const AdmitApprovalReviewInputResponse: MessageFns<AdmitApprovalReviewInp
     }
     if (message.duplicate !== undefined) {
       AdmitApprovalReviewInputDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      AdmitApprovalReviewInputStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -11857,6 +11864,14 @@ export const AdmitApprovalReviewInputResponse: MessageFns<AdmitApprovalReviewInp
           message.duplicate = AdmitApprovalReviewInputDuplicate.decode(reader, reader.uint32());
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = AdmitApprovalReviewInputStale.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11870,6 +11885,7 @@ export const AdmitApprovalReviewInputResponse: MessageFns<AdmitApprovalReviewInp
     return {
       committed: isSet(object.committed) ? AdmitApprovalReviewInputCommitted.fromJSON(object.committed) : undefined,
       duplicate: isSet(object.duplicate) ? AdmitApprovalReviewInputDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? AdmitApprovalReviewInputStale.fromJSON(object.stale) : undefined,
     };
   },
 
@@ -11880,6 +11896,9 @@ export const AdmitApprovalReviewInputResponse: MessageFns<AdmitApprovalReviewInp
     }
     if (message.duplicate !== undefined) {
       obj.duplicate = AdmitApprovalReviewInputDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = AdmitApprovalReviewInputStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -11898,6 +11917,9 @@ export const AdmitApprovalReviewInputResponse: MessageFns<AdmitApprovalReviewInp
       : undefined;
     message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
       ? AdmitApprovalReviewInputDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? AdmitApprovalReviewInputStale.fromPartial(object.stale)
       : undefined;
     return message;
   },
@@ -12035,6 +12057,49 @@ export const AdmitApprovalReviewInputDuplicate: MessageFns<AdmitApprovalReviewIn
   ): AdmitApprovalReviewInputDuplicate {
     const message = createBaseAdmitApprovalReviewInputDuplicate();
     message.runtimeInputId = object.runtimeInputId ?? "";
+    return message;
+  },
+};
+
+function createBaseAdmitApprovalReviewInputStale(): AdmitApprovalReviewInputStale {
+  return {};
+}
+
+export const AdmitApprovalReviewInputStale: MessageFns<AdmitApprovalReviewInputStale> = {
+  encode(_: AdmitApprovalReviewInputStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmitApprovalReviewInputStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmitApprovalReviewInputStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AdmitApprovalReviewInputStale {
+    return {};
+  },
+
+  toJSON(_: AdmitApprovalReviewInputStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmitApprovalReviewInputStale>, I>>(base?: I): AdmitApprovalReviewInputStale {
+    return AdmitApprovalReviewInputStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmitApprovalReviewInputStale>, I>>(_: I): AdmitApprovalReviewInputStale {
+    const message = createBaseAdmitApprovalReviewInputStale();
     return message;
   },
 };

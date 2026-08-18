@@ -282,6 +282,9 @@ func commitInputDeclarationTx(
 		}
 	}
 	if inputKind == "interrupt_control" {
+		if err := cancelAcceptedApprovalReviewInputsTx(ctx, tx, request.GetScope(), now); err != nil {
+			return nil, err
+		}
 		result.interruptToolResults, err = settleInterruptedThreadToolsTx(
 			ctx,
 			tx,
@@ -294,6 +297,26 @@ func commitInputDeclarationTx(
 		}
 	}
 	return result, nil
+}
+
+// An interrupt that wins after Reviewer admission takes over the accepted
+// synchronous custody in the same transaction as its own durable closeout.
+// A committed Reviewer input has already crossed the admission/result race and
+// remains governed by the ordinary Reviewer outcome and interrupt cleanup.
+func cancelAcceptedApprovalReviewInputsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	now time.Time,
+) error {
+	_, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+		SET status = 'cancelled', updated_at = $3
+		WHERE workspace_id = $1
+		  AND session_id = $2
+		  AND input_kind = 'approval_review'
+		  AND status = 'accepted'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), now)
+	return err
 }
 
 func createApprovalReviewInputEventTx(

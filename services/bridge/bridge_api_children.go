@@ -204,7 +204,6 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 // later through CommitInputs; this operation owns only durable target,
 // idempotency, current binding, and accepted custody.
 func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context, request *bridgev1.AdmitApprovalReviewInputRequest) (response *bridgev1.AdmitApprovalReviewInputResponse, resultErr error) {
-	ctx = withInterruptBarrierBirth(ctx)
 	phase := "validate"
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "admit_approval_review_input", request.GetReviewId(), phase, resultErr)
@@ -224,6 +223,9 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		var parentThreadID, role, visibility, statusValue string
@@ -285,6 +287,11 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 		}
 		return nil
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.AdmitApprovalReviewInputResponse{Outcome: &bridgev1.AdmitApprovalReviewInputResponse_Stale{
+				Stale: &bridgev1.AdmitApprovalReviewInputStale{},
+			}}, nil
+		}
 		return nil, err
 	}
 	if committed {

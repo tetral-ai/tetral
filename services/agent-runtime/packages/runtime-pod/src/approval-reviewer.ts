@@ -92,7 +92,11 @@ export interface RuntimeApprovalReviewerThreadCreator {
 				readonly reviewerThreadId?: string;
 				readonly runtimeInputId?: string;
 		  }
-		| { readonly ok: false; readonly message: string }
+		| {
+				readonly ok: false;
+				readonly message: string;
+				readonly staleCustody?: true;
+		  }
 	>;
 	/** Durably closes a sidecar before the corresponding hot thread is released. */
 	readonly closeApprovalReviewerThread: (
@@ -197,7 +201,11 @@ export function createRuntimeApprovalReviewer(
 						readonly reviewerThreadId?: string;
 						readonly runtimeInputId?: string;
 				  }
-				| { readonly ok: false; readonly message: string };
+				| {
+						readonly ok: false;
+						readonly message: string;
+						readonly staleCustody?: true;
+				  };
 			ensured = yield* Effect.promise(() =>
 				options.threadCreator.createApprovalReviewerThread(trunkCreation),
 			).pipe(
@@ -209,6 +217,9 @@ export function createRuntimeApprovalReviewer(
 				),
 			);
 			if (!ensured.ok) {
+				if (ensured.staleCustody === true) {
+					return { type: "stale_custody" as const };
+				}
 				return persistenceUncertainFailure(ensured.message);
 			}
 
@@ -254,6 +265,9 @@ export function createRuntimeApprovalReviewer(
 					created.runtimeInputId === undefined
 				) {
 					lease.release();
+					if (created !== undefined && !created.ok && created.staleCustody === true) {
+						return { type: "stale_custody" as const };
+					}
 					return persistenceUncertainFailure(
 						created !== undefined && !created.ok
 							? created.message
@@ -418,6 +432,9 @@ export function createRuntimeApprovalReviewer(
 						}
 						if (!requestQuiescent) {
 							yield* quarantineUnconfirmedExecution();
+						}
+						if (settlement.type === "stale_custody") {
+							return { type: "stale_custody" };
 						}
 						logApprovalReviewSettlementFailure(
 							options.logger,
@@ -649,6 +666,9 @@ export function createRuntimeApprovalReviewer(
 					}
 					if (lease.kind === "trunk") {
 						manager.discardTrunk(executionThreadId);
+					}
+					if (committed.type === "stale_custody") {
+						return { type: "stale_custody" as const };
 					}
 					logApprovalReviewSettlementFailure(
 						options.logger,
@@ -1001,6 +1021,7 @@ function approvalReviewFailureEvent(
 
 type ReviewerOutcomeSettlement =
 	| { readonly type: "acknowledged" }
+	| { readonly type: "stale_custody" }
 	| {
 			readonly type: "rejected" | "unknown";
 			readonly error: SessionEventWriterError;
@@ -1016,7 +1037,9 @@ function commitReviewerOutcomeEffect(
 		Effect.map(
 			(result): ReviewerOutcomeSettlement =>
 				result.ok
-					? { type: "acknowledged" }
+					? result.type === "stale"
+						? { type: "stale_custody" }
+						: { type: "acknowledged" }
 					: {
 							type: result.error.retryable ? "unknown" : "rejected",
 							error: result.error,
@@ -1234,7 +1257,7 @@ function logApprovalReviewSettlementFailure(
 	reviewId: string,
 	settlement: Exclude<
 		ReviewerOutcomeSettlement,
-		{ readonly type: "acknowledged" }
+		{ readonly type: "acknowledged" | "stale_custody" }
 	>,
 ): void {
 	try {

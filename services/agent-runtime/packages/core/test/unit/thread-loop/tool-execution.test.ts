@@ -5948,6 +5948,7 @@ describe("ThreadLoop", () => {
 			entries: [userMessage("user-1", 0, "hello")],
 		});
 		const appended: SessionEvent[] = [];
+		let runToolCalls = 0;
 		const writer = writerFrom((envelope) => {
 			appended.push(envelope.event);
 			return {
@@ -5990,14 +5991,19 @@ describe("ThreadLoop", () => {
 						},
 						reviewApproval: () =>
 							Effect.succeed({ type: "stale_custody" as const }),
-						runTool: () => ({
-							type: "completed",
-							output: { text: "must not run", truncated: false },
-						}),
+						runTool: () => {
+							runToolCalls++;
+							return {
+								type: "completed",
+								output: { text: "must not run", truncated: false },
+							};
+						},
 					}),
 				),
 			),
 		);
+		expect(runToolCalls).toBe(0);
+		expect(appended.some((event) => event.type === "session.error")).toBe(false);
 		expect(result).toEqual({ type: "interrupted", discardHotState: true });
 		expect(appended.some((event) => event.type === "agent.tool_use")).toBe(
 			false,

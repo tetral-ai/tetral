@@ -559,10 +559,23 @@ export class BridgeAPIApprovalReviewerThreadCreator
 				message: "approval reviewer input admission is unavailable",
 			};
 		}
-		if (!exactlyOneDefined(admitted.committed, admitted.duplicate)) {
+		if (
+			!exactlyOneDefined(
+				admitted.committed,
+				admitted.duplicate,
+				admitted.stale,
+			)
+		) {
 			return {
 				ok: false as const,
 				message: "approval reviewer input admission result was malformed",
+			};
+		}
+		if (admitted.stale !== undefined) {
+			return {
+				ok: false as const,
+				message: "approval reviewer input admission is stale",
+				staleCustody: true as const,
 			};
 		}
 		const runtimeInputId = (admitted.committed ?? admitted.duplicate)

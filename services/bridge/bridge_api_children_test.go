@@ -19,7 +19,9 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -507,6 +509,99 @@ func TestPostgreSQLAdmitApprovalReviewInputSerializesConcurrentReplayWithoutQueu
 	if inboxCount != 1 || statusValue != "accepted" || targetThreadID != reviewerID || queueCount != 0 {
 		t.Fatalf("reviewer admission authority count/status/target/queue = %d/%q/%q/%d; want 1/accepted/%q/0",
 			inboxCount, statusValue, targetThreadID, queueCount, reviewerID)
+	}
+}
+
+func TestPostgreSQLAdmitApprovalReviewInputRejectsInterruptFirstWithoutCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID  = "sesn_reviewer_admission_interrupt_first"
+		parentID   = "thr_reviewer_admission_interrupt_parent"
+		reviewerID = "thr_reviewer_admission_interrupt_target"
+		bindingID  = "bind_reviewer_admission_interrupt"
+		podUID     = "pod_reviewer_admission_interrupt"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, created_at, updated_at
+	) VALUES ('default', $1, $2, 'rin_reviewer_admission_interrupt', 'interrupt_control',
+		'["evt_reviewer_admission_interrupt"]', 1, 1, 'queued',
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, sessionID, parentID); err != nil {
+		t.Fatalf("seed interrupt-first barrier: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	response, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
+		Scope:            bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID),
+		ReviewerThreadId: reviewerID, ReviewId: "arvw_reviewer_admission_interrupt_first",
+	})
+	if err != nil || response.GetStale() == nil {
+		t.Fatalf("interrupt-first Reviewer admission = %#v/%v; want typed stale", response, err)
+	}
+	var reviewerInboxRows int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND input_kind='approval_review'`, sessionID).Scan(&reviewerInboxRows); err != nil {
+		t.Fatalf("count interrupt-first Reviewer custody: %v", err)
+	}
+	if reviewerInboxRows != 0 {
+		t.Fatalf("interrupt-first Reviewer custody rows = %d; want zero", reviewerInboxRows)
+	}
+}
+
+func TestPostgreSQLInterruptCommitCancelsAdmissionFirstReviewerCustodyAtomically(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID        = "sesn_reviewer_admission_first_interrupt"
+		parentID         = "thr_reviewer_admission_first_parent"
+		reviewerID       = "thr_reviewer_admission_first_target"
+		bindingID        = "bind_reviewer_admission_first"
+		podUID           = "pod_reviewer_admission_first"
+		interruptID      = "rin_reviewer_admission_first_interrupt"
+		interruptEventID = "evt_reviewer_admission_first_interrupt"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	admitted, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
+		Scope: scope, ReviewerThreadId: reviewerID, ReviewId: "arvw_reviewer_admission_first_interrupt",
+	})
+	if err != nil || admitted.GetCommitted() == nil {
+		t.Fatalf("admission-first Reviewer custody = %#v/%v; want committed", admitted, err)
+	}
+
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, interruptEventID, 1, "user.interrupt", `{}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, parentID, interruptID, "interrupt_control",
+		`["`+interruptEventID+`"]`, "accepted", bindingID, podUID, 1, 1)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, parentID, interruptID, "interrupt_control", interruptEventID, 1, queue.DefaultMaxAttempts, time.Now().UTC())
+	interruptLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "reviewer-admission-first-interrupt",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+	})
+	if err != nil || committed.GetCommitted().GetInterrupt() == nil {
+		t.Fatalf("interrupt closeout after Reviewer admission = %#v/%v; want committed", committed, err)
+	}
+
+	var reviewerStatus, interruptStatus, queueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$4)`,
+		sessionID, admitted.GetCommitted().GetRuntimeInputId(), interruptID, interruptLease.ID,
+	).Scan(&reviewerStatus, &interruptStatus, &queueStatus); err != nil {
+		t.Fatalf("read admission-first interrupt atomic authority: %v", err)
+	}
+	if reviewerStatus != "cancelled" || interruptStatus != "committed" || queueStatus != "leased" {
+		t.Fatalf("admission-first interrupt statuses = Reviewer %q interrupt %q queue %q; want cancelled/committed/exact delivery lease retained",
+			reviewerStatus, interruptStatus, queueStatus)
 	}
 }
 
