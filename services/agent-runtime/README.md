@@ -41,7 +41,7 @@ invariants stated with them.
 | `ThreadEntry` | `session-manager.ts` | one resident thread with role, status, `ThreadRuntime`, command channel, and `run_slot` | released whole on cleanup — no orphan fibers, timers, or maps survive |
 | `ThreadRunSlot` | `session-manager.ts` | the single-owner run guard (below) | hot memory only; durable truth is `session_events` / `session_messages` / `session_pending_tool_uses` / `session_threads` |
 | `ThreadState` | `thread-loop/thread-state.ts` | accepted inputs, pending tool and approval work, attachments, configuration views, and request usage hints for one resident thread | rebuilt from durable state on cold start; held limits and usage hints are never durable |
-| `ContextManager` | `context-manager.ts` | hot `RuntimeMessage` state for one thread | appends only after durable ACK |
+| `ContextManager` | `context-manager.ts` | sealed provider context plus one optional open Assistant draft | mutates only after an operation-specific durable result |
 | `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
 | `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; failure fallback requires an ACKed outcome, failed requests reach durable idle before trunk reuse, and uncertain outcomes evict only the addressed execution |
@@ -66,7 +66,7 @@ the reducer, not a side-channel wake flag, decides whether work remains.
 | --- | --- |
 | `run_id` / `owner_fiber` / `scope` / `done_deferred` | the active run, its scope, and the deferred that joined waiters await |
 | `stopping` | interrupt installed; the owner is unwinding |
-| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, deferral, or terminal disposition receipt |
+| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, parked custody, or terminal rejection/stale result |
 
 | Event | Idle thread | Active, `stopping = false` | Active, `stopping = true` |
 | --- | --- | --- | --- |
@@ -121,11 +121,11 @@ state are awaited Effects, never detached background work.
 
 | RPC | Hot mutation it gates |
 | --- | --- |
-| `CommitInputs` | append accepted messages to `ContextManager` |
-| `WriteEvent` | update hot assistant/tool state; open or resolve pending waits |
-| `WriteRequestEnd` | validate current custody even when no assistant seal exists; otherwise apply the terminal message/part stamps. An interrupt during an open provider request also applies the identity-matched `CommitInputs` receipt returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
+| `CommitInputs` | apply the caller-held accepted-input context drafts at the Bridge-assigned sequences after the committed result (including idempotent replay) |
+| `WriteEvent` | apply the closed event result and its optional Assistant context append; open or resolve pending waits |
+| `WriteRequestEnd` | validate current custody even when no Assistant draft exists; otherwise seal the open draft. An interrupt during an open provider request also applies the identity-matched input commit returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |
-| `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; validate every returned stamp before removing pending tools or releasing the turn |
+| `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; apply the closed termination result before removing pending tools or releasing the turn |
 
 `Effect` is the shape of every operation with I/O, failure, or cancellation.
 `Fiber` exists only for owned lifetimes — the ThreadRun owner, the provider
@@ -196,6 +196,13 @@ Invariants a replacement must preserve:
 
 - `ProviderRequest.tools[]` carries definitions only — no route kind, RPC names,
   formatter identity, permission policy, sandbox binding, or credentials.
+- Runtime removes an unresolved Tool Call from inherited child-prefix context
+  before provider projection while retaining safe text and reasoning siblings.
+  A local in-progress request may retain its pending Tool Call; a terminal Tool
+  Result remains paired only by `modelToolCallId`.
+- Runtime applies a terminal cancellation to hot conversation context as exactly
+  `{type:"cancelled"}`. Provider-facing context never carries its internal
+  cancellation error or diagnostic.
 - Stream events echo the request identity and arrive well-formed: fragments in
   order, one terminal event, each tool call at most once per id; any violation
   closes the turn as a protocol error and discards uncommitted drafts.
@@ -221,11 +228,12 @@ Invariants a replacement must preserve:
   (`core/src/thread-loop/thread-state.ts`). Runtime admits at most that many
   attachments into a pending request ride; it does not synthesize model-only
   advisory messages for attachments outside the ride.
-- Attachment consumption is settled-output-only: the pending media rides the
-  request and is consumed only when that request end settles. A failed,
-  interrupted, or rescheduled request consumes nothing, and the same media
-  re-rides the next attempt (a rescheduled request end cannot consume
-  attachments).
+- File-backed attachment consumption is declared by exact source Event/file
+  pairs and becomes durable in the Request Start transaction before Provider
+  dispatch. It is therefore at-most-once across error, reschedule, and pod loss.
+  Transient tool-result media remains hot-owned and is consumed only by a
+  successful Request End. Attachments admitted during an active ride wait for
+  the next request.
 
 Conformance tests: `core/test/unit/llm-service.test.ts`,
 `core/test/unit/thread-loop/provider-request.test.ts`,
@@ -260,13 +268,14 @@ with separate anchors.
 Sandbox dispatch accepts one exact durable Tool Use before waiting for its
 result. A cold Runtime rejoins that accepted execution after refreshing its
 binding token; a transient refresh failure does not invent a Tool Result or
-consume durable custody. The terminal result digest stays internal and is
-returned to Bridge with the loop-authored tool-result declaration.
+consume durable custody. Bridge reads and verifies the terminal Sandbox result
+digest from its own durable execution row when Runtime settles the Tool target;
+the digest never crosses the Runtime boundary.
 Sandbox activation exhaustion is normalized at this shared rejoin boundary for
 command, file, media, and command-I/O routes: the private lifecycle settlement
 becomes one non-retryable Runtime error whose public Tool Result contains only
-`sandbox activation could not be completed`, with no route status, partial
-result, attempt metadata, or provider diagnosis.
+`The requested operation could not be completed.`, with no Sandbox concept,
+route status, partial result, attempt metadata, or provider diagnosis.
 
 `RunWeb` reaches the web-connector through `TETRAL_WEB_CONNECTOR_GRPC_ADDR`,
 which boot config requires and gives no default: a Runtime Pod whose Deployment
@@ -326,7 +335,7 @@ specialized sub-agent loop and no reviewer-only model-call path. The parent
 thread sees tool use/result; child work stays child-thread-local.
 
 - Interface: the `subagent` route operations dispatch in `tool-runner.ts`; child
-  threads are created through Bridge `CreateChildThread` with a thread context prefix;
+  threads are created through Bridge `CreateSubagentThread`; Bridge derives and stores the thread context prefix;
   `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
 - Lifecycle: `spawn_agent` prepares a durable child row and context prefix before the
   first message; `send_message` resolves the child by `task_name`, delivering
@@ -337,14 +346,14 @@ thread sees tool use/result; child work stays child-thread-local.
 Invariants a replacement must preserve:
 
 - Child durable thread and context prefix exist before the initial message; a crash
-  after `CreateChildThread` ACK reuses the same child and prefix.
+  after a duplicate `CreateSubagentThread` result reuses the same Bridge-owned child and prefix.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
-  sent envelope → received source/inbox → Runtime command → stamped input
-  receipt. Pod-loss reconciliation hands an accepted input back to the existing
+  sent envelope → received source/inbox → Runtime command → committed input
+  result. Pod-loss reconciliation hands an accepted input back to the existing
   queue job or creates one replacement only after exact Runtime custody is lost.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
-- Completion return rides the same durable wake/receipt rail: the child
+- Completion return rides the same durable wake rail: the child
   settlement writes one sent envelope and wake, admission creates or reuses the
   received source and inbox, and the parent's `CommitInputs` projects it once.
   `wait_agent` returns the exact stored envelope immediately while ensuring the
@@ -363,10 +372,11 @@ Conformance tests: `core/test/unit/session-manager.test.ts`,
 
 ### Command boundary
 
-Every inbound command must name this exact pod — namespace, name, UID (and IP
-when configured) — carry a non-empty binding id and a non-zero binding
-generation, and authenticate through TokenReview to the closed command set; a
-mismatch is a retryable rejection, never a processed command. Anchors:
+Every inbound method-specific request must select this exact pod UID, carry a
+non-empty current binding id and a non-zero binding generation, and authenticate
+through TokenReview to the closed RPC set; a mismatch is a retryable rejection,
+never a processed command. The Runtime Pod does not accept or echo Pod
+namespace, name, or IP as command payload. Anchors:
 `runtime-pod/src/command.ts` (dispatch), `runtime-pod/src/runtime-service.ts`
 (scope binding), `runtime-pod/src/auth.ts` (TokenReview). The pod queries no
 database, calls no sandbox provider, terminates no public HTTP, and holds no
@@ -392,13 +402,13 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `core/test/unit/thread-loop/provider-request.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |
 | `core/test/unit/llm-service.test.ts` | provider-stream ordering/identity validation and normalization |
 | `core/test/unit/runtime-accumulator.test.ts` | per-turn `ProviderStreamAccumulator` framing that never leaks across turns |
-| `core/test/unit/session-event-writer.test.ts`, `runtime-message-projection.test.ts` | `WriteEvent` projection whitelist and hot-state updates after ACK |
+| `core/test/unit/session-event-writer.test.ts`, `runtime-context-projection.test.ts` | `WriteEvent` projection whitelist and hot-state updates after ACK |
 | `core/test/unit/turn-retry-budget.test.ts` | provider and compaction reschedule budgets |
 | `core/test/unit/tool-system.test.ts` | `evaluateToolGate` decisions, `runPolicy` serialization/parallelism, invalid-tool repair, approval routing |
 | `core/test/unit/approval-reviewer-manager.test.ts` | reviewer trunk/sidecar selection, cursor and snapshot succession, decision memo |
 | `core/test/unit/conversation-turns.test.ts` | `fork_turns` turn partitioning |
 | `core/test/unit/session-run-static-boundaries.test.ts`, `static-boundaries.test.ts` | import confinement and dependency boundaries |
-| `runtime-pod/test/unit/command.test.ts`, `runtime-service.test.ts` | command-envelope validation and scope binding |
+| `runtime-pod/test/unit/command.test.ts`, `runtime-service.test.ts` | method-specific ingress validation and scope binding |
 | `runtime-pod/test/unit/auth.test.ts` | TokenReview identity and the closed command set |
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |
 | `runtime-pod/test/unit/tool-runner.test.ts` | route dispatch across sandbox / gateway / bridge / subagent |

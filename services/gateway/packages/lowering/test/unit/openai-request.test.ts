@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   ProviderRequestKind,
-  RuntimeMessageRole,
-  RuntimeToolPartState,
+  ProviderContextRole,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { ProviderRequest, RuntimeMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest, ProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderRequestLoweringError, classifyProviderStreamError } from "../../src/errors.js";
 import { lowerProviderRequest, type ResolvedProviderRequestAttachment } from "../../src/request.js";
 import { OpenAIGPT55Rules } from "../../src/rules/openai.js";
@@ -12,14 +11,10 @@ import { OpenAIGPT55Rules } from "../../src/rules/openai.js";
 describe("openai request lowering", () => {
   test("openai-reasoning-metadata preserves encrypted reasoning metadata and strips stateless item ids", () => {
     const lowered = lowerOpenAIRequest(openAIRequest({
-      messages: [{
-        id: "msg_reasoning",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
           {
-            id: "reasoning",
             reasoning: {
               text: "",
               metadataJson: JSON.stringify({
@@ -47,13 +42,9 @@ describe("openai request lowering", () => {
     }]);
 
     const noMetadata = lowerOpenAIRequest(openAIRequest({
-      messages: [{
-        id: "msg_reasoning_no_metadata",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [{
-          id: "reasoning_no_metadata",
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{
           reasoning: { text: "internal chain", metadataJson: "{}" },
         }],
       }],
@@ -77,7 +68,6 @@ describe("openai request lowering", () => {
         attachments: [{
           transient: {
             attachmentRef: "att_1",
-            sourceToolUseEventId: "sevt_1",
             sourcePath: "/tmp/image.png",
             pageRange: "",
             detail: "auto",
@@ -237,22 +227,21 @@ describe("openai request lowering", () => {
     });
     const lowered = lowerOpenAIRequest(openAIRequest({
       attachments: [attachment],
-      messages: [{
-        id: "msg_tool_surrogate",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [{
-          id: "part_tool_surrogate",
-          tool: {
-            callId: "call_\uD800",
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { toolCall: {
+            modelToolCallId: "call_\uD800",
             name: "tool_\uDC00",
-            toolUseEventId: "evt_tool_surrogate",
-            state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
             inputJson: "{}",
-            outputOrErrorJson: "{}",
-          },
-        }],
+          } },
+          { toolResult: {
+            modelToolCallId: "call_\uD800",
+            completed: { outputJson: "{}" },
+            error: undefined,
+            cancelled: undefined,
+          } },
+        ],
       }],
       tools: [{
         name: "tool_\uDC00",
@@ -267,6 +256,33 @@ describe("openai request lowering", () => {
     ]));
     expect(Object.keys(lowered.tools)).toEqual(["tool_\uFFFD"]);
   });
+
+	test("rejects Tool Call identities that collide after text sanitation", () => {
+		let caught: unknown;
+		try {
+			lowerOpenAIRequest(openAIRequest({
+				context: [{
+					role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+					content: [
+						{ toolCall: { modelToolCallId: "call_\uD800", name: "Read", inputJson: "{}" } },
+						{ toolCall: { modelToolCallId: "call_\uFFFD", name: "Read", inputJson: "{}" } },
+					],
+				}],
+			}));
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(ProviderRequestLoweringError);
+		expect(classifyProviderStreamError(caught)).toMatchObject({
+			code: "provider_request_invalid",
+			retryable: false,
+			fatal: true,
+			statusCode: 400,
+		});
+		expect(String(caught)).toContain(
+			"Provider Tool Call identities collide after text sanitation.",
+		);
+	});
 
   test("openai-schema-lowering applies Codex-style schema lowering", () => {
     const lowered = lowerOpenAIRequest(openAIRequest({
@@ -390,13 +406,12 @@ function openAIRequest(overrides: Partial<ProviderRequest> = {}): ProviderReques
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
-    parentThreadId: undefined,
     bindingId: "bind_1",
     bindingGeneration: 1,
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "openai", modelId: "gpt-5.5", variant: "" },
     system: [],
-    messages: [textMessage("msg_1", "hello")],
+    context: [textMessage("hello")],
     tools: [],
     attachments: [],
     limits: { maxOutputTokens: 2048, timeoutMs: 30_000 },
@@ -404,13 +419,10 @@ function openAIRequest(overrides: Partial<ProviderRequest> = {}): ProviderReques
   };
 }
 
-function textMessage(id: string, text: string): RuntimeMessage {
+function textMessage(text: string): ProviderContextEntry {
   return {
-    id,
-    role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-    status: "completed",
-    origin: "user",
-    parts: [{ id: `${id}_part`, text: { text } }],
+    role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+    content: [{ text: { text } }],
   };
 }
 
@@ -430,7 +442,6 @@ function resolvedAttachment(
 function transientOrigin(attachmentRef: string): NonNullable<ResolvedProviderRequestAttachment["transient"]> {
   return {
     attachmentRef,
-    sourceToolUseEventId: "sevt_1",
     sourcePath: "/tmp/image.png",
     pageRange: "",
     detail: "auto",

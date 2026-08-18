@@ -15,10 +15,6 @@ import type { sendUnaryData, ServerUnaryCall, ServiceError } from "@grpc/grpc-js
 import {
   AgentRuntimePodServiceService,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
-import type {
-  RuntimeInputCommandRequest,
-  RuntimeInputCommandResponse,
-} from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { grpcServerOptions } from "./bounds.js";
 import { GrpcStatusError } from "./runtime-service.js";
 import type { RuntimeControlService } from "./runtime-service.js";
@@ -65,9 +61,9 @@ export function createRuntimeGrpcServer(service: RuntimeControlService): Runtime
   };
 }
 
-function commandHandler(
-  handler: (request: RuntimeInputCommandRequest, metadata: Metadata) => Promise<RuntimeInputCommandResponse>,
-): (call: ServerUnaryCall<RuntimeInputCommandRequest, RuntimeInputCommandResponse>, callback: sendUnaryData<RuntimeInputCommandResponse>) => void {
+function commandHandler<Request, Response>(
+  handler: (request: Request, metadata: Metadata) => Promise<Response>,
+): (call: ServerUnaryCall<Request, Response>, callback: sendUnaryData<Response>) => void {
   return (call, callback) => {
     void unary(() => handler(call.request, call.metadata), callback);
   };

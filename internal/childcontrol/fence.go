@@ -137,7 +137,7 @@ func sourceToolTerminalTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, se
 func matchingCloseReceiptExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, targetThreadID, rootThreadID, sourceID string) (bool, error) {
 	operationID := stableID("child_tree_close", sourceID, rootThreadID)
 	var exists bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_bridge_operations WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND operation='mark_child_thread_closed' AND source_kind='child_close_command' AND idempotency_key=$4)`, workspaceID, sessionID, targetThreadID, operationID).Scan(&exists)
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_bridge_operations WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND operation='close_child_control' AND source_kind='child_close_command' AND idempotency_key=$4)`, workspaceID, sessionID, targetThreadID, operationID).Scan(&exists)
 	return exists, err
 }
 

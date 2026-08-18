@@ -452,6 +452,14 @@ jobs:
       - name: Install Gateway Service dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install Agent Runtime dependencies
+        # The gateway typecheck graph includes cross-service composition
+        # fixtures that import agent-runtime sources; those files resolve
+        # @tetral/gateway-protocol through agent-runtime's file: link, which
+        # only exists after an install on the agent-runtime side.
+        working-directory: ${{ github.workspace }}/services/agent-runtime
+        run: bun install --frozen-lockfile
+
       - name: Start Gateway PostgreSQL test service
         working-directory: ${{ github.workspace }}
         env:
@@ -612,7 +620,7 @@ jobs:
       - name: Secret and redaction static guards
         run: go test ./integration/static -run 'Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log' -count=1
 
-  helper-privilege:
+  sandbox-local-image-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -622,8 +630,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Root sandbox-helper privilege continuity
-        run: ./scripts/run-helper-privilege-ci.sh
+      - name: Setup Go
+        # actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.12'
+          cache-dependency-path: go.sum
+
+      - name: Helper privilege integration
+        run: sudo "$(command -v go)" test ./internal/sandbox/helper -run '^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$' -count=1 -v
+
+      - name: Local Sandbox image smoke
+        run: ./scripts/run-sandbox-local-image-smoke.sh
 
   external-smoke:
     if: >-
@@ -639,6 +657,13 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+
+      - name: Setup Go
+        # actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.12'
+          cache-dependency-path: go.sum
 
       - name: Setup Bun
         # oven-sh/setup-bun@v2

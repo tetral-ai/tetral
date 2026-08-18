@@ -103,7 +103,7 @@ const (
 	//   running              child-thread status write                     running / thread_status_running
 	//   idle                 child idle / finalization                     idle / thread_status_idle
 	//   requires_action      pending external-wait projection              idle + stop-reason / requires-action metadata
-	//   closed_for_runtime   MarkChildThreadClosed (close_agent)           idle; resumable by resume_agent
+	//   closed_for_runtime   CloseChildControl (close_agent)               idle; resumable by resume_agent
 	//   rescheduling         child retry settlement                        rescheduling / thread_status_rescheduled
 	//   terminated           terminal closeout (CommitRuntimeTermination)  terminated / thread_status_terminated
 	//   failed               terminal closeout (CommitRuntimeTermination)  terminated / thread_status_terminated
@@ -332,7 +332,6 @@ const (
 		insert_stream_position BIGINT NOT NULL DEFAULT 0,
 		runtime_write_id TEXT,
 		model_request_id TEXT,
-		stable_reasoning_json TEXT,
 		projection_json TEXT NOT NULL DEFAULT '{}',
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
@@ -413,19 +412,17 @@ const (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
 		session_thread_id TEXT NOT NULL,
-		request_end_event_id TEXT NOT NULL,
+		request_start_event_id TEXT NOT NULL,
 		source_event_id TEXT NOT NULL,
 		file_id TEXT NOT NULL,
-		UNIQUE (
-			workspace_id, session_id, session_thread_id,
-			request_end_event_id, source_event_id, file_id
-		),
+		CONSTRAINT session_file_attachment_consumptions_source_file_key
+			UNIQUE (workspace_id, source_event_id, file_id),
 		FOREIGN KEY (workspace_id, session_id)
 			REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, session_id, session_thread_id)
 			REFERENCES session_threads(workspace_id, session_id, id),
 		FOREIGN KEY (
-			workspace_id, session_id, session_thread_id, request_end_event_id
+			workspace_id, session_id, session_thread_id, request_start_event_id
 		) REFERENCES session_events(
 			workspace_id, session_id, session_thread_id, event_id
 		),
@@ -751,12 +748,15 @@ const (
 			'commit_inputs',
 			'commit_task_notification_result',
 			'write_event',
+			'settle_tool_result',
 			'write_request_end',
 			'finish_idle',
 			'create_child_thread',
+			'deliver_inter_agent_mail',
 			'resolve_child_thread',
 			'list_child_threads',
-			'mark_child_thread_closed',
+			'close_child_control',
+			'close_approval_reviewer',
 			'mark_child_thread_active',
 			'read_command_result',
 			'send_command_input',
@@ -765,6 +765,7 @@ const (
 			'create_transient_attachment',
 			'mcp_manifest_changed',
 			'commit_mcp_tool_result',
+			'relinquish_mcp_tool_result',
 			'commit_internal_tool_repair',
 			'commit_runtime_termination'
 		)),
@@ -810,7 +811,7 @@ const (
 		background_write_sequence BIGINT,
 		memory_projection_state TEXT,
 		mcp_claim_status TEXT,
-		mcp_claim_owner_request_id TEXT,
+		mcp_claim_id TEXT,
 		mcp_claim_lease_expires_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
@@ -932,11 +933,11 @@ const (
 			mcp_claim_status IS NULL OR mcp_claim_status IN ('stored', 'in_flight', 'consumed')
 		),
 		CONSTRAINT session_runtime_tool_results_mcp_claim_shape CHECK (
-			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 			OR (tool_kind = 'mcp' AND mcp_claim_status IS NOT NULL AND (
-				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-				OR (mcp_claim_status = 'consumed' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
+				(mcp_claim_status = 'stored' AND mcp_claim_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'consumed' AND mcp_claim_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'in_flight' AND mcp_claim_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
 			))
 		),
 		CONSTRAINT session_runtime_tool_results_input_shape CHECK (normalized_input_hash <> '' AND tool_name <> '' AND input_json <> '')
@@ -1665,6 +1666,7 @@ END $$`
 	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
+	createPostgreSQLSessionRuntimeInboxAttachmentIndex      = `CREATE INDEX IF NOT EXISTS session_runtime_inbox_attachment_authority_lookup ON session_runtime_inbox(workspace_id, session_id, session_thread_id, runtime_input_id) INCLUDE (input_kind, status)`
 	createPostgreSQLSessionEventsAgentMailDeliveryIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_agent_mail_delivery ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
@@ -1936,6 +1938,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_messages_model_request_unique", createPostgreSQLSessionMessagesModelRequestIndex},
 		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
 		{"index_session_file_attachment_consumptions_pending", createPostgreSQLSessionFileAttachmentPendingIndex},
+		{"index_session_runtime_inbox_attachment_authority", createPostgreSQLSessionRuntimeInboxAttachmentIndex},
 		{"index_session_events_agent_mail_delivery", createPostgreSQLSessionEventsAgentMailDeliveryIndex},
 		{"index_session_pending_tool_uses_status", createPostgreSQLPendingToolUsesStatusIndex},
 		{"index_session_background_tasks_status", createPostgreSQLBackgroundTasksStatusIndex},

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/bound"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/pathsafe"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
+	"github.com/tetral-ai/tetral/internal/sandbox/runtimeidentity"
 )
 
 const (
@@ -704,7 +706,7 @@ func execEnv(input map[string]any) ([]string, *protocol.ToolError) {
 	values := map[string]string{}
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
-		if ok {
+		if ok && !runtimeidentity.IsReservedEnvironmentKey(key) {
 			values[key] = value
 		}
 	}
@@ -713,15 +715,28 @@ func execEnv(input map[string]any) ([]string, *protocol.ToolError) {
 		if !ok {
 			return nil, &protocol.ToolError{Kind: "invalid_input", Message: "env values must be strings"}
 		}
-		values[key] = value
+		if !runtimeidentity.IsReservedEnvironmentKey(key) {
+			values[key] = value
+		}
 	}
+	// This is the final environment for both foreground execution and the
+	// serialized detached-supervisor handoff. Tool input cannot replace the
+	// runtime identity whose HOME owns the Driver-installed global Git config.
+	values["HOME"] = runtimeidentity.Home
+	values["USER"] = runtimeidentity.User
+	values["LOGNAME"] = runtimeidentity.User
 	values["TERM"] = "dumb"
 	values["NO_COLOR"] = "1"
 	values["PAGER"] = "cat"
 	values["GIT_PAGER"] = "cat"
-	out := make([]string, 0, len(values))
-	for key, value := range values {
-		out = append(out, key+"="+value)
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
 	}
 	return out, nil
 }

@@ -1,29 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import { McpErrorKind, McpRetryStatus, RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxMcpToolInputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
-import { validateListMcpToolsResponse, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "../../src/bounds.js";
+import { validateListMcpToolsResponse, validateMcpExecutorPayload, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "../../src/bounds.js";
 import { MCP_BLOB_MAX_BYTES } from "../../src/formatter.js";
 
 describe("MCP connector response bounds", () => {
   test("accepts exact 64 KiB input JSON and rejects one byte over", () => {
     const request = {
-      requestId: "request-1",
       workspaceId: "workspace-1",
       sessionId: "session-1",
       sessionThreadId: "thread-1",
       toolUseEventId: "event-1",
-      mcpServerName: "server-1",
-      toolName: "tool-1",
       bindingId: "binding-1",
       bindingGeneration: 1,
       runtimeBindingToken: "token-1",
-      inputJson: jsonObjectAtBytes(MaxMcpToolInputJsonBytes),
     };
-
-    expect(Buffer.byteLength(request.inputJson, "utf8")).toBe(MaxMcpToolInputJsonBytes);
     expect(validateRunMcpToolRequest(request)).toEqual({ ok: true });
-    expect(validateRunMcpToolRequest({
-      ...request,
+    const executor = { mcpServerName: "server-1", toolName: "tool-1", inputJson: jsonObjectAtBytes(MaxMcpToolInputJsonBytes) };
+    expect(Buffer.byteLength(executor.inputJson, "utf8")).toBe(MaxMcpToolInputJsonBytes);
+    expect(validateMcpExecutorPayload(executor)).toEqual({ ok: true });
+    expect(validateMcpExecutorPayload({
+      ...executor,
       inputJson: jsonObjectAtBytes(MaxMcpToolInputJsonBytes + 1),
     })).toEqual({ ok: false, message: "invalid internal request" });
   });

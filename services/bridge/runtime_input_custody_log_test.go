@@ -64,22 +64,20 @@ func TestPostgreSQLAcceptanceTimeTaskNotificationParkingLogsCommittedCustody(t *
 		PodUID: podUID, PodIP: "10.0.0.1",
 	}}
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
-	if err != nil || plan.Request == nil {
+	if err != nil || plan.AcceptTask == nil {
 		t.Fatalf("prepare task notification = %#v, %v; want Runtime request", plan, err)
 	}
 
 	source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_accept_park_log_close")
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	if _, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), RootChildThreadId: childID,
-		SourceToolUseEventId: source.GetSourceToolUseEventId(), Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
-		IncludeDescendants: true,
+		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
 	}); err != nil {
 		t.Fatalf("admit close fence: %v", err)
 	}
 	var output bytes.Buffer
 	deliveryStore.Logger = slog.New(slog.NewJSONHandler(&output, nil))
-	settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, plan.Request)
+	settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, plan.AttemptedBinding)
 	if err != nil || !settled {
 		t.Fatalf("accept notification behind close fence = %t, %v; want lease settlement", settled, err)
 	}
@@ -153,9 +151,7 @@ func TestPostgreSQLPrepareTaskNotificationParksQueuedCustodyBeforeRuntimeResolut
 	source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_prepare_park_close")
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	if _, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), RootChildThreadId: childID,
-		SourceToolUseEventId: source.GetSourceToolUseEventId(), Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
-		IncludeDescendants: true,
+		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
 	}); err != nil {
 		t.Fatalf("admit close fence: %v", err)
 	}
@@ -163,7 +159,7 @@ func TestPostgreSQLPrepareTaskNotificationParksQueuedCustodyBeforeRuntimeResolut
 	resolver := &recordingRuntimeTargetResolver{err: errors.New("target resolution must not run for parked custody")}
 	deliveryStore.TargetResolver = resolver
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
-	if err != nil || !plan.SettledAccepted || !plan.QueueLeaseSettled || plan.Request != nil {
+	if err != nil || !plan.SettledAccepted || !plan.QueueLeaseSettled || plan.hasCommand() {
 		t.Fatalf("prepare notification behind close fence = %#v, %v; want settled parked custody", plan, err)
 	}
 	if len(resolver.jobs) != 0 {
@@ -211,16 +207,14 @@ func TestPostgreSQLChildCloseAdmissionParksQueuedTaskNotificationAndCancelsQueue
 	source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_close_park_queued")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), RootChildThreadId: childID,
-		SourceToolUseEventId: source.GetSourceToolUseEventId(), Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
-		IncludeDescendants: true,
+		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
 	}
 	first, err := store.AdmitChildInterrupt(context.Background(), request)
-	if err != nil || first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+	if err != nil || first.GetCommitted() == nil {
 		t.Fatalf("admit close over queued notification = %#v, %v; want committed", first, err)
 	}
 	replay, err := store.AdmitChildInterrupt(context.Background(), request)
-	if err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+	if err != nil || replay.GetDuplicate() == nil || replay.GetDuplicate().GetControlOperationId() != first.GetCommitted().GetControlOperationId() {
 		t.Fatalf("replay close admission = %#v, %v; want duplicate", replay, err)
 	}
 	var inboxStatus, queueStatus, parkedBinding, parkedPod string

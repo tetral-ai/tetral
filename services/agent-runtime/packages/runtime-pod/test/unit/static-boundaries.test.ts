@@ -73,16 +73,23 @@ describe("Runtime Pod static boundaries", () => {
     expect(violations).toEqual([]);
   });
 
-  test("protocol exposes Runtime Pod command envelope identity", async () => {
+  test("protocol exposes method-specific Runtime Pod ingress contracts", async () => {
     const protocol = await readFile(
       new URL("src/gen/tetral/agent_runtime/v1/agent_runtime.ts", protocolRoot),
       "utf8",
     );
 
-    expect(protocol).toContain("export interface RuntimeInputCommandRequest");
+    expect(protocol).toContain("export interface AcceptInputRequest");
+    expect(protocol).toContain("export interface AcceptAgentMailRequest");
+    expect(protocol).toContain("export interface AcceptTaskNotificationRequest");
+    expect(protocol).toContain("export interface InterruptRequest");
+    expect(protocol).toContain("export interface ResolveToolConfirmationRequest");
+    expect(protocol).toContain("export interface ApplyRuntimeConfigRequest");
+    expect(protocol).toContain("export interface CleanupSessionRequest");
     expect(protocol).toContain("sessionThreadId: string;");
     expect(protocol).toContain("runtimeInputId: string;");
-    expect(protocol).toContain("RuntimeCommandKind");
+    expect(protocol).not.toContain("RuntimeInput" + "CommandRequest");
+    expect(protocol).not.toContain("RuntimeCommand" + "Kind");
     expect(protocol).toContain("bindingGeneration: number;");
   });
 
@@ -206,8 +213,20 @@ describe("Runtime Pod static boundaries", () => {
     expect(command).toContain("BridgeAPIEventWriter");
     expect(command).toContain("RuntimePodGatewayClient");
     expect(command).toContain("channelOptions: gatewayGrpcChannelOptions()");
-    expect(toolRunner).toContain("new ProviderGatewayServiceClient(options.webAddress, credentials.createInsecure(), webGrpcChannelOptions())");
-    expect(toolRunner).toContain("new McpConnectorServiceClient(options.mcpConnectorAddress, credentials.createInsecure(), grpcClientChannelOptions())");
+    expect(
+      hasNewExpression(toolRunner, "ProviderGatewayServiceClient", [
+        "options.webAddress",
+        "credentials.createInsecure()",
+        "webGrpcChannelOptions()",
+      ]),
+    ).toBe(true);
+    expect(
+      hasNewExpression(toolRunner, "McpConnectorServiceClient", [
+        "options.mcpConnectorAddress",
+        "credentials.createInsecure()",
+        "grpcClientChannelOptions()",
+      ]),
+    ).toBe(true);
     expect(command).toContain("RuntimePodToolRunner");
     expect(command).toContain("createToolCatalog");
     expect(command).toContain("includeSubAgentTools: true");
@@ -293,15 +312,49 @@ describe("Runtime Pod static boundaries", () => {
     const reviewer = await readFile(new URL("src/approval-reviewer.ts", podRoot), "utf8");
     const threadLoop = await readFile(new URL("src/thread-loop/thread-loop.ts", coreRoot), "utf8");
     const toolExecution = await readFile(new URL("src/thread-loop/tool-execution.ts", coreRoot), "utf8");
+    const normalizedReviewer = reviewer.replace(/\s+/g, "");
 
-    expect(reviewer).toContain("return (request) => Effect.gen(function* ()");
-    expect(reviewer).toContain("yield* manager.fork(");
+    expect(normalizedReviewer).toContain("return(request)=>Effect.gen(function*()");
+    expect(normalizedReviewer).toContain("yield*manager.fork(");
     expect(reviewer).not.toContain("return async (request)");
     expect(reviewer).not.toMatch(/\bvoid\s*\(\s*async\s*\(/);
     expect(toolExecution).toContain(") => Effect.Effect<RuntimeApprovalReviewResult, never>;");
     expect(threadLoop).not.toContain("yield* Effect.promise(async () =>");
   });
 });
+
+function hasNewExpression(
+  text: string,
+  constructorName: string,
+  expectedArguments: readonly string[],
+): boolean {
+  const source = ts.createSourceFile(
+    "boundary.ts",
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === constructorName &&
+      node.arguments?.length === expectedArguments.length &&
+      node.arguments.every(
+        (argument, index) =>
+          argument.getText(source).replace(/\s+/g, "") === expectedArguments[index],
+      )
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
 
 async function collectTypeScriptFiles(directoryUrl: URL): Promise<readonly string[]> {
   const entries = await readdir(directoryUrl, { withFileTypes: true });

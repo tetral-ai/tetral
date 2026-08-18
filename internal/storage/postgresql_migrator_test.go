@@ -70,6 +70,45 @@ func TestMigrateSchemaCreatesSessionMCPManifestsShapeAndRLS(t *testing.T) {
 	assertSessionMCPManifestsSchemaShapeAndRLS(t, db, schema)
 }
 
+func TestMigrateSchemaOwnsAttachmentAuthorityInboxIndex(t *testing.T) {
+	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
+	ctx := context.Background()
+	if err := storage.MigrateSchema(ctx, db); err != nil {
+		t.Fatalf("MigrateSchema: %v", err)
+	}
+	assertAttachmentAuthorityInboxIndex(t, db)
+
+	if _, err := db.ExecContext(ctx, `DROP INDEX session_runtime_inbox_attachment_authority_lookup`); err != nil {
+		t.Fatalf("drop attachment authority Inbox index: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM tetral_schema_migrations WHERE version = 1`); err != nil {
+		t.Fatalf("clear disposable baseline stamp: %v", err)
+	}
+	if err := storage.MigrateSchema(ctx, db); err != nil {
+		t.Fatalf("reseed disposable baseline: %v", err)
+	}
+	assertAttachmentAuthorityInboxIndex(t, db)
+}
+
+func assertAttachmentAuthorityInboxIndex(t testing.TB, db *sql.DB) {
+	t.Helper()
+	var definition string
+	if err := db.QueryRow(`SELECT indexdef FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'session_runtime_inbox'
+		  AND indexname = 'session_runtime_inbox_attachment_authority_lookup'`).Scan(&definition); err != nil {
+		t.Fatalf("read attachment authority Inbox index: %v", err)
+	}
+	for _, fragment := range []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "INCLUDE (input_kind, status)"} {
+		if !strings.Contains(definition, fragment) {
+			t.Fatalf("attachment authority Inbox index = %q; missing %q", definition, fragment)
+		}
+	}
+	if strings.Contains(definition, "event_ids_json") {
+		t.Fatalf("attachment authority index stores unbounded event_ids_json: %q", definition)
+	}
+}
+
 func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
@@ -128,7 +167,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "c367edfe42520fc13444fce5e23e896ac689f23e9e9c850e6555a55d1d58c9d3"
+	const want = "eab41c9b4f0c0181f255f6a4b44325c3e22f17fadfa0b492db50607a4611241c"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -536,6 +575,16 @@ func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 	if !rowSecurity || !forceRowSecurity {
 		t.Fatalf("consumption RLS enabled/forced = %v/%v, want true/true", rowSecurity, forceRowSecurity)
 	}
+	var consumptionPairConstraint string
+	if err := db.QueryRowContext(ctx, `SELECT pg_get_constraintdef(oid)
+		FROM pg_constraint
+		WHERE conrelid = 'session_file_attachment_consumptions'::regclass
+		  AND conname = 'session_file_attachment_consumptions_source_file_key'`).Scan(&consumptionPairConstraint); err != nil {
+		t.Fatalf("read consumption source/file constraint: %v", err)
+	}
+	if consumptionPairConstraint != "UNIQUE (workspace_id, source_event_id, file_id)" {
+		t.Fatalf("consumption source/file constraint = %q", consumptionPairConstraint)
+	}
 	var mediaIndexDefinition string
 	if err := db.QueryRowContext(ctx, `SELECT indexdef
 		FROM pg_indexes
@@ -557,14 +606,14 @@ func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 	)`); err != nil {
 		t.Fatalf("seed media thread: %v", err)
 	}
-	for _, eventID := range []string{"sevt_source_media", "sevt_request_end_media"} {
+	for _, eventID := range []string{"sevt_source_media", "sevt_request_start_media", "sevt_request_start_media_second"} {
 		if _, err := db.ExecContext(ctx, `INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
 			payload_json, visibility, session_visible, created_at, updated_at
 		) VALUES (
 			'wksp_media', 'sesn_media', 'thr_media', $1,
-			CASE WHEN $1 = 'sevt_source_media' THEN 1 ELSE 2 END,
-			CASE WHEN $1 = 'sevt_source_media' THEN 'user.message' ELSE 'span.model_request_end' END,
+			CASE $1 WHEN 'sevt_source_media' THEN 1 WHEN 'sevt_request_start_media' THEN 2 ELSE 3 END,
+			CASE WHEN $1 = 'sevt_source_media' THEN 'user.message' ELSE 'span.model_request_start' END,
 			'{}', 'public', true, '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z'
 		)`, eventID); err != nil {
 			t.Fatalf("seed media event %q: %v", eventID, err)
@@ -587,15 +636,23 @@ func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 		t.Fatalf("seed media file: %v", err)
 	}
 	insertConsumption := `INSERT INTO session_file_attachment_consumptions (
-		workspace_id, session_id, session_thread_id, request_end_event_id, source_event_id, file_id
+		workspace_id, session_id, session_thread_id, request_start_event_id, source_event_id, file_id
 	) VALUES (
-		'wksp_media', 'sesn_media', 'thr_media', 'sevt_request_end_media', 'sevt_source_media', 'file_media'
+		'wksp_media', 'sesn_media', 'thr_media', 'sevt_request_start_media', 'sevt_source_media', 'file_media'
 	)`
 	if _, err := db.ExecContext(ctx, insertConsumption); err != nil {
 		t.Fatalf("insert media consumption: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, insertConsumption); err == nil {
-		t.Fatal("duplicate six-key media consumption was accepted")
+		t.Fatal("duplicate source/file media consumption was accepted")
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO session_file_attachment_consumptions (
+		workspace_id, session_id, session_thread_id, request_start_event_id, source_event_id, file_id
+	) VALUES (
+		'wksp_media', 'sesn_media', 'thr_media',
+		'sevt_request_start_media_second', 'sevt_source_media', 'file_media'
+	)`); err == nil {
+		t.Fatal("second Request Start consumed an existing source/file pair")
 	}
 	seedStorageSchemaSession(t, db, "wksp_media", "sesn_media_other")
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_threads (
@@ -607,10 +664,10 @@ func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 		t.Fatalf("seed other media thread: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_file_attachment_consumptions (
-		workspace_id, session_id, session_thread_id, request_end_event_id, source_event_id, file_id
+		workspace_id, session_id, session_thread_id, request_start_event_id, source_event_id, file_id
 	) VALUES (
 		'wksp_media', 'sesn_media_other', 'thr_media_other',
-		'sevt_request_end_media', 'sevt_source_media', 'file_media'
+		'sevt_request_start_media', 'sevt_source_media', 'file_media'
 	)`); err == nil {
 		t.Fatal("cross-session media consumption was accepted")
 	}
@@ -649,14 +706,14 @@ func TestMultimodalConsumptionPoliciesPermitInsertAndSessionCascadeOnly(t *testi
 	)`); err != nil {
 		t.Fatalf("seed policy thread: %v", err)
 	}
-	for _, eventID := range []string{"sevt_source_policy", "sevt_end_policy"} {
+	for _, eventID := range []string{"sevt_source_policy", "sevt_start_policy"} {
 		if _, err := admin.ExecContext(ctx, `INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
 			payload_json, visibility, session_visible, created_at, updated_at
 		) VALUES (
 			'wksp_media_policy', 'sesn_media_policy', 'thr_media_policy', $1,
 			CASE WHEN $1='sevt_source_policy' THEN 1 ELSE 2 END,
-			CASE WHEN $1='sevt_source_policy' THEN 'user.message' ELSE 'span.model_request_end' END,
+			CASE WHEN $1='sevt_source_policy' THEN 'user.message' ELSE 'span.model_request_start' END,
 			'{}', 'public', true, '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z'
 		)`, eventID); err != nil {
 			t.Fatalf("seed policy event %q: %v", eventID, err)
@@ -691,15 +748,15 @@ func TestMultimodalConsumptionPoliciesPermitInsertAndSessionCascadeOnly(t *testi
 		t.Fatalf("set runtime workspace: %v", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO session_file_attachment_consumptions (
-		workspace_id, session_id, session_thread_id, request_end_event_id, source_event_id, file_id
+		workspace_id, session_id, session_thread_id, request_start_event_id, source_event_id, file_id
 	) VALUES (
 		'wksp_media_policy', 'sesn_media_policy', 'thr_media_policy',
-		'sevt_end_policy', 'sevt_source_policy', 'file_media_policy'
+		'sevt_start_policy', 'sevt_source_policy', 'file_media_policy'
 	)`); err != nil {
 		t.Fatalf("runtime insert consumption: %v", err)
 	}
 	updateResult, err := tx.ExecContext(ctx, `UPDATE session_file_attachment_consumptions
-		SET source_event_id='sevt_end_policy'
+		SET source_event_id='sevt_start_policy'
 		WHERE workspace_id='wksp_media_policy' AND session_id='sesn_media_policy'`)
 	if err != nil {
 		t.Fatalf("runtime direct update: %v", err)

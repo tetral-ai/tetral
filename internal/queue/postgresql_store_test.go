@@ -659,6 +659,115 @@ func TestPostgreSQLStoreLeaseCandidateWindowKeepsInterruptException(t *testing.T
 	}
 }
 
+func TestPostgreSQLStoreInterruptRetryRemainsSessionBarrierThroughFinalizationRecovery(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	store := NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), RetryPolicy{
+		BaseDelay: time.Minute, MaxDelay: time.Minute, MaxAttempts: 2,
+		RandomInt64: func(bound int64) int64 { return bound - 1 },
+	})
+	ctx := context.Background()
+	ws := workspace.ID("ws_interrupt_retry_barrier")
+	sessionID := "sesn_interrupt_retry_barrier"
+	threadID := "thrd_interrupt_retry_barrier"
+	now := time.Date(2026, 7, 1, 12, 47, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_intbar", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_interrupt_barrier"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_interrupt_barrier", "interrupt_control", 1, 1),
+		Priority:    100, MaxAttempts: 2, Now: now,
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_msgafter", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_message_after_interrupt"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_message_after_interrupt", "messages", 2, 2), Priority: 200, Now: now.Add(time.Second),
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_sibling_after", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_sibling_after_interrupt"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_interrupt_barrier_sibling", "rin_sibling_after_interrupt", "messages", 3, 3), Priority: 300, Now: now.Add(2 * time.Second),
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_int2", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_second_interrupt"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_second_interrupt", "interrupt_control", 4, 4),
+		Priority:    400, MaxAttempts: 2, Now: now.Add(3 * time.Second),
+	})
+
+	first := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-a", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(4 * time.Second)})
+	if first.ID != interrupt.ID || first.AttemptCount != 1 {
+		t.Fatalf("first lease = %s attempt=%d; want interrupt attempt 1", first.ID, first.AttemptCount)
+	}
+	if ok, err := store.Retry(ctx, RetryRequest{WorkspaceID: ws, JobID: first.ID, LeaseToken: first.LeaseToken, ErrorKind: "runtime_transport_error", Now: now.Add(4 * time.Second)}); err != nil || !ok {
+		t.Fatalf("Retry first interrupt = (%v,%v); want true,nil", ok, err)
+	}
+	if leased, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-b", MaxJobs: 3, LeaseDuration: time.Minute, Now: now.Add(5 * time.Second)}); err != nil || len(leased) != 0 {
+		t.Fatalf("leases during interrupt backoff = %+v err=%v; want none", leased, err)
+	}
+
+	second := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-b", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(2 * time.Minute)})
+	if second.ID != interrupt.ID || second.AttemptCount != 2 {
+		t.Fatalf("second lease = %s attempt=%d; want same interrupt attempt 2", second.ID, second.AttemptCount)
+	}
+	if ok, err := store.Retry(ctx, RetryRequest{WorkspaceID: ws, JobID: second.ID, LeaseToken: second.LeaseToken, ErrorKind: "interrupt_closeout_pending", Now: now.Add(2*time.Minute + time.Second)}); err != nil || !ok {
+		t.Fatalf("Retry final interrupt = (%v,%v); want retained barrier", ok, err)
+	}
+	recovery := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-c", MaxJobs: 3, LeaseDuration: time.Minute, Now: now.Add(10 * time.Minute)})
+	if recovery.ID != interrupt.ID || recovery.AttemptCount != 2 {
+		t.Fatalf("finalization recovery lease = %s attempt=%d; want same interrupt capped at attempt 2", recovery.ID, recovery.AttemptCount)
+	}
+	var status string
+	var attempts int
+	if err := admin.QueryRowContext(ctx, `SELECT status, attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read finalization recovery lease: %v", err)
+	}
+	if status != StatusLeased || attempts != 2 {
+		t.Fatalf("finalization recovery = %s attempt=%d; want leased attempt=2", status, attempts)
+	}
+}
+
+func TestPostgreSQLStoreExpiredFinalInterruptLeaseReclaimsAsBarrier(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_interrupt_reclaim_barrier")
+	sessionID := "sesn_interrupt_reclaim_barrier"
+	now := time.Date(2026, 7, 1, 12, 48, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_reclaim_int", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_reclaim_int"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_reclaim", "rin_reclaim_int", "interrupt_control", 1, 1),
+		Priority:    100, MaxAttempts: 1, Now: now,
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_reclaim_msg", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_reclaim_msg"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_reclaim", "rin_reclaim_msg", "messages", 2, 2), Now: now.Add(time.Second),
+	})
+	leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-old", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second)})
+	if leased.ID != interrupt.ID || leased.AttemptCount != 1 {
+		t.Fatalf("final interrupt lease = %s attempt=%d; want interrupt attempt 1", leased.ID, leased.AttemptCount)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID); err != nil {
+		t.Fatalf("expire interrupt lease: %v", err)
+	}
+	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws}); err != nil || reclaimed != 1 {
+		t.Fatalf("ReclaimExpiredLeases = %d/%v; want 1/nil", reclaimed, err)
+	}
+	candidates, err := store.Lease(ctx, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-new", MaxJobs: 2, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(time.Minute)})
+	if err != nil || len(candidates) != 1 || candidates[0].ID != interrupt.ID {
+		t.Fatalf("post-reclaim leases = %+v/%v; want only exhausted interrupt finalization recovery", candidates, err)
+	}
+	var status string
+	var attempts int
+	if err := admin.QueryRowContext(ctx, `SELECT status, attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), interrupt.ID).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read reclaimed interrupt: %v", err)
+	}
+	if status != StatusLeased || attempts != 1 {
+		t.Fatalf("reclaimed interrupt = %s attempt=%d; want re-leased capped attempt=1", status, attempts)
+	}
+}
+
 func TestPostgreSQLStoreDatabaseAssignsPartitionSequence(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ws := workspace.ID("ws_queue_partition_sequence")
@@ -1736,6 +1845,176 @@ func TestPostgreSQLStoreAtomicallyReplacesMalformedRuntimeInputCustody(t *testin
 	}
 	if replacements != 1 {
 		t.Fatalf("replay replacements = %d; want one", replacements)
+	}
+}
+
+func TestCancelInterruptFencedMessagesUsesCanonicalFollowerIdentity(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	const (
+		sessionID   = "sesn_interrupt_followers"
+		threadID    = "thr_interrupt_followers"
+		interruptID = "rin_interrupt_followers_control"
+	)
+	seedQueueRuntimeInbox(t, admin, sessionID, threadID, "rin_interrupt_follower_queued", "messages", `["evt_follower_queued"]`, 1, 1)
+	for _, follower := range []struct {
+		id        string
+		inboxKind string
+		status    string
+		sequence  int64
+	}{
+		{id: "rin_interrupt_follower_delivering", inboxKind: "messages", status: "delivering", sequence: 2},
+		{id: "rin_interrupt_follower_rejection", inboxKind: "rejection", status: "queued", sequence: 3},
+		{id: "rin_interrupt_follower_after", inboxKind: "messages", status: "queued", sequence: 6},
+		{id: interruptID, inboxKind: "interrupt_control", status: "queued", sequence: 5},
+	} {
+		if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_inbox (
+			workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
+			sequence_from,sequence_to,status,binding_id,binding_generation,target_pod_uid,created_at,updated_at
+		) VALUES ('default',$1,$2,$3,$4,'[]',$5,$5,$6,
+			CASE WHEN $6='delivering' THEN 'bind_interrupt_followers' END,
+			CASE WHEN $6='delivering' THEN 1 END,
+			CASE WHEN $6='delivering' THEN 'pod_interrupt_followers' END,$7,$7)`,
+			sessionID, threadID, follower.id, follower.inboxKind, follower.sequence, follower.status, now); err != nil {
+			t.Fatalf("seed follower Inbox %s: %v", follower.id, err)
+		}
+	}
+	jobs := make(map[string]*Job)
+	for _, follower := range []struct {
+		id       string
+		sequence int64
+		priority int
+	}{
+		{id: "rin_interrupt_follower_queued", sequence: 1},
+		{id: "rin_interrupt_follower_delivering", sequence: 2},
+		{id: "rin_interrupt_follower_rejection", sequence: 3},
+		{id: "rin_interrupt_follower_after", sequence: 6},
+		{id: interruptID, sequence: 5, priority: 100},
+	} {
+		inputKind := "messages"
+		if follower.id == interruptID {
+			inputKind = "interrupt_control"
+		}
+		jobs[follower.id] = mustEnqueue(t, store, EnqueueRequest{
+			WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+			PartitionKey:   FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+			DedupeKey:      FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, follower.id),
+			PayloadVersion: 1,
+			PayloadJSON:    runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, follower.id, inputKind, follower.sequence, follower.sequence),
+			Priority:       follower.priority, Now: now.Add(time.Duration(follower.sequence) * time.Microsecond),
+		})
+	}
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "interrupt-owner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if leased.ID != jobs[interruptID].ID {
+		t.Fatalf("leased job = %s; want interrupt %s", leased.ID, jobs[interruptID].ID)
+	}
+	request := InterruptFenceRequest{
+		Lease: ExactLeaseRequest{
+			WorkspaceID: workspace.DefaultID, JobID: leased.ID, LeaseToken: leased.LeaseToken,
+			Kind: leased.Kind, PartitionKey: leased.PartitionKey, DedupeKey: leased.DedupeKey,
+		},
+		SessionID: sessionID, SessionThreadID: threadID, InterruptFenceSequence: 5, Now: now.Add(2 * time.Second),
+	}
+	stale := request
+	stale.Lease.LeaseToken = "lease_stale"
+	if err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_stale_lease", func(tx *dbconnect.Tx) error {
+		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, stale)
+		if err != nil || active || cancelled != 0 {
+			t.Fatalf("stale interrupt lease cancellation = %v/%d/%v; want false/0/nil", active, cancelled, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("stale interrupt lease transaction: %v", err)
+	}
+
+	if err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_followers", func(tx *dbconnect.Tx) error {
+		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, request)
+		if err != nil || !active || cancelled != 3 {
+			t.Fatalf("interrupt follower cancellation = %v/%d/%v; want true/3/nil", active, cancelled, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("interrupt follower transaction: %v", err)
+	}
+	for _, inputID := range []string{"rin_interrupt_follower_queued", "rin_interrupt_follower_delivering", "rin_interrupt_follower_rejection"} {
+		if got := queueJobStatus(t, admin, workspace.DefaultID, jobs[inputID].ID); got != StatusCancelled {
+			t.Fatalf("Queue follower %s status = %s; want cancelled", inputID, got)
+		}
+		var inboxStatus string
+		if err := admin.QueryRowContext(ctx, `SELECT status FROM session_runtime_inbox
+			WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, inputID).Scan(&inboxStatus); err != nil {
+			t.Fatalf("read Inbox follower %s: %v", inputID, err)
+		}
+		if inboxStatus != "cancelled" {
+			t.Fatalf("Inbox follower %s status = %s; want cancelled", inputID, inboxStatus)
+		}
+	}
+	if got := queueJobStatus(t, admin, workspace.DefaultID, jobs["rin_interrupt_follower_after"].ID); got != StatusPending {
+		t.Fatalf("post-fence Queue follower status = %s; want pending", got)
+	}
+}
+
+func TestCancelInterruptFencedMessagesRollsBackBothCustodySides(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 18, 11, 0, 0, 0, time.UTC)
+	const (
+		sessionID   = "sesn_interrupt_followers_rollback"
+		threadID    = "thr_interrupt_followers_rollback"
+		followerID  = "rin_interrupt_follower_rollback"
+		interruptID = "rin_interrupt_followers_rollback_control"
+	)
+	seedQueueRuntimeInbox(t, admin, sessionID, threadID, followerID, "messages", `["evt_follower_rollback"]`, 1, 1)
+	if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
+		sequence_from,sequence_to,status,created_at,updated_at
+	) VALUES ('default',$1,$2,$3,'interrupt_control','[]',2,2,'queued',$4,$4)`, sessionID, threadID, interruptID, now); err != nil {
+		t.Fatalf("seed rollback interrupt Inbox: %v", err)
+	}
+	follower := mustEnqueue(t, store, EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+		PartitionKey:   FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, followerID),
+		PayloadVersion: 1, PayloadJSON: runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, followerID, "messages", 1, 1), Now: now,
+	})
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+		PartitionKey:   FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
+		PayloadVersion: 1, PayloadJSON: runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, interruptID, "interrupt_control", 2, 2), Priority: 100, Now: now.Add(time.Microsecond),
+	})
+	leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "rollback-owner", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second)})
+	if leased.ID != interrupt.ID {
+		t.Fatalf("leased job = %s; want interrupt %s", leased.ID, interrupt.ID)
+	}
+	rollbackErr := errors.New("force interrupt follower rollback")
+	err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_followers_rollback", func(tx *dbconnect.Tx) error {
+		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, InterruptFenceRequest{
+			Lease:     ExactLeaseRequest{WorkspaceID: workspace.DefaultID, JobID: leased.ID, LeaseToken: leased.LeaseToken, Kind: leased.Kind, PartitionKey: leased.PartitionKey, DedupeKey: leased.DedupeKey},
+			SessionID: sessionID, SessionThreadID: threadID, InterruptFenceSequence: 2, Now: now.Add(2 * time.Second),
+		})
+		if err != nil || !active || cancelled != 1 {
+			t.Fatalf("rollback cancellation = %v/%d/%v; want true/1/nil", active, cancelled, err)
+		}
+		return rollbackErr
+	})
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("rollback transaction error = %v; want %v", err, rollbackErr)
+	}
+	if got := queueJobStatus(t, admin, workspace.DefaultID, follower.ID); got != StatusPending {
+		t.Fatalf("Queue follower after rollback = %s; want pending", got)
+	}
+	var inboxStatus string
+	if err := admin.QueryRowContext(ctx, `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, followerID).Scan(&inboxStatus); err != nil {
+		t.Fatalf("read rollback Inbox follower: %v", err)
+	}
+	if inboxStatus != "queued" {
+		t.Fatalf("Inbox follower after rollback = %s; want queued", inboxStatus)
 	}
 }
 

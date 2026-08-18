@@ -90,6 +90,56 @@ func TestRunExecForegroundCapturesSeparatedStreamsAndEnv(t *testing.T) {
 	}
 }
 
+func TestExecEnvReservesRuntimeIdentityAndRemovesSudoIdentity(t *testing.T) {
+	t.Setenv("HOME", "/root")
+	t.Setenv("USER", "root")
+	t.Setenv("LOGNAME", "root")
+	t.Setenv("SUDO_USER", "daytona")
+	t.Setenv("SUDO_UID", "1000")
+	t.Setenv("SUDO_GID", "1000")
+	t.Setenv("SUDO_COMMAND", "/usr/local/bin/sandbox exec")
+
+	env, toolErr := execEnv(map[string]any{
+		"HOME":         "/tmp/attacker-home",
+		"USER":         "attacker",
+		"LOGNAME":      "attacker",
+		"SUDO_USER":    "attacker",
+		"SUDO_UID":     "999",
+		"SUDO_GID":     "999",
+		"SUDO_COMMAND": "attacker-command",
+		"ORDINARY":     "preserved",
+	})
+	if toolErr != nil {
+		t.Fatalf("execEnv error = %+v", toolErr)
+	}
+	got := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"HOME":      "/home/daytona",
+		"USER":      "daytona",
+		"LOGNAME":   "daytona",
+		"ORDINARY":  "preserved",
+		"TERM":      "dumb",
+		"NO_COLOR":  "1",
+		"PAGER":     "cat",
+		"GIT_PAGER": "cat",
+	} {
+		if got[key] != want {
+			t.Fatalf("exec env %s = %q; want %q", key, got[key], want)
+		}
+	}
+	for _, key := range []string{"SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("exec env retained %s", key)
+		}
+	}
+}
+
 func TestForegroundShellWrapperUsesTetralRuntimeRoot(t *testing.T) {
 	if strings.Contains(foregroundShellWrapper, "TMPDIR") || strings.Contains(foregroundShellWrapper, "/tmp/tetral-helper-foreground") {
 		t.Fatalf("foreground shell wrapper uses host/tmp-derived state path:\n%s", foregroundShellWrapper)

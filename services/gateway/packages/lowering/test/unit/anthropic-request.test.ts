@@ -2,12 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
   ProviderRequestKind,
-  RuntimeMessageRole,
-  RuntimeToolPartState,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderContextItem, ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { lowerProviderRequest, type ResolvedProviderRequestAttachment } from "../../src/request.js";
 import { classifyProviderStreamError, ProviderRequestLoweringError } from "../../src/errors.js";
 import { AnthropicOpus48Rules } from "../../src/rules/anthropic.js";
@@ -18,6 +17,81 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("anthropic request lowering", () => {
+
+  test("classifies an unpaired Tool Result as a non-retryable lowering error", () => {
+    let caught: unknown;
+    try {
+      lowerAnthropicRequest(anthropicRequest({
+        context: [{
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [{
+            toolResult: {
+              modelToolCallId: "call_missing",
+              error: { errorJson: '{"error":{"message":"missing"}}' },
+              completed: undefined,
+              cancelled: undefined,
+            },
+          }],
+        }],
+      }));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ProviderRequestLoweringError);
+    expect(classifyProviderStreamError(caught)).toMatchObject({
+      code: "provider_request_invalid",
+      retryable: false,
+      fatal: true,
+      statusCode: 400,
+    });
+  });
+
+	const invalidToolContexts: Array<{
+		readonly name: string;
+		readonly content: ProviderContextItem[];
+		readonly message: string;
+	}> = [
+		{
+			name: "duplicate Tool Call identity",
+			content: [
+				{ toolCall: { modelToolCallId: "call_duplicate", name: "Read", inputJson: "{}" } },
+				{ toolCall: { modelToolCallId: "call_duplicate", name: "Read", inputJson: "{}" } },
+			],
+			message: "Provider Tool Call identity is duplicated.",
+		},
+		{
+			name: "duplicate Tool Result",
+			content: [
+				{ toolCall: { modelToolCallId: "call_result", name: "Read", inputJson: "{}" } },
+				{ toolResult: { modelToolCallId: "call_result", completed: { outputJson: "{}" }, error: undefined, cancelled: undefined } },
+				{ toolResult: { modelToolCallId: "call_result", completed: { outputJson: "{}" }, error: undefined, cancelled: undefined } },
+			],
+			message: "Provider Tool Result does not pair with exactly one prior Tool Call.",
+		},
+		{
+			name: "multiple Tool Result outcomes",
+			content: [
+				{ toolCall: { modelToolCallId: "call_outcomes", name: "Read", inputJson: "{}" } },
+				{ toolResult: {
+					modelToolCallId: "call_outcomes",
+					completed: { outputJson: "{}" },
+					error: { errorJson: "{}" },
+					cancelled: undefined,
+				} },
+			],
+			message: "Provider Tool Result must select exactly one outcome.",
+		},
+	];
+	for (const scenario of invalidToolContexts) {
+		test(`rejects ${scenario.name} through the typed lowering boundary`, () => {
+			expect(() => lowerAnthropicRequest(anthropicRequest({
+				context: [{
+					role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+					content: scenario.content,
+				}],
+			}))).toThrow(scenario.message);
+		});
+	}
   test("rejects freeform tools before an unsupported provider adapter runs", () => {
     expect(() => lowerAnthropicRequest(anthropicRequest({
       tools: [{
@@ -30,25 +104,19 @@ describe("anthropic request lowering", () => {
 
   test("anthropic-content-normalization drops empty text and unsigned empty reasoning while preserving signed reasoning", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
-      messages: [
+      context: [
         {
-          id: "msg_assistant",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-          status: "completed",
-          origin: "agent",
-          parts: [
-            { id: "empty_text", text: { text: "" } },
-            { id: "empty_unsigned_reasoning", reasoning: { text: "", metadataJson: "{}" } },
-            { id: "empty_unsigned_anthropic_reasoning", reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: {} }) } },
-            { id: "signed_reasoning", reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) } },
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            { text: { text: "" } },
+            { reasoning: { text: "", metadataJson: "{}" } },
+            { reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: {} }) } },
+            { reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) } },
           ],
         },
         {
-          id: "msg_empty",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-          status: "completed",
-          origin: "agent",
-          parts: [{ id: "only_empty_text", text: { text: "" } }],
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [{ text: { text: "" } }],
         },
       ],
     }));
@@ -66,12 +134,9 @@ describe("anthropic request lowering", () => {
 
   test("L3 gives a signed reasoning-only assistant message a companion text part", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
-      messages: [{
-        id: "msg_reasoning_only",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [{ id: "signed_reasoning", reasoning: { text: "thinking", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) } }],
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{ reasoning: { text: "thinking", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) } }],
       }],
     }));
 
@@ -86,22 +151,21 @@ describe("anthropic request lowering", () => {
 
   test("anthropic-tool-id-scrubbing scrubs claude tool call ids to Anthropic's accepted character set", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
-      messages: [{
-        id: "msg_tool",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [{
-          id: "tool_part",
-          tool: {
-            callId: "call:with/slashes and spaces",
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { toolCall: {
+            modelToolCallId: "call:with/slashes and spaces",
             name: "Read",
-            toolUseEventId: "sevt_1",
-            state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
             inputJson: JSON.stringify({ path: "/tmp/a" }),
-            outputOrErrorJson: JSON.stringify({ text: "ok" }),
-          },
-        }],
+          } },
+          { toolResult: {
+            modelToolCallId: "call:with/slashes and spaces",
+            completed: { outputJson: JSON.stringify({ text: "ok" }) },
+            error: undefined,
+            cancelled: undefined,
+          } },
+        ],
       }],
     }));
 
@@ -113,6 +177,54 @@ describe("anthropic request lowering", () => {
       role: "tool",
       content: [{ type: "tool-result", toolCallId: "call_with_slashes_and_spaces" }],
     });
+  });
+
+  test("keeps one ordered assistant envelope and assigns collision-free scrubbed Tool ids", () => {
+    const reasoningMetadata = JSON.stringify({ anthropic: { signature: "sig_collision" } });
+    const lowered = lowerAnthropicRequest(anthropicRequest({
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { text: { text: "before" } },
+          { toolCall: { modelToolCallId: "call:a", name: "Alpha", inputJson: "{}" } },
+          { reasoning: { text: "thinking", metadataJson: reasoningMetadata } },
+          { toolCall: { modelToolCallId: "call/a", name: "Beta", inputJson: "{}" } },
+          { text: { text: "after" } },
+          { toolResult: {
+            modelToolCallId: "call:a",
+            completed: { outputJson: JSON.stringify({ result: "alpha" }) },
+            error: undefined,
+            cancelled: undefined,
+          } },
+          { toolResult: {
+            modelToolCallId: "call/a",
+            completed: { outputJson: JSON.stringify({ result: "beta" }) },
+            error: undefined,
+            cancelled: undefined,
+          } },
+        ],
+      }],
+    }));
+
+    expect(lowered.messages.slice(1)).toMatchObject([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "before" },
+          { type: "tool-call", toolCallId: "call_a", toolName: "Alpha", input: {} },
+          { type: "reasoning", text: "thinking", providerMetadata: JSON.parse(reasoningMetadata) },
+          { type: "tool-call", toolCallId: "call_a_2", toolName: "Beta", input: {} },
+          { type: "text", text: "after" },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "call_a", toolName: "Alpha", output: { result: "alpha" } },
+          { type: "tool-result", toolCallId: "call_a_2", toolName: "Beta", output: { result: "beta" } },
+        ],
+      },
+    ]);
   });
 
   test("anthropic-media-lowering lowers resolved image, PDF, and plain-text attachments into user media parts", () => {
@@ -211,10 +323,10 @@ describe("anthropic request lowering", () => {
         { kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_AGENT, text: "stable two", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_SESSION },
         { kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_SKILL, text: "stable three", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE },
       ],
-      messages: [
-        textMessage("msg_1", "first"),
-        textMessage("msg_2", "second"),
-        textMessage("msg_3", "third"),
+      context: [
+        textMessage("first"),
+        textMessage("second"),
+        textMessage("third"),
       ],
     }));
 
@@ -251,14 +363,11 @@ describe("anthropic request lowering", () => {
 
   test("anthropic-reasoning-metadata preserves Anthropic reasoning metadata and enables reasoning send-through", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
-      messages: [{
-        id: "msg_reasoning",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [
-          { id: "foreign", reasoning: { text: "foreign thought", metadataJson: JSON.stringify({ openai: { itemId: "rs_1" } }) } },
-          { id: "anthropic", reasoning: { text: "native thought", metadataJson: JSON.stringify({ anthropic: { redactedData: "red_1" } }) } },
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { reasoning: { text: "foreign thought", metadataJson: JSON.stringify({ openai: { itemId: "rs_1" } }) } },
+          { reasoning: { text: "native thought", metadataJson: JSON.stringify({ anthropic: { redactedData: "red_1" } }) } },
         ],
       }],
     }));
@@ -383,49 +492,26 @@ describe("anthropic request lowering", () => {
     }))).toThrow("invalid approval reviewer output schema JSON");
   });
 
-  test("L4 rejects unknown tool state instead of inventing interrupted repair messages", () => {
-    expect(() => lowerAnthropicRequest(anthropicRequest({
-      messages: [{
-        id: "msg_tool",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [{
-          id: "tool_part",
-          tool: {
-            callId: "call_1",
-            name: "Read",
-            toolUseEventId: "sevt_1",
-            state: RuntimeToolPartState.UNRECOGNIZED,
-            inputJson: "{}",
-            outputOrErrorJson: "{}",
-          },
-        }],
-      }],
-    }))).toThrow("unknown tool state");
-  });
-
   test("L5 sanitizes lone UTF-16 surrogates before provider lowering", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
       system: [{ kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE, text: "bad \uD800 text", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE }],
-      messages: [
-        textMessage("msg_1", "bad \uDC00 text"),
+      context: [
+        textMessage("bad \uDC00 text"),
         {
-          id: "msg_tool",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-          status: "completed",
-          origin: "agent",
-          parts: [{
-            id: "tool_part",
-            tool: {
-              callId: "call_1",
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            { toolCall: {
+              modelToolCallId: "call_1",
               name: "Read",
-              toolUseEventId: "sevt_1",
-              state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
               inputJson: JSON.stringify({ path: "bad \uD800 input" }),
-              outputOrErrorJson: JSON.stringify({ text: "bad \uDC00 output" }),
-            },
-          }],
+            } },
+            { toolResult: {
+              modelToolCallId: "call_1",
+              completed: { outputJson: JSON.stringify({ text: "bad \uDC00 output" }) },
+              error: undefined,
+              cancelled: undefined,
+            } },
+          ],
         },
       ],
       tools: [{
@@ -455,7 +541,6 @@ describe("anthropic request lowering", () => {
         attachments: [{
           transient: {
             attachmentRef: "att_1",
-            sourceToolUseEventId: "sevt_1",
             sourcePath: "/tmp/image.png",
             pageRange: "",
             detail: "auto",
@@ -511,13 +596,12 @@ function anthropicRequest(overrides: Partial<ProviderRequest> = {}): ProviderReq
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
-    parentThreadId: undefined,
     bindingId: "bind_1",
     bindingGeneration: 1,
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" },
     system: [{ kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE, text: "You are concise.", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE }],
-    messages: [textMessage("msg_1", "hello")],
+    context: [textMessage("hello")],
     tools: [],
     attachments: [],
     limits: { maxOutputTokens: 2048, timeoutMs: 30_000 },
@@ -525,13 +609,10 @@ function anthropicRequest(overrides: Partial<ProviderRequest> = {}): ProviderReq
   };
 }
 
-function textMessage(id: string, text: string) {
+function textMessage(text: string) {
   return {
-    id,
-    role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-    status: "completed",
-    origin: "user",
-    parts: [{ id: `${id}_part`, text: { text } }],
+    role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+    content: [{ text: { text } }],
   };
 }
 
@@ -551,7 +632,6 @@ function resolvedAttachment(
 function transientOrigin(attachmentRef: string): NonNullable<ResolvedProviderRequestAttachment["transient"]> {
   return {
     attachmentRef,
-    sourceToolUseEventId: "sevt_1",
     sourcePath: "/tmp/image.png",
     pageRange: "",
     detail: "auto",

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   ProviderRequestKind,
-  RuntimeMessageRole,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { ProviderRequest, RuntimeMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest, ProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { classifyProviderStreamError, ProviderRequestLoweringError } from "../../src/errors.js";
 import { lowerProviderRequest, remapOpenAICompatibleMessageMetadataForSDK, type ResolvedProviderRequestAttachment } from "../../src/request.js";
 import { ZaiGLM52Rules } from "../../src/rules/zai.js";
@@ -24,7 +24,6 @@ describe("zai GLM request lowering", () => {
         attachments: [{
           transient: {
             attachmentRef: "att_1",
-            sourceToolUseEventId: "sevt_1",
             sourcePath: "/tmp/image.png",
             pageRange: "",
             detail: "auto",
@@ -79,24 +78,18 @@ describe("zai GLM request lowering", () => {
   // GLM preserves verified reasoning_content under the zai provider key.
   test("zai-reasoning-remap lifts interleaved reasoning_content under the zai provider key", () => {
     const withReasoning = lowerZaiRequest(zaiRequest({
-      messages: [{
-        id: "msg_assistant",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [
-          { id: "reasoning", reasoning: { text: "hidden thought", metadataJson: "{}" } },
-          { id: "text", text: { text: "visible answer" } },
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { reasoning: { text: "hidden thought", metadataJson: "{}" } },
+          { text: { text: "visible answer" } },
         ],
       }],
     }));
     const withoutReasoning = lowerZaiRequest(zaiRequest({
-      messages: [{
-        id: "msg_assistant_plain",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [{ id: "text", text: { text: "visible answer" } }],
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [{ text: { text: "visible answer" } }],
       }],
     }));
 
@@ -115,14 +108,11 @@ describe("zai GLM request lowering", () => {
   test("zai-reasoning-remap remaps per-message reasoning metadata to openaiCompatible only at the SDK boundary", () => {
     const lowered = lowerZaiRequest(zaiRequest({
       model: { providerId: "zai", modelId: "glm-5.2", variant: "high" },
-      messages: [{
-        id: "msg_assistant",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [
-          { id: "reasoning", reasoning: { text: "hidden thought", metadataJson: "{}" } },
-          { id: "text", text: { text: "visible answer" } },
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { reasoning: { text: "hidden thought", metadataJson: "{}" } },
+          { text: { text: "visible answer" } },
         ],
       }],
     }));
@@ -183,9 +173,9 @@ describe("zai GLM request lowering", () => {
         { kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE, text: "stable one", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE },
         { kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_AGENT, text: "stable two", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_SESSION },
       ],
-      messages: [
-        textMessage("msg_1", "first"),
-        textMessage("msg_2", "second"),
+      context: [
+        textMessage("first"),
+        textMessage("second"),
       ],
     }));
 
@@ -255,13 +245,12 @@ function zaiRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
-    parentThreadId: undefined,
     bindingId: "bind_1",
     bindingGeneration: 1,
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "zai", modelId: "glm-5.2", variant: "" },
     system: [],
-    messages: [textMessage("msg_1", "hello")],
+    context: [textMessage("hello")],
     tools: [],
     attachments: [],
     limits: { maxOutputTokens: 2048, timeoutMs: 30_000 },
@@ -269,13 +258,10 @@ function zaiRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   };
 }
 
-function textMessage(id: string, text: string): RuntimeMessage {
+function textMessage(text: string): ProviderContextEntry {
   return {
-    id,
-    role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-    status: "completed",
-    origin: "user",
-    parts: [{ id: `${id}_part`, text: { text } }],
+    role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+    content: [{ text: { text } }],
   };
 }
 
@@ -295,7 +281,6 @@ function resolvedAttachment(
 function transientOrigin(attachmentRef: string): NonNullable<ResolvedProviderRequestAttachment["transient"]> {
   return {
     attachmentRef,
-    sourceToolUseEventId: "sevt_1",
     sourcePath: "/tmp/image.png",
     pageRange: "",
     detail: "auto",

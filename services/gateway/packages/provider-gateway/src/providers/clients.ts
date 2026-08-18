@@ -166,7 +166,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     const model = input.request.model;
     const entry = model === undefined ? undefined : lookupGatewayModel(model.providerId, model.modelId);
     if (entry === undefined) {
-      yield providerErrorEvent(input.request, {
+      yield providerErrorEvent({
         code: "provider_unavailable",
         message: "Provider model is not approved by the Gateway catalog.",
         retryable: false,
@@ -177,7 +177,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     }
     const rules = lookupGatewayProviderRules(entry.providerId, entry.modelId);
     if (rules === undefined) {
-      yield providerErrorEvent(input.request, {
+      yield providerErrorEvent({
         code: "provider_unavailable",
         message: "Provider model lowering rules are unavailable.",
         retryable: false,
@@ -203,7 +203,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
         yield* this.streamOpenAICompatible(input, entry, rules);
         return;
     }
-    yield providerErrorEvent(input.request, {
+    yield providerErrorEvent({
       code: "provider_unavailable",
       message: "Provider model is not implemented in this Gateway tier.",
       retryable: false,
@@ -219,7 +219,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
   ): AsyncGenerator<ProviderStreamEvent> {
     const credential = input.credential;
     if (!isProviderAPIKeyCredential(credential, entry.supplyProviderId)) {
-      yield providerErrorEvent(input.request, {
+      yield providerErrorEvent({
         code: "credential_unavailable",
         message: "Provider credentials are unavailable.",
         retryable: false,
@@ -234,7 +234,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       resolvedAttachments: input.resolvedAttachments,
     });
     if (lowered.options.maxOutputTokens === undefined) {
-      yield providerErrorEvent(input.request, {
+      yield providerErrorEvent({
         code: "provider_unavailable",
         message: "Anthropic provider output limit is unavailable.",
         retryable: false,
@@ -272,7 +272,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       maxRetries: 0,
       onError: ignoreProviderStreamError,
     });
-    const raiser = new ProviderStreamRaiser(input.request, {
+    const raiser = new ProviderStreamRaiser({
       usageWireFamily: "anthropic-wire",
       modelLimits: routeEffectiveGatewayModelLimits(entry, credential.supplyMode),
     });
@@ -310,7 +310,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
           abortSignal: input.abortSignal ?? AbortSignal.timeout(input.request.limits?.timeoutMs ?? 1),
         });
         if (refresh?.ok !== true || openAIOAuthCredentialRefreshDue(refresh.credential.expiresAt)) {
-          yield providerErrorEvent(input.request, {
+          yield providerErrorEvent({
             code: "credential_required",
             message: "OpenAI OAuth credential refresh failed; re-authorization is required.",
             retryable: false,
@@ -322,7 +322,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
         oauthCredential = refresh.credential;
       }
       if (openAIOAuthCredentialRefreshDue(oauthCredential.expiresAt)) {
-        yield providerErrorEvent(input.request, {
+        yield providerErrorEvent({
           code: "credential_required",
           message: "OpenAI OAuth credential refresh failed; re-authorization is required.",
           retryable: false,
@@ -345,7 +345,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       );
       return;
     }
-    yield providerErrorEvent(input.request, {
+    yield providerErrorEvent({
       code: "credential_unavailable",
       message: "Provider credentials are unavailable.",
       retryable: false,
@@ -388,7 +388,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       maxRetries: 0,
       onError: ignoreProviderStreamError,
     });
-    const raiser = new ProviderStreamRaiser(input.request, {
+    const raiser = new ProviderStreamRaiser({
       usageWireFamily: "openai-wire",
       modelLimits: routeEffectiveGatewayModelLimits(entry, credential.supplyMode),
     });
@@ -414,7 +414,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
   ): AsyncGenerator<ProviderStreamEvent> {
     const credential = input.credential;
     if (!isProviderAPIKeyCredential(credential, entry.supplyProviderId)) {
-      yield providerErrorEvent(input.request, {
+      yield providerErrorEvent({
         code: "credential_unavailable",
         message: "Provider credentials are unavailable.",
         retryable: false,
@@ -429,7 +429,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       resolvedAttachments: input.resolvedAttachments,
     });
     if (lowered.options.maxOutputTokens === undefined) {
-      yield providerErrorEvent(input.request, {
+      yield providerErrorEvent({
         code: "provider_unavailable",
         message: "Provider output limit is unavailable.",
         retryable: false,
@@ -469,7 +469,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       maxRetries: 0,
       onError: ignoreProviderStreamError,
     });
-    const raiser = new ProviderStreamRaiser(input.request, {
+    const raiser = new ProviderStreamRaiser({
       usageWireFamily: "openai-wire",
       modelLimits: routeEffectiveGatewayModelLimits(entry, credential.supplyMode),
     });

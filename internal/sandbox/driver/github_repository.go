@@ -130,7 +130,7 @@ func githubRepositoryConfigCommand(gitProxyHost string, ticket string, sessionID
 		"git config --global --replace-all credential.helper ''",
 		"git config --global --replace-all user.name " + shellQuote("Tetral Agent"),
 		"git config --global --replace-all user.email " + shellQuote("session+"+sessionID+"@agents.tetral.ai"),
-		"profile=${HOME:-" + shellQuote("/home/"+RuntimeUser) + "}/.profile",
+		"profile=${HOME:-" + shellQuote(RuntimeHome) + "}/.profile",
 		"mkdir -p \"$(dirname \"$profile\")\"",
 		"touch \"$profile\"",
 		"grep -qxF 'export GIT_TERMINAL_PROMPT=0' \"$profile\" || printf '%s\\n' 'export GIT_TERMINAL_PROMPT=0' >> \"$profile\"",

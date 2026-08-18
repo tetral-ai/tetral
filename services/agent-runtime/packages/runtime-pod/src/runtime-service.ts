@@ -1,1280 +1,1717 @@
 /**
- * Implements the authenticated Bridge-to-Runtime command boundary for the Runtime Pod.
+ * Authenticated, method-specific Bridge-to-Runtime Pod ingress.
  *
- * The service authenticates and authorizes callers before command admission, validates the command
- * envelope and selected pod, fences commands against the active session binding, and coalesces only
- * concurrent delivery of the same runtime input while Runtime Core owns completed replay decisions.
- * Durable control ACKs precede hot state updates except for the explicit interrupt closeout
- * ordering below. Task-notification transport ACKs only admit pending work; the owning loop
- * performs its durable semantic commit. The gRPC server invokes this service; `createRuntimePodApp` supplies the
- * authenticator, lifecycle runner, Bridge-backed committers, Runtime Core hosts, cleanup controller,
- * logger, and metrics sink. The service calls those dependencies and protocol validators but does
- * not contact Gateway or providers directly.
+ * Each RPC validates only its owned contract. The method identifies the
+ * operation; no command-kind discriminator, Event range, pod address echo, or
+ * universal response envelope crosses the boundary.
  */
-import { status } from "@grpc/grpc-js";
-import {
-  RuntimeCommandKind,
-  RuntimeCommandStatus,
-  RuntimeInputErrorCode,
-} from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
-import { NoopRuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
-import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
-import { validateRuntimeInputCommandRequest } from "@tetral/agent-runtime-protocol/src/bounds.js";
-import { runtimeInputErrorCodeName, runtimeInputErrorCodeOrGeneric } from "@tetral/agent-runtime-protocol/src/error-codes.js";
-import type { RuntimeInputErrorCodeName } from "@tetral/agent-runtime-protocol/src/error-codes.js";
+
 import type { Metadata } from "@grpc/grpc-js";
+import { status } from "@grpc/grpc-js";
+import type {
+	RuntimeInterruptToolResult,
+	RuntimeProviderAttachment,
+} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
+import { NoopRuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
+import type {
+	RuntimeControlInputCommitResult,
+	RuntimeControlInputDeclaration,
+} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import {
+	validateAcceptAgentMailRequest,
+	validateAcceptInputRequest,
+	validateAcceptTaskNotificationRequest,
+	validateApplyRuntimeConfigRequest,
+	validateCleanupSessionRequest,
+	validateInterruptRequest,
+	validateResolveToolConfirmationRequest,
+} from "@tetral/agent-runtime-protocol/src/bounds.js";
+import type {
+	AcceptAgentMailRequest,
+	AcceptAgentMailResponse,
+	AcceptInputRequest,
+	AcceptInputResponse,
+	AcceptTaskNotificationRequest,
+	AcceptTaskNotificationResponse,
+	ApplyRuntimeConfigRequest,
+	ApplyRuntimeConfigResponse,
+	CleanupSessionRequest,
+	CleanupSessionResponse,
+	InterruptRequest,
+	InterruptResponse,
+	InterruptLeaseRef,
+	ResolveToolConfirmationRequest,
+	ResolveToolConfirmationResponse,
+} from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
+import {
+	AcceptAgentMailFailure,
+	AcceptInputFailure,
+	AcceptInputRejectionReason,
+	AcceptTaskNotificationFailure,
+	ApplyRuntimeConfigFailure,
+	CleanupSessionFailure,
+	CleanupSessionReason,
+	InterruptFailure,
+	InterruptOrigin,
+	ResolveToolConfirmationFailure,
+	ToolConfirmationDecision,
+} from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
+import { semanticErrorFields } from "@tetral/ts-observability";
+import type { ServiceAccountIdentity } from "./auth.js";
+import { GrpcStatusError } from "./errors.js";
 import type { RuntimeCommandLease } from "./lifecycle.js";
 import type {
-  RuntimeInputCommandRequest,
-  RuntimeInputCommandResponse,
-} from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
-import type { ServiceAccountIdentity } from "./auth.js";
-import type { RuntimePodLogger } from "./logger.js";
-import type {
-  RuntimeDeclarationReceipt,
-  RuntimeMessage,
-  RuntimeMessageCreate,
-} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type {
-  RuntimeControlInputCommitResult,
-  RuntimeControlInputDeclaration,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
-import { GrpcStatusError } from "./errors.js";
-import { runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
+	RuntimeIngressRejectionPhase,
+	RuntimeIngressRejectionReason,
+	RuntimePodLogger,
+} from "./logger.js";
 
 export { GrpcStatusError } from "./errors.js";
 
-/**
- * Workload-authentication port used before request validation or Runtime Core access.
- */
 export interface RuntimeAuthenticator {
-  readonly authenticate: (input: { readonly metadata: Metadata; readonly method: string }) => Promise<
-    | { readonly ok: true; readonly serviceAccount: ServiceAccountIdentity }
-    | { readonly ok: false; readonly code: "Unauthenticated" | "PermissionDenied"; readonly message: string }
-  >;
+	readonly authenticate: (input: {
+		readonly metadata: Metadata;
+		readonly method: string;
+	}) => Promise<
+		| { readonly ok: true; readonly serviceAccount: ServiceAccountIdentity }
+		| {
+				readonly ok: false;
+				readonly code: "Unauthenticated" | "PermissionDenied";
+				readonly message: string;
+		  }
+	>;
 }
 
-/**
- * In-process Runtime Core command port for hot session and thread state.
- *
- * Implementations report local capacity and control outcomes without exposing Effect values or
- * Runtime Core service objects across the Runtime Pod boundary.
- */
+/** Current session binding authority shared by session-addressed methods. */
+export interface RuntimeSessionScope {
+	readonly workspaceId: string;
+	readonly sessionId: string;
+	readonly bindingId: string;
+	readonly bindingGeneration: number;
+	readonly targetPodUid: string;
+}
+
+/** Current session binding plus the thread selected by a thread-addressed method. */
+export interface RuntimeThreadScope extends RuntimeSessionScope {
+	readonly sessionThreadId: string;
+}
+
+/** One active Runtime Inbox identity. */
+export interface RuntimeInputScope extends RuntimeThreadScope {
+	readonly runtimeInputId: string;
+}
+
+export type RuntimeAcceptInputCommand = RuntimeInputScope & {
+	readonly inputOrder: number;
+} & (
+		| { readonly kind: "messages"; readonly contentJson: string }
+		| {
+				readonly kind: "rejection";
+				readonly reasonCode:
+					| "runtime_command_payload_too_large"
+					| "runtime_command_rejected";
+		  }
+	);
+
+export interface RuntimeAgentMailCommand extends RuntimeInputScope {
+	readonly kind: "inter_agent_message";
+	readonly deliveryId: string;
+	readonly content: string;
+}
+
+export interface RuntimeTaskNotificationCommand extends RuntimeInputScope {
+	readonly kind: "task_notification";
+	readonly inputOrder: number;
+	readonly taskId: string;
+	readonly sourceToolUseEventId: string;
+	readonly status: "completed" | "failed" | "cancelled" | "expired";
+	readonly notificationJson: string;
+}
+
+export interface RuntimeInterruptCommand extends RuntimeInputScope {
+	readonly interruptLeaseRef: InterruptLeaseRef;
+	readonly origin: "user" | "agent";
+}
+
+export interface RuntimeToolConfirmationCommand extends RuntimeInputScope {
+	readonly toolUseEventId: string;
+	readonly decision: "allow" | "deny";
+	readonly denyMessage?: string | undefined;
+}
+
+export interface RuntimeConfigCommand extends RuntimeSessionScope {
+	readonly configIdentity: string;
+	readonly generation: number;
+	readonly mcpServerName?: string | undefined;
+	readonly manifestETag?: string | undefined;
+	readonly manifestReadiness?: "ready" | "unready";
+	readonly manifestDiagnostic?: string | undefined;
+	readonly contentJson: string;
+}
+
+export interface RuntimeCleanupCommand extends RuntimeSessionScope {
+	readonly cleanupOperationId: string;
+}
+
 export interface RuntimeSessionRunHost {
-  readonly handleAcceptInput: (command: RuntimeMessagesCommand) => Promise<
-    | {
-        readonly ok: true;
-        readonly sessionId: string;
-        readonly created: boolean;
-        readonly started: boolean;
-        readonly duplicate?: true | undefined;
-      }
-    | {
-        readonly ok: false;
-        readonly sessionId: string;
-        readonly reason: "local_session_capacity_exceeded" | "control_conflict" | "context_load_failed";
-        readonly retryable?: boolean | undefined;
-      }
-  >;
-  readonly handleAgentMail: (command: RuntimeAgentMailCommand) => Promise<
-    | { readonly ok: true; readonly sessionId: string; readonly applied: boolean }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "thread_not_receivable" | "context_load_failed"; readonly retryable?: boolean | undefined }
-  >;
-  readonly handleInterruptControl: (
-    sessionId: string,
-    command: RuntimeCommandScope & { readonly origin: "user" | "agent" },
-    commitInterruptInput: (declaration: RuntimeControlInputDeclaration) => Promise<RuntimeControlInputCommitResult>,
-  ) => Promise<
-    | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly interrupted: boolean; readonly idleInterrupt: boolean; readonly duplicate?: true | undefined; readonly stale?: true | undefined }
-    | {
-        readonly ok: false;
-        readonly sessionId: string;
-        readonly reason: "local_session_capacity_exceeded" | "control_busy" | "context_load_failed";
-        readonly retryable?: boolean | undefined;
-        readonly errorCode?: string | number | undefined;
-      }
-  >;
-  readonly handleToolConfirmation: (
-    sessionId: string,
-    command: RuntimeCommandScope & {
-      readonly sourceEventId: string;
-      readonly toolUseEventId: string;
-      readonly decision: "allow" | "deny";
-      readonly denyMessage?: string | undefined;
-    },
-    commit: (declaration: RuntimeControlInputDeclaration) => Promise<RuntimeControlInputCommitResult>,
-  ) => Promise<
-    | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly applied: boolean; readonly stale?: true | undefined }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "control_busy" | "control_conflict" | "context_load_failed" }
-  >;
-  readonly handleTaskNotification: (
-    sessionId: string,
-    command: RuntimeCommandScope & {
-      readonly taskId: string;
-      readonly sourceToolUseEventId: string;
-      readonly status: "completed" | "failed" | "cancelled" | "expired";
-      readonly payloadJson: string;
-    },
-  ) => Promise<
-    | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly applied: boolean }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "control_busy" | "control_conflict" | "context_load_failed" }
-  >;
-  readonly handleRuntimeConfigPatch: (
-    sessionId: string,
-    command: RuntimeCommandScope & {
-      readonly generation?: number;
-      readonly mcpServerName?: string;
-      readonly manifestETag?: string;
-      readonly manifestReadiness?: "ready" | "unready";
-      readonly manifestDiagnostic?: string;
-      readonly payloadJson: string;
-    },
-  ) => Promise<
-    | {
-        readonly ok: true;
-        readonly sessionId: string;
-        readonly created: boolean;
-        readonly applied: boolean;
-        readonly noResidency?: true | undefined;
-      }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "control_busy" | "control_conflict" | "context_load_failed" }
-  >;
+	readonly handleAcceptInput: (
+		command: RuntimeAcceptInputCommand,
+	) => Promise<
+		| {
+				readonly ok: true;
+				readonly sessionId: string;
+				readonly created: boolean;
+				readonly started: boolean;
+				readonly duplicate?: true | undefined;
+		  }
+		| {
+				readonly ok: false;
+				readonly sessionId: string;
+				readonly reason:
+					| "local_session_capacity_exceeded"
+					| "control_conflict"
+					| "context_load_failed"
+					| "barrier_stale";
+				readonly retryable?: boolean | undefined;
+		  }
+	>;
+	readonly handleAgentMail: (
+		command: RuntimeAgentMailCommand,
+	) => Promise<
+		| {
+				readonly ok: true;
+				readonly sessionId: string;
+				readonly applied: boolean;
+		  }
+		| {
+				readonly ok: false;
+				readonly sessionId: string;
+				readonly reason:
+					| "local_session_capacity_exceeded"
+					| "thread_not_receivable"
+					| "context_load_failed"
+					| "barrier_stale";
+				readonly retryable?: boolean | undefined;
+		  }
+	>;
+	readonly handleInterruptControl: (
+		sessionId: string,
+		command: RuntimeInterruptCommand,
+		commitInterruptInput: (
+			declaration: RuntimeControlInputDeclaration,
+		) => Promise<RuntimeControlInputCommitResult>,
+	) => Promise<
+		| {
+				readonly ok: true;
+				readonly sessionId: string;
+				readonly created: boolean;
+				readonly interrupted: boolean;
+				readonly idleInterrupt: boolean;
+				readonly duplicate?: true | undefined;
+				readonly stale?: true | undefined;
+		  }
+		| {
+				readonly ok: false;
+				readonly sessionId: string;
+				readonly reason:
+					| "local_session_capacity_exceeded"
+					| "control_busy"
+					| "context_load_failed";
+				readonly retryable?: boolean | undefined;
+				readonly errorCode?: string | number | undefined;
+		  }
+	>;
+	readonly handleToolConfirmation: (
+		sessionId: string,
+		command: RuntimeToolConfirmationCommand,
+		commit: (
+			declaration: RuntimeControlInputDeclaration,
+		) => Promise<RuntimeControlInputCommitResult>,
+	) => Promise<
+		| {
+				readonly ok: true;
+				readonly sessionId: string;
+				readonly created: boolean;
+				readonly applied: boolean;
+				readonly stale?: true | undefined;
+		  }
+		| {
+				readonly ok: false;
+				readonly sessionId: string;
+				readonly reason:
+					| "local_session_capacity_exceeded"
+					| "control_busy"
+					| "control_conflict"
+					| "context_load_failed"
+					| "barrier_stale";
+		  }
+	>;
+	readonly handleTaskNotification: (
+		sessionId: string,
+		command: RuntimeTaskNotificationCommand,
+	) => Promise<
+		| {
+				readonly ok: true;
+				readonly sessionId: string;
+				readonly created: boolean;
+				readonly applied: boolean;
+		  }
+		| {
+				readonly ok: false;
+				readonly sessionId: string;
+				readonly reason:
+					| "local_session_capacity_exceeded"
+					| "control_busy"
+					| "control_conflict"
+					| "context_load_failed"
+					| "barrier_stale";
+		  }
+	>;
+	readonly handleRuntimeConfigPatch: (
+		sessionId: string,
+		command: RuntimeConfigCommand,
+	) => Promise<
+		| {
+				readonly ok: true;
+				readonly sessionId: string;
+				readonly created: boolean;
+				readonly applied: boolean;
+				readonly noResidency?: true | undefined;
+		  }
+		| {
+				readonly ok: false;
+				readonly sessionId: string;
+				readonly reason:
+					| "local_session_capacity_exceeded"
+					| "control_busy"
+					| "control_conflict"
+					| "context_load_failed";
+		  }
+	>;
 }
 
-/**
- * Validated command identity, binding fence, and event-sequence evidence passed to in-process hosts
- * and Bridge-backed committers.
- */
-export interface RuntimeCommandScope {
-  readonly requestId: string;
-  readonly workspaceId: string;
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly bindingId: string;
-  readonly bindingGeneration: number;
-  readonly targetPodUid: string;
-  readonly runtimeInputId: string;
-  readonly eventIds: readonly string[];
-  readonly sequenceFrom: number;
-  readonly sequenceTo: number;
-}
-
-/** Accepted message or bounded rejection command passed to Runtime Core. */
-export type RuntimeMessagesCommand = RuntimeCommandScope & (
-  | { readonly kind: "messages"; readonly payloadJson: string }
-  | {
-      readonly kind: "rejection";
-      readonly reasonCode: "runtime_command_payload_too_large" | "runtime_command_rejected";
-    }
-);
-
-/** Stored child-completion envelope delivered from its database-stamped input source. */
-export interface RuntimeAgentMailCommand extends RuntimeCommandScope {
-  readonly deliveryId: string;
-  readonly sourceThreadId: string;
-  readonly sourceToolUseEventId: string;
-  readonly message: RuntimeMessage;
-}
-
-/**
- * Bridge-backed durable input port for interrupts and tool confirmations.
- */
 export interface RuntimeControlInputCommitter {
-  readonly commitControlInput: (input: {
-    readonly scope: RuntimeCommandScope;
-    readonly inputKind: "interrupt_control" | "tool_confirmation";
-    readonly messageCreates: readonly RuntimeMessageCreate[];
-  }) => Promise<
-    | { readonly ok: true; readonly stale: true }
-    | { readonly ok: true; readonly receipt: RuntimeDeclarationReceipt }
-    | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string; readonly message: string }
-  >;
+	readonly commitControlInput: (input: {
+		readonly scope: RuntimeInputScope;
+		readonly inputKind: "interrupt_control" | "tool_confirmation";
+		readonly interruptLeaseRef?: InterruptLeaseRef | undefined;
+	}) => Promise<
+		| { readonly ok: true; readonly type: "stale" }
+		| { readonly ok: true; readonly type: "barrier_stale" }
+		| {
+				readonly ok: true;
+				readonly type: "committed";
+				readonly assignedContextSequences: readonly number[];
+				readonly pendingAttachments: readonly RuntimeProviderAttachment[];
+				readonly interruptToolResults: readonly RuntimeInterruptToolResult[];
+		  }
+		| {
+				readonly ok: false;
+				readonly retryable: boolean;
+				readonly errorCode: string;
+				readonly message: string;
+		  }
+	>;
 }
 
-/**
- * Cleanup admission port whose completion resolves only after hot session state is cleared.
- */
 export interface RuntimeCleanupController {
-  readonly startCleanup: (scope: RuntimeCommandScope, reason: "expired" | "operator_requested") => Promise<
-    | {
-        readonly ok: true;
-        readonly sessionId: string;
-        readonly completion: Promise<{ readonly ok: true; readonly sessionId: string; readonly cleaned: boolean }>;
-      }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "session_busy" }
-  >;
+	readonly startCleanup: (
+		scope: RuntimeCleanupCommand,
+		reason: "expired" | "operator_requested",
+	) => Promise<
+		| {
+				readonly ok: true;
+				readonly sessionId: string;
+				readonly completion: Promise<{
+					readonly ok: true;
+					readonly sessionId: string;
+					readonly cleaned: boolean;
+				}>;
+		  }
+		| {
+				readonly ok: false;
+				readonly sessionId: string;
+				readonly reason: "session_busy";
+		  }
+	>;
 }
 
-/**
- * Lifecycle admission port that tracks a command and supplies its shutdown-aware lease.
- */
 export interface RuntimeCommandRunner {
-  readonly runCommand: <Response>(command: (lease: RuntimeCommandLease) => Promise<Response>) => Promise<Response>;
+	readonly runCommand: <Response>(
+		command: (lease: RuntimeCommandLease) => Promise<Response>,
+	) => Promise<Response>;
 }
 
-/**
- * Pod identity, authorization policy, command ports, lifecycle gates, and observability dependencies
- * used by `RuntimeControlService`.
- */
 export interface RuntimeControlServiceOptions {
-  readonly ownPod: {
-    readonly namespace: string;
-    readonly name: string;
-    readonly uid: string;
-    readonly ip: string;
-  };
-  readonly allowedBridge: ServiceAccountIdentity;
-  readonly authenticator: RuntimeAuthenticator;
-  readonly runHost: RuntimeSessionRunHost;
-  readonly controlInputCommitter?: RuntimeControlInputCommitter;
-  readonly cleanupController: RuntimeCleanupController;
-  readonly logger: RuntimePodLogger;
-  readonly ready: () => boolean;
-  readonly commandRunner?: RuntimeCommandRunner;
-  readonly metrics?: RuntimeMetricsSink | undefined;
+	readonly ownPod: {
+		readonly namespace: string;
+		readonly name: string;
+		readonly uid: string;
+		readonly ip: string;
+	};
+	readonly allowedBridge: ServiceAccountIdentity;
+	readonly authenticator: RuntimeAuthenticator;
+	readonly runHost: RuntimeSessionRunHost;
+	readonly controlInputCommitter?: RuntimeControlInputCommitter;
+	readonly cleanupController: RuntimeCleanupController;
+	readonly logger: RuntimePodLogger;
+	readonly ready: () => boolean;
+	readonly commandRunner?: RuntimeCommandRunner;
+	readonly metrics?: RuntimeMetricsSink | undefined;
 }
 
-const AcceptInputFullMethod = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput";
-const AcceptAgentMailFullMethod = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail";
-const AcceptTaskNotificationFullMethod = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptTaskNotification";
-const InterruptFullMethod = "/tetral.agent_runtime.v1.AgentRuntimePodService/Interrupt";
-const ResolveToolConfirmationFullMethod = "/tetral.agent_runtime.v1.AgentRuntimePodService/ResolveToolConfirmation";
-const ApplyRuntimeConfigFullMethod = "/tetral.agent_runtime.v1.AgentRuntimePodService/ApplyRuntimeConfig";
-const CleanupSessionFullMethod = "/tetral.agent_runtime.v1.AgentRuntimePodService/CleanupSession";
+const Methods = {
+	acceptInput: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput",
+	acceptAgentMail:
+		"/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail",
+	acceptTaskNotification:
+		"/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptTaskNotification",
+	interrupt: "/tetral.agent_runtime.v1.AgentRuntimePodService/Interrupt",
+	resolveToolConfirmation:
+		"/tetral.agent_runtime.v1.AgentRuntimePodService/ResolveToolConfirmation",
+	applyRuntimeConfig:
+		"/tetral.agent_runtime.v1.AgentRuntimePodService/ApplyRuntimeConfig",
+	cleanupSession:
+		"/tetral.agent_runtime.v1.AgentRuntimePodService/CleanupSession",
+} as const;
 
-type CommandEffect = "wake-run" | "agent-mail" | "cleanup" | "interrupt" | "tool-confirmation" | "task-notification" | "runtime-config";
-
-interface CommandIdentity {
-  readonly requestId: string;
-  readonly workspaceId: string;
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly bindingId: string;
-  readonly bindingGeneration: number;
-  readonly targetPodNamespace: string;
-  readonly targetPodName: string;
-  readonly targetPodUid: string;
-  readonly targetPodIp: string;
-  readonly runtimeInputId: string;
-  readonly eventIds: readonly string[];
-  readonly sequenceFrom: number;
-  readonly sequenceTo: number;
-  readonly commandKind: RuntimeCommandKind;
-  readonly payloadJson: string;
-  readonly callerServiceAccount: string;
-}
-
-interface InFlightCommand {
-  readonly identity: CommandIdentity;
-  readonly result: Promise<RuntimeInputCommandResponse>;
-  readonly resolve: (response: RuntimeInputCommandResponse) => void;
-  readonly reject: (error: unknown) => void;
+interface InFlight<Response> {
+	readonly identity: string;
+	readonly result: Promise<Response>;
+	readonly resolve: (response: Response) => void;
+	readonly reject: (error: unknown) => void;
 }
 
 interface ActiveSessionBinding {
-  readonly bindingId: string;
-  readonly bindingGeneration: number;
+	readonly bindingId: string;
+	readonly bindingGeneration: number;
 }
 
-/**
- * Handles the seven Bridge command RPCs and maps local outcomes to the protocol's in-band responses or
- * pod-scoped gRPC statuses.
- *
- * The service retains Session-scoped config content identities, shares one in-flight result among
- * concurrent deliveries, and reconstructs every response from the current request binding. Ordinary
- * command receipts remain owned by the resident thread and cleanup drops active binding custody.
- */
+interface RuntimeConfigMemoEntry {
+	readonly configIdentity: string;
+	readonly contentJson: string;
+}
+
+interface IngressRejectionDiagnostic {
+	readonly phase: RuntimeIngressRejectionPhase;
+	readonly reason: RuntimeIngressRejectionReason;
+	readonly grpcCode?: string | undefined;
+}
+
+interface MethodExecution<Request extends RuntimeSessionScope, Response> {
+	readonly request: Request;
+	readonly metadata: Metadata;
+	readonly method: string;
+	readonly operation: string;
+	readonly operationId: string;
+	readonly dedupeKey: string;
+	readonly identity: () => string;
+	readonly validate: (request: Request) => {
+		readonly ok: boolean;
+		readonly message?: string;
+	};
+	readonly selectedPodRejected: () => Response;
+	readonly bindingRejected: () => Response;
+	readonly identityRejected: () => Response;
+	readonly duplicate: (response: Response) => Response;
+	readonly rejected: (response: Response) => boolean;
+	readonly rejectionDiagnostic?:
+		| ((response: Response) => IngressRejectionDiagnostic)
+		| undefined;
+	readonly apply: () => Promise<Response>;
+	readonly acceptedBinding: boolean;
+}
+
 export class RuntimeControlService {
-  private acceptingCommands = true;
-  private readonly configContentMemo = new Map<string, Pick<CommandIdentity, "runtimeInputId" | "payloadJson">>();
-  private readonly inFlight = new Map<string, InFlightCommand>();
-  private readonly activeBindings = new Map<string, ActiveSessionBinding>();
+	private acceptingCommands = true;
+	private readonly inFlight = new Map<string, InFlight<unknown>>();
+	private readonly activeBindings = new Map<string, ActiveSessionBinding>();
+	// One entry per active configuration family is enough to detect payload
+	// conflicts for the current identity. A newer generation supersedes the old
+	// identity; non-resident sessions and completed cleanup retain no memo state.
+	private readonly configContentMemo = new Map<
+		string,
+		Map<string, RuntimeConfigMemoEntry>
+	>();
 
-  constructor(private readonly options: RuntimeControlServiceOptions) {}
+	constructor(private readonly options: RuntimeControlServiceOptions) {}
 
-  /** Closes the service-local admission gate before lifecycle drain begins. */
-  beginShutdown(): void {
-    this.acceptingCommands = false;
-  }
+	beginShutdown(): void {
+		this.acceptingCommands = false;
+	}
 
-  /** Accepts a user-message command and wakes or creates its hot Runtime Core run. */
-  async acceptInput(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
-    return await this.runRuntimeCommand(
-      request,
-      metadata,
-      AcceptInputFullMethod,
-      RuntimeCommandKind.RUNTIME_COMMAND_KIND_MESSAGES,
-      "wake-run",
-    );
-  }
+	async acceptInput(
+		request: AcceptInputRequest,
+		metadata: Metadata,
+	): Promise<AcceptInputResponse> {
+		const scope = inputScope(request);
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.acceptInput,
+			operation: "AcceptInput",
+			operationId: request.runtimeInputId,
+			dedupeKey: inputDedupeKey("input", request),
+			identity: () => stableIdentity(request),
+			validate: validateAcceptInputRequest,
+			selectedPodRejected: () =>
+				acceptInputRejected(
+					AcceptInputFailure.ACCEPT_INPUT_FAILURE_SELECTED_POD_MISMATCH,
+					true,
+				),
+			bindingRejected: () =>
+				acceptInputRejected(
+					AcceptInputFailure.ACCEPT_INPUT_FAILURE_BINDING_MISMATCH,
+					true,
+				),
+			identityRejected: () =>
+				acceptInputRejected(
+					AcceptInputFailure.ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT,
+					false,
+				),
+			duplicate: (response) =>
+				response.rejected === undefined ? { duplicate: {} } : response,
+			rejected: (response) => response.rejected !== undefined,
+			apply: async () => {
+				const result = await this.options.runHost.handleAcceptInput(
+					acceptInputCommand(request, scope),
+				);
+				if (!result.ok) {
+					if (result.reason === "barrier_stale") {
+						return acceptInputRejected(
+							AcceptInputFailure.ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
+					if (result.reason === "control_conflict") {
+						return acceptInputRejected(
+							AcceptInputFailure.ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT,
+							false,
+						);
+					}
+					if (result.reason === "context_load_failed") {
+						return acceptInputRejected(
+							AcceptInputFailure.ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED,
+							result.retryable ?? false,
+						);
+					}
+					throw new GrpcStatusError(
+						status.RESOURCE_EXHAUSTED,
+						"local runtime capacity exceeded",
+					);
+				}
+				return result.duplicate === true ? { duplicate: {} } : { accepted: {} };
+			},
+			acceptedBinding: true,
+		});
+	}
 
-  /** Accepts one delivered durable agent-mail envelope directly and wakes its target thread. */
-  async acceptAgentMail(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
-    return await this.runRuntimeCommand(
-      request,
-      metadata,
-      AcceptAgentMailFullMethod,
-      RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
-      "agent-mail",
-    );
-  }
+	async acceptAgentMail(
+		request: AcceptAgentMailRequest,
+		metadata: Metadata,
+	): Promise<AcceptAgentMailResponse> {
+		const scope = inputScope(request);
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.acceptAgentMail,
+			operation: "AcceptAgentMail",
+			operationId: request.runtimeInputId,
+			dedupeKey: inputDedupeKey("agent-mail", request),
+			identity: () => stableIdentity(request),
+			validate: validateAcceptAgentMailRequest,
+			selectedPodRejected: () =>
+				acceptAgentMailRejected(
+					AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_SELECTED_POD_MISMATCH,
+					true,
+				),
+			bindingRejected: () =>
+				acceptAgentMailRejected(
+					AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_BINDING_MISMATCH,
+					true,
+				),
+			identityRejected: () =>
+				acceptAgentMailRejected(
+					AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT,
+					false,
+				),
+			duplicate: (response) =>
+				response.rejected === undefined ? { duplicate: {} } : response,
+			rejected: (response) => response.rejected !== undefined,
+			apply: async () => {
+				const result = await this.options.runHost.handleAgentMail({
+					...scope,
+					kind: "inter_agent_message",
+					deliveryId: request.deliveryId,
+					content: request.content,
+				});
+				if (!result.ok) {
+					if (result.reason === "barrier_stale") {
+						return acceptAgentMailRejected(
+							AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
+					if (result.reason === "local_session_capacity_exceeded") {
+						throw new GrpcStatusError(
+							status.RESOURCE_EXHAUSTED,
+							"local runtime capacity exceeded",
+						);
+					}
+					const reason =
+						result.reason === "thread_not_receivable"
+							? AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE
+							: AcceptAgentMailFailure.ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED;
+					return acceptAgentMailRejected(
+						reason,
+						result.reason === "context_load_failed"
+							? (result.retryable ?? false)
+							: false,
+					);
+				}
+				return result.applied ? { accepted: {} } : { duplicate: {} };
+			},
+			acceptedBinding: true,
+		});
+	}
 
-  /** Admits a background task notification for settlement by its owning agent run. */
-  async acceptTaskNotification(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
-    return await this.runRuntimeCommand(
-      request,
-      metadata,
-      AcceptTaskNotificationFullMethod,
-      RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
-      "task-notification",
-    );
-  }
+	async acceptTaskNotification(
+		request: AcceptTaskNotificationRequest,
+		metadata: Metadata,
+	): Promise<AcceptTaskNotificationResponse> {
+		const scope = inputScope(request);
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.acceptTaskNotification,
+			operation: "AcceptTaskNotification",
+			operationId: request.runtimeInputId,
+			dedupeKey: inputDedupeKey("task-notification", request),
+			identity: () => stableIdentity(request),
+			validate: validateAcceptTaskNotificationRequest,
+			selectedPodRejected: () =>
+				acceptTaskRejected(
+					AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_SELECTED_POD_MISMATCH,
+					true,
+				),
+			bindingRejected: () =>
+				acceptTaskRejected(
+					AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_BINDING_MISMATCH,
+					true,
+				),
+			identityRejected: () =>
+				acceptTaskRejected(
+					AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_IDENTITY_CONFLICT,
+					false,
+				),
+			duplicate: (response) =>
+				response.rejected === undefined ? { duplicate: {} } : response,
+			rejected: (response) => response.rejected !== undefined,
+			apply: async () => {
+				const content = taskNotificationContent(request.notificationJson);
+				const result = await this.options.runHost.handleTaskNotification(
+					request.sessionId,
+					{
+						...scope,
+						kind: "task_notification",
+						inputOrder: request.inputOrder,
+						taskId: content.taskId,
+						sourceToolUseEventId: content.sourceToolUseEventId,
+						status: content.status,
+						notificationJson: request.notificationJson,
+					},
+				);
+				if (!result.ok) {
+					if (result.reason === "barrier_stale") {
+						return acceptTaskRejected(
+							AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
+					return acceptTaskRejected(
+						taskFailure(result.reason),
+						result.reason === "control_busy" ||
+							result.reason === "context_load_failed",
+					);
+				}
+				return result.applied ? { accepted: {} } : { duplicate: {} };
+			},
+			acceptedBinding: true,
+		});
+	}
 
-  /** Runs the interrupt closeout path and commits its control input at the prescribed closeout point. */
-  async interrupt(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
-    return await this.runRuntimeCommand(
-      request,
-      metadata,
-      InterruptFullMethod,
-      RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
-      "interrupt",
-    );
-  }
+	async interrupt(
+		request: InterruptRequest,
+		metadata: Metadata,
+	): Promise<InterruptResponse> {
+		const scope = inputScope(request);
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.interrupt,
+			operation: "Interrupt",
+			operationId: request.runtimeInputId,
+			dedupeKey: inputDedupeKey("interrupt", request),
+			identity: () => stableIdentity(request),
+			validate: validateInterruptRequest,
+			selectedPodRejected: () =>
+				interruptRejected(
+					InterruptFailure.INTERRUPT_FAILURE_SELECTED_POD_MISMATCH,
+					true,
+				),
+			bindingRejected: () =>
+				interruptRejected(
+					InterruptFailure.INTERRUPT_FAILURE_BINDING_MISMATCH,
+					true,
+				),
+			identityRejected: () =>
+				interruptRejected(
+					InterruptFailure.INTERRUPT_FAILURE_IDENTITY_CONFLICT,
+					false,
+				),
+			duplicate: (response) =>
+				response.rejected === undefined ? { duplicate: {} } : response,
+			rejected: (response) => response.rejected !== undefined,
+			apply: async () => {
+				let committed: RuntimeControlInputCommitResult | undefined;
+				const result = await this.options.runHost.handleInterruptControl(
+					request.sessionId,
+					{
+						...scope,
+						interruptLeaseRef: request.interruptLeaseRef!,
+						origin:
+							request.origin === InterruptOrigin.INTERRUPT_ORIGIN_AGENT
+								? "agent"
+								: "user",
+					},
+					async (declaration) => {
+						committed = await this.commitControlInput(
+							scope,
+							declaration,
+							request.interruptLeaseRef,
+						);
+						return committed;
+					},
+				);
+				if (!result.ok) {
+					if (committed?.ok === false) {
+						return interruptRejected(
+							commitInterruptFailure(committed.errorCode),
+							committed.retryable,
+						);
+					}
+					if (result.reason === "local_session_capacity_exceeded") {
+						throw new GrpcStatusError(
+							status.RESOURCE_EXHAUSTED,
+							"local runtime capacity exceeded",
+						);
+					}
+					return interruptRejected(
+						result.reason === "control_busy"
+							? InterruptFailure.INTERRUPT_FAILURE_CONTROL_BUSY
+							: InterruptFailure.INTERRUPT_FAILURE_CONTEXT_LOAD_FAILED,
+						result.retryable ?? result.reason === "control_busy",
+					);
+				}
+				if (result.duplicate === true) {
+					return { duplicate: {} };
+				}
+				if (result.idleInterrupt && committed === undefined) {
+					throw new GrpcStatusError(
+						status.INTERNAL,
+						"idle interrupt completed without a durable declaration",
+					);
+				}
+				return { accepted: {} };
+			},
+			acceptedBinding: true,
+		});
+	}
 
-  /** Commits and applies an allow or deny decision for a pending tool confirmation. */
-  async resolveToolConfirmation(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
-    return await this.runRuntimeCommand(
-      request,
-      metadata,
-      ResolveToolConfirmationFullMethod,
-      RuntimeCommandKind.RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION,
-      "tool-confirmation",
-    );
-  }
+	async resolveToolConfirmation(
+		request: ResolveToolConfirmationRequest,
+		metadata: Metadata,
+	): Promise<ResolveToolConfirmationResponse> {
+		const scope = inputScope(request);
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.resolveToolConfirmation,
+			operation: "ResolveToolConfirmation",
+			operationId: request.runtimeInputId,
+			dedupeKey: inputDedupeKey("tool-confirmation", request),
+			identity: () => stableIdentity(request),
+			validate: validateResolveToolConfirmationRequest,
+			selectedPodRejected: () =>
+				resolveToolRejected(
+					ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SELECTED_POD_MISMATCH,
+					true,
+				),
+			bindingRejected: () =>
+				resolveToolRejected(
+					ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_BINDING_MISMATCH,
+					true,
+				),
+			identityRejected: () =>
+				resolveToolRejected(
+					ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_IDENTITY_CONFLICT,
+					false,
+				),
+			duplicate: (response) =>
+				response.rejected === undefined ? { duplicate: {} } : response,
+			rejected: (response) => response.rejected !== undefined,
+			apply: async () => {
+				let committed: RuntimeControlInputCommitResult | undefined;
+				const result = await this.options.runHost.handleToolConfirmation(
+					request.sessionId,
+					{
+						...scope,
+						toolUseEventId: request.toolUseEventId,
+						decision:
+							request.decision ===
+							ToolConfirmationDecision.TOOL_CONFIRMATION_DECISION_DENY
+								? "deny"
+								: "allow",
+						...(request.denyMessage === undefined
+							? {}
+							: { denyMessage: request.denyMessage }),
+					},
+					async (declaration) => {
+						committed = await this.commitControlInput(scope, declaration);
+						return committed;
+					},
+				);
+				if (!result.ok && committed?.ok === false) {
+					return resolveToolRejected(
+						commitToolFailure(committed.errorCode),
+						committed.retryable,
+					);
+				}
+				if (!result.ok) {
+					if (result.reason === "local_session_capacity_exceeded") {
+						throw new GrpcStatusError(
+							status.RESOURCE_EXHAUSTED,
+							"local runtime capacity exceeded",
+						);
+					}
+					if (result.reason === "control_busy") {
+						throw new GrpcStatusError(
+							status.UNAVAILABLE,
+							"runtime control command busy",
+						);
+					}
+					return resolveToolRejected(
+						result.reason === "control_conflict"
+							? ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTROL_CONFLICT
+							: ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED,
+						false,
+					);
+				}
+				if ("stale" in result) {
+					if (
+						committed?.ok === true &&
+						"stale" in committed &&
+						committed.barrierStale === true
+					) {
+						return resolveToolRejected(
+							ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE,
+							false,
+						);
+					}
+					return { stale: {} };
+				}
+				return result.applied ? { accepted: {} } : { duplicate: {} };
+			},
+			acceptedBinding: true,
+		});
+	}
 
-  /** Applies a validated runtime or MCP manifest generation patch to hot state. */
-  async applyRuntimeConfig(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
-    return await this.runRuntimeCommand(
-      request,
-      metadata,
-      ApplyRuntimeConfigFullMethod,
-      RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
-      "runtime-config",
-    );
-  }
+	async applyRuntimeConfig(
+		request: ApplyRuntimeConfigRequest,
+		metadata: Metadata,
+	): Promise<ApplyRuntimeConfigResponse> {
+		const scope = sessionScope(request);
+		const configIdentity = runtimeConfigIdentity(request);
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.applyRuntimeConfig,
+			operation: "ApplyRuntimeConfig",
+			operationId: configIdentity,
+			dedupeKey: `runtime-config\u0000${sessionKey(request)}\u0000${configIdentity}`,
+			identity: () => stableIdentity(request),
+			validate: validateApplyRuntimeConfigRequest,
+			selectedPodRejected: () =>
+				applyConfigRejected(
+					ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_SELECTED_POD_MISMATCH,
+					true,
+				),
+			bindingRejected: () =>
+				applyConfigRejected(
+					ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_BINDING_MISMATCH,
+					true,
+				),
+			identityRejected: () =>
+				applyConfigRejected(
+					ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT,
+					false,
+				),
+			duplicate: (result) =>
+				result.rejected === undefined ? { duplicate: {} } : result,
+			rejected: (result) => result.rejected !== undefined,
+			rejectionDiagnostic: (result) =>
+				result.rejected?.reason ===
+				ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT
+					? { phase: "identity", reason: "identity_conflict" }
+					: { phase: "application", reason: "operation_rejected" },
+			apply: async () => {
+				// Authentication, bounds, selected-Pod, and binding checks in executeMethod
+				// deliberately precede both content parsing and this process-local memo probe.
+				const command = runtimeConfigCommand(request, scope);
+				const memoSessionKey = sessionKey(request);
+				const memoFamily = runtimeConfigMemoFamily(command);
+				const sessionMemo = this.configContentMemo.get(memoSessionKey);
+				const existing = sessionMemo?.get(memoFamily);
+				if (
+					existing?.configIdentity === command.configIdentity &&
+					existing.contentJson !== command.contentJson
+				) {
+					return applyConfigRejected(
+						ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT,
+						false,
+					);
+				}
+				const result = await this.options.runHost.handleRuntimeConfigPatch(
+					request.sessionId,
+					command,
+				);
+				if (!result.ok) {
+					return applyConfigRejected(
+						configFailure(result.reason),
+						result.reason === "control_busy" ||
+							result.reason === "context_load_failed",
+					);
+				}
+				if (result.noResidency === true) {
+					this.deleteRuntimeConfigMemo(memoSessionKey, memoFamily);
+					return { noResidency: {} };
+				}
+				const nextSessionMemo =
+					sessionMemo ?? new Map<string, RuntimeConfigMemoEntry>();
+				nextSessionMemo.set(memoFamily, {
+					configIdentity: command.configIdentity,
+					contentJson: command.contentJson,
+				});
+				this.configContentMemo.set(memoSessionKey, nextSessionMemo);
+				return result.applied ? { applied: {} } : { duplicate: {} };
+			},
+			acceptedBinding: true,
+		});
+	}
 
-  /** Waits for admitted hot-state cleanup before acknowledging the cleanup command. */
-  async cleanupSession(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
-    return await this.runRuntimeCommand(
-      request,
-      metadata,
-      CleanupSessionFullMethod,
-      RuntimeCommandKind.RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
-      "cleanup",
-    );
-  }
+	async cleanupSession(
+		request: CleanupSessionRequest,
+		metadata: Metadata,
+	): Promise<CleanupSessionResponse> {
+		const scope: RuntimeCleanupCommand = {
+			...sessionScope(request),
+			cleanupOperationId: request.cleanupOperationId,
+		};
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.cleanupSession,
+			operation: "CleanupSession",
+			operationId: request.cleanupOperationId,
+			dedupeKey: `cleanup\u0000${sessionKey(request)}\u0000${request.cleanupOperationId}`,
+			identity: () => stableIdentity(request),
+			validate: validateCleanupSessionRequest,
+			selectedPodRejected: () =>
+				cleanupRejected(
+					CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH,
+					true,
+				),
+			bindingRejected: () =>
+				cleanupRejected(
+					CleanupSessionFailure.CLEANUP_SESSION_FAILURE_BINDING_MISMATCH,
+					true,
+				),
+			identityRejected: () =>
+				cleanupRejected(
+					CleanupSessionFailure.CLEANUP_SESSION_FAILURE_CLEANUP_FAILED,
+					false,
+				),
+			duplicate: (response) =>
+				response.rejected === undefined ? { duplicate: {} } : response,
+			rejected: (response) => response.rejected !== undefined,
+			apply: async () => {
+				const cleanup = await this.options.cleanupController.startCleanup(
+					scope,
+					request.reason === CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED
+						? "expired"
+						: "operator_requested",
+				);
+				if (!cleanup.ok) {
+					runtimeMetrics(this.options).recordCleanupCommandOutcome("rejected");
+					return cleanupRejected(
+						CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SESSION_BUSY,
+						true,
+					);
+				}
+				runtimeMetrics(this.options).recordCleanupCommandOutcome("accepted");
+				try {
+					await cleanup.completion;
+					this.configContentMemo.delete(sessionKey(request));
+					runtimeMetrics(this.options).recordCleanupCommandOutcome("completed");
+					return { completed: {} };
+				} catch {
+					runtimeMetrics(this.options).recordCleanupCommandOutcome("failed");
+					return cleanupRejected(
+						CleanupSessionFailure.CLEANUP_SESSION_FAILURE_CLEANUP_FAILED,
+						true,
+					);
+				}
+			},
+			acceptedBinding: false,
+		});
+	}
 
-  private async runRuntimeCommand(
-    request: RuntimeInputCommandRequest,
-    metadata: Metadata,
-    method: string,
-    expectedKind: RuntimeCommandKind,
-    effect: CommandEffect,
-  ): Promise<RuntimeInputCommandResponse> {
-    const startedAt = Date.now();
-    const caller = await this.authorize(metadata, method);
-    if (this.options.commandRunner !== undefined) {
-      return await this.options.commandRunner.runCommand(
-        async (lease) => await this.runRuntimeCommandAfterAuthorization(request, caller, method, expectedKind, effect, startedAt, true, lease),
-      );
-    }
-    return await this.runRuntimeCommandAfterAuthorization(request, caller, method, expectedKind, effect, startedAt, false);
-  }
+	private async executeMethod<Request extends RuntimeSessionScope, Response>(
+		execution: MethodExecution<Request, Response>,
+	): Promise<Response> {
+		const startedAt = Date.now();
+		let caller: { readonly serviceAccount: ServiceAccountIdentity };
+		try {
+			caller = await this.authorize(execution.metadata, execution.method);
+		} catch (error) {
+			this.logOutcome(
+				execution,
+				undefined,
+				startedAt,
+				{
+					phase: "authentication",
+					reason: "authentication_rejected",
+					grpcCode: grpcCodeText(error),
+				},
+				false,
+			);
+			throw error;
+		}
+		let rejectionRecorded = false;
+		const recordRejection = (
+			diagnostic: IngressRejectionDiagnostic,
+			identityTrusted: boolean,
+		): void => {
+			rejectionRecorded = true;
+			this.logOutcome(
+				execution,
+				caller,
+				startedAt,
+				diagnostic,
+				identityTrusted,
+			);
+		};
+		const run = async (lease?: RuntimeCommandLease): Promise<Response> => {
+			try {
+				this.ensureAccepting(lease !== undefined);
+				lease?.throwIfAborted();
+			} catch (error) {
+				recordRejection(
+					{
+						phase: "lifecycle",
+						reason: "runtime_not_accepting",
+						grpcCode: grpcCodeText(error),
+					},
+					false,
+				);
+				throw error;
+			}
+			const validation = execution.validate(execution.request);
+			if (!validation.ok) {
+				recordRejection(
+					{
+						phase: "request_validation",
+						reason: "invalid_request",
+						grpcCode: "InvalidArgument",
+					},
+					false,
+				);
+				throw new GrpcStatusError(
+					status.INVALID_ARGUMENT,
+					validation.message ?? "invalid internal request",
+				);
+			}
+			if (execution.request.targetPodUid !== this.options.ownPod.uid) {
+				const response = execution.selectedPodRejected();
+				recordRejection(
+					{ phase: "selected_pod", reason: "selected_pod_mismatch" },
+					true,
+				);
+				return response;
+			}
+			if (!this.activeBindingMatches(execution.request)) {
+				const response = execution.bindingRejected();
+				recordRejection({ phase: "binding", reason: "binding_mismatch" }, true);
+				return response;
+			}
+			const identity = execution.identity();
+			const existing = this.inFlight.get(execution.dedupeKey) as
+				| InFlight<Response>
+				| undefined;
+			if (existing !== undefined) {
+				if (existing.identity !== identity) {
+					const response = execution.identityRejected();
+					recordRejection(
+						{ phase: "identity", reason: "identity_conflict" },
+						true,
+					);
+					return response;
+				}
+				let settled: Response;
+				try {
+					settled = await existing.result;
+				} catch (error) {
+					recordRejection(grpcRejectionDiagnostic(error), true);
+					throw error;
+				}
+				const response = execution.duplicate(settled);
+				if (execution.rejected(response)) {
+					recordRejection(
+						execution.rejectionDiagnostic?.(response) ?? {
+							phase: "application",
+							reason: "operation_rejected",
+						},
+						true,
+					);
+				} else {
+					this.logOutcome(execution, caller, startedAt, undefined, true);
+				}
+				return response;
+			}
+			const reservation = createInFlight<Response>(identity);
+			this.inFlight.set(execution.dedupeKey, reservation as InFlight<unknown>);
+			const unregisterAbort = lease?.onAbort(() => {
+				this.inFlight.delete(execution.dedupeKey);
+				reservation.reject(
+					new GrpcStatusError(
+						status.FAILED_PRECONDITION,
+						"runtime pod shutdown drain timed out",
+					),
+				);
+			});
+			try {
+				const response = await execution.apply();
+				lease?.throwIfAborted();
+				if (!execution.rejected(response)) {
+					this.recordAcceptedBinding(
+						execution.request,
+						execution.acceptedBinding,
+					);
+				}
+				this.inFlight.delete(execution.dedupeKey);
+				reservation.resolve(response);
+				unregisterAbort?.();
+				if (execution.rejected(response)) {
+					recordRejection(
+						execution.rejectionDiagnostic?.(response) ?? {
+							phase: "application",
+							reason: "operation_rejected",
+						},
+						true,
+					);
+				} else {
+					this.logOutcome(execution, caller, startedAt, undefined, true);
+				}
+				return response;
+			} catch (error) {
+				unregisterAbort?.();
+				this.inFlight.delete(execution.dedupeKey);
+				reservation.reject(error);
+				if (!rejectionRecorded) {
+					recordRejection(grpcRejectionDiagnostic(error), true);
+				}
+				if (error instanceof GrpcStatusError) {
+					throw error;
+				}
+				throw new GrpcStatusError(
+					status.INTERNAL,
+					"runtime pod command failed",
+				);
+			}
+		};
+		try {
+			return this.options.commandRunner === undefined
+				? await run()
+				: await this.options.commandRunner.runCommand(
+						async (lease) => await run(lease),
+					);
+		} catch (error) {
+			if (!rejectionRecorded) {
+				recordRejection(
+					{
+						phase: "lifecycle",
+						reason: "runtime_not_accepting",
+						grpcCode: grpcCodeText(error),
+					},
+					false,
+				);
+			}
+			throw error;
+		}
+	}
 
-  private async runRuntimeCommandAfterAuthorization(
-    request: RuntimeInputCommandRequest,
-    caller: { readonly serviceAccount: ServiceAccountIdentity },
-    method: string,
-    expectedKind: RuntimeCommandKind,
-    effect: CommandEffect,
-    startedAt: number,
-    acceptedByLifecycle: boolean,
-    lease?: RuntimeCommandLease,
-  ): Promise<RuntimeInputCommandResponse> {
-    this.ensureAccepting(acceptedByLifecycle);
-    lease?.throwIfAborted();
-    validateRuntimeInputCommandOrThrow(request);
-    if (request.commandKind !== expectedKind) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
-    }
-    const podValidation = this.validateSelectedPod(request);
-    if (!podValidation.ok) {
-      return this.rejected(request, true, podValidation.errorCode);
-    }
+	private async commitControlInput(
+		scope: RuntimeInputScope,
+		declaration: RuntimeControlInputDeclaration,
+		interruptLeaseRef?: InterruptLeaseRef,
+	): Promise<RuntimeControlInputCommitResult> {
+		if (this.options.controlInputCommitter === undefined) {
+			throw new GrpcStatusError(
+				status.INTERNAL,
+				"control input durable committer is unavailable",
+			);
+		}
+		const result = await this.options.controlInputCommitter.commitControlInput({
+			scope,
+			inputKind:
+				declaration.inputKind === "interrupt"
+					? "interrupt_control"
+					: "tool_confirmation",
+			...(declaration.inputKind === "interrupt"
+				? { interruptLeaseRef }
+				: {}),
+		});
+		if (!result.ok) {
+			return {
+				ok: false,
+				retryable: result.retryable,
+				errorCode: result.errorCode,
+			};
+		}
+		if (result.type === "stale" || result.type === "barrier_stale") {
+			return {
+				ok: true,
+				stale: true,
+				...(result.type === "barrier_stale" ? { barrierStale: true } : {}),
+			};
+		}
+		return {
+			ok: true,
+			type: result.type,
+			assignedContextSequences: result.assignedContextSequences,
+			pendingAttachments: result.pendingAttachments,
+			interruptToolResults: result.interruptToolResults,
+		};
+	}
 
-    const callerServiceAccount = serviceAccountText(caller.serviceAccount);
-    const identity = commandIdentity(request, callerServiceAccount);
-    const dedupeKey = runtimeCommandDedupeKey(request);
-    const configPatch = expectedKind === RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH;
-    const configMemoKey = runtimeConfigContentMemoKey(request);
-    const existingConfigContent = configPatch ? this.configContentMemo.get(configMemoKey) : undefined;
-    if (
-      existingConfigContent !== undefined &&
-      (
-        existingConfigContent.runtimeInputId !== identity.runtimeInputId ||
-        existingConfigContent.payloadJson !== identity.payloadJson
-      )
-    ) {
-      return this.rejected(request, false, "runtime_input_identity_conflict");
-    }
-    const existingInFlight = this.inFlight.get(dedupeKey);
-    if (existingInFlight !== undefined) {
-      if (configPatch && !this.activeBindingMatches(request)) {
-        return this.rejected(request, true, "binding_identity_mismatch");
-      }
-      if (!(configPatch ? sameRuntimeConfigPatchIdentity(existingInFlight.identity, identity) : sameCommandIdentity(existingInFlight.identity, identity))) {
-        return this.rejected(request, false, "runtime_input_identity_conflict");
-      }
-      return responseForCurrentRequest(
-        request,
-        await existingInFlight.result,
-        RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE,
-      );
-    }
-    if (!this.activeBindingMatches(request)) {
-      return this.rejected(request, true, "binding_identity_mismatch");
-    }
+	private deleteRuntimeConfigMemo(
+		memoSessionKey: string,
+		memoFamily: string,
+	): void {
+		const sessionMemo = this.configContentMemo.get(memoSessionKey);
+		if (sessionMemo === undefined) {
+			return;
+		}
+		sessionMemo.delete(memoFamily);
+		if (sessionMemo.size === 0) {
+			this.configContentMemo.delete(memoSessionKey);
+		}
+	}
 
-    const reservation = createInFlight(identity);
-    this.inFlight.set(dedupeKey, reservation);
-    const unregisterAbort = lease?.onAbort(() => {
-      this.inFlight.delete(dedupeKey);
-      reservation.reject(new GrpcStatusError(status.FAILED_PRECONDITION, "runtime pod shutdown drain timed out"));
-    });
-    try {
-      const effectResponse = await this.applyEffect(request, effect);
-      if (effectResponse?.status === RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED) {
-        this.inFlight.delete(dedupeKey);
-        reservation.resolve(effectResponse);
-        unregisterAbort?.();
-        const errorCode = runtimeInputErrorCodeName(effectResponse.errorCode);
-        this.options.logger.info({
-          event: "runtime_command_rejected",
-          "event.kind": "runtime_command_rejected",
-          operation: runtimeCommandOperation(request.commandKind),
-          component: "runtime-control-service",
-          "grpc.method": method,
-          "grpc.code": "OK",
-          "caller.service_account": callerServiceAccount,
-          "duration.ms": Date.now() - startedAt,
-          "workspace.id": request.workspaceId,
-          "session.id": request.sessionId,
-          "thread.id": request.sessionThreadId,
-          "runtime_input.id": request.runtimeInputId,
-          "binding.id": request.bindingId,
-          "request.id": request.requestId,
-          retryable: effectResponse.retryable,
-          terminal: !effectResponse.retryable,
-          ...semanticErrorFields({
-            errorClass: "runtime_command_rejected",
-            errorCode,
-            messageSafe: "runtime command rejected",
-          }),
-          error_code: errorCode,
-        });
-        return effectResponse;
-      }
-      lease?.throwIfAborted();
-      this.recordAcceptedBinding(request, effect);
-      const response = effectResponse ?? this.accepted(request);
-      if (configPatch) {
-        this.configContentMemo.set(configMemoKey, {
-          runtimeInputId: identity.runtimeInputId,
-          payloadJson: identity.payloadJson,
-        });
-      }
-      this.inFlight.delete(dedupeKey);
-      reservation.resolve(response);
-      unregisterAbort?.();
-      this.options.logger.info({
-        event: "runtime_command_accepted",
-        "event.kind": "runtime_command_accepted",
-        operation: runtimeCommandOperation(request.commandKind),
-        component: "runtime-control-service",
-        "grpc.method": method,
-        "grpc.code": "OK",
-        "caller.service_account": callerServiceAccount,
-        "duration.ms": Date.now() - startedAt,
-        "workspace.id": request.workspaceId,
-        "session.id": request.sessionId,
-        "thread.id": request.sessionThreadId,
-        "runtime_input.id": request.runtimeInputId,
-        "binding.id": request.bindingId,
-        "request.id": request.requestId,
-      });
-      return response;
-    } catch (error) {
-      unregisterAbort?.();
-      this.inFlight.delete(dedupeKey);
-      reservation.reject(error);
-      if (error instanceof GrpcStatusError) {
-        throw error;
-      }
-      throw new GrpcStatusError(status.INTERNAL, "runtime pod command failed");
-    }
-  }
+	private async authorize(
+		metadata: Metadata,
+		method: string,
+	): Promise<{ readonly serviceAccount: ServiceAccountIdentity }> {
+		const result = await this.options.authenticator.authenticate({
+			metadata,
+			method,
+		});
+		if (!result.ok) {
+			throw new GrpcStatusError(
+				result.code === "Unauthenticated"
+					? status.UNAUTHENTICATED
+					: status.PERMISSION_DENIED,
+				result.message,
+			);
+		}
+		if (
+			result.serviceAccount.namespace !==
+				this.options.allowedBridge.namespace ||
+			result.serviceAccount.name !== this.options.allowedBridge.name
+		) {
+			throw new GrpcStatusError(status.PERMISSION_DENIED, "permission denied");
+		}
+		return { serviceAccount: result.serviceAccount };
+	}
 
-  private async applyEffect(request: RuntimeInputCommandRequest, effect: CommandEffect): Promise<RuntimeInputCommandResponse | undefined> {
-    if (effect === "wake-run") {
-      const command = messagesCommandFromRequest(request);
-      const result = await this.options.runHost.handleAcceptInput(command);
-      if (!result.ok) {
-        if (result.reason === "control_conflict") {
-          return this.rejected(request, false, "runtime_input_identity_conflict");
-        }
-        if (result.reason === "context_load_failed") {
-          return this.rejected(request, result.retryable ?? false, "runtime_context_load_failed");
-        }
-        throw new GrpcStatusError(status.RESOURCE_EXHAUSTED, "local runtime capacity exceeded");
-      }
-      if (result.duplicate === true) {
-        return this.duplicate(request);
-      }
-      return;
-    }
-    if (effect === "agent-mail") {
-      const result = await this.options.runHost.handleAgentMail({
-        ...commandScope(request),
-        ...agentMailFromPayload(request),
-      });
-      if (!result.ok) {
-        if (result.reason === "local_session_capacity_exceeded") {
-          throw new GrpcStatusError(status.RESOURCE_EXHAUSTED, "local runtime capacity exceeded");
-        }
-        return this.rejected(
-          request,
-          result.reason === "context_load_failed" ? result.retryable ?? false : false,
-          result.reason === "thread_not_receivable" ? "runtime_control_not_accepted" : "runtime_context_load_failed",
-        );
-      }
-      if (result.ok && !result.applied) {
-        return this.duplicate(request);
-      }
-      return;
-    }
-    // INTERRUPT CLOSEOUT ORDER. The run host freezes new work before settling
-    // the command. When a provider request is open, WriteRequestEnd joins the
-    // separately owned interrupt CommitInputs envelope; otherwise this callback
-    // is that input's CommitInputs boundary. Bridge locks the durable unfinished-
-    // Tool census, writes each terminal conversation result, and returns only
-    // the minimal projections needed by a current-custody hot Thread.
-    //
-    //  # | action                                      | durable boundary
-    // ---+---------------------------------------------+------------------------------------------
-    //  1 | freeze the provider request and stop new ToolFibers | none
-    //  2 | cancel provider and join ToolFibers         | none
-    //  3 | close an open request and its interrupt     | joined WriteRequestEnd + CommitInputs receipt
-    //  4 | otherwise settle the interrupt input        | CommitInputs callback
-    //  5 | publish the database-stamped projection     | receipt application
-    //  6 | record end_turn                             | FinishIdle after the interrupt receipt
-    //
-    // INVARIANTS:
-    // - Runtime carries cancellation intent; Bridge owns the exhaustive durable
-    //   census, terminal result writes, and Sandbox execution consumption.
-    // - An open request and its interrupt are one atomic database operation, so
-    //   losing either transport response is resolved by declaration replay.
-    // - The interrupt receipt is the last input commit; only its FinishIdle may
-    //   follow before the run slot is released.
-    // - The admitted user.interrupt event already exists. The host callback
-    //   commits the intent, marks that source processed, and applies the returned
-    //   census projections without creating a second interrupt event.
-    // - An admitted idle interrupt still commits its declaration. Only redelivery
-    //   after that exact closeout has completed is a no-op; the interrupt fence
-    //   sequence rides the command so redelivered events stay ordered.
-    // - A late tool result cannot overwrite the Bridge-authored terminal result;
-    //   provider cancellation and background cleanup remain independently owned.
-    if (effect === "interrupt") {
-	  const interruptPayload = parseObjectPayload(request.payloadJson, "interrupt control");
-	  const origin = stringField(interruptPayload, "origin");
-	  if (origin !== "user" && origin !== "agent") {
-		throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid interrupt control origin");
-	  }
-      let closeoutCommitResult: Awaited<ReturnType<typeof this.commitControlInput>> | undefined;
-      const result = await this.options.runHost.handleInterruptControl(
-        request.sessionId,
-		{ ...commandScope(request), origin },
-        async (declaration) => {
-          const committed = await this.commitControlInput(request, "interrupt_control", declaration);
-          closeoutCommitResult = committed;
-          return committed;
-        },
-      );
-      if (!result.ok) {
-        if (closeoutCommitResult?.ok === false) {
-          return this.rejected(request, closeoutCommitResult.retryable, closeoutCommitResult.errorCode);
-        }
-        if (result.errorCode !== undefined) {
-          return this.rejected(request, result.retryable === true, result.errorCode);
-        }
-        const accepted = ensureRuntimeControlAccepted(result);
-        if (accepted.ok) {
-          throw new GrpcStatusError(status.INTERNAL, "invalid interrupt control result");
-        }
-        return this.rejected(request, accepted.retryable, accepted.errorCode);
-      }
-      if (result.duplicate === true) {
-        return this.duplicate(request);
-      }
-      if (result.idleInterrupt && closeoutCommitResult === undefined) {
-        throw new GrpcStatusError(status.INTERNAL, "idle interrupt completed without a durable declaration");
-      }
-      return;
-    }
-    if (effect === "tool-confirmation") {
-      const command = { ...commandScope(request), ...toolConfirmationFromPayload(request.runtimeInputId, request.payloadJson) };
-      let commitResult: Awaited<ReturnType<typeof this.commitControlInput>> | undefined;
-      const result = await this.options.runHost.handleToolConfirmation(request.sessionId, command, async (declaration) => {
-        commitResult = await this.commitControlInput(request, "tool_confirmation", declaration);
-        return commitResult;
-      });
-      if (!result.ok && commitResult?.ok === false) {
-        return this.rejected(request, commitResult.retryable, commitResult.errorCode);
-      }
-      const accepted = ensureToolConfirmationAccepted(result);
-      if (!accepted.ok) {
-        return this.rejected(request, false, accepted.errorCode);
-      }
-      if (result.ok && "stale" in result) {
-        return;
-      }
-      if (result.ok && !result.applied) {
-        return this.duplicate(request);
-      }
-      return;
-    }
-    if (effect === "task-notification") {
-      const command = taskNotificationFromPayload(request.runtimeInputId, request.payloadJson);
-      const result = await this.options.runHost.handleTaskNotification(request.sessionId, {
-        ...commandScope(request),
-        ...command,
-      });
-      const accepted = ensureRuntimeControlAccepted(result);
-      if (!accepted.ok) {
-        return this.rejected(request, accepted.retryable, accepted.errorCode);
-      }
-      if (result.ok && !result.applied) {
-        return this.duplicate(request);
-      }
-      return;
-    }
-    if (effect === "runtime-config") {
-      const result = await this.options.runHost.handleRuntimeConfigPatch(
-        request.sessionId,
-        { ...commandScope(request), ...runtimeConfigPatchFromPayload(request.runtimeInputId, request.payloadJson) },
-      );
-      const accepted = ensureRuntimeControlAccepted(result);
-      if (!accepted.ok) {
-        return this.rejected(request, accepted.retryable, accepted.errorCode);
-      }
-      if (result.ok && !result.applied && result.noResidency !== true) {
-        return this.duplicate(request);
-      }
-      return;
-    }
-    const cleanup = await this.options.cleanupController.startCleanup(commandScope(request), cleanupReasonFromPayload(request.payloadJson));
-    if (!cleanup.ok) {
-      runtimeMetrics(this.options).recordCleanupCommandOutcome("rejected");
-      throw new GrpcStatusError(status.FAILED_PRECONDITION, "cleanup not accepted");
-    }
-    runtimeMetrics(this.options).recordCleanupCommandOutcome("accepted");
-    try {
-      await cleanup.completion;
-      runtimeMetrics(this.options).recordCleanupCommandOutcome("completed");
-    } catch {
-      runtimeMetrics(this.options).recordCleanupCommandOutcome("failed");
-      throw new GrpcStatusError(status.FAILED_PRECONDITION, "cleanup did not complete");
-    }
-  }
+	private ensureAccepting(acceptedByLifecycle: boolean): void {
+		if (
+			!acceptedByLifecycle &&
+			(!this.options.ready() || !this.acceptingCommands)
+		) {
+			throw new GrpcStatusError(
+				status.FAILED_PRECONDITION,
+				"runtime pod not ready",
+			);
+		}
+	}
 
-  private async commitControlInput(
-    request: RuntimeInputCommandRequest,
-    inputKind: "interrupt_control" | "tool_confirmation",
-    declaration: RuntimeControlInputDeclaration,
-  ): Promise<RuntimeControlInputCommitResult> {
-    if (this.options.controlInputCommitter === undefined) {
-      throw new GrpcStatusError(status.INTERNAL, "control input durable committer is unavailable");
-    }
-    const ack = await this.options.controlInputCommitter.commitControlInput({
-      scope: commandScope(request),
-      inputKind,
-      messageCreates: declaration.messageCreates,
-    });
-    if (!ack.ok) {
-      return {
-        ok: false,
-        retryable: ack.retryable,
-        errorCode: runtimeInputErrorCodeOrGeneric(ack.errorCode),
-      };
-    }
-    return "stale" in ack
-      ? { ok: true, stale: true }
-      : { ok: true, receipt: ack.receipt };
-  }
+	private activeBindingMatches(scope: RuntimeSessionScope): boolean {
+		const active = this.activeBindings.get(sessionKey(scope));
+		return (
+			active === undefined ||
+			(active.bindingId === scope.bindingId &&
+				active.bindingGeneration === scope.bindingGeneration)
+		);
+	}
 
-  private async authorize(metadata: Metadata, method: string): Promise<{ readonly serviceAccount: ServiceAccountIdentity }> {
-    const result = await this.options.authenticator.authenticate({ metadata, method });
-    if (!result.ok) {
-      throw new GrpcStatusError(result.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, result.message);
-    }
-    if (
-      result.serviceAccount.namespace !== this.options.allowedBridge.namespace ||
-      result.serviceAccount.name !== this.options.allowedBridge.name
-    ) {
-      throw new GrpcStatusError(status.PERMISSION_DENIED, "permission denied");
-    }
-    return { serviceAccount: result.serviceAccount };
-  }
+	private recordAcceptedBinding(
+		scope: RuntimeSessionScope,
+		retain: boolean,
+	): void {
+		if (!retain) {
+			this.activeBindings.delete(sessionKey(scope));
+			return;
+		}
+		this.activeBindings.set(sessionKey(scope), {
+			bindingId: scope.bindingId,
+			bindingGeneration: scope.bindingGeneration,
+		});
+	}
 
-  private ensureAccepting(acceptedByLifecycle: boolean): void {
-    if (!acceptedByLifecycle && (!this.options.ready() || !this.acceptingCommands)) {
-      throw new GrpcStatusError(status.FAILED_PRECONDITION, "runtime pod not ready");
-    }
-  }
-
-  private validateSelectedPod(request: RuntimeInputCommandRequest): { readonly ok: true } | { readonly ok: false; readonly errorCode: RuntimeInputErrorCodeName } {
-    if (
-      request.targetPodNamespace !== this.options.ownPod.namespace ||
-      request.targetPodName !== this.options.ownPod.name ||
-      request.targetPodUid !== this.options.ownPod.uid ||
-      request.targetPodIp !== this.options.ownPod.ip
-    ) {
-      return { ok: false, errorCode: "selected_pod_identity_mismatch" };
-    }
-    return { ok: true };
-  }
-
-  private activeBindingMatches(request: RuntimeInputCommandRequest): boolean {
-    const active = this.activeBindings.get(runtimeSessionKey(request));
-    return active === undefined ||
-      (active.bindingId === request.bindingId && active.bindingGeneration === request.bindingGeneration);
-  }
-
-  private recordAcceptedBinding(request: RuntimeInputCommandRequest, effect: CommandEffect): void {
-    const key = runtimeSessionKey(request);
-    if (effect === "cleanup") {
-      this.activeBindings.delete(key);
-      return;
-    }
-    this.activeBindings.set(key, {
-      bindingId: request.bindingId,
-      bindingGeneration: request.bindingGeneration,
-    });
-  }
-
-  private accepted(request: RuntimeInputCommandRequest): RuntimeInputCommandResponse {
-    return {
-      status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED,
-      retryable: false,
-      errorCode: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED,
-      sessionId: request.sessionId,
-      runtimeInputId: request.runtimeInputId,
-      bindingId: request.bindingId,
-      bindingGeneration: request.bindingGeneration,
-    };
-  }
-
-  private duplicate(request: RuntimeInputCommandRequest): RuntimeInputCommandResponse {
-    return {
-      ...this.accepted(request),
-      status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE,
-    };
-  }
-
-  private rejected(request: RuntimeInputCommandRequest, retryable: boolean, errorCode: RuntimeInputErrorCode | string): RuntimeInputCommandResponse {
-    return {
-      status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
-      retryable,
-      errorCode: typeof errorCode === "number" ? errorCode : runtimeInputErrorCodeOrGeneric(errorCode),
-      sessionId: request.sessionId,
-      runtimeInputId: request.runtimeInputId,
-      bindingId: request.bindingId,
-      bindingGeneration: request.bindingGeneration,
-    };
-  }
+	private logOutcome<Request extends RuntimeSessionScope, Response>(
+		execution: MethodExecution<Request, Response>,
+		caller: { readonly serviceAccount: ServiceAccountIdentity } | undefined,
+		startedAt: number,
+		rejection: IngressRejectionDiagnostic | undefined,
+		identityTrusted: boolean,
+	): void {
+		const rejected = rejection !== undefined;
+		const errorFields =
+			rejection !== undefined
+				? semanticErrorFields({
+						errorClass: "runtime_command_rejected",
+						errorCode: rejection.reason,
+						messageSafe: "runtime command rejected",
+					})
+				: {};
+		try {
+			this.options.logger.info({
+				event: rejected
+					? "runtime_command_rejected"
+					: "runtime_command_accepted",
+				"event.kind": rejected
+					? "runtime_command_rejected"
+					: "runtime_command_accepted",
+				operation: execution.operation,
+				component: "runtime-control-service",
+				"grpc.method": execution.method,
+				"grpc.code": rejection?.grpcCode ?? "OK",
+				...(caller === undefined
+					? {}
+					: {
+							"caller.service_account": serviceAccountText(
+								caller.serviceAccount,
+							),
+						}),
+				"duration.ms": Date.now() - startedAt,
+				...(identityTrusted
+					? {
+							"workspace.id": execution.request.workspaceId,
+							"session.id": execution.request.sessionId,
+							...(hasThread(execution.request)
+								? { "thread.id": execution.request.sessionThreadId }
+								: {}),
+							"operation.id": execution.operationId,
+							"binding.id": execution.request.bindingId,
+						}
+					: {}),
+				...(rejection === undefined
+					? {}
+					: { phase: rejection.phase, reason: rejection.reason }),
+				...errorFields,
+			});
+		} catch {
+			// Command handling is authoritative; ingress diagnostics are fail-open.
+		}
+	}
 }
 
-function runtimeCommandOperation(kind: RuntimeCommandKind): string {
-  switch (kind) {
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_MESSAGES:
-      return "AcceptMessages";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL:
-      return "AcceptInterruptControl";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION:
-      return "AcceptToolConfirmation";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION:
-      return "AcceptTaskNotification";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL:
-      return "AcceptAgentMail";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH:
-      return "AcceptRuntimeConfigPatch";
-    case RuntimeCommandKind.RUNTIME_COMMAND_KIND_CLEANUP_SESSION:
-      return "CleanupSession";
-    default:
-      return "AcceptInput";
-  }
+function sessionScope(input: RuntimeSessionScope): RuntimeSessionScope {
+	return {
+		workspaceId: input.workspaceId,
+		sessionId: input.sessionId,
+		bindingId: input.bindingId,
+		bindingGeneration: input.bindingGeneration,
+		targetPodUid: input.targetPodUid,
+	};
 }
 
-function runtimeCommandDedupeKey(request: RuntimeInputCommandRequest): string {
-  return `${request.workspaceId}\u0000${request.runtimeInputId}`;
+function inputScope(input: RuntimeInputScope): RuntimeInputScope {
+	return {
+		...sessionScope(input),
+		sessionThreadId: input.sessionThreadId,
+		runtimeInputId: input.runtimeInputId,
+	};
 }
 
-function runtimeConfigContentMemoKey(request: RuntimeInputCommandRequest): string {
-  return `${request.workspaceId}\u0000${request.sessionId}\u0000${request.commandKind}\u0000${request.runtimeInputId}`;
+function acceptInputCommand(
+	request: AcceptInputRequest,
+	scope: RuntimeInputScope,
+): RuntimeAcceptInputCommand {
+	if (request.rejection !== undefined) {
+		return {
+			...scope,
+			inputOrder: request.inputOrder,
+			kind: "rejection",
+			reasonCode:
+				request.rejection.reason ===
+				AcceptInputRejectionReason.ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE
+					? "runtime_command_payload_too_large"
+					: "runtime_command_rejected",
+		};
+	}
+	return {
+		...scope,
+		inputOrder: request.inputOrder,
+		kind: "messages",
+		contentJson: request.messagesJson ?? "",
+	};
 }
 
-function runtimeSessionKey(request: RuntimeInputCommandRequest): string {
-  return `${request.workspaceId}\u0000${request.sessionId}`;
-}
-
-function validateRuntimeInputCommandOrThrow(request: RuntimeInputCommandRequest): void {
-  const result = validateRuntimeInputCommandRequest(request);
-  if (!result.ok) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, result.message);
-  }
-}
-
-function commandScope(request: RuntimeInputCommandRequest): RuntimeCommandScope {
-  return {
-    requestId: request.requestId,
-    workspaceId: request.workspaceId,
-    sessionId: request.sessionId,
-    sessionThreadId: request.sessionThreadId,
-    bindingId: request.bindingId,
-    bindingGeneration: request.bindingGeneration,
-    targetPodUid: request.targetPodUid,
-    runtimeInputId: request.runtimeInputId,
-    eventIds: [...request.eventIds],
-    sequenceFrom: request.sequenceFrom,
-    sequenceTo: request.sequenceTo,
-  };
-}
-
-function messagesCommandFromRequest(request: RuntimeInputCommandRequest): RuntimeMessagesCommand {
-  const rejection = boundedRejectionFromPayload(request.payloadJson);
-  if (rejection !== undefined) {
-    return {
-      ...commandScope(request),
-      kind: "rejection",
-      reasonCode: rejection.reasonCode,
-    };
-  }
-  return {
-    ...commandScope(request),
-    kind: "messages",
-    payloadJson: request.payloadJson,
-  };
-}
-
-function boundedRejectionFromPayload(
-  payloadJson: string,
-): { readonly reasonCode: "runtime_command_payload_too_large" | "runtime_command_rejected" } | undefined {
-  if (payloadJson.length === 0) {
-    return undefined;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payloadJson);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return undefined;
-  }
-  const record = parsed as Record<string, unknown>;
-  if (record.input_kind !== "rejection") {
-    return undefined;
-  }
-  if (
-    Object.keys(record).length !== 2 ||
-    (record.reason_code !== "runtime_command_payload_too_large" &&
-      record.reason_code !== "runtime_command_rejected")
-  ) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
-  }
-  return { reasonCode: record.reason_code };
-}
-
-function commandIdentity(request: RuntimeInputCommandRequest, callerServiceAccount: string): CommandIdentity {
-  return {
-    requestId: request.requestId,
-    workspaceId: request.workspaceId,
-    sessionId: request.sessionId,
-    sessionThreadId: request.sessionThreadId,
-    bindingId: request.bindingId,
-    bindingGeneration: request.bindingGeneration,
-    targetPodNamespace: request.targetPodNamespace,
-    targetPodName: request.targetPodName,
-    targetPodUid: request.targetPodUid,
-    targetPodIp: request.targetPodIp,
-    runtimeInputId: request.runtimeInputId,
-    eventIds: [...request.eventIds],
-    sequenceFrom: request.sequenceFrom,
-    sequenceTo: request.sequenceTo,
-    commandKind: request.commandKind,
-    payloadJson: request.payloadJson,
-    callerServiceAccount,
-  };
-}
-
-function sameCommandIdentity(left: CommandIdentity, right: CommandIdentity): boolean {
-  return JSON.stringify({ ...left, requestId: "" }) === JSON.stringify({ ...right, requestId: "" });
-}
-
-function sameRuntimeConfigPatchIdentity(left: CommandIdentity, right: CommandIdentity): boolean {
-  return left.runtimeInputId === right.runtimeInputId && left.payloadJson === right.payloadJson;
-}
-
-function createInFlight(identity: CommandIdentity): InFlightCommand {
-  let resolve: (response: RuntimeInputCommandResponse) => void = () => undefined;
-  let reject: (error: unknown) => void = () => undefined;
-  const result = new Promise<RuntimeInputCommandResponse>((done, fail) => {
-    resolve = done;
-    reject = fail;
-  });
-  result.catch(() => undefined);
-  return { identity, result, resolve, reject };
-}
-
-function responseForCurrentRequest(
-  request: RuntimeInputCommandRequest,
-  response: RuntimeInputCommandResponse,
-  acceptedStatus: RuntimeCommandStatus,
-): RuntimeInputCommandResponse {
-  return {
-    ...response,
-    status: response.status === RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED
-      ? RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED
-      : acceptedStatus,
-    sessionId: request.sessionId,
-    runtimeInputId: request.runtimeInputId,
-    bindingId: request.bindingId,
-    bindingGeneration: request.bindingGeneration,
-  };
-}
-
-function runtimeMetrics(options: RuntimeControlServiceOptions): RuntimeMetricsSink {
-  return options.metrics ?? NoopRuntimeMetricsSink;
-}
-
-function cleanupReasonFromPayload(payloadJson: string): "expired" | "operator_requested" {
-  if (payloadJson.length === 0) {
-    return "operator_requested";
-  }
-  try {
-    const parsed = JSON.parse(payloadJson) as { readonly reason?: unknown };
-    return parsed.reason === "expired" ? "expired" : "operator_requested";
-  } catch {
-    return "operator_requested";
-  }
-}
-
-function ensureRuntimeControlAccepted(result: { readonly ok: boolean; readonly reason?: string }):
-  | { readonly ok: true }
-  | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string } {
-  if (result.ok) {
-    return { ok: true };
-  }
-  if (result.reason === "local_session_capacity_exceeded") {
-    throw new GrpcStatusError(status.RESOURCE_EXHAUSTED, "local runtime capacity exceeded");
-  }
-  if (result.reason === "control_busy") {
-    return { ok: false, retryable: true, errorCode: "control_busy" };
-  }
-  if (result.reason === "control_conflict") {
-    return { ok: false, retryable: false, errorCode: "runtime_control_conflict" };
-  }
-  if (result.reason === "context_load_failed") {
-    return { ok: false, retryable: true, errorCode: "runtime_context_load_failed" };
-  }
-  return { ok: false, retryable: false, errorCode: "runtime_control_not_accepted" };
-}
-
-function ensureToolConfirmationAccepted(result: {
-  readonly ok: boolean;
-  readonly reason?: "local_session_capacity_exceeded" | "control_busy" | "control_conflict" | "context_load_failed";
-}): { readonly ok: true } | { readonly ok: false; readonly errorCode: string } {
-  if (result.ok) {
-    return { ok: true };
-  }
-  if (result.reason === "local_session_capacity_exceeded") {
-    throw new GrpcStatusError(status.RESOURCE_EXHAUSTED, "local runtime capacity exceeded");
-  }
-  if (result.reason === "control_busy") {
-    throw new GrpcStatusError(status.UNAVAILABLE, "runtime control command busy");
-  }
-  if (result.reason === "control_conflict") {
-    return { ok: false, errorCode: "runtime_control_conflict" };
-  }
-  if (result.reason === "context_load_failed") {
-    return { ok: false, errorCode: "runtime_context_load_failed" };
-  }
-  return { ok: false, errorCode: "runtime_control_not_accepted" };
-}
-
-function toolConfirmationFromPayload(
-  runtimeInputId: string,
-  payloadJson: string,
-): {
-  readonly runtimeInputId: string;
-  readonly sourceEventId: string;
-  readonly toolUseEventId: string;
-  readonly decision: "allow" | "deny";
-  readonly denyMessage?: string | undefined;
+function taskNotificationContent(notificationJson: string): {
+	readonly taskId: string;
+	readonly sourceToolUseEventId: string;
+	readonly status: RuntimeTaskNotificationCommand["status"];
 } {
-  const payload = parseObjectPayload(payloadJson, "tool confirmation");
-  const sourceEventId = stringField(payload, "source_event_id");
-  const toolUseEventId = stringField(payload, "tool_use_event_id");
-  const decision = stringField(payload, "decision");
-  if (sourceEventId === undefined || toolUseEventId === undefined || (decision !== "allow" && decision !== "deny")) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid tool confirmation payload");
-  }
-  return {
-    runtimeInputId,
-    sourceEventId,
-    toolUseEventId,
-    decision,
-    ...(typeof payload.deny_message === "string" ? { denyMessage: payload.deny_message } : {}),
-  };
+	const payload = parseObjectContent(notificationJson, "task notification");
+	const taskId = stringField(payload, "task_id");
+	const sourceToolUseEventId = stringField(payload, "source_tool_use_event_id");
+	const statusValue = stringField(payload, "status");
+	if (
+		taskId === undefined ||
+		taskId.length === 0 ||
+		sourceToolUseEventId === undefined ||
+		sourceToolUseEventId.length === 0 ||
+		(statusValue !== "completed" &&
+			statusValue !== "failed" &&
+			statusValue !== "cancelled" &&
+			statusValue !== "expired")
+	) {
+		throw new GrpcStatusError(
+			status.INVALID_ARGUMENT,
+			"invalid task notification content",
+		);
+	}
+	for (const field of ["stdout", "stderr"] as const) {
+		const value = payload[field];
+		if (
+			!isObjectRecord(value) ||
+			typeof value.text !== "string" ||
+			typeof value.truncated !== "boolean"
+		) {
+			throw new GrpcStatusError(
+				status.INVALID_ARGUMENT,
+				"invalid task notification content",
+			);
+		}
+	}
+	return { taskId, sourceToolUseEventId, status: statusValue };
 }
 
-function agentMailFromPayload(
-  request: RuntimeInputCommandRequest,
-): Pick<RuntimeAgentMailCommand, "deliveryId" | "sourceThreadId" | "sourceToolUseEventId" | "message"> {
-  if (
-    request.eventIds.length !== 1 ||
-    request.sequenceFrom <= 0 ||
-    request.sequenceFrom !== request.sequenceTo
-  ) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid agent mail payload");
-  }
-  const payload = parseObjectPayload(request.payloadJson, "agent mail");
-  const deliveryId = stringField(payload, "delivery_id");
-  const sourceThreadId = stringField(payload, "source_thread_id");
-  const sourceToolUseEventId = stringField(payload, "source_tool_use_event_id");
-  let message: RuntimeMessage;
-  try {
-    message = runtimeMessageFromPublicAgentMail(JSON.stringify(payload.message));
-  } catch {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid agent mail payload");
-  }
-  if (
-    deliveryId === undefined ||
-    sourceThreadId === undefined ||
-    sourceToolUseEventId === undefined ||
-    request.runtimeInputId !== `agent_mail:${deliveryId}`
-  ) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid agent mail payload");
-  }
-  return {
-    deliveryId,
-    sourceThreadId,
-    sourceToolUseEventId,
-    message,
-  };
+function runtimeConfigCommand(
+	request: ApplyRuntimeConfigRequest,
+	scope: RuntimeSessionScope,
+): RuntimeConfigCommand {
+	if (request.sessionConfig !== undefined) {
+		return {
+			...scope,
+			configIdentity: `session:${request.sessionConfig.generation}`,
+			generation: request.sessionConfig.generation,
+			contentJson: request.sessionConfig.contentJson,
+		};
+	}
+	const manifest = request.mcpManifest!;
+	const payload = parseObjectContent(manifest.contentJson, "runtime config");
+	const manifestPayload = isObjectRecord(payload.mcp_manifest)
+		? payload.mcp_manifest
+		: payload;
+	const readinessValue = stringField(manifestPayload, "readiness") ?? "ready";
+	const manifestETag = stringField(manifestPayload, "manifest_etag");
+	const diagnostic = stringField(manifestPayload, "diagnostic");
+	if (readinessValue !== "ready" && readinessValue !== "unready") {
+		throw new GrpcStatusError(
+			status.INVALID_ARGUMENT,
+			"invalid runtime config content",
+		);
+	}
+	if (readinessValue === "ready" && manifestETag === undefined) {
+		throw new GrpcStatusError(
+			status.INVALID_ARGUMENT,
+			"invalid runtime config content",
+		);
+	}
+	return {
+		...scope,
+		configIdentity: `mcp:${manifest.mcpServerName}:${manifest.generation}`,
+		generation: manifest.generation,
+		mcpServerName: manifest.mcpServerName,
+		...(manifestETag === undefined ? {} : { manifestETag }),
+		manifestReadiness: readinessValue,
+		...(diagnostic === undefined ? {} : { manifestDiagnostic: diagnostic }),
+		contentJson: manifest.contentJson,
+	};
 }
 
-function taskNotificationFromPayload(
-  runtimeInputId: string,
-  payloadJson: string,
-): {
-  readonly runtimeInputId: string;
-  readonly taskId: string;
-  readonly sourceToolUseEventId: string;
-  readonly status: "completed" | "failed" | "cancelled" | "expired";
-  readonly payloadJson: string;
-} {
-  const payload = parseObjectPayload(payloadJson, "task notification");
-  const taskId = stringField(payload, "task_id");
-  const sourceToolUseEventId = stringField(payload, "source_tool_use_event_id");
-  const statusValue = stringField(payload, "status");
-  if (
-    taskId === undefined ||
-    sourceToolUseEventId === undefined ||
-    (statusValue !== "completed" && statusValue !== "failed" && statusValue !== "cancelled" && statusValue !== "expired") ||
-    !hasExactFields(payload, ["task_id", "source_tool_use_event_id", "status", "stdout", "stderr"], ["exit_code"])
-  ) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid task notification payload");
-  }
-  if (hasOwn(payload, "exit_code")) {
-    nullableSafeInteger(payload.exit_code, "task notification exit_code");
-  }
-  validateTaskNotificationStream(payload, "stdout");
-  validateTaskNotificationStream(payload, "stderr");
-  return {
-    runtimeInputId,
-    taskId,
-    sourceToolUseEventId,
-    status: statusValue,
-    payloadJson,
-  };
+function runtimeConfigIdentity(request: ApplyRuntimeConfigRequest): string {
+	if (request.sessionConfig !== undefined) {
+		return `session:${request.sessionConfig.generation}`;
+	}
+	if (request.mcpManifest !== undefined) {
+		return `mcp:${request.mcpManifest.mcpServerName}:${request.mcpManifest.generation}`;
+	}
+	// Validation rejects a missing variant before this value can enter a trusted log.
+	return "invalid-runtime-config";
 }
 
-function validateTaskNotificationStream(payload: Record<string, unknown>, field: "stdout" | "stderr"): void {
-  if (!hasOwn(payload, field)) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid task notification ${field}`);
-  }
-  const value = payload[field];
-  if (!isObjectRecord(value)) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid task notification ${field}`);
-  }
-  const text = value.text;
-  const truncated = value.truncated;
-  if (
-    typeof text !== "string" ||
-    typeof truncated !== "boolean" ||
-    !hasExactFields(value, ["text", "truncated"], ["original_bytes", "original_lines"])
-  ) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid task notification ${field}`);
-  }
-  for (const optional of ["original_bytes", "original_lines"] as const) {
-    if (hasOwn(value, optional)) {
-      const count = nullableSafeInteger(value[optional], `task notification ${field}.${optional}`);
-      if (count !== null && count < 0) {
-        throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid task notification ${field}.${optional}`);
-      }
-    }
-  }
+function runtimeConfigMemoFamily(command: RuntimeConfigCommand): string {
+	return command.mcpServerName === undefined
+		? "session"
+		: `mcp:${command.mcpServerName}`;
 }
 
-function nullableSafeInteger(value: unknown, field: string): number | null {
-  if (value === null) {
-    return null;
-  }
-  if (typeof value === "number" && Number.isSafeInteger(value)) {
-    return value;
-  }
-  throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid ${field}`);
+function stableIdentity(value: unknown): string {
+	return JSON.stringify(value);
 }
 
-function runtimeConfigPatchFromPayload(
-  runtimeInputId: string,
-  payloadJson: string,
-): {
-  readonly runtimeInputId: string;
-  readonly generation?: number;
-  readonly mcpServerName?: string;
-  readonly manifestETag?: string;
-  readonly manifestReadiness?: "ready" | "unready";
-  readonly manifestDiagnostic?: string;
-  readonly payloadJson: string;
-} {
-  const payload = parseObjectPayload(payloadJson, "runtime config");
-  if (isObjectRecord(payload.mcp_manifest)) {
-    const mcpServerName = stringField(payload.mcp_manifest, "mcp_server_name");
-    const manifestETag = stringField(payload.mcp_manifest, "manifest_etag");
-    const manifestGeneration = numberField(payload.mcp_manifest, "manifest_generation");
-    const readinessValue = stringField(payload.mcp_manifest, "readiness") ?? "ready";
-    const diagnostic = stringField(payload.mcp_manifest, "diagnostic");
-    const tools = payload.mcp_manifest.tools;
-    const readinessShape = !hasOwn(payload.mcp_manifest, "readiness") || typeof payload.mcp_manifest.readiness === "string";
-    const diagnosticShape = !hasOwn(payload.mcp_manifest, "diagnostic") || payload.mcp_manifest.diagnostic === null || typeof payload.mcp_manifest.diagnostic === "string";
-    const etagAbsent = !hasOwn(payload.mcp_manifest, "manifest_etag");
-    const ready = readinessValue === "ready" && manifestETag !== undefined && diagnostic === undefined && diagnosticShape;
-    const unready = readinessValue === "unready" && etagAbsent && diagnostic !== undefined && diagnosticShape &&
-      (tools === undefined || (Array.isArray(tools) && tools.length === 0));
-    if (mcpServerName === undefined || manifestGeneration === undefined ||
-      !Number.isSafeInteger(manifestGeneration) || manifestGeneration <= 0 || !readinessShape || (!ready && !unready)) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid runtime config payload");
-    }
-    const manifestReadiness = readinessValue === "unready" ? "unready" : "ready";
-    if (ready) {
-      validateMcpManifestTools(tools);
-    }
-    return {
-      runtimeInputId,
-      generation: manifestGeneration,
-      mcpServerName,
-      ...(manifestETag !== undefined ? { manifestETag } : {}),
-      manifestReadiness,
-      ...(diagnostic !== undefined ? { manifestDiagnostic: diagnostic } : {}),
-      payloadJson,
-    };
-  }
-  const generation = numberField(payload, "config_generation") ?? numberField(payload, "generation");
-  if (generation === undefined || !Number.isSafeInteger(generation) || generation <= 0) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid runtime config payload");
-  }
-  return { runtimeInputId, generation, payloadJson };
+function sessionKey(input: {
+	readonly workspaceId: string;
+	readonly sessionId: string;
+}): string {
+	return `${input.workspaceId}\u0000${input.sessionId}`;
 }
 
-function validateMcpManifestTools(value: unknown): void {
-  if (!Array.isArray(value)) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid runtime config payload");
-  }
-  for (const tool of value) {
-    if (!isObjectRecord(tool)) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid runtime config payload");
-    }
-    const extraFields = Object.keys(tool).filter((field) => field !== "name" && field !== "description" && field !== "input_schema");
-    if (
-      extraFields.length > 0 ||
-      stringField(tool, "name") === undefined ||
-      typeof tool.description !== "string" ||
-      !isObjectRecord(tool.input_schema)
-    ) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid runtime config payload");
-    }
-  }
+function inputDedupeKey(method: string, input: RuntimeInputScope): string {
+	return `${method}\u0000${input.workspaceId}\u0000${input.runtimeInputId}`;
 }
 
-function parseObjectPayload(payloadJson: string, kind: string): Record<string, unknown> {
-  if (payloadJson.length === 0) {
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, `missing ${kind} payload`);
-  }
-  try {
-    const parsed = JSON.parse(payloadJson) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid ${kind} payload`);
-    }
-    return parsed as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof GrpcStatusError) {
-      throw error;
-    }
-    throw new GrpcStatusError(status.INVALID_ARGUMENT, `invalid ${kind} payload`);
-  }
+function createInFlight<Response>(identity: string): InFlight<Response> {
+	let resolve: (response: Response) => void = () => undefined;
+	let reject: (error: unknown) => void = () => undefined;
+	const result = new Promise<Response>((done, fail) => {
+		resolve = done;
+		reject = fail;
+	});
+	result.catch(() => undefined);
+	return { identity, result, resolve, reject };
 }
 
-function hasOwn(payload: Record<string, unknown>, field: string): boolean {
-  return Object.prototype.hasOwnProperty.call(payload, field);
+function acceptInputRejected(
+	reason: AcceptInputFailure,
+	retryable: boolean,
+): AcceptInputResponse {
+	return { rejected: { reason, retryable } };
 }
 
-function hasExactFields(
-  payload: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[],
-): boolean {
-  const fields = new Set(Object.keys(payload));
-  return required.every((field) => fields.delete(field)) &&
-    optional.every((field) => !fields.has(field) || fields.delete(field)) &&
-    fields.size === 0;
+function acceptAgentMailRejected(
+	reason: AcceptAgentMailFailure,
+	retryable: boolean,
+): AcceptAgentMailResponse {
+	return { rejected: { reason, retryable } };
+}
+
+function acceptTaskRejected(
+	reason: AcceptTaskNotificationFailure,
+	retryable: boolean,
+): AcceptTaskNotificationResponse {
+	return { rejected: { reason, retryable } };
+}
+
+function interruptRejected(
+	reason: InterruptFailure,
+	retryable: boolean,
+): InterruptResponse {
+	return { rejected: { reason, retryable } };
+}
+
+function resolveToolRejected(
+	reason: ResolveToolConfirmationFailure,
+	retryable: boolean,
+): ResolveToolConfirmationResponse {
+	return { rejected: { reason, retryable } };
+}
+
+function applyConfigRejected(
+	reason: ApplyRuntimeConfigFailure,
+	retryable: boolean,
+): ApplyRuntimeConfigResponse {
+	return { rejected: { reason, retryable } };
+}
+
+function cleanupRejected(
+	reason: CleanupSessionFailure,
+	retryable: boolean,
+): CleanupSessionResponse {
+	return { rejected: { reason, retryable } };
+}
+
+function taskFailure(reason: string): AcceptTaskNotificationFailure {
+	switch (reason) {
+		case "control_busy":
+			return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY;
+		case "control_conflict":
+			return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT;
+		case "context_load_failed":
+			return AcceptTaskNotificationFailure.ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED;
+		default:
+			throw new GrpcStatusError(
+				status.RESOURCE_EXHAUSTED,
+				"local runtime capacity exceeded",
+			);
+	}
+}
+
+function configFailure(reason: string): ApplyRuntimeConfigFailure {
+	switch (reason) {
+		case "control_busy":
+			return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY;
+		case "control_conflict":
+			return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_CONFLICT;
+		case "context_load_failed":
+			return ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_CONTEXT_LOAD_FAILED;
+		default:
+			throw new GrpcStatusError(
+				status.RESOURCE_EXHAUSTED,
+				"local runtime capacity exceeded",
+			);
+	}
+}
+
+function commitInterruptFailure(errorCode: string | number): InterruptFailure {
+	return typeof errorCode === "string" &&
+		(errorCode.includes("unavailable") || errorCode.includes("token"))
+		? InterruptFailure.INTERRUPT_FAILURE_DURABLE_COMMIT_UNAVAILABLE
+		: InterruptFailure.INTERRUPT_FAILURE_DURABLE_COMMIT_REJECTED;
+}
+
+function commitToolFailure(
+	errorCode: string | number,
+): ResolveToolConfirmationFailure {
+	return typeof errorCode === "string" &&
+		(errorCode.includes("unavailable") || errorCode.includes("token"))
+		? ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE
+		: ResolveToolConfirmationFailure.RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED;
+}
+
+function parseObjectContent(
+	contentJson: string,
+	kind: string,
+): Record<string, unknown> {
+	try {
+		const parsed = JSON.parse(contentJson) as unknown;
+		if (!isObjectRecord(parsed)) {
+			throw new Error("not an object");
+		}
+		return parsed;
+	} catch {
+		throw new GrpcStatusError(
+			status.INVALID_ARGUMENT,
+			`invalid ${kind} content`,
+		);
+	}
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringField(payload: Record<string, unknown>, field: string): string | undefined {
-  const value = payload[field];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+function stringField(
+	payload: Record<string, unknown>,
+	field: string,
+): string | undefined {
+	const value = payload[field];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function numberField(payload: Record<string, unknown>, field: string): number | undefined {
-  const value = payload[field];
-  return typeof value === "number" ? value : undefined;
+function hasThread(value: RuntimeSessionScope): value is RuntimeThreadScope {
+	return (
+		"sessionThreadId" in value && typeof value.sessionThreadId === "string"
+	);
 }
 
 function serviceAccountText(serviceAccount: ServiceAccountIdentity): string {
-  return `${serviceAccount.namespace}/${serviceAccount.name}`;
+	return `${serviceAccount.namespace}/${serviceAccount.name}`;
+}
+
+function runtimeMetrics(
+	options: RuntimeControlServiceOptions,
+): RuntimeMetricsSink {
+	return options.metrics ?? NoopRuntimeMetricsSink;
+}
+
+function grpcRejectionDiagnostic(error: unknown): IngressRejectionDiagnostic {
+	if (!(error instanceof GrpcStatusError)) {
+		return {
+			phase: "application",
+			reason: "internal_failure",
+			grpcCode: "Internal",
+		};
+	}
+	switch (error.code) {
+		case status.INVALID_ARGUMENT:
+			return {
+				phase: "content_parse",
+				reason: "invalid_content",
+				grpcCode: "InvalidArgument",
+			};
+		case status.RESOURCE_EXHAUSTED:
+			return {
+				phase: "application",
+				reason: "resource_exhausted",
+				grpcCode: "ResourceExhausted",
+			};
+		case status.UNAVAILABLE:
+			return {
+				phase: "application",
+				reason: "operation_unavailable",
+				grpcCode: "Unavailable",
+			};
+		case status.FAILED_PRECONDITION:
+			return {
+				phase: "lifecycle",
+				reason: "runtime_not_accepting",
+				grpcCode: "FailedPrecondition",
+			};
+		default:
+			return {
+				phase: "application",
+				reason: "internal_failure",
+				grpcCode: grpcCodeText(error),
+			};
+	}
+}
+
+function grpcCodeText(error: unknown): string {
+	if (!(error instanceof GrpcStatusError)) return "Internal";
+	switch (error.code) {
+		case status.OK:
+			return "OK";
+		case status.CANCELLED:
+			return "Cancelled";
+		case status.INVALID_ARGUMENT:
+			return "InvalidArgument";
+		case status.FAILED_PRECONDITION:
+			return "FailedPrecondition";
+		case status.PERMISSION_DENIED:
+			return "PermissionDenied";
+		case status.RESOURCE_EXHAUSTED:
+			return "ResourceExhausted";
+		case status.UNAUTHENTICATED:
+			return "Unauthenticated";
+		case status.UNAVAILABLE:
+			return "Unavailable";
+		default:
+			return "Internal";
+	}
 }

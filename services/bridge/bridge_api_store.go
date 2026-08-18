@@ -59,12 +59,15 @@ const (
 	bridgeOpCommitTaskNotificationResult   = "commit_task_notification_result"
 	runtimeTaskNotificationPayloadMaxBytes = 16 * 1024
 	bridgeOpWriteEvent                     = "write_event"
+	bridgeOpSettleToolResult               = "settle_tool_result"
 	bridgeOpWriteRequestEnd                = "write_request_end"
 	bridgeOpFinishIdle                     = "finish_idle"
 	bridgeOpCreateChildThread              = "create_child_thread"
+	bridgeOpDeliverInterAgentMail          = "deliver_inter_agent_mail"
 	bridgeOpResolveChildThread             = "resolve_child_thread"
 	bridgeOpListChildThreads               = "list_child_threads"
-	bridgeOpMarkChildThreadClosed          = "mark_child_thread_closed"
+	bridgeOpCloseChildControl              = "close_child_control"
+	bridgeOpCloseApprovalReviewer          = "close_approval_reviewer"
 	bridgeOpMarkChildThreadActive          = "mark_child_thread_active"
 	bridgeOpReadCommandResult              = "read_command_result"
 	bridgeOpSendCommandInput               = "send_command_input"
@@ -72,6 +75,7 @@ const (
 	bridgeOpRunMemory                      = "run_memory"
 	bridgeOpMcpManifestChanged             = "mcp_manifest_changed"
 	bridgeOpCommitMcpToolResult            = "commit_mcp_tool_result"
+	bridgeOpRelinquishMcpToolResult        = "relinquish_mcp_tool_result"
 	bridgeOpCommitInternalToolRepair       = "commit_internal_tool_repair"
 	bridgeOpCommitRuntimeTermination       = "commit_runtime_termination"
 	mcpManifestAcceptanceLockCategory      = int32(0x6D63_7061) // "mcpa"
@@ -87,7 +91,8 @@ const (
 	// concurrency fence: it prevents two replicas from executing one
 	// tool_use_event_id's side effect at once (a timeout-retry racing the
 	// still-running original). An expired reservation is superseded by the next
-	// Claim, and a replay after Commit is served from the stored result.
+	// Claim, a deterministic pre-commit failure relinquishes the exact claim,
+	// and a replay after Commit is served from the stored result.
 	mcpClaimStatusStored   = "stored"
 	mcpClaimStatusInFlight = "in_flight"
 	mcpClaimStatusConsumed = "consumed"
@@ -406,7 +411,7 @@ type runtimeToolResult struct {
 	TaskID                 sql.NullString
 	MemoryProjectionState  sql.NullString
 	MCPClaimStatus         sql.NullString
-	MCPClaimOwnerRequestID sql.NullString
+	MCPClaimID             sql.NullString
 	MCPClaimLeaseExpiresAt sql.NullString
 }
 
@@ -422,7 +427,7 @@ type runtimeToolResultInsert struct {
 	TaskID                 sql.NullString
 	MemoryProjectionState  sql.NullString
 	MCPClaimStatus         string
-	MCPClaimOwnerRequestID sql.NullString
+	MCPClaimID             sql.NullString
 	MCPClaimLeaseExpiresAt sql.NullString
 	Now                    time.Time
 }
@@ -439,7 +444,7 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status,
 	               COALESCE(result_json, ''), COALESCE(result_digest, ''), model_tool_call_id, execution_state,
 	               background_task_started, task_id, memory_projection_state,
-	               mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
+	               mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -461,7 +466,7 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON,
 		&existing.AckStatus, &existing.ResultJSON, &existing.ResultDigest, &existing.ModelToolCallID, &existing.ExecutionState,
 		&existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState,
-		&existing.MCPClaimStatus, &existing.MCPClaimOwnerRequestID, &existing.MCPClaimLeaseExpiresAt,
+		&existing.MCPClaimStatus, &existing.MCPClaimID, &existing.MCPClaimLeaseExpiresAt,
 	); dbconnect.IsNoRows(err) {
 		return runtimeToolResult{}, false, nil
 	} else if err != nil {
@@ -477,7 +482,7 @@ func insertRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
 			background_task_started, task_id, memory_projection_state, mcp_claim_status,
-			mcp_claim_owner_request_id, mcp_claim_lease_expires_at, created_at, updated_at
+			mcp_claim_id, mcp_claim_lease_expires_at, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
@@ -493,7 +498,7 @@ func insertRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		tool.TaskID,
 		tool.MemoryProjectionState,
 		claimStatus,
-		tool.MCPClaimOwnerRequestID,
+		tool.MCPClaimID,
 		tool.MCPClaimLeaseExpiresAt,
 		tool.Now,
 	)
@@ -637,37 +642,6 @@ func rowsAffected(result sql.Result) bool {
 	return err == nil && count > 0
 }
 
-func committedAck(runtimeInputID string, runtimeWriteID string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:         bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED,
-		RuntimeInputId: runtimeInputID,
-		RuntimeWriteId: runtimeWriteID,
-	}
-}
-
-func duplicateAck(runtimeInputID string, runtimeWriteID string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:         bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE,
-		RuntimeInputId: runtimeInputID,
-		RuntimeWriteId: runtimeWriteID,
-	}
-}
-
-func rejectedAck(errorCode string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:    bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED,
-		ErrorCode: errorCode,
-	}
-}
-
-func rejectedTaskNotificationAck(runtimeInputID string, errorCode string) *bridgev1.BridgeWriteAck {
-	return &bridgev1.BridgeWriteAck{
-		Status:         bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED,
-		RuntimeInputId: runtimeInputID,
-		ErrorCode:      errorCode,
-	}
-}
-
 // defaultTime parses a wire timestamp, falling back when the caller omitted it.
 // Wire timestamps are RFC 3339; durable columns are native timestamps, so an
 // unparsable value is rejected here rather than stored.
@@ -706,13 +680,6 @@ func nullableSQLString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }
 
-func boolHashPart(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
-}
-
 func bridgeRequestHash(parts ...string) string {
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(digest[:])
@@ -723,14 +690,6 @@ func nullableJSONString(value sql.NullString) any {
 		return nil
 	}
 	return value.String
-}
-
-// nullableJSONTime renders a nullable durable timestamp for a JSON projection.
-func nullableJSONTime(value sql.NullTime) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time.UTC().Format(time.RFC3339Nano)
 }
 
 var _ BridgeAPIStore = (*PostgreSQLBridgeAPIStore)(nil)

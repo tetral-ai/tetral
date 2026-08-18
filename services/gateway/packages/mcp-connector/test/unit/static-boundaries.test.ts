@@ -114,9 +114,9 @@ describe("mcp-connector static boundaries", () => {
     const bridgeTests = readFileSync(join(import.meta.dir, "../../../../../bridge/bridge_api_mcp_test.go"), "utf8");
 
     expect(bridgeStore).toContain("mcpClaimLeaseTTL       = 180 * time.Second");
-    expect(bridgeTests).toContain("func TestPostgreSQLBridgeAPIStoreMCPToolResultClaimLease");
-    expect(bridgeTests).toContain("base.Add(181 * time.Second)");
-    expect(bridgeTests).toContain("want committed renewed reservation");
+    expect(bridgeTests).toContain("func TestPostgreSQLBridgeAPIStoreMCPClaimUsesDurableToolFactsAndFencesTakeover");
+    expect(bridgeTests).toContain("now.Add(mcpClaimLeaseTTL + time.Second)");
+    expect(bridgeTests).toContain("displaced owner commit");
   });
 
   test("pins every individual claim-to-commit phase budget", () => {

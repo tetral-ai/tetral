@@ -4,8 +4,7 @@ import {
   ProviderFinishReason,
   ProviderRequestKind,
   ProviderStreamEventType,
-  RuntimeMessageRole,
-  RuntimeToolPartState,
+  ProviderContextRole,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderKeyFailureError } from "../../src/providers/pool.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
@@ -90,6 +89,58 @@ describe("ProviderClientRegistry provider streaming", () => {
         code: "provider_configuration_invalid",
         retryable: false,
         fatal: true,
+      },
+    });
+    expect(providerFactoryCalls).toBe(0);
+    expect(streamCalls).toBe(0);
+  });
+
+  test("rejects an unpaired Tool Result at the provider client boundary", async () => {
+    let providerFactoryCalls = 0;
+    let streamCalls = 0;
+    const registry = new ProviderClientRegistry({
+      anthropicProviderFactory: () => {
+        providerFactoryCalls += 1;
+        return (modelId) => ({ provider: "anthropic", modelId });
+      },
+      streamText: () => {
+        streamCalls += 1;
+        return streamTextResult([finishPart()]);
+      },
+    });
+    const request = anthropicRequest({
+      context: [
+        {
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            {
+              toolResult: {
+                modelToolCallId: "call_without_owner",
+                completed: { outputJson: "{}" },
+                error: undefined,
+                cancelled: undefined,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    let caught: unknown;
+    try {
+      await collectEvents(
+        registry.stream({ request, credential: platformAnthropicCredential() }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      providerError: {
+        code: "provider_request_invalid",
+        retryable: false,
+        fatal: true,
+        statusCode: 400,
       },
     });
     expect(providerFactoryCalls).toBe(0);
@@ -816,30 +867,26 @@ describe("ProviderClientRegistry provider streaming", () => {
     const objectSchema = JSON.stringify({ type: "object", properties: {}, additionalProperties: false });
     const events = await collectEvents(registry.stream({
       request: openAIRequest({
-        messages: [
+        context: [
           {
-            id: "msg_patch_user",
-            role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-            status: "completed",
-            origin: "user",
-            parts: [{ id: "part_patch_user", text: { text: "apply this patch" } }],
+            role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+            content: [{ text: { text: "apply this patch" } }],
           },
           {
-            id: "msg_patch_tool",
-            role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-            status: "completed",
-            origin: "agent",
-            parts: [{
-              id: "part_patch_tool",
-              tool: {
-                callId: "call_history_patch",
+            role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+            content: [
+              { toolCall: {
+                modelToolCallId: "call_history_patch",
                 name: "apply_patch",
-                toolUseEventId: "sevt_history_patch",
-                state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
                 inputJson: JSON.stringify(rawPatch),
-                outputOrErrorJson: JSON.stringify({ status: "success", result: "done" }),
-              },
-            }],
+              } },
+              { toolResult: {
+                modelToolCallId: "call_history_patch",
+                completed: { outputJson: JSON.stringify({ status: "success", result: "done" }) },
+                error: undefined,
+                cancelled: undefined,
+              } },
+            ],
           },
         ],
         tools: [
@@ -1218,14 +1265,11 @@ describe("ProviderClientRegistry provider streaming", () => {
     const events = await collectEvents(registry.stream({
       request: deepSeekRequest({
         model: { providerId: "deepseek", modelId: "deepseek-v4-pro", variant: "high" },
-        messages: [{
-          id: "msg_assistant",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-          status: "completed",
-          origin: "agent",
-          parts: [
-            { id: "rs_1", reasoning: { text: "hidden", metadataJson: "{}" } },
-            { id: "txt_1", text: { text: "visible" } },
+        context: [{
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            { reasoning: { text: "hidden", metadataJson: "{}" } },
+            { text: { text: "visible" } },
           ],
         }],
       }),
@@ -1276,14 +1320,11 @@ describe("ProviderClientRegistry provider streaming", () => {
     const events = await collectEvents(registry.stream({
       request: zaiRequest({
         model: { providerId: "zai", modelId: "glm-5.2", variant: "high" },
-        messages: [{
-          id: "msg_assistant",
-          role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-          status: "completed",
-          origin: "agent",
-          parts: [
-            { id: "rs_1", reasoning: { text: "hidden", metadataJson: "{}" } },
-            { id: "txt_1", text: { text: "visible" } },
+        context: [{
+          role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+          content: [
+            { reasoning: { text: "hidden", metadataJson: "{}" } },
+            { text: { text: "visible" } },
           ],
         }],
         limits: { maxOutputTokens: 200_000, timeoutMs: 30_000 },
@@ -1413,7 +1454,6 @@ function resolvedAttachment(
 function transientOrigin(attachmentRef: string): NonNullable<ResolvedProviderRequestAttachment["transient"]> {
   return {
     attachmentRef,
-    sourceToolUseEventId: "sevt_tool_1",
     sourcePath: "/tmp/image.png",
     pageRange: "",
     detail: "auto",

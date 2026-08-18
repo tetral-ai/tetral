@@ -11,7 +11,7 @@
  * read, network call, or durable write.
  *
  * Lowering first verifies that the request model and required limits agree with
- * the selected rules. It renders sanitized system segments, runtime messages,
+ * the selected rules. It renders sanitized system segments, provider context,
  * completed tool call/result pairs, and a trailing user attachment message;
  * attachment bytes must match request entries one-for-one by origin and
  * metadata. Provider media and reasoning rules run during that render, so empty
@@ -25,18 +25,18 @@
  * the explicit adapter boundary exported by this module.
  */
 import {
+  ProviderContextRole,
   ProviderRequestKind,
-  RuntimeMessageRole,
-  RuntimeToolPartState,
   SystemCacheHint,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
+  ProviderContextEntry,
+  ProviderContextItem,
+  ProviderToolCall,
+  ProviderToolResult,
   ProviderRequest,
-  RuntimeMessage,
-  RuntimePart,
   ProviderRequestAttachment,
   RuntimeToolDefinition,
-  RuntimeToolPart,
   SystemSegment,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderRequestLoweringError } from "./errors.js";
@@ -207,9 +207,10 @@ export interface ResolvedProviderRequestAttachment extends ProviderRequestAttach
  * Lowers one complete provider request according to its exact model rules.
  *
  * Messages are rendered and filtered before cache points are selected. System
- * messages stay first, runtime messages retain their order, each tool part
- * expands to an adjacent assistant-call/tool-result pair, and resolved media is
- * appended as one user message. Tool schemas and the request-level structured
+ * messages stay first, provider context entries retain their order, and each
+ * Assistant entry becomes one Assistant message whose ordered content keeps
+ * concurrent Tool Calls grouped. Resolved media is appended as one user message.
+ * Tool schemas and the request-level structured
  * output schema use the selected schema strategy; the latter is accepted only
  * for an approval-reviewer request on a model that enables it. Provider options
  * retain the model's frozen defaults for an empty variant, validate any nonempty
@@ -235,20 +236,20 @@ export function lowerProviderRequest(request: ProviderRequest, rules: ProviderRu
   }
   // Fixed lowering order -- reordering these steps changes the outbound wire bytes:
   //   1. Attachment + message normalization builds the envelope list
-  //      (lowerRequestAttachments, lowerSystemSegment, lowerRuntimeMessage).
+  //      (lowerRequestAttachments, lowerSystemSegment, lowerProviderContext).
   //      Normalization is what drops empty/omitted parts, so a message removed
   //      here is absent from the list the next step observes.
   //   2. applyCacheControl marks cache points over that already-normalized list,
   //      so a message dropped in step 1 can never receive a cache marker.
   //   3. Output-schema and provider-option assembly (lowerRequestStructuredOutput,
   //      lowerProviderOptions) run last and do not touch message content.
-  // UPDATE-WITH: lowerRequestAttachments, lowerSystemSegment, lowerRuntimeMessage,
+  // UPDATE-WITH: lowerRequestAttachments, lowerSystemSegment, lowerProviderContext,
   // applyCacheControl, lowerRequestStructuredOutput, lowerProviderOptions (this file).
   const attachmentMessage = lowerRequestAttachments(request.attachments, options.resolvedAttachments ?? [], rules);
 
   const envelopes = [
     ...request.system.map((segment) => lowerSystemSegment(segment)),
-    ...request.messages.flatMap((message) => lowerRuntimeMessage(message, rules)),
+    ...lowerProviderContext(request.context, rules),
     ...(attachmentMessage === undefined ? [] : [attachmentMessage]),
   ];
   const messages = applyCacheControl(envelopes, rules);
@@ -308,47 +309,79 @@ function lowerSystemSegment(segment: SystemSegment): LoweredMessageEnvelope {
   };
 }
 
-function lowerRuntimeMessage(message: RuntimeMessage, rules: ProviderRules): readonly LoweredMessageEnvelope[] {
-  if (rules.reasoning.strategy === "provider-options" && message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT) {
-    return lowerProviderOptionsReasoningMessage(message, rules);
+interface LoweredProviderToolCallIdentity {
+  readonly toolCallId: string;
+  readonly toolName: string;
+}
+
+function lowerProviderContext(
+  context: readonly ProviderContextEntry[],
+  rules: ProviderRules,
+): readonly LoweredMessageEnvelope[] {
+  const toolCalls = new Map<string, LoweredProviderToolCallIdentity>();
+  const providerToolCallIds = new Set<string>();
+  const toolResults = new Set<string>();
+  return context.flatMap((entry) => lowerProviderContextEntry(entry, rules, toolCalls, providerToolCallIds, toolResults));
+}
+
+function lowerProviderContextEntry(
+  entry: ProviderContextEntry,
+  rules: ProviderRules,
+  toolCalls: Map<string, LoweredProviderToolCallIdentity>,
+  providerToolCallIds: Set<string>,
+  toolResults: Set<string>,
+): readonly LoweredMessageEnvelope[] {
+  if (rules.reasoning.strategy === "provider-options" && entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT) {
+    return lowerProviderOptionsReasoningEntry(entry, rules, toolCalls, providerToolCallIds, toolResults);
   }
 
-  const envelopes: LoweredMessageEnvelope[] = [];
-  const normalParts: Array<LoweredTextPart | LoweredReasoningPart> = [];
-  const hasSignedReasoning = message.parts.some((part) => part.reasoning !== undefined && hasSignedProviderReasoning(part, rules));
+  const assistantContent: LoweredAssistantContentPart[] = [];
+  const toolContent: LoweredToolResultPart[] = [];
+  const hasSignedReasoning = entry.content.some((item) => item.reasoning !== undefined && hasSignedProviderReasoning(item, rules));
 
-  for (const part of message.parts) {
-    if (part.text !== undefined) {
-      const text = sanitizeText(part.text.text);
+  for (const item of entry.content) {
+    if (item.text !== undefined) {
+      const text = sanitizeText(item.text.text);
       if (text.length > 0) {
-        normalParts.push({ type: "text", text });
-      } else if (hasSignedReasoning && message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT) {
-        normalParts.push({ type: "text", text: " " });
+        assistantContent.push({ type: "text", text });
+      } else if (hasSignedReasoning && entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT) {
+        assistantContent.push({ type: "text", text: " " });
       }
       continue;
     }
-    if (part.reasoning !== undefined) {
-      const lowered = lowerReasoningPart(part, rules);
+    if (item.reasoning !== undefined) {
+      const lowered = lowerReasoningContent(item, rules);
       if (lowered !== undefined) {
-        normalParts.push(lowered);
+        assistantContent.push(lowered);
       }
       continue;
     }
-    if (part.tool !== undefined) {
-      envelopes.push(...lowerToolPart(part.tool, rules));
+    if (entry.role !== ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT) {
+      throw new Error("gateway_protocol_error: user provider context may contain only text");
+    }
+    if (item.toolCall !== undefined) {
+      assistantContent.push(lowerToolCall(item.toolCall, rules, toolCalls, providerToolCallIds));
+      continue;
+    }
+    if (item.toolResult !== undefined) {
+      toolContent.push(lowerToolResult(item.toolResult, toolCalls, toolResults));
     }
   }
 
   if (
     hasSignedReasoning &&
-    message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT &&
-    !normalParts.some((part) => part.type === "text")
+    entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT &&
+    !assistantContent.some((part) => part.type === "text")
   ) {
-    normalParts.push({ type: "text", text: " " });
+    assistantContent.push({ type: "text", text: " " });
   }
 
-  if (normalParts.length > 0) {
-    envelopes.unshift({ message: messageForRole(message.role, normalParts), systemCacheCandidate: false });
+  const envelopes: LoweredMessageEnvelope[] = [];
+  if (assistantContent.length > 0) {
+    envelopes.push({ message: messageForRole(entry.role, assistantContent), systemCacheCandidate: false });
+  }
+  if (toolContent.length > 0) {
+    envelopes.push({ message: { role: "tool", content: toolContent }, systemCacheCandidate: false });
   }
   return envelopes;
 }
@@ -424,7 +457,6 @@ function sameAttachmentOrigin(left: ProviderRequestAttachment, right: ProviderRe
       left.fileBacked === undefined &&
       right.fileBacked === undefined &&
       left.transient.attachmentRef === right.transient.attachmentRef &&
-      left.transient.sourceToolUseEventId === right.transient.sourceToolUseEventId &&
       left.transient.sourcePath === right.transient.sourcePath &&
       left.transient.pageRange === right.transient.pageRange &&
       left.transient.detail === right.transient.detail;
@@ -471,35 +503,49 @@ function invalidAttachmentResolution(): ProviderRequestLoweringError {
   });
 }
 
-function lowerProviderOptionsReasoningMessage(message: RuntimeMessage, rules: ProviderRules): readonly LoweredMessageEnvelope[] {
+function lowerProviderOptionsReasoningEntry(
+  entry: ProviderContextEntry,
+  rules: ProviderRules,
+  toolCalls: Map<string, LoweredProviderToolCallIdentity>,
+  providerToolCallIds: Set<string>,
+  toolResults: Set<string>,
+): readonly LoweredMessageEnvelope[] {
   if (rules.reasoning.strategy !== "provider-options") {
     throw new Error("gateway_protocol_error: provider-options reasoning strategy is not configured");
   }
   const reasoningRules = rules.reasoning;
 
-  const envelopes: LoweredMessageEnvelope[] = [];
-  const normalParts: LoweredTextPart[] = [];
+  const normalParts: LoweredAssistantContentPart[] = [];
+  const toolParts: LoweredToolResultPart[] = [];
   const reasoningParts: string[] = [];
 
-  for (const part of message.parts) {
-    if (part.text !== undefined) {
-      const text = sanitizeText(part.text.text);
+  for (const item of entry.content) {
+    if (item.text !== undefined) {
+      const text = sanitizeText(item.text.text);
       if (text.length > 0) {
         normalParts.push({ type: "text", text });
       }
       continue;
     }
-    if (part.reasoning !== undefined) {
-      reasoningParts.push(sanitizeText(part.reasoning.text));
+    if (item.reasoning !== undefined) {
+      reasoningParts.push(sanitizeText(item.reasoning.text));
       continue;
     }
-    if (part.tool !== undefined) {
-      envelopes.push(...lowerToolPart(part.tool, rules));
+    if (item.toolCall !== undefined) {
+      normalParts.push(lowerToolCall(item.toolCall, rules, toolCalls, providerToolCallIds));
+      continue;
+    }
+    if (item.toolResult !== undefined) {
+      toolParts.push(lowerToolResult(item.toolResult, toolCalls, toolResults));
     }
   }
 
+  const envelopes: LoweredMessageEnvelope[] = [];
   if (normalParts.length > 0 || reasoningParts.length > 0) {
-    envelopes.unshift({ message: { role: "assistant", content: normalParts }, systemCacheCandidate: false });
+    envelopes.push({ message: { role: "assistant", content: normalParts }, systemCacheCandidate: false });
+  }
+  if (toolParts.length > 0) {
+    envelopes.push({ message: { role: "tool", content: toolParts }, systemCacheCandidate: false });
   }
 
   const reasoningContent = reasoningParts.length > 0 ? reasoningParts.join("") : "";
@@ -519,8 +565,8 @@ function lowerProviderOptionsReasoningMessage(message: RuntimeMessage, rules: Pr
   });
 }
 
-function lowerReasoningPart(part: RuntimePart, rules: ProviderRules): LoweredReasoningPart | LoweredTextPart | undefined {
-  const reasoning = part.reasoning;
+function lowerReasoningContent(item: ProviderContextItem, rules: ProviderRules): LoweredReasoningPart | LoweredTextPart | undefined {
+  const reasoning = item.reasoning;
   if (reasoning === undefined) {
     return undefined;
   }
@@ -543,66 +589,73 @@ function lowerReasoningPart(part: RuntimePart, rules: ProviderRules): LoweredRea
   return rules.reasoning.unmatchedReasoning === "text" && text.length > 0 ? { type: "text", text } : undefined;
 }
 
-function lowerToolPart(tool: RuntimeToolPart, rules: ProviderRules): readonly LoweredMessageEnvelope[] {
-  const sanitizedToolCallId = sanitizeText(tool.callId);
-  const toolCallId = rules.scrubToolCallIds ? scrubClaudeToolCallId(sanitizedToolCallId) : sanitizedToolCallId;
+function lowerToolCall(
+  tool: ProviderToolCall,
+  rules: ProviderRules,
+  toolCalls: Map<string, LoweredProviderToolCallIdentity>,
+  providerToolCallIds: Set<string>,
+): LoweredToolCallPart {
+  if (toolCalls.has(tool.modelToolCallId)) {
+    throw invalidProviderToolContext("Provider Tool Call identity is duplicated.");
+  }
+  const sanitizedToolCallId = sanitizeText(tool.modelToolCallId);
+  const toolCallId = rules.scrubToolCallIds
+    ? allocateProviderToolCallId(scrubClaudeToolCallId(sanitizedToolCallId), providerToolCallIds)
+    : registerProviderToolCallId(sanitizedToolCallId, providerToolCallIds);
   const toolName = sanitizeText(tool.name);
   const input = parseProviderJson(tool.inputJson, "tool input");
-  const toolCall: LoweredMessageEnvelope = {
-    message: {
-      role: "assistant",
-      content: [{ type: "tool-call", toolCallId, toolName, input }],
-    },
-    systemCacheCandidate: false,
+  toolCalls.set(tool.modelToolCallId, { toolCallId, toolName });
+  return {
+    type: "tool-call",
+    toolCallId,
+    toolName,
+    input,
   };
-  const toolResult: LoweredMessageEnvelope = {
-    message: {
-      role: "tool",
-      content: [lowerToolResult(tool, toolCallId, toolName)],
-    },
-    systemCacheCandidate: false,
-  };
-  return [toolCall, toolResult];
 }
 
-function lowerToolResult(tool: RuntimeToolPart, toolCallId: string, toolName: string): LoweredToolResultPart {
-  switch (tool.state) {
-    case RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED:
-      return {
-        type: "tool-result",
-        toolCallId,
-        toolName,
-        output: parseProviderJson(tool.outputOrErrorJson, "tool output"),
-      };
-    case RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR:
-      return {
-        type: "tool-result",
-        toolCallId,
-        toolName,
-        output: parseProviderJson(tool.outputOrErrorJson, "tool error"),
-        isError: true,
-      };
-    case RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED:
-      return {
-        type: "tool-result",
-        toolCallId,
-        toolName,
-        output: { type: "text", text: "[tool execution cancelled]" },
-        isError: true,
-      };
-    default:
-      throw new Error("gateway_protocol_error: unknown tool state cannot be lowered");
+function lowerToolResult(
+  result: ProviderToolResult,
+  toolCalls: ReadonlyMap<string, LoweredProviderToolCallIdentity>,
+  toolResults: Set<string>,
+): LoweredToolResultPart {
+  const call = toolCalls.get(result.modelToolCallId);
+  if (call === undefined || toolResults.has(result.modelToolCallId)) {
+    throw invalidProviderToolContext("Provider Tool Result does not pair with exactly one prior Tool Call.");
   }
+  toolResults.add(result.modelToolCallId);
+  const outcomeCount = Number(result.completed !== undefined) + Number(result.error !== undefined) + Number(result.cancelled !== undefined);
+  if (outcomeCount !== 1) {
+    throw invalidProviderToolContext("Provider Tool Result must select exactly one outcome.");
+  }
+  return result.completed !== undefined
+    ? {
+        type: "tool-result",
+        ...call,
+        output: parseProviderJson(result.completed.outputJson, "tool output"),
+      }
+    : result.error !== undefined
+      ? {
+          type: "tool-result",
+          ...call,
+          output: parseProviderJson(result.error.errorJson, "tool error"),
+          isError: true,
+        }
+      : {
+          type: "tool-result",
+          ...call,
+          output: { type: "text", text: "[tool execution cancelled]" },
+          isError: true,
+        };
 }
 
 function messageForRole(
-  role: RuntimeMessageRole,
-  parts: readonly (LoweredTextPart | LoweredReasoningPart)[],
+  role: ProviderContextRole,
+  parts: readonly LoweredAssistantContentPart[],
 ): LoweredUserMessage | LoweredAssistantMessage {
   switch (role) {
-    case RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER:
+    case ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER:
       return { role: "user", content: parts.filter((part): part is LoweredTextPart => part.type === "text") };
-    case RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT:
+    case ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT:
       return { role: "assistant", content: parts };
     default:
       throw new Error("gateway_protocol_error: only user and assistant messages carry text or reasoning parts");
@@ -886,11 +939,11 @@ function withPartProviderOption<T extends LoweredUserContentPart | LoweredAssist
   };
 }
 
-function hasSignedProviderReasoning(part: RuntimePart, rules: ProviderRules): boolean {
+function hasSignedProviderReasoning(item: ProviderContextItem, rules: ProviderRules): boolean {
   if (rules.reasoning.strategy !== "provider-metadata") {
     return false;
   }
-  const metadata = parseMetadataJson(part.reasoning?.metadataJson ?? "{}");
+  const metadata = parseMetadataJson(item.reasoning?.metadataJson ?? "{}");
   const providerMetadata = providerMetadataFor(metadata, rules.reasoning.metadataKey);
   return providerMetadata !== undefined && hasSignedMetadata(providerMetadata);
 }
@@ -1204,6 +1257,39 @@ function sanitizeProviderJsonValue(value: unknown): unknown {
 
 function scrubClaudeToolCallId(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+function allocateProviderToolCallId(base: string, used: Set<string>): string {
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  for (let collision = 2; ; collision += 1) {
+    const suffix = `_${collision}`;
+    const candidate = `${base.slice(0, Math.max(0, 128 - suffix.length))}${suffix}`;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+}
+
+function registerProviderToolCallId(toolCallId: string, used: Set<string>): string {
+  if (used.has(toolCallId)) {
+    throw invalidProviderToolContext("Provider Tool Call identities collide after text sanitation.");
+  }
+  used.add(toolCallId);
+  return toolCallId;
+}
+
+function invalidProviderToolContext(message: string): ProviderRequestLoweringError {
+  return new ProviderRequestLoweringError({
+    code: "provider_request_invalid",
+    message,
+    retryable: false,
+    fatal: true,
+    statusCode: 400,
+  });
 }
 
 function sanitizeText(value: string): string {

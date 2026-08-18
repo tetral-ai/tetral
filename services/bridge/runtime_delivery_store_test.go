@@ -31,7 +31,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // This file owns PostgreSQL runtime delivery-store behavior tests.
@@ -125,9 +124,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	store.MCPManifestLister = lister
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	job := RuntimeJob{
 		JobID:           "qjob_bridge_initial_mcp",
 		LeaseToken:      "lease_bridge_initial_mcp",
@@ -140,7 +137,6 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"type":"messages"}`,
 	}
 	seedBridgeAPIEvent(t, admin, "default", job.SessionID, job.SessionThreadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
@@ -160,7 +156,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 		lister.requests[0].ManifestETag != "" {
 		t.Fatalf("MCP manifest lister requests = %#v; want initial github list", lister.requests)
 	}
-	if len(sender.requests) != 1 || sender.requests[0].GetRuntimeInputId() != job.RuntimeInputID {
+	if len(sender.requests) != 1 || sender.requests[0].(*agentruntimev1.AcceptInputRequest).GetRuntimeInputId() != job.RuntimeInputID {
 		t.Fatalf("runtime commands = %#v; want the original input in the capture attempt", sender.requests)
 	}
 	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_initial_mcp", "github", 1)
@@ -205,22 +201,20 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 	if err != nil {
 		t.Fatalf("decode committed MCP manifest delivery intent: %v", err)
 	}
-	redriveSender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	redriveSender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	redriveStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	redriveResult, err := (RuntimePodDirectDeliverer{Store: redriveStore, Sender: redriveSender}).DeliverRuntimeJob(context.Background(), redrivenJob)
 	if err != nil {
 		t.Fatalf("redrive committed MCP manifest generation: %v", err)
 	}
 	if redriveResult.Status != RuntimeDeliveryAccepted || len(redriveSender.requests) != 1 ||
-		redriveSender.requests[0].GetRuntimeInputId() != "runtime_config_update:mcp_manifest:sesn_bridge_initial_mcp:github:1" {
+		redriveSender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest).GetMcpManifest().GetGeneration() != 1 {
 		t.Fatalf("redriven manifest delivery = %#v requests %#v; want one accepted generation-1 command", redriveResult, redriveSender.requests)
 	}
 	var delivered struct {
 		MCPManifest map[string]json.RawMessage `json:"mcp_manifest"`
 	}
-	if err := json.Unmarshal([]byte(redriveSender.requests[0].GetPayloadJson()), &delivered); err != nil {
+	if err := json.Unmarshal([]byte(redriveSender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest).GetMcpManifest().GetContentJson()), &delivered); err != nil {
 		t.Fatalf("decode rebuilt MCP command: %v", err)
 	}
 	var manifestETag string
@@ -324,9 +318,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureAdvancesSingleAttemptInp
 			deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 			deliveryStore.Clock = func() time.Time { return now }
 			deliveryStore.MCPManifestLister = test.lister(t)
-			sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-				Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-			}}
+			sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 			runner := &JobRunner{
 				Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{"default"},
 				Deliverer: manifestCompositionDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},
@@ -335,7 +327,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureAdvancesSingleAttemptInp
 			if err := runner.RunOnce(context.Background()); err != nil {
 				t.Fatalf("run single-attempt input: %v", err)
 			}
-			if len(sender.requests) != 1 || sender.requests[0].GetRuntimeInputId() != job.RuntimeInputID {
+			if len(sender.requests) != 1 || sender.requests[0].(*agentruntimev1.AcceptInputRequest).GetRuntimeInputId() != job.RuntimeInputID {
 				t.Fatalf("Runtime requests = %#v; want original input once", sender.requests)
 			}
 			var readiness, diagnostic, inboxStatus, inputQueueStatus string
@@ -410,7 +402,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRejectsUnclassifiedMCPFailureWithoutDurab
 			seedRuntimeInboxBirthForJob(t, admin, job)
 			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 			store.MCPManifestLister = newExactFailureMCPManifestLister(t, test.code, test.values)
-			sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+			sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 			result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 			if err != nil || result.Status == RuntimeDeliveryAccepted || len(sender.requests) != 0 {
 				t.Fatalf("unclassified discovery delivery = %+v/%v requests:%d; want retained input without Runtime", result, err, len(sender.requests))
@@ -456,7 +448,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureRacesManifestNotificatio
 		seedRuntimeInboxBirthForJob(t, admin, job)
 		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 		store.MCPManifestLister = lister
-		sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+		sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 		return admin, store, job, sender
 	}
 	readState := func(t *testing.T, admin *sql.DB, wantGeneration int64, wantReadiness string, wantJobs int) {
@@ -543,7 +535,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPTransitionRollbackRetainsInputC
 	}
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.MCPManifestLister = &recordingMCPManifestLister{err: mcpManifestDiscoveryError{diagnostic: mcpManifestDiagnosticDiscoveryUnavailable}}
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil || result.Status != RuntimeDeliveryRejected || !result.Retryable || len(sender.requests) != 0 {
 		t.Fatalf("delivery after manifest transaction rollback = %#v/%v requests %d; want retryable rejection/nil/0", result, err, len(sender.requests))
@@ -595,8 +587,9 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 		WorkspaceId: "default", SessionId: sessionID, McpServerName: "github", ManifestEtag: "etag_over",
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := bridge.McpManifestChanged(context.Background(), request); status.Code(err) != codes.ResourceExhausted {
-			t.Fatalf("over-cap manifest attempt %d = %v; want ResourceExhausted", attempt+1, err)
+		response, err := bridge.McpManifestChanged(context.Background(), request)
+		if err != nil || (attempt == 0 && response.GetCommitted() == nil) || (attempt == 1 && response.GetDuplicate() == nil) {
+			t.Fatalf("over-cap manifest attempt %d = %+v err %v; want committed then duplicate", attempt+1, response, err)
 		}
 	}
 	var manifestRows, queueJobs int
@@ -627,8 +620,7 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 		t.Fatalf("rebuild runtime config: %v", err)
 	}
 	cold, err := bridge.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:          bridgeAPIScope(sessionID, "thrd_"+sessionID, "bind_manifest_composition", 1, "pod_manifest_composition"),
-		RuntimeInputId: "rin_manifest_composition_cold",
+		Scope: bridgeAPIScope(sessionID, "thrd_"+sessionID, "bind_manifest_composition", 1, "pod_manifest_composition"),
 	})
 	if err != nil {
 		t.Fatalf("load replacement Runtime context: %v", err)
@@ -712,17 +704,13 @@ func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBefore
 		AND payload_json::jsonb ->> 'mcp_server_name'='github'`, sessionID).Scan(&manifestJobID, &manifestMaxAttempts); err != nil {
 		t.Fatalf("read manifest Queue job: %v", err)
 	}
-	rejected := &agentruntimev1.RuntimeInputCommandResponse{
-		Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
-		Retryable: true,
-		ErrorCode: agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH,
-	}
-	responses := make([]*agentruntimev1.RuntimeInputCommandResponse, 0, manifestMaxAttempts+1)
+	rejected := RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "binding_mismatch"}
+	responses := make([]RuntimeDeliveryResult, 0, manifestMaxAttempts+1)
 	for range manifestMaxAttempts {
 		responses = append(responses, rejected)
 	}
-	responses = append(responses, &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED})
-	sender := &recordingRuntimeCommandSender{responses: responses}
+	responses = append(responses, RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted})
+	sender := &recordingRuntimeCommandSender{results: responses}
 	queueServer := tetralqueue.NewServer(queueStore, nil)
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	composedDeliverer := manifestCompositionDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}}
@@ -770,7 +758,7 @@ func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBefore
 	if len(sender.requests) != manifestMaxAttempts+1 {
 		t.Fatalf("Runtime manifest requests = %d; want %d", len(sender.requests), manifestMaxAttempts+1)
 	}
-	redrive := sender.requests[len(sender.requests)-1]
+	redrive := sender.requests[len(sender.requests)-1].(*agentruntimev1.ApplyRuntimeConfigRequest)
 	var rebuilt struct {
 		MCPManifest struct {
 			Generation int64  `json:"manifest_generation"`
@@ -778,11 +766,11 @@ func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBefore
 			Diagnostic string `json:"diagnostic"`
 		} `json:"mcp_manifest"`
 	}
-	if err := json.Unmarshal([]byte(redrive.GetPayloadJson()), &rebuilt); err != nil {
+	if err := json.Unmarshal([]byte(redrive.GetMcpManifest().GetContentJson()), &rebuilt); err != nil {
 		t.Fatalf("decode redriven manifest command: %v", err)
 	}
-	if redrive.GetRuntimeInputId() != runtimeMCPManifestInputID(sessionID, "github", 2) || rebuilt.MCPManifest.Generation != 2 || rebuilt.MCPManifest.Readiness != "unready" || rebuilt.MCPManifest.Diagnostic != "delivery_exhausted" {
-		t.Fatalf("redriven command = input %q payload %+v; want durable generation 2 unready payload", redrive.GetRuntimeInputId(), rebuilt.MCPManifest)
+	if redrive.GetMcpManifest().GetGeneration() != 2 || rebuilt.MCPManifest.Generation != 2 || rebuilt.MCPManifest.Readiness != "unready" || rebuilt.MCPManifest.Diagnostic != "delivery_exhausted" {
+		t.Fatalf("redriven config = generation %d payload %+v; want durable generation 2 unready payload", redrive.GetMcpManifest().GetGeneration(), rebuilt.MCPManifest)
 	}
 
 	followers, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
@@ -810,18 +798,20 @@ func (d manifestCompositionDeliverer) ReplayRuntimeDeliveryFinalization(ctx cont
 	return d.direct.ReplayRuntimeDeliveryFinalization(ctx, job)
 }
 
+func (d manifestCompositionDeliverer) FinalizeMalformedRuntimeInputCustody(ctx context.Context, lease MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	return d.direct.FinalizeMalformedRuntimeInputCustody(ctx, lease)
+}
+
 func deliverQueuedManifestPayload(t *testing.T, runtime *sql.DB, admin *sql.DB, sessionID string, generation int64) string {
 	t.Helper()
 	job := queuedManifestJob(t, admin, sessionID, generation)
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	delivery := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	result, err := (RuntimePodDirectDeliverer{Store: delivery, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil || result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 1 {
 		t.Fatalf("deliver manifest generation %d = %+v, %v, requests %d", generation, result, err, len(sender.requests))
 	}
-	return sender.requests[0].GetPayloadJson()
+	return sender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest).GetMcpManifest().GetContentJson()
 }
 
 func queuedManifestJob(t *testing.T, admin *sql.DB, sessionID string, generation int64) RuntimeJob {
@@ -847,13 +837,7 @@ func queuedManifestJob(t *testing.T, admin *sql.DB, sessionID string, generation
 
 type runtimeManifestCompositionResult struct {
 	CommandResponse struct {
-		Status            int32  `json:"status"`
-		Retryable         bool   `json:"retryable"`
-		ErrorCode         int32  `json:"errorCode"`
-		SessionID         string `json:"sessionId"`
-		RuntimeInputID    string `json:"runtimeInputId"`
-		BindingID         string `json:"bindingId"`
-		BindingGeneration int64  `json:"bindingGeneration"`
+		Applied *struct{} `json:"applied"`
 	} `json:"commandResponse"`
 	WarmCurrentGeneration    int `json:"warmCurrentGeneration"`
 	ColdCurrentGeneration    int `json:"coldCurrentGeneration"`
@@ -864,6 +848,7 @@ type runtimeManifestCompositionResult struct {
 }
 
 type bunRuntimeManifestCompositionSender struct {
+	recordingRuntimeCommandSender
 	InputPath                string
 	RuntimeConfigPayloadJSON string
 	ReadyManifestPayloadJSON string
@@ -875,29 +860,23 @@ type bunRuntimeManifestCompositionSender struct {
 	Result                   runtimeManifestCompositionResult
 }
 
-func (s *bunRuntimeManifestCompositionSender) SendRuntimeCommand(ctx context.Context, _ RuntimePodTarget, request *agentruntimev1.RuntimeInputCommandRequest) (*agentruntimev1.RuntimeInputCommandResponse, error) {
+func (s *bunRuntimeManifestCompositionSender) ApplyRuntimeConfig(ctx context.Context, _ RuntimePodTarget, request *agentruntimev1.ApplyRuntimeConfigRequest) (*agentruntimev1.ApplyRuntimeConfigResponse, error) {
 	inputJSON, err := json.Marshal(map[string]any{
 		"workspaceId":              request.GetWorkspaceId(),
 		"sessionId":                request.GetSessionId(),
 		"runtimeConfigPayloadJson": s.RuntimeConfigPayloadJSON,
 		"readyManifestPayloadJson": s.ReadyManifestPayloadJSON,
 		"runtimeCommandRequest": map[string]any{
-			"requestId":          request.GetRequestId(),
-			"workspaceId":        request.GetWorkspaceId(),
-			"sessionId":          request.GetSessionId(),
-			"sessionThreadId":    request.GetSessionThreadId(),
-			"bindingId":          request.GetBindingId(),
-			"bindingGeneration":  request.GetBindingGeneration(),
-			"targetPodNamespace": request.GetTargetPodNamespace(),
-			"targetPodName":      request.GetTargetPodName(),
-			"targetPodUid":       request.GetTargetPodUid(),
-			"targetPodIp":        request.GetTargetPodIp(),
-			"runtimeInputId":     request.GetRuntimeInputId(),
-			"eventIds":           append([]string{}, request.GetEventIds()...),
-			"sequenceFrom":       request.GetSequenceFrom(),
-			"sequenceTo":         request.GetSequenceTo(),
-			"commandKind":        request.GetCommandKind(),
-			"payloadJson":        request.GetPayloadJson(),
+			"workspaceId":       request.GetWorkspaceId(),
+			"sessionId":         request.GetSessionId(),
+			"bindingId":         request.GetBindingId(),
+			"bindingGeneration": request.GetBindingGeneration(),
+			"targetPodUid":      request.GetTargetPodUid(),
+			"mcpManifest": map[string]any{
+				"mcpServerName": request.GetMcpManifest().GetMcpServerName(),
+				"generation":    request.GetMcpManifest().GetGeneration(),
+				"contentJson":   request.GetMcpManifest().GetContentJson(),
+			},
 		},
 		"coldContextJson":         s.ColdContextJSON,
 		"coldRuntimeBindingToken": s.ColdRuntimeBindingToken,
@@ -920,15 +899,10 @@ func (s *bunRuntimeManifestCompositionSender) SendRuntimeCommand(ctx context.Con
 	if err := json.Unmarshal(output, &s.Result); err != nil {
 		return nil, fmt.Errorf("decode Runtime manifest composition: %w: %s", err, output)
 	}
-	return &agentruntimev1.RuntimeInputCommandResponse{
-		Status:            agentruntimev1.RuntimeCommandStatus(s.Result.CommandResponse.Status),
-		Retryable:         s.Result.CommandResponse.Retryable,
-		ErrorCode:         agentruntimev1.RuntimeInputErrorCode(s.Result.CommandResponse.ErrorCode),
-		SessionId:         s.Result.CommandResponse.SessionID,
-		RuntimeInputId:    s.Result.CommandResponse.RuntimeInputID,
-		BindingId:         s.Result.CommandResponse.BindingID,
-		BindingGeneration: s.Result.CommandResponse.BindingGeneration,
-	}, nil
+	if s.Result.CommandResponse.Applied == nil {
+		return nil, errors.New("Runtime manifest composition did not apply the config")
+	}
+	return &agentruntimev1.ApplyRuntimeConfigResponse{Outcome: &agentruntimev1.ApplyRuntimeConfigResponse_Applied{Applied: &agentruntimev1.ApplyRuntimeConfigApplied{}}}, nil
 }
 
 func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly(t *testing.T) {
@@ -991,7 +965,6 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"type":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -1017,7 +990,7 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 	if readiness != "ready" {
 		t.Fatalf("captured MCP manifest readiness = %q; want ready", readiness)
 	}
-	if plan.Request == nil || plan.Request.GetRuntimeInputId() != job.RuntimeInputID {
+	if plan.AcceptInput == nil || plan.AcceptInput.GetRuntimeInputId() != job.RuntimeInputID {
 		t.Fatalf("PrepareRuntimeCommand plan = %#v; want same-attempt runtime input delivery", plan)
 	}
 }
@@ -1042,7 +1015,7 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 	job := RuntimeJob{
 		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
 		RuntimeInputID: inputID, EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
-		InputKind: "messages", CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
+		InputKind: "messages",
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
 	now := time.Now().UTC()
@@ -1118,6 +1091,7 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 }
 
 type oauthReadyRuntimeSender struct {
+	recordingRuntimeCommandSender
 	admin                *sql.DB
 	client               *dbconnect.Client
 	inputPath            string
@@ -1129,7 +1103,7 @@ type oauthReadyRuntimeSender struct {
 	lastError string
 }
 
-func (s *oauthReadyRuntimeSender) SendRuntimeCommand(ctx context.Context, _ RuntimePodTarget, request *agentruntimev1.RuntimeInputCommandRequest) (*agentruntimev1.RuntimeInputCommandResponse, error) {
+func (s *oauthReadyRuntimeSender) AcceptInput(ctx context.Context, _ RuntimePodTarget, request *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error) {
 	var manifestJobID, manifestJobEnvelope string
 	if err := s.admin.QueryRowContext(ctx, `SELECT id, payload_json FROM queue_jobs
 		WHERE workspace_id=$1 AND kind='runtime_config_update'
@@ -1179,11 +1153,7 @@ func (s *oauthReadyRuntimeSender) SendRuntimeCommand(ctx context.Context, _ Runt
 		s.lastError = fmt.Sprintf("decode ready MCP provider composition: %v", err)
 		return nil, errors.New(s.lastError)
 	}
-	return &agentruntimev1.RuntimeInputCommandResponse{
-		Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-		SessionId: request.GetSessionId(), RuntimeInputId: request.GetRuntimeInputId(),
-		BindingId: request.GetBindingId(), BindingGeneration: request.GetBindingGeneration(),
-	}, nil
+	return &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Accepted{Accepted: &agentruntimev1.AcceptInputAccepted{}}}, nil
 }
 
 type oauthInitialManifestConnector struct {
@@ -1455,7 +1425,6 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 		RuntimeInputID:  "task_notification:task_bridge_delivery",
 		EventIDs:        []string{},
 		InputKind:       "task_notification",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_task_delivery","session_thread_id":"thr_bridge_task_delivery","runtime_input_id":"task_notification:task_bridge_delivery","event_ids":[],"input_kind":"task_notification"}`,
 	}
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
@@ -1468,8 +1437,8 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 	if len(resolver.jobs) != 1 || resolver.jobs[0].RuntimeInputID != job.RuntimeInputID || resolver.jobs[0].SessionThreadID != "thr_bridge_task_delivery" {
 		t.Fatalf("target resolver jobs = %+v; want task notification delivery resolved through runtime target", resolver.jobs)
 	}
-	if strings.Contains(plan.Request.GetPayloadJson(), "provider_command_id") {
-		t.Fatalf("runtime task notification leaked provider metadata: %s", plan.Request.GetPayloadJson())
+	if plan.AcceptTask == nil || strings.Contains(plan.AcceptTask.GetNotificationJson(), "provider_command_id") {
+		t.Fatalf("runtime task notification leaked provider metadata: %#v", plan.AcceptTask)
 	}
 	var payload struct {
 		TaskID               string `json:"task_id"`
@@ -1486,35 +1455,33 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 			OriginalLines int64 `json:"original_lines"`
 		} `json:"stderr"`
 	}
-	if err := json.Unmarshal([]byte(plan.Request.GetPayloadJson()), &payload); err != nil {
+	if err := json.Unmarshal([]byte(plan.AcceptTask.GetNotificationJson()), &payload); err != nil {
 		t.Fatalf("decode runtime task notification payload: %v", err)
 	}
 	if payload.TaskID != "task_bridge_delivery" || payload.SourceToolUseEventID != "sevt_tool_delivery" || payload.Status != "completed" {
 		t.Fatalf("runtime task notification payload = %#v", payload)
 	}
-	if len([]byte(plan.Request.GetPayloadJson())) > runtimeTaskNotificationPayloadMaxBytes {
-		t.Fatalf("runtime task notification payload bytes = %d; want <= %d", len([]byte(plan.Request.GetPayloadJson())), runtimeTaskNotificationPayloadMaxBytes)
+	if len([]byte(plan.AcceptTask.GetNotificationJson())) > runtimeTaskNotificationPayloadMaxBytes {
+		t.Fatalf("runtime task notification payload bytes = %d; want <= %d", len([]byte(plan.AcceptTask.GetNotificationJson())), runtimeTaskNotificationPayloadMaxBytes)
 	}
 	if !payload.Stdout.Truncated || !payload.Stderr.Truncated ||
 		payload.Stdout.OriginalBytes != 51200 || payload.Stdout.OriginalLines != 5000 ||
 		payload.Stderr.OriginalBytes != 51200 || payload.Stderr.OriginalLines != 6000 {
 		t.Fatalf("runtime task notification stream bounds = stdout:%+v stderr:%+v", payload.Stdout, payload.Stderr)
 	}
-	assertNoTaskOutputPaths(t, plan.Request.GetPayloadJson())
+	assertNoTaskOutputPaths(t, plan.AcceptTask.GetNotificationJson())
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	apiStore.Clock = store.Clock
 	committed, err := apiStore.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
 		t,
-		runtimeScopeFromCommandRequest(plan.Request),
+		runtimeScopeFromAttempt(job, plan.AttemptedBinding),
 		job.RuntimeInputID,
-		plan.TaskNotification.TaskID,
-		plan.TaskNotification.ResultJSON,
 	))
 	if err != nil {
 		t.Fatalf("CommitTaskNotificationResult delivery: %v", err)
 	}
-	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("CommitTaskNotificationResult ack = %s; want committed", committed.GetAck().GetStatus())
+	if committed.GetCommitted() == nil {
+		t.Fatalf("CommitTaskNotificationResult outcome = %#v; want committed", committed)
 	}
 	var taskStatus string
 	var inboxStatus string
@@ -1746,9 +1713,7 @@ func TestRuntimeConfigDeliveryRebuildsSupersededManifestAtTheCurrentGeneration(t
 
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), RuntimeJob{
 		Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID,
 		RuntimeInputID: runtimeMCPManifestInputID(sessionID, "github", 1), MCPServerName: "github", MCPManifestGeneration: "1",
@@ -1759,12 +1724,13 @@ func TestRuntimeConfigDeliveryRebuildsSupersededManifestAtTheCurrentGeneration(t
 	if result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 1 {
 		t.Fatalf("superseded manifest result = %#v requests=%d; want one accepted fresh apply", result, len(sender.requests))
 	}
-	request := sender.requests[0]
-	if request.GetRuntimeInputId() != runtimeMCPManifestInputID(sessionID, "github", 2) ||
-		!strings.Contains(request.GetPayloadJson(), `"manifest_generation":2`) ||
-		!strings.Contains(request.GetPayloadJson(), `"name":"github_current"`) ||
-		strings.Contains(request.GetPayloadJson(), `github_old`) {
-		t.Fatalf("rebuilt superseded command id/payload = %q/%s; want current generation and content", request.GetRuntimeInputId(), request.GetPayloadJson())
+	request := sender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest)
+	contentJSON := request.GetMcpManifest().GetContentJson()
+	if request.GetMcpManifest().GetGeneration() != 2 ||
+		!strings.Contains(contentJSON, `"manifest_generation":2`) ||
+		!strings.Contains(contentJSON, `"name":"github_current"`) ||
+		strings.Contains(contentJSON, `github_old`) {
+		t.Fatalf("rebuilt superseded config generation/payload = %d/%s; want current generation and content", request.GetMcpManifest().GetGeneration(), contentJSON)
 	}
 }
 
@@ -1795,13 +1761,12 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationTerminalDuplicateIsStale(
 		SessionThreadID: "thr_bridge_task_delivery_terminal_dup",
 		RuntimeInputID:  "task_notification:task_bridge_delivery_terminal_dup",
 		InputKind:       "task_notification",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_task_delivery_terminal_dup","session_thread_id":"thr_bridge_task_delivery_terminal_dup","runtime_input_id":"task_notification:task_bridge_delivery_terminal_dup","event_ids":[],"input_kind":"task_notification"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand terminal duplicate task notification: %v", err)
 	}
-	if !plan.StaleAccepted || plan.Request != nil || plan.TaskNotification != nil {
+	if !plan.StaleAccepted || plan.hasCommand() || plan.TaskNotification != nil {
 		t.Fatalf("plan = %#v; want terminal duplicate stale accepted without runtime command", plan)
 	}
 	assertNoRuntimeInboxRow(t, admin, "task_notification:task_bridge_delivery_terminal_dup")
@@ -1818,9 +1783,7 @@ func TestPostgreSQLRuntimeDeliveryStoreMarksInboxAcceptedAfterRuntimeAccepts(t *
 
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	job := RuntimeJob{
 		JobID:           "qjob_inbox_accept",
 		LeaseToken:      "lease_inbox_accept",
@@ -1833,7 +1796,6 @@ func TestPostgreSQLRuntimeDeliveryStoreMarksInboxAcceptedAfterRuntimeAccepts(t *
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_inbox_accept","session_thread_id":"thr_bridge_inbox_accept","runtime_input_id":"rin_inbox_accept","event_ids":["sevt_inbox_accept"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -1894,15 +1856,15 @@ func TestPostgreSQLRuntimeDeliveryStorePersistsDistinctInboxesForChunkedBacklog(
 			RuntimeInputID:  runtimeInputID, EventIDs: chunk,
 			SequenceFrom: int64(index*queue.MaxRuntimeInputEventRefsPerJob + 1),
 			SequenceTo:   int64(index*queue.MaxRuntimeInputEventRefsPerJob + len(chunk)),
-			InputKind:    "messages", CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-			PayloadJSON: string(payload),
+			InputKind:    "messages",
+			PayloadJSON:  string(payload),
 		}
 		seedRuntimeInboxBirthForJob(t, admin, job)
 		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand chunk %d: %v", index+1, err)
 		}
-		if plan.Request == nil || plan.Request.GetRuntimeInputId() != runtimeInputID {
+		if plan.AcceptInput == nil || plan.AcceptInput.GetRuntimeInputId() != runtimeInputID {
 			t.Fatalf("chunk %d plan = %#v; want runtime input %s", index+1, plan, runtimeInputID)
 		}
 		if _, err := admin.ExecContext(context.Background(),
@@ -1997,7 +1959,6 @@ func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_inbox_accept_fence","session_thread_id":"thr_bridge_inbox_accept_fence","runtime_input_id":"rin_inbox_accept_fence","event_ids":["sevt_inbox_accept_fence"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -2009,25 +1970,29 @@ func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand replay: %v", err)
 	}
-	if replayedPlan.Request.GetPayloadJson() != plan.Request.GetPayloadJson() {
-		t.Fatalf("replayed message payload = %q; want byte-identical %q", replayedPlan.Request.GetPayloadJson(), plan.Request.GetPayloadJson())
+	if replayedPlan.AcceptInput.GetMessagesJson() != plan.AcceptInput.GetMessagesJson() {
+		t.Fatalf("replayed message payload = %q; want byte-identical %q", replayedPlan.AcceptInput.GetMessagesJson(), plan.AcceptInput.GetMessagesJson())
 	}
 	var payload struct {
-		Messages []struct {
-			Origin string `json:"origin"`
-			Role   string `json:"role"`
-			Parts  []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"messages"`
+		Messages []json.RawMessage `json:"messages"`
 	}
-	if err := json.Unmarshal([]byte(plan.Request.GetPayloadJson()), &payload); err != nil {
+	if err := json.Unmarshal([]byte(plan.AcceptInput.GetMessagesJson()), &payload); err != nil {
 		t.Fatalf("decode accepted message payload: %v", err)
 	}
-	if len(payload.Messages) != 1 || payload.Messages[0].Origin != "user" || payload.Messages[0].Role != "user" ||
-		len(payload.Messages[0].Parts) != 1 || payload.Messages[0].Parts[0].Type != "text" || payload.Messages[0].Parts[0].Text != "hello" {
-		t.Fatalf("accepted message payload = %#v; want canonical SDK user message", payload.Messages)
+	if len(payload.Messages) != 1 {
+		t.Fatalf("accepted message payload = %#v; want one context draft", payload.Messages)
+	}
+	message, err := decodeRuntimeDeclarationObject(string(payload.Messages[0]))
+	if err != nil || len(message) != 1 {
+		t.Fatalf("accepted message payload = %#v, %v; want parts-only context draft", message, err)
+	}
+	parts, ok := message["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("accepted message parts = %#v; want one text part", message["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok || len(part) != 3 || part["type"] != "text" || part["text"] != "hello" || part["truncated"] != false {
+		t.Fatalf("accepted message part = %#v; want exact narrow text", parts[0])
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_inbox
@@ -2036,7 +2001,7 @@ func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *
 		    AND runtime_input_id = 'rin_inbox_accept_fence'`); err != nil {
 		t.Fatalf("mutate inbox fence: %v", err)
 	}
-	_, err = store.MarkRuntimeInputAccepted(context.Background(), job, plan.Request)
+	_, err = store.MarkRuntimeInputAccepted(context.Background(), job, plan.AttemptedBinding)
 	var prepareErr runtimeDeliveryPrepareError
 	if !errors.As(err, &prepareErr) || prepareErr.kind != "runtime_inbox_accept_missing" || !prepareErr.retryable {
 		t.Fatalf("MarkRuntimeInputAccepted fenced err = %v; want retryable runtime_inbox_accept_missing", err)
@@ -2075,7 +2040,6 @@ func TestPostgreSQLRuntimeDeliveryStoreRejectsRuntimeInboxPayloadConflict(t *tes
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_inbox_conflict","session_thread_id":"thr_bridge_inbox_conflict","runtime_input_id":"rin_inbox_conflict","event_ids":["sevt_inbox_conflict_one"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, first)
@@ -2112,41 +2076,31 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_control_delivery", "bind_bridge_control_delivery", 1, "pod_uid_control_delivery")
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_interrupt_control", 1, "user.interrupt", `{}`)
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_confirmation_control", 2, "user.tool_confirmation", `{"tool_use_id":"sevt_tool_control","result":"deny","deny_message":"not now"}`)
+	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope("sesn_bridge_control_delivery", "thr_bridge_control_delivery", "bind_bridge_control_delivery", 1, "pod_uid_control_delivery"), "sevt_control_delivery_run")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_interrupt_control", 2, "user.interrupt", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_confirmation_control", 3, "user.tool_confirmation", `{"tool_use_id":"sevt_tool_control","result":"deny","deny_message":"not now"}`)
 
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
 
-	interruptJob := RuntimeJob{
-		JobID:           "qjob_bridge_interrupt",
-		LeaseToken:      "lease_bridge_interrupt",
-		Kind:            queue.KindRuntimeInput,
-		WorkspaceID:     "default",
-		SessionID:       "sesn_bridge_control_delivery",
-		SessionThreadID: "thr_bridge_control_delivery",
-		RuntimeInputID:  "rin_bridge_interrupt",
-		EventIDs:        []string{"sevt_interrupt_control"},
-		SequenceFrom:    1,
-		SequenceTo:      1,
-		InputKind:       "interrupt_control",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
-		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_interrupt","event_ids":["sevt_interrupt_control"],"sequence_from":1,"sequence_to":1,"input_kind":"interrupt_control"}`,
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "rin_bridge_interrupt", "interrupt_control", "sevt_interrupt_control", 2, 3, time.Now().UTC().Add(-time.Minute))
+	leasedInterrupt := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "control-payload-test",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	interruptJob, err := DecodeRuntimeJob(queueJobProto(leasedInterrupt))
+	if err != nil {
+		t.Fatalf("decode interrupt control lease: %v", err)
 	}
 	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
 	interrupt, err := store.PrepareRuntimeCommand(context.Background(), interruptJob)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand interrupt: %v", err)
 	}
-	var interruptPayload struct {
-		SourceEventID          string `json:"source_event_id"`
-		InterruptFenceSequence int64  `json:"interrupt_fence_sequence"`
-	}
-	if err := json.Unmarshal([]byte(interrupt.Request.GetPayloadJson()), &interruptPayload); err != nil {
-		t.Fatalf("decode interrupt payload: %v", err)
-	}
-	if interruptPayload.SourceEventID != "sevt_interrupt_control" || interruptPayload.InterruptFenceSequence != 1 || strings.Contains(interrupt.Request.GetPayloadJson(), "runtime_input_id") {
-		t.Fatalf("interrupt runtime payload = %s; want runtime control payload", interrupt.Request.GetPayloadJson())
+	if interrupt.Interrupt == nil || interrupt.Interrupt.GetRuntimeInputId() != interruptJob.RuntimeInputID ||
+		interrupt.Interrupt.GetInterruptLeaseRef().GetJobId() != interruptJob.JobID || interrupt.Interrupt.GetOrigin() != agentruntimev1.InterruptOrigin_INTERRUPT_ORIGIN_USER {
+		t.Fatalf("interrupt runtime request = %#v; want typed user interrupt", interrupt.Interrupt)
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_events
@@ -2175,182 +2129,233 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 		SessionThreadID: "thr_bridge_control_delivery",
 		RuntimeInputID:  "rin_bridge_confirmation",
 		EventIDs:        []string{"sevt_confirmation_control"},
-		SequenceFrom:    2,
-		SequenceTo:      2,
+		SequenceFrom:    3,
+		SequenceTo:      3,
 		InputKind:       "tool_confirmation",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION,
-		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_confirmation","event_ids":["sevt_confirmation_control"],"sequence_from":2,"sequence_to":2,"input_kind":"tool_confirmation"}`,
+		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_control_delivery","session_thread_id":"thr_bridge_control_delivery","runtime_input_id":"rin_bridge_confirmation","event_ids":["sevt_confirmation_control"],"sequence_from":3,"sequence_to":3,"input_kind":"tool_confirmation"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, confirmationJob)
 	confirmation, err := store.PrepareRuntimeCommand(context.Background(), confirmationJob)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand tool confirmation: %v", err)
 	}
-	var confirmationPayload struct {
-		SourceEventID  string `json:"source_event_id"`
-		ToolUseEventID string `json:"tool_use_event_id"`
-		Decision       string `json:"decision"`
-		DenyMessage    string `json:"deny_message"`
-	}
-	if err := json.Unmarshal([]byte(confirmation.Request.GetPayloadJson()), &confirmationPayload); err != nil {
-		t.Fatalf("decode confirmation payload: %v", err)
-	}
-	if confirmationPayload.SourceEventID != "sevt_confirmation_control" ||
-		confirmationPayload.ToolUseEventID != "sevt_tool_control" ||
-		confirmationPayload.Decision != "deny" ||
-		confirmationPayload.DenyMessage != "not now" ||
-		strings.Contains(confirmation.Request.GetPayloadJson(), "runtime_input_id") ||
-		strings.Contains(confirmation.Request.GetPayloadJson(), `"result"`) ||
-		strings.Contains(confirmation.Request.GetPayloadJson(), `"tool_use_id"`) {
-		t.Fatalf("tool confirmation runtime payload = %s; want runtime command payload", confirmation.Request.GetPayloadJson())
+	if confirmation.ToolConfirmation == nil ||
+		confirmation.ToolConfirmation.GetRuntimeInputId() != confirmationJob.RuntimeInputID ||
+		confirmation.ToolConfirmation.GetToolUseEventId() != "sevt_tool_control" ||
+		confirmation.ToolConfirmation.GetDecision() != agentruntimev1.ToolConfirmationDecision_TOOL_CONFIRMATION_DECISION_DENY ||
+		confirmation.ToolConfirmation.GetDenyMessage() != "not now" {
+		t.Fatalf("tool confirmation runtime request = %#v; want typed deny decision", confirmation.ToolConfirmation)
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreAppliesProcessedInterruptFence(t *testing.T) {
-	t.Run("all superseded messages stale ack without inbox", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence", "sevt_old_message_1", 1, "user.message", `{"content":[{"type":"text","text":"old 1"}]}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence", "sevt_old_message_2", 2, "user.message", `{"content":[{"type":"text","text":"old 2"}]}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_fence", "thr_bridge_interrupt_fence", "sevt_processed_interrupt", 3, "user.interrupt", `{}`)
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_events
-			    SET processed_at = '2026-01-01T00:03:01Z'
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_interrupt_fence'
-			    AND event_id = 'sevt_processed_interrupt'`); err != nil {
-			t.Fatalf("mark interrupt processed: %v", err)
-		}
-		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 2, 0, time.UTC) }
+func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID        = "sesn_bridge_interrupt_replay_fence"
+		threadID         = "thr_bridge_interrupt_replay_fence"
+		interruptEventID = "sevt_bridge_interrupt_replay_fence"
+		messageEventID   = "sevt_bridge_interrupt_replay_successor"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence")
+	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence"), "sevt_interrupt_replay_run")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 2, "user.interrupt", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEventID, 3, "user.message", `{"content":[{"type":"text","text":"new turn"}]}`)
 
-		job := RuntimeJob{
-			JobID:           "qjob_superseded_messages",
-			LeaseToken:      "lease_superseded_messages",
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     "default",
-			SessionID:       "sesn_bridge_interrupt_fence",
-			SessionThreadID: "thr_bridge_interrupt_fence",
-			RuntimeInputID:  "rin_superseded_messages",
-			EventIDs:        []string{"sevt_old_message_1", "sevt_old_message_2"},
-			SequenceFrom:    1,
-			SequenceTo:      2,
-			InputKind:       "messages",
-			CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-			PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_fence","session_thread_id":"thr_bridge_interrupt_fence","runtime_input_id":"rin_superseded_messages","event_ids":["sevt_old_message_1","sevt_old_message_2"],"sequence_from":1,"sequence_to":2,"input_kind":"messages"}`,
+	interruptJob := RuntimeJob{
+		JobID: "qjob_int_replay", LeaseToken: "lease_bridge_interrupt_replay_fence", Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_bridge_interrupt_replay_fence", EventIDs: []string{interruptEventID},
+		SequenceFrom: 2, SequenceTo: 2, InputKind: "interrupt_control",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_fence","event_ids":["sevt_bridge_interrupt_replay_fence"],"sequence_from":2,"sequence_to":2,"input_kind":"interrupt_control"}`,
+	}
+	messageJob := RuntimeJob{
+		JobID: "qjob_msg_replay", LeaseToken: "lease_bridge_interrupt_replay_successor", Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_bridge_interrupt_replay_successor", EventIDs: []string{messageEventID},
+		SequenceFrom: 3, SequenceTo: 3, InputKind: "messages",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_replay_fence","session_thread_id":"thr_bridge_interrupt_replay_fence","runtime_input_id":"rin_bridge_interrupt_replay_successor","event_ids":["sevt_bridge_interrupt_replay_successor"],"sequence_from":3,"sequence_to":3,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, interruptJob)
+	seedRuntimeInboxBirthForJob(t, admin, messageJob)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+		SET status='delivering', binding_id=$2, binding_generation=1, target_pod_uid=$3
+		WHERE workspace_id='default' AND runtime_input_id=$1`,
+		messageJob.RuntimeInputID, "bind_bridge_interrupt_replay_fence", "pod_uid_interrupt_replay_fence"); err != nil {
+		t.Fatalf("seed preplanned follower Runtime authority: %v", err)
+	}
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueue := func(job RuntimeJob, maxAttempts int) {
+		t.Helper()
+		if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+			ID: job.JobID, WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+			PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+			DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, job.RuntimeInputID),
+			PayloadVersion: 1, PayloadJSON: []byte(job.PayloadJSON), MaxAttempts: maxAttempts,
+			Priority: func() int {
+				if job.InputKind == "interrupt_control" {
+					return 100
+				}
+				return 0
+			}(),
+			Now: time.Now().UTC().Add(-time.Minute),
+		}); err != nil {
+			t.Fatalf("enqueue %s: %v", job.RuntimeInputID, err)
 		}
-		seedRuntimeInboxBirthForJob(t, admin, job)
-		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-		if err != nil {
-			t.Fatalf("PrepareRuntimeCommand superseded messages: %v", err)
+	}
+	// Three attempts keep the receipt-bearing retry below terminal exhaustion,
+	// so this proof distinguishes retry-start replay from final-attempt recovery.
+	enqueue(interruptJob, 3)
+	enqueue(messageJob, queue.DefaultMaxAttempts)
+
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
+	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	sender := &receiptGatedInterruptSender{
+		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
+		store:                         apiStore,
+		scope:                         bridgeAPIScope(sessionID, threadID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence"),
+		inputID:                       interruptJob.RuntimeInputID,
+	}
+	candidate := enginekubernetes.BindingCandidate{
+		Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0",
+		PodUID: "pod_uid_interrupt_replay_fence", PodIP: "10.0.0.10",
+	}
+	newRunner := func() *JobRunner {
+		freshStore := NewJobRunnerRuntimeDeliveryStore(
+			dbconnect.NewClientForTesting(runtime), nil, JobRunnerConfig{AgentRuntimeGRPCPort: 9090},
+			func() enginekubernetes.BindingVisibilitySnapshot {
+				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
+			},
+		)
+		freshStore.Clock = deliveryStore.Clock
+		return &JobRunner{
+			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+			Deliverer: RuntimePodDirectDeliverer{Store: freshStore, Sender: sender},
+			Config:    JobRunnerConfig{LeaseOwner: "interrupt-receipt-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 		}
-		if !plan.StaleAccepted || plan.Request != nil {
-			t.Fatalf("superseded plan = %+v; want stale accepted without Runtime request", plan)
-		}
-		var inboxStatus string
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status
-			   FROM session_runtime_inbox
-			  WHERE workspace_id = 'default'
-			    AND runtime_input_id = 'rin_superseded_messages'`).Scan(&inboxStatus); err != nil {
-			t.Fatalf("read superseded inbox custody: %v", err)
-		}
-		if inboxStatus != "cancelled" {
-			t.Fatalf("superseded inbox status = %q; want cancelled", inboxStatus)
-		}
+	}
+
+	if err := newRunner().RunOnce(context.Background()); err != nil {
+		t.Fatalf("run hot-accepted interrupt without receipt: %v", err)
+	}
+	var interruptQueueStatus, followerQueueStatus, interruptInboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3)`,
+		interruptJob.JobID, messageJob.JobID, interruptJob.RuntimeInputID,
+	).Scan(&interruptQueueStatus, &followerQueueStatus, &interruptInboxStatus); err != nil {
+		t.Fatalf("read receipt-pending barrier: %v", err)
+	}
+	if interruptQueueStatus != queue.StatusPending || followerQueueStatus != queue.StatusPending ||
+		interruptInboxStatus != "delivering" || sender.interruptCalls != 1 || len(sender.requests) != 1 {
+		t.Fatalf("receipt-pending facts = Queue %s follower %s Inbox %s interrupt calls/requests %d/%d",
+			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
+	}
+	blockedFollowers, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "receipt-pending-follower-proof",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
 	})
-
-	t.Run("mixed superseded and deliverable messages are fatal", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed", "sevt_old_message", 1, "user.message", `{"content":[{"type":"text","text":"old"}]}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed", "sevt_processed_interrupt", 3, "user.interrupt", `{}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_mixed", "thr_bridge_interrupt_mixed", "sevt_new_message", 4, "user.message", `{"content":[{"type":"text","text":"new"}]}`)
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_events
-			    SET processed_at = '2026-01-01T00:03:01Z'
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_interrupt_mixed'
-			    AND event_id = 'sevt_processed_interrupt'`); err != nil {
-			t.Fatalf("mark mixed interrupt processed: %v", err)
-		}
-		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 2, 0, time.UTC) }
-
-		_, err := store.PrepareRuntimeCommand(context.Background(), RuntimeJob{
-			JobID:           "qjob_mixed_messages",
-			LeaseToken:      "lease_mixed_messages",
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     "default",
-			SessionID:       "sesn_bridge_interrupt_mixed",
-			SessionThreadID: "thr_bridge_interrupt_mixed",
-			RuntimeInputID:  "rin_mixed_messages",
-			EventIDs:        []string{"sevt_old_message", "sevt_new_message"},
-			SequenceFrom:    1,
-			SequenceTo:      4,
-			InputKind:       "messages",
-			CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-			PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_mixed","session_thread_id":"thr_bridge_interrupt_mixed","runtime_input_id":"rin_mixed_messages","event_ids":["sevt_old_message","sevt_new_message"],"sequence_from":1,"sequence_to":4,"input_kind":"messages"}`,
-		})
-		var prepareErr runtimeDeliveryPrepareError
-		if !errors.As(err, &prepareErr) || prepareErr.kind != "runtime_input_superseded_by_interrupt" || prepareErr.retryable {
-			t.Fatalf("mixed messages err = %v; want nonretryable runtime_input_superseded_by_interrupt", err)
-		}
+	if err != nil || len(blockedFollowers) != 0 {
+		t.Fatalf("follower leases before interrupt receipt = %#v/%v; want none", blockedFollowers, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, interruptJob.JobID); err != nil {
+		t.Fatalf("make interrupt retry available: %v", err)
+	}
+	receiptLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "receipt-response-lost",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
 	})
-
-	t.Run("post fence messages remain deliverable", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_interrupt_post_fence", "thr_bridge_interrupt_post_fence")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_interrupt_post_fence", "bind_bridge_interrupt_post_fence", 1, "pod_uid_interrupt_post_fence")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_post_fence", "thr_bridge_interrupt_post_fence", "sevt_processed_interrupt", 3, "user.interrupt", `{}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_interrupt_post_fence", "thr_bridge_interrupt_post_fence", "sevt_new_message", 4, "user.message", `{"content":[{"type":"text","text":"new"}]}`)
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_events
-			    SET processed_at = '2026-01-01T00:03:01Z'
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_interrupt_post_fence'
-			    AND event_id = 'sevt_processed_interrupt'`); err != nil {
-			t.Fatalf("mark post-fence interrupt processed: %v", err)
-		}
-		store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 2, 0, time.UTC) }
-
-		job := RuntimeJob{
-			JobID:           "qjob_post_fence_message",
-			LeaseToken:      "lease_post_fence_message",
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     "default",
-			SessionID:       "sesn_bridge_interrupt_post_fence",
-			SessionThreadID: "thr_bridge_interrupt_post_fence",
-			RuntimeInputID:  "rin_post_fence_message",
-			EventIDs:        []string{"sevt_new_message"},
-			SequenceFrom:    4,
-			SequenceTo:      4,
-			InputKind:       "messages",
-			CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-			PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_interrupt_post_fence","session_thread_id":"thr_bridge_interrupt_post_fence","runtime_input_id":"rin_post_fence_message","event_ids":["sevt_new_message"],"sequence_from":4,"sequence_to":4,"input_kind":"messages"}`,
-		}
-		seedRuntimeInboxBirthForJob(t, admin, job)
-		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-		if err != nil {
-			t.Fatalf("PrepareRuntimeCommand post-fence messages: %v", err)
-		}
-		if plan.StaleAccepted || plan.Request == nil {
-			t.Fatalf("post-fence plan = %+v; want Runtime request", plan)
-		}
-		var inboxStatus string
-		var sequenceFrom int64
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status, sequence_from
-			   FROM session_runtime_inbox
-			  WHERE workspace_id = 'default'
-			    AND runtime_input_id = 'rin_post_fence_message'`).Scan(&inboxStatus, &sequenceFrom); err != nil {
-			t.Fatalf("read post-fence inbox: %v", err)
-		}
-		if inboxStatus != "delivering" || sequenceFrom != 4 {
-			t.Fatalf("post-fence inbox status=%q sequence_from=%d; want delivering/4", inboxStatus, sequenceFrom)
-		}
+	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: sender.scope, RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(receiptLease),
 	})
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("commit late closeout before retry = %#v/%v", committed, err)
+	}
+	preAckFollower, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: sender.scope, RuntimeInputId: messageJob.RuntimeInputID,
+	})
+	if err != nil || preAckFollower.GetBarrierStale() == nil {
+		t.Fatalf("pre-ACK follower CommitInputs = %#v/%v; want delivery-barrier stale", preAckFollower, err)
+	}
+	var preACKMessages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&preACKMessages); err != nil {
+		t.Fatalf("count pre-ACK follower Messages: %v", err)
+	}
+	if preACKMessages != 0 {
+		t.Fatalf("pre-ACK follower Messages = %d; want 0", preACKMessages)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, receiptLease.ID); err != nil {
+		t.Fatalf("expire lost receipt response lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim lost receipt response lease = %d/%v", reclaimed, err)
+	}
+
+	if err := newRunner().RunOnce(context.Background()); err != nil {
+		t.Fatalf("run retry-start receipt replay: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3)`,
+		interruptJob.JobID, messageJob.JobID, interruptJob.RuntimeInputID,
+	).Scan(&interruptQueueStatus, &followerQueueStatus, &interruptInboxStatus); err != nil {
+		t.Fatalf("read receipt-gated ACK: %v", err)
+	}
+	if interruptQueueStatus != queue.StatusAcknowledged || followerQueueStatus != queue.StatusPending ||
+		interruptInboxStatus != "committed" || sender.interruptCalls != 1 || len(sender.requests) != 1 {
+		t.Fatalf("receipt replay facts = Queue %s follower %s Inbox %s interrupt calls/requests %d/%d",
+			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
+	}
+
+	if err := newRunner().RunOnce(context.Background()); err != nil {
+		t.Fatalf("deliver receipt-released follower: %v", err)
+	}
+	var followerInboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		messageJob.JobID, messageJob.RuntimeInputID,
+	).Scan(&followerQueueStatus, &followerInboxStatus); err != nil {
+		t.Fatalf("read delivered follower: %v", err)
+	}
+	if followerQueueStatus != queue.StatusAcknowledged || followerInboxStatus != "accepted" ||
+		sender.interruptCalls != 1 || len(sender.requests) != 2 {
+		t.Fatalf("follower facts = Queue %s Inbox %s interrupt calls %d total requests %d; want acknowledged/accepted/1/2",
+			followerQueueStatus, followerInboxStatus, sender.interruptCalls, len(sender.requests))
+	}
+	if _, ok := sender.requests[1].(*agentruntimev1.AcceptInputRequest); !ok {
+		t.Fatalf("second Runtime request = %T; want exact follower AcceptInput", sender.requests[1])
+	}
+}
+
+type receiptGatedInterruptSender struct {
+	*recordingRuntimeCommandSender
+	store          *PostgreSQLBridgeAPIStore
+	scope          *bridgev1.RuntimeScope
+	inputID        string
+	interruptCalls int
+}
+
+func (s *receiptGatedInterruptSender) Interrupt(
+	_ context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.InterruptRequest,
+) (*agentruntimev1.InterruptResponse, error) {
+	s.targets = append(s.targets, target)
+	s.requests = append(s.requests, request)
+	s.interruptCalls++
+	return &agentruntimev1.InterruptResponse{
+		Outcome: &agentruntimev1.InterruptResponse_Accepted{Accepted: &agentruntimev1.InterruptAccepted{}},
+	}, nil
 }
 
 func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *testing.T) {
@@ -2383,7 +2388,6 @@ func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"type":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -2394,8 +2398,8 @@ func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *
 	if plan.Target.PodName != candidate.PodName || plan.Target.PodUID != candidate.PodUID || plan.Target.PodIP != candidate.PodIP {
 		t.Fatalf("target = %+v; want candidate %+v", plan.Target, candidate)
 	}
-	if plan.Request.GetBindingId() == "" || plan.Request.GetBindingGeneration() == 0 || plan.Request.GetTargetPodName() != candidate.PodName {
-		t.Fatalf("request binding envelope = %+v; want claimed binding and target identity", plan.Request)
+	if plan.AttemptedBinding.BindingID == "" || plan.AttemptedBinding.Generation == 0 || plan.AttemptedBinding.TargetPodUID != candidate.PodUID {
+		t.Fatalf("attempted binding = %+v; want claimed binding and target identity", plan.AttemptedBinding)
 	}
 
 	var podName string
@@ -2408,8 +2412,8 @@ func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_resolve'`).Scan(&podName, &podUID, &podIP, &generation); err != nil {
 		t.Fatalf("read claimed binding: %v", err)
 	}
-	if podName != candidate.PodName || podUID != candidate.PodUID || podIP != candidate.PodIP || generation != plan.Request.GetBindingGeneration() {
-		t.Fatalf("claimed binding = %s/%s/%s gen %d; want %s/%s/%s gen %d", podName, podUID, podIP, generation, candidate.PodName, candidate.PodUID, candidate.PodIP, plan.Request.GetBindingGeneration())
+	if podName != candidate.PodName || podUID != candidate.PodUID || podIP != candidate.PodIP || generation != plan.AttemptedBinding.Generation {
+		t.Fatalf("claimed binding = %s/%s/%s gen %d; want %s/%s/%s gen %d", podName, podUID, podIP, generation, candidate.PodName, candidate.PodUID, candidate.PodIP, plan.AttemptedBinding.Generation)
 	}
 }
 
@@ -2432,7 +2436,6 @@ func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopReject
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_runtime_rejected"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -2441,7 +2444,7 @@ func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopReject
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand runtime rejection: %v", err)
 	}
-	if got := plan.Request.GetRuntimeInputId(); got != "rin_bridge_runtime_rejected" {
+	if got := plan.AcceptInput.GetRuntimeInputId(); got != "rin_bridge_runtime_rejected" {
 		t.Fatalf("prepared runtime input id = %q; want rin_bridge_runtime_rejected", got)
 	}
 	result := RuntimeDeliveryResult{
@@ -2513,14 +2516,7 @@ func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopReject
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand bounded rejection: %v", err)
 	}
-	var bounded struct {
-		InputKind  string `json:"input_kind"`
-		ReasonCode string `json:"reason_code"`
-	}
-	if err := json.Unmarshal([]byte(retryPlan.Request.GetPayloadJson()), &bounded); err != nil {
-		t.Fatalf("decode bounded rejection payload: %v", err)
-	}
-	if bounded.InputKind != "rejection" || bounded.ReasonCode != "runtime_command_payload_too_large" {
-		t.Fatalf("bounded rejection payload = %+v; want closed source-free fact", bounded)
+	if retryPlan.AcceptInput == nil || retryPlan.AcceptInput.GetRejection().GetReason() != agentruntimev1.AcceptInputRejectionReason_ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE {
+		t.Fatalf("bounded rejection request = %+v; want typed payload-too-large fact", retryPlan.AcceptInput)
 	}
 }

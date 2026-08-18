@@ -5,7 +5,7 @@ import { ProviderStreamTimeoutError, classifyOpenAIProviderError, classifyProvid
 
 describe("Gateway provider error raising", () => {
   test("emits bounded provider-error events without raw provider material", () => {
-    const event = providerErrorEvent({ requestId: "req_1", modelRequestId: "mreq_1" }, {
+    const event = providerErrorEvent({
       code: "provider_unavailable",
       message: "Provider model is not enabled.",
       retryable: false,
@@ -14,8 +14,6 @@ describe("Gateway provider error raising", () => {
     });
 
     expect(event).toMatchObject({
-      requestId: "req_1",
-      modelRequestId: "mreq_1",
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
       providerError: {
         metadataJson: "{}",
@@ -32,8 +30,8 @@ describe("Gateway provider error raising", () => {
 
   test("emits valid UTF-8 at the exact provider-error message byte boundary", () => {
     const exact = `${"a".repeat(MaxProviderErrorMessageBytes - 3)}€`;
-    const atLimit = providerErrorEvent({ requestId: "req_exact", modelRequestId: "mreq_exact" }, { message: exact });
-    const overLimit = providerErrorEvent({ requestId: "req_over", modelRequestId: "mreq_over" }, { message: `${exact}b` });
+    const atLimit = providerErrorEvent({ message: exact });
+    const overLimit = providerErrorEvent({ message: `${exact}b` });
 
     expect(Buffer.byteLength(atLimit.providerError?.error?.message ?? "", "utf8")).toBe(MaxProviderErrorMessageBytes);
     expect(atLimit.providerError?.error?.message).toBe(exact);

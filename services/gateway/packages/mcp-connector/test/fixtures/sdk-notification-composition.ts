@@ -9,7 +9,6 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   AgentRuntimeBridgeServiceService,
-  BridgeWriteStatus,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   AgentRuntimeBridgeServiceServer,
@@ -85,14 +84,7 @@ const bridgeServer = new Server();
 bridgeServer.addService(AgentRuntimeBridgeServiceService, {
   mcpManifestChanged: (call, callback) => {
     bridgeRequests.push(call.request);
-    callback(null, {
-      ack: {
-        status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED,
-        runtimeInputId: "runtime_config_update:mcp_manifest:sesn_1:github:1",
-        runtimeWriteId: "",
-        errorCode: "",
-      },
-    });
+    callback(null, { committed: {} });
   },
 } as AgentRuntimeBridgeServiceServer);
 

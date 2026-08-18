@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -68,12 +69,14 @@ func (m *PostgreSQLSandboxMediaMaterializer) RecoverResult(ctx context.Context, 
 	if statusValue != "staged" || !validSandboxTransientAttachmentMIME(mime) {
 		return SandboxMediaRecovery{}, errSandboxMediaStateConflict
 	}
-	var attachmentMetadata map[string]string
+	var attachmentMetadata sandboxTransientAttachmentMetadata
 	if err := json.Unmarshal([]byte(metadataJSON), &attachmentMetadata); err != nil {
 		return SandboxMediaRecovery{}, errSandboxMediaStateConflict
 	}
-	blobMetadata, err := m.blobs.HeadObject(ctx, blobPointer)
-	if err != nil {
+	if !validSandboxTransientAttachmentMetadata(attachmentMetadata) || blobPointer != sandboxTransientAttachmentBlobPointer(ref, attachmentRef) {
+		return SandboxMediaRecovery{}, errSandboxMediaStateConflict
+	}
+	if err := m.verifyStagedBlob(ctx, blobPointer, attachmentMetadata); err != nil {
 		var notFound *blob.NotFoundError
 		if errors.As(err, &notFound) {
 			return SandboxMediaRecovery{Found: true}, nil
@@ -83,13 +86,13 @@ func (m *PostgreSQLSandboxMediaMaterializer) RecoverResult(ctx context.Context, 
 	result := map[string]any{
 		"attachment_ref":           attachmentRef,
 		"mime":                     mime,
-		"filename":                 attachmentMetadata["filename"],
-		"source_path":              attachmentMetadata["source_path"],
+		"filename":                 attachmentMetadata.Filename,
+		"source_path":              attachmentMetadata.SourcePath,
 		"source_tool_use_event_id": ref.ToolUseEventID,
-		"detail":                   attachmentMetadata["detail"],
-		"size_bytes":               blobMetadata.SizeBytes,
+		"detail":                   attachmentMetadata.Detail,
+		"size_bytes":               attachmentMetadata.SizeBytes,
 	}
-	if pageRange := attachmentMetadata["page_range"]; pageRange != "" {
+	if pageRange := attachmentMetadata.PageRange; pageRange != "" {
 		result["page_range"] = pageRange
 	}
 	encoded, err := json.Marshal(map[string]any{"status": "success", "result": result})
@@ -141,10 +144,11 @@ func (m *PostgreSQLSandboxMediaMaterializer) MaterializeResult(ctx context.Conte
 		return "", err
 	}
 	attachmentRef := sandboxAttachmentRef(ref)
-	blobPointer := path.Join("transient-attachments", ref.WorkspaceID, ref.SessionID, attachmentRef)
-	metadataJSON, err := json.Marshal(map[string]string{
-		"filename": filename, "source_path": sourcePath,
-		"page_range": sandboxString(source["page_range"]), "detail": "auto",
+	blobPointer := sandboxTransientAttachmentBlobPointer(ref, attachmentRef)
+	metadataJSON, err := json.Marshal(sandboxTransientAttachmentMetadata{
+		Filename: filename, SourcePath: sourcePath,
+		PageRange: sandboxString(source["page_range"]), Detail: "auto",
+		SizeBytes: int64(len(body)), SHA256: sandboxTransientAttachmentDigest(body),
 	})
 	if err != nil {
 		return "", err
@@ -164,16 +168,16 @@ func (m *PostgreSQLSandboxMediaMaterializer) MaterializeResult(ctx context.Conte
 		); err != nil {
 			return err
 		}
-		var storedSessionID, storedThreadID, storedSourceID, storedPointer, storedMIME string
+		var storedSessionID, storedThreadID, storedSourceID, storedPointer, storedMIME, storedMetadataJSON string
 		if err := tx.QueryRow(ctx,
-			`SELECT session_id, session_thread_id, source_tool_use_event_id, blob_pointer, mime, status
+			`SELECT session_id, session_thread_id, source_tool_use_event_id, blob_pointer, mime, metadata_json, status
 			   FROM session_transient_attachments
 			  WHERE workspace_id=$1 AND attachment_ref=$2 FOR UPDATE`,
 			ref.WorkspaceID, attachmentRef,
-		).Scan(&storedSessionID, &storedThreadID, &storedSourceID, &storedPointer, &storedMIME, &statusValue); err != nil {
+		).Scan(&storedSessionID, &storedThreadID, &storedSourceID, &storedPointer, &storedMIME, &storedMetadataJSON, &statusValue); err != nil {
 			return err
 		}
-		if storedSessionID != ref.SessionID || storedThreadID != ref.SessionThreadID || storedSourceID != ref.ToolUseEventID || storedPointer != blobPointer || storedMIME != mime || (statusValue != "uploading" && statusValue != "staged") {
+		if storedSessionID != ref.SessionID || storedThreadID != ref.SessionThreadID || storedSourceID != ref.ToolUseEventID || storedPointer != blobPointer || storedMIME != mime || storedMetadataJSON != string(metadataJSON) || (statusValue != "uploading" && statusValue != "staged") {
 			return errSandboxMediaCustodyConflict
 		}
 		return nil
@@ -194,6 +198,15 @@ func (m *PostgreSQLSandboxMediaMaterializer) MaterializeResult(ctx context.Conte
 				return "", headErr
 			}
 			if metadata.SizeBytes != int64(len(body)) {
+				return "", errors.New("sandbox media Blob custody could not be verified")
+			}
+			existing, getErr := m.blobs.Get(ctx, blobPointer)
+			if getErr != nil {
+				return "", getErr
+			}
+			existingBody, readErr := io.ReadAll(io.LimitReader(existing, SandboxTransientAttachmentMaxBytes+1))
+			closeErr := existing.Close()
+			if readErr != nil || closeErr != nil || len(existingBody) > SandboxTransientAttachmentMaxBytes || sandboxTransientAttachmentDigest(existingBody) != sandboxTransientAttachmentDigest(body) {
 				return "", errors.New("sandbox media Blob custody could not be verified")
 			}
 		}
@@ -219,6 +232,15 @@ func (m *PostgreSQLSandboxMediaMaterializer) MaterializeResult(ctx context.Conte
 			return "", err
 		}
 	}
+	if statusValue == "staged" {
+		var attachmentMetadata sandboxTransientAttachmentMetadata
+		if err := json.Unmarshal(metadataJSON, &attachmentMetadata); err != nil || !validSandboxTransientAttachmentMetadata(attachmentMetadata) {
+			return "", errSandboxMediaStateConflict
+		}
+		if err := m.verifyStagedBlob(ctx, blobPointer, attachmentMetadata); err != nil {
+			return "", err
+		}
+	}
 	delete(source, "data_base64")
 	source["attachment_ref"] = attachmentRef
 	source["filename"] = filename
@@ -230,6 +252,58 @@ func (m *PostgreSQLSandboxMediaMaterializer) MaterializeResult(ctx context.Conte
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+type sandboxTransientAttachmentMetadata struct {
+	Filename   string `json:"filename"`
+	SourcePath string `json:"source_path"`
+	PageRange  string `json:"page_range"`
+	Detail     string `json:"detail"`
+	SizeBytes  int64  `json:"size_bytes"`
+	SHA256     string `json:"sha256"`
+}
+
+func validSandboxTransientAttachmentMetadata(metadata sandboxTransientAttachmentMetadata) bool {
+	if metadata.Filename == "" || metadata.SizeBytes <= 0 || metadata.SizeBytes > SandboxTransientAttachmentMaxBytes || len(metadata.SHA256) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(metadata.SHA256)
+	return err == nil && hex.EncodeToString(decoded) == metadata.SHA256
+}
+
+func sandboxTransientAttachmentBlobPointer(ref SandboxExecutionRef, attachmentRef string) string {
+	return path.Join("transient-attachments", ref.WorkspaceID, ref.SessionID, attachmentRef)
+}
+
+func sandboxTransientAttachmentDigest(body []byte) string {
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:])
+}
+
+func (m *PostgreSQLSandboxMediaMaterializer) verifyStagedBlob(ctx context.Context, blobPointer string, metadata sandboxTransientAttachmentMetadata) error {
+	blobMetadata, err := m.blobs.HeadObject(ctx, blobPointer)
+	if err != nil {
+		return err
+	}
+	if blobMetadata.SizeBytes != metadata.SizeBytes {
+		return errSandboxMediaStateConflict
+	}
+	reader, err := m.blobs.Get(ctx, blobPointer)
+	if err != nil {
+		return err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(reader, SandboxTransientAttachmentMaxBytes+1))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if int64(len(body)) != metadata.SizeBytes || sandboxTransientAttachmentDigest(body) != metadata.SHA256 {
+		return errSandboxMediaStateConflict
+	}
+	return nil
 }
 
 func sandboxToolCanReturnMedia(toolName string) bool {

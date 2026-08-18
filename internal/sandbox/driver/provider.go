@@ -480,15 +480,18 @@ func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 	return daytonaProviderError(stage, sandbox.ProviderErrorUnknown, true, 0, "daytona sandbox request failed", err)
 }
 
-// Daytona Create capacity is recognized from the SDK's structured response
-// message at the provider boundary. The anchored grammar deliberately fails
-// closed when Daytona changes wording; Queue retry remains owned by the
+// Daytona Create capacity is recognized from the first logical line of the
+// SDK's structured response. That line is the stable machine discriminator;
+// later lines are mutable provider guidance. The anchored grammar deliberately
+// rejects prefixes and wording drift, while Queue retry remains owned by the
 // activation lifecycle after this adapter emits a proved-not-started outcome.
 func daytonaCreateDiskCapacityExceeded(validation *daytonaerrors.DaytonaValidationError) bool {
 	if validation == nil || validation.DaytonaError == nil {
 		return false
 	}
-	match := daytonaDiskCapacityMessagePattern.FindStringSubmatch(strings.TrimSpace(validation.Message))
+	message := strings.TrimSpace(validation.Message)
+	firstLine, _, _ := strings.Cut(message, "\n")
+	match := daytonaDiskCapacityMessagePattern.FindStringSubmatch(strings.TrimSpace(firstLine))
 	if len(match) != 3 {
 		return false
 	}

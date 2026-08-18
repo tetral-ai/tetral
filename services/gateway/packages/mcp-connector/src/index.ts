@@ -20,12 +20,13 @@
  * STATE MACHINE (tool-result durability). Every durable attachment and
  * idempotency write is performed by Bridge, not by this package; the connector
  * only holds an executed result in memory and forwards bytes to Bridge:
- * - absent -> in_flight: ClaimMcpToolResult inserts the leased reservation for
- *   (toolUseEventId, normalizedInputHash). Writer: Bridge (bridge-client.ts).
- * - in_flight -> in_flight: an active duplicate returns an in-flight outcome
- *   without a write; an expired claim renews the owner and lease in place.
+ * - absent -> in_flight: Connector creates one claimId and ClaimMcpToolResult
+ *   reserves the durable toolUseEventId for that execution attempt. Writer:
+ *   Bridge (bridge-client.ts).
+ * - in_flight -> in_flight: replay of the same claim renews its lease; another
+ *   active claim remains in flight; an expired lease is replaced by a new claimId.
  * - in_flight -> stored: after in-memory execution, CommitMcpToolResult ships
- *   inline media; Bridge creates attachment rows and stores refsOnlyResultJson.
+ *   inline media; Bridge creates attachment rows and stores the refs-only result.
  * - stored -> stored: a duplicate claim reads the stored refs-only response and
  *   returns a replay outcome without mutating the row.
  *

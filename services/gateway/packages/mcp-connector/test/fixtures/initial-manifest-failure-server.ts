@@ -49,7 +49,7 @@ const service = new McpConnectorServiceShell({
   runtimeBindingTokenVerifier: createRuntimeBindingTokenVerifier({
     hmacKey: "manifest-failure-binding-key-32bytes",
   }),
-  idempotencyStore: new InMemoryMcpIdempotencyStore(),
+  idempotencyStore: new InMemoryMcpIdempotencyStore({ mcpServerName: "github", toolName: "create_issue", inputJson: "{}" }),
   manifestChangeNotifier: {
     notify: async () => ({ ok: true, duplicate: false }),
   },

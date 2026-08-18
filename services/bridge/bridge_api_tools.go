@@ -39,8 +39,7 @@ const (
 // Sandbox Service. The execution row and refs-only Queue job become visible
 // together, and the ACK returns immediately after that transaction commits.
 func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error) {
-	canonicalInputJSON, canonicalInputHash, err := validateSandboxExecutionRequest(request)
-	if err != nil {
+	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
 		return nil, err
 	}
 	created := false
@@ -56,10 +55,14 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		} else if settled {
 			return status.Error(codes.FailedPrecondition, "sandbox tool use is already settled")
 		}
+		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.tool_use", true)
+		if err != nil {
+			return err
+		}
 		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		} else if ok {
-			if !sandboxExecutionIdentityMatches(existing, request, canonicalInputJSON, canonicalInputHash) {
+			if !sandboxExecutionIdentityMatches(existing, tool) {
 				return status.Error(codes.AlreadyExists, "tool use id conflicts with existing result")
 			}
 			if existing.ExecutionState.String == "consumed" {
@@ -67,14 +70,13 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 			}
 			return nil
 		}
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		evaluatedPermission, err := verifySandboxExecutionDurableIdentityTx(ctx, tx, request, canonicalInputJSON)
-		if err != nil {
-			return err
-		}
-		if err := verifyApprovedSandboxExecutionHandoffTx(ctx, tx, request, canonicalInputJSON, evaluatedPermission); err != nil {
+		if err := verifyApprovedToolExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
 			return err
 		}
 		now := s.now()
@@ -88,8 +90,8 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 				$8, 'pending', 1, FALSE, $9, $9)`,
 			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 			request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
-			canonicalInputHash, request.GetToolName(), canonicalInputJSON,
-			request.GetModelToolCallId(), now,
+			tool.NormalizedInputHash, tool.ToolName, tool.InputJSON,
+			tool.ModelToolCallID, now,
 		); err != nil {
 			return err
 		}
@@ -112,13 +114,15 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		created = true
 		return nil
 	}); err != nil {
+		if isConversationMutationStaleError(err) {
+			return &bridgev1.AcceptSandboxExecutionResponse{Outcome: &bridgev1.AcceptSandboxExecutionResponse_Stale{Stale: &bridgev1.SandboxExecutionStale{}}}, nil
+		}
 		return nil, err
 	}
-	ack := duplicateAck("", "")
 	if created {
-		ack = committedAck("", "")
+		return &bridgev1.AcceptSandboxExecutionResponse{Outcome: &bridgev1.AcceptSandboxExecutionResponse_Committed{Committed: &bridgev1.SandboxExecutionCommitted{}}}, nil
 	}
-	return &bridgev1.AcceptSandboxExecutionResponse{Ack: ack}, nil
+	return &bridgev1.AcceptSandboxExecutionResponse{Outcome: &bridgev1.AcceptSandboxExecutionResponse_Duplicate{Duplicate: &bridgev1.SandboxExecutionDuplicate{}}}, nil
 }
 
 func rejectSandboxExecutionAfterReleaseFenceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
@@ -141,50 +145,99 @@ func rejectSandboxExecutionAfterReleaseFenceTx(ctx context.Context, tx *dbconnec
 // AwaitSandboxExecution reads one accepted execution until Sandbox Service
 // settles it. It never creates an execution row or Queue job.
 func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
-	if _, _, err := validateSandboxExecutionRequest(request); err != nil {
+	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
 		return nil, err
 	}
 	if err := s.withScopeReadOnlyTx(ctx, request.GetScope(), "agentruntimebridge.await_sandbox_execution", func(tx *dbconnect.Tx) error {
 		return verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope())
 	}); err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.AwaitSandboxExecutionResponse{Outcome: &bridgev1.AwaitSandboxExecutionResponse_Stale{Stale: &bridgev1.SandboxExecutionAwaitStale{}}}, nil
+		}
 		return nil, err
 	}
 	terminal, err := s.waitForSandboxExecutionResult(ctx, request)
 	if err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.AwaitSandboxExecutionResponse{Outcome: &bridgev1.AwaitSandboxExecutionResponse_Stale{Stale: &bridgev1.SandboxExecutionAwaitStale{}}}, nil
+		}
 		return nil, err
 	}
 	return &bridgev1.AwaitSandboxExecutionResponse{
-		ResultJson:            terminal.ResultJSON,
-		ResultDigest:          terminal.ResultDigest,
-		BackgroundTaskStarted: terminal.BackgroundTaskStarted,
-		TaskId:                terminal.TaskID.String,
+		Outcome: &bridgev1.AwaitSandboxExecutionResponse_Completed{Completed: &bridgev1.SandboxExecutionCompleted{
+			ResultJson: terminal.ResultJSON,
+			TaskId:     terminal.TaskID.String,
+		}},
 	}, nil
 }
 
-type sandboxExecutionRequest interface {
-	GetScope() *bridgev1.RuntimeScope
-	GetToolUseEventId() string
-	GetNormalizedInputHash() string
-	GetToolName() string
-	GetInputJson() string
-	GetModelToolCallId() string
+func validateDurableToolTarget(scope *bridgev1.RuntimeScope, toolUseEventID string) error {
+	if err := validateRuntimeScope(scope); err != nil {
+		return err
+	}
+	if toolUseEventID == "" {
+		return status.Error(codes.InvalidArgument, "tool use event id is required")
+	}
+	return nil
 }
 
-func validateSandboxExecutionRequest(request sandboxExecutionRequest) (string, string, error) {
-	if request.GetToolUseEventId() == "" || request.GetModelToolCallId() == "" || request.GetNormalizedInputHash() == "" || request.GetToolName() == "" || request.GetInputJson() == "" {
-		return "", "", status.Error(codes.InvalidArgument, "invalid sandbox execution request")
+type durableToolExecution struct {
+	ModelRequestID      string
+	ModelToolCallID     string
+	ToolName            string
+	MCPServerName       string
+	InputJSON           string
+	NormalizedInputHash string
+	EvaluatedPermission string
+}
+
+func loadDurableToolExecutionTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+	eventType string,
+	lock bool,
+) (durableToolExecution, error) {
+	query := `SELECT payload_json, projection_json, model_request_id
+		  FROM session_events
+		 WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		   AND event_id = $4 AND type = $5`
+	if lock {
+		query += ` FOR UPDATE`
 	}
-	if !json.Valid([]byte(request.GetInputJson())) {
-		return "", "", status.Error(codes.InvalidArgument, "tool input must be JSON")
+	var payloadJSON, projectionJSON string
+	var modelRequestID sql.NullString
+	if err := tx.QueryRow(ctx, query,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID, eventType,
+	).Scan(&payloadJSON, &projectionJSON, &modelRequestID); dbconnect.IsNoRows(err) {
+		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use is missing")
+	} else if err != nil {
+		return durableToolExecution{}, err
 	}
-	canonicalInputJSON, canonicalInputHash, err := canonicalRunToolInput(request.GetInputJson())
-	if err != nil {
-		return "", "", status.Error(codes.InvalidArgument, "tool input must be JSON")
+	var payload runtimeToolUseEventPayload
+	var projection struct {
+		ModelToolCallID string `json:"model_tool_call_id"`
 	}
-	if request.GetNormalizedInputHash() != canonicalInputHash {
-		return "", "", status.Error(codes.InvalidArgument, "normalized input hash does not match canonical tool input")
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use payload is invalid")
 	}
-	return canonicalInputJSON, canonicalInputHash, nil
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil {
+		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use projection is invalid")
+	}
+	inputJSON, inputHash, err := canonicalRunToolInput(string(defaultRawJSON(payload.Input, json.RawMessage(`{}`))))
+	if err != nil || !modelRequestID.Valid || modelRequestID.String == "" || projection.ModelToolCallID == "" || payload.Name == "" {
+		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool execution facts are incomplete")
+	}
+	return durableToolExecution{
+		ModelRequestID:      modelRequestID.String,
+		ModelToolCallID:     projection.ModelToolCallID,
+		ToolName:            payload.Name,
+		MCPServerName:       payload.MCPServerName,
+		InputJSON:           inputJSON,
+		NormalizedInputHash: inputHash,
+		EvaluatedPermission: payload.EvaluatedPermission,
+	}, nil
 }
 
 func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
@@ -202,65 +255,6 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	return nil
 }
 
-func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.Tx, request sandboxExecutionRequest, canonicalInputJSON string) (string, error) {
-	var payloadJSON string
-	var modelRequestID sql.NullString
-	if err := tx.QueryRow(ctx,
-		`SELECT payload_json, model_request_id FROM session_events
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND event_id = $4 AND type = 'agent.tool_use'
-		  FOR UPDATE`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
-	).Scan(&payloadJSON, &modelRequestID); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use is missing")
-	} else if err != nil {
-		return "", err
-	}
-	var payload runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.Name != request.GetToolName() {
-		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use identity is invalid")
-	}
-	eventInputJSON, _, err := canonicalRunToolInput(string(defaultRawJSON(payload.Input, json.RawMessage(`{}`))))
-	if err != nil || eventInputJSON != canonicalInputJSON {
-		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use input does not match")
-	}
-	if !modelRequestID.Valid || modelRequestID.String == "" {
-		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use has no model request")
-	}
-	var messageJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT data_json FROM session_messages
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND model_request_id = $4 AND kind = 'assistant'
-		  LIMIT 1`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(), modelRequestID.String,
-	).Scan(&messageJSON); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool message is missing")
-	} else if err != nil {
-		return "", err
-	}
-	var message struct {
-		Parts []struct {
-			Type           string `json:"type"`
-			ToolCallID     string `json:"toolCallId"`
-			ToolName       string `json:"toolName"`
-			ToolUseEventID string `json:"toolUseEventId"`
-		} `json:"parts"`
-	}
-	if err := json.Unmarshal([]byte(messageJSON), &message); err != nil {
-		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool message is invalid")
-	}
-	for _, part := range message.Parts {
-		if part.Type == "tool" && part.ToolUseEventID == request.GetToolUseEventId() &&
-			part.ToolCallID == request.GetModelToolCallId() && part.ToolName == request.GetToolName() {
-			return payload.EvaluatedPermission, nil
-		}
-	}
-	return "", status.Error(codes.FailedPrecondition, "durable sandbox tool call identity does not match")
-}
-
 func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMessage {
 	if len(value) == 0 || string(value) == "null" {
 		return fallback
@@ -268,12 +262,12 @@ func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMes
 	return value
 }
 
-func verifyApprovedSandboxExecutionHandoffTx(
+func verifyApprovedToolExecutionHandoffTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
-	request sandboxExecutionRequest,
-	canonicalInputJSON string,
-	evaluatedPermission string,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+	tool durableToolExecution,
 ) error {
 	var modelToolCallID, toolName, inputJSON, statusValue string
 	var decision sql.NullString
@@ -283,11 +277,10 @@ func verifyApprovedSandboxExecutionHandoffTx(
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		    AND tool_use_event_id = $4
 		  FOR UPDATE`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
 	).Scan(&modelToolCallID, &toolName, &inputJSON, &statusValue, &decision)
 	if dbconnect.IsNoRows(err) {
-		switch evaluatedPermission {
+		switch tool.EvaluatedPermission {
 		case "allow":
 			return nil
 		case "ask", "deny":
@@ -300,11 +293,11 @@ func verifyApprovedSandboxExecutionHandoffTx(
 		return err
 	}
 	canonicalApprovalInput, _, err := canonicalRunToolInput(inputJSON)
-	if err != nil || modelToolCallID != request.GetModelToolCallId() || toolName != request.GetToolName() ||
-		canonicalApprovalInput != canonicalInputJSON {
+	if err != nil || modelToolCallID != tool.ModelToolCallID || toolName != tool.ToolName ||
+		canonicalApprovalInput != tool.InputJSON {
 		return status.Error(codes.AlreadyExists, "approved tool identity conflicts with execution")
 	}
-	switch evaluatedPermission {
+	switch tool.EvaluatedPermission {
 	case "allow":
 		return nil
 	case "deny":
@@ -319,30 +312,27 @@ func verifyApprovedSandboxExecutionHandoffTx(
 	}
 }
 
-func mustCanonicalRunToolInput(raw string) string {
-	canonical, _, err := canonicalRunToolInput(raw)
-	if err != nil {
-		return ""
-	}
-	return canonical
+func sandboxExecutionIdentityMatches(existing runtimeToolResult, tool durableToolExecution) bool {
+	return existing.ToolKind == bridgeToolKindSandbox && existing.NormalizedInputHash == tool.NormalizedInputHash &&
+		existing.ToolName == tool.ToolName && existing.InputJSON == tool.InputJSON &&
+		existing.ModelToolCallID.Valid && existing.ModelToolCallID.String == tool.ModelToolCallID
 }
 
-func sandboxExecutionIdentityMatches(existing runtimeToolResult, request sandboxExecutionRequest, canonicalInputJSON string, canonicalInputHash string) bool {
-	return existing.ToolKind == bridgeToolKindSandbox && existing.NormalizedInputHash == canonicalInputHash &&
-		existing.ToolName == request.GetToolName() && existing.InputJSON == canonicalInputJSON &&
-		existing.ModelToolCallID.Valid && existing.ModelToolCallID.String == request.GetModelToolCallId()
-}
-
-func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request sandboxExecutionRequest) (runtimeToolResult, error) {
+func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (runtimeToolResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, sandboxExecutionWaitTimeout)
 	defer cancel()
 	ticker := time.NewTicker(runtimeToolResultPollInterval)
 	defer ticker.Stop()
 	for {
 		var stored runtimeToolResult
+		var tool durableToolExecution
 		var found bool
 		err := s.Client.WithWorkspaceReadOnlyTx(waitCtx, request.GetScope().GetWorkspaceId(), "agentruntimebridge.wait_sandbox_tool", func(tx *dbconnect.Tx) error {
 			var err error
+			tool, err = loadDurableToolExecutionTx(waitCtx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.tool_use", false)
+			if err != nil {
+				return err
+			}
 			stored, found, err = readRuntimeToolResultReadOnlyTx(waitCtx, tx, request.GetScope(), request.GetToolUseEventId())
 			return err
 		})
@@ -352,7 +342,7 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 			}
 			return runtimeToolResult{}, err
 		}
-		if !found || !sandboxExecutionIdentityMatches(stored, request, mustCanonicalRunToolInput(request.GetInputJson()), request.GetNormalizedInputHash()) {
+		if !found || !sandboxExecutionIdentityMatches(stored, tool) {
 			return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool execution identity changed while waiting")
 		}
 		if stored.ExecutionState.Valid && stored.ExecutionState.String == "terminal_unconsumed" {
@@ -394,38 +384,49 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 //     not fanned out and see the change only at their own next materialization
 //     (cold return); this package must not grow a cross-session fan-out.
 func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridgev1.RunMemoryRequest) (*bridgev1.RunMemoryResponse, error) {
-	if request.GetToolUseEventId() == "" || request.GetNormalizedInputHash() == "" || request.GetInputJson() == "" {
-		return nil, status.Error(codes.InvalidArgument, "invalid run memory request")
-	}
-	if !json.Valid([]byte(request.GetInputJson())) {
-		return nil, status.Error(codes.InvalidArgument, "memory input must be JSON")
+	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
+		return nil, err
 	}
 	now := s.now()
 	var response *bridgev1.RunMemoryResponse
-	var phaseTwoAck *bridgev1.BridgeWriteAck
+	phaseTwoDuplicate := false
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.execute_memory", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.tool_use", true)
+		if err != nil {
+			return err
+		}
+		if tool.ToolName != "memory" || tool.MCPServerName != "" {
+			return status.Error(codes.FailedPrecondition, "durable tool is not a memory operation")
+		}
+		var memoryInput memoryToolInput
+		if err := json.Unmarshal([]byte(tool.InputJSON), &memoryInput); err != nil || memoryInput.Action == "" {
+			return status.Error(codes.FailedPrecondition, "durable memory input is invalid")
+		}
 		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		} else if ok {
-			if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
+			if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != tool.NormalizedInputHash {
 				return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
 			}
 			if existing.MemoryProjectionState.Valid && existing.MemoryProjectionState.String == memoryProjectionStatePending {
-				phaseTwoAck = duplicateAck("", "")
+				phaseTwoDuplicate = true
 				return nil
 			}
-			response = &bridgev1.RunMemoryResponse{Ack: duplicateAck("", ""), ResultJson: existing.ResultJSON}
+			response = duplicateMemoryRunResponse(existing.ResultJSON)
 			return nil
 		}
-		resultJSON, err := applyMemoryToolTx(ctx, tx, request.GetScope(), request.GetOperation(), request.GetInputJson())
+		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		resultJSON, err := applyMemoryToolTx(ctx, tx, request.GetScope(), memoryInput.Action, tool.InputJSON)
 		if err != nil {
 			return err
 		}
 		var projectionState sql.NullString
-		if len(memoryProjectionPlanPaths(request.GetInputJson(), resultJSON)) > 0 {
+		if len(memoryProjectionPlanPaths(tool.InputJSON, resultJSON)) > 0 {
 			storeID, bindingResultJSON, err := resolveWritableMemoryStoreTx(ctx, tx, request.GetScope())
 			if err != nil {
 				return err
@@ -467,9 +468,9 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		if err := insertRuntimeToolResultTx(ctx, tx, request.GetScope(), runtimeToolResultInsert{
 			ToolUseEventID:        request.GetToolUseEventId(),
 			ToolKind:              bridgeToolKindMemory,
-			NormalizedInputHash:   request.GetNormalizedInputHash(),
+			NormalizedInputHash:   tool.NormalizedInputHash,
 			ToolName:              "memory",
-			InputJSON:             request.GetInputJson(),
+			InputJSON:             tool.InputJSON,
 			AckStatus:             bridgeAckCommitted,
 			ResultJSON:            resultJSON,
 			MemoryProjectionState: projectionState,
@@ -478,33 +479,47 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 			return err
 		}
 		if projectionState.Valid && projectionState.String == memoryProjectionStatePending {
-			phaseTwoAck = committedAck("", "")
 			return nil
 		}
-		response = &bridgev1.RunMemoryResponse{Ack: committedAck("", ""), ResultJson: resultJSON}
+		response = committedMemoryRunResponse(resultJSON)
 		return nil
 	}); err != nil {
+		if isConversationMutationStaleError(err) {
+			return &bridgev1.RunMemoryResponse{Outcome: &bridgev1.RunMemoryResponse_Stale{Stale: &bridgev1.MemoryRunStale{}}}, nil
+		}
 		return nil, err
 	}
 	if response == nil {
-		return s.completePendingMemoryProjection(ctx, request, phaseTwoAck)
+		response, err := s.completePendingMemoryProjection(ctx, request, phaseTwoDuplicate)
+		if isScopeSupersededError(err) {
+			return &bridgev1.RunMemoryResponse{Outcome: &bridgev1.RunMemoryResponse_Stale{Stale: &bridgev1.MemoryRunStale{}}}, nil
+		}
+		return response, err
 	}
 	return response, nil
+}
+
+func committedMemoryRunResponse(resultJSON string) *bridgev1.RunMemoryResponse {
+	return &bridgev1.RunMemoryResponse{Outcome: &bridgev1.RunMemoryResponse_Committed{Committed: &bridgev1.MemoryRunCommitted{ResultJson: resultJSON}}}
+}
+
+func duplicateMemoryRunResponse(resultJSON string) *bridgev1.RunMemoryResponse {
+	return &bridgev1.RunMemoryResponse{Outcome: &bridgev1.RunMemoryResponse_Duplicate{Duplicate: &bridgev1.MemoryRunDuplicate{ResultJson: resultJSON}}}
 }
 
 func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context, request *bridgev1.CommitInternalToolRepairRequest) (*bridgev1.CommitInternalToolRepairResponse, error) {
 	if err := validateInternalToolRepairRequest(request); err != nil {
 		return nil, err
 	}
-	repairKey := internalToolRepairKey(request.GetModelRequestId(), request.GetModelToolCallId(), request.GetToolName())
+	repairKey := request.GetRepairKey()
 	declarationDigest, err := internalToolRepairDeclarationDigest(request, repairKey)
 	if err != nil {
 		return nil, err
 	}
 	now := s.now()
 	var (
-		ack     *bridgev1.BridgeWriteAck
-		receipt *bridgev1.DeclarationReceipt
+		facts     internalToolRepairDurableFacts
+		duplicate bool
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_internal_tool_repair", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
@@ -529,16 +544,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			return err
 		} else if ok {
 			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
-				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+				return status.Error(codes.FailedPrecondition, "stored internal tool repair result is invalid")
 			}
 			if existing.DeclarationDigest != declarationDigest {
 				return status.Error(codes.AlreadyExists, "internal tool repair idempotency conflict")
 			}
-			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
-			if err != nil {
-				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+			if err := json.Unmarshal([]byte(existing.ReceiptJSON), &facts); err != nil || facts.RepairEventID == "" || facts.AssignedMessageSequence <= 0 {
+				return status.Error(codes.FailedPrecondition, "stored internal tool repair result is invalid")
 			}
-			ack = duplicateAck("", repairKey)
+			duplicate = true
 			return nil
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -552,24 +566,24 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			return err
 		}
 		if err := verifyModelToolCallIDAvailableTx(
-			ctx, tx, request.GetScope(), request.GetModelRequestId(), request.GetModelToolCallId(),
+			ctx, tx, request.GetScope(), request.GetModelToolCallId(),
 		); err != nil {
 			return err
 		}
-		eventID, eventSequence, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
+		eventID, _, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
 		if err != nil {
 			return err
 		}
-		receipt, err = commitInternalToolRepairCreateTx(
+		facts, err = commitInternalToolRepairContextTx(
 			ctx,
 			tx,
 			request.GetScope(),
-			repairKey,
 			eventID,
-			eventSequence,
+			request.GetModelRequestId(),
 			request.GetModelToolCallId(),
 			request.GetToolName(),
-			request.GetMessageCreate(),
+			request.GetCanonicalInputJson(),
+			request.GetError(),
 			now,
 		)
 		if err != nil {
@@ -579,17 +593,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			ctx,
 			tx,
 			request.GetScope(),
-			request.GetModelRequestId(),
 			request.GetModelToolCallId(),
 		); err != nil {
 			return err
 		}
-		receipt.DeclarationDigest = declarationDigest
-		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		resultJSON, err := marshalBridgeJSON(facts)
 		if err != nil {
 			return err
 		}
-		if err := insertBridgeDeclarationOperationTx(
+		return insertBridgeDeclarationOperationTx(
 			ctx,
 			tx,
 			request.GetScope(),
@@ -597,18 +609,17 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			"internal_tool_repair",
 			repairKey,
 			declarationDigest,
-			receiptJSON,
+			resultJSON,
 			now,
-		); err != nil {
-			return err
-		}
-		ack = committedAck("", repairKey)
-		return nil
+		)
 	}); err != nil {
+		if isSessionInterruptBarrierStaleError(err) {
+			return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Stale{Stale: &bridgev1.CommitInternalToolRepairStale{}}}, nil
+		}
 		return nil, err
 	}
-	if receipt == nil || len(receipt.GetEvents()) != 1 || len(receipt.GetMessages()) != 1 {
-		return nil, status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+	if facts.RepairEventID == "" || facts.AssignedMessageSequence <= 0 {
+		return nil, status.Error(codes.FailedPrecondition, "internal tool repair result is invalid")
 	}
 	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
 	if err != nil {
@@ -621,29 +632,40 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		"internal_tool_repair",
 		repairKey,
 		declarationDigest,
-		ack,
+		duplicate,
 		observation,
 	)
-	return &bridgev1.CommitInternalToolRepairResponse{
-		Ack: ack,
-		Declaration: &bridgev1.DeclarationResponse{
-			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
-			ObservedBindingId:         observation.BindingID,
-			ObservedBindingGeneration: observation.BindingGeneration,
-			ApplicationDisposition:    observation.Disposition,
-		},
-	}, nil
+	if !observation.Current {
+		return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Stale{Stale: &bridgev1.CommitInternalToolRepairStale{}}}, nil
+	}
+	if duplicate {
+		return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Duplicate{Duplicate: &bridgev1.CommitInternalToolRepairDuplicate{
+			RepairEventId: facts.RepairEventID, AssignedMessageSequence: facts.AssignedMessageSequence,
+		}}}, nil
+	}
+	return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Committed{Committed: &bridgev1.CommitInternalToolRepairCommitted{
+		RepairEventId: facts.RepairEventID, AssignedMessageSequence: facts.AssignedMessageSequence,
+	}}}, nil
 }
 
 func validateInternalToolRepairRequest(request *bridgev1.CommitInternalToolRepairRequest) error {
 	if err := validateRuntimeScope(request.GetScope()); err != nil {
 		return err
 	}
-	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || request.GetMessageCreate() == nil {
+	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || request.GetCanonicalInputJson() == "" || request.GetError() == nil || request.GetRepairKey() == "" {
 		return status.Error(codes.InvalidArgument, "invalid internal tool repair request")
 	}
 	if len([]byte(request.GetModelToolCallId())) > internalToolRepairIDMaxBytes || len([]byte(request.GetToolName())) > internalToolRepairIDMaxBytes {
 		return status.Error(codes.InvalidArgument, "internal tool repair identifiers are too large")
+	}
+	if request.GetRepairKey() != internalToolRepairKey(request.GetModelRequestId(), request.GetModelToolCallId(), request.GetToolName()) {
+		return status.Error(codes.InvalidArgument, "internal tool repair key is invalid")
+	}
+	if _, err := canonicalRunToolJSON(request.GetCanonicalInputJson()); err != nil {
+		return status.Error(codes.InvalidArgument, "internal tool repair canonical input is invalid")
+	}
+	if _, err := canonicalRuntimeToolError(request.GetError()); err != nil {
+		return err
 	}
 	return nil
 }
@@ -672,12 +694,26 @@ func insertInternalToolRepairEventTx(
 		return "", 0, err
 	}
 	visibility, sessionVisible := threadScope.publicProjection("agent.tool_result")
+	errorValue, err := canonicalRuntimeToolError(request.GetError())
+	if err != nil {
+		return "", 0, err
+	}
+	projection := runtimeToolProjectionFromDurableTool(durableToolExecution{
+		ModelRequestID:  request.GetModelRequestId(),
+		ModelToolCallID: request.GetModelToolCallId(),
+		ToolName:        request.GetToolName(),
+		InputJSON:       request.GetCanonicalInputJson(),
+	}, map[string]any{"type": "error", "error": errorValue})
+	projectionJSON, err := marshalBridgeJSON(projection)
+	if err != nil {
+		return "", 0, err
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
 			created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, '{}', $11, $11, $11)`,
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, $11, $12, $12, $12)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -688,6 +724,7 @@ func insertInternalToolRepairEventTx(
 		sessionVisible,
 		repairKey,
 		request.GetModelRequestId(),
+		projectionJSON,
 		now,
 	); err != nil {
 		return "", 0, err
@@ -708,10 +745,7 @@ func internalToolRepairKey(modelRequestID string, modelToolCallID string, toolNa
 	return "internal_invalid_tool_" + hex.EncodeToString(hash.Sum(nil))
 }
 
-func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.Context, request *bridgev1.RunMemoryRequest, ack *bridgev1.BridgeWriteAck) (*bridgev1.RunMemoryResponse, error) {
-	if ack == nil {
-		ack = duplicateAck("", "")
-	}
+func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.Context, request *bridgev1.RunMemoryRequest, duplicate bool) (*bridgev1.RunMemoryResponse, error) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -727,11 +761,19 @@ func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.C
 			if !ok {
 				return status.Error(codes.FailedPrecondition, "memory tool result is missing")
 			}
-			if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
+			tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.tool_use", false)
+			if err != nil {
+				return err
+			}
+			if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != tool.NormalizedInputHash {
 				return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
 			}
 			if !existing.MemoryProjectionState.Valid || existing.MemoryProjectionState.String != memoryProjectionStatePending {
-				response = &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: existing.ResultJSON}
+				if duplicate {
+					response = duplicateMemoryRunResponse(existing.ResultJSON)
+				} else {
+					response = committedMemoryRunResponse(existing.ResultJSON)
+				}
 			}
 			return nil
 		}); err != nil {

@@ -9,19 +9,22 @@
  * @packageDocumentation
  */
 
-import type { RuntimeMessage } from "../contracts/runtime.js";
+import type {
+	RuntimeContextEntry,
+	RuntimeContextPart,
+	RuntimeInterruptToolResult,
+	RuntimeOpenRequestDraft,
+} from "../contracts/runtime.js";
 
 /** Durable, non-sequenced parent context installed separately from child history. */
 export interface ThreadContextPrefix {
-  readonly childThreadId: string;
-  readonly parentThreadId: string;
-  readonly parentBoundaryEventId: string;
-  readonly entries: readonly RuntimeMessage[];
-  readonly createdAt: string;
-  readonly consumedByCheckpointMessageId?: string | undefined;
+	readonly childThreadId: string;
+	readonly parentThreadId: string;
+	readonly parentBoundaryEventId: string;
+	readonly entries: readonly RuntimeContextEntry[];
 }
 
-// ContextManager owns the hot RuntimeMessage list for one ThreadEntry. New writes are
+// ContextManager owns sealed provider context plus one optional open Assistant draft. New writes are
 // projected only after durable ACK; cold hydration may append projections already read
 // from durable state. These methods carry the hot mutation, but the discipline
 // permitting each one lives at the ThreadLoop/SessionManager call site:
@@ -34,10 +37,10 @@ export interface ThreadContextPrefix {
 // | apply compaction (prefix replace)  | compaction event/projection ACK |
 //
 // ThreadState separately owns the last-request usage hint and route-effective
-// limits. A terminal RuntimeMessage may also carry its own usage when the
-// WriteRequestEnd-gated projection replaces that message in this list.
+// limits. Request-end settlement seals the open draft into provider context only
+// after the durable operation succeeds.
 //
-// A tool-confirmation commit appends its database-stamped user decision before
+// A tool-confirmation commit appends its Bridge-derived user decision before
 // waking the approved tool. A task notification uses the background-task settlement
 // path and projects a bounded runtime note. A thread context prefix is loaded from the CHILD
 // thread's durable context and is never rebuilt from the current parent. The
@@ -49,72 +52,192 @@ export interface ThreadContextPrefix {
 //              services/agent-runtime/packages/core/src/session/session-manager.ts
 /** Mutable hot message list whose generation invalidates reviewer feed cursors on rewrites. */
 export class ContextManager {
-  readonly sessionId: string;
-  #messages: RuntimeMessage[];
-  #threadContextPrefix: ThreadContextPrefix | undefined;
-  #generation = 0;
+	readonly sessionId: string;
+	#entries: RuntimeContextEntry[];
+	#openRequestDraft: RuntimeOpenRequestDraft | undefined;
+	#threadContextPrefix: ThreadContextPrefix | undefined;
+	#generation = 0;
 
-  constructor(sessionId: string, initialMessages: readonly RuntimeMessage[] = []) {
-    this.sessionId = sessionId;
-    this.#messages = [...initialMessages];
-  }
+	constructor(
+		sessionId: string,
+		initialEntries: readonly RuntimeContextEntry[] = [],
+	) {
+		this.sessionId = sessionId;
+		this.#entries = [...initialEntries];
+	}
 
-  messages(): readonly RuntimeMessage[] {
-    return [...this.#messages];
-  }
+	entries(): readonly RuntimeContextEntry[] {
+		return [...this.#entries];
+	}
 
-  threadContextPrefix(): ThreadContextPrefix | undefined {
-    return this.#threadContextPrefix;
-  }
+	threadContextPrefix(): ThreadContextPrefix | undefined {
+		return this.#threadContextPrefix;
+	}
 
-  installThreadContextPrefix(prefix: ThreadContextPrefix | undefined): void {
-    this.#threadContextPrefix = prefix;
-  }
+	installThreadContextPrefix(prefix: ThreadContextPrefix | undefined): void {
+		this.#threadContextPrefix = prefix;
+	}
 
-  providerMessages(): readonly RuntimeMessage[] {
-    return [...(this.#threadContextPrefix?.entries ?? []), ...this.#messages];
-  }
+	providerEntries(): readonly RuntimeContextEntry[] {
+		return [...(this.#threadContextPrefix?.entries ?? []), ...this.#entries];
+	}
 
-  messageListSnapshot(): { readonly generation: number; readonly messages: readonly RuntimeMessage[] } {
-    return {
-      generation: this.#generation,
-      messages: this.messages(),
-    };
-  }
+	providerEntrySegments(): readonly (readonly RuntimeContextEntry[])[] {
+		const prefix = this.#threadContextPrefix?.entries ?? [];
+		return prefix.length === 0
+			? [this.entries()]
+			: [[...prefix], this.entries()];
+	}
 
-  replaceMessages(messages: readonly RuntimeMessage[]): void {
-    const appendOnly = this.#messages.length <= messages.length && this.#messages.every(
-      (message, index) => JSON.stringify(message) === JSON.stringify(messages[index]),
-    );
-    this.#messages = [...messages];
-    if (!appendOnly) {
-      this.#generation += 1;
-    }
-  }
+	entryListSnapshot(): {
+		readonly generation: number;
+		readonly entries: readonly RuntimeContextEntry[];
+	} {
+		return {
+			generation: this.#generation,
+			entries: this.entries(),
+		};
+	}
 
-  replaceMessagesThroughSequence(boundarySequence: number, messages: readonly RuntimeMessage[]): readonly RuntimeMessage[] {
-    const preserved = this.#messages.filter((message) => message.sequence > boundarySequence);
-    this.#messages = [...messages, ...preserved];
-    this.#generation += 1;
-    return this.messages();
-  }
+	replaceEntries(entries: readonly RuntimeContextEntry[]): void {
+		const appendOnly =
+			this.#entries.length <= entries.length &&
+			this.#entries.every(
+				(entry, index) =>
+					JSON.stringify(entry) === JSON.stringify(entries[index]),
+			);
+		this.#entries = [...entries];
+		if (!appendOnly) {
+			this.#generation += 1;
+		}
+	}
 
-  appendMessage(message: RuntimeMessage): void {
-    this.#messages = [...this.#messages, message];
-  }
+	replaceEntriesThroughSequence(
+		boundarySequence: number,
+		entries: readonly RuntimeContextEntry[],
+	): readonly RuntimeContextEntry[] {
+		const preserved = this.#entries.filter(
+			(entry) => entry.messageSequence > boundarySequence,
+		);
+		this.#entries = [...entries, ...preserved];
+		this.#generation += 1;
+		return this.entries();
+	}
 
-  message(messageId: string): RuntimeMessage | undefined {
-    return this.#messages.find((message) => message.id === messageId);
-  }
+	appendEntry(entry: RuntimeContextEntry): void {
+		this.#entries = [...this.#entries, entry];
+	}
 
-  updateMessage(message: RuntimeMessage): void {
-    this.#messages = this.#messages.map((existingMessage) => (existingMessage.id === message.id ? message : existingMessage));
-    this.#generation += 1;
-  }
+	entry(messageSequence: number): RuntimeContextEntry | undefined {
+		return this.#entries.find(
+			(entry) => entry.messageSequence === messageSequence,
+		);
+	}
 
-  clear(): void {
-    this.#messages = [];
-    this.#threadContextPrefix = undefined;
-    this.#generation += 1;
-  }
+	updateEntry(entry: RuntimeContextEntry): void {
+		this.#entries = this.#entries.map((existingEntry) =>
+			existingEntry.messageSequence === entry.messageSequence
+				? entry
+				: existingEntry,
+		);
+		this.#generation += 1;
+	}
+
+	openRequestDraft(): RuntimeOpenRequestDraft | undefined {
+		return this.#openRequestDraft;
+	}
+
+	installOpenRequestDraft(draft: RuntimeOpenRequestDraft | undefined): void {
+		this.#openRequestDraft = draft;
+	}
+
+	/** Appends one terminal Tool Result to its sole sealed-entry or open-draft owner. */
+	appendToolResult(
+		messageSequence: number,
+		modelToolCallId: string,
+		result: Extract<
+			RuntimeContextPart,
+			{ readonly type: "tool_result" }
+		>["result"],
+	): "sealed" | "open" {
+		const sealedEntry = this.entry(messageSequence);
+		const openDraft =
+			this.#openRequestDraft?.messageSequence === messageSequence
+				? this.#openRequestDraft
+				: undefined;
+		if ((sealedEntry === undefined) === (openDraft === undefined)) {
+			throw new Error(
+				"Tool result must target exactly one sealed entry or open Request draft",
+			);
+		}
+		const append = (
+			parts: readonly RuntimeContextPart[],
+		): RuntimeContextPart[] => {
+			const callCount = parts.filter(
+				(part) =>
+					part.type === "tool_call" && part.modelToolCallId === modelToolCallId,
+			).length;
+			const resultCount = parts.filter(
+				(part) =>
+					part.type === "tool_result" &&
+					part.modelToolCallId === modelToolCallId,
+			).length;
+			if (callCount !== 1 || resultCount !== 0) {
+				throw new Error("Tool result target is missing or already terminal");
+			}
+			return [...parts, { type: "tool_result", modelToolCallId, result }];
+		};
+		if (sealedEntry !== undefined) {
+			if (sealedEntry.contextKind !== "assistant") {
+				throw new Error("Tool result target is not Assistant context");
+			}
+			this.updateEntry({ ...sealedEntry, parts: append(sealedEntry.parts) });
+			return "sealed";
+		}
+		this.#openRequestDraft = { ...openDraft!, parts: append(openDraft!.parts) };
+		return "open";
+	}
+
+	appendInterruptToolResults(
+		routes: readonly {
+			readonly toolUseEventId: string;
+			readonly assistantMessageSequence: number;
+			readonly modelToolCallId: string;
+		}[],
+		results: readonly RuntimeInterruptToolResult[],
+	): void {
+		for (const result of results) {
+			const route = routes.find(
+				(candidate) => candidate.toolUseEventId === result.toolUseEventId,
+			);
+			if (route === undefined)
+				throw new Error("interrupt Tool result has no active route");
+			this.appendToolResult(
+				route.assistantMessageSequence,
+				route.modelToolCallId,
+				result.result,
+			);
+		}
+	}
+
+	sealOpenRequestDraft(): RuntimeContextEntry {
+		const draft = this.#openRequestDraft;
+		if (draft === undefined)
+			throw new Error("cannot seal a missing open Request draft");
+		const entry: RuntimeContextEntry = {
+			messageSequence: draft.messageSequence,
+			contextKind: "assistant",
+			parts: draft.parts,
+		};
+		this.appendEntry(entry);
+		this.#openRequestDraft = undefined;
+		return entry;
+	}
+
+	clear(): void {
+		this.#entries = [];
+		this.#openRequestDraft = undefined;
+		this.#threadContextPrefix = undefined;
+		this.#generation += 1;
+	}
 }

@@ -8,18 +8,98 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 // This file owns cleanup-session and delete-cleanup state-machine tests.
+
+func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID       = "sesn_cleanup_narrow_tool"
+		threadID        = "thr_cleanup_narrow_tool"
+		modelRequestID  = "mreq_cleanup_narrow_tool"
+		toolUseEventID  = "evt_cleanup_narrow_tool_use"
+		modelToolCallID = "call_cleanup_narrow_tool"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_cleanup_narrow_tool", 1, "pod_cleanup_narrow_tool")
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+	) VALUES
+	('default', $1, $2, 'evt_cleanup_narrow_start', 1, 'span.model_request_start',
+	 '{}', 'internal', false, $3,
+	 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
+	 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+	('default', $1, $2, $4, 2, 'agent.tool_use',
+	 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
+	 'public', true, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+	('default', $1, $2, 'evt_cleanup_narrow_end', 3, 'span.model_request_end',
+	 '{"type":"span.model_request_end","model_request_start_id":"evt_cleanup_narrow_start","is_error":false}',
+	 'internal', false, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		sessionID, threadID, modelRequestID, toolUseEventID,
+	); err != nil {
+		t.Fatalf("seed cleanup Tool turn: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(
+		t, admin, "default", sessionID, threadID, modelRequestID,
+		toolUseEventID, modelToolCallID, "Read",
+	)
+	client := dbconnect.NewClientForTesting(runtime)
+	scope := bridgeAPIScope(sessionID, threadID, "bind_cleanup_narrow_tool", 1, "pod_cleanup_narrow_tool")
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.cleanup_narrow_tool", func(tx *dbconnect.Tx) error {
+		_, err := insertPendingToolTerminalResultTx(context.Background(), tx, scope, cleanupPendingWait{
+			ThreadID: threadID, ToolUseEventID: toolUseEventID, ModelRequestID: modelRequestID,
+			ModelToolCallID: modelToolCallID, EventType: "agent.tool_use",
+		}, pendingToolTerminal{
+			ErrorType: "cleanup_expired",
+			Message:   "Sandbox tool execution expired during session cleanup.",
+		}, time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC))
+		return err
+	}); err != nil {
+		t.Fatalf("settle cleanup-expired Tool: %v", err)
+	}
+	var messageCount int
+	var dataJSON string
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*), max(data_json)
+		FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, threadID,
+	).Scan(&messageCount, &dataJSON); err != nil {
+		t.Fatalf("read cleanup Tool context: %v", err)
+	}
+	if messageCount != 1 {
+		t.Fatalf("cleanup Tool context messages = %d; want original Assistant message only", messageCount)
+	}
+	stored, err := decodeRuntimeDeclarationObject(dataJSON)
+	if err != nil {
+		t.Fatalf("decode cleanup Tool context: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("cleanup Tool context = %#v; want parts only", stored)
+	}
+	parts, ok := stored["parts"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("cleanup Tool parts = %#v; want one call/result pair", stored["parts"])
+	}
+	resultPart, ok := parts[1].(map[string]any)
+	if !ok || resultPart["type"] != "tool_result" || resultPart["modelToolCallId"] != modelToolCallID {
+		t.Fatalf("cleanup Tool result = %#v; want exact narrow Tool identity", parts[1])
+	}
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("cleanup-narrow-tool-signing-key")
+	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("LoadContext after cleanup Tool settlement: %v", err)
+	}
+	assertRuntimeDirectContextComposition(t, loaded.GetContextJson())
+}
 
 func TestSessionDeleteCleanupDrainsUnadoptedOutputCaptureBeforeRemovingReceipt(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -458,13 +538,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 		SessionID:      "sesn_bridge_cleanup_preclaim",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_preclaim_1",
 		CleanupJobID:   "cleanup_bridge_preclaim_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_preclaim","cleanup_job_id":"cleanup_bridge_preclaim_1"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup preclaim: %v", err)
 	}
-	if !plan.StaleAccepted || plan.Request != nil {
+	if !plan.StaleAccepted || plan.CleanupSession != nil {
 		t.Fatalf("cleanup preclaim plan = %#v; want stale with no Runtime command", plan)
 	}
 	var claimedAt sql.NullString
@@ -508,7 +587,7 @@ func TestPostgreSQLRuntimeDeliveryStoreDeletedSessionSilentlyStalesOrdinaryJobs(
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand %s: %v", job.Kind, err)
 		}
-		if !plan.StaleAccepted || plan.Request != nil {
+		if !plan.StaleAccepted || plan.CleanupSession != nil {
 			t.Fatalf("deleted %s plan = %#v; want silent stale ack", job.Kind, plan)
 		}
 	}
@@ -551,14 +630,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 		SessionID:      "sesn_bridge_cleanup_confirm",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_confirm_1",
 		CleanupJobID:   "cleanup_bridge_confirm_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_confirm","cleanup_job_id":"cleanup_bridge_confirm_1"}`,
 	}
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup confirmation: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup confirmation plan = %#v; want claimed Runtime command", plan)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -646,13 +724,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedIn
 		SessionID:      "sesn_bridge_cleanup_preidle",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_preidle_1",
 		CleanupJobID:   "cleanup_bridge_preidle_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_preidle","cleanup_job_id":"cleanup_bridge_preidle_1"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup preidle: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup preidle plan = %#v; want claim despite pre-idle unprocessed child input", plan)
 	}
 }
@@ -694,13 +771,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsPostIdleChildInputBy
 		SessionID:      "sesn_bridge_cleanup_child_postidle",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_child_postidle_1",
 		CleanupJobID:   "cleanup_bridge_child_postidle_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_child_postidle","cleanup_job_id":"cleanup_bridge_child_postidle_1"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup child post-idle: %v", err)
 	}
-	if !plan.StaleAccepted || plan.Request != nil {
+	if !plan.StaleAccepted || plan.CleanupSession != nil {
 		t.Fatalf("cleanup child post-idle plan = %#v; want stale without Runtime command", plan)
 	}
 }
@@ -726,7 +802,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhileChildRuns(t
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand with running child: %v", err)
 	}
-	if !plan.StaleAccepted || plan.Request != nil {
+	if !plan.StaleAccepted || plan.CleanupSession != nil {
 		t.Fatalf("cleanup plan with running child = %#v; want benign skip", plan)
 	}
 	assertBridgeCleanupTreeRescheduled(t, admin, sessionID, "2026-01-01T01:01:00Z")
@@ -750,7 +826,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhileChildRuns(t
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand after child idle: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup plan after child idle = %#v; want claimed Runtime command", plan)
 	}
 }
@@ -771,7 +847,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhenChildStartsB
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand before child starts: %v", err)
 	}
-	if plan.StaleAccepted || plan.Request == nil {
+	if plan.StaleAccepted || plan.CleanupSession == nil {
 		t.Fatalf("cleanup claim before child starts = %#v; want Runtime command", plan)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -820,7 +896,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand with requires_action child: %v", err)
 		}
-		if plan.StaleAccepted || plan.Request == nil {
+		if plan.StaleAccepted || plan.CleanupSession == nil {
 			t.Fatalf("cleanup plan with requires_action child = %#v; want claimed Runtime command", plan)
 		}
 	})
@@ -846,7 +922,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand with post-idle confirmation: %v", err)
 		}
-		if !plan.StaleAccepted || plan.Request != nil {
+		if !plan.StaleAccepted || plan.CleanupSession != nil {
 			t.Fatalf("cleanup plan with post-idle confirmation = %#v; want wake-fenced skip", plan)
 		}
 	})
@@ -872,7 +948,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 		if err != nil {
 			t.Fatalf("PrepareRuntimeCommand with running reviewer: %v", err)
 		}
-		if !plan.StaleAccepted || plan.Request != nil {
+		if !plan.StaleAccepted || plan.CleanupSession != nil {
 			t.Fatalf("cleanup plan with running reviewer = %#v; want role-blind busy skip", plan)
 		}
 		assertBridgeCleanupTreeRescheduled(t, admin, sessionID, "2026-01-01T01:01:00Z")
@@ -929,9 +1005,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 		t.Fatalf("mark cleanup enqueued: %v", err)
 	}
 
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	store.TargetResolver = KubernetesRuntimeTargetResolver{
@@ -952,7 +1026,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 		SessionID:      "sesn_bridge_cleanup_gone",
 		RuntimeInputID: "cleanup_session:cleanup_bridge_gone_1",
 		CleanupJobID:   "cleanup_bridge_gone_1",
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_gone","cleanup_job_id":"cleanup_bridge_gone_1"}`,
 	}
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
@@ -1041,7 +1114,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 7, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
-	start := seedBridgeAPIRequestStart(
+	seedBridgeAPIRequestStart(
 		t, bridgeStore, scope, "rwrite_cleanup_cold_approval_start", modelRequestID, "agent_provider_request", 0,
 	)
 	approvalInputValue := map[string]any{
@@ -1052,51 +1125,25 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	if err != nil {
 		t.Fatalf("marshal cleanup approval input: %v", err)
 	}
-	initialPreviewBytes := approvalInputJSON[:cleanupRuntimeInputPreviewMaxBytes]
-	for len(initialPreviewBytes) > 0 && !utf8.Valid(initialPreviewBytes) {
-		initialPreviewBytes = initialPreviewBytes[:len(initialPreviewBytes)-1]
-	}
-	approvalPartJSON, err := json.Marshal(map[string]any{
-		"type":       "tool",
-		"toolCallId": "tool-call-cleanup-cold-approval",
-		"toolName":   "Write",
-		"state": map[string]any{
-			"status": "running",
-			"input": map[string]any{
-				"value":     approvalInputValue,
-				"preview":   string(initialPreviewBytes),
-				"truncated": true,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal cleanup approval part: %v", err)
-	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
-		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
-			t, scope, "rwrite_cleanup_cold_approval_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartCreateForTest{
-				kind: "tool",
-				json: string(approvalPartJSON),
-			},
-		)},
+		EventType:             "agent.tool_use",
+		PayloadJson:           `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest("tool-call-cleanup-cold-approval", "Write", string(approvalInputJSON)),
 	})
-	if err != nil {
-		t.Fatalf("write cleanup approval Tool Use: %v", err)
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("write cleanup approval Tool Use: response=%#v err=%v", toolUse, err)
 	}
+	toolUseEventID := toolUse.GetCommitted().GetEventId()
 	if _, err := bridgeStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_end", ModelRequestId: modelRequestID,
-		ModelRequestStartEventId: start.GetEventId(), FinishReason: "tool_calls", UsageJson: `{}`,
-		RequestKind: "agent_provider_request",
+		FinishReason: "tool_calls", UsageJson: `{}`,
 	}); err != nil {
 		t.Fatalf("seal cleanup approval request: %v", err)
 	}
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, &bridgev1.FinishIdleRequest{
 		Scope: scope, DurableTurnId: durableTurnID,
-		StopReasonJson: `{"type":"requires_action","event_ids":["` + toolUse.GetEventId() + `"]}`,
+		StopReasonJson: `{"type":"requires_action","event_ids":["` + toolUseEventID + `"]}`,
 	}); err != nil {
 		t.Fatalf("finish cleanup approval requires-action turn: %v", err)
 	}
@@ -1122,15 +1169,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		},
 	}
 	result, err := (RuntimePodDirectDeliverer{
-		Store: cleanupStore,
-		Sender: &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-			Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
-		}},
+		Store:  cleanupStore,
+		Sender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
 	}).DeliverRuntimeJob(context.Background(), RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID: "qjob_cleanup_cold_approval", LeaseToken: "lease_cleanup_cold_approval",
 		Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: sessionID,
 		RuntimeInputID: "cleanup_session:cleanup_cold_approval_1", CleanupJobID: "cleanup_cold_approval_1",
-		CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"cleanup_cold_approval_1"}`,
 	})
 	if err != nil {
@@ -1147,7 +1191,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, recoveryBindingID, 8, recoveryPodUID)
 	recoveryScope := bridgeAPIScope(sessionID, threadID, recoveryBindingID, 8, recoveryPodUID)
 	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_load",
+		Scope: recoveryScope,
 	})
 	if err != nil {
 		t.Fatalf("LoadContext after ordinary cleanup: %v", err)
@@ -1157,7 +1201,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		t.Fatalf("decode cleanup approval context: %v", err)
 	}
 	if len(payload.PendingToolUses) != 1 ||
-		payload.PendingToolUses[0].ToolUseEventID != toolUse.GetEventId() ||
+		payload.PendingToolUses[0].ToolUseEventID != toolUseEventID ||
 		payload.PendingToolUses[0].ModelRequestID != modelRequestID ||
 		payload.PendingToolUses[0].Status != "pending" {
 		t.Fatalf("pending approval after ordinary cleanup = %#v; want same requires-action member", payload.PendingToolUses)
@@ -1165,39 +1209,23 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	if len(payload.PendingSandboxExecutions) != 0 {
 		t.Fatalf("sandbox executions after ordinary approval cleanup = %#v; want none", payload.PendingSandboxExecutions)
 	}
-	if len(payload.ColdCoverage.PendingToolIDs) != 1 || payload.ColdCoverage.PendingToolIDs[0] != toolUse.GetEventId() {
-		t.Fatalf("cold pending approval coverage = %#v; want same Tool Use", payload.ColdCoverage)
-	}
 	foundCleanupPart := false
-	for _, rawMessage := range payload.Messages {
-		var message struct {
-			Parts []struct {
-				ToolCallID string `json:"toolCallId"`
-				State      struct {
-					Input struct {
-						Value     map[string]any `json:"value"`
-						Preview   string         `json:"preview"`
-						Truncated bool           `json:"truncated"`
-					} `json:"input"`
-				} `json:"state"`
-			} `json:"parts"`
-		}
-		if err := json.Unmarshal(rawMessage, &message); err != nil {
-			t.Fatalf("decode cleanup approval message: %v", err)
-		}
-		for _, part := range message.Parts {
-			if part.ToolCallID != "tool-call-cleanup-cold-approval" {
+	for _, entry := range payload.ContextEntries {
+		for _, rawPart := range entry.Parts {
+			var part struct {
+				Type            string         `json:"type"`
+				ModelToolCallID string         `json:"modelToolCallId"`
+				CanonicalInput  map[string]any `json:"canonicalInput"`
+			}
+			if err := json.Unmarshal(rawPart, &part); err != nil {
+				t.Fatalf("decode cleanup approval context part: %v", err)
+			}
+			if part.Type != "tool_call" || part.ModelToolCallID != "tool-call-cleanup-cold-approval" {
 				continue
 			}
 			foundCleanupPart = true
-			if !reflect.DeepEqual(part.State.Input.Value, approvalInputValue) {
+			if !reflect.DeepEqual(part.CanonicalInput, approvalInputValue) {
 				t.Fatalf("cleanup approval input value changed across LoadContext")
-			}
-			if len([]byte(part.State.Input.Preview)) > cleanupRuntimeInputPreviewMaxBytes ||
-				!utf8.ValidString(part.State.Input.Preview) || !part.State.Input.Truncated {
-				t.Fatalf("cleanup approval preview bytes/UTF-8/truncated = %d/%v/%v; want <=%d/true/true",
-					len([]byte(part.State.Input.Preview)), utf8.ValidString(part.State.Input.Preview), part.State.Input.Truncated,
-					cleanupRuntimeInputPreviewMaxBytes)
 			}
 		}
 	}
@@ -1206,14 +1234,14 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}
 
 	setBridgeAPIPendingApprovalStatus(
-		t, admin, "default", sessionID, threadID, toolUse.GetEventId(), "resolving",
+		t, admin, "default", sessionID, threadID, toolUseEventID, "resolving",
 	)
 	confirmationEventID := "evt_cleanup_cold_approval_deny"
 	confirmationSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
 	seedBridgeAPIEvent(
 		t, admin, "default", sessionID, threadID, confirmationEventID, confirmationSequence,
 		"user.tool_confirmation",
-		`{"type":"user.tool_confirmation","tool_use_id":"`+toolUse.GetEventId()+`","result":"deny","deny_message":"not safe"}`,
+		`{"type":"user.tool_confirmation","tool_use_id":"`+toolUseEventID+`","result":"deny","deny_message":"not safe"}`,
 	)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_inbox (
@@ -1227,36 +1255,30 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		t.Fatalf("seed cleanup approval confirmation inbox: %v", err)
 	}
 	if _, err := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_deny", InputKind: "tool_confirmation",
-		EventIds: []string{confirmationEventID}, SequenceFrom: confirmationSequence, SequenceTo: confirmationSequence,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeApprovalInputCreateForTest(
-			"default", sessionID, threadID, "rin_cleanup_cold_approval_deny", confirmationEventID, "Approval denied: not safe",
-		)},
+		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_deny",
 	}); err != nil {
 		t.Fatalf("commit cleanup approval denial: %v", err)
 	}
-	terminal, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: recoveryScope, RuntimeWriteId: "rwrite_cleanup_cold_approval_result", ModelRequestId: modelRequestID,
-		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"Approval denied: not safe"}],"is_error":true}`,
-		SessionVisible: true,
-		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolUse.GetEventId(), "Approval denied: not safe")},
-	})
+	terminal, err := bridgeStore.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+		recoveryScope,
+		bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: not safe"),
+	))
 	if err != nil {
-		t.Fatalf("write cleanup approval denial result: %v", err)
+		t.Fatalf("settle cleanup approval denial result: %v", err)
 	}
+	bridgeRequireToolSettlementOutcomeForTest(t, terminal, "committed")
 	var pendingStatus string
 	var resultEventID sql.NullString
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT status, result_event_id
 		   FROM session_pending_tool_uses
 		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2 AND tool_use_event_id = $3`,
-		sessionID, threadID, toolUse.GetEventId(),
+		sessionID, threadID, toolUseEventID,
 	).Scan(&pendingStatus, &resultEventID); err != nil {
 		t.Fatalf("read cleanup approval after denial: %v", err)
 	}
-	if pendingStatus != "resolved" || !resultEventID.Valid || resultEventID.String != terminal.GetEventId() {
-		t.Fatalf("cleanup approval settlement = %q/%v; want resolved by %s", pendingStatus, resultEventID, terminal.GetEventId())
+	if pendingStatus != "resolved" || !resultEventID.Valid {
+		t.Fatalf("cleanup approval settlement = %q/%v; want resolved by a durable Event", pendingStatus, resultEventID)
 	}
 }
 
@@ -1301,7 +1323,6 @@ func cleanupTreeJob(sessionID string, cleanupID string) RuntimeJob {
 		SessionID:      sessionID,
 		RuntimeInputID: "cleanup_session:" + cleanupID,
 		CleanupJobID:   cleanupID,
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"` + cleanupID + `"}`,
 	}
 }

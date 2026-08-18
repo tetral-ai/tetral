@@ -32,13 +32,13 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AgentRuntimePodServiceClient interface {
-	AcceptInput(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error)
-	AcceptAgentMail(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error)
-	AcceptTaskNotification(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error)
-	Interrupt(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error)
-	ResolveToolConfirmation(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error)
-	ApplyRuntimeConfig(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error)
-	CleanupSession(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error)
+	AcceptInput(ctx context.Context, in *AcceptInputRequest, opts ...grpc.CallOption) (*AcceptInputResponse, error)
+	AcceptAgentMail(ctx context.Context, in *AcceptAgentMailRequest, opts ...grpc.CallOption) (*AcceptAgentMailResponse, error)
+	AcceptTaskNotification(ctx context.Context, in *AcceptTaskNotificationRequest, opts ...grpc.CallOption) (*AcceptTaskNotificationResponse, error)
+	Interrupt(ctx context.Context, in *InterruptRequest, opts ...grpc.CallOption) (*InterruptResponse, error)
+	ResolveToolConfirmation(ctx context.Context, in *ResolveToolConfirmationRequest, opts ...grpc.CallOption) (*ResolveToolConfirmationResponse, error)
+	ApplyRuntimeConfig(ctx context.Context, in *ApplyRuntimeConfigRequest, opts ...grpc.CallOption) (*ApplyRuntimeConfigResponse, error)
+	CleanupSession(ctx context.Context, in *CleanupSessionRequest, opts ...grpc.CallOption) (*CleanupSessionResponse, error)
 }
 
 type agentRuntimePodServiceClient struct {
@@ -49,9 +49,9 @@ func NewAgentRuntimePodServiceClient(cc grpc.ClientConnInterface) AgentRuntimePo
 	return &agentRuntimePodServiceClient{cc}
 }
 
-func (c *agentRuntimePodServiceClient) AcceptInput(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error) {
+func (c *agentRuntimePodServiceClient) AcceptInput(ctx context.Context, in *AcceptInputRequest, opts ...grpc.CallOption) (*AcceptInputResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RuntimeInputCommandResponse)
+	out := new(AcceptInputResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimePodService_AcceptInput_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -59,9 +59,9 @@ func (c *agentRuntimePodServiceClient) AcceptInput(ctx context.Context, in *Runt
 	return out, nil
 }
 
-func (c *agentRuntimePodServiceClient) AcceptAgentMail(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error) {
+func (c *agentRuntimePodServiceClient) AcceptAgentMail(ctx context.Context, in *AcceptAgentMailRequest, opts ...grpc.CallOption) (*AcceptAgentMailResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RuntimeInputCommandResponse)
+	out := new(AcceptAgentMailResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimePodService_AcceptAgentMail_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -69,9 +69,9 @@ func (c *agentRuntimePodServiceClient) AcceptAgentMail(ctx context.Context, in *
 	return out, nil
 }
 
-func (c *agentRuntimePodServiceClient) AcceptTaskNotification(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error) {
+func (c *agentRuntimePodServiceClient) AcceptTaskNotification(ctx context.Context, in *AcceptTaskNotificationRequest, opts ...grpc.CallOption) (*AcceptTaskNotificationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RuntimeInputCommandResponse)
+	out := new(AcceptTaskNotificationResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimePodService_AcceptTaskNotification_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -79,9 +79,9 @@ func (c *agentRuntimePodServiceClient) AcceptTaskNotification(ctx context.Contex
 	return out, nil
 }
 
-func (c *agentRuntimePodServiceClient) Interrupt(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error) {
+func (c *agentRuntimePodServiceClient) Interrupt(ctx context.Context, in *InterruptRequest, opts ...grpc.CallOption) (*InterruptResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RuntimeInputCommandResponse)
+	out := new(InterruptResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimePodService_Interrupt_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -89,9 +89,9 @@ func (c *agentRuntimePodServiceClient) Interrupt(ctx context.Context, in *Runtim
 	return out, nil
 }
 
-func (c *agentRuntimePodServiceClient) ResolveToolConfirmation(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error) {
+func (c *agentRuntimePodServiceClient) ResolveToolConfirmation(ctx context.Context, in *ResolveToolConfirmationRequest, opts ...grpc.CallOption) (*ResolveToolConfirmationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RuntimeInputCommandResponse)
+	out := new(ResolveToolConfirmationResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimePodService_ResolveToolConfirmation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -99,9 +99,9 @@ func (c *agentRuntimePodServiceClient) ResolveToolConfirmation(ctx context.Conte
 	return out, nil
 }
 
-func (c *agentRuntimePodServiceClient) ApplyRuntimeConfig(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error) {
+func (c *agentRuntimePodServiceClient) ApplyRuntimeConfig(ctx context.Context, in *ApplyRuntimeConfigRequest, opts ...grpc.CallOption) (*ApplyRuntimeConfigResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RuntimeInputCommandResponse)
+	out := new(ApplyRuntimeConfigResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimePodService_ApplyRuntimeConfig_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -109,9 +109,9 @@ func (c *agentRuntimePodServiceClient) ApplyRuntimeConfig(ctx context.Context, i
 	return out, nil
 }
 
-func (c *agentRuntimePodServiceClient) CleanupSession(ctx context.Context, in *RuntimeInputCommandRequest, opts ...grpc.CallOption) (*RuntimeInputCommandResponse, error) {
+func (c *agentRuntimePodServiceClient) CleanupSession(ctx context.Context, in *CleanupSessionRequest, opts ...grpc.CallOption) (*CleanupSessionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RuntimeInputCommandResponse)
+	out := new(CleanupSessionResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimePodService_CleanupSession_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -123,13 +123,13 @@ func (c *agentRuntimePodServiceClient) CleanupSession(ctx context.Context, in *R
 // All implementations must embed UnimplementedAgentRuntimePodServiceServer
 // for forward compatibility.
 type AgentRuntimePodServiceServer interface {
-	AcceptInput(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error)
-	AcceptAgentMail(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error)
-	AcceptTaskNotification(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error)
-	Interrupt(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error)
-	ResolveToolConfirmation(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error)
-	ApplyRuntimeConfig(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error)
-	CleanupSession(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error)
+	AcceptInput(context.Context, *AcceptInputRequest) (*AcceptInputResponse, error)
+	AcceptAgentMail(context.Context, *AcceptAgentMailRequest) (*AcceptAgentMailResponse, error)
+	AcceptTaskNotification(context.Context, *AcceptTaskNotificationRequest) (*AcceptTaskNotificationResponse, error)
+	Interrupt(context.Context, *InterruptRequest) (*InterruptResponse, error)
+	ResolveToolConfirmation(context.Context, *ResolveToolConfirmationRequest) (*ResolveToolConfirmationResponse, error)
+	ApplyRuntimeConfig(context.Context, *ApplyRuntimeConfigRequest) (*ApplyRuntimeConfigResponse, error)
+	CleanupSession(context.Context, *CleanupSessionRequest) (*CleanupSessionResponse, error)
 	mustEmbedUnimplementedAgentRuntimePodServiceServer()
 }
 
@@ -140,25 +140,25 @@ type AgentRuntimePodServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAgentRuntimePodServiceServer struct{}
 
-func (UnimplementedAgentRuntimePodServiceServer) AcceptInput(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error) {
+func (UnimplementedAgentRuntimePodServiceServer) AcceptInput(context.Context, *AcceptInputRequest) (*AcceptInputResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptInput not implemented")
 }
-func (UnimplementedAgentRuntimePodServiceServer) AcceptAgentMail(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error) {
+func (UnimplementedAgentRuntimePodServiceServer) AcceptAgentMail(context.Context, *AcceptAgentMailRequest) (*AcceptAgentMailResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptAgentMail not implemented")
 }
-func (UnimplementedAgentRuntimePodServiceServer) AcceptTaskNotification(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error) {
+func (UnimplementedAgentRuntimePodServiceServer) AcceptTaskNotification(context.Context, *AcceptTaskNotificationRequest) (*AcceptTaskNotificationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptTaskNotification not implemented")
 }
-func (UnimplementedAgentRuntimePodServiceServer) Interrupt(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error) {
+func (UnimplementedAgentRuntimePodServiceServer) Interrupt(context.Context, *InterruptRequest) (*InterruptResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Interrupt not implemented")
 }
-func (UnimplementedAgentRuntimePodServiceServer) ResolveToolConfirmation(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error) {
+func (UnimplementedAgentRuntimePodServiceServer) ResolveToolConfirmation(context.Context, *ResolveToolConfirmationRequest) (*ResolveToolConfirmationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveToolConfirmation not implemented")
 }
-func (UnimplementedAgentRuntimePodServiceServer) ApplyRuntimeConfig(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error) {
+func (UnimplementedAgentRuntimePodServiceServer) ApplyRuntimeConfig(context.Context, *ApplyRuntimeConfigRequest) (*ApplyRuntimeConfigResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ApplyRuntimeConfig not implemented")
 }
-func (UnimplementedAgentRuntimePodServiceServer) CleanupSession(context.Context, *RuntimeInputCommandRequest) (*RuntimeInputCommandResponse, error) {
+func (UnimplementedAgentRuntimePodServiceServer) CleanupSession(context.Context, *CleanupSessionRequest) (*CleanupSessionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CleanupSession not implemented")
 }
 func (UnimplementedAgentRuntimePodServiceServer) mustEmbedUnimplementedAgentRuntimePodServiceServer() {
@@ -184,7 +184,7 @@ func RegisterAgentRuntimePodServiceServer(s grpc.ServiceRegistrar, srv AgentRunt
 }
 
 func _AgentRuntimePodService_AcceptInput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RuntimeInputCommandRequest)
+	in := new(AcceptInputRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -196,13 +196,13 @@ func _AgentRuntimePodService_AcceptInput_Handler(srv interface{}, ctx context.Co
 		FullMethod: AgentRuntimePodService_AcceptInput_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimePodServiceServer).AcceptInput(ctx, req.(*RuntimeInputCommandRequest))
+		return srv.(AgentRuntimePodServiceServer).AcceptInput(ctx, req.(*AcceptInputRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimePodService_AcceptAgentMail_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RuntimeInputCommandRequest)
+	in := new(AcceptAgentMailRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -214,13 +214,13 @@ func _AgentRuntimePodService_AcceptAgentMail_Handler(srv interface{}, ctx contex
 		FullMethod: AgentRuntimePodService_AcceptAgentMail_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimePodServiceServer).AcceptAgentMail(ctx, req.(*RuntimeInputCommandRequest))
+		return srv.(AgentRuntimePodServiceServer).AcceptAgentMail(ctx, req.(*AcceptAgentMailRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimePodService_AcceptTaskNotification_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RuntimeInputCommandRequest)
+	in := new(AcceptTaskNotificationRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -232,13 +232,13 @@ func _AgentRuntimePodService_AcceptTaskNotification_Handler(srv interface{}, ctx
 		FullMethod: AgentRuntimePodService_AcceptTaskNotification_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimePodServiceServer).AcceptTaskNotification(ctx, req.(*RuntimeInputCommandRequest))
+		return srv.(AgentRuntimePodServiceServer).AcceptTaskNotification(ctx, req.(*AcceptTaskNotificationRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimePodService_Interrupt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RuntimeInputCommandRequest)
+	in := new(InterruptRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -250,13 +250,13 @@ func _AgentRuntimePodService_Interrupt_Handler(srv interface{}, ctx context.Cont
 		FullMethod: AgentRuntimePodService_Interrupt_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimePodServiceServer).Interrupt(ctx, req.(*RuntimeInputCommandRequest))
+		return srv.(AgentRuntimePodServiceServer).Interrupt(ctx, req.(*InterruptRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimePodService_ResolveToolConfirmation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RuntimeInputCommandRequest)
+	in := new(ResolveToolConfirmationRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -268,13 +268,13 @@ func _AgentRuntimePodService_ResolveToolConfirmation_Handler(srv interface{}, ct
 		FullMethod: AgentRuntimePodService_ResolveToolConfirmation_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimePodServiceServer).ResolveToolConfirmation(ctx, req.(*RuntimeInputCommandRequest))
+		return srv.(AgentRuntimePodServiceServer).ResolveToolConfirmation(ctx, req.(*ResolveToolConfirmationRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimePodService_ApplyRuntimeConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RuntimeInputCommandRequest)
+	in := new(ApplyRuntimeConfigRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -286,13 +286,13 @@ func _AgentRuntimePodService_ApplyRuntimeConfig_Handler(srv interface{}, ctx con
 		FullMethod: AgentRuntimePodService_ApplyRuntimeConfig_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimePodServiceServer).ApplyRuntimeConfig(ctx, req.(*RuntimeInputCommandRequest))
+		return srv.(AgentRuntimePodServiceServer).ApplyRuntimeConfig(ctx, req.(*ApplyRuntimeConfigRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimePodService_CleanupSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RuntimeInputCommandRequest)
+	in := new(CleanupSessionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -304,7 +304,7 @@ func _AgentRuntimePodService_CleanupSession_Handler(srv interface{}, ctx context
 		FullMethod: AgentRuntimePodService_CleanupSession_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimePodServiceServer).CleanupSession(ctx, req.(*RuntimeInputCommandRequest))
+		return srv.(AgentRuntimePodServiceServer).CleanupSession(ctx, req.(*CleanupSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }

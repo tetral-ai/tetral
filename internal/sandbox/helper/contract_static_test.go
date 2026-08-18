@@ -2,6 +2,7 @@ package helper_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,6 +56,23 @@ func TestHelperDoesNotImportServiceOrProviderBoundaries(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk helper source: %v", err)
+	}
+	command := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "./...")
+	command.Dir = root
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list Helper dependency closure: %v\n%s", err, output)
+	}
+	for _, dependency := range strings.Fields(string(output)) {
+		for _, forbidden := range []string{
+			"github.com/daytonaio/",
+			"github.com/tetral-ai/tetral/internal/sandbox/driver",
+			"github.com/tetral-ai/tetral/services/",
+		} {
+			if strings.HasPrefix(dependency, forbidden) {
+				t.Fatalf("Helper dependency closure contains forbidden boundary %q", dependency)
+			}
+		}
 	}
 }
 

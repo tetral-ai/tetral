@@ -17,8 +17,8 @@ import (
 )
 
 type FileAttachmentValidator interface {
-	ValidateEventAttachments(context.Context, files.SessionTransaction, workspace.ID, []files.EventAttachmentReference) error
-	PrimeEventAttachmentPDFCounts(context.Context, workspace.ID, []files.EventAttachmentReference) error
+	ValidateEventAttachments(context.Context, files.SessionTransaction, workspace.ID, string, []files.EventAttachmentReference) error
+	PrimeEventAttachmentPDFCounts(context.Context, workspace.ID, string, []files.EventAttachmentReference) error
 }
 
 type PostgreSQLSessionEventStore struct {
@@ -99,6 +99,7 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 					ctx,
 					sessionEventFilesTransaction{tx: tx},
 					workspaceID,
+					sessionID,
 					fileReferences,
 				); err != nil {
 					return err
@@ -222,6 +223,7 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 			if primeErr := s.fileAttachmentValidator.PrimeEventAttachmentPDFCounts(
 				ctx,
 				workspaceID,
+				sessionID,
 				fileReferences,
 			); primeErr != nil {
 				return nil, primeErr
@@ -312,7 +314,7 @@ func (s *PostgreSQLSessionEventStore) enqueueRuntimeInputJobs(ctx context.Contex
 				}
 			}
 			jobIndex++
-			// Durable timestamps are microsecond-precision, so fan-out jobs are spaced
+			// Durable timestamps are microsecond-precision, so jobs born by one request are spaced
 			// one microsecond apart to keep created_at ordering equal to insert order.
 			chunkTime := now.Add(time.Duration(jobIndex) * time.Microsecond)
 			if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
@@ -343,7 +345,7 @@ func resolveEventTargetThreadIDs(ctx context.Context, tx *dbconnect.Tx, workspac
 			}
 			return []string{threadID}, nil
 		}
-		return listInterruptTargetThreadIDs(ctx, tx, workspaceID, sessionID)
+		return []string{admission.mainThreadID}, nil
 	case EventTypeUserToolConfirmation:
 		threadID, err := resolvePendingToolConfirmation(ctx, tx, workspaceID, sessionID, event.toolUseEventID, event.toolResult, event.denyMessage, now)
 		if err != nil {
@@ -441,39 +443,6 @@ func resolveInterruptTargetThreadID(ctx context.Context, tx *dbconnect.Tx, works
 		return "", err
 	}
 	return threadID, nil
-}
-
-func listInterruptTargetThreadIDs(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string) ([]string, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT id
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND visibility = 'public'
-		    AND archived_at IS NULL
-		  ORDER BY created_at ASC, id ASC`,
-		string(workspaceID),
-		sessionID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var threadIDs []string
-	for rows.Next() {
-		var threadID string
-		if err := rows.Scan(&threadID); err != nil {
-			return nil, err
-		}
-		threadIDs = append(threadIDs, threadID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(threadIDs) == 0 {
-		return nil, errors.New("sessionevent: no public interrupt targets")
-	}
-	return threadIDs, nil
 }
 
 func resolvePendingToolConfirmationTarget(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, toolUseEventID string) (string, error) {

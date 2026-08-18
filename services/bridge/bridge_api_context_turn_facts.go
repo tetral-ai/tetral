@@ -42,19 +42,25 @@ type bridgeLoadContextRequestEnd struct {
 	Rescheduled         bool    `json:"rescheduled"`
 }
 
-type bridgeLoadContextToolUse struct{}
+type bridgeLoadContextToolUse struct {
+	ModelToolCallID string `json:"modelToolCallId"`
+	ToolName        string `json:"toolName"`
+}
 
 type bridgeLoadContextToolResult struct {
-	ToolUseEventID string `json:"toolUseEventId,omitempty"`
-	RepairKey      string `json:"repairKey,omitempty"`
+	ModelToolCallID string `json:"modelToolCallId,omitempty"`
+	ToolName        string `json:"toolName,omitempty"`
+	Outcome         string `json:"outcome,omitempty"`
+	RepairKey       string `json:"repairKey,omitempty"`
 }
 
 type bridgeLoadContextRepairFact struct {
-	RepairKey      string `json:"repairKey"`
-	MessageID      string `json:"messageId"`
-	RepairEventID  string `json:"repairEventId"`
-	EventSequence  int64  `json:"eventSequence"`
-	ModelRequestID string `json:"modelRequestId"`
+	RepairKey       string `json:"repairKey"`
+	RepairEventID   string `json:"repairEventId"`
+	EventSequence   int64  `json:"eventSequence"`
+	ModelRequestID  string `json:"modelRequestId"`
+	ModelToolCallID string `json:"modelToolCallId"`
+	ToolName        string `json:"toolName"`
 }
 
 type bridgeLoadContextIdle struct {
@@ -88,8 +94,8 @@ var bridgeLoadContextTurnEventTypes = []string{
 
 // loadThreadTurnFactsTx projects only facts with independent durable identity.
 // Runtime relates public Tools through their Tool Use references and internal
-// repairs through repair_key/runtime_write_id; Message mutation history is not
-// a checkpoint input.
+// repairs through their own stable event identity; Message mutation history is
+// not a checkpoint input.
 func loadThreadTurnFactsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -256,27 +262,78 @@ func loadContextTurnEventFloorTx(
 		compactionFloor = sequence
 		break
 	}
-	if durableTurnID == nil {
-		return compactionFloor, nil
-	}
 	var durableTurnFloor int64
-	err := tx.QueryRow(ctx,
-		`SELECT sequence
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND event_id = $4
-		    AND type IN ('session.status_running', 'session.thread_status_running')`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *durableTurnID,
-	).Scan(&durableTurnFloor)
-	if dbconnect.IsNoRows(err) {
-		return 0, status.Error(codes.FailedPrecondition, "durable turn has no running event")
+	if durableTurnID != nil {
+		err := tx.QueryRow(ctx,
+			`SELECT sequence
+			   FROM session_events
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND event_id = $4
+			    AND type IN ('session.status_running', 'session.thread_status_running')`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *durableTurnID,
+		).Scan(&durableTurnFloor)
+		if dbconnect.IsNoRows(err) {
+			return 0, status.Error(codes.FailedPrecondition, "durable turn has no running event")
+		}
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		err := tx.QueryRow(ctx,
+			`SELECT sequence
+			   FROM session_events
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND type IN ('session.status_running', 'session.thread_status_running')
+			  ORDER BY sequence DESC
+			  LIMIT 1`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+		).Scan(&durableTurnFloor)
+		if err != nil && !dbconnect.IsNoRows(err) {
+			return 0, err
+		}
 	}
+	eventFloor := durableTurnFloor
+	var unresolvedRequestFloor sql.NullInt64
+	err := tx.QueryRow(ctx,
+		`SELECT MIN(request_start.sequence)
+		   FROM session_events tool_use
+		   JOIN session_events request_start
+		     ON request_start.workspace_id=tool_use.workspace_id
+		    AND request_start.session_id=tool_use.session_id
+		    AND request_start.session_thread_id=tool_use.session_thread_id
+		    AND request_start.model_request_id=tool_use.model_request_id
+		    AND request_start.type='span.model_request_start'
+		  WHERE tool_use.workspace_id=$1 AND tool_use.session_id=$2 AND tool_use.session_thread_id=$3
+		    AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+		    AND request_start.sequence >= $4
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_events tool_result
+		       WHERE tool_result.workspace_id=tool_use.workspace_id
+		         AND tool_result.session_id=tool_use.session_id
+		         AND tool_result.session_thread_id=tool_use.session_thread_id
+		         AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		         AND COALESCE(
+		               tool_result.payload_json::jsonb ->> 'tool_use_event_id',
+		               tool_result.payload_json::jsonb ->> 'tool_use_id',
+		               tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
+		             )=tool_use.event_id
+		    )`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), compactionFloor,
+	).Scan(&unresolvedRequestFloor)
 	if err != nil {
 		return 0, err
 	}
-	return compactionFloor, nil
+	if unresolvedRequestFloor.Valid && unresolvedRequestFloor.Int64 < eventFloor {
+		eventFloor = unresolvedRequestFloor.Int64
+	}
+	if eventFloor < compactionFloor {
+		eventFloor = compactionFloor
+	}
+	return eventFloor, nil
 }
 
 func bridgeTurnEventFact(
@@ -341,32 +398,19 @@ func bridgeTurnEventFact(
 		if !modelRequestID.Valid {
 			return event, status.Error(codes.FailedPrecondition, "tool use fact has no model request identity")
 		}
-		event.ToolUse = &bridgeLoadContextToolUse{}
-	case "agent.tool_result", "agent.mcp_tool_result":
-		result, err := bridgeTurnToolResultFact(eventType, payloadJSON, runtimeWriteID)
+		toolUse, err := bridgeTurnToolUseFact(payloadJSON, projectionJSON)
 		if err != nil {
 			return event, err
 		}
-		if !modelRequestID.Valid && result.ToolUseEventID != "" {
-			if err := tx.QueryRow(ctx,
-				`SELECT model_request_id
-				   FROM session_events
-				  WHERE workspace_id = $1
-				    AND session_id = $2
-				    AND session_thread_id = $3
-				    AND event_id = $4
-				    AND type IN ('agent.tool_use', 'agent.mcp_tool_use')`,
-				scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), result.ToolUseEventID,
-			).Scan(&modelRequestID); err != nil {
-				if dbconnect.IsNoRows(err) {
-					return event, status.Error(codes.FailedPrecondition, "tool result fact has no model request identity")
-				}
-				return event, err
-			}
-			if !modelRequestID.Valid || modelRequestID.String == "" {
-				return event, status.Error(codes.FailedPrecondition, "tool result fact has no model request identity")
-			}
-			event.ModelRequestID = &modelRequestID.String
+		event.ToolUse = toolUse
+	case "agent.tool_result", "agent.mcp_tool_result":
+		result, resultModelRequestID, err := bridgeTurnToolResultFact(ctx, tx, scope, eventType, payloadJSON, projectionJSON, runtimeWriteID)
+		if err != nil {
+			return event, err
+		}
+		if !modelRequestID.Valid && resultModelRequestID != "" {
+			modelRequestID = sql.NullString{String: resultModelRequestID, Valid: true}
+			event.ModelRequestID = &resultModelRequestID
 		}
 		if !modelRequestID.Valid {
 			return event, status.Error(codes.FailedPrecondition, "tool result fact has no model request identity")
@@ -419,62 +463,96 @@ func bridgeTurnEventTypeAllowed(eventType string) bool {
 }
 
 func loadContextRequestEndRescheduledTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, modelRequestID string) (bool, error) {
-	var receiptJSON string
+	var rescheduled bool
 	err := tx.QueryRow(ctx,
-		`SELECT COALESCE(receipt_json, '')
-		   FROM session_bridge_operations
+		`SELECT EXISTS (
+		   SELECT 1 FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
-		    AND operation = 'write_request_end'
-		    AND source_kind = 'model_request'
-		    AND idempotency_key = $4`,
+		    AND model_request_id = $4
+		    AND type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
+		)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&receiptJSON)
-	if dbconnect.IsNoRows(err) {
-		return false, nil
-	}
+	).Scan(&rescheduled)
 	if err != nil {
 		return false, err
 	}
-	receipt, err := unmarshalDeclarationReceipt(receiptJSON)
-	if err != nil {
-		return false, status.Error(codes.FailedPrecondition, "request end receipt is malformed")
+	return rescheduled, nil
+}
+
+func bridgeTurnToolUseFact(payloadJSON string, projectionJSON string) (*bridgeLoadContextToolUse, error) {
+	var payload runtimeToolUseEventPayload
+	var projection struct {
+		ModelToolCallID string `json:"model_tool_call_id"`
 	}
-	return receipt.GetRequestReschedule().GetDisposition() == bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED, nil
+	if json.Unmarshal([]byte(payloadJSON), &payload) != nil || json.Unmarshal([]byte(projectionJSON), &projection) != nil ||
+		payload.Name == "" || projection.ModelToolCallID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "tool use direct facts are malformed")
+	}
+	return &bridgeLoadContextToolUse{ModelToolCallID: projection.ModelToolCallID, ToolName: payload.Name}, nil
 }
 
 func bridgeTurnToolResultFact(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
 	eventType string,
 	payloadJSON string,
+	projectionJSON string,
 	runtimeWriteID sql.NullString,
-) (*bridgeLoadContextToolResult, error) {
+) (*bridgeLoadContextToolResult, string, error) {
 	var payload struct {
-		ToolUseEventID string `json:"tool_use_event_id"`
-		ToolUseID      string `json:"tool_use_id"`
-		MCPToolUseID   string `json:"mcp_tool_use_id"`
-		RepairKind     string `json:"repair_kind"`
+		ToolUseEventID  string `json:"tool_use_event_id"`
+		ToolUseID       string `json:"tool_use_id"`
+		MCPToolUseID    string `json:"mcp_tool_use_id"`
+		RepairKind      string `json:"repair_kind"`
+		ModelToolCallID string `json:"model_tool_call_id"`
+		ToolName        string `json:"tool_name"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, "tool result projection is malformed")
+		return nil, "", status.Error(codes.FailedPrecondition, "tool result projection is malformed")
 	}
 	if payload.RepairKind != "" {
-		if eventType != "agent.tool_result" || payload.RepairKind != "invalid_tool" || !runtimeWriteID.Valid || runtimeWriteID.String == "" {
-			return nil, status.Error(codes.FailedPrecondition, "internal tool repair projection is malformed")
+		if eventType != "agent.tool_result" || payload.RepairKind != "invalid_tool" || !runtimeWriteID.Valid || runtimeWriteID.String == "" ||
+			payload.ModelToolCallID == "" || payload.ToolName == "" {
+			return nil, "", status.Error(codes.FailedPrecondition, "internal tool repair projection is malformed")
 		}
-		return &bridgeLoadContextToolResult{
-			RepairKey: runtimeWriteID.String,
-		}, nil
+		return &bridgeLoadContextToolResult{RepairKey: runtimeWriteID.String}, "", nil
 	}
-	toolUseEventID, err := runtimeToolResultUseEventID(eventType, runtimeToolResultEventPayload{
+	toolUseEventID, err := durableToolResultUseEventID(eventType, durableToolResultEventPayload{
 		ToolUseEventID: payload.ToolUseEventID,
 		ToolUseID:      payload.ToolUseID,
 		MCPToolUseID:   payload.MCPToolUseID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &bridgeLoadContextToolResult{ToolUseEventID: toolUseEventID}, nil
+	var modelRequestID, toolUsePayloadJSON, toolUseProjectionJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(model_request_id, ''), payload_json, projection_json
+		   FROM session_events
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		    AND event_id=$4 AND type IN ('agent.tool_use','agent.mcp_tool_use')`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+	).Scan(&modelRequestID, &toolUsePayloadJSON, &toolUseProjectionJSON); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return nil, "", status.Error(codes.FailedPrecondition, "tool result has no durable Tool Use")
+		}
+		return nil, "", err
+	}
+	toolUse, err := bridgeTurnToolUseFact(toolUsePayloadJSON, toolUseProjectionJSON)
+	if err != nil {
+		return nil, "", err
+	}
+	var projection struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil ||
+		(projection.State != "completed" && projection.State != "error" && projection.State != "cancelled") {
+		return nil, "", status.Error(codes.FailedPrecondition, "tool result direct facts are malformed")
+	}
+	return &bridgeLoadContextToolResult{ModelToolCallID: toolUse.ModelToolCallID, ToolName: toolUse.ToolName, Outcome: projection.State}, modelRequestID, nil
 }
 
 func loadContextRepairFactsTx(
@@ -484,20 +562,15 @@ func loadContextRepairFactsTx(
 	eventFloor int64,
 ) ([]bridgeLoadContextRepairFact, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT m.repair_key, m.message_id, e.event_id, e.sequence, e.model_request_id
-		   FROM session_messages AS m
-		   JOIN session_events AS e
-		     ON e.workspace_id = m.workspace_id
-		    AND e.session_id = m.session_id
-		    AND e.session_thread_id = m.session_thread_id
-		    AND e.runtime_write_id = m.repair_key
-		    AND e.type = 'agent.tool_result'
-		  WHERE m.workspace_id = $1
-		    AND m.session_id = $2
-		    AND m.session_thread_id = $3
-		    AND m.repair_key IS NOT NULL
-		    AND e.sequence >= $4
-		  ORDER BY e.sequence ASC`,
+		`SELECT runtime_write_id, payload_json, event_id, sequence, model_request_id
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND type = 'agent.tool_result'
+		    AND payload_json::jsonb ->> 'repair_kind' = 'invalid_tool'
+		    AND sequence >= $4
+		  ORDER BY sequence ASC`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -511,17 +584,18 @@ func loadContextRepairFactsTx(
 	seen := make(map[string]struct{})
 	for rows.Next() {
 		var fact bridgeLoadContextRepairFact
+		var payloadJSON string
 		var modelRequestID sql.NullString
 		if err := rows.Scan(
 			&fact.RepairKey,
-			&fact.MessageID,
+			&payloadJSON,
 			&fact.RepairEventID,
 			&fact.EventSequence,
 			&modelRequestID,
 		); err != nil {
 			return nil, err
 		}
-		if fact.RepairKey == "" || fact.MessageID == "" || fact.RepairEventID == "" ||
+		if fact.RepairKey == "" || fact.RepairEventID == "" ||
 			fact.EventSequence <= 0 || !modelRequestID.Valid || modelRequestID.String == "" {
 			return nil, status.Error(codes.FailedPrecondition, "internal repair direct reference is malformed")
 		}
@@ -530,6 +604,19 @@ func loadContextRepairFactsTx(
 		}
 		seen[fact.RepairKey] = struct{}{}
 		fact.ModelRequestID = modelRequestID.String
+		payload, err := decodeRuntimeDeclarationObject(payloadJSON)
+		if err != nil || requireRuntimeObjectFields(
+			payload,
+			[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
+			[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
+		) != nil || payload["type"] != "agent.tool_result" || payload["repair_kind"] != "invalid_tool" {
+			return nil, status.Error(codes.FailedPrecondition, "internal repair direct event is malformed")
+		}
+		fact.ModelToolCallID, _ = payload["model_tool_call_id"].(string)
+		fact.ToolName, _ = payload["tool_name"].(string)
+		if fact.ModelToolCallID == "" || fact.ToolName == "" {
+			return nil, status.Error(codes.FailedPrecondition, "internal repair direct event is incomplete")
+		}
 		facts = append(facts, fact)
 	}
 	if err := rows.Err(); err != nil {

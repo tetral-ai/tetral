@@ -10,221 +10,197 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-func TestCloseoutWriteRejectionTaxonomy(t *testing.T) {
+func TestCloseoutSentinelTaxonomyPreservesGRPCStatus(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		err      error
 		wantCode string
-		wantOK   bool
 	}{
-		{name: "superseded", err: scopeSupersededError(status.Error(codes.FailedPrecondition, "stale")), wantCode: closeoutScopeSupersededCode, wantOK: true},
-		{name: "unrepairable", err: closeoutUnrepairableError(status.Error(codes.Internal, "invalid")), wantCode: closeoutUnrepairableCode, wantOK: true},
-		{name: "validation", err: status.Error(codes.InvalidArgument, "invalid"), wantCode: closeoutUnrepairableCode, wantOK: true},
-		{name: "idempotency conflict", err: status.Error(codes.AlreadyExists, "conflict"), wantCode: closeoutUnrepairableCode, wantOK: true},
-		{name: "transient failed precondition", err: status.Error(codes.FailedPrecondition, "preparation not ready"), wantOK: false},
-		{name: "transport", err: status.Error(codes.Unavailable, "database unavailable"), wantOK: false},
+		{name: "superseded", err: scopeSupersededError(status.Error(codes.FailedPrecondition, "stale")), wantCode: closeoutScopeSupersededCode},
+		{name: "unrepairable", err: closeoutUnrepairableError(status.Error(codes.Internal, "invalid")), wantCode: closeoutUnrepairableCode},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			gotCode, gotOK := closeoutWriteRejectionCode(test.err)
-			if gotOK != test.wantOK || gotCode != test.wantCode {
-				t.Fatalf("closeoutWriteRejectionCode() = (%q, %t); want (%q, %t)", gotCode, gotOK, test.wantCode, test.wantOK)
+			gotCode, ok := closeoutSentinelCode(test.err)
+			if !ok || gotCode != test.wantCode {
+				t.Fatalf("closeoutSentinelCode() = (%q, %t); want (%q, true)", gotCode, ok, test.wantCode)
 			}
-			if status.Code(test.err) == codes.Unknown && test.wantOK {
+			if status.Code(test.err) == codes.Unknown {
 				t.Fatalf("sentinel lost wrapped gRPC status: %v", test.err)
 			}
 		})
 	}
-}
-
-func TestBridgeAPIServerWriteEventReturnsSupersededForEveryInitialCustodyEnd(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		mutate func(t *testing.T, fixture closeoutSentinelFixture)
-		scope  func(fixture closeoutSentinelFixture) *bridgev1.RuntimeScope
-		ctx    func(fixture closeoutSentinelFixture) context.Context
-	}{
-		{
-			name: "binding absent",
-			mutate: func(t *testing.T, fixture closeoutSentinelFixture) {
-				if _, err := fixture.admin.ExecContext(context.Background(),
-					`DELETE FROM session_runtime_bindings WHERE workspace_id = 'default' AND session_id = $1`, fixture.sessionID); err != nil {
-					t.Fatalf("delete runtime binding: %v", err)
-				}
-			},
-		},
-		{
-			name: "binding generation replaced",
-			scope: func(fixture closeoutSentinelFixture) *bridgev1.RuntimeScope {
-				return bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 2, fixture.podUID)
-			},
-		},
-		{
-			name: "session deleted",
-			mutate: func(t *testing.T, fixture closeoutSentinelFixture) {
-				if _, err := fixture.admin.ExecContext(context.Background(),
-					`UPDATE sessions SET lifecycle_state = 'deleted' WHERE workspace_id = 'default' AND id = $1`, fixture.sessionID); err != nil {
-					t.Fatalf("mark session deleted: %v", err)
-				}
-			},
-		},
-		{
-			name: "session not found",
-			scope: func(fixture closeoutSentinelFixture) *bridgev1.RuntimeScope {
-				return bridgeAPIScope("sesn_closeout_missing", "thr_closeout_missing", fixture.bindingID, 1, fixture.podUID)
-			},
-		},
-		{
-			name: "caller pod uid mismatch",
-			ctx: func(fixture closeoutSentinelFixture) context.Context {
-				return internalgrpcauth.ContextWithIdentity(context.Background(), internalgrpcauth.Identity{
-					ServiceAccount:   internalgrpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"},
-					KubernetesPodUID: "pod_uid_other",
-				})
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newCloseoutSentinelFixture(t, test.name)
-			modelRequestID := "mreq_" + fixture.sessionID
-			start, err := fixture.store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope:                         bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID),
-				RuntimeWriteId:                "rwrite_start_" + fixture.sessionID,
-				ModelRequestId:                modelRequestID,
-				EventType:                     "span.model_request_start",
-				PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
-				ContextThroughMessageSequence: bridgeAPIInt64(0),
-				RequestKind:                   "agent_provider_request",
-				SessionVisible:                false,
-			})
-			if err != nil {
-				t.Fatalf("seed request start: %v", err)
-			}
-			if test.mutate != nil {
-				test.mutate(t, fixture)
-			}
-			scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
-			if test.scope != nil {
-				scope = test.scope(fixture)
-			}
-			ctx := context.Background()
-			if test.ctx != nil {
-				ctx = test.ctx(fixture)
-			}
-			response, err := fixture.server.WriteEvent(ctx, closeoutWriteEventRequest(scope, "rwrite_"+fixture.sessionID))
-			if err != nil {
-				t.Fatalf("WriteEvent error = %v; want rejected ACK", err)
-			}
-			if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-				response.GetAck().GetErrorCode() != closeoutScopeSupersededCode {
-				t.Fatalf("WriteEvent ack = %+v; want rejected %q", response.GetAck(), closeoutScopeSupersededCode)
-			}
-			assertNoCloseoutBridgeOperation(t, fixture, "rwrite_"+fixture.sessionID)
-			idleResponse, err := fixture.server.FinishIdle(ctx, &bridgev1.FinishIdleRequest{
-				Scope:          scope,
-				DurableTurnId:  "rwrite_start_" + fixture.sessionID,
-				StopReasonJson: `{"type":"end_turn"}`,
-			})
-			if err != nil {
-				t.Fatalf("FinishIdle error = %v; want rejected ACK", err)
-			}
-			if idleResponse.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-				idleResponse.GetAck().GetErrorCode() != closeoutScopeSupersededCode {
-				t.Fatalf("FinishIdle ack = %+v; want rejected %q", idleResponse.GetAck(), closeoutScopeSupersededCode)
-			}
-			assertNoCloseoutBridgeOperation(t, fixture, "rwrite_idle_"+fixture.sessionID)
-			requestEndResponse, err := fixture.server.WriteRequestEnd(ctx, &bridgev1.WriteRequestEndRequest{
-				Scope:                    scope,
-				RuntimeWriteId:           "rwrite_request_end_" + fixture.sessionID,
-				ModelRequestId:           modelRequestID,
-				ModelRequestStartEventId: start.GetEventId(),
-				FinishReason:             "stop",
-				UsageJson:                `{}`,
-			})
-			if err != nil {
-				t.Fatalf("WriteRequestEnd error = %v; want rejected ACK", err)
-			}
-			if requestEndResponse.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-				requestEndResponse.GetAck().GetErrorCode() != closeoutScopeSupersededCode {
-				t.Fatalf("WriteRequestEnd ack = %+v; want rejected %q", requestEndResponse.GetAck(), closeoutScopeSupersededCode)
-			}
-			assertNoCloseoutBridgeOperation(t, fixture, "mreq_"+fixture.sessionID+":rwrite_request_end_"+fixture.sessionID)
-			terminationResponse, err := fixture.server.CommitRuntimeTermination(ctx, &bridgev1.CommitRuntimeTerminationRequest{
-				Scope:          scope,
-				RuntimeWriteId: "rwrite_termination_" + fixture.sessionID,
-				FailureJson:    `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
-			})
-			if err != nil {
-				t.Fatalf("CommitRuntimeTermination error = %v; want rejected ACK", err)
-			}
-			if terminationResponse.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-				terminationResponse.GetAck().GetErrorCode() != closeoutScopeSupersededCode {
-				t.Fatalf("CommitRuntimeTermination ack = %+v; want rejected %q", terminationResponse.GetAck(), closeoutScopeSupersededCode)
-			}
-			assertNoCloseoutBridgeOperation(t, fixture, "session:rwrite_termination_"+fixture.sessionID)
-		})
+	if _, ok := closeoutSentinelCode(status.Error(codes.Unavailable, "transient")); ok {
+		t.Fatal("ordinary gRPC error was classified as a closeout sentinel")
 	}
 }
 
-func TestBridgeAPIServerCloseoutUnrepairableAndTransientArms(t *testing.T) {
-	fixture := newCloseoutSentinelFixture(t, "unrepairable")
-	invalid, err := fixture.server.WriteEvent(context.Background(), closeoutWriteEventRequest(
+func TestBridgeAPIServerReturnsClosedStaleResultsForSupersededCloseouts(t *testing.T) {
+	fixture := newCloseoutSentinelFixture(t, "typed_stale")
+	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	modelRequestID := "mreq_" + fixture.sessionID
+	seedBridgeAPIRequestStart(t, fixture.store, scope, "rwrite_start_"+fixture.sessionID, modelRequestID, requestKindAgentProviderRequest, 0)
+	if _, err := fixture.admin.ExecContext(context.Background(),
+		`DELETE FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`,
+		fixture.sessionID,
+	); err != nil {
+		t.Fatalf("delete runtime binding: %v", err)
+	}
+
+	written, err := fixture.server.WriteEvent(context.Background(), closeoutWriteEventRequest(scope, "rwrite_"+fixture.sessionID))
+	if err != nil || written.GetStale() == nil {
+		t.Fatalf("WriteEvent stale result = %#v err=%v", written, err)
+	}
+	idle, err := fixture.server.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
+		Scope: scope, DurableTurnId: "rwrite_start_" + fixture.sessionID, StopReasonJson: `{"type":"end_turn"}`,
+	})
+	if err != nil || idle.GetStale() == nil {
+		t.Fatalf("FinishIdle stale result = %#v err=%v", idle, err)
+	}
+	ended, err := fixture.server.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_end_" + fixture.sessionID, ModelRequestId: modelRequestID,
+		FinishReason: "stop", UsageJson: `{}`,
+	})
+	if err != nil || ended.GetStale() == nil {
+		t.Fatalf("WriteRequestEnd stale result = %#v err=%v", ended, err)
+	}
+	terminated, err := fixture.server.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_termination_" + fixture.sessionID,
+		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
+	})
+	if err != nil || terminated.GetStale() == nil {
+		t.Fatalf("CommitRuntimeTermination stale result = %#v err=%v", terminated, err)
+	}
+}
+
+func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.T) {
+	fixture := newCloseoutSentinelFixture(t, "termination_replay_binding")
+	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	running, err := fixture.store.WriteEvent(context.Background(), closeoutWriteEventRequest(scope, "rwrite_termination_replay_binding"))
+	if err != nil || running.GetCommitted() == nil {
+		t.Fatalf("open durable Runtime turn = %#v/%v", running, err)
+	}
+	runtimeWriteID := running.GetCommitted().GetEventId()
+	request := &bridgev1.CommitRuntimeTerminationRequest{
+		Scope: scope, RuntimeWriteId: runtimeWriteID,
+		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
+	}
+	committed, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("CommitRuntimeTermination = %#v/%v; want committed", committed, err)
+	}
+	if _, err := fixture.admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_bindings
+		    SET binding_id='bind_termination_replacement', binding_generation=2,
+		        agent_runtime_pod_uid='pod_termination_replacement'
+		  WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
+	); err != nil {
+		t.Fatalf("replace Runtime binding: %v", err)
+	}
+	replay, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
+	if err != nil || replay.GetStale() == nil {
+		t.Fatalf("old-Pod termination replay = %#v/%v; want stale", replay, err)
+	}
+}
+
+func TestBridgeAPIServerKeepsStructuralFailureOutOfStaleUnion(t *testing.T) {
+	fixture := newCloseoutSentinelFixture(t, "structural")
+	response, err := fixture.server.WriteEvent(context.Background(), closeoutWriteEventRequest(
 		bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID),
 		"",
 	))
-	if err != nil {
-		t.Fatalf("invalid WriteEvent error = %v; want rejected ACK", err)
+	if response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("invalid WriteEvent response=%#v err=%v; want InvalidArgument", response, err)
 	}
-	if invalid.GetAck().GetErrorCode() != closeoutUnrepairableCode {
-		t.Fatalf("invalid WriteEvent errorCode = %q; want %q", invalid.GetAck().GetErrorCode(), closeoutUnrepairableCode)
-	}
+}
 
-	missingThreadScope := bridgeAPIScope(fixture.sessionID, "thr_missing_closeout", fixture.bindingID, 1, fixture.podUID)
-	missing, err := fixture.server.WriteEvent(context.Background(), closeoutWriteEventRequest(missingThreadScope, "rwrite_missing_thread"))
-	if err != nil {
-		t.Fatalf("missing-thread WriteEvent error = %v; want rejected ACK", err)
+func TestBridgeAPIServerMapsInputSettlementScopeSupersessionToTypedStale(t *testing.T) {
+	for _, rpc := range []string{"commit_inputs", "commit_task_notification_result"} {
+		for _, staleKind := range []string{"binding_generation", "pod_uid", "session_deleted"} {
+			t.Run(rpc+"/"+staleKind, func(t *testing.T) {
+				fixture := newCloseoutSentinelFixture(t, rpc+"_"+staleKind)
+				scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+				inputID := "rin_" + fixture.sessionID
+				if rpc == "commit_inputs" {
+					seedBridgeAPIEvent(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, "evt_"+fixture.sessionID, 1, "user.message", `{"content":[{"type":"text","text":"stale"}]}`)
+					seedBridgeAPIRuntimeInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, "messages",
+						`["evt_`+fixture.sessionID+`"]`, "accepted", fixture.bindingID, fixture.podUID, 1, 1)
+				} else {
+					inputID = "task_notification:task_" + fixture.sessionID
+					seedBridgeAPITaskNotificationInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, fixture.bindingID, fixture.podUID)
+				}
+				switch staleKind {
+				case "binding_generation":
+					scope.Binding.BindingGeneration++
+				case "pod_uid":
+					scope.Binding.TargetPodUid = "pod_superseded"
+				case "session_deleted":
+					if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted'
+						WHERE workspace_id='default' AND id=$1`, fixture.sessionID); err != nil {
+						t.Fatalf("delete superseded Session: %v", err)
+					}
+				}
+				if rpc == "commit_inputs" {
+					response, err := fixture.server.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: inputID})
+					if err != nil || response.GetStale() == nil {
+						t.Fatalf("CommitInputs superseded scope = %#v/%v; want typed stale", response, err)
+					}
+				} else {
+					response, err := fixture.server.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{Scope: scope, RuntimeInputId: inputID})
+					if err != nil || response.GetStale() == nil {
+						t.Fatalf("CommitTaskNotificationResult superseded scope = %#v/%v; want typed stale", response, err)
+					}
+				}
+				var inboxStatus string
+				var operations int
+				if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+					(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+					(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`,
+					fixture.sessionID, inputID,
+				).Scan(&inboxStatus, &operations); err != nil {
+					t.Fatalf("read typed stale input facts: %v", err)
+				}
+				if inboxStatus != "accepted" || operations != 0 {
+					t.Fatalf("typed stale mutated input facts = Inbox %s operations %d", inboxStatus, operations)
+				}
+			})
+		}
 	}
-	if missing.GetAck().GetErrorCode() != closeoutUnrepairableCode {
-		t.Fatalf("missing-thread WriteEvent errorCode = %q; want %q", missing.GetAck().GetErrorCode(), closeoutUnrepairableCode)
+}
+
+func TestBridgeAPIServerDoesNotClassifyMalformedInputSettlementsAsStale(t *testing.T) {
+	fixture := newCloseoutSentinelFixture(t, "input_structural_control")
+	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 2, fixture.podUID)
+	if response, err := fixture.server.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{Scope: scope}); response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("malformed CommitInputs = %#v/%v; want InvalidArgument", response, err)
 	}
-	missingIdle, err := fixture.server.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          missingThreadScope,
-		DurableTurnId:  "rwrite_missing_thread_idle",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
-	if err != nil {
-		t.Fatalf("missing-thread FinishIdle error = %v; want rejected ACK", err)
-	}
-	if missingIdle.GetAck().GetErrorCode() != closeoutUnrepairableCode {
-		t.Fatalf("missing-thread FinishIdle errorCode = %q; want %q", missingIdle.GetAck().GetErrorCode(), closeoutUnrepairableCode)
+	if response, err := fixture.server.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{Scope: scope}); response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("malformed CommitTaskNotificationResult = %#v/%v; want InvalidArgument", response, err)
 	}
 }
 
 func TestCloseoutTerminalChildSentinel(t *testing.T) {
-	fixture := newCloseoutSentinelFixture(t, "lower_layers")
+	fixture := newCloseoutSentinelFixture(t, "terminal_child")
 	client := dbconnect.NewClientForTesting(fixture.runtime)
-
-	childID := "thr_closeout_terminal_child"
+	childID := "thr_closeout_terminal_child_subagent"
 	if _, err := fixture.admin.ExecContext(context.Background(),
 		`INSERT INTO session_threads (
 			workspace_id, id, session_id, parent_thread_id, role, visibility, agent_type, task_name, status,
 			created_at, last_active_at, updated_at
 		) VALUES ('default', $1, $2, $3, 'subagent', 'public', 'worker', 'worker', 'terminated',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		childID, fixture.sessionID, fixture.threadID); err != nil {
+		childID, fixture.sessionID, fixture.threadID,
+	); err != nil {
 		t.Fatalf("seed terminal child: %v", err)
 	}
 	err := client.WithWorkspaceTx(context.Background(), "default", "closeout.terminal_child", func(tx *dbconnect.Tx) error {
 		return updateChildThreadStatusTx(
-			context.Background(),
-			tx,
+			context.Background(), tx,
 			bridgeAPIScope(fixture.sessionID, childID, fixture.bindingID, 1, fixture.podUID),
-			"idle",
-			fixture.store.now(),
+			"idle", fixture.store.now(),
 		)
 	})
 	if code, ok := closeoutSentinelCode(err); !ok || code != closeoutScopeSupersededCode {
@@ -245,7 +221,7 @@ type closeoutSentinelFixture struct {
 
 func newCloseoutSentinelFixture(t *testing.T, suffix string) closeoutSentinelFixture {
 	t.Helper()
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	suffix = strings.ReplaceAll(suffix, " ", "_")
 	sessionID := "sesn_closeout_" + suffix
 	threadID := "thr_closeout_" + suffix
@@ -253,38 +229,16 @@ func newCloseoutSentinelFixture(t *testing.T, suffix string) closeoutSentinelFix
 	podUID := "pod_uid_closeout_" + suffix
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	return closeoutSentinelFixture{
-		runtime:   runtime,
-		admin:     admin,
-		sessionID: sessionID,
-		threadID:  threadID,
-		bindingID: bindingID,
-		podUID:    podUID,
-		store:     store,
-		server:    BridgeAPIServer{store: store},
+		runtime: runtimeDB, admin: admin, sessionID: sessionID, threadID: threadID,
+		bindingID: bindingID, podUID: podUID, store: store, server: BridgeAPIServer{store: store},
 	}
 }
 
 func closeoutWriteEventRequest(scope *bridgev1.RuntimeScope, writeID string) *bridgev1.WriteEventRequest {
 	return &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: writeID,
-		EventType:      "session.status_running",
-		PayloadJson:    `{"type":"session.status_running"}`,
-	}
-}
-
-func assertNoCloseoutBridgeOperation(t *testing.T, fixture closeoutSentinelFixture, writeID string) {
-	t.Helper()
-	var count int
-	if err := fixture.admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND idempotency_key = $1`,
-		writeID,
-	).Scan(&count); err != nil {
-		t.Fatalf("count closeout bridge operations: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("bridge operation count = %d; want 0", count)
+		Scope: scope, RuntimeWriteId: writeID, EventType: "session.status_running",
+		PayloadJson: `{"type":"session.status_running"}`,
 	}
 }

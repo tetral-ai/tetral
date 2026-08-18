@@ -1,9 +1,7 @@
 package static
 
 import (
-	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -61,7 +59,7 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	// on a maintainer's machine and getting no checks at all.
 	engineCIJobs := []string{
 		"go-static:", "go-test:", "protocol:", "agent-runtime-ts:", "gateway-ts:",
-		"k8s-manifests:", "helm-chart:", "security:", "helper-privilege:", "external-smoke:",
+		"k8s-manifests:", "helm-chart:", "security:", "sandbox-local-image-smoke:", "external-smoke:",
 	}
 	for _, jobName := range engineCIJobs {
 		if !strings.Contains(workflowJobForStaticTest(t, text, jobName), "runs-on: ubuntu-latest") {
@@ -75,8 +73,8 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	}
 	// A hosted runner starts empty, so each Go toolchain keys its cache on the
 	// repository's module file.
-	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 6 {
-		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 6", got)
+	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 8 {
+		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 8", got)
 	}
 	if strings.Count(text, "persist-credentials: false") != 12 {
 		t.Fatal("each engine-ci checkout must disable credential persistence")
@@ -250,7 +248,7 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 		"gateway-ts:",
 		"k8s-manifests:",
 		"security:",
-		"helper-privilege:",
+		"sandbox-local-image-smoke:",
 		"external-smoke:",
 	}
 	for _, jobName := range requiredJobs {
@@ -400,7 +398,9 @@ func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
 	}
 	text := string(content)
 	versionJob := workflowJobForStaticTest(t, text, "version:")
+	sandboxImageJob := workflowJobForStaticTest(t, text, "sandbox-image:")
 	imagesJob := workflowJobForStaticTest(t, text, "images:")
+	releaseSmokeJob := workflowJobForStaticTest(t, text, "daytona-release-smoke:")
 	chartJob := workflowJobForStaticTest(t, text, "chart:")
 
 	for _, token := range []string{
@@ -417,14 +417,50 @@ func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
 	}
 	for _, token := range []string{
 		"needs: version",
+		"digest: ${{ steps.build.outputs.digest }}",
+		"file: Dockerfile.sandbox",
+		"push: true",
+		"tags: ghcr.io/${{ github.repository_owner }}/sandbox:${{ needs.version.outputs.version }}",
+	} {
+		if !strings.Contains(sandboxImageJob, token) {
+			t.Errorf("release Sandbox image job missing %q", token)
+		}
+	}
+	for _, token := range []string{
+		"needs: version",
 		"${{ needs.version.outputs.version }}",
 	} {
 		if !strings.Contains(imagesJob, token) {
 			t.Errorf("release image job missing %q", token)
 		}
 	}
+	if strings.Contains(imagesJob, "- image: sandbox") || strings.Contains(imagesJob, "Dockerfile.sandbox") {
+		t.Error("generic release image matrix duplicates the separately published Sandbox image")
+	}
 	for _, token := range []string{
-		"needs: [version, images]",
+		"needs: sandbox-image",
+		"environment: release",
+		"permissions:\n      contents: read",
+		"TETRAL_DAYTONA_RELEASE_SMOKE_IMAGE: ghcr.io/${{ github.repository_owner }}/sandbox@${{ needs.sandbox-image.outputs.digest }}",
+		"DAYTONA_API_URL: ${{ secrets.DAYTONA_API_URL }}",
+		"DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}",
+		"-tags daytona_release_smoke",
+		"^TestDaytonaPublishedImageProductionAdapterSmoke$",
+	} {
+		if !strings.Contains(releaseSmokeJob, token) {
+			t.Errorf("Daytona release smoke job missing %q", token)
+		}
+	}
+	if strings.Contains(releaseSmokeJob, "packages: write") {
+		t.Error("Daytona release smoke job must not receive package write permission")
+	}
+	for _, secret := range []string{"${{ secrets.DAYTONA_API_URL }}", "${{ secrets.DAYTONA_API_KEY }}"} {
+		if count := strings.Count(text, secret); count != 1 {
+			t.Errorf("release workflow Daytona secret %q count = %d; want release smoke only", secret, count)
+		}
+	}
+	for _, token := range []string{
+		"needs: [version, images, daytona-release-smoke]",
 		"version: v4.2.0",
 		`helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION"`,
 		"helm push",
@@ -436,7 +472,65 @@ func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
 	}
 }
 
-func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
+func TestDaytonaPublishedImageSmokeIsReleaseOnlyAndUsesProductionAdapters(t *testing.T) {
+	engineRoot := finalArchitectureEngineRoot(t)
+	smokePath := filepath.Join(engineRoot, "services", "sandbox", "daytona_release_smoke_test.go")
+	smokeBody, err := os.ReadFile(smokePath) //nolint:gosec // Repository-local release-smoke source.
+	if err != nil {
+		t.Fatalf("read Daytona release smoke: %v", err)
+	}
+	smoke := string(smokeBody)
+	if !strings.HasPrefix(smoke, "//go:build daytona_release_smoke\n") {
+		t.Fatal("Daytona release smoke must be excluded from normal Go test selection")
+	}
+	for _, token := range []string{
+		"driver.NewDaytonaArtifactBuilderForClient(client.Snapshot, imageRef)",
+		"buildReleaseSmokeArtifact(ctx, builder, artifactRequest)",
+		"driver.NewDaytonaLifecycleProviderForSDKClient(client, cfg)",
+		"driver.NewDaytonaHelperExecutorForSDKClient(client, cfg.CommandTimeout)",
+		"lifecycle.CreateSandbox(ctx, sandbox.CreateSandboxRequest{Setup: setup})",
+		"lifecycle.InspectState(ctx, handle.SandboxID)",
+		"cleanup.cleanupSandbox(cleanupCtx, lifecycle, stableName, ownershipLabels, policy)",
+		"lifecycle.ResolveSandbox(ctx, stableName, labels)",
+		"snapshot.Name != expectedName",
+		"helper.CheckHealth(ctx, target)",
+		`ToolName: "Write"`,
+		`ToolName: "Read"`,
+		`ToolName: "exec_command"`,
+	} {
+		if !strings.Contains(smoke, token) {
+			t.Errorf("Daytona release smoke missing production-path proof %q", token)
+		}
+	}
+	for _, forbidden := range []string{
+		"t.Skip(",
+		"ProviderArtifactRef: imageRef",
+		"t.Fatalf(\"%v",
+		"t.Fatal(err)",
+		"ResultJSON)",
+	} {
+		if strings.Contains(smoke, forbidden) {
+			t.Errorf("Daytona release smoke contains unsafe or invalid pattern %q", forbidden)
+		}
+	}
+
+	ciBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")) //nolint:gosec // Repository-local workflow.
+	if err != nil {
+		t.Fatalf("read engine CI workflow: %v", err)
+	}
+	for _, forbidden := range []string{
+		"daytona-release-smoke",
+		"daytona_release_smoke",
+		"TestDaytonaPublishedImageProductionAdapterSmoke",
+		"TETRAL_DAYTONA_RELEASE_SMOKE_IMAGE",
+	} {
+		if strings.Contains(string(ciBody), forbidden) {
+			t.Errorf("engine-ci.yml must not register release-only Daytona token %q", forbidden)
+		}
+	}
+}
+
+func TestEngineCIWorkflowRunsLocalSandboxImageSmoke(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	workflowPath := filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")
 	body, err := os.ReadFile(workflowPath) //nolint:gosec // repository-local workflow.
@@ -444,78 +538,38 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 		t.Fatalf("read workflow: %v", err)
 	}
 	workflow := string(body)
-	if count := strings.Count(workflow, "\n  helper-privilege:"); count != 1 {
-		t.Fatalf("helper-privilege job count = %d; want exactly one", count)
+	if count := strings.Count(workflow, "\n  sandbox-local-image-smoke:"); count != 1 {
+		t.Fatalf("sandbox-local-image-smoke job count = %d; want exactly one", count)
 	}
-	job := workflowJobForStaticTest(t, workflow, "helper-privilege:")
+	job := workflowJobForStaticTest(t, workflow, "sandbox-local-image-smoke:")
 	for _, token := range []string{
 		"runs-on: ubuntu-latest",
 		"persist-credentials: false",
-		"run: ./scripts/run-helper-privilege-ci.sh",
+		"name: Helper privilege integration",
+		`sudo "$(command -v go)" test ./internal/sandbox/helper -run '^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$' -count=1 -v`,
+		"run: ./scripts/run-sandbox-local-image-smoke.sh",
 	} {
 		if !strings.Contains(job, token) {
-			t.Fatalf("helper-privilege job missing %q; job was:\n%s", token, job)
+			t.Fatalf("sandbox-local-image-smoke job missing %q; job was:\n%s", token, job)
 		}
-	}
-	for _, forbidden := range []string{"go test ./...", "make test", "bun test", "TETRAL_TEST_DATABASE_URL"} {
-		if strings.Contains(job, forbidden) {
-			t.Fatalf("helper-privilege job widens root execution with %q", forbidden)
-		}
-	}
-	if regexp.MustCompile(`(?m)(docker\s+login\b|uses:\s*docker/login-action@)`).MatchString(job) {
-		t.Fatal("helper-privilege job must use an anonymous pull for the public GHCR mirror")
-	}
-
-	scriptPath := filepath.Join(engineRoot, "scripts", "run-helper-privilege-ci.sh")
-	scriptBody, err := os.ReadFile(scriptPath) //nolint:gosec // repository-local CI command.
-	if err != nil {
-		t.Fatalf("read helper privilege script: %v", err)
-	}
-	script := string(scriptBody)
-	for _, token := range []string{
-		"docker run --rm",
-		"--user 0:0",
-		"ghcr.io/tetral-ai/mirror/golang:1.25.12",
-		`test "$(id -u)" -eq 0`,
-		"go test ./internal/sandbox/helper",
-		"TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop",
-		"--- SKIP:",
-	} {
-		if !strings.Contains(script, token) {
-			t.Fatalf("helper privilege script missing %q", token)
-		}
-	}
-	if strings.Contains(script, "go test ./...") {
-		t.Fatal("helper privilege script must not run the full suite as root")
-	}
-	for _, thirdParty := range []string{
-		"public.ecr.aws/docker/library/golang:1.25.12",
-		"docker.io/library/golang:1.25.12",
-	} {
-		if strings.Contains(script, thirdParty) {
-			t.Fatalf("helper privilege script must not pull Go from shared third-party registry %q", thirdParty)
-		}
-	}
-	if got := strings.Count(script, "golang:1.25.12"); got != 1 {
-		t.Fatalf("helper privilege Go image reference count = %d; want only the GHCR mirror reference", got)
-	}
-	if regexp.MustCompile(`(?m)docker\s+login\b`).MatchString(script) {
-		t.Fatal("helper privilege script must use an anonymous pull for the public GHCR mirror")
 	}
 }
 
-func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
-	script := filepath.Join(finalArchitectureEngineRoot(t), "scripts", "run-helper-privilege-ci.sh")
-	command := exec.Command("bash", script, "--verify-output")
-	command.Stdin = bytes.NewBufferString("--- SKIP: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.00s)\n")
-	if err := command.Run(); err == nil {
-		t.Fatal("helper privilege output guard accepted a skipped proof")
+func TestSandboxSmokeUsesReleaseRecipe(t *testing.T) {
+	engineRoot := finalArchitectureEngineRoot(t)
+	smokeBody, err := os.ReadFile(filepath.Join(engineRoot, "scripts", "run-sandbox-local-image-smoke.sh")) //nolint:gosec // Repository-local script.
+	if err != nil {
+		t.Fatalf("read local Sandbox smoke: %v", err)
 	}
-
-	command = exec.Command("bash", script, "--verify-output")
-	command.Stdin = bytes.NewBufferString("--- PASS: TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop (0.01s)\n")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("helper privilege output guard rejected a passing proof: %v\n%s", err, output)
+	if strings.Contains(string(smokeBody), "SANDBOX_HELPER_BASE_IMAGE") || strings.Contains(string(smokeBody), "--build-arg") {
+		t.Fatal("local Sandbox smoke substitutes a release Dockerfile build argument")
+	}
+	releaseBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-release.yml")) //nolint:gosec // Repository-local workflow.
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	if strings.Contains(string(releaseBody), "build_args:") || strings.Contains(string(releaseBody), "build-args:") {
+		t.Fatal("release workflow retains an empty build-argument channel")
 	}
 }
 
@@ -563,6 +617,9 @@ permissions:
 		`          - primary: public.ecr.aws/docker/library/golang:1.25.12
             fallback: docker.io/library/golang:1.25.12
             target: ghcr.io/tetral-ai/mirror/golang:1.25.12`,
+		`          - primary: public.ecr.aws/docker/library/ubuntu:24.04
+            fallback: docker.io/library/ubuntu:24.04
+            target: ghcr.io/tetral-ai/mirror/ubuntu:24.04`,
 		`          - primary: public.ecr.aws/docker/library/postgres:18-alpine
             fallback: docker.io/library/postgres:18-alpine
             target: ghcr.io/tetral-ai/mirror/postgres:18-alpine`,

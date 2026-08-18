@@ -1,13 +1,11 @@
 package agentruntimebridge
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +20,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
@@ -53,16 +50,15 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_stdin_replay")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_stdin_replay","chars":"hello\n"},"evaluated_permission":"allow"}`)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, "evt_source_stdin_replay")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC) }
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_stdin_replay")
-	scope.RequestId = "req_bridge_stdin_replay"
 	request := &bridgev1.SendCommandInputRequest{
 		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID,
-		InputJson: `{"chars":"hello\n"}`,
+		OperationId: "cmdop_bridge_stdin_replay", InputJson: `{"chars":"hello\n","session_id":"task_bridge_stdin_replay"}`,
 	}
 
 	type callResult struct {
@@ -98,12 +94,12 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 		t.Fatalf("settle accepted stdin operation: %v", err)
 	}
 	first := <-firstDone
-	if first.err != nil || first.response.GetWriteSeq() != 1 || first.response.GetResultJson() != terminalJSON {
-		t.Fatalf("first SendCommandInput = response %+v err %v; want sequence 1", first.response, first.err)
+	if first.err != nil || first.response.GetCommitted().GetResultJson() != terminalJSON {
+		t.Fatalf("first SendCommandInput = response %+v err %v; want committed result", first.response, first.err)
 	}
 	replay, err := store.SendCommandInput(context.Background(), request)
-	if err != nil || replay.GetWriteSeq() != 1 || replay.GetResultJson() != terminalJSON {
-		t.Fatalf("replay SendCommandInput = response %+v err %v; want original sequence 1", replay, err)
+	if err != nil || replay.GetDuplicate().GetResultJson() != terminalJSON {
+		t.Fatalf("replay SendCommandInput = response %+v err %v; want original result", replay, err)
 	}
 	var taskSequence int64
 	if err := admin.QueryRowContext(context.Background(), `SELECT stdin_write_sequence FROM session_background_tasks
@@ -129,14 +125,12 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_consumed")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_poll_consumed","chars":""},"evaluated_permission":"allow"}`)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", terminalJSON)
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, terminalEventID, 2, "agent.tool_result", `{"tool_use_id":"`+toolUseEventID+`"}`)
-	requestID, _, _ := readCommandResultOwnerIdentity(toolUseEventID, taskID, 0)
-	inputJSON, err := marshalBridgeJSON(map[string]any{
-		"task_id": taskID, "max_output_tokens": 0,
-	})
+	requestID := "cmdop_bridge_poll_consumed"
+	inputJSON, err := marshalBridgeJSON(map[string]any{"session_id": taskID, "chars": ""})
 	if err != nil {
 		t.Fatalf("marshal poll input: %v", err)
 	}
@@ -161,9 +155,9 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	defer cancel()
 	response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).ReadCommandResult(ctx, &bridgev1.ReadCommandResultRequest{
 		Scope:  bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_poll_consumed"),
-		TaskId: taskID, ToolUseEventId: toolUseEventID,
+		TaskId: taskID, ToolUseEventId: toolUseEventID, OperationId: requestID,
 	})
-	if err != nil || response.GetResultJson() != terminalJSON {
+	if err != nil || response.GetCompleted().GetResultJson() != terminalJSON {
 		t.Fatalf("ReadCommandResult consumed replay = response %+v err %v; want stored terminal result", response, err)
 	}
 }
@@ -182,7 +176,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_wait_consumed")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_poll_wait_consumed","chars":""},"evaluated_permission":"allow"}`)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	type callResult struct {
@@ -195,7 +189,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 	go func() {
 		response, err := store.ReadCommandResult(ctx, &bridgev1.ReadCommandResultRequest{
 			Scope:  bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_poll_wait_consumed"),
-			TaskId: taskID, ToolUseEventId: toolUseEventID,
+			TaskId: taskID, ToolUseEventId: toolUseEventID, OperationId: "cmdop_bridge_poll_wait_consumed",
 		})
 		done <- callResult{response: response, err: err}
 	}()
@@ -246,7 +240,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 		t.Fatalf("commit terminal consumption: %v", err)
 	}
 	result := <-done
-	if result.err != nil || result.response.GetResultJson() != terminalJSON {
+	if result.err != nil || result.response.GetCompleted().GetResultJson() != terminalJSON {
 		t.Fatalf("ReadCommandResult waiting consumption = response %+v err %v; want stored terminal result", result.response, result.err)
 	}
 }
@@ -297,8 +291,8 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_cancel_receipt")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
-	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, "evt_source_cancel_receipt")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"sleep 60"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
 		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 		normalized_input_hash, tool_name, input_json, ack_status,
@@ -311,9 +305,9 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_cancel_receipt")
-	scope.RequestId = "req_bridge_cancel_receipt"
 	request := &bridgev1.CancelCommandRequest{
-		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID, Reason: "runtime_interrupted",
+		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID,
+		OperationId: "cmdop_bridge_cancel_receipt", Reason: "runtime_interrupted",
 	}
 	type callResult struct {
 		response *bridgev1.CancelCommandResponse
@@ -325,7 +319,7 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 		done <- callResult{response: response, err: err}
 	}()
 
-	requestID := scope.RequestId + ":cancel"
+	requestID := request.GetOperationId()
 	receiptID := backgroundCommandReceiptID(requestID)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -362,11 +356,11 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 		t.Fatalf("settle cancel receipt: %v", err)
 	}
 	first := <-done
-	if first.err != nil || first.response.GetResultJson() != terminalJSON {
+	if first.err != nil || first.response.GetCommitted().GetResultJson() != terminalJSON {
 		t.Fatalf("CancelCommand = response %+v err %v", first.response, first.err)
 	}
 	replay, err := store.CancelCommand(context.Background(), request)
-	if err != nil || replay.GetResultJson() != terminalJSON {
+	if err != nil || replay.GetDuplicate().GetResultJson() != terminalJSON {
 		t.Fatalf("replay CancelCommand = response %+v err %v", replay, err)
 	}
 	var receipts int
@@ -376,6 +370,55 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 	}
 	if receipts != 2 {
 		t.Fatalf("background receipts = %d; want poll and cancel", receipts)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreBackgroundCommandsRejectUnrelatedSameThreadAuthority(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_command_authority"
+		threadID    = "thr_bridge_command_authority"
+		bindingID   = "bind_bridge_command_authority"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_command_authority")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_poll", 1, "agent.tool_use",
+		`{"name":"write_stdin","input":{"session_id":"task_command_expected","chars":""},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_send", 2, "agent.tool_use",
+		`{"name":"write_stdin","input":{"session_id":"task_command_expected","chars":"hello"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_exec", 3, "agent.tool_use",
+		`{"name":"exec_command","input":{"cmd":"sleep 60"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_other_exec", 4, "agent.tool_use",
+		`{"name":"exec_command","input":{"cmd":"sleep 30"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_expected", "evt_command_exec")
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_other", "evt_command_other_exec")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_command_authority")
+	if _, err := store.ReadCommandResult(context.Background(), &bridgev1.ReadCommandResultRequest{
+		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_poll", OperationId: "cmdop_wrong_task",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("read with unrelated task error = %v; want FailedPrecondition", err)
+	}
+	if _, err := store.SendCommandInput(context.Background(), &bridgev1.SendCommandInputRequest{
+		Scope: scope, TaskId: "task_command_expected", ToolUseEventId: "evt_command_send", OperationId: "cmdop_wrong_input",
+		InputJson: `{"session_id":"task_command_expected","chars":"different"}`,
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("send with divergent durable input error = %v; want FailedPrecondition", err)
+	}
+	if _, err := store.CancelCommand(context.Background(), &bridgev1.CancelCommandRequest{
+		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_exec", OperationId: "cmdop_wrong_cancel",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("cancel with unrelated source Tool error = %v; want FailedPrecondition", err)
+	}
+	var count int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND background_request_id LIKE 'cmdop_wrong_%'`, workspaceID, sessionID).Scan(&count); err != nil {
+		t.Fatalf("count rejected background receipts: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected background receipts = %d; want none", count)
 	}
 }
 
@@ -474,38 +517,27 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	storedResultJSON := `{"task_id":"task_bridge_notify","source_tool_use_event_id":"sevt_tool_notify","status":"expired","stdout":{"text":"","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":null}`
 	settleBridgeAPIBackgroundTask(t, admin, "sesn_bridge_task_notify", "task_bridge_notify", "expired", storedResultJSON)
 	seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_notify", "thr_bridge_task_notify", "task_notification:task_bridge_notify", "bind_bridge_task_notify", "pod_uid_task_notify")
-	resultJSON, err := canonicalTaskNotificationPayloadJSON("task_bridge_notify", "sevt_tool_notify", "expired", storedResultJSON)
-	if err != nil {
-		t.Fatalf("build delivered task notification: %v", err)
-	}
-
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
-	request := bridgeTaskNotificationRequestForTest(
-		t,
-		bridgeAPIScope("sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify"),
-		"task_notification:task_bridge_notify",
-		"task_bridge_notify",
-		resultJSON,
-	)
+	request := &bridgev1.CommitTaskNotificationResultRequest{
+		Scope:          bridgeAPIScope("sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify"),
+		RuntimeInputId: "task_notification:task_bridge_notify",
+	}
 	response, err := store.CommitTaskNotificationResult(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitTaskNotificationResult: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("ack = %s; want committed", response.GetAck().GetStatus())
+	if response.GetCommitted() == nil || len(response.GetCommitted().GetAssignedContextSequences()) != 1 {
+		t.Fatalf("outcome = %#v; want committed runtime-notification delta", response)
 	}
 	replay, err := store.CommitTaskNotificationResult(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitTaskNotificationResult replay: %v", err)
 	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("replay ack = %s; want duplicate", replay.GetAck().GetStatus())
-	}
-	if len(response.GetDeclaration().GetReceipts()) != 1 ||
-		len(replay.GetDeclaration().GetReceipts()) != 1 ||
-		!proto.Equal(response.GetDeclaration().GetReceipts()[0], replay.GetDeclaration().GetReceipts()[0]) {
-		t.Fatalf("task notification replay receipts diverged: committed=%#v replay=%#v", response.GetDeclaration(), replay.GetDeclaration())
+	if replay.GetCommitted() == nil ||
+		len(replay.GetCommitted().GetAssignedContextSequences()) != 1 ||
+		replay.GetCommitted().GetAssignedContextSequences()[0] != response.GetCommitted().GetAssignedContextSequences()[0] {
+		t.Fatalf("task notification lost-ACK replay diverged: committed=%#v replay=%#v", response, replay)
 	}
 
 	var taskStatus string
@@ -558,15 +590,8 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 		t.Fatalf("settlement status=%q terminal=%v inbox=%q messages=%d events=%d; want expired/event/committed/1/1",
 			taskStatus, terminalEventID.Valid, inboxStatus, notificationMessages, notificationEvents)
 	}
-	receipt := response.GetDeclaration().GetReceipts()[0]
-	if len(receipt.GetEvents()) != 1 || len(receipt.GetMessages()) != 1 ||
-		receipt.GetEvents()[0].GetEventId() != terminalEventID.String {
-		t.Fatalf("task notification receipt = %#v; want one event and one positional message", receipt)
-	}
 	var notificationMessage struct {
-		Role   string `json:"role"`
-		Origin string `json:"origin"`
-		Parts  []struct {
+		Parts []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"parts"`
@@ -574,49 +599,15 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	if err := json.Unmarshal([]byte(notificationDataJSON), &notificationMessage); err != nil {
 		t.Fatalf("decode runtime notification message: %v", err)
 	}
-	if notificationMessage.Role != "user" || notificationMessage.Origin != "runtime" || len(notificationMessage.Parts) != 1 ||
+	if len(notificationMessage.Parts) != 1 ||
 		notificationMessage.Parts[0].Type != "text" ||
 		!strings.Contains(notificationMessage.Parts[0].Text, `"task_id":"task_bridge_notify"`) ||
 		strings.Contains(notificationMessage.Parts[0].Text, `"output_paths"`) ||
 		strings.Contains(notificationMessage.Parts[0].Text, `/tmp/tetral-runtime/tasks/`) ||
-		strings.Contains(notificationDataJSON, "provider_") {
-		t.Fatalf("runtime notification data = %s; want runtime-origin RuntimeMessage without task output paths or provider metadata", notificationDataJSON)
-	}
-
-}
-
-func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationAcceptsDeliveredPayloadBytes(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_bytes", "thr_bridge_task_bytes")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_bytes", "bind_bridge_task_bytes", 1, "pod_uid_task_bytes")
-	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", "sesn_bridge_task_bytes", "thr_bridge_task_bytes", "bind_bridge_task_bytes", "task_bridge_bytes", "sevt_tool_bytes")
-	storedResultJSON := `{"task_id":"task_bridge_bytes","source_tool_use_event_id":"sevt_tool_bytes","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
-	settleBridgeAPIBackgroundTask(t, admin, "sesn_bridge_task_bytes", "task_bridge_bytes", "completed", storedResultJSON)
-	seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_bytes", "thr_bridge_task_bytes", "task_notification:task_bridge_bytes", "bind_bridge_task_bytes", "pod_uid_task_bytes")
-
-	deliveredPayload, err := canonicalTaskNotificationPayloadJSON("task_bridge_bytes", "sevt_tool_bytes", "completed", storedResultJSON)
-	if err != nil {
-		t.Fatalf("build delivered task notification: %v", err)
-	}
-	request := bridgeTaskNotificationRequestForTest(
-		t,
-		bridgeAPIScope("sesn_bridge_task_bytes", "thr_bridge_task_bytes", "bind_bridge_task_bytes", 1, "pod_uid_task_bytes"),
-		"task_notification:task_bridge_bytes",
-		"task_bridge_bytes",
-		deliveredPayload,
-	)
-	request.MessageCreate.Parts[0] = &bridgev1.RuntimePartCreate{
-		PartKind: "text",
-		PartJson: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", deliveredPayload),
-	}
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	response, err := store.CommitTaskNotificationResult(context.Background(), request)
-	if err != nil {
-		t.Fatalf("CommitTaskNotificationResult delivered payload: %v", err)
-	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("ack = %s; want committed", response.GetAck().GetStatus())
+		strings.Contains(notificationDataJSON, "provider_") ||
+		strings.Contains(notificationDataJSON, `"role"`) ||
+		strings.Contains(notificationDataJSON, `"origin"`) {
+		t.Fatalf("runtime notification data = %s; want narrow provider-visible parts without task output paths or provider metadata", notificationDataJSON)
 	}
 }
 
@@ -643,15 +634,13 @@ func TestPostgreSQLBridgeAPIStoreTaskNotificationStaleSettlementHasStableEvidenc
 		WHERE workspace_id='default' AND session_id=$1 AND task_id=$2`, sessionID, taskID, terminal); err != nil {
 		t.Fatalf("seed prior terminal notification: %v", err)
 	}
-	canonical, err := canonicalTaskNotificationPayloadJSON(taskID, sourceID, "completed", storedResult)
-	if err != nil {
-		t.Fatalf("build stale notification: %v", err)
-	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	request := bridgeTaskNotificationRequestForTest(t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inputID, taskID, canonical)
+	request := &bridgev1.CommitTaskNotificationResultRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		response, err := store.CommitTaskNotificationResult(context.Background(), request)
-		if err != nil || response.GetAck().GetErrorCode() != "task_notification_stale" || response.GetAck().GetRuntimeInputId() != inputID {
+		if err != nil || response.GetStale() == nil {
 			t.Fatalf("stale settlement attempt %d = %#v/%v", attempt+1, response, err)
 		}
 	}
@@ -692,15 +681,13 @@ func TestPostgreSQLBridgeAPIStoreRejectsInvalidTaskNotificationSourceEventPerInp
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
 	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
-	canonical, err := canonicalTaskNotificationPayloadJSON(taskID, sourceID, "completed", storedResult)
-	if err != nil {
-		t.Fatalf("build invalid-source notification: %v", err)
-	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	request := bridgeTaskNotificationRequestForTest(t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inputID, taskID, canonical)
+	request := &bridgev1.CommitTaskNotificationResultRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		response, err := store.CommitTaskNotificationResult(context.Background(), request)
-		if err != nil || response.GetAck().GetErrorCode() != "task_notification_result_invalid" {
+		if err != nil || response.GetRejected().GetReason() != bridgev1.TaskNotificationRejectionReason_TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID {
 			t.Fatalf("invalid-source settlement attempt %d = %#v/%v", attempt+1, response, err)
 		}
 	}
@@ -717,126 +704,6 @@ func TestPostgreSQLBridgeAPIStoreRejectsInvalidTaskNotificationSourceEventPerInp
 	}
 	if inboxStatus != "dead_lettered" || operations != 1 || events != 0 || messages != 0 {
 		t.Fatalf("invalid-source settlement = Inbox:%s operations:%d events:%d messages:%d", inboxStatus, operations, events, messages)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreTerminalTaskNotificationRejectionIsInputScoped(t *testing.T) {
-	cases := []struct {
-		name      string
-		errorCode string
-		mutate    func(*bridgev1.CommitTaskNotificationResultRequest)
-	}{
-		{
-			name: "invalid result shape", errorCode: "task_notification_result_invalid",
-			mutate: func(request *bridgev1.CommitTaskNotificationResultRequest) {
-				request.ResultJson = `{"task_id":"task_rejection","source_tool_use_event_id":"sevt_tool_rejection","status":"completed","stdout":{"text":"done","truncated":false}}`
-			},
-		},
-		{
-			name: "invalid Message shape", errorCode: "task_notification_message_invalid",
-			mutate: func(request *bridgev1.CommitTaskNotificationResultRequest) {
-				request.MessageCreate.Parts[0].PartKind = "reasoning"
-			},
-		},
-		{
-			name: "canonical byte mismatch", errorCode: "task_notification_payload_mismatch",
-			mutate: func(request *bridgev1.CommitTaskNotificationResultRequest) {
-				request.ResultJson = `{"source_tool_use_event_id":"sevt_tool_rejection","status":"completed","stderr":{"text":"","truncated":false},"stdout":{"text":"tampered","truncated":false},"task_id":"task_rejection"}`
-				request.MessageCreate.Parts[0].PartJson = fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, request.ResultJson)
-			},
-		},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			seedBridgeAPISession(t, admin, "default", "sesn_task_rejection", "thr_task_rejection")
-			seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_task_rejection", "bind_task_rejection", 1, "pod_task_rejection")
-			seedBridgeAPINotifiableBackgroundTask(t, admin, "default", "sesn_task_rejection", "thr_task_rejection", "bind_task_rejection", "task_rejection", "sevt_tool_rejection")
-			storedResultJSON := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
-			settleBridgeAPIBackgroundTask(t, admin, "sesn_task_rejection", "task_rejection", "completed", storedResultJSON)
-			seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_task_rejection", "thr_task_rejection", "task_notification:task_rejection", "bind_task_rejection", "pod_task_rejection")
-			canonical, err := canonicalTaskNotificationPayloadJSON("task_rejection", "sevt_tool_rejection", "completed", storedResultJSON)
-			if err != nil {
-				t.Fatalf("build canonical task notification: %v", err)
-			}
-			request := bridgeTaskNotificationRequestForTest(t,
-				bridgeAPIScope("sesn_task_rejection", "thr_task_rejection", "bind_task_rejection", 1, "pod_task_rejection"),
-				"task_notification:task_rejection", "task_rejection", canonical,
-			)
-			testCase.mutate(request)
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			var rejectionLog bytes.Buffer
-			store.Logger = slog.New(slog.NewJSONHandler(&rejectionLog, nil))
-
-			response, err := store.CommitTaskNotificationResult(context.Background(), request)
-			if err != nil {
-				t.Fatalf("CommitTaskNotificationResult rejection: %v", err)
-			}
-			if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-				response.GetAck().GetRuntimeInputId() != request.GetRuntimeInputId() ||
-				response.GetAck().GetErrorCode() != testCase.errorCode || response.GetDeclaration() != nil {
-				t.Fatalf("rejected response = %#v; want exact input-scoped ACK without receipt", response)
-			}
-			var logRecord map[string]any
-			if err := json.Unmarshal(rejectionLog.Bytes(), &logRecord); err != nil {
-				t.Fatalf("decode task notification rejection log: %v", err)
-			}
-			if len(logRecord) != 13 || logRecord["operation"] != bridgeOpCommitTaskNotificationResult ||
-				logRecord["event.kind"] != "runtime_declaration_rejected" ||
-				logRecord["validator.id"] == "" || logRecord["rpc.grpc.status_name"] != "OK" ||
-				logRecord["workspace.id"] != "default" || logRecord["session.id"] != "sesn_task_rejection" ||
-				logRecord["thread.id"] != "thr_task_rejection" || logRecord["runtime_input.id"] != request.GetRuntimeInputId() ||
-				logRecord["task.id"] != "task_rejection" {
-				t.Fatalf("task notification rejection log = %#v; want bounded identity record", logRecord)
-			}
-			if strings.Contains(rejectionLog.String(), "tampered") || strings.Contains(rejectionLog.String(), "stdout") || strings.Contains(rejectionLog.String(), "reasoning") {
-				t.Fatalf("task notification rejection log leaked declaration content: %s", rejectionLog.String())
-			}
-			replay, err := store.CommitTaskNotificationResult(context.Background(), request)
-			if err != nil || !proto.Equal(response.GetAck(), replay.GetAck()) || replay.GetDeclaration() != nil {
-				t.Fatalf("rejected replay = %#v/%v; want exact stored ACK", replay, err)
-			}
-
-			var inboxStatus string
-			var operations, events, messages int
-			if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
-				WHERE workspace_id='default' AND runtime_input_id=$1`, request.GetRuntimeInputId()).Scan(&inboxStatus); err != nil {
-				t.Fatalf("read rejected Inbox: %v", err)
-			}
-			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations
-				WHERE workspace_id='default' AND session_id='sesn_task_rejection'
-				  AND operation='commit_task_notification_result' AND ack_status='rejected'
-				  AND runtime_input_id=$1 AND error_code=$2`, request.GetRuntimeInputId(), testCase.errorCode).Scan(&operations); err != nil {
-				t.Fatalf("count rejected operation: %v", err)
-			}
-			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
-				WHERE workspace_id='default' AND session_id='sesn_task_rejection' AND type='runtime_notification'`).Scan(&events); err != nil {
-				t.Fatalf("count rejected Events: %v", err)
-			}
-			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages
-				WHERE workspace_id='default' AND session_id='sesn_task_rejection' AND kind='runtime_notification'`).Scan(&messages); err != nil {
-				t.Fatalf("count rejected Messages: %v", err)
-			}
-			if inboxStatus != "dead_lettered" || operations != 1 || events != 0 || messages != 0 {
-				t.Fatalf("rejection facts = Inbox:%s operation:%d Events:%d Messages:%d", inboxStatus, operations, events, messages)
-			}
-			if testCase.errorCode == "task_notification_payload_mismatch" {
-				deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-				replayed, found, err := deliveryStore.ReplayRuntimeDeliveryFinalization(context.Background(), RuntimeJob{
-					Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: "sesn_task_rejection",
-					SessionThreadID: "thr_task_rejection", RuntimeInputID: request.GetRuntimeInputId(), InputKind: "task_notification",
-				})
-				if err != nil || !found || replayed.Status != RuntimeDeliveryDuplicate {
-					t.Fatalf("replay rejected delivery finalization = %#v/%t/%v; want Queue ACK disposition", replayed, found, err)
-				}
-			}
-
-			changed := proto.Clone(request).(*bridgev1.CommitTaskNotificationResultRequest)
-			changed.MessageCreate.MessageInfoJson = `{"role":"user","origin":"runtime","status":"completed","responseId":"changed"}`
-			if _, err := store.CommitTaskNotificationResult(context.Background(), changed); status.Code(err) != codes.AlreadyExists {
-				t.Fatalf("changed rejected replay error = %v; want AlreadyExists", err)
-			}
-		})
 	}
 }
 
@@ -890,6 +757,10 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_reclaim")
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message'
+		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_reclaim'`, sessionID); err != nil {
+		t.Fatalf("corrupt durable task source: %v", err)
+	}
 	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
@@ -907,15 +778,12 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 	if err != nil || len(leased) != 1 || leased[0].ID != queued.ID {
 		t.Fatalf("lease task notification Queue job = %#v/%v", leased, err)
 	}
-	canonical, err := canonicalTaskNotificationPayloadJSON(taskID, "sevt_task_rejection_reclaim", "completed", storedResult)
-	if err != nil {
-		t.Fatalf("build canonical notification: %v", err)
+	request := &bridgev1.CommitTaskNotificationResultRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
 	}
-	request := bridgeTaskNotificationRequestForTest(t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inputID, taskID, canonical)
-	request.MessageCreate.Parts[0].PartKind = "reasoning"
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := bridgeStore.CommitTaskNotificationResult(context.Background(), request)
-	if err != nil || response.GetAck().GetErrorCode() != "task_notification_message_invalid" {
+	if err != nil || response.GetRejected().GetReason() != bridgev1.TaskNotificationRejectionReason_TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID {
 		t.Fatalf("commit durable task notification rejection = %#v/%v", response, err)
 	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
@@ -964,6 +832,10 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_acceptance")
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message'
+		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_acceptance'`, sessionID); err != nil {
+		t.Fatalf("corrupt durable task source: %v", err)
+	}
 	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
@@ -985,24 +857,19 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 	if err != nil {
 		t.Fatalf("decode task notification Queue job: %v", err)
 	}
-	canonical, err := canonicalTaskNotificationPayloadJSON(taskID, "sevt_task_rejection_acceptance", "completed", storedResult)
-	if err != nil {
-		t.Fatalf("build canonical task notification: %v", err)
+	request := &bridgev1.CommitTaskNotificationResultRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
 	}
-	request := bridgeTaskNotificationRequestForTest(t,
-		bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inputID, taskID, canonical,
-	)
-	request.MessageCreate.Parts[0].PartJson = fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, canonical+" ")
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := apiStore.CommitTaskNotificationResult(context.Background(), request)
-	if err != nil || response.GetAck().GetErrorCode() != "task_notification_payload_mismatch" {
+	if err != nil || response.GetRejected().GetReason() != bridgev1.TaskNotificationRejectionReason_TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID {
 		t.Fatalf("commit terminal notification rejection = %#v/%v", response, err)
 	}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	planRequest := &agentruntimev1.RuntimeInputCommandRequest{
-		BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
+	attemptedBinding := RuntimeAttemptedBinding{
+		BindingID: bindingID, Generation: 1, TargetPodUID: podUID,
 	}
-	if settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, planRequest); err != nil || settled {
+	if settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, attemptedBinding); err != nil || settled {
 		t.Fatalf("MarkRuntimeInputAccepted after rejection = settled:%t err:%v; want replayed terminal Inbox", settled, err)
 	}
 	if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
@@ -1038,14 +905,9 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 		storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 		settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
 		seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inboxID, bindingID, podUID)
-		canonical, err := canonicalTaskNotificationPayloadJSON(taskID, "sevt_tool_identity_fence", "completed", storedResult)
-		if err != nil {
-			t.Fatalf("build canonical task notification: %v", err)
-		}
-
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 		response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
-			t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inboxID, taskID, canonical,
+			t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inboxID,
 		))
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("CommitTaskNotificationResult mismatched identities = %#v/%v; want FailedPrecondition", response, err)
@@ -1073,31 +935,10 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 				inboxStatus, terminalEventID.Valid, notificationEvents, notificationMessages, operations)
 		}
 		replay, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
-			t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inboxID, taskID, canonical,
+			t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inboxID,
 		))
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("CommitTaskNotificationResult identity mismatch replay = %#v/%v; want FailedPrecondition", replay, err)
-		}
-	})
-
-	t.Run("source tool use mismatch is stale without settlement", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_source_fence", "thr_bridge_task_source_fence")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_source_fence", "bind_bridge_task_source_fence", 1, "pod_uid_task_source_fence")
-		seedBridgeAPINotifiableBackgroundTask(t, admin, "default", "sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "bind_bridge_task_source_fence", "task_source_fence", "sevt_tool_original")
-		settleBridgeAPIBackgroundTask(t, admin, "sesn_bridge_task_source_fence", "task_source_fence", "completed", `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
-		seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "task_notification:task_source_fence", "bind_bridge_task_source_fence", "pod_uid_task_source_fence")
-
-		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
-			t,
-			bridgeAPIScope("sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "bind_bridge_task_source_fence", 1, "pod_uid_task_source_fence"),
-			"task_notification:task_source_fence",
-			"task_source_fence",
-			`{"task_id":"task_source_fence","source_tool_use_event_id":"sevt_tool_other","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
-		))
-		if status.Code(err) != codes.FailedPrecondition {
-			t.Fatalf("CommitTaskNotificationResult source mismatch = %#v/%v; want FailedPrecondition", response, err)
 		}
 	})
 
@@ -1114,8 +955,6 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 			t,
 			bridgeAPIScope("sesn_bridge_task_inbox_fence", "thr_bridge_task_inbox_fence", "bind_bridge_task_inbox_fence", 1, "pod_uid_task_inbox_fence"),
 			"task_notification:task_inbox_fence",
-			"task_inbox_fence",
-			`{"task_id":"task_inbox_fence","source_tool_use_event_id":"sevt_tool_inbox","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
 		))
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("inbox pod mismatch err = %v; want FailedPrecondition", err)
@@ -1139,11 +978,7 @@ func TestPostgreSQLBridgeAPIStoreTaskNotificationRejectsEveryRuntimeScopeMismatc
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
 	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
-	canonical, err := canonicalTaskNotificationPayloadJSON(taskID, "sevt_task_scope_fence", "completed", storedResult)
-	if err != nil {
-		t.Fatalf("build canonical task notification: %v", err)
-	}
-	valid := bridgeTaskNotificationRequestForTest(t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inputID, taskID, canonical)
+	valid := bridgeTaskNotificationRequestForTest(t, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), inputID)
 	wrongCaller := internalgrpcauth.ContextWithIdentity(context.Background(), internalgrpcauth.Identity{
 		ServiceAccount:   internalgrpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"},
 		KubernetesPodUID: "pod_task_scope_other",
@@ -1196,7 +1031,7 @@ func TestPostgreSQLBridgeAPIStoreTaskNotificationRejectsEveryRuntimeScopeMismatc
 	}
 }
 
-func TestPostgreSQLCommitTaskNotificationDeferredReceiptLeavesQueueCustodyToJobRunner(t *testing.T) {
+func TestPostgreSQLCommitTaskNotificationParkedReceiptLeavesQueueCustodyToJobRunner(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_task_deferred_receipt"
@@ -1215,14 +1050,10 @@ func TestPostgreSQLCommitTaskNotificationDeferredReceiptLeavesQueueCustodyToJobR
 	resultJSON := `{"task_id":"task_deferred_receipt","source_tool_use_event_id":"evt_task_deferred_source","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", resultJSON)
 
-	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_task_deferred_close")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	if _, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), RootChildThreadId: childID,
-		SourceToolUseEventId: closeSource.GetSourceToolUseEventId(), Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
-		IncludeDescendants: true,
-	}); err != nil {
-		t.Fatalf("admit child close: %v", err)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime'
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID); err != nil {
+		t.Fatalf("close notification target: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,
@@ -1240,19 +1071,14 @@ func TestPostgreSQLCommitTaskNotificationDeferredReceiptLeavesQueueCustodyToJobR
 		t.Fatalf("enqueue notification Queue custody: %v", err)
 	}
 
-	response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
-		t,
-		bridgeAPIScope(sessionID, childID, bindingID, 1, podUID),
-		inputID,
-		taskID,
-		resultJSON,
-	))
+	response, err := store.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
+		Scope: bridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeInputId: inputID,
+	})
 	if err != nil {
 		t.Fatalf("commit deferred task notification: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED ||
-		response.GetAck().GetErrorCode() != "task_notification_deferred" {
-		t.Fatalf("deferred notification ACK = %#v; want task_notification_deferred", response.GetAck())
+	if response.GetParked() == nil {
+		t.Fatalf("parked notification outcome = %#v; want parked", response)
 	}
 	var inboxStatus, queueStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status,job.status

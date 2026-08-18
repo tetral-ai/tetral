@@ -18,45 +18,45 @@
  */
 
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
-export const PostgreSQLSchemaVersionOneChecksum = "c367edfe42520fc13444fce5e23e896ac689f23e9e9c850e6555a55d1d58c9d3";
+export const PostgreSQLSchemaVersionOneChecksum =
+	"eab41c9b4f0c0181f255f6a4b44325c3e22f17fadfa0b492db50607a4611241c";
 
-const PostgreSQLSchemaRegistry = [
-  PostgreSQLSchemaVersionOneChecksum,
-] as const;
+const PostgreSQLSchemaRegistry = [PostgreSQLSchemaVersionOneChecksum] as const;
 
 /** Enumerates the public-safe failure classifications produced by schema verification. */
 export type SchemaVerificationErrorKind =
-  | "schema_missing"
-  | "schema_behind"
-  | "schema_ahead"
-  | "schema_history_malformed"
-  | "schema_history_gap"
-  | "schema_history_duplicate"
-  | "schema_checksum_drift";
+	| "schema_missing"
+	| "schema_behind"
+	| "schema_ahead"
+	| "schema_history_malformed"
+	| "schema_history_gap"
+	| "schema_history_duplicate"
+	| "schema_checksum_drift";
 
 /** Defines the tagged-template query capability required to read migration history. */
-export interface SchemaSQL {
-  <T = unknown>(strings: TemplateStringsArray, ...values: unknown[]): PromiseLike<T>;
-}
+export type SchemaSQL = <T = unknown>(
+	strings: TemplateStringsArray,
+	...values: unknown[]
+) => PromiseLike<T>;
 
 /** Reports a classified schema verification failure without retaining its SQL driver cause. */
 export class SchemaVerificationError extends Error {
-  readonly kind: SchemaVerificationErrorKind;
+	readonly kind: SchemaVerificationErrorKind;
 
-  constructor(kind: SchemaVerificationErrorKind) {
-    super(publicMessage(kind));
-    this.name = "SchemaVerificationError";
-    this.kind = kind;
-  }
+	constructor(kind: SchemaVerificationErrorKind) {
+		super(publicMessage(kind));
+		this.name = "SchemaVerificationError";
+		this.kind = kind;
+	}
 }
 
 interface RegistryPresenceRow {
-  readonly exists: boolean;
+	readonly exists: boolean;
 }
 
 interface AppliedMigrationRow {
-  readonly version: number | bigint | string;
-  readonly checksum: string;
+	readonly version: number | bigint | string;
+	readonly checksum: string;
 }
 
 // verifyPostgreSQLSchema is intentionally SELECT-only and needs no migration
@@ -73,63 +73,72 @@ interface AppliedMigrationRow {
  * checksum that differs from the pinned registry.
  */
 export async function verifyPostgreSQLSchema(sql: SchemaSQL): Promise<void> {
-  let presence: readonly RegistryPresenceRow[];
-  let history: readonly AppliedMigrationRow[];
-  try {
-    presence = await sql<readonly RegistryPresenceRow[]>`
+	let presence: readonly RegistryPresenceRow[];
+	let history: readonly AppliedMigrationRow[];
+	try {
+		presence = await sql<readonly RegistryPresenceRow[]>`
       SELECT to_regclass('tetral_schema_migrations') IS NOT NULL AS exists
     `;
-    if (presence.length !== 1 || typeof presence[0]?.exists !== "boolean") {
-      throw new SchemaVerificationError("schema_history_malformed");
-    }
-    if (!presence[0].exists) {
-      throw new SchemaVerificationError("schema_missing");
-    }
-    history = await sql<readonly AppliedMigrationRow[]>`
+		if (presence.length !== 1 || typeof presence[0]?.exists !== "boolean") {
+			throw new SchemaVerificationError("schema_history_malformed");
+		}
+		if (!presence[0].exists) {
+			throw new SchemaVerificationError("schema_missing");
+		}
+		history = await sql<readonly AppliedMigrationRow[]>`
       SELECT version, checksum FROM tetral_schema_migrations ORDER BY version
     `;
-    if (!Array.isArray(history)) {
-      throw new SchemaVerificationError("schema_history_malformed");
-    }
-  } catch (error) {
-    if (error instanceof SchemaVerificationError) throw error;
-    throw new SchemaVerificationError("schema_history_malformed");
-  }
+		if (!Array.isArray(history)) {
+			throw new SchemaVerificationError("schema_history_malformed");
+		}
+	} catch (error) {
+		if (error instanceof SchemaVerificationError) throw error;
+		throw new SchemaVerificationError("schema_history_malformed");
+	}
 
-  const seen = new Set<number>();
-  for (const [index, row] of history.entries()) {
-    if (row === null || typeof row !== "object") {
-      throw new SchemaVerificationError("schema_history_malformed");
-    }
-    const version = Number(row.version);
-    if (!Number.isSafeInteger(version) || version <= 0 || typeof row.checksum !== "string") {
-      throw new SchemaVerificationError("schema_history_malformed");
-    }
-    if (seen.has(version)) {
-      throw new SchemaVerificationError("schema_history_duplicate");
-    }
-    seen.add(version);
-    if (version !== index + 1) {
-      throw new SchemaVerificationError("schema_history_gap");
-    }
-    if (index >= PostgreSQLSchemaRegistry.length) {
-      throw new SchemaVerificationError("schema_ahead");
-    }
-    if (row.checksum !== PostgreSQLSchemaRegistry[index]) {
-      throw new SchemaVerificationError("schema_checksum_drift");
-    }
-  }
-  if (history.length < PostgreSQLSchemaRegistry.length) {
-    throw new SchemaVerificationError("schema_behind");
-  }
+	const seen = new Set<number>();
+	for (const [index, row] of history.entries()) {
+		if (row === null || typeof row !== "object") {
+			throw new SchemaVerificationError("schema_history_malformed");
+		}
+		const version = Number(row.version);
+		if (
+			!Number.isSafeInteger(version) ||
+			version <= 0 ||
+			typeof row.checksum !== "string"
+		) {
+			throw new SchemaVerificationError("schema_history_malformed");
+		}
+		if (seen.has(version)) {
+			throw new SchemaVerificationError("schema_history_duplicate");
+		}
+		seen.add(version);
+		if (version !== index + 1) {
+			throw new SchemaVerificationError("schema_history_gap");
+		}
+		if (index >= PostgreSQLSchemaRegistry.length) {
+			throw new SchemaVerificationError("schema_ahead");
+		}
+		if (row.checksum !== PostgreSQLSchemaRegistry[index]) {
+			throw new SchemaVerificationError("schema_checksum_drift");
+		}
+	}
+	if (history.length < PostgreSQLSchemaRegistry.length) {
+		throw new SchemaVerificationError("schema_behind");
+	}
 }
 
 function publicMessage(kind: SchemaVerificationErrorKind): string {
-  switch (kind) {
-    case "schema_missing": return "postgresql schema registry is missing";
-    case "schema_behind": return "postgresql schema is behind this binary";
-    case "schema_ahead": return "postgresql schema is ahead of this binary";
-    case "schema_checksum_drift": return "postgresql schema checksum does not match this binary";
-    default: return "postgresql schema history is malformed";
-  }
+	switch (kind) {
+		case "schema_missing":
+			return "postgresql schema registry is missing";
+		case "schema_behind":
+			return "postgresql schema is behind this binary";
+		case "schema_ahead":
+			return "postgresql schema is ahead of this binary";
+		case "schema_checksum_drift":
+			return "postgresql schema checksum does not match this binary";
+		default:
+			return "postgresql schema history is malformed";
+	}
 }

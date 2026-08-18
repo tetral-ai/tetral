@@ -187,7 +187,101 @@ func TestPostgreSQLBridgeAPIStoreReadsBoundedOffsetFileAttachmentChunks(t *testi
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttachments(t *testing.T) {
+func TestPostgreSQLBridgeFileAttachmentScopeCannotBypassHotColdOrBlobBoundaries(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionA = "sesn_bridge_attachment_scope_a"
+		sessionB = "sesn_bridge_attachment_scope_b"
+		threadA  = "thr_bridge_attachment_scope_a"
+		binding  = "bind_bridge_attachment_scope_a"
+		podUID   = "pod_bridge_attachment_scope_a"
+		eventID  = "sevt_bridge_attachment_scope_cross"
+		fileID   = "file_bridge_attachment_scope_b"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionA, threadA)
+	seedBridgeAPISession(t, admin, "default", sessionB, "thr_bridge_attachment_scope_b")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionA, binding, 1, podUID)
+	inner := blob.NewFakeBlobStore()
+	seedBridgeAPIFileAttachment(t, admin, inner, fileID, "private.png", "image/png", "private")
+	if _, err := admin.ExecContext(context.Background(), `UPDATE files
+		SET scope_type = 'session', scope_id = $2
+		WHERE workspace_id = 'default' AND file_id = $1`, fileID, sessionB); err != nil {
+		t.Fatalf("scope cross-Session file: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionA, threadA, eventID, 1, "user.message",
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"`+fileID+`"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionA, threadA, "rin_bridge_attachment_scope_cross", "messages",
+		`["`+eventID+`"]`, "accepted", binding, podUID, 1, 1)
+
+	rangeStore := &rangeRecordingBlobStore{inner: inner}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.FileBlobStore = rangeStore
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-attachment-scope-token-key")
+	scope := bridgeAPIScope(sessionA, threadA, binding, 1, podUID)
+	pair := &bridgev1.FileAttachmentPair{SourceEventId: eventID, FileId: fileID}
+
+	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_attachment_scope_cross",
+	})
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("commit historical cross-Session input = %#v/%v", committed, err)
+	}
+	if attachments := committed.GetCommitted().GetContext().GetPendingAttachmentJson(); len(attachments) != 0 {
+		t.Fatalf("hot cross-Session attachment projection = %q; want none", attachments)
+	}
+
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("cold load cross-Session attachment: %v", err)
+	}
+	var contextPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &contextPayload); err != nil {
+		t.Fatalf("decode cold cross-Session context: %v", err)
+	}
+	if len(contextPayload.PendingAttachments) != 0 {
+		t.Fatalf("cold cross-Session attachment projection = %#v; want none", contextPayload.PendingAttachments)
+	}
+
+	metadata, err := store.ResolveFileAttachmentMetadata(context.Background(), &bridgev1.ResolveFileAttachmentMetadataRequest{
+		Scope: scope, Attachments: []*bridgev1.FileAttachmentPair{pair},
+	})
+	if err != nil || len(metadata.GetAttachments()) != 1 ||
+		metadata.GetAttachments()[0].GetRejected().GetReason() != bridgev1.FileAttachmentRejectionReason_FILE_ATTACHMENT_REJECTION_REASON_DELETED {
+		t.Fatalf("cross-Session metadata = %#v/%v; want in-band unavailable", metadata, err)
+	}
+	chunk, err := store.ReadFileAttachmentChunk(context.Background(), &bridgev1.ReadFileAttachmentChunkRequest{
+		Scope: scope, Attachment: pair, Offset: 0, Length: 1,
+	})
+	if err != nil || chunk.GetRejected().GetReason() != bridgev1.FileAttachmentRejectionReason_FILE_ATTACHMENT_REJECTION_REASON_DELETED {
+		t.Fatalf("cross-Session blob read = %#v/%v; want in-band unavailable", chunk, err)
+	}
+	if rangeStore.getCalls != 0 || len(rangeStore.ranges) != 0 {
+		t.Fatalf("cross-Session blob reads = full:%d ranges:%d; want zero", rangeStore.getCalls, len(rangeStore.ranges))
+	}
+
+	started, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_scope_cross",
+		ModelRequestId: "mreq_bridge_attachment_scope_cross", EventType: "span.model_request_start",
+		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
+		RequestKind: requestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
+	})
+	if status.Code(err) != codes.InvalidArgument || started != nil {
+		t.Fatalf("cross-Session Request Start = %#v/%v; want InvalidArgument", started, err)
+	}
+	var starts, consumptions, operations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = $1 AND type = 'span.model_request_start'),
+		(SELECT count(*) FROM session_file_attachment_consumptions WHERE workspace_id = 'default' AND session_id = $1),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND session_id = $1 AND operation = 'write_event')`,
+		sessionA).Scan(&starts, &consumptions, &operations); err != nil {
+		t.Fatalf("read rejected Request Start facts: %v", err)
+	}
+	if starts != 0 || consumptions != 0 || operations != 0 {
+		t.Fatalf("rejected Request Start facts = starts:%d consumptions:%d operations:%d; want zero", starts, consumptions, operations)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreLoadContextDerivesCommittedUnconsumedFileAttachments(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_file_pending"
@@ -217,37 +311,32 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttach
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_pending_unprojected"}}]}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_file_pending_later", 3, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_pending_later"}}]}`)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_first", "sevt_file_pending_first", 1)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_later", "sevt_file_pending_later", 2)
-	requestStart := seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 2)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_file_pending_missing", 4, "user.message",
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_pending_missing"}}]}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET processed_at=now()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND event_id IN ('sevt_file_pending_first', 'sevt_file_pending_later', 'sevt_file_pending_missing')`, sessionID, threadID); err != nil {
+		t.Fatalf("mark attachment inputs processed: %v", err)
+	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_first", "messages",
+		`["sevt_file_pending_first"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 1, 1)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_later", "messages",
+		`["sevt_file_pending_later"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 3, 3)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_missing", "messages",
+		`["sevt_file_pending_missing"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 4, 4)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 0, &bridgev1.FileAttachmentPair{
+		SourceEventId: "sevt_file_pending_first", FileId: "file_pending_consumed",
+	})
 	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_file_pending_end", ModelRequestId: "mreq_file_pending",
-		ModelRequestStartEventId: requestStart.GetEventId(), FinishReason: "stop", UsageJson: `{}`,
-		RequestKind: "agent_provider_request",
+		FinishReason: "stop", UsageJson: `{}`,
 	})
 	if err != nil {
 		t.Fatalf("seed request end: %v", err)
 	}
-	var requestEndEventID string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT event_id FROM session_events
-		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
-		    AND model_request_id = 'mreq_file_pending' AND type = 'span.model_request_end'`,
-		sessionID, threadID,
-	).Scan(&requestEndEventID); err != nil {
-		t.Fatalf("read request end event: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_file_attachment_consumptions (
-			workspace_id, session_id, session_thread_id, request_end_event_id, source_event_id, file_id
-		) VALUES ('default', $1, $2, $3, 'sevt_file_pending_first', 'file_pending_consumed')`,
-		sessionID, threadID, requestEndEventID); err != nil {
-		t.Fatalf("seed consumed file attachment: %v", err)
-	}
 
-	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: scope, RuntimeInputId: "rin_bridge_file_pending",
-	})
+	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("LoadContext pending attachments: %v", err)
 	}
@@ -285,29 +374,174 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttach
 	}
 }
 
-func TestPendingFileAttachmentQueryUsesMediaBoundedProjectedMessageLookups(t *testing.T) {
-	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+func TestPostgreSQLBridgeAPIStoreLoadContextRequiresUnambiguousCommittedMessageCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID = "sesn_bridge_file_plan"
-		threadID  = "thr_bridge_file_plan"
-		eventID   = "sevt_bridge_file_plan_media"
+		sessionID = "sesn_bridge_file_authority"
+		threadID  = "thr_bridge_file_authority"
+		bindingID = "bind_bridge_file_authority"
+		podUID    = "pod_bridge_file_authority"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-file-authority-token-key")
+
+	type custodyCase struct {
+		name      string
+		sequence  int64
+		status    string
+		inputKind string
+	}
+	cases := []custodyCase{
+		{name: "committed", sequence: 1, status: "committed", inputKind: "messages"},
+		{name: "dead_lettered", sequence: 2, status: "dead_lettered", inputKind: "messages"},
+		{name: "cancelled", sequence: 3, status: "cancelled", inputKind: "messages"},
+		{name: "rejected", sequence: 4, status: "committed", inputKind: "rejection"},
+		{name: "conflicting", sequence: 5, status: "committed", inputKind: "messages"},
+		{name: "missing", sequence: 6},
+	}
+	attachmentStore := blob.NewFakeBlobStore()
+	for _, testCase := range cases {
+		eventID := "sevt_file_authority_" + testCase.name
+		fileID := "file_authority_" + testCase.name
+		seedBridgeAPIFileAttachment(t, admin, attachmentStore, fileID, testCase.name+".png", "image/png", testCase.name)
+		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, testCase.sequence, "user.message",
+			`{"content":[{"type":"image","source":{"type":"file","file_id":"`+fileID+`"}}]}`)
+		if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET processed_at=now()
+			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, eventID); err != nil {
+			t.Fatalf("mark %s event processed: %v", testCase.name, err)
+		}
+		if testCase.status != "" {
+			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_"+testCase.name,
+				testCase.inputKind, `[`+strconv.Quote(eventID)+`]`, testCase.status, bindingID, podUID,
+				testCase.sequence, testCase.sequence)
+		}
+	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_conflict",
+		"rejection", `["sevt_file_authority_conflicting"]`, "committed", bindingID, podUID, 5, 5)
+
+	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+	})
+	if err != nil {
+		t.Fatalf("LoadContext attachment authority: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode attachment authority context: %v", err)
+	}
+	if len(payload.PendingAttachments) != 1 || payload.PendingAttachments[0].Origin.FileBacked == nil ||
+		payload.PendingAttachments[0].Origin.FileBacked.FileID != "file_authority_committed" {
+		t.Fatalf("pending attachments = %#v; want only unambiguous committed message custody", payload.PendingAttachments)
+	}
+}
+
+func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *testing.T) {
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID     = "sesn_bridge_file_plan"
+		threadID      = "thr_bridge_file_plan"
+		otherThreadID = "thr_bridge_file_plan_other"
+		eventID       = "sevt_bridge_file_plan_media"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, otherThreadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_file_plan"}}]}`)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_bridge_file_plan_media", eventID, 1)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET processed_at=now()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND event_id=$3`,
+		sessionID, threadID, eventID); err != nil {
+		t.Fatalf("mark media input processed: %v", err)
+	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_plan_media", "messages",
+		`["sevt_bridge_file_plan_media"]`, "committed", "bind_bridge_file_plan", "pod_bridge_file_plan", 1, 1)
+	if _, err := admin.ExecContext(context.Background(), `WITH ids AS (
+		SELECT value, CASE WHEN value = 0 THEN 'file_bridge_file_plan' ELSE 'file_bridge_file_plan_' || value::text END AS file_id
+		  FROM generate_series(0, 31) AS value
+	), objects AS (
+		INSERT INTO file_objects (workspace_id, object_id, blob_key, size_bytes, sha256, created_at)
+		SELECT 'default', 'fobj_' || file_id, 'files/default/fobj_' || file_id, 1, repeat('a', 64), '2026-01-01T00:00:00Z'
+		  FROM ids
+	)
+	INSERT INTO files (workspace_id, file_id, object_id, filename, mime_type, downloadable, created_at)
+	SELECT 'default', file_id, 'fobj_' || file_id, file_id || '.png', 'image/png', TRUE, '2026-01-01T00:00:00Z'
+	  FROM ids`); err != nil {
+		t.Fatalf("seed plan file rows: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_bridge_file_plan_start", 100, "span.model_request_start", `{"type":"span.model_request_start"}`)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_file_attachment_consumptions (
+		workspace_id, session_id, session_thread_id, request_start_event_id, source_event_id, file_id
+	) VALUES ('default', $1, $2, 'sevt_bridge_file_plan_start', $3, 'file_bridge_file_plan')`, sessionID, threadID, eventID); err != nil {
+		t.Fatalf("seed consumed plan attachment: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, binding_id,
+		binding_generation, target_pod_uid, created_at, updated_at, committed_at
+	)
+	SELECT 'default', $1, $2, 'rin_bridge_file_plan_history_' || value::text,
+	       'messages', jsonb_build_array('sevt_unrelated_' || value::text)::text,
+	       value + 100, value + 100, 'committed', 'bind_bridge_file_plan', 1,
+	       'pod_bridge_file_plan', '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 1000) AS value`, sessionID, threadID); err != nil {
+		t.Fatalf("seed unrelated Inbox history: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, binding_id,
+		binding_generation, target_pod_uid, created_at, updated_at, committed_at
+	)
+	SELECT 'default', $1, $2, 'rin_bridge_file_plan_other_' || value::text,
+	       'messages', jsonb_build_array('sevt_other_' || value::text)::text,
+	       value, value, 'committed', 'bind_bridge_file_plan', 1,
+	       'pod_bridge_file_plan', '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 10000) AS value`, sessionID, otherThreadID); err != nil {
+		t.Fatalf("seed other-Thread Inbox history: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type,
+		payload_json, visibility, session_visible, processed_at, created_at, updated_at
+	)
+	SELECT 'default', $1, $2, 'sevt_bridge_file_plan_media_' || value::text,
+	       value + 1, 'user.message',
+	       jsonb_build_object('content', jsonb_build_array(jsonb_build_object(
+	           'type', 'image', 'source', jsonb_build_object(
+	               'type', 'file', 'file_id', 'file_bridge_file_plan_' || value::text))))::text,
+	       'public', TRUE, '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 31) AS value`, sessionID, threadID); err != nil {
+		t.Fatalf("seed additional media events: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, binding_id,
+		binding_generation, target_pod_uid, created_at, updated_at, committed_at
+	)
+	SELECT 'default', $1, $2, 'rin_bridge_file_plan_media_' || value::text,
+	       'messages', jsonb_build_array('sevt_bridge_file_plan_media_' || value::text)::text,
+	       value + 1, value + 1, 'committed', 'bind_bridge_file_plan', 1,
+	       'pod_bridge_file_plan', '2026-01-01T00:00:00Z',
+	       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	  FROM generate_series(1, 31) AS value`, sessionID, threadID); err != nil {
+		t.Fatalf("seed additional media Inbox authority: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type,
-			payload_json, visibility, session_visible, created_at, updated_at
+			payload_json, visibility, session_visible, processed_at, created_at, updated_at
 		)
 		SELECT 'default', $1, $2,
 		       'sevt_bridge_file_plan_' || value::text,
-		       value + 1,
+		       value + 1000,
 		       'user.message',
 		       '{"content":[{"type":"text","text":"non-media"}]}',
 		       'public',
 		       TRUE,
+		       '2026-01-01T00:00:00Z',
 		       '2026-01-01T00:00:00Z',
 		       '2026-01-01T00:00:00Z'
 		  FROM generate_series(1, 10000) AS value`,
@@ -315,55 +549,118 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedProjectedMessageLookups(t *te
 	); err != nil {
 		t.Fatalf("seed non-media events: %v", err)
 	}
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, created_at, updated_at
-		)
-		SELECT 'default', $1, $2,
-		       'msg_bridge_file_plan_' || value::text,
-		       value + 1,
-		       'user',
-		       '{"parts":[]}',
-		       'sevt_bridge_file_plan_' || value::text,
-		       '2026-01-01T00:00:00Z',
-		       '2026-01-01T00:00:00Z'
-		  FROM generate_series(1, 10000) AS value`,
-		sessionID, threadID,
-	); err != nil {
-		t.Fatalf("seed non-media projected messages: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_messages, session_events`); err != nil {
+	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events; ANALYZE session_runtime_inbox`); err != nil {
 		t.Fatalf("analyze media query tables: %v", err)
 	}
 	rows, err := admin.QueryContext(context.Background(),
-		"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) "+loadThreadPendingFileAttachmentsSQL,
+		"EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) "+loadThreadPendingFileAttachmentsSQL,
 		"default", sessionID, threadID,
 	)
 	if err != nil {
 		t.Fatalf("explain pending file query: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var planLines []string
+	var planJSON string
 	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
+		if err := rows.Scan(&planJSON); err != nil {
 			t.Fatalf("scan pending file query plan: %v", err)
 		}
-		planLines = append(planLines, line)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("pending file query plan rows: %v", err)
 	}
-	plan := strings.Join(planLines, "\n")
-	if strings.Contains(plan, "Seq Scan on session_messages") {
-		t.Fatalf("pending file query scans total thread messages:\n%s", plan)
+	var documents []struct {
+		Plan map[string]any `json:"Plan"`
 	}
-	if !strings.Contains(plan, "idx_session_messages_source_event") {
-		t.Fatalf("pending file query does not use source-event lookup index:\n%s", plan)
+	if err := json.Unmarshal([]byte(planJSON), &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("decode pending file query plan = %v/%s", err, planJSON)
 	}
-	if strings.Contains(plan, "Seq Scan on session_events") {
-		t.Fatalf("pending file query scans non-media session events:\n%s", plan)
+	var mediaIndex, inboxIndex, consumptionIndex bool
+	var inboxLoops float64
+	var inboxSeqScan bool
+	sharedHitBlocks, _ := documents[0].Plan["Shared Hit Blocks"].(float64)
+	sharedReadBlocks, _ := documents[0].Plan["Shared Read Blocks"].(float64)
+	sharedBlocks := sharedHitBlocks + sharedReadBlocks
+	walkPostgreSQLPlan(documents[0].Plan, func(node map[string]any) {
+		relation, _ := node["Relation Name"].(string)
+		index, _ := node["Index Name"].(string)
+		nodeType, _ := node["Node Type"].(string)
+		if index == "session_events_pending_media_lookup" {
+			mediaIndex = true
+		}
+		if index == "session_runtime_inbox_attachment_authority_lookup" {
+			inboxIndex = true
+			inboxLoops, _ = node["Actual Loops"].(float64)
+		}
+		if index == "session_file_attachment_consumptions_pending_lookup" {
+			consumptionIndex = true
+		}
+		if relation == "session_runtime_inbox" && nodeType == "Seq Scan" {
+			inboxSeqScan = true
+		}
+	})
+	if !mediaIndex || !inboxIndex || !consumptionIndex || inboxSeqScan || inboxLoops != 1 || sharedBlocks > 2000 {
+		t.Fatalf("pending file plan facts = mediaIndex:%t inboxIndex:%t consumptionIndex:%t inboxSeq:%t inboxLoops:%.0f sharedBlocks:%.0f\n%s",
+			mediaIndex, inboxIndex, consumptionIndex, inboxSeqScan, inboxLoops, sharedBlocks, planJSON)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreRejectsConsumptionWhenFileRowIsMissing(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_bridge_file_missing_consumption"
+		threadID  = "thr_bridge_file_missing_consumption"
+		eventID   = "sevt_bridge_file_missing_consumption"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
+		`{"content":[{"type":"document","source":{"type":"file","file_id":"file_missing_consumption"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_missing_consumption", "messages",
+		`["`+eventID+`"]`, "committed", "bind_bridge_file_missing_consumption", "pod_bridge_file_missing_consumption", 1, 1)
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_bridge_file_missing_hot", 2, "user.message",
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_missing_hot"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_missing_hot", "messages",
+		`["sevt_bridge_file_missing_hot"]`, "accepted", "bind_bridge_file_missing_consumption", "pod_bridge_file_missing_consumption", 2, 2)
+	hot, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope:          bridgeAPIScope(sessionID, threadID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption"),
+		RuntimeInputId: "rin_bridge_file_missing_hot",
+	})
+	if err != nil || hot.GetCommitted() == nil || len(hot.GetCommitted().GetContext().GetPendingAttachmentJson()) != 0 {
+		t.Fatalf("CommitInputs missing file projection = %#v/%v; want committed with no attachment", hot, err)
+	}
+	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          bridgeAPIScope(sessionID, threadID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption"),
+		RuntimeWriteId: "rwrite_bridge_file_missing_consumption",
+		ModelRequestId: "mreq_bridge_file_missing_consumption",
+		EventType:      "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: eventID, FileId: "file_missing_consumption"}},
+	})
+	if status.Code(err) != codes.InvalidArgument || response != nil {
+		t.Fatalf("WriteEvent missing file row = %#v/%v; want InvalidArgument and no receipt", response, err)
+	}
+	var starts, consumptions int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_file_attachment_consumptions WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&starts, &consumptions); err != nil {
+		t.Fatalf("read missing-file consumption residue: %v", err)
+	}
+	if starts != 0 || consumptions != 0 {
+		t.Fatalf("missing-file consumption residue = starts:%d consumptions:%d; want zero", starts, consumptions)
+	}
+}
+
+func walkPostgreSQLPlan(node map[string]any, visit func(map[string]any)) {
+	visit(node)
+	children, _ := node["Plans"].([]any)
+	for _, child := range children {
+		childNode, _ := child.(map[string]any)
+		if childNode != nil {
+			walkPostgreSQLPlan(childNode, visit)
+		}
 	}
 }
 
@@ -390,8 +687,7 @@ func seedBridgeAPIFileAttachment(t *testing.T, db *sql.DB, blobStore blob.BlobSt
 
 func seedBridgeAPIProjectedUserMessage(t *testing.T, db *sql.DB, sessionID, threadID, messageID, sourceEventID string, sequence int64) {
 	t.Helper()
-	dataJSON := `{"id":"` + messageID + `","sessionId":"` + sessionID + `","role":"user","origin":"user","sequence":` +
-		strconv.FormatInt(sequence-1, 10) + `,"status":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","parts":[]}`
+	dataJSON := `{"parts":[]}`
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,

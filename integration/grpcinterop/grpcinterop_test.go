@@ -43,24 +43,20 @@ func TestGoClientCallsBunRuntimePodAcceptInput(t *testing.T) {
 	})
 	client := agentruntimev1.NewAgentRuntimePodServiceClient(conn)
 
-	okResponse, err := client.AcceptInput(authContext(ctx), validRuntimeInputCommand("runtime_input_go_ok"))
+	okResponse, err := client.AcceptInput(authContext(ctx), validAcceptInputRequest("runtime_input_go_ok"))
 	if err != nil {
 		t.Fatalf("AcceptInput OK: %v", err)
 	}
-	if okResponse.GetStatus() != agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED ||
-		okResponse.GetSessionId() != "sesn_go" ||
-		okResponse.GetRuntimeInputId() != "runtime_input_go_ok" ||
-		okResponse.GetBindingId() != "bind_go" ||
-		okResponse.GetBindingGeneration() != 42 {
-		t.Fatalf("AcceptInput response = %+v; want accepted exact identity", okResponse)
+	if okResponse.GetAccepted() == nil {
+		t.Fatalf("AcceptInput response = %+v; want typed accepted outcome", okResponse)
 	}
 
-	_, err = client.AcceptInput(context.Background(), validRuntimeInputCommand("runtime_input_go_no_auth"))
+	_, err = client.AcceptInput(context.Background(), validAcceptInputRequest("runtime_input_go_no_auth"))
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("AcceptInput without auth error = %v; want Unauthenticated", err)
 	}
 
-	_, err = client.AcceptInput(authContext(ctx), &agentruntimev1.RuntimeInputCommandRequest{})
+	_, err = client.AcceptInput(authContext(ctx), &agentruntimev1.AcceptInputRequest{})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("AcceptInput invalid request error = %v; want InvalidArgument", err)
 	}
@@ -154,24 +150,17 @@ func authContext(ctx context.Context) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer caller-token")
 }
 
-func validRuntimeInputCommand(runtimeInputID string) *agentruntimev1.RuntimeInputCommandRequest {
-	return &agentruntimev1.RuntimeInputCommandRequest{
-		RequestId:          "req_go",
-		WorkspaceId:        "wksp_go",
-		SessionId:          "sesn_go",
-		SessionThreadId:    "thrd_go",
-		BindingId:          "bind_go",
-		BindingGeneration:  42,
-		TargetPodNamespace: "engine",
-		TargetPodName:      "runtime-pod-a",
-		TargetPodUid:       "uid-a",
-		TargetPodIp:        "10.0.0.1",
-		RuntimeInputId:     runtimeInputID,
-		EventIds:           []string{"evnt_go"},
-		SequenceFrom:       1,
-		SequenceTo:         1,
-		CommandKind:        agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-		PayloadJson:        "{}",
+func validAcceptInputRequest(runtimeInputID string) *agentruntimev1.AcceptInputRequest {
+	return &agentruntimev1.AcceptInputRequest{
+		WorkspaceId:       "wksp_go",
+		SessionId:         "sesn_go",
+		SessionThreadId:   "thrd_go",
+		BindingId:         "bind_go",
+		BindingGeneration: 42,
+		TargetPodUid:      "uid-a",
+		RuntimeInputId:    runtimeInputID,
+		InputOrder:        1,
+		Content:           &agentruntimev1.AcceptInputRequest_MessagesJson{MessagesJson: "{}"},
 	}
 }
 

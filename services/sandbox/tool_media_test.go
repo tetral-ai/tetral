@@ -1,10 +1,12 @@
 package tetralsandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -118,6 +120,48 @@ func TestPostgreSQLSandboxMediaMaterializerRetriesTransientStagedBlobInspection(
 	}
 }
 
+func TestPostgreSQLSandboxMediaRecoveryRejectsSameSizeBlobSubstitution(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	blobStore := blob.NewFakeBlobStore()
+	materializer := NewPostgreSQLSandboxMediaMaterializer(dbconnect.NewClientForTesting(runtimeDB), blobStore)
+	ref := SandboxExecutionRef{
+		WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+		SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a",
+	}
+	raw := `{"status":"success","result":{"mime":"image/png","data_base64":"` + base64.StdEncoding.EncodeToString([]byte("image-bytes")) + `"}}`
+	if _, err := materializer.MaterializeResult(ctx, ref, "view_image", `{"path":"/workspace/plot.png"}`, raw, time.Now()); err != nil {
+		t.Fatalf("MaterializeResult: %v", err)
+	}
+	materializer.blobs = substitutedGetBlobStore{BlobStore: blobStore, body: []byte("other-bytes")}
+
+	if _, err := materializer.RecoverResult(ctx, ref); !errors.Is(err, errSandboxMediaStateConflict) {
+		t.Fatalf("RecoverResult error = %T %v; want same-size Blob substitution rejection", err, err)
+	}
+}
+
+func TestPostgreSQLSandboxMediaStagedReplayRejectsSameSizeBlobSubstitution(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	blobStore := blob.NewFakeBlobStore()
+	materializer := NewPostgreSQLSandboxMediaMaterializer(dbconnect.NewClientForTesting(runtimeDB), blobStore)
+	ref := SandboxExecutionRef{
+		WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+		SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a",
+	}
+	raw := `{"status":"success","result":{"mime":"image/png","data_base64":"` + base64.StdEncoding.EncodeToString([]byte("image-bytes")) + `"}}`
+	if _, err := materializer.MaterializeResult(ctx, ref, "view_image", `{"path":"/workspace/plot.png"}`, raw, time.Now()); err != nil {
+		t.Fatalf("MaterializeResult: %v", err)
+	}
+	materializer.blobs = substitutedGetBlobStore{BlobStore: blobStore, body: []byte("other-bytes")}
+
+	if _, err := materializer.MaterializeResult(ctx, ref, "view_image", `{"path":"/workspace/plot.png"}`, raw, time.Now()); !errors.Is(err, errSandboxMediaStateConflict) {
+		t.Fatalf("staged replay error = %T %v; want same-size Blob substitution rejection", err, err)
+	}
+}
+
 func TestPostgreSQLSandboxMediaRecoveryStopsBeforeBlobInspectionWithoutQueueAuthority(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
@@ -223,4 +267,13 @@ func TestPostgreSQLSandboxMediaStagingRejectsSupersededQueueLease(t *testing.T) 
 	if status != "staged" {
 		t.Fatalf("attachment after successor staging = %q; want staged", status)
 	}
+}
+
+type substitutedGetBlobStore struct {
+	blob.BlobStore
+	body []byte
+}
+
+func (s substitutedGetBlobStore) Get(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.body)), nil
 }

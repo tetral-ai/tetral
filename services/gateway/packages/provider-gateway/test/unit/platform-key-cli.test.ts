@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { ProviderFinishReason, RuntimeMessageRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { ProviderFinishReason, ProviderContextRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { decryptAES256GCM } from "../../src/providers/crypto.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { CachedPlatformCredentialPool, ProviderCredentialResolver, SQLGatewayCredentialStore } from "../../src/providers/credentials.js";
@@ -488,14 +488,10 @@ function openAIGoldenRequest(): ProviderRequest {
     workspaceId: "wksp_pool",
     sessionId: "sesn_pool_openai",
     model: { providerId: "openai", modelId: "gpt-5.5", variant: "xhigh" },
-    messages: [
+    context: [
       {
-        id: "msg_pool_user",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{
-          id: "part_pool_user",
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{
           text: { text: "Say ok and call Search once." },
         }],
       },

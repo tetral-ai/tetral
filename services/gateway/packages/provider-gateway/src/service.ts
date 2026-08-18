@@ -158,7 +158,7 @@ export class ProviderGatewayServiceShell {
       if (release === undefined) {
         errorClass = "provider_error";
         errorCode = "provider_unavailable";
-        yield providerErrorEvent(request, {
+        yield providerErrorEvent({
           code: "provider_unavailable",
           message: "Gateway provider capacity is exhausted.",
           retryable: true,
@@ -222,7 +222,7 @@ export class ProviderGatewayServiceShell {
         const classified = classifyProviderStreamError(error);
         errorClass = "provider_error";
         errorCode = providerLogErrorCode(classified.code);
-        yield providerErrorEvent(request, classified);
+        yield providerErrorEvent(classified);
       } finally {
         abortSignal?.removeEventListener("abort", forwardAbort);
         finishMetrics(failed);
@@ -339,7 +339,7 @@ export class ProviderGatewayServiceShell {
   ): AsyncGenerator<ProviderStreamEvent> {
     const catalogError = this.catalogGate(request);
     if (catalogError !== undefined) {
-      yield providerErrorEvent(request, catalogError);
+      yield providerErrorEvent(catalogError);
       return;
     }
     const attachmentResolution = await withinProviderDeadline(
@@ -349,13 +349,11 @@ export class ProviderGatewayServiceShell {
       () => abortOnTimeout({ kind: "overall_timeout" }),
     );
     if (!attachmentResolution.ok) {
-      yield providerErrorEvent(request, attachmentResolution.error);
+      yield providerErrorEvent(attachmentResolution.error);
       return;
     }
     if (attachmentResolution.rejections.length > 0) {
       yield {
-        requestId: request.requestId,
-        modelRequestId: request.modelRequestId,
         type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS,
         attachmentRejections: {
           rejections: [...attachmentResolution.rejections],
@@ -394,7 +392,7 @@ export class ProviderGatewayServiceShell {
         () => abortOnTimeout({ kind: "overall_timeout" }),
       );
       if (!credential.ok) {
-        yield providerErrorEvent(request, credential.error);
+        yield providerErrorEvent(credential.error);
         return;
       }
       const resolvedCredential = credential.credential;
@@ -421,7 +419,7 @@ export class ProviderGatewayServiceShell {
           overallTimeoutMs: providerDeadlineRemainingMs(providerDeadline),
         });
         for await (const event of providerEvents) {
-          const eventValidation = validateProviderStreamEvent(event, request);
+          const eventValidation = validateProviderStreamEvent(event);
           if (!eventValidation.ok) {
             throw new GrpcStatusError(status.INTERNAL, "gateway provider stream contract violation");
           }
@@ -438,7 +436,7 @@ export class ProviderGatewayServiceShell {
           throw error;
         }
         if (error instanceof ProviderRequestLoweringError) {
-          yield providerErrorEvent(request, error.providerError);
+          yield providerErrorEvent(error.providerError);
           return;
         }
         const providerKeyFailure = error instanceof ProviderKeyFailureError
@@ -457,12 +455,12 @@ export class ProviderGatewayServiceShell {
             logProviderStreamIncomplete(this.options.logger, request, error);
           }
           recordFailureOrigin("transport_failure");
-          yield providerErrorEvent(request, classifyProviderStreamError(error));
+          yield providerErrorEvent(classifyProviderStreamError(error));
           return;
         }
         if (resolvedCredential?.source !== "platform" || emitted) {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(request, providerKeyFailure.classification.providerError);
+          yield providerErrorEvent(providerKeyFailure.classification.providerError);
           return;
         }
         const platformKeyId = resolvedCredential.platformKey.keyId;
@@ -472,7 +470,7 @@ export class ProviderGatewayServiceShell {
         lastPlatformProviderError = providerKeyFailure.classification.providerError;
         if (providerKeyFailure.classification.action === "fail-fast" || platformAttempts >= PlatformKeyPoolConstants.maxKeySwitchesPerTurn) {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(request, providerKeyFailure.classification.providerError);
+          yield providerErrorEvent(providerKeyFailure.classification.providerError);
           return;
         }
       }
@@ -890,7 +888,7 @@ class CatalogGatedProviderStreamer implements ProviderRequestStreamer {
     const message = entry === undefined
       ? "Provider model is not approved by the Gateway catalog."
       : "Provider Gateway streamer is not configured.";
-    yield providerErrorEvent(input.request, {
+    yield providerErrorEvent({
       code: "provider_unavailable",
       message,
       retryable: false,

@@ -5,7 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -43,49 +43,42 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("mcp-tool-failure-composition-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	requestStart := seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_tool_failure_start", modelRequest, "agent_provider_request", 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_tool_failure_start", modelRequest, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_use", ModelRequestId: modelRequest,
-		EventType:      "agent.mcp_tool_use",
-		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
-		SessionVisible: true,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
-			t, scope, "rwrite_mcp_tool_failure_use", "agent.mcp_tool_use", "streaming",
-			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"` + modelCall + `","toolName":"github_search","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"query":"tetral"},"preview":"{\"query\":\"tetral\"}","truncated":false}}}`},
-		)},
+		EventType:             "agent.mcp_tool_use",
+		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
+		SessionVisible:        true,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelCall, "github_search", `{"query":"tetral"}`),
 	})
 	if err != nil {
 		t.Fatalf("write MCP Tool Use: %v", err)
 	}
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_end", ModelRequestId: modelRequest,
-		ModelRequestStartEventId: requestStart.GetEventId(), RequestKind: "agent_provider_request",
 		FinishReason: "tool-calls", UsageJson: `{}`,
 	}); err != nil {
 		t.Fatalf("write request end: %v", err)
 	}
-	const inputJSON = `{"query":"tetral"}`
 	claim := &bridgev1.ClaimMcpToolResultRequest{
-		Scope: scope, ToolUseEventId: toolUse.GetEventId(), NormalizedInputHash: sha256Hex(inputJSON),
-		McpServerName: "github", ToolName: "github_search", InputJson: inputJSON,
+		Scope: scope, ToolUseEventId: toolUse.GetCommitted().GetEventId(), ClaimId: "claim_mcp_tool_failure",
 	}
-	if _, err := store.ClaimMcpToolResult(context.Background(), claim); err != nil {
-		t.Fatalf("claim MCP materialization: %v", err)
+	claimed, err := store.ClaimMcpToolResult(context.Background(), claim)
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("claim MCP execution = %#v/%v", claimed, err)
 	}
 	store.Logger = slog.New(panicSlogHandler{})
-	materialized, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
-		Scope: scope, ToolUseEventId: claim.GetToolUseEventId(), NormalizedInputHash: claim.GetNormalizedInputHash(),
-		McpServerName: claim.GetMcpServerName(), ToolName: claim.GetToolName(), InputJson: claim.GetInputJson(),
+	committedResult, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: claim.GetToolUseEventId(), ClaimId: claim.GetClaimId(),
 		ResultJson: `{"response":{"status":3,"result_text":"credential and provider response must not escape","attachments":[],"error_kind":2,"retry_status":2},"content_items":0,"refresh_triggered":true}`,
 	})
-	if err != nil || materialized.GetMaterializationHandle() == "" {
-		t.Fatalf("commit MCP materialization with failing telemetry = %#v/%v", materialized, err)
+	if err != nil || committedResult.GetCommitted() == nil {
+		t.Fatalf("commit MCP result with failing telemetry = %#v/%v", committedResult, err)
 	}
 	fixtureInput := map[string]any{
 		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
 		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
-		"modelRequestId": modelRequest, "modelToolCallId": modelCall, "toolUseEventId": toolUse.GetEventId(),
-		"materializationHandle": materialized.GetMaterializationHandle(),
+		"modelRequestId": modelRequest, "modelToolCallId": modelCall, "toolUseEventId": toolUse.GetCommitted().GetEventId(),
 	}
 	rawInput, err := json.Marshal(fixtureInput)
 	if err != nil {
@@ -104,9 +97,8 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	var composed struct {
 		ConnectorCalls int `json:"connectorCalls"`
 		Result         struct {
-			Type                     string `json:"type"`
-			MCPMaterializationHandle string `json:"mcpMaterializationHandle"`
-			Error                    struct {
+			Type  string `json:"type"`
+			Error struct {
 				Message   string `json:"message"`
 				Retryable bool   `json:"retryable"`
 			} `json:"error"`
@@ -115,57 +107,44 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 			Type  string          `json:"type"`
 			Error json.RawMessage `json:"error"`
 		} `json:"settlement"`
-		Event struct {
-			Type       string `json:"type"`
-			MCPToolUse string `json:"mcp_tool_use_id"`
-			IsError    bool   `json:"is_error"`
-			Content    []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"event"`
+		DeclaredError json.RawMessage `json:"declaredError"`
 	}
 	if err := json.Unmarshal(output, &composed); err != nil {
 		t.Fatalf("decode MCP failure composition: %v: %s", err, output)
 	}
 	if composed.ConnectorCalls != 1 || composed.Result.Type != "error" || composed.Result.Error.Retryable ||
-		composed.Result.MCPMaterializationHandle != materialized.GetMaterializationHandle() ||
 		composed.Result.Error.Message != "MCP tool execution is unavailable." || composed.Settlement.Type != "error" ||
-		composed.Event.Type != "agent.mcp_tool_result" || composed.Event.MCPToolUse != toolUse.GetEventId() ||
-		!composed.Event.IsError || len(composed.Event.Content) != 1 || composed.Event.Content[0].Text != "MCP tool execution is unavailable." {
-		t.Fatalf("MCP failure composition = %+v; want one generic non-retryable Tool Result", composed)
+		len(composed.DeclaredError) == 0 {
+		t.Fatalf("MCP failure composition = %+v; want one generic non-retryable Tool settlement", composed)
 	}
-	payload, err := json.Marshal(composed.Event)
-	if err != nil {
-		t.Fatalf("encode MCP Tool Result event: %v", err)
-	}
-	committed, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_result", ModelRequestId: modelRequest,
-		EventType: "agent.mcp_tool_result", PayloadJson: string(payload), SessionVisible: true,
-		McpMaterializationHandle: &composed.Result.MCPMaterializationHandle,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: &bridgev1.RuntimeToolSettlement{
-			ToolUseEventId: toolUse.GetEventId(),
-			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: string(composed.Settlement.Error)}},
-		}},
+	request := bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
+		Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: string(composed.DeclaredError)}},
 	})
+	committed, err := store.SettleToolResult(context.Background(), request)
 	if err != nil {
 		t.Fatalf("commit MCP Tool Result: %v", err)
 	}
-	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_result_second", ModelRequestId: modelRequest,
-		EventType: "agent.mcp_tool_result", PayloadJson: string(payload), SessionVisible: true,
-		McpMaterializationHandle: &composed.Result.MCPMaterializationHandle,
-		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolUse.GetEventId(), "MCP tool execution is unavailable.")},
-	}); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("second MCP Tool Result settlement = %v; want AlreadyExists", err)
+	bridgeRequireToolSettlementOutcomeForTest(t, committed, "committed")
+	replayed, err := store.SettleToolResult(context.Background(), proto.Clone(request).(*bridgev1.SettleToolResultRequest))
+	if err != nil {
+		t.Fatalf("replay MCP Tool Result settlement: %v", err)
+	}
+	bridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
+	if _, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+		scope,
+		bridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "different"),
+	)); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("conflicting MCP Tool Result settlement = %v; want AlreadyExists", err)
 	}
 	var toolResults, sessionErrors int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.mcp_tool_result' AND payload_json::jsonb ->> 'mcp_tool_use_id'=$2),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`, sessionID, toolUse.GetEventId()).Scan(&toolResults, &sessionErrors); err != nil {
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`, sessionID, toolUse.GetCommitted().GetEventId()).Scan(&toolResults, &sessionErrors); err != nil {
 		t.Fatalf("count MCP failure durable results: %v", err)
 	}
-	if toolResults != 1 || sessionErrors != 0 || committed.GetEventId() == "" {
-		t.Fatalf("durable MCP failure = Tool Results %d Session errors %d event %q; want 1/0/nonempty", toolResults, sessionErrors, committed.GetEventId())
+	if toolResults != 1 || sessionErrors != 0 {
+		t.Fatalf("durable MCP failure = Tool Results %d Session errors %d; want 1/0", toolResults, sessionErrors)
 	}
 	var durableMessage string
 	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
@@ -174,27 +153,19 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 		t.Fatalf("read MCP Tool projection: %v", err)
 	}
 	var mcpProjection struct {
-		Parts []struct {
-			State struct {
-				Error struct {
-					Type    string `json:"type"`
-					Message string `json:"message"`
-				} `json:"error"`
-			} `json:"state"`
-		} `json:"parts"`
+		Parts []map[string]any `json:"parts"`
 	}
-	if err := json.Unmarshal([]byte(durableMessage), &mcpProjection); err != nil || len(mcpProjection.Parts) != 1 ||
-		mcpProjection.Parts[0].State.Error.Type == "" || mcpProjection.Parts[0].State.Error.Message != "MCP tool execution is unavailable." {
+	if err := json.Unmarshal([]byte(durableMessage), &mcpProjection); err != nil || len(mcpProjection.Parts) != 2 {
 		t.Fatalf("MCP Tool error was not normalized: %s", durableMessage)
 	}
-	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope, RuntimeInputId: "rin_mcp_tool_failure_cold"})
+	result, _ := mcpProjection.Parts[1]["result"].(map[string]any)
+	failure, _ := result["error"].(map[string]any)
+	if result["type"] != "error" || failure["message"] != "MCP tool execution is unavailable." {
+		t.Fatalf("MCP Tool error was not normalized: %s", durableMessage)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("LoadContext after MCP Tool failure: %v", err)
-	}
-	checkpoint := runColdCheckpointComposition(t, loaded.GetContextJson())
-	if checkpoint.Checkpoint.Request == nil || checkpoint.Checkpoint.Request.ModelRequestID != modelRequest ||
-		checkpoint.Checkpoint.Request.ToolMemberCount != 1 || checkpoint.ReducerAction != "prepare_next_request" {
-		t.Fatalf("MCP failure checkpoint = %+v; want one terminal member and next request", checkpoint)
 	}
 	for _, forbidden := range []string{"credential and provider response must not escape", "access_token", "refresh_token"} {
 		if strings.Contains(string(output), forbidden) || strings.Contains(loaded.GetContextJson(), forbidden) {
@@ -203,12 +174,86 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	}
 }
 
-func TestPostgreSQLMCPUncertaintySettlesWithoutMaterialization(t *testing.T) {
+func TestPostgreSQLMCPErrorSettlementPreservesAnActiveClaim(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID    = "sesn_mcp_uncertain_without_materialization"
-		threadID     = "thr_mcp_uncertain_without_materialization"
-		modelRequest = "mreq_mcp_uncertain_without_materialization"
+		sessionID = "sesn_mcp_in_flight_error"
+		threadID  = "thr_mcp_in_flight_error"
+		bindingID = "bind_mcp_in_flight_error"
+		podUID    = "pod_mcp_in_flight_error"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("mcp-in-flight-error-signing-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	claim, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_in_flight_error",
+	})
+	if err != nil || claim.GetAcquired() == nil {
+		t.Fatalf("claim MCP execution = %#v/%v; want acquired", claim, err)
+	}
+
+	const errorJSON = `{"type":"runtime_invalid_sequence","message":"durable MCP error settlement","retryable":false}`
+	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUseEventID,
+		Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
+			ErrorJson: errorJSON,
+		}},
+	}))
+	if err != nil || settled.GetCommitted() == nil {
+		t.Fatalf("settle model-visible MCP error = %#v/%v; want committed", settled, err)
+	}
+
+	var claimStatus string
+	var claimID, lease sql.NullString
+	if err := admin.QueryRowContext(context.Background(), `SELECT mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID).Scan(&claimStatus, &claimID, &lease); err != nil {
+		t.Fatalf("read MCP claim after error settlement: %v", err)
+	}
+	if claimStatus != mcpClaimStatusInFlight || claimID.String != "claim_mcp_in_flight_error" || !lease.Valid {
+		t.Fatalf("MCP claim after error settlement = %q/%v/%v; want original in-flight lease", claimStatus, claimID, lease)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("load model-visible in-flight MCP error: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode model-visible in-flight MCP error: %v", err)
+	}
+	var parts []json.RawMessage
+	if len(payload.ContextEntries) == 1 {
+		parts = payload.ContextEntries[0].Parts
+	} else if payload.OpenRequestDraft != nil {
+		parts = payload.OpenRequestDraft.Parts
+	}
+	if len(parts) != 2 {
+		t.Fatalf("in-flight MCP error context = entries=%#v draft=%#v", payload.ContextEntries, payload.OpenRequestDraft)
+	}
+	var resultPart struct {
+		Result struct {
+			Type  string `json:"type"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(parts[1], &resultPart); err != nil ||
+		resultPart.Result.Type != "error" || resultPart.Result.Error.Message != "durable MCP error settlement" {
+		t.Fatalf("model-visible MCP error settlement = %#v err=%v", resultPart, err)
+	}
+}
+
+func TestPostgreSQLMCPUncertaintySettlesWithoutResultAlias(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID    = "sesn_mcp_uncertain_without_result_alias"
+		threadID     = "thr_mcp_uncertain_without_result_alias"
+		modelRequest = "mreq_mcp_uncertain_without_result_alias"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_mcp_uncertain", 1, "pod_mcp_uncertain")
@@ -218,29 +263,23 @@ func TestPostgreSQLMCPUncertaintySettlesWithoutMaterialization(t *testing.T) {
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_uncertain_use", ModelRequestId: modelRequest,
 		EventType: "agent.mcp_tool_use", PayloadJson: `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
-			t, scope, "rwrite_mcp_uncertain_use", "agent.mcp_tool_use", "streaming",
-			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_mcp_uncertain","toolName":"github_search","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"query":"tetral"},"preview":"{\"query\":\"tetral\"}","truncated":false}}}`},
-		)},
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_uncertain", "github_search", `{"query":"tetral"}`),
 	})
 	if err != nil {
 		t.Fatalf("write MCP Tool Use: %v", err)
 	}
 	message := "The MCP tool execution is still in progress. Check the external service before retrying."
-	errorSettlement := bridgeErrorToolSettlementForTest(toolUse.GetEventId(), message)
-	result, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_mcp_uncertain_result", ModelRequestId: modelRequest,
-		EventType: "agent.mcp_tool_result", PayloadJson: `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":` + fmt.Sprintf("%q", message) + `}],"is_error":true}`,
-		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: errorSettlement},
-	})
-	if err != nil || result.GetEventId() == "" {
-		t.Fatalf("write unmaterialized MCP uncertainty = %#v/%v", result, err)
+	errorSettlement := bridgeErrorToolSettlementForTest(toolUse.GetCommitted().GetEventId(), message)
+	result, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, errorSettlement))
+	if err != nil {
+		t.Fatalf("write MCP uncertainty = %#v/%v", result, err)
 	}
+	bridgeRequireToolSettlementOutcomeForTest(t, result, "committed")
 
 	var durableResults int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
 		WHERE workspace_id='default' AND session_id=$1 AND type='agent.mcp_tool_result'
-		  AND payload_json::jsonb ->> 'mcp_tool_use_id'=$2`, sessionID, toolUse.GetEventId()).Scan(&durableResults); err != nil {
+		  AND payload_json::jsonb ->> 'mcp_tool_use_id'=$2`, sessionID, toolUse.GetCommitted().GetEventId()).Scan(&durableResults); err != nil {
 		t.Fatalf("count durable MCP uncertainty: %v", err)
 	}
 	if durableResults != 1 {
@@ -284,10 +323,8 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGe
 	if err != nil {
 		t.Fatalf("McpManifestChanged: %v", err)
 	}
-	runtimeInputID := "runtime_config_update:mcp_manifest:sesn_bridge_mcp_manifest:github:1"
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		response.GetAck().GetRuntimeInputId() != runtimeInputID {
-		t.Fatalf("McpManifestChanged ack = %#v; want committed runtime input id", response.GetAck())
+	if response.GetCommitted() == nil {
+		t.Fatalf("McpManifestChanged = %#v; want committed", response)
 	}
 	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_manifest", "github", 1)
 
@@ -298,9 +335,8 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGe
 	if err != nil {
 		t.Fatalf("McpManifestChanged replay: %v", err)
 	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		len(lister.requests) != 1 {
-		t.Fatalf("McpManifestChanged replay ack=%#v lister calls=%d; want duplicate without re-list", replay.GetAck(), len(lister.requests))
+	if replay.GetDuplicate() == nil || len(lister.requests) != 1 {
+		t.Fatalf("McpManifestChanged replay=%#v lister calls=%d; want duplicate without re-list", replay, len(lister.requests))
 	}
 
 	changed := proto.Clone(request).(*bridgev1.McpManifestChangedRequest)
@@ -409,146 +445,95 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	scope := bridgeAPIScope("sesn_bridge_mcp_tool", "thr_bridge_mcp_tool", "bind_bridge_mcp_tool", 1, "pod_uid_mcp_tool")
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	claim := &bridgev1.ClaimMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      "evt_mcp_tool",
-		NormalizedInputHash: "hash_mcp_tool",
-		McpServerName:       "github",
-		ToolName:            "create_issue",
-		InputJson:           `{"title":"Bug","body":"Details"}`,
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_tool",
 	}
 	claimed, err := store.ClaimMcpToolResult(context.Background(), claim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult first: %v", err)
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("ClaimMcpToolResult first = %#v/%v; want acquired", claimed, err)
 	}
-	if claimed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || claimed.GetResultJson() != "" {
-		t.Fatalf("first claim = %+v; want accepted empty result", claimed)
+	if claimed.GetAcquired().GetMcpServerName() != "github" ||
+		claimed.GetAcquired().GetToolName() != "create_issue" ||
+		claimed.GetAcquired().GetInputJson() != `{"body":"Details","title":"Bug"}` {
+		t.Fatalf("acquired executor payload = %#v; want durable Tool facts", claimed.GetAcquired())
 	}
 	var claimStatus string
-	var claimOwner sql.NullString
-	var claimExpires sql.NullString
+	var claimOwner, claimExpires sql.NullString
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
+		`SELECT mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_tool' AND tool_use_event_id = 'evt_mcp_tool'`).Scan(&claimStatus, &claimOwner, &claimExpires); err != nil {
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_tool' AND tool_use_event_id = $1`,
+		toolUseEventID,
+	).Scan(&claimStatus, &claimOwner, &claimExpires); err != nil {
 		t.Fatalf("read mcp claim: %v", err)
 	}
-	if claimStatus != "in_flight" || !claimOwner.Valid || claimOwner.String != scope.GetRequestId() || !claimExpires.Valid || claimExpires.String != "2026-01-01T00:03:30Z" {
+	if claimStatus != "in_flight" || !claimOwner.Valid || claimOwner.String != claim.GetClaimId() ||
+		!claimExpires.Valid || claimExpires.String != "2026-01-01T00:03:30Z" {
 		t.Fatalf("initial MCP claim = status %q owner %+v expires %+v; want in_flight owned lease", claimStatus, claimOwner, claimExpires)
 	}
-	activeClaim, err := store.ClaimMcpToolResult(context.Background(), claim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult active duplicate: %v", err)
+	renewed, err := store.ClaimMcpToolResult(context.Background(), claim)
+	if err != nil || renewed.GetAcquired() == nil {
+		t.Fatalf("same-claim renewal = %#v/%v; want acquired", renewed, err)
 	}
-	if activeClaim.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED || activeClaim.GetAck().GetErrorCode() != "mcp_claim_in_flight" {
-		t.Fatalf("active duplicate claim = %+v; want in-flight rejected ack", activeClaim)
-	}
-	reorderedClaim := proto.Clone(claim).(*bridgev1.ClaimMcpToolResultRequest)
-	reorderedClaim.InputJson = `{"body":"Details","title":"Bug"}`
-	activeReorderedClaim, err := store.ClaimMcpToolResult(context.Background(), reorderedClaim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult active duplicate with reordered raw JSON: %v", err)
-	}
-	if activeReorderedClaim.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED || activeReorderedClaim.GetAck().GetErrorCode() != "mcp_claim_in_flight" {
-		t.Fatalf("active reordered duplicate claim = %+v; want in-flight rejected ack", activeReorderedClaim)
+	inFlight, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_tool_other",
+	})
+	if err != nil || inFlight.GetInFlight() == nil {
+		t.Fatalf("different active claim = %#v/%v; want in-flight", inFlight, err)
 	}
 
-	resultJSON := `{"response":{"status":1,"result_text":"created","attachments":[]},"content_items":1,"refresh_triggered":false}`
+	const resultJSON = `{"response":{"status":1,"result_text":"created","attachments":[]},"content_items":1,"refresh_triggered":false}`
 	commitRequest := &bridgev1.CommitMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      claim.GetToolUseEventId(),
-		NormalizedInputHash: claim.GetNormalizedInputHash(),
-		McpServerName:       claim.GetMcpServerName(),
-		ToolName:            claim.GetToolName(),
-		InputJson:           claim.GetInputJson(),
-		ResultJson:          resultJSON,
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claim.GetClaimId(), ResultJson: resultJSON,
 	}
 	committed, err := store.CommitMcpToolResult(context.Background(), commitRequest)
-	if err != nil {
-		t.Fatalf("CommitMcpToolResult: %v", err)
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("CommitMcpToolResult = %#v/%v; want committed", committed, err)
 	}
-	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || committed.GetRefsOnlyResultJson() != resultJSON {
-		t.Fatalf("commit = %+v; want committed stored result", committed)
+	if committed.GetCommitted().GetAttachmentRef() != "" {
+		t.Fatalf("committed attachment ref = %q; want no generated fact", committed.GetCommitted().GetAttachmentRef())
 	}
-	assertMCPMaterializationDeclaration(t, committed, commitRequest, scope)
-	var toolKind string
-	var toolName string
-	var storedResult string
+	duplicateCommit, err := store.CommitMcpToolResult(context.Background(), commitRequest)
+	if err != nil || duplicateCommit.GetDuplicate() == nil {
+		t.Fatalf("CommitMcpToolResult replay = %#v/%v; want duplicate", duplicateCommit, err)
+	}
+	if duplicateCommit.GetDuplicate().GetAttachmentRef() != "" {
+		t.Fatalf("duplicate attachment ref = %q; want no generated fact", duplicateCommit.GetDuplicate().GetAttachmentRef())
+	}
+	completed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_tool_read",
+	})
+	if err != nil || completed.GetAlreadyCompleted().GetResultJson() != resultJSON {
+		t.Fatalf("direct durable read = %#v/%v; want exact stored result", completed, err)
+	}
+	var toolKind, toolName, storedResult string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT tool_kind, tool_name, result_json, mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
+		`SELECT tool_kind, tool_name, result_json, mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_tool' AND tool_use_event_id = 'evt_mcp_tool'`).Scan(&toolKind, &toolName, &storedResult, &claimStatus, &claimOwner, &claimExpires); err != nil {
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_tool' AND tool_use_event_id = $1`,
+		toolUseEventID,
+	).Scan(&toolKind, &toolName, &storedResult, &claimStatus, &claimOwner, &claimExpires); err != nil {
 		t.Fatalf("read mcp runtime tool result: %v", err)
 	}
-	if toolKind != "mcp" || toolName != "github/create_issue" || storedResult != resultJSON || claimStatus != "stored" || claimOwner.Valid || claimExpires.Valid {
-		t.Fatalf("stored MCP result = kind %q tool %q json %q claim %q owner %+v expires %+v; want mcp github/create_issue stored result", toolKind, toolName, storedResult, claimStatus, claimOwner, claimExpires)
+	if toolKind != "mcp" || toolName != "github/create_issue" || storedResult != resultJSON ||
+		claimStatus != "stored" || claimOwner.Valid || claimExpires.Valid {
+		t.Fatalf("stored MCP result = kind %q tool %q json %q claim %q owner %+v expires %+v", toolKind, toolName, storedResult, claimStatus, claimOwner, claimExpires)
 	}
 
-	replayed, err := store.ClaimMcpToolResult(context.Background(), claim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult replay: %v", err)
-	}
-	if replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replayed.GetResultJson() != resultJSON {
-		t.Fatalf("replay claim = %+v; want duplicate stored result", replayed)
-	}
-	if replayed.GetDeclaration() == nil ||
-		len(replayed.GetDeclaration().GetReceipts()) != 1 ||
-		!proto.Equal(replayed.GetDeclaration().GetReceipts()[0], committed.GetDeclaration().GetReceipts()[0]) {
-		t.Fatalf("replay declaration = %+v; want durable commit receipt %+v", replayed.GetDeclaration(), committed.GetDeclaration())
-	}
-	reorderedReplay, err := store.ClaimMcpToolResult(context.Background(), reorderedClaim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult replay with reordered raw JSON: %v", err)
-	}
-	if reorderedReplay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || reorderedReplay.GetResultJson() != resultJSON {
-		t.Fatalf("reordered replay claim = %+v; want duplicate stored result", reorderedReplay)
-	}
-	duplicateRequest := &bridgev1.CommitMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      claim.GetToolUseEventId(),
-		NormalizedInputHash: claim.GetNormalizedInputHash(),
-		McpServerName:       claim.GetMcpServerName(),
-		ToolName:            claim.GetToolName(),
-		InputJson:           reorderedClaim.GetInputJson(),
-		ResultJson:          resultJSON,
-	}
-	duplicateCommit, err := store.CommitMcpToolResult(context.Background(), duplicateRequest)
-	if err != nil {
-		t.Fatalf("CommitMcpToolResult duplicate: %v", err)
-	}
-	if duplicateCommit.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || duplicateCommit.GetRefsOnlyResultJson() != resultJSON {
-		t.Fatalf("duplicate commit = %+v; want duplicate stored result", duplicateCommit)
-	}
-	assertMCPMaterializationDeclaration(t, duplicateCommit, duplicateRequest, scope)
-	if !proto.Equal(committed.GetDeclaration(), duplicateCommit.GetDeclaration()) {
-		t.Fatalf("duplicate declaration = %+v; want committed declaration %+v", duplicateCommit.GetDeclaration(), committed.GetDeclaration())
-	}
-
-	conflict := proto.Clone(claim).(*bridgev1.ClaimMcpToolResultRequest)
-	conflict.NormalizedInputHash = "hash_mcp_other"
-	if _, err := store.ClaimMcpToolResult(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("conflicting ClaimMcpToolResult err = %v; want AlreadyExists", err)
-	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_bindings
 		    SET binding_id = 'bind_bridge_mcp_tool_replacement',
 		        binding_generation = 2,
 		        agent_runtime_pod_uid = 'pod_uid_mcp_tool_replacement',
 		        updated_at = '2026-01-01T00:00:31Z'
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_mcp_tool'`,
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_tool'`,
 	); err != nil {
 		t.Fatalf("replace MCP replay binding: %v", err)
 	}
 	staleReplay, err := store.ClaimMcpToolResult(context.Background(), claim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult stale replay: %v", err)
-	}
-	if staleReplay.GetResultJson() != resultJSON ||
-		staleReplay.GetDeclaration().GetApplicationDisposition() != bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY ||
-		staleReplay.GetDeclaration().GetObservedBindingId() != "bind_bridge_mcp_tool_replacement" ||
-		staleReplay.GetDeclaration().GetObservedBindingGeneration() != 2 {
-		t.Fatalf("stale replay = %+v; want exact result with replacement-binding observation", staleReplay)
+	if err != nil || staleReplay.GetStale() == nil {
+		t.Fatalf("ClaimMcpToolResult stale replay = %#v/%v; want stale", staleReplay, err)
 	}
 }
 
@@ -571,43 +556,31 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultIdentityIncludesThread(t *testing.
 	}
 	for threadID, resultJSON := range results {
 		scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_mcp_thread_identity", 1, "pod_uid_mcp_thread_identity")
+		toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 		claim := &bridgev1.ClaimMcpToolResultRequest{
-			Scope:               scope,
-			ToolUseEventId:      "evt_shared_mcp_tool",
-			NormalizedInputHash: "hash_shared_mcp_tool",
-			McpServerName:       "github",
-			ToolName:            "create_issue",
-			InputJson:           `{"title":"shared"}`,
+			Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_" + threadID,
 		}
-		if _, err := store.ClaimMcpToolResult(context.Background(), claim); err != nil {
-			t.Fatalf("ClaimMcpToolResult thread %s: %v", threadID, err)
+		claimed, err := store.ClaimMcpToolResult(context.Background(), claim)
+		if err != nil || claimed.GetAcquired() == nil {
+			t.Fatalf("ClaimMcpToolResult thread %s = %#v/%v", threadID, claimed, err)
 		}
-		if _, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
-			Scope:               scope,
-			ToolUseEventId:      claim.GetToolUseEventId(),
-			NormalizedInputHash: claim.GetNormalizedInputHash(),
-			McpServerName:       claim.GetMcpServerName(),
-			ToolName:            claim.GetToolName(),
-			InputJson:           claim.GetInputJson(),
-			ResultJson:          resultJSON,
-		}); err != nil {
-			t.Fatalf("CommitMcpToolResult thread %s: %v", threadID, err)
+		committed, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+			Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claim.GetClaimId(), ResultJson: resultJSON,
+		})
+		if err != nil || committed.GetCommitted() == nil {
+			t.Fatalf("CommitMcpToolResult thread %s = %#v/%v", threadID, committed, err)
 		}
-		replay, err := store.ClaimMcpToolResult(context.Background(), claim)
-		if err != nil {
-			t.Fatalf("ClaimMcpToolResult replay thread %s: %v", threadID, err)
-		}
-		if replay.GetResultJson() != resultJSON {
-			t.Fatalf("thread %s replay = %q; want %q", threadID, replay.GetResultJson(), resultJSON)
+		replay, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+			Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "read_" + threadID,
+		})
+		if err != nil || replay.GetAlreadyCompleted().GetResultJson() != resultJSON {
+			t.Fatalf("thread %s direct read = %#v/%v; want %q", threadID, replay, err, resultJSON)
 		}
 	}
 	var rowCount int
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND tool_use_event_id = 'evt_shared_mcp_tool'`,
+		`SELECT count(*) FROM session_runtime_tool_results
+		  WHERE workspace_id = 'default' AND session_id = $1 AND tool_kind = 'mcp'`,
 		sessionID,
 	).Scan(&rowCount); err != nil {
 		t.Fatalf("count thread-scoped MCP results: %v", err)
@@ -629,46 +602,26 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	scope := bridgeAPIScope("sesn_bridge_mcp_media", "thr_bridge_mcp_media", "bind_bridge_mcp_media", 1, "pod_uid_mcp_media")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_media_start", "mreq_mcp_media", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_mcp_media_tool_use",
-		ModelRequestId: "mreq_mcp_media",
-		EventType:      "agent.mcp_tool_use",
-		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"get_file_contents","input":{"path":"plot.png"},"mcp_server_name":"github","evaluated_permission":"allow"}`,
-		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
-			t,
-			scope,
-			"rwrite_mcp_media_tool_use",
-			"agent.mcp_tool_use",
-			"streaming",
-			bridgeRuntimePartCreateForTest{
-				kind: "tool",
-				json: `{"type":"tool","toolCallId":"call_mcp_media","toolName":"get_file_contents","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"path":"plot.png"},"preview":"{\"path\":\"plot.png\"}","truncated":false}}}`,
-			},
-		)},
+		Scope:                 scope,
+		RuntimeWriteId:        "rwrite_mcp_media_tool_use",
+		ModelRequestId:        "mreq_mcp_media",
+		EventType:             "agent.mcp_tool_use",
+		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"get_file_contents","input":{"path":"plot.png"},"mcp_server_name":"github","evaluated_permission":"allow"}`,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_media", "get_file_contents", `{"path":"plot.png"}`),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent MCP tool use: %v", err)
 	}
 	claim := &bridgev1.ClaimMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      toolUse.GetEventId(),
-		NormalizedInputHash: "hash_mcp_media",
-		McpServerName:       "github",
-		ToolName:            "get_file_contents",
-		InputJson:           `{"path":"plot.png"}`,
+		Scope: scope, ToolUseEventId: toolUse.GetCommitted().GetEventId(), ClaimId: "claim_mcp_media",
 	}
-	if _, err := store.ClaimMcpToolResult(context.Background(), claim); err != nil {
-		t.Fatalf("ClaimMcpToolResult: %v", err)
+	claimed, err := store.ClaimMcpToolResult(context.Background(), claim)
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("ClaimMcpToolResult = %#v/%v", claimed, err)
 	}
 	pendingJSON := `{"response":{"status":1,"result_text":"[MCP attachment: plot.png]","attachments":[{"mime":"image/png","size_bytes":3,"suggested_filename":"plot.png"}]},"content_items":1,"refresh_triggered":false}`
 	request := &bridgev1.CommitMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      claim.GetToolUseEventId(),
-		NormalizedInputHash: claim.GetNormalizedInputHash(),
-		McpServerName:       claim.GetMcpServerName(),
-		ToolName:            claim.GetToolName(),
-		InputJson:           claim.GetInputJson(),
-		ResultJson:          pendingJSON,
+		Scope: scope, ToolUseEventId: claim.GetToolUseEventId(), ClaimId: claim.GetClaimId(), ResultJson: pendingJSON,
 		InlineMedia: []*bridgev1.McpInlineMedia{{
 			Data:              []byte{1, 2, 3},
 			Mime:              "image/png",
@@ -679,16 +632,21 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if err != nil {
 		t.Fatalf("CommitMcpToolResult: %v", err)
 	}
-	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("commit ack = %+v; want committed", committed.GetAck())
+	if committed.GetCommitted() == nil {
+		t.Fatalf("commit = %+v; want committed", committed)
 	}
-	assertMCPMaterializationDeclaration(t, committed, request, scope)
-	if committed.GetMaterializationHandle() != toolUse.GetEventId() {
-		t.Fatalf("materialization handle = %q; want %q", committed.GetMaterializationHandle(), toolUse.GetEventId())
+	if committed.GetCommitted().GetAttachmentRef() == "" {
+		t.Fatal("committed attachment ref is empty; want Bridge-generated fact")
 	}
-	refsOnlyJSON := committed.GetRefsOnlyResultJson()
+	read, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUse.GetCommitted().GetEventId(), ClaimId: "claim_mcp_media_read",
+	})
+	if err != nil || read.GetAlreadyCompleted() == nil {
+		t.Fatalf("read committed MCP result = %#v/%v", read, err)
+	}
+	refsOnlyJSON := read.GetAlreadyCompleted().GetResultJson()
 	if refsOnlyJSON == "" || strings.Contains(refsOnlyJSON, "data_base64") || strings.Contains(refsOnlyJSON, "AQID") {
-		t.Fatalf("refs-only result = %q; want non-empty result without media bytes", refsOnlyJSON)
+		t.Fatalf("direct durable result = %q; want non-empty result without media bytes", refsOnlyJSON)
 	}
 	var result struct {
 		Response struct {
@@ -710,12 +668,15 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if !strings.HasPrefix(attachment.AttachmentRef, "att_") || attachment.Mime != "image/png" || attachment.SizeBytes != 3 || attachment.SuggestedFilename != "plot.png" {
 		t.Fatalf("refs-only attachment = %+v; want completed ref metadata", attachment)
 	}
+	if committed.GetCommitted().GetAttachmentRef() != attachment.AttachmentRef {
+		t.Fatalf("committed attachment ref = %q; want generated ref %q", committed.GetCommitted().GetAttachmentRef(), attachment.AttachmentRef)
+	}
 
 	var storedResult string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT result_json FROM session_runtime_tool_results
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_media' AND tool_use_event_id = $1`,
-		toolUse.GetEventId()).Scan(&storedResult); err != nil {
+		toolUse.GetCommitted().GetEventId()).Scan(&storedResult); err != nil {
 		t.Fatalf("read stored MCP result: %v", err)
 	}
 	if storedResult != refsOnlyJSON {
@@ -729,7 +690,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 		Scan(&workspaceID, &sessionID, &threadID, &sourceEventID, &blobPointer, &mime, &metadataJSON, &attachmentStatus); err != nil {
 		t.Fatalf("read committed MCP attachment: %v", err)
 	}
-	if workspaceID != "default" || sessionID != "sesn_bridge_mcp_media" || threadID != "thr_bridge_mcp_media" || sourceEventID != toolUse.GetEventId() || mime != "image/png" || attachmentStatus != "staged" {
+	if workspaceID != "default" || sessionID != "sesn_bridge_mcp_media" || threadID != "thr_bridge_mcp_media" || sourceEventID != toolUse.GetCommitted().GetEventId() || mime != "image/png" || attachmentStatus != "staged" {
 		t.Fatalf("attachment tenancy/status = %q/%q/%q/%q %q %q; want scoped staged row", workspaceID, sessionID, threadID, sourceEventID, mime, attachmentStatus)
 	}
 	if !strings.Contains(metadataJSON, `"filename":"plot.png"`) {
@@ -743,17 +704,20 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if err != nil {
 		t.Fatalf("CommitMcpToolResult duplicate: %v", err)
 	}
-	if duplicate.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		duplicate.GetRefsOnlyResultJson() != refsOnlyJSON ||
-		duplicate.GetMaterializationHandle() != toolUse.GetEventId() {
-		t.Fatalf("duplicate commit = %+v; want identical refs-only replay", duplicate)
+	if duplicate.GetDuplicate() == nil {
+		t.Fatalf("duplicate commit = %+v; want duplicate", duplicate)
 	}
-	assertMCPMaterializationDeclaration(t, duplicate, request, scope)
-	if !proto.Equal(committed.GetDeclaration(), duplicate.GetDeclaration()) {
-		t.Fatalf("duplicate declaration = %+v; want committed declaration %+v", duplicate.GetDeclaration(), committed.GetDeclaration())
+	if duplicate.GetDuplicate().GetAttachmentRef() != attachment.AttachmentRef {
+		t.Fatalf("duplicate attachment ref = %q; want committed ref %q", duplicate.GetDuplicate().GetAttachmentRef(), attachment.AttachmentRef)
+	}
+	if deletes := blobStore.Deletes(); len(deletes) != 0 {
+		t.Fatalf("blob deletes after durable duplicate = %v; want none", deletes)
+	}
+	if data, ok := blobStore.Bytes(blobPointer); !ok || !bytes.Equal(data, []byte{1, 2, 3}) {
+		t.Fatalf("attachment blob after durable duplicate = %v present=%v; want referenced bytes", data, ok)
 	}
 	var attachmentCount int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_transient_attachments WHERE source_tool_use_event_id = $1`, toolUse.GetEventId()).Scan(&attachmentCount); err != nil {
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_transient_attachments WHERE source_tool_use_event_id = $1`, toolUse.GetCommitted().GetEventId()).Scan(&attachmentCount); err != nil {
 		t.Fatalf("count MCP attachments: %v", err)
 	}
 	if attachmentCount != 1 {
@@ -764,43 +728,29 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if err != nil {
 		t.Fatalf("ClaimMcpToolResult active attachment replay: %v", err)
 	}
-	if activeReplay.GetResultJson() != refsOnlyJSON {
-		t.Fatalf("active attachment replay = %q; want byte-identical %q", activeReplay.GetResultJson(), refsOnlyJSON)
-	}
-	if activeReplay.GetMaterializationHandle() != toolUse.GetEventId() {
-		t.Fatalf("claim replay handle = %q; want %q", activeReplay.GetMaterializationHandle(), toolUse.GetEventId())
+	if activeReplay.GetAlreadyCompleted().GetResultJson() != refsOnlyJSON {
+		t.Fatalf("active attachment replay = %#v; want byte-identical %q", activeReplay, refsOnlyJSON)
 	}
 
-	materializationHandle := toolUse.GetEventId()
-	resultWrite := &bridgev1.WriteEventRequest{
-		Scope:                    scope,
-		RuntimeWriteId:           "rwrite_mcp_media_tool_result",
-		ModelRequestId:           "mreq_mcp_media",
-		EventType:                "agent.mcp_tool_result",
-		McpMaterializationHandle: &materializationHandle,
-		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"[MCP attachment: plot.png]"}]}`,
-		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "[MCP attachment: plot.png]")},
-	}
-	resultEvent, err := store.WriteEvent(context.Background(), resultWrite)
+	resultWrite := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "[MCP attachment: plot.png]"))
+	resultEvent, err := store.SettleToolResult(context.Background(), resultWrite)
 	if err != nil {
-		t.Fatalf("WriteEvent MCP tool result: %v", err)
+		t.Fatalf("SettleToolResult MCP result: %v", err)
 	}
-	if resultEvent.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("MCP result ack = %+v; want committed", resultEvent.GetAck())
-	}
-	var materializationStatus string
+	bridgeRequireToolSettlementOutcomeForTest(t, resultEvent, "committed")
+	var resultStatus string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT mcp_claim_status
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_mcp_media'
 		    AND tool_use_event_id = $1`,
-		toolUse.GetEventId(),
-	).Scan(&materializationStatus); err != nil {
-		t.Fatalf("read consumed MCP materialization: %v", err)
+		toolUse.GetCommitted().GetEventId(),
+	).Scan(&resultStatus); err != nil {
+		t.Fatalf("read consumed MCP result: %v", err)
 	}
-	if materializationStatus != "consumed" {
-		t.Fatalf("MCP materialization status = %q; want consumed", materializationStatus)
+	if resultStatus != "consumed" {
+		t.Fatalf("MCP result status = %q; want consumed", resultStatus)
 	}
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT status FROM session_transient_attachments WHERE attachment_ref = $1`,
@@ -811,30 +761,29 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if attachmentStatus != "active" {
 		t.Fatalf("MCP attachment status = %q; want active", attachmentStatus)
 	}
-	replayedResult, err := store.WriteEvent(context.Background(), proto.Clone(resultWrite).(*bridgev1.WriteEventRequest))
+	replayedResult, err := store.SettleToolResult(context.Background(), proto.Clone(resultWrite).(*bridgev1.SettleToolResultRequest))
 	if err != nil {
-		t.Fatalf("WriteEvent MCP tool result replay: %v", err)
+		t.Fatalf("SettleToolResult MCP result replay: %v", err)
 	}
-	if replayedResult.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		replayedResult.GetEventId() != resultEvent.GetEventId() {
-		t.Fatalf("MCP result replay = %+v; want duplicate original event", replayedResult)
-	}
+	bridgeRequireToolSettlementOutcomeForTest(t, replayedResult, "duplicate")
+	var resultEventID string
 	var committedResultPayload string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND event_id=$1`,
-		resultEvent.GetEventId(),
-	).Scan(&committedResultPayload); err != nil {
+		`SELECT event_id, payload_json FROM session_events
+		  WHERE workspace_id='default' AND session_id='sesn_bridge_mcp_media'
+		    AND type='agent.mcp_tool_result' AND payload_json::jsonb->>'mcp_tool_use_id'=$1`,
+		toolUse.GetCommitted().GetEventId(),
+	).Scan(&resultEventID, &committedResultPayload); err != nil {
 		t.Fatalf("read committed MCP result before changed replay: %v", err)
 	}
-	changedResultWrite := proto.Clone(resultWrite).(*bridgev1.WriteEventRequest)
-	changedResultWrite.PayloadJson = `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"changed after consumption"}]}`
-	if _, err := store.WriteEvent(context.Background(), changedResultWrite); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("WriteEvent consumed MCP result replay with changed body err = %v; want AlreadyExists", err)
+	changedResultWrite := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "changed after consumption"))
+	if _, err := store.SettleToolResult(context.Background(), changedResultWrite); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("SettleToolResult consumed MCP result with changed outcome err = %v; want AlreadyExists", err)
 	}
 	var payloadAfterChangedReplay string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND event_id=$1`,
-		resultEvent.GetEventId(),
+		resultEventID,
 	).Scan(&payloadAfterChangedReplay); err != nil {
 		t.Fatalf("read committed MCP result after changed replay: %v", err)
 	}
@@ -860,8 +809,8 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 			if err != nil {
 				t.Fatalf("ClaimMcpToolResult %s replay: %v", lifecycle.name, err)
 			}
-			if replay.GetResultJson() != refsOnlyJSON {
-				t.Fatalf("%s replay = %q; want exact durable result %q", lifecycle.name, replay.GetResultJson(), refsOnlyJSON)
+			if replay.GetAlreadyCompleted().GetResultJson() != refsOnlyJSON {
+				t.Fatalf("%s replay = %#v; want exact durable result %q", lifecycle.name, replay, refsOnlyJSON)
 			}
 		})
 	}
@@ -869,39 +818,186 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT result_json FROM session_runtime_tool_results
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_media' AND tool_use_event_id = $1`,
-		toolUse.GetEventId()).Scan(&durableResultAfterReplay); err != nil {
+		toolUse.GetCommitted().GetEventId()).Scan(&durableResultAfterReplay); err != nil {
 		t.Fatalf("read durable result after unavailable replay: %v", err)
 	}
 	if durableResultAfterReplay != storedResult {
 		t.Fatalf("durable MCP result changed during replay = %q; want %q", durableResultAfterReplay, storedResult)
 	}
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_bridge_operations
-		    SET receipt_json = replace(receipt_json, $1, 'att_wrong')
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_mcp_media'
-		    AND session_thread_id = 'thr_bridge_mcp_media'
-		    AND operation = 'commit_mcp_tool_result'`,
-		attachment.AttachmentRef,
-	); err != nil {
-		t.Fatalf("corrupt MCP attachment receipt: %v", err)
+}
+
+type commitBarrierBlobStore struct {
+	*blob.FakeBlobStore
+	puts    chan string
+	release chan struct{}
+}
+
+func (s *commitBarrierBlobStore) Put(ctx context.Context, key string, content io.Reader, size int64) error {
+	if err := s.FakeBlobStore.Put(ctx, key, content, size); err != nil {
+		return err
 	}
-	if _, err := store.ClaimMcpToolResult(context.Background(), claim); status.Code(err) != codes.FailedPrecondition ||
-		status.Convert(err).Message() != "mcp materialization receipt is invalid" {
-		t.Fatalf("claim with mismatched attachment receipt err = %v; want invalid receipt", err)
+	s.puts <- key
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.release:
+		return nil
 	}
-	if _, err := admin.ExecContext(context.Background(),
-		`DELETE FROM session_bridge_operations
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_mcp_media'
-		    AND session_thread_id = 'thr_bridge_mcp_media'
-		    AND operation = 'commit_mcp_tool_result'`,
-	); err != nil {
-		t.Fatalf("delete MCP materialization receipt: %v", err)
+}
+
+func TestPostgreSQLMCPMediaCommitRaceCleansTheDefinitiveReplayBlob(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_media_commit_race"
+		threadID  = "thr_mcp_media_commit_race"
+		bindingID = "bind_mcp_media_commit_race"
+		podUID    = "pod_mcp_media_commit_race"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	blobStore := &commitBarrierBlobStore{
+		FakeBlobStore: blob.NewFakeBlobStore(),
+		puts:          make(chan string, 2),
+		release:       make(chan struct{}),
 	}
-	if _, err := store.ClaimMcpToolResult(context.Background(), claim); status.Code(err) != codes.FailedPrecondition ||
-		status.Convert(err).Message() != "mcp materialization receipt is missing" {
-		t.Fatalf("claim without materialization receipt err = %v; want missing receipt", err)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.AttachmentBlobStore = blobStore
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	claimID := "claim_mcp_media_commit_race"
+	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+	})
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("claim MCP media execution = %#v/%v", claimed, err)
+	}
+	request := &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+		ResultJson:  `{"response":{"status":1,"result_text":"[MCP attachment: plot.png]","attachments":[{"mime":"image/png","size_bytes":3,"suggested_filename":"plot.png"}]},"content_items":1,"refresh_triggered":false}`,
+		InlineMedia: []*bridgev1.McpInlineMedia{{Data: []byte{1, 2, 3}, Mime: "image/png", SuggestedFilename: "plot.png"}},
+	}
+	type commitResult struct {
+		response *bridgev1.CommitMcpToolResultResponse
+		err      error
+	}
+	results := make(chan commitResult, 2)
+	for range 2 {
+		go func() {
+			response, err := store.CommitMcpToolResult(context.Background(), proto.Clone(request).(*bridgev1.CommitMcpToolResultRequest))
+			results <- commitResult{response: response, err: err}
+		}()
+	}
+	putKeys := []string{<-blobStore.puts, <-blobStore.puts}
+	close(blobStore.release)
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("racing MCP media commits failed: %v / %v", first.err, second.err)
+	}
+	responses := []*bridgev1.CommitMcpToolResultResponse{first.response, second.response}
+	var durableRef string
+	var committed, duplicate int
+	for _, response := range responses {
+		switch {
+		case response.GetCommitted() != nil:
+			committed++
+			durableRef = response.GetCommitted().GetAttachmentRef()
+		case response.GetDuplicate() != nil:
+			duplicate++
+			if durableRef == "" {
+				durableRef = response.GetDuplicate().GetAttachmentRef()
+			}
+		default:
+			t.Fatalf("racing MCP media response = %#v", response)
+		}
+	}
+	if committed != 1 || duplicate != 1 || durableRef == "" ||
+		first.response.GetCommitted().GetAttachmentRef() != "" && first.response.GetCommitted().GetAttachmentRef() != durableRef ||
+		second.response.GetCommitted().GetAttachmentRef() != "" && second.response.GetCommitted().GetAttachmentRef() != durableRef ||
+		first.response.GetDuplicate().GetAttachmentRef() != "" && first.response.GetDuplicate().GetAttachmentRef() != durableRef ||
+		second.response.GetDuplicate().GetAttachmentRef() != "" && second.response.GetDuplicate().GetAttachmentRef() != durableRef {
+		t.Fatalf("racing MCP media outcomes = %#v / %#v; want one shared committed ref", first.response, second.response)
+	}
+	durablePointer := transientAttachmentBlobPointer(scope, durableRef)
+	if !blobStore.Has(durablePointer) {
+		t.Fatalf("durable MCP media blob %q is absent", durablePointer)
+	}
+	deletes := blobStore.Deletes()
+	if len(deletes) != 1 || deletes[0] == durablePointer ||
+		deletes[0] != putKeys[0] && deletes[0] != putKeys[1] {
+		t.Fatalf("MCP media replay cleanup = puts %v deletes %v durable %q", putKeys, deletes, durablePointer)
+	}
+	if blobStore.Has(deletes[0]) {
+		t.Fatalf("definitive replay blob %q was not removed", deletes[0])
+	}
+	var attachmentCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_transient_attachments
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND source_tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID).Scan(&attachmentCount); err != nil {
+		t.Fatalf("count durable MCP media attachments: %v", err)
+	}
+	if attachmentCount != 1 {
+		t.Fatalf("durable MCP media attachment rows = %d; want 1", attachmentCount)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMCPToolResultPreservesBlobWhenCommitOutcomeIsUnknown(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_mcp_commit_unknown", "bind_bridge_mcp_commit_unknown", 1, "pod_uid_mcp_commit_unknown")
+
+	if _, err := admin.ExecContext(context.Background(), `CREATE TABLE mcp_commit_probe (
+		attachment_ref TEXT PRIMARY KEY
+	)`); err != nil {
+		t.Fatalf("create deferred commit probe: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `GRANT SELECT, REFERENCES ON mcp_commit_probe TO tetral_runtime_test`); err != nil {
+		t.Fatalf("grant deferred commit probe: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `ALTER TABLE session_transient_attachments
+		ADD CONSTRAINT session_transient_attachments_commit_probe
+		FOREIGN KEY (attachment_ref) REFERENCES mcp_commit_probe(attachment_ref)
+		DEFERRABLE INITIALLY DEFERRED`); err != nil {
+		t.Fatalf("install deferred commit failure: %v", err)
+	}
+
+	blobStore := blob.NewFakeBlobStore()
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.AttachmentBlobStore = blobStore
+	scope := bridgeAPIScope("sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown", "bind_bridge_mcp_commit_unknown", 1, "pod_uid_mcp_commit_unknown")
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	claimID := "claim_mcp_commit_unknown"
+	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+	})
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("ClaimMcpToolResult = %#v/%v; want acquired", claimed, err)
+	}
+
+	_, err = store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID,
+		ResultJson: `{"response":{"status":1,"result_text":"[MCP attachment: plot.png]","attachments":[{"mime":"image/png","size_bytes":3,"suggested_filename":"plot.png"}]},"content_items":1,"refresh_triggered":false}`,
+		InlineMedia: []*bridgev1.McpInlineMedia{{
+			Data: []byte{1, 2, 3}, Mime: "image/png", SuggestedFilename: "plot.png",
+		}},
+	})
+	if err == nil {
+		t.Fatal("CommitMcpToolResult with deferred constraint = nil; want commit failure")
+	}
+	if blobStore.Len() != 1 {
+		t.Fatalf("blob count after unknown commit outcome = %d; want conservative retention", blobStore.Len())
+	}
+	if deletes := blobStore.Deletes(); len(deletes) != 0 {
+		t.Fatalf("blob deletes after unknown commit outcome = %v; want none", deletes)
+	}
+	var attachmentCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_transient_attachments WHERE source_tool_use_event_id = $1`,
+		toolUseEventID,
+	).Scan(&attachmentCount); err != nil {
+		t.Fatalf("count rolled-back MCP attachments: %v", err)
+	}
+	if attachmentCount != 0 {
+		t.Fatalf("attachment rows after forced rollback = %d; want zero", attachmentCount)
 	}
 }
 
@@ -916,19 +1012,10 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultConcurrentClaimLease(t *testing.T)
 		store.Clock = func() time.Time { return base }
 		return store
 	}
-	scopeA := bridgeAPIScope("sesn_bridge_mcp_claim_race", "thr_bridge_mcp_claim_race", "bind_bridge_mcp_claim_race", 1, "pod_uid_mcp_claim_race")
-	scopeA.RequestId = "req_mcp_claim_race_a"
-	scopeB := proto.Clone(scopeA).(*bridgev1.RuntimeScope)
-	scopeB.RequestId = "req_mcp_claim_race_b"
-	claim := func(scope *bridgev1.RuntimeScope) *bridgev1.ClaimMcpToolResultRequest {
-		return &bridgev1.ClaimMcpToolResultRequest{
-			Scope:               scope,
-			ToolUseEventId:      "evt_mcp_claim_race",
-			NormalizedInputHash: "hash_mcp_claim_race",
-			McpServerName:       "github",
-			ToolName:            "create_issue",
-			InputJson:           `{"title":"Race"}`,
-		}
+	scope := bridgeAPIScope("sesn_bridge_mcp_claim_race", "thr_bridge_mcp_claim_race", "bind_bridge_mcp_claim_race", 1, "pod_uid_mcp_claim_race")
+	toolUseEventID := writeDurableMCPToolUseForTest(t, newStore(), scope)
+	claim := func(claimID string) *bridgev1.ClaimMcpToolResultRequest {
+		return &bridgev1.ClaimMcpToolResultRequest{Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID}
 	}
 
 	type claimResult struct {
@@ -939,7 +1026,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultConcurrentClaimLease(t *testing.T)
 	results := make(chan claimResult, 2)
 	var ready sync.WaitGroup
 	ready.Add(2)
-	for _, request := range []*bridgev1.ClaimMcpToolResultRequest{claim(scopeA), claim(scopeB)} {
+	for _, request := range []*bridgev1.ClaimMcpToolResultRequest{claim("claim_mcp_race_a"), claim("claim_mcp_race_b")} {
 		go func(request *bridgev1.ClaimMcpToolResultRequest) {
 			ready.Done()
 			<-start
@@ -950,27 +1037,23 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultConcurrentClaimLease(t *testing.T)
 	ready.Wait()
 	close(start)
 
-	var committed int
-	var inFlight int
+	var acquired, inFlight int
 	for range 2 {
 		result := <-results
 		if result.err != nil {
 			t.Fatalf("ClaimMcpToolResult concurrent err = %v", result.err)
 		}
-		switch result.response.GetAck().GetStatus() {
-		case bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED:
-			committed++
-		case bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED:
-			if result.response.GetAck().GetErrorCode() != "mcp_claim_in_flight" {
-				t.Fatalf("rejected concurrent claim = %+v; want mcp_claim_in_flight", result.response)
-			}
+		switch {
+		case result.response.GetAcquired() != nil:
+			acquired++
+		case result.response.GetInFlight() != nil:
 			inFlight++
 		default:
-			t.Fatalf("concurrent claim = %+v; want committed or in-flight rejected", result.response)
+			t.Fatalf("concurrent claim = %+v; want acquired or in-flight", result.response)
 		}
 	}
-	if committed != 1 || inFlight != 1 {
-		t.Fatalf("concurrent claim statuses committed=%d inFlight=%d; want 1/1", committed, inFlight)
+	if acquired != 1 || inFlight != 1 {
+		t.Fatalf("concurrent claim outcomes acquired=%d inFlight=%d; want 1/1", acquired, inFlight)
 	}
 
 	var rowCount int
@@ -978,13 +1061,91 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultConcurrentClaimLease(t *testing.T)
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*), COALESCE(max(mcp_claim_status), '')
 		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_mcp_claim_race'
-		    AND tool_use_event_id = 'evt_mcp_claim_race'`).Scan(&rowCount, &claimStatus); err != nil {
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_claim_race' AND tool_use_event_id = $1`,
+		toolUseEventID,
+	).Scan(&rowCount, &claimStatus); err != nil {
 		t.Fatalf("read concurrent mcp claim row: %v", err)
 	}
 	if rowCount != 1 || claimStatus != "in_flight" {
 		t.Fatalf("concurrent mcp claim rows = %d status=%q; want one in_flight reservation", rowCount, claimStatus)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMCPClaimEnforcesDurablePermissionHandoff(t *testing.T) {
+	for _, testCase := range []struct {
+		name                string
+		evaluatedPermission string
+		approvalStatus      string
+		approvalDecision    string
+		wantCode            codes.Code
+		wantAcquired        bool
+	}{
+		{name: "direct allow", evaluatedPermission: "allow", wantCode: codes.OK, wantAcquired: true},
+		{name: "resolved ask allow", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", wantCode: codes.OK, wantAcquired: true},
+		{name: "deny", evaluatedPermission: "deny", wantCode: codes.FailedPrecondition},
+		{name: "ask missing approval", evaluatedPermission: "ask", wantCode: codes.FailedPrecondition},
+		{name: "ask unresolved", evaluatedPermission: "ask", approvalStatus: "pending", wantCode: codes.FailedPrecondition},
+		{name: "ask denied", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "deny", wantCode: codes.FailedPrecondition},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(testCase.name, " ", "_")
+			sessionID := "sesn_mcp_permission_" + suffix
+			threadID := "thr_mcp_permission_" + suffix
+			toolUseID := "evt_mcp_permission_" + suffix
+			modelRequestID := "mreq_mcp_permission_" + suffix
+			modelToolCallID := "call_mcp_permission_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_mcp_permission_"+suffix, 1, "pod_mcp_permission_"+suffix)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.mcp_tool_use",
+				`{"name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"`+testCase.evaluatedPermission+`"}`)
+			if _, err := admin.ExecContext(context.Background(),
+				`UPDATE session_events SET model_request_id = $2, projection_json = $4 WHERE workspace_id = $1 AND event_id = $3`,
+				"default", modelRequestID, toolUseID, `{"model_tool_call_id":"`+modelToolCallID+`"}`,
+			); err != nil {
+				t.Fatalf("stamp MCP permission model request: %v", err)
+			}
+			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "github_search")
+			if testCase.approvalStatus != "" {
+				var approvalDecision any
+				if testCase.approvalDecision != "" {
+					approvalDecision = testCase.approvalDecision
+				}
+				if _, err := admin.ExecContext(context.Background(),
+					`INSERT INTO session_pending_tool_uses (
+						workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+						tool_name, input_json, decision, status, created_at, updated_at
+					) VALUES ('default', $1, $2, $3, $4, 'github_search', '{"query":"tetral"}', $5, $6,
+						'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+					sessionID, threadID, toolUseID, modelToolCallID, approvalDecision, testCase.approvalStatus,
+				); err != nil {
+					t.Fatalf("seed MCP permission approval: %v", err)
+				}
+			}
+
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+				Scope:          bridgeAPIScope(sessionID, threadID, "bind_mcp_permission_"+suffix, 1, "pod_mcp_permission_"+suffix),
+				ToolUseEventId: toolUseID,
+				ClaimId:        "claim_mcp_permission_" + suffix,
+			})
+			if status.Code(err) != testCase.wantCode {
+				t.Fatalf("ClaimMcpToolResult error = %v; want %s", err, testCase.wantCode)
+			}
+			if (claimed != nil && claimed.GetAcquired() != nil) != testCase.wantAcquired {
+				t.Fatalf("ClaimMcpToolResult = %#v; acquired=%t", claimed, testCase.wantAcquired)
+			}
+			var claimCount int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`,
+				sessionID, toolUseID,
+			).Scan(&claimCount); err != nil {
+				t.Fatalf("read MCP permission claim count: %v", err)
+			}
+			if claimCount != map[bool]int{true: 1, false: 0}[testCase.wantAcquired] {
+				t.Fatalf("MCP permission claim rows = %d; acquired=%t", claimCount, testCase.wantAcquired)
+			}
+		})
 	}
 }
 
@@ -997,131 +1158,249 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultClaimLease(t *testing.T) {
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return base }
 	scope := bridgeAPIScope("sesn_bridge_mcp_lease", "thr_bridge_mcp_lease", "bind_bridge_mcp_lease", 1, "pod_uid_mcp_lease")
-	claim := &bridgev1.ClaimMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      "evt_mcp_lease",
-		NormalizedInputHash: "hash_mcp_lease",
-		McpServerName:       "github",
-		ToolName:            "create_issue",
-		InputJson:           `{"title":"Race"}`,
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	firstClaim := &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_lease_first",
 	}
-	first, err := store.ClaimMcpToolResult(context.Background(), claim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult first: %v", err)
+	first, err := store.ClaimMcpToolResult(context.Background(), firstClaim)
+	if err != nil || first.GetAcquired() == nil {
+		t.Fatalf("ClaimMcpToolResult first = %#v/%v; want acquired", first, err)
 	}
-	if first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("first claim = %+v; want committed reservation", first)
-	}
-	active, err := store.ClaimMcpToolResult(context.Background(), claim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult active: %v", err)
-	}
-	if active.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED || active.GetAck().GetErrorCode() != "mcp_claim_in_flight" {
-		t.Fatalf("active claim = %+v; want in-flight rejected ack", active)
+	active, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_lease_retry",
+	})
+	if err != nil || active.GetInFlight() == nil {
+		t.Fatalf("ClaimMcpToolResult active = %#v/%v; want in-flight", active, err)
 	}
 
-	retryScope := proto.Clone(scope).(*bridgev1.RuntimeScope)
-	retryScope.RequestId = "req_mcp_lease_retry"
-	retryClaim := proto.Clone(claim).(*bridgev1.ClaimMcpToolResultRequest)
-	retryClaim.Scope = retryScope
 	store.Clock = func() time.Time { return base.Add(181 * time.Second) }
+	retryClaim := &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_lease_retry",
+	}
 	reclaimed, err := store.ClaimMcpToolResult(context.Background(), retryClaim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult expired retry: %v", err)
-	}
-	if reclaimed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("expired retry claim = %+v; want committed renewed reservation", reclaimed)
+	if err != nil || reclaimed.GetAcquired() == nil {
+		t.Fatalf("ClaimMcpToolResult expired retry = %#v/%v; want acquired", reclaimed, err)
 	}
 
-	resultJSON := `{"response":{"status":1,"result_text":"created","attachments":[]},"content_items":1,"refresh_triggered":false}`
+	const resultJSON = `{"response":{"status":1,"result_text":"created","attachments":[]},"content_items":1,"refresh_triggered":false}`
 	oldOwnerCommit, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
-		Scope:               scope,
-		ToolUseEventId:      claim.GetToolUseEventId(),
-		NormalizedInputHash: claim.GetNormalizedInputHash(),
-		McpServerName:       claim.GetMcpServerName(),
-		ToolName:            claim.GetToolName(),
-		InputJson:           claim.GetInputJson(),
-		ResultJson:          resultJSON,
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: firstClaim.GetClaimId(), ResultJson: resultJSON,
 	})
-	if err != nil {
-		t.Fatalf("CommitMcpToolResult old owner: %v", err)
+	if err != nil || oldOwnerCommit.GetStale() == nil {
+		t.Fatalf("CommitMcpToolResult old owner = %#v/%v; want stale", oldOwnerCommit, err)
 	}
-	if oldOwnerCommit.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED || oldOwnerCommit.GetAck().GetErrorCode() != "mcp_claim_not_owned" {
-		t.Fatalf("old owner commit = %+v; want stale owner rejected ack", oldOwnerCommit)
-	}
-
 	newOwnerCommit, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
-		Scope:               retryScope,
-		ToolUseEventId:      retryClaim.GetToolUseEventId(),
-		NormalizedInputHash: retryClaim.GetNormalizedInputHash(),
-		McpServerName:       retryClaim.GetMcpServerName(),
-		ToolName:            retryClaim.GetToolName(),
-		InputJson:           retryClaim.GetInputJson(),
-		ResultJson:          resultJSON,
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: retryClaim.GetClaimId(), ResultJson: resultJSON,
 	})
-	if err != nil {
-		t.Fatalf("CommitMcpToolResult new owner: %v", err)
+	if err != nil || newOwnerCommit.GetCommitted() == nil {
+		t.Fatalf("CommitMcpToolResult new owner = %#v/%v; want committed", newOwnerCommit, err)
 	}
-	if newOwnerCommit.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || newOwnerCommit.GetRefsOnlyResultJson() != resultJSON {
-		t.Fatalf("new owner commit = %+v; want committed stored result", newOwnerCommit)
-	}
-	replay, err := store.ClaimMcpToolResult(context.Background(), retryClaim)
-	if err != nil {
-		t.Fatalf("ClaimMcpToolResult replay after lease commit: %v", err)
-	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetResultJson() != resultJSON {
-		t.Fatalf("replay after lease commit = %+v; want duplicate stored result", replay)
+	replay, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_lease_read",
+	})
+	if err != nil || replay.GetAlreadyCompleted().GetResultJson() != resultJSON {
+		t.Fatalf("direct read after lease commit = %#v/%v; want exact result", replay, err)
 	}
 }
 
-func assertMCPMaterializationDeclaration(
-	t *testing.T,
-	response *bridgev1.CommitMcpToolResultResponse,
-	request *bridgev1.CommitMcpToolResultRequest,
-	scope *bridgev1.RuntimeScope,
-) {
-	t.Helper()
-	declaration := response.GetDeclaration()
-	if declaration == nil {
-		t.Fatal("MCP materialization declaration is nil")
+func TestPostgreSQLBridgeAPIStoreMCPOperationsReturnTypedStaleCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_typed_stale"
+		threadID  = "thr_mcp_typed_stale"
+		bindingID = "bind_mcp_typed_stale"
+		podUID    = "pod_mcp_typed_stale"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	stale := bridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
+
+	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{Scope: stale, ToolUseEventId: "evt_mcp", ClaimId: "claim_stale"})
+	if err != nil || claimed.GetStale() == nil {
+		t.Fatalf("ClaimMcpToolResult stale = %#v/%v", claimed, err)
 	}
-	if declaration.GetObservedBindingId() != scope.GetBinding().GetBindingId() ||
-		declaration.GetObservedBindingGeneration() != scope.GetBinding().GetBindingGeneration() ||
-		declaration.GetApplicationDisposition() != bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY {
-		t.Fatalf("MCP declaration observation = %+v; want current binding %q/%d", declaration, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration())
+	committed, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope: stale, ToolUseEventId: "evt_mcp", ClaimId: "claim_stale", ResultJson: `{"response":{"attachments":[]}}`,
+	})
+	if err != nil || committed.GetStale() == nil {
+		t.Fatalf("CommitMcpToolResult stale = %#v/%v", committed, err)
 	}
-	if len(declaration.GetReceipts()) != 1 {
-		t.Fatalf("MCP declaration receipts = %d; want one", len(declaration.GetReceipts()))
+}
+
+func TestPostgreSQLBridgeAPIStoreMCPClaimUsesDurableToolFactsAndFencesTakeover(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_durable_claim"
+		threadID  = "thr_mcp_durable_claim"
+		bindingID = "bind_mcp_durable_claim"
+		podUID    = "pod_mcp_durable_claim"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.Clock = func() time.Time { return now }
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+
+	firstClaim := &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_first",
 	}
-	receipt := declaration.GetReceipts()[0]
-	digest, err := mcpMaterializationDeclarationDigest(request)
+	first, err := store.ClaimMcpToolResult(context.Background(), firstClaim)
 	if err != nil {
-		t.Fatalf("compute MCP declaration digest: %v", err)
+		t.Fatalf("ClaimMcpToolResult first: %v", err)
 	}
-	if receipt.GetSessionThreadId() != scope.GetSessionThreadId() ||
-		receipt.GetOperationKind() != bridgeOpCommitMcpToolResult ||
-		receipt.GetSourceKind() != "mcp_tool_execution" ||
-		receipt.GetOperationId() != mcpMaterializationSourceID(request) ||
-		receipt.GetDeclarationDigest() != digest {
-		t.Fatalf("MCP declaration receipt = %+v; want matching materialization identity", receipt)
+	if first.GetAcquired() == nil || first.GetAcquired().GetMcpServerName() != "github" ||
+		first.GetAcquired().GetToolName() != "create_issue" ||
+		first.GetAcquired().GetInputJson() != `{"body":"Details","title":"Bug"}` {
+		t.Fatalf("first claim = %#v; want Bridge-derived executor payload", first)
 	}
-	if len(receipt.GetEvents()) != 0 ||
-		len(receipt.GetMessages()) != 0 ||
-		len(receipt.GetPendingAttachmentDeltaJson()) != len(request.GetInlineMedia()) ||
-		len(receipt.GetPrefixConsumptions()) != 0 ||
-		receipt.GetRequestReschedule() != nil ||
-		len(receipt.GetChildLifecycle()) != 0 ||
-		receipt.GetIdleCloseout() != nil ||
-		receipt.CompactedThroughMessageSequence != nil {
-		t.Fatalf("MCP declaration receipt deltas = %+v; want attachment-only delta", receipt)
+	sameOwner, err := store.ClaimMcpToolResult(context.Background(), firstClaim)
+	if err != nil || sameOwner.GetAcquired() == nil {
+		t.Fatalf("same-owner replay = %#v/%v; want acquired with renewed lease", sameOwner, err)
 	}
-	if !validMCPMaterializationReceipt(
-		receipt,
-		request,
-		mcpMaterializationSourceID(request),
-		digest,
-		response.GetRefsOnlyResultJson(),
-	) {
-		t.Fatalf("MCP declaration receipt = %+v; want exact refs-only attachment delta", receipt)
+	activeOther, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_other",
+	})
+	if err != nil || activeOther.GetInFlight() == nil {
+		t.Fatalf("other active claim = %#v/%v; want in-flight", activeOther, err)
 	}
+
+	now = now.Add(mcpClaimLeaseTTL + time.Second)
+	takeoverClaim := &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_takeover",
+	}
+	takeover, err := store.ClaimMcpToolResult(context.Background(), takeoverClaim)
+	if err != nil || takeover.GetAcquired() == nil {
+		t.Fatalf("expired lease takeover = %#v/%v; want acquired", takeover, err)
+	}
+
+	const resultJSON = `{"response":{"status":1,"result_text":"created","attachments":[]},"content_items":1,"refresh_triggered":false}`
+	staleCommit, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: firstClaim.GetClaimId(), ResultJson: resultJSON,
+	})
+	if err != nil || staleCommit.GetStale() == nil {
+		t.Fatalf("displaced owner commit = %#v/%v; want stale", staleCommit, err)
+	}
+	commitRequest := &bridgev1.CommitMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: takeoverClaim.GetClaimId(), ResultJson: resultJSON,
+	}
+	committed, err := store.CommitMcpToolResult(context.Background(), commitRequest)
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("active owner commit = %#v/%v; want committed", committed, err)
+	}
+	duplicate, err := store.CommitMcpToolResult(context.Background(), commitRequest)
+	if err != nil || duplicate.GetDuplicate() == nil {
+		t.Fatalf("commit replay = %#v/%v; want duplicate", duplicate, err)
+	}
+	completed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_after_completion",
+	})
+	if err != nil || completed.GetAlreadyCompleted().GetResultJson() != resultJSON {
+		t.Fatalf("completed claim = %#v/%v; want exact direct durable result", completed, err)
+	}
+
+	var toolName, inputJSON, claimStatus string
+	var owner, lease sql.NullString
+	if err := admin.QueryRowContext(context.Background(), `SELECT tool_name, input_json, mcp_claim_status,
+		mcp_claim_id, mcp_claim_lease_expires_at
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID,
+	).Scan(&toolName, &inputJSON, &claimStatus, &owner, &lease); err != nil {
+		t.Fatalf("read durable MCP result: %v", err)
+	}
+	if toolName != "github/create_issue" || inputJSON != `{"body":"Details","title":"Bug"}` ||
+		claimStatus != mcpClaimStatusStored || owner.Valid || lease.Valid {
+		t.Fatalf("durable MCP result = %q/%q/%q/%v/%v", toolName, inputJSON, claimStatus, owner, lease)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMCPRelinquishReleasesOnlyExactClaimAndReplays(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_relinquish"
+		threadID  = "thr_mcp_relinquish"
+		bindingID = "bind_mcp_relinquish"
+		podUID    = "pod_mcp_relinquish"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+
+	firstClaim := &bridgev1.ClaimMcpToolResultRequest{Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_relinquish_first"}
+	claimed, err := store.ClaimMcpToolResult(context.Background(), firstClaim)
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("first MCP claim = %#v/%v; want acquired", claimed, err)
+	}
+	relinquish := &bridgev1.RelinquishMcpToolResultRequest{Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: firstClaim.GetClaimId()}
+	released, err := store.RelinquishMcpToolResult(context.Background(), relinquish)
+	if err != nil || released.GetRelinquished() == nil {
+		t.Fatalf("first MCP relinquish = %#v/%v; want relinquished", released, err)
+	}
+	var remaining int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID).Scan(&remaining); err != nil {
+		t.Fatalf("count relinquished MCP claims: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("relinquished MCP claims = %d; want 0", remaining)
+	}
+	replayed, err := store.RelinquishMcpToolResult(context.Background(), proto.Clone(relinquish).(*bridgev1.RelinquishMcpToolResultRequest))
+	if err != nil || replayed.GetDuplicate() == nil {
+		t.Fatalf("MCP relinquish replay = %#v/%v; want duplicate", replayed, err)
+	}
+
+	secondClaim := &bridgev1.ClaimMcpToolResultRequest{Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_relinquish_second"}
+	claimed, err = store.ClaimMcpToolResult(context.Background(), secondClaim)
+	if err != nil || claimed.GetAcquired() == nil {
+		t.Fatalf("post-relinquish MCP claim = %#v/%v; want immediate acquired", claimed, err)
+	}
+	stale, err := store.RelinquishMcpToolResult(context.Background(), &bridgev1.RelinquishMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_relinquish_wrong",
+	})
+	if err != nil || stale.GetStale() == nil {
+		t.Fatalf("wrong MCP relinquish = %#v/%v; want stale", stale, err)
+	}
+	var activeClaim string
+	if err := admin.QueryRowContext(context.Background(), `SELECT mcp_claim_id FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID).Scan(&activeClaim); err != nil {
+		t.Fatalf("read active MCP claim: %v", err)
+	}
+	if activeClaim != secondClaim.GetClaimId() {
+		t.Fatalf("active MCP claim = %q; want %q", activeClaim, secondClaim.GetClaimId())
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMCPClaimRejectsNonAuthoritativeTarget(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_mcp_target", "thr_mcp_target")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_mcp_target", "bind_mcp_target", 1, "pod_mcp_target")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_mcp_target", "thr_mcp_target", "bind_mcp_target", 1, "pod_mcp_target")
+	if _, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: "evt_missing_mcp_target", ClaimId: "claim_missing_mcp_target",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("missing durable target error = %v; want FailedPrecondition", err)
+	}
+}
+
+func writeDurableMCPToolUseForTest(t *testing.T, store *PostgreSQLBridgeAPIStore, scope *bridgev1.RuntimeScope) string {
+	t.Helper()
+	const modelRequestID = "mreq_mcp_durable_claim"
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_durable_claim_start", modelRequestID, "agent_provider_request", 0)
+	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_durable_claim_use", ModelRequestId: modelRequestID,
+		EventType:             "agent.mcp_tool_use",
+		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"create_issue","mcp_server_name":"github","input":{"title":"Bug","body":"Details"},"evaluated_permission":"allow"}`,
+		SessionVisible:        true,
+		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_durable_claim", "create_issue", `{"title":"Bug","body":"Details"}`),
+	})
+	if err != nil {
+		t.Fatalf("write durable MCP Tool use: %v", err)
+	}
+	return response.GetCommitted().GetEventId()
 }

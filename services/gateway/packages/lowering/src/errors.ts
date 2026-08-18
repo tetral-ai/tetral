@@ -14,7 +14,6 @@ import {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
   ProviderError,
-  ProviderRequest,
   ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxIdBytes, MaxProviderErrorMessageBytes, truncateUtf8Bytes } from "@tetral/gateway-protocol/src/bounds.js";
@@ -55,15 +54,13 @@ export class ProviderStreamTimeoutError extends Error {
 }
 
 /**
- * Builds a terminal provider-error event tied to the Runtime request identities.
+ * Builds a terminal provider-error event for the already-correlated gRPC stream.
  * The input message is bounded but is otherwise trusted to already be safe for
  * Runtime; callers do not pass provider bodies, headers, credentials, or stack
  * traces through this function.
  */
-export function providerErrorEvent(request: Pick<ProviderRequest, "requestId" | "modelRequestId">, input: ProviderErrorInput): ProviderStreamEvent {
+export function providerErrorEvent(input: ProviderErrorInput): ProviderStreamEvent {
   return {
-    requestId: request.requestId,
-    modelRequestId: request.modelRequestId,
     type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
     providerError: {
       metadataJson: "{}",

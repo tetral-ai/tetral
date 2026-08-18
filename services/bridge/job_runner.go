@@ -11,7 +11,6 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -81,6 +80,10 @@ type malformedRuntimeInputCustodyReplacer interface {
 	ReplaceMalformedRuntimeInputCustody(context.Context, RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error)
 }
 
+type malformedRuntimeInputCustodyFinalizer interface {
+	FinalizeMalformedRuntimeInputCustody(context.Context, MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error)
+}
+
 type RuntimePodLossRepairer interface {
 	RepairLostRuntimeBindings(context.Context, string) (int, error)
 }
@@ -97,6 +100,8 @@ type RuntimeJob struct {
 	JobID                 string
 	LeaseToken            string
 	Kind                  string
+	PartitionKey          string
+	DedupeKey             string
 	WorkspaceID           string
 	SessionID             string
 	SessionThreadID       string
@@ -111,7 +116,6 @@ type RuntimeJob struct {
 	SequenceTo            int64
 	InputKind             string
 	RejectionReasonCode   string
-	CommandKind           agentruntimev1.RuntimeCommandKind
 	PayloadJSON           string
 	AttemptCount          int32
 	MaxAttempts           int32
@@ -120,9 +124,11 @@ type RuntimeJob struct {
 type RuntimeDeliveryStatus string
 
 const (
-	RuntimeDeliveryAccepted  RuntimeDeliveryStatus = "accepted"
-	RuntimeDeliveryDuplicate RuntimeDeliveryStatus = "duplicate"
-	RuntimeDeliveryRejected  RuntimeDeliveryStatus = "rejected"
+	RuntimeDeliveryAccepted      RuntimeDeliveryStatus = "accepted"
+	RuntimeDeliveryDuplicate     RuntimeDeliveryStatus = "duplicate"
+	RuntimeDeliveryRejected      RuntimeDeliveryStatus = "rejected"
+	RuntimeDeliveryBarrierStale  RuntimeDeliveryStatus = "barrier_stale"
+	RuntimeDeliveryAuthorityLost RuntimeDeliveryStatus = "authority_lost"
 )
 
 type RuntimeDeliveryResult struct {
@@ -133,7 +139,7 @@ type RuntimeDeliveryResult struct {
 	QueueLeaseSettled bool
 	// The command plan carries the binding that actually owned this attempt.
 	// These process-local fields fence Bridge finalization after a Pod-loss
-	// handoff; they are not Queue payload, receipt, or durable state.
+	// handoff; they are not Queue payload, RPC result, or durable state.
 	AttemptedBindingID         string
 	AttemptedBindingGeneration int64
 	AttemptedTargetPodUID      string
@@ -237,6 +243,28 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg JobRunnerConfig) error {
 	job, err := DecodeRuntimeJob(queueJob)
 	if err != nil {
+		if queueJob.GetKind() == queue.KindRuntimeInput {
+			finalizer, ok := r.Deliverer.(malformedRuntimeInputCustodyFinalizer)
+			if !ok {
+				return errors.New("malformed runtime-input custody finalizer is required")
+			}
+			outcome, finalizeErr := finalizer.FinalizeMalformedRuntimeInputCustody(ctx, malformedRuntimeInputLease(queueJob))
+			if finalizeErr != nil {
+				return finalizeErr
+			}
+			if outcome.Retry {
+				return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+					WorkspaceId:  queueJob.GetWorkspaceId(),
+					JobId:        queueJob.GetId(),
+					LeaseToken:   queueJob.GetLeaseToken(),
+					ErrorKind:    "invalid_runtime_job_payload",
+					ErrorMessage: "runtime queue payload is invalid",
+				}))
+			}
+			if outcome.Handled {
+				return nil
+			}
+		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId:  queueJob.GetWorkspaceId(),
 			JobId:        queueJob.GetId(),
@@ -246,19 +274,6 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}))
 	}
 	workCtx, stopHeartbeat := startJobRunnerHeartbeat(ctx, r.Queue, job, cfg)
-	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" {
-		if _, err := r.Queue.Cancel(workCtx, &queuev1.CancelRequest{
-			WorkspaceId:            job.WorkspaceID,
-			SessionId:              job.SessionID,
-			SessionThreadId:        job.SessionThreadID,
-			InterruptFenceSequence: job.SequenceTo,
-		}); err != nil {
-			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-				return heartbeatErr
-			}
-			return err
-		}
-	}
 	if job.Kind == queue.KindRuntimeInput {
 		replayer, ok := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
 		if !ok {
@@ -273,7 +288,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 				return heartbeatErr
 			}
 			if invalidRuntimeJobPayload(err) {
-				return r.deadLetterInvalidRuntimeJob(ctx, job)
+				return r.settleInvalidRuntimeJobPayload(ctx, job)
 			}
 			return err
 		}
@@ -284,6 +299,26 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			r.logRuntimeJobAttempt(job, "none", "durable_replay")
 			return r.applyRuntimeDeliveryResult(ctx, job, replayed)
 		}
+		if job.InputKind == "interrupt_control" && runtimeJobFinalAttempt(job) {
+			finalized, finalizeErr := r.finalizeRuntimeDelivery(workCtx, job, RuntimeDeliveryResult{
+				Status:       RuntimeDeliveryRejected,
+				Retryable:    false,
+				ErrorKind:    "runtime_delivery_exhausted",
+				ErrorMessage: "runtime delivery attempts are exhausted",
+			})
+			heartbeatErr := stopHeartbeat()
+			if heartbeatErr != nil && !finalized.QueueLeaseSettled {
+				return heartbeatErr
+			}
+			if finalizeErr != nil {
+				if invalidRuntimeJobPayload(finalizeErr) {
+					return r.settleInvalidRuntimeJobPayload(ctx, job)
+				}
+				return finalizeErr
+			}
+			r.logRuntimeJobAttempt(job, "none", runtimeJobFinalizationDisposition(finalized))
+			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
+		}
 	}
 	result, deliverErr := r.Deliverer.DeliverRuntimeJob(workCtx, job)
 	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil && !result.QueueLeaseSettled {
@@ -293,6 +328,17 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		return deliverErr
 	}
 	if deliverErr != nil {
+		if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" {
+			replayer := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
+			replayed, found, replayErr := replayer.ReplayRuntimeDeliveryFinalization(ctx, job)
+			if replayErr != nil {
+				return replayErr
+			}
+			if found {
+				r.logRuntimeJobAttempt(job, "runtime_transport_error", "durable_replay")
+				return r.applyRuntimeDeliveryResult(ctx, job, replayed)
+			}
+		}
 		preparationKind := runtimeJobPreparationErrorKind(deliverErr)
 		attemptedBindingID := result.AttemptedBindingID
 		attemptedBindingGeneration := result.AttemptedBindingGeneration
@@ -310,11 +356,11 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 			return r.deferRuntimeConfig(ctx, job)
 		}
-		if runtimeJobFinalAttempt(job) {
+		if runtimeJobFinalAttempt(job) && job.InputKind != "interrupt_control" {
 			finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 			if err != nil {
 				if invalidRuntimeJobPayload(err) {
-					return r.deadLetterInvalidRuntimeJob(ctx, job)
+					return r.settleInvalidRuntimeJobPayload(ctx, job)
 				}
 				return err
 			}
@@ -338,6 +384,12 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		r.logRuntimeJobAttempt(job, "none", "deferred")
 		return r.deferRuntimeConfig(ctx, job)
 	}
+	// An interrupt without a durable receipt remains an outcome-unknown Session
+	// partition barrier. Queue.Retry preserves that custody even when Runtime
+	// returned a nominally terminal rejection; only receipt replay may ACK it.
+	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" && result.Status == RuntimeDeliveryRejected {
+		result.Retryable = true
+	}
 	preparationKind := "none"
 	if result.ErrorKind != "" {
 		preparationKind = result.ErrorKind
@@ -346,7 +398,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 		if err != nil {
 			if invalidRuntimeJobPayload(err) {
-				return r.deadLetterInvalidRuntimeJob(ctx, job)
+				return r.settleInvalidRuntimeJobPayload(ctx, job)
 			}
 			return err
 		}
@@ -358,6 +410,13 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 	}
 	r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(result))
 	return r.applyRuntimeDeliveryResult(ctx, job, result)
+}
+
+func malformedRuntimeInputLease(job *queuev1.QueueJob) MalformedRuntimeInputLease {
+	return MalformedRuntimeInputLease{
+		WorkspaceID: job.GetWorkspaceId(), JobID: job.GetId(), LeaseToken: job.GetLeaseToken(),
+		Kind: job.GetKind(), PartitionKey: job.GetPartitionKey(), DedupeKey: job.GetDedupeKey(),
+	}
 }
 
 func runtimeJobPreparationErrorKind(err error) string {
@@ -406,6 +465,52 @@ func (r *JobRunner) logRuntimeJobAttempt(job RuntimeJob, preparationKind string,
 func invalidRuntimeJobPayload(err error) bool {
 	var preparation runtimeDeliveryPrepareError
 	return errors.As(err, &preparation) && preparation.kind == "invalid_runtime_job_payload" && !preparation.retryable
+}
+
+func (r *JobRunner) settleInvalidRuntimeJobPayload(ctx context.Context, job RuntimeJob) error {
+	if job.Kind != queue.KindRuntimeInput || job.InputKind != "interrupt_control" {
+		return r.deadLetterInvalidRuntimeJob(ctx, job)
+	}
+	finalizer, ok := r.Deliverer.(malformedRuntimeInputCustodyFinalizer)
+	if !ok {
+		return errors.New("malformed runtime-input custody finalizer is required")
+	}
+	outcome, err := finalizer.FinalizeMalformedRuntimeInputCustody(ctx, MalformedRuntimeInputLease{
+		WorkspaceID:  job.WorkspaceID,
+		JobID:        job.JobID,
+		LeaseToken:   job.LeaseToken,
+		Kind:         job.Kind,
+		PartitionKey: job.PartitionKey,
+		DedupeKey:    job.DedupeKey,
+	})
+	if err != nil {
+		return err
+	}
+	if outcome.Retry {
+		return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+			WorkspaceId:  job.WorkspaceID,
+			JobId:        job.JobID,
+			LeaseToken:   job.LeaseToken,
+			ErrorKind:    "invalid_runtime_job_payload",
+			ErrorMessage: "runtime queue payload is invalid",
+		}))
+	}
+	if outcome.Handled {
+		disposition := "invalid_interrupt_terminalized"
+		if !outcome.InterruptTerminalized {
+			disposition = "invalid_interrupt_settled"
+		}
+		r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", disposition)
+		return nil
+	}
+	r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", "invalid_interrupt_invariant_dead_lettered")
+	return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		WorkspaceId:  job.WorkspaceID,
+		JobId:        job.JobID,
+		LeaseToken:   job.LeaseToken,
+		ErrorKind:    "invalid_runtime_job_payload",
+		ErrorMessage: "interrupt runtime custody has no unique canonical Inbox",
+	}))
 }
 
 func (r *JobRunner) deadLetterInvalidRuntimeJob(ctx context.Context, job RuntimeJob) error {
@@ -464,10 +569,16 @@ func (r *JobRunner) finalizeRuntimeDelivery(ctx context.Context, job RuntimeJob,
 }
 
 func runtimeDeliveryRequiresFinalization(job RuntimeJob, result RuntimeDeliveryResult) bool {
+	if result.Status == RuntimeDeliveryBarrierStale {
+		return job.Kind == queue.KindRuntimeInput && job.InputKind != "interrupt_control"
+	}
 	if result.Status != RuntimeDeliveryRejected {
 		return false
 	}
 	if job.Kind == queue.KindRuntimeInput {
+		if job.InputKind == "interrupt_control" {
+			return false
+		}
 		return !result.Retryable || runtimeJobFinalAttempt(job)
 	}
 	return isMCPManifestRuntimeJob(job) && runtimeJobFinalAttempt(job)
@@ -530,7 +641,12 @@ func startJobRunnerHeartbeat(ctx context.Context, client QueueClient, job Runtim
 }
 
 func (r *JobRunner) applyRuntimeDeliveryResult(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) error {
+	if result.QueueLeaseSettled {
+		return nil
+	}
 	switch result.Status {
+	case RuntimeDeliveryAuthorityLost:
+		return nil
 	case RuntimeDeliveryAccepted, RuntimeDeliveryDuplicate:
 		return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
 			WorkspaceId: job.WorkspaceID,
@@ -556,6 +672,8 @@ func (r *JobRunner) applyRuntimeDeliveryResult(ctx context.Context, job RuntimeJ
 			ErrorKind:    errorKind,
 			ErrorMessage: errorMessage,
 		}))
+	case RuntimeDeliveryBarrierStale:
+		return errors.New("barrier-stale runtime delivery was not atomically finalized")
 	default:
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId:  job.WorkspaceID,
@@ -612,14 +730,15 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 	if !eventless && (payload.SequenceFrom <= 0 || payload.SequenceTo < payload.SequenceFrom) {
 		return RuntimeJob{}, errors.New("runtime input payload sequence range is invalid")
 	}
-	commandKind, err := RuntimeCommandKindForInputKind(payload.InputKind)
-	if err != nil {
-		return RuntimeJob{}, err
+	if !validRuntimeInputKind(payload.InputKind) {
+		return RuntimeJob{}, fmt.Errorf("unknown runtime input kind %q", payload.InputKind)
 	}
 	return RuntimeJob{
 		JobID:           queueJob.GetId(),
 		LeaseToken:      queueJob.GetLeaseToken(),
 		Kind:            queue.KindRuntimeInput,
+		PartitionKey:    queueJob.GetPartitionKey(),
+		DedupeKey:       queueJob.GetDedupeKey(),
 		WorkspaceID:     payload.WorkspaceID,
 		SessionID:       payload.SessionID,
 		SessionThreadID: payload.SessionThreadID,
@@ -628,7 +747,6 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		SequenceFrom:    payload.SequenceFrom,
 		SequenceTo:      payload.SequenceTo,
 		InputKind:       payload.InputKind,
-		CommandKind:     commandKind,
 		PayloadJSON:     queueJob.GetPayloadJson(),
 		AttemptCount:    queueJob.GetAttemptCount(),
 		MaxAttempts:     queueJob.GetMaxAttempts(),
@@ -685,7 +803,6 @@ func decodeRuntimeConfigUpdateJob(queueJob *queuev1.QueueJob) (RuntimeJob, error
 		ConfigGeneration:      configGeneration,
 		MCPServerName:         mcpServerName,
 		MCPManifestGeneration: manifestGeneration,
-		CommandKind:           agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
 		PayloadJSON:           queueJob.GetPayloadJson(),
 		AttemptCount:          queueJob.GetAttemptCount(),
 		MaxAttempts:           queueJob.GetMaxAttempts(),
@@ -737,7 +854,6 @@ func decodeCleanupSessionJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		SessionID:      payload.SessionID,
 		RuntimeInputID: "cleanup_session:" + payload.CleanupJobID,
 		CleanupJobID:   payload.CleanupJobID,
-		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON:    queueJob.GetPayloadJson(),
 	}, nil
 }
@@ -763,109 +879,16 @@ func decodeSessionDeleteCleanupJob(queueJob *queuev1.QueueJob) (RuntimeJob, erro
 		RuntimeInputID: "session_delete_cleanup:" + payload.DeleteCleanupID,
 		CleanupJobID:   payload.DeleteCleanupID, DeleteCleanupID: payload.DeleteCleanupID,
 		AttemptCount: queueJob.GetAttemptCount(), MaxAttempts: queueJob.GetMaxAttempts(),
-		CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON: queueJob.GetPayloadJson(),
 	}, nil
 }
 
-func RuntimeCommandKindForInputKind(inputKind string) (agentruntimev1.RuntimeCommandKind, error) {
+func validRuntimeInputKind(inputKind string) bool {
 	switch inputKind {
-	case "messages":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES, nil
-	case "interrupt_control":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL, nil
-	case "tool_confirmation":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION, nil
-	case "task_notification":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION, nil
-	case "agent_mail":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_AGENT_MAIL, nil
-	case "rejection":
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES, nil
+	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "rejection":
+		return true
 	default:
-		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_UNSPECIFIED, fmt.Errorf("unknown runtime input kind %q", inputKind)
-	}
-}
-
-func RuntimeDeliveryResultFromResponse(response *agentruntimev1.RuntimeInputCommandResponse) RuntimeDeliveryResult {
-	return RuntimeDeliveryResultFromResponseForRequest(response, nil)
-}
-
-func RuntimeDeliveryResultFromResponseForRequest(
-	response *agentruntimev1.RuntimeInputCommandResponse,
-	request *agentruntimev1.RuntimeInputCommandRequest,
-) RuntimeDeliveryResult {
-	if response == nil {
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			ErrorKind:    "invalid_runtime_response",
-			ErrorMessage: "runtime response is missing",
-		}
-	}
-	if request != nil && !runtimeResponseIdentityMatchesRequest(response, request) {
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    false,
-			ErrorKind:    "invalid_runtime_response_identity",
-			ErrorMessage: "runtime response identity does not match command",
-		}
-	}
-	switch response.GetStatus() {
-	case agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED:
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
-	case agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_DUPLICATE:
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
-	case agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED:
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    response.GetRetryable(),
-			ErrorKind:    runtimeInputErrorKind(response.GetErrorCode()),
-			ErrorMessage: "runtime rejected input",
-		}
-	default:
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			ErrorKind:    "invalid_runtime_response",
-			ErrorMessage: "runtime response status is invalid",
-		}
-	}
-}
-
-func runtimeResponseIdentityMatchesRequest(response *agentruntimev1.RuntimeInputCommandResponse, request *agentruntimev1.RuntimeInputCommandRequest) bool {
-	return response.GetSessionId() == request.GetSessionId() &&
-		response.GetRuntimeInputId() == request.GetRuntimeInputId() &&
-		response.GetBindingId() == request.GetBindingId() &&
-		response.GetBindingGeneration() == request.GetBindingGeneration()
-}
-
-func runtimeInputErrorKind(code agentruntimev1.RuntimeInputErrorCode) string {
-	switch code {
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH:
-		return "selected_pod_identity_mismatch"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT:
-		return "runtime_input_identity_conflict"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH:
-		return "binding_identity_mismatch"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE:
-		return "bridge_commit_unavailable"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED:
-		return "bridge_commit_rejected"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE:
-		return "bridge_token_unavailable"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID:
-		return "bridge_task_notification_projection_invalid"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT:
-		return "runtime_control_conflict"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED:
-		return "runtime_context_load_failed"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED:
-		return "runtime_control_not_accepted"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY:
-		return "control_busy"
-	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT:
-		return "runtime_rejected_input"
-	default:
-		return "runtime_rejected_input"
+		return false
 	}
 }
 

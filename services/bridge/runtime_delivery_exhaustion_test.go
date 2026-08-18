@@ -13,7 +13,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -48,6 +47,51 @@ func TestRuntimeDeliveryExhaustionEventIDMatchesDatabaseDerivation(t *testing.T)
 	}
 }
 
+func TestPostgreSQLJobRunnerMalformedNonInterruptKeepsCanonicalReplacementOwner(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_malformed_message_replacement"
+		threadID  = "thr_malformed_message_replacement"
+		inputID   = "rin_malformed_message_replacement"
+		eventID   = "evt_malformed_message_replacement"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"recover"}]}`)
+	job := exhaustionRuntimeJob(sessionID, threadID, inputID, "messages", []string{eventID})
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queued := enqueueExhaustionJob(t, queueStore, job, time.Now().UTC().Add(-time.Minute))
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET payload_json = payload_json::jsonb - 'input_kind'
+		WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
+		t.Fatalf("malform non-interrupt Queue payload: %v", err)
+	}
+	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseOwner: "malformed-message-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run malformed non-interrupt owner: %v", err)
+	}
+	var sessionStatus, inboxStatus, oldQueueStatus string
+	var pendingReplacements, sessionErrors int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4 AND status='pending'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`,
+		sessionID, inputID, queued.ID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+	).Scan(&sessionStatus, &inboxStatus, &oldQueueStatus, &pendingReplacements, &sessionErrors); err != nil {
+		t.Fatalf("read malformed non-interrupt replacement: %v", err)
+	}
+	if sessionStatus != "idle" || inboxStatus != "queued" || oldQueueStatus != queue.StatusDeadLettered || pendingReplacements != 1 || sessionErrors != 0 || deliverer.deliveries != 0 {
+		t.Fatalf("malformed non-interrupt owner = Session %s Inbox %s old Queue %s replacements %d errors %d Runtime %d",
+			sessionStatus, inboxStatus, oldQueueStatus, pendingReplacements, sessionErrors, deliverer.deliveries)
+	}
+}
+
 func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -67,16 +111,15 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 	apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-exhaustion-boundary-key!")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_exhaustion_message", InputKind: "messages",
-		EventIds: []string{"evt_exhaustion_message"}, SequenceFrom: 1, SequenceTo: 1,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
-			"default", sessionID, threadID, "rin_exhaustion_message", "evt_exhaustion_message", "hello",
-		)},
+		Scope: scope, RuntimeInputId: "rin_exhaustion_message",
 	})
 	if err != nil {
 		t.Fatalf("commit exhaustion boundary input: %v", err)
 	}
-	messageSequence := committed.GetDeclaration().GetReceipts()[0].GetMessages()[0].GetMessageSequence()
+	if len(committed.GetCommitted().GetContext().GetAssignedContextSequences()) != 1 {
+		t.Fatalf("commit exhaustion boundary assigned context sequences = %#v; want one entry", committed)
+	}
+	messageSequence := committed.GetCommitted().GetContext().GetAssignedContextSequences()[0]
 
 	seedBridgeAPIEvent(
 		t, admin, "default", sessionID, threadID,
@@ -109,7 +152,7 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 		t.Fatalf("exhaustion messages count/max sequence = %d/%d; want 1/%d", messageCount, maximumSequence, messageSequence)
 	}
 	if _, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: scope, RuntimeInputId: "rin_exhaustion_cold_load",
+		Scope: scope,
 	}); err != nil {
 		t.Fatalf("LoadContext after exhaustion: %v", err)
 	}
@@ -393,7 +436,7 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 				)
 				seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 				seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-				messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_invalid_missing_mail", completionMailEnvelope("main", "task_child", "done"))
+				messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_child", "done"))
 				seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_invalid_missing_mail", 1, "agent.thread_message_sent",
 					bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_invalid_missing_mail", messageJSON))
 				request, _, err := agentMailWakeEnqueueRequest("default", sessionID, mainID, delivery, now)
@@ -508,7 +551,7 @@ func TestPostgreSQLCompletionMailProducerAndJobRunnerTerminalizeQueuedInbox(t *t
 		t.Fatalf("read completion-mail source before exhaustion: %v", err)
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
@@ -756,6 +799,10 @@ func (d *postgresFinalizingDeliverer) ReplayRuntimeDeliveryFinalization(ctx cont
 
 func (d *postgresFinalizingDeliverer) ReplaceMalformedRuntimeInputCustody(ctx context.Context, job RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error) {
 	return d.store.ReplaceMalformedRuntimeInputCustody(ctx, job)
+}
+
+func (d *postgresFinalizingDeliverer) FinalizeMalformedRuntimeInputCustody(ctx context.Context, lease MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	return d.store.FinalizeMalformedRuntimeInputCustody(ctx, lease)
 }
 
 var errSyntheticQueueResponseLoss = errors.New("synthetic queue response loss")

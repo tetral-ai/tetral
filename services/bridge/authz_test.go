@@ -23,12 +23,12 @@ type childInterruptTransportStore struct {
 
 func (s *childInterruptTransportStore) AdmitChildInterrupt(context.Context, *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error) {
 	s.admitted = true
-	return &bridgev1.AdmitChildInterruptResponse{Ack: committedAck("", "source")}, nil
+	return &bridgev1.AdmitChildInterruptResponse{Outcome: &bridgev1.AdmitChildInterruptResponse_Committed{Committed: &bridgev1.AdmitChildInterruptCommitted{ControlOperationId: "source"}}}, nil
 }
 
 func (s *childInterruptTransportStore) AwaitChildInterrupt(context.Context, *bridgev1.AwaitChildInterruptRequest) (*bridgev1.AwaitChildInterruptResponse, error) {
 	s.awaited = true
-	return &bridgev1.AwaitChildInterruptResponse{Ack: committedAck("", "source")}, nil
+	return &bridgev1.AwaitChildInterruptResponse{Outcome: &bridgev1.AwaitChildInterruptResponse_Completed{Completed: &bridgev1.AwaitChildInterruptCompleted{}}}, nil
 }
 
 func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {
@@ -51,6 +51,9 @@ func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {
 	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName); err != nil {
 		t.Fatalf("gateway CommitMcpToolResult authorization error = %v; want nil", err)
 	}
+	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName); err != nil {
+		t.Fatalf("gateway RelinquishMcpToolResult authorization error = %v; want nil", err)
+	}
 	err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName)
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("gateway AcceptSandboxExecution authorization error = %v; want PermissionDenied", err)
@@ -65,6 +68,9 @@ func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {
 	}
 	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName); err != nil {
 		t.Fatalf("runtime pod CommitInternalToolRepair authorization error = %v; want nil", err)
+	}
+	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_SettleToolResult_FullMethodName); err != nil {
+		t.Fatalf("runtime pod SettleToolResult authorization error = %v; want nil", err)
 	}
 	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_RefreshRuntimeBindingToken_FullMethodName); err != nil {
 		t.Fatalf("runtime pod RefreshRuntimeBindingToken authorization error = %v; want nil", err)

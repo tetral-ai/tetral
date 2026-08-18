@@ -80,8 +80,8 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedFiltersPinnedFamilyAndLogsAft
 	if err != nil {
 		t.Fatalf("McpManifestChanged: %v", err)
 	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("McpManifestChanged status = %s; want committed", response.GetAck().GetStatus())
+	if response.GetCommitted() == nil {
+		t.Fatalf("McpManifestChanged result = %#v; want committed", response)
 	}
 	assertStoredMCPManifest(t, admin, "sesn_mcp_collision_changed", "connector_etag_changed", []string{"exec_command", "memory", "github_search"})
 	assertMCPFamilyOmissionWarnings(t, logs.Bytes(), ServiceNameBridgeAPI, "sesn_mcp_collision_changed", "claude", []string{"Read"})

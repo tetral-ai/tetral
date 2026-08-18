@@ -432,27 +432,27 @@ eof_line: "*** End of File" LF
 
     const spawn = schemaFor("spawn_agent");
     expect(spawn.required).toEqual(["task_name", "prompt"]);
-    expect(spawn.properties?.task_name).toMatchObject({ type: "string", minLength: 1 });
+    expect(spawn.properties?.task_name).toMatchObject({ type: "string", minLength: 1, maxLength: 128 });
     expect(spawn.properties?.prompt).toMatchObject({ type: "string", minLength: 1 });
     expect(withoutDescriptions(spawn.properties?.agent_type)).toEqual({ enum: ["general", "research", "worker"] });
     expect(withoutDescriptions(spawn.properties?.fork_turns)).toEqual({
-      anyOf: [{ enum: ["none", "all"] }, { type: "string", pattern: "^[1-9][0-9]*$" }],
+      anyOf: [{ enum: ["none", "all"] }, { type: "string", pattern: "^(?:[1-9][0-9]{0,2}|1000)$" }],
     });
 
     const send = schemaFor("send_message");
     expect(send.required).toEqual(["task_name", "message"]);
-    expect(send.properties?.task_name).toMatchObject({ type: "string", minLength: 1 });
+    expect(send.properties?.task_name).toMatchObject({ type: "string", minLength: 1, maxLength: 128 });
     expect(send.properties?.message).toMatchObject({ type: "string", minLength: 1 });
 
     const wait = schemaFor("wait_agent");
     expect(wait.required).toEqual(["task_name"]);
-    expect(wait.properties?.task_name).toMatchObject({ type: "string", minLength: 1 });
+    expect(wait.properties?.task_name).toMatchObject({ type: "string", minLength: 1, maxLength: 128 });
     expect(withoutDescriptions(wait.properties?.timeout_ms)).toEqual({ type: "integer", minimum: 0 });
 
     for (const name of ["interrupt_agent", "close_agent", "resume_agent"]) {
       const schema = schemaFor(name);
       expect(schema.required).toEqual(["task_name"]);
-      expect(withoutDescriptions(schema.properties)).toEqual({ task_name: { type: "string", minLength: 1 } });
+      expect(withoutDescriptions(schema.properties)).toEqual({ task_name: { type: "string", minLength: 1, maxLength: 128 } });
     }
 
     const list = schemaFor("list_agents");

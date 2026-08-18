@@ -28,13 +28,31 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc LoadContext(LoadContextRequest) returns (LoadContextResponse);",
 		"rpc CommitInputs(CommitInputsRequest) returns (CommitInputsResponse);",
 		"rpc CommitTaskNotificationResult(CommitTaskNotificationResultRequest) returns (CommitTaskNotificationResultResponse);",
+		"message CommitInputsCommitted",
+		"message CommitTaskNotificationResultParked {}",
 		"rpc WriteEvent(WriteEventRequest) returns (WriteEventResponse);",
+		"rpc SettleToolResult(SettleToolResultRequest) returns (SettleToolResultResponse);",
 		"rpc WriteRequestEnd(WriteRequestEndRequest) returns (WriteRequestEndResponse);",
 		"rpc FinishIdle(FinishIdleRequest) returns (FinishIdleResponse);",
-		"rpc CreateChildThread(CreateChildThreadRequest) returns (CreateChildThreadResponse);",
+		"rpc CommitRuntimeTermination(CommitRuntimeTerminationRequest) returns (CommitRuntimeTerminationResponse);",
+		"rpc CreateSubagentThread(CreateSubagentThreadRequest) returns (CreateSubagentThreadResponse);",
+		"rpc EnsureApprovalReviewerTrunk(EnsureApprovalReviewerTrunkRequest) returns (EnsureApprovalReviewerTrunkResponse);",
+		"rpc EnsureApprovalReviewerSidecar(EnsureApprovalReviewerSidecarRequest) returns (EnsureApprovalReviewerSidecarResponse);",
+		"rpc AdmitApprovalReviewInput(AdmitApprovalReviewInputRequest) returns (AdmitApprovalReviewInputResponse);",
 		"rpc ResolveChildThread(ResolveChildThreadRequest) returns (ResolveChildThreadResponse);",
 		"rpc ListChildThreads(ListChildThreadsRequest) returns (ListChildThreadsResponse);",
-		"rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);",
+		"rpc DeliverInterAgentMail(DeliverInterAgentMailRequest) returns (DeliverInterAgentMailResponse);",
+		"rpc ReadAgentMail(ReadAgentMailRequest) returns (ReadAgentMailResponse);",
+		"rpc AdmitChildInterrupt(AdmitChildInterruptRequest) returns (AdmitChildInterruptResponse);",
+		"rpc AwaitChildInterrupt(AwaitChildInterruptRequest) returns (AwaitChildInterruptResponse);",
+		"message ChildThreadFact",
+		"message DeliverInterAgentMailCommitted {}",
+		"message AdmitChildInterruptCommitted",
+		"string control_operation_id = 1;",
+		"message MarkChildThreadActiveCommitted",
+		"ChildLifecycleDisposition disposition = 1;",
+		"rpc CloseChildControl(CloseChildControlRequest) returns (CloseChildControlResponse);",
+		"rpc CloseApprovalReviewer(CloseApprovalReviewerRequest) returns (CloseApprovalReviewerResponse);",
 		"rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);",
 		"rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);",
 		"rpc AwaitSandboxExecution(AwaitSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);",
@@ -44,20 +62,35 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc RunMemory(RunMemoryRequest) returns (RunMemoryResponse);",
 		"message AcceptSandboxExecutionRequest",
 		"string tool_use_event_id = 2;",
-		"string normalized_input_hash = 3;",
-		"string model_tool_call_id = 7;",
 		"message AcceptSandboxExecutionResponse",
+		"message SandboxExecutionCommitted {}",
 		"message AwaitSandboxExecutionResponse",
 		"message RunMemoryRequest",
-		"string tool_use_event_id = 2;",
-		"string normalized_input_hash = 3;",
+		"message MemoryRunCommitted",
+		"message ClaimMcpToolResultRequest",
+		"string claim_id = 3;",
+		"message McpToolClaimAcquired",
+		"message CommitMcpToolResultRequest",
+		"message McpToolCommitCommitted",
+		"string attachment_ref = 1;",
+		"rpc RelinquishMcpToolResult(RelinquishMcpToolResultRequest) returns (RelinquishMcpToolResultResponse);",
+		"message RelinquishMcpToolResultRequest",
+		"message McpToolRelinquishRelinquished {}",
+		"string operation_id = 6;",
 		"message RuntimeScope",
 		"message RuntimeBindingRef",
 		"message ServerToolUseUsage",
-		"ServerToolUseUsage server_tool_use = 9;",
+		"message SettleToolResultRequest",
+		"RuntimeToolSettlement settlement = 2;",
+		"message SettleToolResultResponse",
+		"ToolResultCommitted committed = 1;",
+		"ToolResultDuplicate duplicate = 2;",
+		"ToolResultStale stale = 3;",
+		"message RuntimeTerminationCommitted",
+		"message RuntimeTerminationDuplicate",
+		"message RuntimeTerminationStale {}",
 		"int64 web_search_requests = 1;",
 		"int64 web_fetch_requests = 2;",
-		"BRIDGE_WRITE_STATUS_COMMITTED",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("bridge proto missing %q", required)
@@ -66,6 +99,14 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	for _, forbidden := range []string{
 		"string memory" + "_store_id",
 		"memory" + "_store_id =",
+		"rpc CreateChildThread(",
+		"rpc ResolveInterAgentDelivery(",
+		"message ChildLifecycleSource",
+		"string child_thread_json",
+		"enum RuntimeInputDisposition",
+		"message CommitInputsDuplicate",
+		"message CommitTaskNotificationResultDuplicate",
+		"message CommitTaskNotificationResultDeferred",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("bridge proto exposes forbidden Runtime boundary field %q", forbidden)
@@ -110,27 +151,25 @@ func TestRuntimePodServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	for _, required := range []string{
 		"package tetral.agent_runtime.v1;",
 		"github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1;agentruntimev1",
-		"rpc AcceptInput(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc AcceptTaskNotification(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc Interrupt(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc ResolveToolConfirmation(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc ApplyRuntimeConfig(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"rpc CleanupSession(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);",
-		"RUNTIME_COMMAND_KIND_MESSAGES",
-		"RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL",
-		"RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION",
-		"RUNTIME_COMMAND_KIND_TASK_NOTIFICATION",
-		"RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH",
-		"RUNTIME_COMMAND_KIND_CLEANUP_SESSION",
-		"string session_thread_id = 4;",
-		"int64 binding_generation = 6;",
-		"string runtime_input_id = 11;",
-		"repeated string event_ids = 12;",
-		"RuntimeCommandKind command_kind = 15;",
-		"string payload_json = 16;",
+		"rpc AcceptInput(AcceptInputRequest) returns (AcceptInputResponse);",
+		"rpc AcceptAgentMail(AcceptAgentMailRequest) returns (AcceptAgentMailResponse);",
+		"rpc AcceptTaskNotification(AcceptTaskNotificationRequest) returns (AcceptTaskNotificationResponse);",
+		"rpc Interrupt(InterruptRequest) returns (InterruptResponse);",
+		"rpc ResolveToolConfirmation(ResolveToolConfirmationRequest) returns (ResolveToolConfirmationResponse);",
+		"rpc ApplyRuntimeConfig(ApplyRuntimeConfigRequest) returns (ApplyRuntimeConfigResponse);",
+		"rpc CleanupSession(CleanupSessionRequest) returns (CleanupSessionResponse);",
+		"int64 input_order = 8;",
+		"string delivery_id = 8;",
+		"string tool_use_event_id = 8;",
+		"string cleanup_operation_id = 6;",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("runtime pod proto missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"RuntimeInput" + "CommandRequest", "RuntimeInput" + "CommandResponse", "RuntimeCommand" + "Kind", "command_kind", "event_ids"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("runtime pod proto retained universal command member %q", forbidden)
 		}
 	}
 	for _, generated := range []string{
@@ -166,7 +205,11 @@ func TestGatewayServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"ProviderRequestKind request_kind = 3;",
 		"string runtime_binding_token = 10;",
 		"repeated SystemSegment system = 12;",
-		"repeated RuntimeMessage messages = 13;",
+		"repeated ProviderContextEntry context = 13;",
+		"message ProviderContextEntry",
+		"repeated ProviderContextItem content = 2;",
+		"message ProviderToolCall",
+		"string model_tool_call_id = 1;",
 		"repeated RuntimeToolDefinition tools = 14;",
 		"repeated ProviderRequestAttachment attachments = 15;",
 		"ProviderRequestLimits limits = 16;",
@@ -204,6 +247,23 @@ func TestGatewayServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("gateway proto missing %q", required)
+		}
+	}
+	for _, retired := range []string{
+		"optional string tool_use_event_id = 3;",
+		"string source_tool_use_event_id",
+		"enum RuntimeMessageRole",
+		"enum RuntimeToolPartState",
+		"message RuntimeMessage {",
+		"message RuntimePart {",
+		"message RuntimeTextPart {",
+		"message RuntimeReasoningPart {",
+		"message RuntimeToolPart {",
+		"repeated RuntimeMessage messages = 13;",
+		"string output_or_error_json",
+	} {
+		if strings.Contains(text, retired) {
+			t.Fatalf("Gateway provider carrier retained Runtime-owned member %q", retired)
 		}
 	}
 	for _, generated := range []string{
@@ -259,12 +319,12 @@ func TestGeneratedTypeScriptProtocolUsesSafeNumericScalars(t *testing.T) {
 		t.Fatalf("read generated runtime pod protocol: %v", err)
 	}
 	text := string(agentRuntimeBody)
-	for _, forbidden := range []string{"bindingGeneration: bigint", "bindingGeneration: string", "sequenceFrom: bigint", "sequenceTo: bigint"} {
+	for _, forbidden := range []string{"bindingGeneration: bigint", "bindingGeneration: string", "inputOrder: bigint", "inputOrder: string"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("generated Runtime Pod protocol contains forbidden scalar %q", forbidden)
 		}
 	}
-	for _, required := range []string{"bindingGeneration: number", "sequenceFrom: number", "sequenceTo: number"} {
+	for _, required := range []string{"bindingGeneration: number", "inputOrder: number"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("generated Runtime Pod protocol missing TypeScript number scalar %q", required)
 		}

@@ -5,7 +5,7 @@ import {
   ProviderFinishReason,
   ProviderRequestKind,
   ProviderStreamEventType,
-  RuntimeMessageRole,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -25,7 +25,6 @@ function request(): ProviderRequest {
     workspaceId: "workspace-1",
     sessionId: "session-1",
     sessionThreadId: "thread-1",
-    parentThreadId: undefined,
     bindingId: "binding-1",
     bindingGeneration: 7,
     runtimeBindingToken: "runtime-binding-token-1",
@@ -37,13 +36,10 @@ function request(): ProviderRequest {
         cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
       },
     ],
-    messages: [
+    context: [
       {
-        id: "message-1",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-        status: "completed",
-        origin: "user",
-        parts: [{ id: "part-1", text: { text: "hello" } }],
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+        content: [{ text: { text: "hello" } }],
       },
     ],
     tools: [],
@@ -64,10 +60,8 @@ function gatewayClient(events: readonly ProviderStreamEvent[]): GatewayClient {
   };
 }
 
-function event(type: ProviderStreamEventType, payload: Omit<ProviderStreamEvent, "requestId" | "modelRequestId" | "type"> = {}): ProviderStreamEvent {
+function event(type: ProviderStreamEventType, payload: Omit<ProviderStreamEvent, "type"> = {}): ProviderStreamEvent {
   return {
-    requestId: "provider-request-1",
-    modelRequestId: "model-request-1",
     type,
     ...payload,
   };
@@ -354,7 +348,7 @@ describe("LLMService Gateway boundary", () => {
       event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS, {
         attachmentRejections: {
           rejections: [{
-            transient: undefined,
+            transientAttachmentRef: undefined,
             fileBacked: { sourceEventId: "sevt_file_1", fileId: "file_1" },
             reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
           }],
@@ -375,10 +369,9 @@ describe("LLMService Gateway boundary", () => {
     ]);
   });
 
-  test("rejects transient attachment reports whose full origin differs from the request", async () => {
+  test("accepts only the unique transient attachment ref carried by the request", async () => {
     const transient = {
       attachmentRef: "att_1",
-      sourceToolUseEventId: "sevt_tool_1",
       sourcePath: "mcp:github/plot.png",
       pageRange: "1-2",
       detail: "high",
@@ -392,31 +385,22 @@ describe("LLMService Gateway boundary", () => {
         filename: "plot.png",
       }],
     };
-    const mismatches = [
-      { ...transient, sourceToolUseEventId: "sevt_tool_other" },
-      { ...transient, sourcePath: "mcp:github/other.png" },
-      { ...transient, pageRange: "3-4" },
-      { ...transient, detail: "low" },
-    ];
+    const events = await collect(createLLMService(gatewayClient([
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS, {
+        attachmentRejections: {
+          rejections: [{
+            transientAttachmentRef: "att_other",
+            fileBacked: undefined,
+            reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
+          }],
+        },
+      }),
+    ])).stream(providerRequest));
 
-    for (const reported of mismatches) {
-      const events = await collect(createLLMService(gatewayClient([
-        event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS, {
-          attachmentRejections: {
-            rejections: [{
-              transient: reported,
-              fileBacked: undefined,
-              reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
-            }],
-          },
-        }),
-      ])).stream(providerRequest));
-
-      expect(events).toEqual([{
-        type: "provider-error",
-        error: expect.objectContaining({ code: "gateway_protocol_error" }),
-      }]);
-    }
+    expect(events).toEqual([{
+      type: "provider-error",
+      error: expect.objectContaining({ code: "gateway_protocol_error" }),
+    }]);
   });
 
   test("rejects repeated, late, and unknown attachment rejection reports as gateway_protocol_error", async () => {
@@ -432,7 +416,7 @@ describe("LLMService Gateway boundary", () => {
     const rejection = event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS, {
       attachmentRejections: {
         rejections: [{
-          transient: undefined,
+          transientAttachmentRef: undefined,
           fileBacked: { sourceEventId: "sevt_file_1", fileId: "file_1" },
           reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
         }],
@@ -441,7 +425,7 @@ describe("LLMService Gateway boundary", () => {
     const unknown = event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS, {
       attachmentRejections: {
         rejections: [{
-          transient: undefined,
+          transientAttachmentRef: undefined,
           fileBacked: { sourceEventId: "sevt_unknown", fileId: "file_unknown" },
           reason: ProviderAttachmentRejectionReason.PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED,
         }],
@@ -487,10 +471,8 @@ describe("LLMService Gateway boundary", () => {
     }
   });
 
-  test("rejects wrong ids, out-of-order fragments, and events after terminal as gateway_protocol_error", async () => {
+  test("rejects out-of-order fragments and events after terminal as gateway_protocol_error", async () => {
     for (const events of [
-      [event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { requestId: "wrong", text: { id: "text-1", text: "", metadataJson: "{}" } } as Partial<ProviderStreamEvent>)],
-      [event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { modelRequestId: "wrong", text: { id: "text-1", text: "", metadataJson: "{}" } } as Partial<ProviderStreamEvent>)],
       [event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, { text: { id: "text-1", text: "orphan", metadataJson: "{}" } })],
       [
         event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH, { finish: { reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP, metadataJson: "{}" } }),

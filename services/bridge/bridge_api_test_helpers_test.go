@@ -2,18 +2,15 @@ package agentruntimebridge
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +29,15 @@ import (
 
 // This file owns shared Bridge API store test fixtures and assertions.
 
+func bridgeInterruptLeaseRef(job *queue.Job) *bridgev1.InterruptLeaseRef {
+	if job == nil {
+		return nil
+	}
+	return &bridgev1.InterruptLeaseRef{
+		JobId: job.ID, LeaseToken: job.LeaseToken, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+	}
+}
+
 func repoRootFromBridgeTest(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -39,41 +45,6 @@ func repoRootFromBridgeTest(t *testing.T) string {
 		t.Fatalf("getwd: %v", err)
 	}
 	return filepath.Clean(filepath.Join(wd, "../.."))
-}
-
-func assertCommitInputsConflictDidNotAdvance(t *testing.T, admin *sql.DB, sessionID string, runtimeInputID string, eventIDs []string) {
-	t.Helper()
-	var inboxStatus string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT status FROM session_runtime_inbox WHERE workspace_id = 'default' AND runtime_input_id = $1`, runtimeInputID).Scan(&inboxStatus); err != nil {
-		t.Fatalf("read conflicting inbox status: %v", err)
-	}
-	var processedCount int
-	var messageCount int
-	var operationCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND event_id = ANY($1) AND processed_at IS NOT NULL`, eventIDs).Scan(&processedCount); err != nil {
-		t.Fatalf("count processed conflicting events: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND source_event_id = ANY($1)`, eventIDs).Scan(&messageCount); err != nil {
-		t.Fatalf("count conflicting message projections: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND session_id = $1 AND operation = 'commit_inputs'`, sessionID).Scan(&operationCount); err != nil {
-		t.Fatalf("count conflicting commit operations: %v", err)
-	}
-	if inboxStatus != "accepted" || processedCount != 0 || messageCount != 0 || operationCount != 0 {
-		t.Fatalf("conflicting commit advanced inbox=%q processed=%d messages=%d operations=%d; want accepted/0/0/0", inboxStatus, processedCount, messageCount, operationCount)
-	}
-}
-
-func bridgeUserInputCreateForTest(_ string, _ string, _ string, _ string, _ string, textValue string) *bridgev1.RuntimeMessageCreate {
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT, "user", "user", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", textValue)})
-}
-
-func bridgeApprovalInputCreateForTest(_ string, _ string, _ string, _ string, _ string, textValue string) *bridgev1.RuntimeMessageCreate {
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT, "user", "user", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", textValue)})
 }
 
 func bridgeAgentMailCommitRequestForTest(
@@ -104,7 +75,7 @@ func bridgeAgentMailCommitRequestForTest(
 	}
 	var sequence int64
 	if existing == 0 {
-		publicMessage, err := publicInterAgentMessageJSON(json.RawMessage(messageJSON))
+		publicMessage, err := validatedPublicInterAgentMessageJSON(json.RawMessage(messageJSON))
 		if err != nil {
 			t.Fatalf("normalize admitted agent mail message: %v", err)
 		}
@@ -154,60 +125,44 @@ func bridgeAgentMailCommitRequestForTest(
 		seedBridgeAPIRuntimeInbox(t, db, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimeInputID, "agent_mail", fmt.Sprintf("[%q]", eventID), "accepted", scope.GetBinding().GetBindingId(), scope.GetBinding().GetTargetPodUid(), sequence, sequence)
 	}
 	if _, err := db.ExecContext(context.Background(),
-		`UPDATE session_runtime_inbox SET binding_generation=$3
-		  WHERE workspace_id=$1 AND runtime_input_id=$2`,
-		scope.GetWorkspaceId(), runtimeInputID, scope.GetBinding().GetBindingGeneration(),
+		`UPDATE session_runtime_inbox
+		    SET status='accepted',
+		        event_ids_json=$3,
+		        sequence_from=$4,
+		        sequence_to=$4,
+		        binding_id=$5,
+		        binding_generation=$6,
+		        target_pod_uid=$7,
+		        updated_at=now()
+		  WHERE workspace_id=$1
+		    AND runtime_input_id=$2
+		    AND status IN ('queued', 'delivering', 'accepted')`,
+		scope.GetWorkspaceId(), runtimeInputID, fmt.Sprintf("[%q]", eventID), sequence,
+		scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(),
 	); err != nil {
-		t.Fatalf("align agent mail inbox binding generation: %v", err)
+		t.Fatalf("align admitted agent mail inbox: %v", err)
 	}
-	var message struct {
-		Origin string `json:"origin"`
-		Parts  []struct {
-			Text string `json:"text"`
-		} `json:"parts"`
-	}
-	if err := json.Unmarshal([]byte(messageJSON), &message); err != nil || len(message.Parts) != 1 || message.Parts[0].Text == "" {
-		t.Fatalf("decode agent mail message: %v", err)
-	}
-	create := bridgeMessageCreateForTest(
-		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
-		"user",
-		"runtime",
-		bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", message.Parts[0].Text)},
-	)
 	return &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: runtimeInputID, InputKind: "agent_mail",
-		EventIds: []string{eventID}, SequenceFrom: sequence, SequenceTo: sequence,
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{create},
+		Scope: scope, RuntimeInputId: runtimeInputID,
 	}
 }
 
-type bridgeRuntimePartCreateForTest struct {
-	kind string
-	json string
+func bridgeTextContextDeltaForTest(text string) *bridgev1.RuntimeContextDelta {
+	return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: text}}}}}
 }
 
-func bridgeRuntimeOutputAppendForTest(
-	t *testing.T,
-	_ *bridgev1.RuntimeScope,
-	_ string,
-	_ string,
-	_ string,
-	parts ...bridgeRuntimePartCreateForTest,
-) *bridgev1.RuntimeAssistantPartAppend {
-	t.Helper()
-	return bridgeAssistantAppendForTest(t, parts...)
+func bridgeToolCallContextDeltaForTest(modelToolCallID, toolName, canonicalInputJSON string) *bridgev1.RuntimeContextDelta {
+	return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
+		ModelToolCallId: modelToolCallID, ToolName: toolName, CanonicalInputJson: canonicalInputJSON,
+	}}}}}
 }
 
-func bridgeCancelledToolSettlementForTest(toolUseEventID, message string) *bridgev1.RuntimeToolSettlement {
-	errorJSON := fmt.Sprintf(`{"type":"runtime","code":"runtime_terminated","message":%q,"retryable":false,"fatal":true}`, message)
-	return &bridgev1.RuntimeToolSettlement{
-		ToolUseEventId: toolUseEventID,
-		Outcome: &bridgev1.RuntimeToolSettlement_Cancelled{
-			Cancelled: &bridgev1.RuntimeToolCancelled{ErrorJson: &errorJSON},
-		},
-	}
-}
+type panicSlogHandler struct{}
+
+func (panicSlogHandler) Enabled(context.Context, slog.Level) bool  { return true }
+func (panicSlogHandler) Handle(context.Context, slog.Record) error { panic("logger failed") }
+func (panicSlogHandler) WithAttrs([]slog.Attr) slog.Handler        { return panicSlogHandler{} }
+func (panicSlogHandler) WithGroup(string) slog.Handler             { return panicSlogHandler{} }
 
 func bridgeCompletedToolSettlementForTest(toolUseEventID, textValue string) *bridgev1.RuntimeToolSettlement {
 	return &bridgev1.RuntimeToolSettlement{
@@ -231,50 +186,43 @@ func bridgeErrorToolSettlementForTest(toolUseEventID, message string) *bridgev1.
 	}
 }
 
-func bridgeMessageCreateForTest(kind bridgev1.RuntimeMessageCreateKind, role, origin string, parts ...bridgeRuntimePartCreateForTest) *bridgev1.RuntimeMessageCreate {
-	creates := make([]*bridgev1.RuntimePartCreate, 0, len(parts))
-	for _, part := range parts {
-		creates = append(creates, &bridgev1.RuntimePartCreate{PartKind: part.kind, PartJson: part.json})
-	}
-	return &bridgev1.RuntimeMessageCreate{MessageKind: kind, MessageInfoJson: fmt.Sprintf("{\"role\":%q,\"origin\":%q,\"status\":\"completed\"}", role, origin), Parts: creates}
+func bridgeToolSettlementRequestForTest(
+	scope *bridgev1.RuntimeScope,
+	settlement *bridgev1.RuntimeToolSettlement,
+) *bridgev1.SettleToolResultRequest {
+	return &bridgev1.SettleToolResultRequest{Scope: scope, Settlement: settlement}
 }
 
-func bridgeCompletionMailCreateForTest(_ *bridgev1.RuntimeScope, _ string, envelope string) *bridgev1.RuntimeMessageCreate {
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL, "user", "runtime", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", envelope)})
-}
-
-func bridgeAssistantAppendForTest(t *testing.T, parts ...bridgeRuntimePartCreateForTest) *bridgev1.RuntimeAssistantPartAppend {
+func bridgeRequireToolSettlementOutcomeForTest(
+	t *testing.T,
+	response *bridgev1.SettleToolResultResponse,
+	want string,
+) {
 	t.Helper()
-	creates := make([]*bridgev1.RuntimePartCreate, 0, len(parts))
-	for _, part := range parts {
-		if !json.Valid([]byte(part.json)) {
-			t.Fatalf("invalid part JSON")
-		}
-		creates = append(creates, &bridgev1.RuntimePartCreate{PartKind: part.kind, PartJson: part.json})
+	if response == nil {
+		t.Fatalf("Tool settlement response is nil; want %s", want)
 	}
-	return &bridgev1.RuntimeAssistantPartAppend{Parts: creates}
+	got := ""
+	switch response.GetOutcome().(type) {
+	case *bridgev1.SettleToolResultResponse_Committed:
+		got = "committed"
+	case *bridgev1.SettleToolResultResponse_Duplicate:
+		got = "duplicate"
+	case *bridgev1.SettleToolResultResponse_Stale:
+		got = "stale"
+	default:
+		t.Fatalf("Tool settlement response has no closed outcome: %#v", response)
+	}
+	if got != want {
+		t.Fatalf("Tool settlement outcome = %s; want %s", got, want)
+	}
 }
 
-func bridgeTaskNotificationCreateForTest(t *testing.T, runtimeInputID, taskID, resultJSON string) *bridgev1.RuntimeMessageCreate {
+func bridgeTaskNotificationRequestForTest(t *testing.T, scope *bridgev1.RuntimeScope, runtimeInputID string) *bridgev1.CommitTaskNotificationResultRequest {
 	t.Helper()
-	terminalStatus, err := terminalStatusFromResultJSON(resultJSON)
-	if err != nil {
-		t.Fatal(err)
+	return &bridgev1.CommitTaskNotificationResultRequest{
+		Scope: scope, RuntimeInputId: runtimeInputID,
 	}
-	_, sourceToolUseEventID, ok := taskNotificationDeclaredIdentity(resultJSON)
-	if !ok {
-		t.Fatal("task notification result identity is invalid")
-	}
-	payload, err := canonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = runtimeInputID
-	return bridgeMessageCreateForTest(bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION, "user", "runtime", bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", payload)})
-}
-
-func bridgeTaskNotificationRequestForTest(t *testing.T, scope *bridgev1.RuntimeScope, runtimeInputID, taskID, resultJSON string) *bridgev1.CommitTaskNotificationResultRequest {
-	return &bridgev1.CommitTaskNotificationResultRequest{Scope: scope, RuntimeInputId: runtimeInputID, TaskId: taskID, ResultJson: resultJSON, MessageCreate: bridgeTaskNotificationCreateForTest(t, runtimeInputID, taskID, resultJSON)}
 }
 
 func createBridgeTransientAttachmentForTest(t *testing.T, store *PostgreSQLBridgeAPIStore, scope *bridgev1.RuntimeScope, runtimeWriteID string, sourceToolUseEventID string, data []byte) *bridgev1.TransientAttachmentRef {
@@ -433,6 +381,32 @@ func bridgeAPIFinishIdleRequest(
 	}
 }
 
+func seedReadySandboxForSharedToolExecution(t *testing.T, db *sql.DB, workspaceID string, sessionID string) {
+	t.Helper()
+	environmentID := "env_" + sessionID
+	if _, err := db.Exec(`UPDATE environments SET current_generation=1 WHERE workspace_id=$1 AND id=$2`, workspaceID, environmentID); err != nil {
+		t.Fatalf("set shared-tool environment generation: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO environment_artifacts (
+		workspace_id, environment_id, generation, status, provider, provider_artifact_ref,
+		normalized_config_hash, artifact_input_hash, runtime_network_policy_json, packages_json,
+		created_at, updated_at
+	) VALUES ($1, $2, 1, 'ready', 'daytona', 'artifact_shared_tool_execution',
+		'config_hash', 'artifact_hash', '{"type":"unrestricted"}', '{}', clock_timestamp(), clock_timestamp())`, workspaceID, environmentID); err != nil {
+		t.Fatalf("seed shared-tool environment artifact: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id, environment_generation,
+		provider, provider_resource_id, binding_revision, materialized_resource_revision,
+		resource_credential_expires_at, resource_roots_json, provider_metadata_json,
+		helper_verified_at, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, 1,
+		clock_timestamp()+interval '2 hours', '[]', '{}', clock_timestamp(), clock_timestamp(), clock_timestamp())`,
+		workspaceID, sessionID, "sbox_"+sessionID, environmentID, "provider_"+sessionID); err != nil {
+		t.Fatalf("seed ready shared-tool Sandbox binding: %v", err)
+	}
+}
+
 func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity")
@@ -442,35 +416,27 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_identity_other", "bind_bridge_tool_identity_foreign", 1, "pod_uid_tool_identity_foreign")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity", 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf '<>&'","workdir":"/workspace"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_events SET model_request_id = 'mreq_tool_identity' WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
+		`UPDATE session_events
+		    SET model_request_id = 'mreq_tool_identity', projection_json = '{"model_tool_call_id":"call_tool_identity"}'
+		  WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "mreq_tool_identity", "evt_tool_identity", "call_tool_identity", "exec_command")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	canonicalInput := `{"cmd":"printf '<>&'","workdir":"/workspace"}`
 	request := &bridgev1.AcceptSandboxExecutionRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_identity", "thr_bridge_tool_identity", "bind_bridge_tool_identity", 1, "pod_uid_tool_identity"),
-		ToolUseEventId:      "evt_tool_identity",
-		ModelToolCallId:     "call_tool_identity",
-		NormalizedInputHash: sha256Hex(canonicalInput),
-		ToolName:            "exec_command",
-		InputJson:           canonicalInput,
+		Scope:          bridgeAPIScope("sesn_bridge_tool_identity", "thr_bridge_tool_identity", "bind_bridge_tool_identity", 1, "pod_uid_tool_identity"),
+		ToolUseEventId: "evt_tool_identity",
 	}
 	first, err := store.AcceptSandboxExecution(context.Background(), request)
 	if err != nil {
 		t.Fatalf("AcceptSandboxExecution: %v", err)
 	}
-	reordered := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
-	reordered.Scope.RequestId = "req_bridge_tool_identity_replay"
-	reordered.InputJson = "{ \"workdir\" : \"/workspace\", \"cmd\" : \"printf '<>&'\" }"
-	replay, err := store.AcceptSandboxExecution(context.Background(), reordered)
+	replay, err := store.AcceptSandboxExecution(context.Background(), request)
 	if err != nil {
-		t.Fatalf("AcceptSandboxExecution canonical replay: %v", err)
+		t.Fatalf("AcceptSandboxExecution replay: %v", err)
 	}
-	if first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+	if first.GetCommitted() == nil || replay.GetDuplicate() == nil {
 		t.Fatalf("accept first/replay = %+v / %+v; want committed then duplicate", first, replay)
 	}
 
@@ -479,15 +445,6 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 		wantCode codes.Code
 		mutate   func(*bridgev1.AcceptSandboxExecutionRequest)
 	}{
-		{name: "hash", wantCode: codes.InvalidArgument, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
-			conflict.NormalizedInputHash = "different_hash"
-		}},
-		{name: "name", wantCode: codes.AlreadyExists, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
-			conflict.ToolName = "Bash"
-		}},
-		{name: "payload_reusing_hash", wantCode: codes.InvalidArgument, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
-			conflict.InputJson = `{"cmd":"printf different","workdir":"/workspace"}`
-		}},
 		{name: "other_thread", wantCode: codes.FailedPrecondition, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.Scope.SessionThreadId = "thr_bridge_tool_identity_other"
 		}},
@@ -502,23 +459,16 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	} {
 		t.Run(test.name+" conflict", func(t *testing.T) {
 			conflict := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
-			conflict.Scope.RequestId = "req_bridge_tool_identity_conflict_" + test.name
 			test.mutate(conflict)
 			if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != test.wantCode {
 				t.Fatalf("AcceptSandboxExecution %s conflict error = %v; want %s", test.name, err, test.wantCode)
 			}
 		})
 	}
-	if _, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
-		Scope: request.GetScope(), ToolUseEventId: request.GetToolUseEventId(), NormalizedInputHash: request.GetNormalizedInputHash(),
-		McpServerName: "github", ToolName: "create_issue", InputJson: request.GetInputJson(),
-	}); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("cross-kind MCP claim error = %v; want AlreadyExists", err)
-	}
 	var rowCount int
 	var claimStatus, claimOwner, claimLease sql.NullString
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), max(mcp_claim_status), max(mcp_claim_owner_request_id), max(mcp_claim_lease_expires_at)
+		`SELECT count(*), max(mcp_claim_status), max(mcp_claim_id), max(mcp_claim_lease_expires_at)
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_tool_identity' AND tool_use_event_id = 'evt_tool_identity'`,
 	).Scan(&rowCount, &claimStatus, &claimOwner, &claimLease); err != nil {
@@ -546,22 +496,8 @@ func assertNoRuntimeInboxRow(t *testing.T, db *sql.DB, runtimeInputID string) {
 	}
 }
 
-func sourceFunctionBody(t *testing.T, source string, signature string) string {
-	t.Helper()
-	start := strings.Index(source, signature)
-	if start < 0 {
-		t.Fatalf("%s not found", signature)
-	}
-	body := source[start:]
-	if next := strings.Index(body[len(signature):], "\nfunc "); next >= 0 {
-		body = body[:len(signature)+next]
-	}
-	return body
-}
-
 func bridgeAPIScope(sessionID string, threadID string, bindingID string, generation int64, podUID string) *bridgev1.RuntimeScope {
 	return &bridgev1.RuntimeScope{
-		RequestId:       "req_" + sessionID,
 		WorkspaceId:     "default",
 		SessionId:       sessionID,
 		SessionThreadId: threadID,
@@ -581,6 +517,7 @@ func seedBridgeAPIRequestStart(
 	modelRequestID string,
 	requestKind string,
 	messageBoundary int64,
+	consumedFileAttachments ...*bridgev1.FileAttachmentPair,
 ) *bridgev1.WriteEventResponse {
 	t.Helper()
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
@@ -591,32 +528,12 @@ func seedBridgeAPIRequestStart(
 		PayloadJson:                   fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, modelRequestID),
 		ContextThroughMessageSequence: bridgeAPIInt64(messageBoundary),
 		RequestKind:                   requestKind,
+		ConsumedFileAttachments:       consumedFileAttachments,
 	})
 	if err != nil {
 		t.Fatalf("seed request start: %v", err)
 	}
 	return response
-}
-
-func bridgeInternalToolRepairCreateForTest(
-	toolCallID string,
-	toolName string,
-	message string,
-) *bridgev1.RuntimeMessageCreate {
-	return bridgeMessageCreateForTest(
-		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR,
-		"assistant",
-		"agent",
-		bridgeRuntimePartCreateForTest{
-			kind: "tool",
-			json: fmt.Sprintf(
-				`{"type":"tool","toolCallId":%q,"toolName":%q,"completedAt":"2026-01-01T00:00:00Z","state":{"status":"error","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"error":{"type":"provider_tool_protocol_error","message":%q,"retryable":false}}}`,
-				toolCallID,
-				toolName,
-				message,
-			),
-		},
-	)
 }
 
 func testJSONPathString(t *testing.T, raw string, path string) string {
@@ -627,22 +544,6 @@ func testJSONPathString(t *testing.T, raw string, path string) string {
 		t.Fatalf("JSON path %s = %#v; want string", path, value)
 	}
 	return stringValue
-}
-
-func testJSONPathInt(t *testing.T, raw string, path string) int64 {
-	t.Helper()
-	value := testJSONPathValue(t, raw, path)
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed)
-	case int64:
-		return typed
-	case int:
-		return int64(typed)
-	default:
-		t.Fatalf("JSON path %s = %#v; want number", path, value)
-		return 0
-	}
 }
 
 func assertNoTaskOutputPaths(t *testing.T, raw string) {
@@ -672,11 +573,6 @@ func testJSONPathValue(t *testing.T, raw string, path string) any {
 	return current
 }
 
-func bridgeRuntimeUserMessageJSON(t *testing.T, sessionID string, messageID string, text string) string {
-	t.Helper()
-	return bridgeRuntimeMessageJSON(t, sessionID, messageID, text, "user")
-}
-
 func bridgeAcceptedMessageDeliveryPayload(t *testing.T, runtime *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, eventIDs []string, sequenceFrom int64, sequenceTo int64) string {
 	t.Helper()
 	client := dbconnect.NewClientForTesting(runtime)
@@ -701,108 +597,28 @@ func bridgeAcceptedMessageDeliveryPayload(t *testing.T, runtime *sql.DB, workspa
 	return payloadJSON
 }
 
-func assertBridgeRuntimeUserProjection(t *testing.T, raw string, sessionID string, text string) {
+func assertBridgeUserContextProjection(t *testing.T, raw string, text string) {
 	t.Helper()
-	var message struct {
-		ID        string `json:"id"`
-		SessionID string `json:"sessionId"`
-		Role      string `json:"role"`
-		Origin    string `json:"origin"`
-		Sequence  int64  `json:"sequence"`
-		Status    string `json:"status"`
-		Parts     []struct {
-			ID          string `json:"id"`
-			SessionID   string `json:"sessionId"`
-			MessageID   string `json:"messageId"`
-			Sequence    int64  `json:"sequence"`
-			Type        string `json:"type"`
-			Text        string `json:"text"`
-			Status      string `json:"status"`
-			Truncated   bool   `json:"truncated"`
-			CompletedAt string `json:"completedAt"`
-		} `json:"parts"`
+	parts, err := decodeStoredRuntimeContextParts(raw)
+	if err != nil || len(parts) != 1 {
+		t.Fatalf("decode projected user context: parts=%d err=%v raw=%s", len(parts), err, raw)
 	}
-	if err := json.Unmarshal([]byte(raw), &message); err != nil {
-		t.Fatalf("unmarshal projected user RuntimeMessage: %v", err)
+	var part map[string]any
+	if err := json.Unmarshal(parts[0], &part); err != nil {
+		t.Fatalf("decode projected user text: %v", err)
 	}
-	if message.ID == "" || message.SessionID != sessionID || message.Role != "user" || message.Origin != "user" || message.Sequence <= 0 || message.Status != "completed" || len(message.Parts) != 1 {
-		t.Fatalf("projected user RuntimeMessage = %+v; want completed user message", message)
-	}
-	part := message.Parts[0]
-	if part.ID == "" || part.SessionID != sessionID || part.MessageID != message.ID || part.Sequence != 0 || part.Type != "text" || part.Text != text || part.Status != "completed" || part.Truncated {
-		t.Fatalf("projected user RuntimePart = %+v; want completed text part", part)
+	if len(part) != 2 || part["type"] != "text" || part["text"] != text {
+		t.Fatalf("projected user context part = %#v; want exact text %q", part, text)
 	}
 }
 
-func bridgeRuntimeNotificationMessageJSON(t *testing.T, sessionID string, messageID string, text string) string {
+func bridgePublicMessageJSONForTest(t *testing.T, text string) string {
 	t.Helper()
-	return bridgeRuntimeMessageJSON(t, sessionID, messageID, text, "runtime")
-}
-
-func bridgeRuntimeMessageJSON(t *testing.T, sessionID string, messageID string, text string, origin string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"id":        messageID,
-		"sessionId": sessionID,
-		"role":      "user",
-		"origin":    origin,
-		"sequence":  0,
-		"status":    "completed",
-		"createdAt": "2026-01-01T00:00:00Z",
-		"updatedAt": "2026-01-01T00:00:00Z",
-		"parts": []map[string]any{
-			{
-				"id":          messageID + "_text",
-				"sessionId":   sessionID,
-				"messageId":   messageID,
-				"sequence":    0,
-				"createdAt":   "2026-01-01T00:00:00Z",
-				"updatedAt":   "2026-01-01T00:00:00Z",
-				"type":        "text",
-				"text":        text,
-				"truncated":   false,
-				"status":      "completed",
-				"completedAt": "2026-01-01T00:00:00Z",
-			},
-		},
-	})
+	raw, err := publicAgentMailMessageJSON(text)
 	if err != nil {
-		t.Fatalf("marshal runtime user message: %v", err)
+		t.Fatalf("marshal public message content: %v", err)
 	}
-	return string(raw)
-}
-
-func bridgeThreadContextPrefixJSON(t *testing.T, sessionID string, messageID string, text string, parentThreadID string, sourceToolUseEventID string, forkTurns string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"source_parent_thread_id":   parentThreadID,
-		"parent_boundary_event_id":  sourceToolUseEventID,
-		"source_tool_use_event_id":  sourceToolUseEventID,
-		"fork_turns":                forkTurns,
-		"runtime_messages_snapshot": []json.RawMessage{json.RawMessage(bridgeRuntimeUserMessageJSON(t, sessionID, messageID, text))},
-	})
-	if err != nil {
-		t.Fatalf("marshal thread context prefix: %v", err)
-	}
-	return string(raw)
-}
-
-func bridgeReviewerThreadContextPrefixJSON(t *testing.T, parentThreadID string, parentBoundaryEventID string, reviewID string, messages []json.RawMessage) string {
-	t.Helper()
-	if messages == nil {
-		messages = []json.RawMessage{}
-	}
-	raw, err := json.Marshal(map[string]any{
-		"source_parent_thread_id":   parentThreadID,
-		"parent_boundary_event_id":  parentBoundaryEventID,
-		"review_id":                 reviewID,
-		"fork_turns":                "all",
-		"runtime_messages_snapshot": messages,
-	})
-	if err != nil {
-		t.Fatalf("marshal reviewer thread context prefix: %v", err)
-	}
-	return string(raw)
+	return raw
 }
 
 func bridgeInterAgentMessageJSON(t *testing.T, deliveryID string, sourceThreadID string, sourceToolUseEventID string, messageJSON string) string {
@@ -836,41 +652,7 @@ func bridgeInterAgentSentEventJSON(t *testing.T, deliveryID string, sourceThread
 	return string(raw)
 }
 
-func bridgeRuntimeMessageWithPublicContentJSON(t *testing.T, sessionID string, messageID string) string {
-	t.Helper()
-	var message map[string]any
-	if err := json.Unmarshal([]byte(bridgeRuntimeNotificationMessageJSON(t, sessionID, messageID, "repair text")), &message); err != nil {
-		t.Fatalf("decode Runtime message fixture: %v", err)
-	}
-	message["content"] = []map[string]any{
-		{"type": "text", "text": "first public block"},
-		{"type": "text", "text": "second public block"},
-	}
-	raw, err := json.Marshal(message)
-	if err != nil {
-		t.Fatalf("marshal Runtime message with public content: %v", err)
-	}
-	return string(raw)
-}
-
-func readBridgeEventPayloadByID(t *testing.T, db *sql.DB, sessionID string, eventID string) string {
-	t.Helper()
-	var payload string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT payload_json
-		   FROM session_events
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND event_id = $2`,
-		sessionID,
-		eventID,
-	).Scan(&payload); err != nil {
-		t.Fatalf("read Bridge event payload %s: %v", eventID, err)
-	}
-	return payload
-}
-
-func assertDurableInterAgentOrderedPublicContentPreservesRuntimeMessage(t *testing.T, raw string) {
+func assertDurableInterAgentPublicContent(t *testing.T, raw string, wantText string) {
 	t.Helper()
 	var payload struct {
 		Message struct {
@@ -878,94 +660,6 @@ func assertDurableInterAgentOrderedPublicContentPreservesRuntimeMessage(t *testi
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
-			Parts []json.RawMessage `json:"parts"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("decode ordered durable inter-agent payload: %v", err)
-	}
-	if len(payload.Message.Content) != 2 ||
-		payload.Message.Content[0].Type != "text" || payload.Message.Content[0].Text != "first public block" ||
-		payload.Message.Content[1].Type != "text" || payload.Message.Content[1].Text != "second public block" {
-		t.Fatalf("durable ordered public content = %+v; want original two-block order", payload.Message.Content)
-	}
-	if len(payload.Message.Parts) != 1 {
-		t.Fatalf("durable repair parts = %d; want original Runtime repair part retained", len(payload.Message.Parts))
-	}
-}
-
-func assertProjectedSentInterAgentEvent(t *testing.T, raw []byte, targetThreadID string, targetTaskName string, wantTaskName bool) {
-	t.Helper()
-	var event map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &event); err != nil {
-		t.Fatalf("decode projected sent event: %v", err)
-	}
-	wantFieldCount := 5
-	if wantTaskName {
-		wantFieldCount++
-	}
-	if len(event) != wantFieldCount || string(event["to_session_thread_id"]) != strconv.Quote(targetThreadID) ||
-		string(event["content"]) != `[{"text":"first public block","type":"text"},{"text":"second public block","type":"text"}]` {
-		t.Fatalf("projected sent event has wrong exact fields/values: %s", raw)
-	}
-	if wantTaskName {
-		if string(event["to_agent_name"]) != strconv.Quote(targetTaskName) {
-			t.Fatalf("projected to_agent_name = %s; want %q: %s", event["to_agent_name"], targetTaskName, raw)
-		}
-	} else if _, exists := event["to_agent_name"]; exists {
-		t.Fatalf("projected primary target retained to_agent_name: %s", raw)
-	}
-}
-
-func assertRejectedSentInterAgentWriteHasNoDurableSideEffects(t *testing.T, db *sql.DB, sessionID string, runtimeWriteID string) {
-	t.Helper()
-	var eventCount int
-	var streamChangeCount int
-	var bridgeOperationCount int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT
-			(SELECT count(*)
-			   FROM session_events
-			  WHERE workspace_id = 'default'
-			    AND session_id = $1
-			    AND runtime_write_id = $2),
-			(SELECT count(*)
-			   FROM session_event_stream_changes
-			  WHERE workspace_id = 'default'
-			    AND session_id = $1),
-			(SELECT count(*)
-			   FROM session_bridge_operations
-			  WHERE workspace_id = 'default'
-			    AND session_id = $1
-			    AND (idempotency_key = $2 OR runtime_write_id = $2))`,
-		sessionID,
-		runtimeWriteID,
-	).Scan(&eventCount, &streamChangeCount, &bridgeOperationCount); err != nil {
-		t.Fatalf("read malformed sent-event durable side effects for %s: %v", runtimeWriteID, err)
-	}
-	if eventCount != 0 || streamChangeCount != 0 || bridgeOperationCount != 0 {
-		t.Fatalf(
-			"malformed sent-event durable rows for %s = events %d stream changes %d bridge operations %d; want all zero",
-			runtimeWriteID,
-			eventCount,
-			streamChangeCount,
-			bridgeOperationCount,
-		)
-	}
-}
-
-func assertDurableInterAgentPublicContentPreservesRuntimeMessage(t *testing.T, raw string, wantText string) {
-	t.Helper()
-	var payload struct {
-		Message struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-			Parts []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"parts"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
@@ -973,9 +667,6 @@ func assertDurableInterAgentPublicContentPreservesRuntimeMessage(t *testing.T, r
 	}
 	if len(payload.Message.Content) != 1 || payload.Message.Content[0].Type != "text" || payload.Message.Content[0].Text != wantText {
 		t.Fatalf("durable public message content = %+v; want ordered text %q", payload.Message.Content, wantText)
-	}
-	if len(payload.Message.Parts) != 1 || payload.Message.Parts[0].Type != "text" || payload.Message.Parts[0].Text != wantText {
-		t.Fatalf("durable repair message parts = %+v; want original runtime text %q retained", payload.Message.Parts, wantText)
 	}
 }
 
@@ -1005,51 +696,6 @@ func memoryReplaceInputJSON(t *testing.T, path string, oldText string, newText s
 		t.Fatalf("marshal memory replace input: %v", err)
 	}
 	return string(raw)
-}
-
-func memoryDeleteInputJSON(t *testing.T, path string, expectedText string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"action":        "delete",
-		"path":          path,
-		"expected_text": expectedText,
-	})
-	if err != nil {
-		t.Fatalf("marshal memory delete input: %v", err)
-	}
-	return string(raw)
-}
-
-func verifyRuntimeBindingTokenForTest(t *testing.T, token string, key []byte) map[string]any {
-	t.Helper()
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 || parts[0] != "rtbt_v1" {
-		t.Fatalf("runtime binding token = %q; want rtbt_v1 token", token)
-	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(parts[1]))
-	expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	if parts[2] != expected {
-		t.Fatalf("runtime binding token signature mismatch")
-	}
-	body, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Fatalf("decode runtime binding token payload: %v", err)
-	}
-	var claims map[string]any
-	if err := json.Unmarshal(body, &claims); err != nil {
-		t.Fatalf("parse runtime binding token payload: %v", err)
-	}
-	return claims
-}
-
-func bridgeThreadVisibility(t *testing.T, db *sql.DB, threadID string) string {
-	t.Helper()
-	var visibility string
-	if err := db.QueryRowContext(context.Background(), `SELECT visibility FROM session_threads WHERE id = $1`, threadID).Scan(&visibility); err != nil {
-		t.Fatalf("read thread visibility: %v", err)
-	}
-	return visibility
 }
 
 func seedBridgeAPISession(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string) {
@@ -1100,37 +746,13 @@ func seedBridgeAPIDurableToolMessage(
 		t.Fatalf("allocate durable tool message sequence: %v", err)
 	}
 	messageID := "msg_" + toolUseEventID
-	partID := "part_" + toolUseEventID
 	timestamp := "2026-01-01T00:00:00Z"
 	dataJSON, err := json.Marshal(map[string]any{
-		"id":        messageID,
-		"sessionId": sessionID,
-		"role":      "assistant",
-		"origin":    "agent",
-		"sequence":  messageSequence,
-		"status":    "streaming",
-		"createdAt": timestamp,
-		"updatedAt": timestamp,
 		"parts": []map[string]any{{
-			"id":             partID,
-			"sessionId":      sessionID,
-			"messageId":      messageID,
-			"sequence":       0,
-			"createdAt":      timestamp,
-			"updatedAt":      timestamp,
-			"type":           "tool",
-			"toolCallId":     toolCallID,
-			"toolName":       toolName,
-			"toolUseEventId": toolUseEventID,
-			"toolEvent":      map[string]any{"kind": "tool"},
-			"state": map[string]any{
-				"status": "running",
-				"input": map[string]any{
-					"value":     map[string]any{},
-					"preview":   "{}",
-					"truncated": false,
-				},
-			},
+			"type":            "tool_call",
+			"modelToolCallId": toolCallID,
+			"toolName":        toolName,
+			"canonicalInput":  map[string]any{},
 		}},
 	})
 	if err != nil {
@@ -1152,6 +774,19 @@ func seedBridgeAPIDurableToolMessage(
 		timestamp,
 	); err != nil {
 		t.Fatalf("seed durable tool message: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE session_events
+		    SET model_request_id = $4,
+		        projection_json = COALESCE(projection_json, '{}')::jsonb || $5::jsonb
+		  WHERE workspace_id = $1 AND session_id = $2 AND event_id = $3`,
+		workspaceID,
+		sessionID,
+		toolUseEventID,
+		modelRequestID,
+		fmt.Sprintf(`{"model_tool_call_id":%q,"tool_name":%q}`, toolCallID, toolName),
+	); err != nil {
+		t.Fatalf("seed durable Tool Use identity: %v", err)
 	}
 }
 
@@ -1180,9 +815,9 @@ func seedBridgeAPIInternalReviewerThread(t *testing.T, db *sql.DB, workspaceID s
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_threads (
 			workspace_id, id, session_id, parent_thread_id, role, visibility, status,
-			created_at, last_active_at, updated_at
+			is_trunk, created_at, last_active_at, updated_at
 		) VALUES ($1, $2, $3, $4, 'approval_reviewer', 'internal', 'idle',
-			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			true, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID,
 		reviewerThreadID,
 		sessionID,
@@ -1258,99 +893,10 @@ func bridgeAPIChildFinishIdleFailureRequest(suffix string) *bridgev1.FinishIdleR
 	)
 	durableTurnID := "evt_bridge_child_finish_idle_running_" + suffix
 	return &bridgev1.FinishIdleRequest{
-		Scope:          scope,
-		DurableTurnId:  durableTurnID,
-		StopReasonJson: `{"type":"end_turn"}`,
-		CompletionMailCreate: bridgeCompletionMailCreateForTest(
-			scope,
-			durableTurnID,
-			completionMailEnvelope("main", "task_"+"thr_bridge_child_finish_idle_"+suffix, "completed"),
-		),
-	}
-}
-
-func assertBridgeAPIChildFinishIdlePreservesSessionState(t *testing.T, db *sql.DB, sessionID string, mainThreadID string, bindingID string, bindingGeneration int64) {
-	t.Helper()
-	var sessionStatus string
-	var mainThreadStatus string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT s.status, st.status
-		   FROM sessions s
-		   JOIN session_threads st
-		     ON st.workspace_id = s.workspace_id
-		    AND st.session_id = s.id
-		    AND st.id = $2
-		  WHERE s.workspace_id = 'default'
-		    AND s.id = $1`, sessionID, mainThreadID).Scan(&sessionStatus, &mainThreadStatus); err != nil {
-		t.Fatalf("read protected session/main thread status: %v", err)
-	}
-	if sessionStatus != "running" || mainThreadStatus != "running" {
-		t.Fatalf("protected session/main thread status = %q/%q; want running/running", sessionStatus, mainThreadStatus)
-	}
-	var runtimeBindingID string
-	var runtimeBindingGeneration int64
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT binding_id, binding_generation
-		   FROM session_runtime_bindings
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1`, sessionID).Scan(&runtimeBindingID, &runtimeBindingGeneration); err != nil {
-		t.Fatalf("read protected runtime binding: %v", err)
-	}
-	if runtimeBindingID != bindingID || runtimeBindingGeneration != bindingGeneration {
-		t.Fatalf("protected runtime binding = %q/%d; want %q/%d", runtimeBindingID, runtimeBindingGeneration, bindingID, bindingGeneration)
-	}
-	var runtimeStatus string
-	var statusEventID string
-	var idleSince sql.NullString
-	var cleanupAfter sql.NullString
-	var cleanupEnqueuedAt string
-	var cleanupClaimedAt string
-	var cleanupJobID string
-	var statusBindingID string
-	var statusBindingGeneration int64
-	var statusUpdatedAt string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT status, status_event_id, idle_since, cleanup_after,
-		        cleanup_enqueued_at, cleanup_claimed_at, cleanup_job_id,
-		        binding_id, binding_generation, updated_at
-		   FROM session_runtime_status
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1`, sessionID).Scan(
-		&runtimeStatus,
-		&statusEventID,
-		&idleSince,
-		&cleanupAfter,
-		&cleanupEnqueuedAt,
-		&cleanupClaimedAt,
-		&cleanupJobID,
-		&statusBindingID,
-		&statusBindingGeneration,
-		&statusUpdatedAt,
-	); err != nil {
-		t.Fatalf("read protected runtime status sentinel: %v", err)
-	}
-	if runtimeStatus != "running" ||
-		statusEventID != "evt_child_status_session_running_sentinel" ||
-		idleSince.Valid ||
-		cleanupAfter.Valid ||
-		cleanupEnqueuedAt != "2026-01-01T00:00:10Z" ||
-		cleanupClaimedAt != "2026-01-01T00:00:11Z" ||
-		cleanupJobID != "qjob_child_status_cleanup_sentinel" ||
-		statusBindingID != "bind_child_status_runtime_sentinel" ||
-		statusBindingGeneration != 41 ||
-		statusUpdatedAt != "2026-01-01T00:00:12Z" {
-		t.Fatalf("protected runtime status changed = status %q event %q idleSince=%v cleanupAfter=%v enqueued %q claimed %q job %q binding %q/%d updated %q",
-			runtimeStatus,
-			statusEventID,
-			idleSince,
-			cleanupAfter,
-			cleanupEnqueuedAt,
-			cleanupClaimedAt,
-			cleanupJobID,
-			statusBindingID,
-			statusBindingGeneration,
-			statusUpdatedAt,
-		)
+		Scope:              scope,
+		DurableTurnId:      durableTurnID,
+		StopReasonJson:     `{"type":"end_turn"}`,
+		CompletionMailText: bridgeString(completionMailEnvelope("main", "task_"+"thr_bridge_child_finish_idle_"+suffix, "completed")),
 	}
 }
 
@@ -1460,18 +1006,6 @@ func seedAgentMailCustody(t *testing.T, db *sql.DB, sessionID string, targetThre
 	}
 }
 
-func acceptAgentMailCustody(t *testing.T, db *sql.DB, runtimeInputID string, eventID string, sequence int64, bindingID string, podUID string) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox
-		SET status='accepted', event_ids_json=$3, sequence_from=$4, sequence_to=$4,
-		    binding_id=$5, binding_generation=1, target_pod_uid=$6, updated_at=now()
-		WHERE workspace_id=$1 AND runtime_input_id=$2`,
-		"default", runtimeInputID, fmt.Sprintf("[%q]", eventID), sequence, bindingID, podUID,
-	); err != nil {
-		t.Fatalf("accept agent-mail Inbox custody: %v", err)
-	}
-}
-
 func seedBridgeAPIRuntimeInbox(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, inputKind string, eventsJSON string, status string, bindingID string, podUID string, sequenceFrom int64, sequenceTo int64) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
@@ -1495,6 +1029,29 @@ func seedBridgeAPIEvent(t *testing.T, db *sql.DB, workspaceID string, sessionID 
 		workspaceID, sessionID, threadID, eventID, sequence, eventType, payloadJSON); err != nil {
 		t.Fatalf("seed bridge api event: %v", err)
 	}
+}
+
+func seedBridgeAPIChildLifecycleToolSource(t *testing.T, db *sql.DB, sessionID string, parentID string, sourceID string) string {
+	t.Helper()
+	var taskName string
+	if err := db.QueryRowContext(context.Background(), `SELECT task_name FROM session_threads
+		WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'
+		ORDER BY created_at,id LIMIT 1`, sessionID, parentID).Scan(&taskName); err != nil {
+		t.Fatalf("read child task for lifecycle source: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"type": "agent.tool_use", "name": "close_agent", "input": map[string]any{"task_name": taskName},
+	})
+	if err != nil {
+		t.Fatalf("marshal child lifecycle source: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,visibility,session_visible,created_at,updated_at
+	) SELECT 'default',$1,$2,$3,COALESCE(max(sequence),0)+1,'agent.tool_use',$4,'public',true,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'
+	FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, parentID, sourceID, string(payload)); err != nil {
+		t.Fatalf("seed child lifecycle Tool Use: %v", err)
+	}
+	return sourceID
 }
 
 func seedBridgeAPIStreamChange(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, revision int64, visibility string, sessionVisible bool) int64 {
@@ -1563,22 +1120,46 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 	t.Helper()
 	seedBridgeAPIBackgroundTask(t, db, workspaceID, sessionID, threadID, bindingID, taskID, sourceToolUseEventID)
 	if _, err := db.ExecContext(context.Background(), `UPDATE session_events
-		SET type='agent.tool_use', model_request_id='mreq_' || $4,
+		SET type='agent.tool_use',
 		    payload_json='{"type":"agent.tool_use","name":"exec_command","input":{},"evaluated_permission":"allow"}'
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4`,
 		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
 		t.Fatalf("mark background task source Tool Use: %v", err)
 	}
+	seedBridgeAPIDurableToolMessage(t, db, workspaceID, sessionID, threadID,
+		"mreq_"+sourceToolUseEventID, sourceToolUseEventID, "call_"+sourceToolUseEventID, "exec_command")
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-		visibility, session_visible, model_request_id, created_at, updated_at
+		visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 	) SELECT $1, $2, $3, 'evt_result_' || $4,
 		COALESCE((SELECT MAX(sequence) + 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2), 1),
 		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_event_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
-		'internal', false, 'mreq_' || $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		'internal', false, 'mreq_' || $4,
+		jsonb_build_object(
+			'model_tool_call_id','call_' || $4,'tool_name','exec_command','input','{}'::jsonb,'state','completed',
+			'output',jsonb_build_object('text','Background command accepted.','truncated',false)
+		),
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 	WHERE NOT EXISTS (SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND event_id='evt_result_' || $4)`,
 		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
 		t.Fatalf("seed background task source Tool Result: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_messages
+		SET data_json = jsonb_set(
+			data_json::jsonb,
+			'{parts}',
+			(data_json::jsonb -> 'parts') || jsonb_build_array(jsonb_build_object(
+				'type', 'tool_result',
+				'modelToolCallId', 'call_' || $4,
+				'result', jsonb_build_object(
+					'type', 'completed',
+					'output', jsonb_build_object('text', 'Background command accepted.')
+				)
+			))
+		)::text
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND source_event_id=$4`,
+		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
+		t.Fatalf("seed background task durable Tool Result context: %v", err)
 	}
 }
 
@@ -1588,7 +1169,8 @@ func seedBridgeAPIPendingApproval(t *testing.T, db *sql.DB, workspaceID string, 
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_use', $6, 'public', true, 'mrq_pending_approval', $6, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_use', $6, 'public', true, 'mrq_pending_approval',
+			'{"model_tool_call_id":"toolu_cleanup_wait"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID,
 		sessionID,
 		threadID,
@@ -2061,64 +1643,6 @@ func assertMemoryPathConflictResult(t *testing.T, raw string, wantConflicts []me
 	}
 	if payload.ConflictingPaths != nil {
 		t.Fatalf("path conflict returned legacy conflicting_paths in %s", raw)
-	}
-}
-
-func assertToolResultRuntimeMessage(t *testing.T, raw string, wantCallID string, wantName string, wantToolUseEventID string, wantState string, wantOutput string) {
-	t.Helper()
-	var message struct {
-		Role   string `json:"role"`
-		Origin string `json:"origin"`
-		Status string `json:"status"`
-		Parts  []struct {
-			Type           string `json:"type"`
-			ToolCallID     string `json:"toolCallId"`
-			ToolName       string `json:"toolName"`
-			ToolUseEventID string `json:"toolUseEventId"`
-			State          struct {
-				Status string `json:"status"`
-				Input  struct {
-					Value map[string]any `json:"value"`
-				} `json:"input"`
-				Output struct {
-					Text string `json:"text"`
-				} `json:"output"`
-			} `json:"state"`
-		} `json:"parts"`
-	}
-	if err := json.Unmarshal([]byte(raw), &message); err != nil {
-		t.Fatalf("parse runtime message: %v\n%s", err, raw)
-	}
-	if message.Role != "assistant" || message.Origin != "agent" || message.Status != "streaming" || len(message.Parts) != 1 {
-		t.Fatalf("runtime message role/origin/status/parts = %q/%q/%q/%d; want assistant/agent/streaming/1 in %s",
-			message.Role, message.Origin, message.Status, len(message.Parts), raw)
-	}
-	part := message.Parts[0]
-	if part.Type != "tool" || part.ToolCallID != wantCallID || part.ToolName != wantName ||
-		part.ToolUseEventID != wantToolUseEventID || part.State.Status != wantState ||
-		part.State.Output.Text != wantOutput || part.State.Input.Value["q"] != "x" {
-		t.Fatalf("runtime tool part = type %q call %q name %q event %q state %q output %q input %#v; want tool/%s/%s/%s/%s/%s in %s",
-			part.Type, part.ToolCallID, part.ToolName, part.ToolUseEventID, part.State.Status,
-			part.State.Output.Text, part.State.Input.Value, wantCallID, wantName, wantToolUseEventID, wantState, wantOutput, raw)
-	}
-}
-
-func assertNoRuntimeToolResult(t *testing.T, db *sql.DB, sessionID string, toolUseEventID string) {
-	t.Helper()
-	var count int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND tool_use_event_id = $2`,
-		sessionID,
-		toolUseEventID,
-	).Scan(&count); err != nil {
-		t.Fatalf("count runtime tool results: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("runtime tool result count for %s/%s = %d; want none", sessionID, toolUseEventID, count)
 	}
 }
 

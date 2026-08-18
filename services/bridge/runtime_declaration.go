@@ -10,13 +10,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strconv"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
@@ -100,19 +97,12 @@ func marshalRuntimeDeclarationObjectWithRawField(value map[string]any, fieldName
 }
 
 func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
-	creates, err := canonicalRuntimeMessageCreates(request.GetMessageCreates())
-	if err != nil {
-		return "", err
-	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"event_ids":         request.GetEventIds(),
-		"input_kind":        inputKind,
-		"message_creates":   creates,
-		"operation_kind":    bridgeOpCommitInputs,
-		"runtime_input_id":  request.GetRuntimeInputId(),
-		"sequence_from":     request.GetSequenceFrom(),
-		"sequence_to":       request.GetSequenceTo(),
-		"session_thread_id": request.GetScope().GetSessionThreadId(),
+		"approval_review_text": request.GetApprovalReviewText(),
+		"input_kind":           inputKind,
+		"operation_kind":       bridgeOpCommitInputs,
+		"runtime_input_id":     request.GetRuntimeInputId(),
+		"session_thread_id":    request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
@@ -127,36 +117,25 @@ func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputK
 func writeEventDeclarationDigest(
 	request *bridgev1.WriteEventRequest,
 	payloadJSON string,
-	serverToolUseJSON string,
+	consumedFileJSON string,
 ) (string, error) {
 	payloadJSON = stripInternalProviderFields(payloadJSON)
-	assistantAppend, err := canonicalRuntimeAssistantPartAppend(request.GetAssistantPartAppend())
-	if err != nil {
-		return "", err
-	}
-	toolSettlement, err := canonicalRuntimeToolSettlement(request.GetToolSettlement())
+	assistantDelta, err := canonicalRuntimeContextDelta(request.GetAssistantContextDelta())
 	if err != nil {
 		return "", err
 	}
 	declaration := map[string]any{
-		"assistant_part_append": assistantAppend,
-		"event_type":            request.GetEventType(),
-		"mcp_materialization_handle": nullableDeclarationString(
-			request.GetMcpMaterializationHandle(),
-		),
-		"model_request_id": nullableDeclarationString(request.GetModelRequestId()),
-		"operation_kind":   bridgeOpWriteEvent,
-		"runtime_write_id": request.GetRuntimeWriteId(),
-		"sandbox_result_digest": nullableDeclarationString(
-			request.GetSandboxResultDigest(),
-		),
-		"server_tool_use":   json.RawMessage(serverToolUseJSON),
-		"session_thread_id": request.GetScope().GetSessionThreadId(),
-		"tool_settlement":   toolSettlement,
+		"assistant_context_delta": assistantDelta,
+		"event_type":              request.GetEventType(),
+		"model_request_id":        nullableDeclarationString(request.GetModelRequestId()),
+		"operation_kind":          bridgeOpWriteEvent,
+		"runtime_write_id":        request.GetRuntimeWriteId(),
+		"session_thread_id":       request.GetScope().GetSessionThreadId(),
 	}
 	if request.GetEventType() == "span.model_request_start" {
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
 		declaration["request_kind"] = nullableDeclarationString(request.GetRequestKind())
+		declaration["consumed_file_attachments"] = json.RawMessage(consumedFileJSON)
 	}
 	raw, err := marshalRuntimeDeclarationObjectWithRawField(declaration, "payload", payloadJSON)
 	if err != nil {
@@ -175,13 +154,12 @@ func writeRequestEndDeclarationDigest(
 	finishReason string,
 	usageJSON string,
 	consumedTransientJSON string,
-	consumedFileJSON string,
 ) (string, error) {
-	trailingAppend, err := canonicalRuntimeAssistantPartAppend(request.GetTrailingPartAppend())
+	trailingDelta, err := canonicalRuntimeContextDelta(request.GetTrailingContextDelta())
 	if err != nil {
 		return "", err
 	}
-	checkpointCreate, err := canonicalRuntimeMessageCreate(request.GetCompactionCheckpointCreate())
+	compactionContext, err := canonicalRuntimeContextDelta(request.GetCompactionContext())
 	if err != nil {
 		return "", err
 	}
@@ -215,30 +193,25 @@ func writeRequestEndDeclarationDigest(
 	var interruptSettlement any
 	if value := request.GetInterruptSettlement(); value != nil {
 		interruptSettlement = map[string]any{
-			"event_ids":        value.GetEventIds(),
 			"runtime_input_id": value.GetRuntimeInputId(),
-			"sequence_from":    value.GetSequenceFrom(),
-			"sequence_to":      value.GetSequenceTo(),
 		}
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"compacted_through_message_sequence": compactedThrough,
-		"compaction_checkpoint_create":       checkpointCreate,
+		"compaction_context":                 compactionContext,
 		"compaction_event_payload":           compactionEventPayload,
 		"consumed_attachment_refs":           json.RawMessage(consumedTransientJSON),
-		"consumed_file_attachments":          json.RawMessage(consumedFileJSON),
 		"error_kind":                         nullableDeclarationString(request.GetErrorKind()),
 		"finish_reason":                      finishReason,
 		"interrupt_settlement":               interruptSettlement,
 		"is_error":                           request.GetIsError(),
 		"model_request_id":                   request.GetModelRequestId(),
-		"model_request_start_event_id":       request.GetModelRequestStartEventId(),
 		"operation_kind":                     bridgeOpWriteRequestEnd,
 		"prefix_consumption":                 prefixConsumption,
 		"request_kind":                       requestKind,
 		"reschedule":                         reschedule,
 		"session_thread_id":                  request.GetScope().GetSessionThreadId(),
-		"trailing_part_append":               trailingAppend,
+		"trailing_context_delta":             trailingDelta,
 		"usage":                              json.RawMessage(usageJSON),
 	})
 	if err != nil {
@@ -252,16 +225,12 @@ func writeRequestEndDeclarationDigest(
 }
 
 func finishIdleDeclarationDigest(request *bridgev1.FinishIdleRequest, stopReasonJSON string) (string, error) {
-	completionMail, err := canonicalRuntimeMessageCreate(request.GetCompletionMailCreate())
-	if err != nil {
-		return "", err
-	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"completion_mail_create": completionMail,
-		"durable_turn_id":        request.GetDurableTurnId(),
-		"operation_kind":         bridgeOpFinishIdle,
-		"session_thread_id":      request.GetScope().GetSessionThreadId(),
-		"stop_reason":            json.RawMessage(stopReasonJSON),
+		"completion_mail_text": nullableDeclarationString(request.GetCompletionMailText()),
+		"durable_turn_id":      request.GetDurableTurnId(),
+		"operation_kind":       bridgeOpFinishIdle,
+		"session_thread_id":    request.GetScope().GetSessionThreadId(),
+		"stop_reason":          json.RawMessage(stopReasonJSON),
 	})
 	if err != nil {
 		return "", err
@@ -273,29 +242,15 @@ func finishIdleDeclarationDigest(request *bridgev1.FinishIdleRequest, stopReason
 	return sha256Hex(canonical), nil
 }
 
-func runtimeTerminationDeclarationDigest(
+func runtimeTerminationRequestHash(
 	request *bridgev1.CommitRuntimeTerminationRequest,
 	failureJSON string,
 ) (string, error) {
-	settlements := make([]any, 0, len(request.GetToolSettlements()))
-	for _, settlement := range request.GetToolSettlements() {
-		canonical, err := canonicalRuntimeToolSettlement(settlement)
-		if err != nil {
-			return "", err
-		}
-		settlements = append(settlements, canonical)
-	}
-	completionMail, err := canonicalRuntimeMessageCreate(request.GetCompletionMailCreate())
-	if err != nil {
-		return "", err
-	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"completion_mail_create": completionMail,
-		"failure":                json.RawMessage(failureJSON),
-		"operation_kind":         bridgeOpCommitRuntimeTermination,
-		"runtime_write_id":       request.GetRuntimeWriteId(),
-		"session_thread_id":      request.GetScope().GetSessionThreadId(),
-		"tool_settlements":       settlements,
+		"failure":           json.RawMessage(failureJSON),
+		"operation_kind":    bridgeOpCommitRuntimeTermination,
+		"runtime_write_id":  request.GetRuntimeWriteId(),
+		"session_thread_id": request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
@@ -337,12 +292,17 @@ func internalToolRepairDeclarationDigest(
 	request *bridgev1.CommitInternalToolRepairRequest,
 	repairKey string,
 ) (string, error) {
-	create, err := canonicalRuntimeMessageCreate(request.GetMessageCreate())
+	input, err := canonicalRuntimeDeclarationJSON(request.GetCanonicalInputJson())
 	if err != nil {
-		return "", err
+		return "", status.Error(codes.InvalidArgument, "internal Tool repair input is invalid")
+	}
+	errorValue, err := decodeRuntimeToolErrorJSON(request.GetError().GetErrorJson())
+	if err != nil {
+		return "", status.Error(codes.InvalidArgument, "internal Tool repair error is invalid")
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"message_create":     create,
+		"canonical_input":    json.RawMessage(input),
+		"error":              errorValue,
 		"model_request_id":   request.GetModelRequestId(),
 		"model_tool_call_id": request.GetModelToolCallId(),
 		"operation_kind":     bridgeOpCommitInternalToolRepair,
@@ -363,25 +323,10 @@ func internalToolRepairDeclarationDigest(
 func taskNotificationDeclarationDigest(
 	request *bridgev1.CommitTaskNotificationResultRequest,
 ) (string, error) {
-	create := request.GetMessageCreate()
-	parts := make([]map[string]any, 0, len(create.GetParts()))
-	for _, part := range create.GetParts() {
-		parts = append(parts, map[string]any{
-			"part_json": part.GetPartJson(),
-			"part_kind": part.GetPartKind(),
-		})
-	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"message_create": map[string]any{
-			"message_info_json": create.GetMessageInfoJson(),
-			"message_kind":      create.GetMessageKind(),
-			"parts":             parts,
-		},
 		"operation_kind":    bridgeOpCommitTaskNotificationResult,
-		"result_json":       request.GetResultJson(),
 		"runtime_input_id":  request.GetRuntimeInputId(),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
-		"task_id":           request.GetTaskId(),
 	})
 	if err != nil {
 		return "", err
@@ -393,19 +338,7 @@ func taskNotificationDeclarationDigest(
 	return sha256Hex(canonical), nil
 }
 
-func mcpMaterializationSourceID(request *bridgev1.CommitMcpToolResultRequest) string {
-	return stableRuntimeID(
-		"mcp_tool_execution",
-		request.GetToolUseEventId(),
-		request.GetNormalizedInputHash(),
-	)
-}
-
-func mcpMaterializationDeclarationDigest(request *bridgev1.CommitMcpToolResultRequest) (string, error) {
-	inputJSON, err := canonicalRuntimeDeclarationJSON(request.GetInputJson())
-	if err != nil {
-		return "", status.Error(codes.InvalidArgument, "mcp tool input is invalid")
-	}
+func mcpToolCommitDeclarationDigest(request *bridgev1.CommitMcpToolResultRequest) (string, error) {
 	resultJSON, err := canonicalRuntimeDeclarationJSON(request.GetResultJson())
 	if err != nil {
 		return "", status.Error(codes.InvalidArgument, "mcp tool result is invalid")
@@ -423,15 +356,12 @@ func mcpMaterializationDeclarationDigest(request *bridgev1.CommitMcpToolResultRe
 		})
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"inline_media":          inlineMedia,
-		"input":                 json.RawMessage(inputJSON),
-		"mcp_server_name":       request.GetMcpServerName(),
-		"normalized_input_hash": request.GetNormalizedInputHash(),
-		"operation_kind":        bridgeOpCommitMcpToolResult,
-		"result":                json.RawMessage(resultJSON),
-		"session_thread_id":     request.GetScope().GetSessionThreadId(),
-		"tool_name":             request.GetToolName(),
-		"tool_use_event_id":     request.GetToolUseEventId(),
+		"claim_id":          request.GetClaimId(),
+		"inline_media":      inlineMedia,
+		"operation_kind":    bridgeOpCommitMcpToolResult,
+		"result":            json.RawMessage(resultJSON),
+		"session_thread_id": request.GetScope().GetSessionThreadId(),
+		"tool_use_event_id": request.GetToolUseEventId(),
 	})
 	if err != nil {
 		return "", err
@@ -443,67 +373,21 @@ func mcpMaterializationDeclarationDigest(request *bridgev1.CommitMcpToolResultRe
 	return sha256Hex(canonical), nil
 }
 
-func canonicalRuntimeMessageCreates(creates []*bridgev1.RuntimeMessageCreate) ([]any, error) {
-	result := make([]any, 0, len(creates))
-	for _, create := range creates {
-		canonical, err := canonicalRuntimeMessageCreate(create)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, canonical)
-	}
-	return result, nil
-}
-
-func canonicalRuntimeMessageCreate(create *bridgev1.RuntimeMessageCreate) (any, error) {
-	if create == nil {
-		return nil, nil
-	}
-	if _, err := validateRuntimeMessageCreate(create); err != nil {
-		return nil, err
-	}
-	messageInfo, err := canonicalRuntimeDeclarationJSON(create.GetMessageInfoJson())
+func mcpToolRelinquishDeclarationDigest(request *bridgev1.RelinquishMcpToolResultRequest) (string, error) {
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+		"claim_id":          request.GetClaimId(),
+		"operation_kind":    bridgeOpRelinquishMcpToolResult,
+		"session_thread_id": request.GetScope().GetSessionThreadId(),
+		"tool_use_event_id": request.GetToolUseEventId(),
+	})
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "runtime message create info is invalid")
+		return "", err
 	}
-	parts, err := canonicalRuntimeParts(create.GetParts())
+	canonical, err := canonicalRunToolJSON(string(raw))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return map[string]any{
-		"message_info": json.RawMessage(messageInfo),
-		"message_kind": create.GetMessageKind().String(),
-		"parts":        parts,
-	}, nil
-}
-
-func canonicalRuntimeAssistantPartAppend(appendValue *bridgev1.RuntimeAssistantPartAppend) (any, error) {
-	if appendValue == nil {
-		return nil, nil
-	}
-	parts, err := canonicalRuntimeParts(appendValue.GetParts())
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"parts": parts}, nil
-}
-
-func canonicalRuntimeParts(runtimeParts []*bridgev1.RuntimePartCreate) ([]any, error) {
-	parts := make([]any, 0, len(runtimeParts))
-	for _, part := range runtimeParts {
-		if _, err := validateRuntimePartCreate(part); err != nil {
-			return nil, err
-		}
-		partJSON, err := canonicalRuntimeDeclarationJSON(part.GetPartJson())
-		if err != nil {
-			return nil, status.Error(codes.InvalidArgument, "runtime part is invalid")
-		}
-		parts = append(parts, map[string]any{
-			"part_json": json.RawMessage(partJSON),
-			"part_kind": part.GetPartKind(),
-		})
-	}
-	return parts, nil
+	return sha256Hex(canonical), nil
 }
 
 func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) (any, error) {
@@ -513,25 +397,43 @@ func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) 
 	value := map[string]any{"tool_use_event_id": settlement.GetToolUseEventId()}
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
+		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		if err != nil || validateRuntimeBoundedText(output) != nil {
+			return nil, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
+		}
 		canonical, err := canonicalRuntimeDeclarationJSON(outcome.Completed.GetOutputJson())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
 		}
-		value["completed"] = json.RawMessage(canonical)
+		usage, err := normalizeServerToolUseUsage(outcome.Completed.GetServerToolUse())
+		if err != nil {
+			return nil, err
+		}
+		value["completed"] = map[string]any{
+			"output":          json.RawMessage(canonical),
+			"server_tool_use": json.RawMessage(usage.CanonicalJSON),
+		}
 	case *bridgev1.RuntimeToolSettlement_Error:
-		canonical, err := canonicalRuntimeDeclarationJSON(outcome.Error.GetErrorJson())
+		toolError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool error is invalid")
 		}
-		value["error"] = json.RawMessage(canonical)
+		usage, err := normalizeServerToolUseUsage(outcome.Error.GetServerToolUse())
+		if err != nil {
+			return nil, err
+		}
+		value["error"] = map[string]any{
+			"error":           toolError,
+			"server_tool_use": json.RawMessage(usage.CanonicalJSON),
+		}
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
 		var errorValue any
 		if outcome.Cancelled.ErrorJson != nil {
-			canonical, err := canonicalRuntimeDeclarationJSON(outcome.Cancelled.GetErrorJson())
+			toolError, err := decodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
 			if err != nil {
 				return nil, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
 			}
-			errorValue = json.RawMessage(canonical)
+			errorValue = toolError
 		}
 		value["cancelled"] = errorValue
 	default:
@@ -561,196 +463,112 @@ func nullableDeclarationInt64(value *int64) any {
 	return *value
 }
 
-func commitInputCreatesTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	inputKind string,
-	runtimeInputID string,
-	eventIDs []string,
-	creates []*bridgev1.RuntimeMessageCreate,
-	now time.Time,
-) (*bridgev1.DeclarationReceipt, error) {
-	events := make(map[string]*bridgev1.DurableEventStamp, len(eventIDs))
-	for _, eventID := range eventIDs {
-		var eventType string
-		var eventSequence int64
-		if err := tx.QueryRow(ctx,
-			`SELECT type, sequence
-			   FROM session_events
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4
-			  FOR UPDATE`,
-			scope.GetWorkspaceId(),
-			scope.GetSessionId(),
-			scope.GetSessionThreadId(),
-			eventID,
-		).Scan(&eventType, &eventSequence); err != nil {
-			return nil, err
-		}
-		events[eventID] = &bridgev1.DurableEventStamp{
-			SessionThreadId: scope.GetSessionThreadId(),
-			EventId:         eventID,
-			EventSequence:   eventSequence,
-			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_EXISTING,
-		}
-	}
-
-	messageStamps := make([]*bridgev1.DurableMessageStamp, 0, len(creates))
-	for index, create := range creates {
-		if index >= len(eventIDs) {
-			return nil, status.Error(codes.InvalidArgument, "runtime message create has no source event")
-		}
-		stamp, err := insertRuntimeMessageCreateTx(ctx, tx, scope, inputKind, eventIDs[index], nil, create, now)
-		if err != nil {
-			return nil, err
-		}
-		messageStamps = append(messageStamps, stamp)
-	}
-	eventStamps := make([]*bridgev1.DurableEventStamp, 0, len(eventIDs))
-	for _, eventID := range eventIDs {
-		eventStamps = append(eventStamps, events[eventID])
-	}
-	return &bridgev1.DeclarationReceipt{
-		SessionThreadId: scope.GetSessionThreadId(),
-		OperationKind:   bridgeOpCommitInputs,
-		SourceKind:      inputKind,
-		OperationId:     runtimeInputID,
-		Events:          eventStamps,
-		Messages:        messageStamps,
-	}, nil
+type durableContextWrite struct {
+	MessageID              string
+	MessageSequence        int64
+	CreatedToolUseEventIDs []string
 }
 
-func commitWriteEventDeclarationTx(
+type writeEventDurableFacts struct {
+	EventID                string   `json:"eventId"`
+	MessageSequence        *int64   `json:"messageSequence,omitempty"`
+	CreatedToolUseEventIDs []string `json:"createdToolUseEventIds"`
+}
+
+func commitWriteEventContextTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	runtimeWriteID string,
 	eventType string,
 	eventID string,
-	eventSequence int64,
 	modelRequestID string,
-	appendValue *bridgev1.RuntimeAssistantPartAppend,
-	settlement *bridgev1.RuntimeToolSettlement,
+	delta *bridgev1.RuntimeContextDelta,
 	now time.Time,
-) (*bridgev1.DeclarationReceipt, error) {
-	var messageStamps []*bridgev1.DurableMessageStamp
-	if appendValue != nil {
-		stamp, err := appendRuntimeAssistantMembersTx(
-			ctx,
-			tx,
-			scope,
-			eventType,
-			eventID,
-			modelRequestID,
-			appendValue,
-			now,
-		)
+) (writeEventDurableFacts, error) {
+	facts := writeEventDurableFacts{EventID: eventID, CreatedToolUseEventIDs: []string{}}
+	if delta != nil {
+		write, err := appendRuntimeAssistantContextTx(ctx, tx, scope, eventType, eventID, modelRequestID, delta, now)
 		if err != nil {
-			return nil, err
+			return writeEventDurableFacts{}, err
 		}
-		messageStamps = []*bridgev1.DurableMessageStamp{stamp}
+		facts.MessageSequence = &write.MessageSequence
+		facts.CreatedToolUseEventIDs = write.CreatedToolUseEventIDs
 	}
-	if settlement != nil {
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, modelRequestID, settlement, now); err != nil {
-			return nil, err
-		}
-	}
-	return &bridgev1.DeclarationReceipt{
-		SessionThreadId: scope.GetSessionThreadId(),
-		OperationKind:   bridgeOpWriteEvent,
-		SourceKind:      eventType,
-		OperationId:     runtimeWriteID,
-		Events: []*bridgev1.DurableEventStamp{{
-			SessionThreadId: scope.GetSessionThreadId(),
-			EventId:         eventID,
-			EventSequence:   eventSequence,
-			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-		}},
-		Messages: messageStamps,
-	}, nil
+	return facts, nil
 }
 
-func commitWriteRequestEndDeclarationTx(
+type requestEndDurableFacts struct {
+	RequestEndEventID         string
+	Disposition               string
+	SealedMessageSequence     *int64
+	EffectiveDeadline         string
+	CompactionEventID         string
+	CheckpointMessageSequence int64
+	InterruptToolResults      []*bridgev1.RuntimeInterruptToolResult
+}
+
+func commitWriteRequestEndContextTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
-	usage bridgeUsage,
-	providerUsageJSON string,
+	requestKind string,
 	threadScope threadMutationScope,
 	requestEndEventID string,
-	requestEndSequence int64,
 	now time.Time,
-) (*bridgev1.DeclarationReceipt, error) {
-	receipt := &bridgev1.DeclarationReceipt{
-		SessionThreadId: request.GetScope().GetSessionThreadId(),
-		OperationKind:   bridgeOpWriteRequestEnd,
-		SourceKind:      "model_request",
-		OperationId:     request.GetModelRequestId(),
-		Events: []*bridgev1.DurableEventStamp{{
-			SessionThreadId: request.GetScope().GetSessionThreadId(),
-			EventId:         requestEndEventID,
-			EventSequence:   requestEndSequence,
-			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-		}},
-	}
-	if request.GetRequestKind() != requestKindCompactionSummary {
-		if request.GetCompactionCheckpointCreate() != nil || request.GetPrefixConsumption() != nil ||
+) (requestEndDurableFacts, error) {
+	facts := requestEndDurableFacts{RequestEndEventID: requestEndEventID}
+	if requestKind != requestKindCompactionSummary {
+		if request.GetCompactionContext() != nil || request.GetPrefixConsumption() != nil ||
 			request.CompactedThroughMessageSequence != nil ||
 			request.GetCompactionEventPayloadJson() != "" {
-			return nil, status.Error(codes.InvalidArgument, "ordinary request end declaration is invalid")
+			return requestEndDurableFacts{}, status.Error(codes.InvalidArgument, "ordinary request end declaration is invalid")
 		}
-		if request.GetTrailingPartAppend() != nil {
+		if request.GetTrailingContextDelta() != nil {
 			if request.GetIsError() || request.GetReschedule() != nil {
-				return nil, status.Error(codes.InvalidArgument, "unsuccessful request end cannot append assistant parts")
+				return requestEndDurableFacts{}, status.Error(codes.InvalidArgument, "unsuccessful request end cannot append assistant context")
 			}
-			messageStamp, err := appendRuntimeAssistantMembersTx(
-				ctx,
-				tx,
-				request.GetScope(),
-				"model_request",
-				requestEndEventID,
-				request.GetModelRequestId(),
-				request.GetTrailingPartAppend(),
-				now,
-			)
+			write, err := appendRuntimeAssistantContextTx(ctx, tx, request.GetScope(), "model_request", requestEndEventID, request.GetModelRequestId(), request.GetTrailingContextDelta(), now)
 			if err != nil {
-				return nil, err
+				return requestEndDurableFacts{}, err
 			}
-			receipt.Messages = []*bridgev1.DurableMessageStamp{messageStamp}
+			facts.SealedMessageSequence = &write.MessageSequence
 		}
-		if err := sealRuntimeAssistantMessageTx(ctx, tx, request, usage, providerUsageJSON, now); err != nil {
-			return nil, err
+		sequence, err := sealRuntimeAssistantContextTx(ctx, tx, request, now)
+		if err != nil {
+			return requestEndDurableFacts{}, err
 		}
-		return receipt, nil
+		if sequence != nil {
+			facts.SealedMessageSequence = sequence
+		}
+		return facts, nil
 	}
 	if request.GetIsError() || request.GetReschedule() != nil {
-		if request.GetTrailingPartAppend() != nil || request.GetCompactionCheckpointCreate() != nil ||
+		if request.GetTrailingContextDelta() != nil || request.GetCompactionContext() != nil ||
 			request.GetPrefixConsumption() != nil ||
 			request.CompactedThroughMessageSequence != nil ||
 			request.GetCompactionEventPayloadJson() != "" {
-			return nil, status.Error(codes.InvalidArgument, "non-successful compaction request end carries checkpoint fields")
+			return requestEndDurableFacts{}, status.Error(codes.InvalidArgument, "non-successful compaction request end carries checkpoint fields")
 		}
-		return receipt, nil
+		if _, err := sealRuntimeAssistantContextTx(ctx, tx, request, now); err != nil {
+			return requestEndDurableFacts{}, err
+		}
+		return facts, nil
 	}
-	if request.GetTrailingPartAppend() != nil || request.GetCompactionCheckpointCreate() == nil ||
-		request.GetCompactionCheckpointCreate().GetMessageKind() != bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT ||
+	if request.GetTrailingContextDelta() != nil || request.GetCompactionContext() == nil ||
 		request.CompactedThroughMessageSequence == nil ||
 		request.GetCompactionEventPayloadJson() == "" {
-		return nil, status.Error(codes.InvalidArgument, "successful compaction request end is incomplete")
+		return requestEndDurableFacts{}, status.Error(codes.InvalidArgument, "successful compaction request end is incomplete")
 	}
 	var compactionPayload struct {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal([]byte(request.GetCompactionEventPayloadJson()), &compactionPayload); err != nil ||
 		compactionPayload.Type != "agent.thread_context_compacted" {
-		return nil, status.Error(codes.InvalidArgument, "compaction event payload is invalid")
+		return requestEndDurableFacts{}, status.Error(codes.InvalidArgument, "compaction event payload is invalid")
 	}
 	compactionPayloadJSON, err := canonicalRuntimeDeclarationJSON(request.GetCompactionEventPayloadJson())
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "compaction event payload is invalid")
+		return requestEndDurableFacts{}, status.Error(codes.InvalidArgument, "compaction event payload is invalid")
 	}
 	var durableBoundary int64
 	if err := tx.QueryRow(ctx,
@@ -763,16 +581,16 @@ func commitWriteRequestEndDeclarationTx(
 		request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(),
 	).Scan(&durableBoundary); err != nil {
-		return nil, err
+		return requestEndDurableFacts{}, err
 	}
 	if request.GetCompactedThroughMessageSequence() != durableBoundary {
-		return nil, status.Error(codes.FailedPrecondition, "compaction message boundary is stale")
+		return requestEndDurableFacts{}, status.Error(codes.FailedPrecondition, "compaction message boundary is stale")
 	}
 	visibility, sessionVisible := threadScope.publicProjection("agent.thread_context_compacted")
 	compactionEventID := id.New("evt_")
 	compactionEventSequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
 	if err != nil {
-		return nil, err
+		return requestEndDurableFacts{}, err
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
@@ -792,7 +610,7 @@ func commitWriteRequestEndDeclarationTx(
 		request.GetModelRequestId(),
 		now,
 	); err != nil {
-		return nil, err
+		return requestEndDurableFacts{}, err
 	}
 	if _, err := appendSessionEventStreamChangeTx(
 		ctx,
@@ -803,111 +621,61 @@ func commitWriteRequestEndDeclarationTx(
 		sessionVisible,
 		now,
 	); err != nil {
-		return nil, err
+		return requestEndDurableFacts{}, err
 	}
-	checkpointStamp, err := insertRuntimeMessageCreateTx(
+	checkpoint, err := insertCompactionContextEntryTx(
 		ctx,
 		tx,
 		request.GetScope(),
-		"agent.thread_context_compacted",
 		compactionEventID,
 		nil,
-		request.GetCompactionCheckpointCreate(),
+		request.GetCompactionContext(),
 		now,
 	)
 	if err != nil {
-		return nil, err
+		return requestEndDurableFacts{}, err
 	}
-	if checkpointStamp.GetMessageSequence() != durableBoundary+1 {
-		return nil, status.Error(codes.FailedPrecondition, "compaction checkpoint sequence is invalid")
+	if checkpoint.MessageSequence != durableBoundary+1 {
+		return requestEndDurableFacts{}, status.Error(codes.FailedPrecondition, "compaction checkpoint sequence is invalid")
 	}
-	prefixStamp, err := consumeThreadContextPrefixTx(
+	if err := consumeThreadContextPrefixTx(
 		ctx,
 		tx,
 		request.GetScope(),
 		request.GetPrefixConsumption(),
-		checkpointStamp,
-	)
-	if err != nil {
-		return nil, err
+		checkpoint.MessageID,
+	); err != nil {
+		return requestEndDurableFacts{}, err
 	}
-	receipt.Events = append(receipt.Events, &bridgev1.DurableEventStamp{
-		SessionThreadId: request.GetScope().GetSessionThreadId(),
-		EventId:         compactionEventID,
-		EventSequence:   compactionEventSequence,
-		Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-	})
-	receipt.Messages = []*bridgev1.DurableMessageStamp{checkpointStamp}
-	if prefixStamp != nil {
-		receipt.PrefixConsumptions = []*bridgev1.PrefixConsumptionStamp{prefixStamp}
-	}
-	receipt.CompactedThroughMessageSequence = &durableBoundary
-	return receipt, nil
+	facts.CompactionEventID = compactionEventID
+	facts.CheckpointMessageSequence = checkpoint.MessageSequence
+	return facts, nil
 }
 
-// sealRuntimeAssistantMessageTx owns the request-level terminal fields. It
-// loads the locked durable projection and changes no member identity or Tool
-// state; member append, target settlement, and request seal therefore remain
-// disjoint writers even though they share one Assistant row.
-func sealRuntimeAssistantMessageTx(
+// Request End seals every member that already crossed its durable append
+// boundary. Runtime discards incomplete in-memory fragments before declaring
+// the End, so deleting this row would make hot and cold history disagree.
+// Pod-loss closeout is classified separately by LoadContext because no hot
+// owner remains to prove a partial draft complete.
+func sealRuntimeAssistantContextTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
-	usage bridgeUsage,
-	providerUsageJSON string,
 	now time.Time,
-) error {
-	var messageID, dataJSON string
-	err := tx.QueryRow(ctx, `SELECT message_id,data_json FROM session_messages
+) (*int64, error) {
+	var messageID string
+	var sequence int64
+	err := tx.QueryRow(ctx, `SELECT message_id,sequence FROM session_messages
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 		 AND model_request_id=$4 AND kind='assistant' FOR UPDATE`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId()).Scan(&messageID, &dataJSON)
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId()).Scan(&messageID, &sequence)
 	if dbconnect.IsNoRows(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var message map[string]any
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil || message == nil || message["role"] != "assistant" {
-		return status.Error(codes.FailedPrecondition, "durable Assistant message is invalid")
-	}
-	message["status"] = "completed"
-	if request.GetIsError() || request.GetReschedule() != nil {
-		message["status"] = "failed"
-	}
-	message["finishReason"] = request.GetFinishReason()
-	if request.GetUsageJson() != "" {
-		// Request accounting and durable Runtime messages intentionally use
-		// different wire vocabularies. This seal is the sole projection owner:
-		// cold Runtime loads must see the same canonical usage contract that hot
-		// Runtime messages use, including uncached rather than total input tokens.
-		message["usage"] = map[string]any{
-			"inputTokens":       usage.InputUncached,
-			"cacheReadTokens":   optionalInt64Value(usage.InputCacheRead),
-			"cacheWriteTokens":  optionalInt64Value(usage.InputCacheWrite),
-			"outputTokens":      usage.OutputTotal,
-			"reasoningTokens":   optionalInt64Value(usage.OutputReasoning),
-			"totalTokens":       optionalInt64Value(usage.Total),
-			"providerUsageJson": defaultString(providerUsageJSON, "{}"),
-		}
-	}
-	message["updatedAt"] = now.UTC().Format(time.RFC3339Nano)
-	updatedJSON, err := json.Marshal(message)
-	if err != nil {
-		return err
-	}
-	result, err := tx.Exec(ctx, `UPDATE session_messages SET data_json=$5,updated_at=$6
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND message_id=$4 AND model_request_id=$7`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(),
-		messageID, string(updatedJSON), now, request.GetModelRequestId())
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "Assistant request seal lost its durable message")
-	}
-	return nil
+	return &sequence, nil
 }
 
 func consumeThreadContextPrefixTx(
@@ -915,8 +683,8 @@ func consumeThreadContextPrefixTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	requested *bridgev1.PrefixConsumptionDraft,
-	checkpoint *bridgev1.DurableMessageStamp,
-) (*bridgev1.PrefixConsumptionStamp, error) {
+	checkpointMessageID string,
+) error {
 	var parentBoundaryEventID string
 	var consumedBy sql.NullString
 	err := tx.QueryRow(ctx,
@@ -932,24 +700,24 @@ func consumeThreadContextPrefixTx(
 	).Scan(&parentBoundaryEventID, &consumedBy)
 	if dbconnect.IsNoRows(err) {
 		if requested != nil {
-			return nil, status.Error(codes.FailedPrecondition, "thread context prefix does not exist")
+			return status.Error(codes.FailedPrecondition, "thread context prefix does not exist")
 		}
-		return nil, nil
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if consumedBy.Valid {
-		return nil, status.Error(codes.FailedPrecondition, "thread context prefix is already consumed")
+		return status.Error(codes.FailedPrecondition, "thread context prefix is already consumed")
 	}
 	if requested == nil {
-		return nil, status.Error(codes.FailedPrecondition, "unconsumed thread context prefix is omitted")
+		return status.Error(codes.FailedPrecondition, "unconsumed thread context prefix is omitted")
 	}
 	if requested.GetChildThreadId() != scope.GetSessionThreadId() ||
 		requested.GetParentBoundaryEventId() != parentBoundaryEventID {
-		return nil, status.Error(codes.InvalidArgument, "thread context prefix consumption identity is invalid")
+		return status.Error(codes.InvalidArgument, "thread context prefix consumption identity is invalid")
 	}
-	result, err := tx.Exec(ctx,
+	updateResult, err := tx.Exec(ctx,
 		`UPDATE session_thread_context_prefixes
 		    SET consumed_by_checkpoint_message_id = $4
 		  WHERE workspace_id = $1
@@ -959,49 +727,43 @@ func consumeThreadContextPrefixTx(
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		checkpoint.GetMessageId(),
+		checkpointMessageID,
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if !rowsAffected(result) {
-		return nil, status.Error(codes.FailedPrecondition, "thread context prefix consumption lost its fence")
+	if !rowsAffected(updateResult) {
+		return status.Error(codes.FailedPrecondition, "thread context prefix consumption lost its fence")
 	}
-	return &bridgev1.PrefixConsumptionStamp{
-		ChildThreadId:         scope.GetSessionThreadId(),
-		ParentBoundaryEventId: parentBoundaryEventID,
-		CheckpointMessageId:   checkpoint.GetMessageId(),
-		Disposition:           bridgev1.PrefixConsumptionDisposition_PREFIX_CONSUMPTION_DISPOSITION_CONSUMED,
-	}, nil
+	return nil
 }
 
-func appendRuntimeAssistantMembersTx(
+func appendRuntimeAssistantContextTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	eventType string,
 	eventID string,
 	modelRequestID string,
-	appendValue *bridgev1.RuntimeAssistantPartAppend,
+	delta *bridgev1.RuntimeContextDelta,
 	now time.Time,
-) (*bridgev1.DurableMessageStamp, error) {
-	if modelRequestID == "" || appendValue == nil || len(appendValue.GetParts()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "assistant part append is incomplete")
+) (durableContextWrite, error) {
+	if modelRequestID == "" || delta == nil || len(delta.GetParts()) == 0 {
+		return durableContextWrite{}, status.Error(codes.InvalidArgument, "assistant context append is incomplete")
 	}
 	switch eventType {
-	case "agent.message", "agent.tool_use", "agent.mcp_tool_use", "model_request":
+	case "agent.message", "agent.tool_use", "agent.mcp_tool_use", "model_request", "internal_tool_repair":
 	default:
-		return nil, status.Error(codes.InvalidArgument, "event cannot append assistant parts")
+		return durableContextWrite{}, status.Error(codes.InvalidArgument, "event cannot append assistant context")
 	}
 
 	var (
 		messageID       string
 		messageSequence int64
-		messageCreated  time.Time
 		existingJSON    string
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT message_id, sequence, created_at, data_json
+		`SELECT message_id, sequence, data_json
 		   FROM session_messages
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -1009,9 +771,8 @@ func appendRuntimeAssistantMembersTx(
 		    AND model_request_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&messageID, &messageSequence, &messageCreated, &existingJSON)
+	).Scan(&messageID, &messageSequence, &existingJSON)
 	insertMessage := false
-	disposition := bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_UPDATED
 	if dbconnect.IsNoRows(err) {
 		if err := tx.QueryRow(ctx,
 			`SELECT COALESCE(MAX(sequence), 0) + 1
@@ -1019,98 +780,66 @@ func appendRuntimeAssistantMembersTx(
 			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
 		).Scan(&messageSequence); err != nil {
-			return nil, err
+			return durableContextWrite{}, err
 		}
 		messageID = id.New("msg_")
-		messageCreated = now
-		existingJSON = `{"role":"assistant","origin":"agent","status":"streaming","parts":[]}`
+		existingJSON = `{"parts":[]}`
 		insertMessage = true
-		disposition = bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED
 	} else if err != nil {
-		return nil, err
+		return durableContextWrite{}, err
 	}
 
-	var message map[string]any
-	if err := json.Unmarshal([]byte(existingJSON), &message); err != nil || message == nil {
-		return nil, status.Error(codes.FailedPrecondition, "durable assistant message is invalid")
+	stored, err := decodeRuntimeDeclarationObject(existingJSON)
+	if err != nil || requireRuntimeObjectFields(stored, []string{"parts"}, []string{"parts"}) != nil {
+		return durableContextWrite{}, status.Error(codes.FailedPrecondition, "durable assistant context is invalid")
 	}
-	if message["role"] != "assistant" || message["origin"] != "agent" {
-		return nil, status.Error(codes.FailedPrecondition, "durable assistant message ownership is invalid")
-	}
-	if statusValue, _ := message["status"].(string); statusValue != "" && statusValue != "streaming" {
-		return nil, status.Error(codes.AlreadyExists, "assistant message is already sealed")
-	}
-	existingParts, ok := message["parts"].([]any)
+	existingParts, ok := stored["parts"].([]any)
 	if !ok {
-		return nil, status.Error(codes.FailedPrecondition, "durable assistant parts are invalid")
+		return durableContextWrite{}, status.Error(codes.FailedPrecondition, "durable assistant context is invalid")
 	}
 
 	toolCount := 0
 	textCount := 0
-	partStamps := make([]*bridgev1.DurablePartStamp, 0, len(appendValue.GetParts()))
-	for _, partCreate := range appendValue.GetParts() {
-		part, err := validateRuntimePartCreate(partCreate)
-		if err != nil {
-			return nil, err
-		}
-		if partCreate.GetPartKind() == "tool" {
+	createdToolIDs := make([]string, 0)
+	declaredParts, err := canonicalRuntimeContextParts(delta)
+	if err != nil {
+		return durableContextWrite{}, err
+	}
+	for _, part := range declaredParts {
+		if part["type"] == "tool_call" {
 			toolCount++
-			if part["toolUseEventId"] != nil && part["toolUseEventId"] != "" {
-				return nil, status.Error(codes.InvalidArgument, "new Tool Use already has a durable event identity")
-			}
-			part["toolUseEventId"] = eventID
-			if eventType == "agent.tool_use" {
-				part["toolEvent"] = map[string]any{"kind": "tool"}
-			}
+			createdToolIDs = append(createdToolIDs, eventID)
 		}
-		if partCreate.GetPartKind() == "text" {
+		if part["type"] == "text" {
 			textCount++
 		}
-		partID := id.New("part_")
-		partSequence := int64(len(existingParts))
-		timestamp := now.UTC().Format(time.RFC3339Nano)
-		part["id"] = partID
-		part["sessionId"] = scope.GetSessionId()
-		part["messageId"] = messageID
-		part["sequence"] = partSequence
-		part["createdAt"] = timestamp
-		part["updatedAt"] = timestamp
 		existingParts = append(existingParts, part)
-		partStamps = append(partStamps, &bridgev1.DurablePartStamp{
-			PartId: partID, MessageId: messageID, PartSequence: partSequence,
-			CreatedAt: timestamp, UpdatedAt: timestamp,
-			Disposition: bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
-		})
 	}
 	switch eventType {
 	case "agent.tool_use", "agent.mcp_tool_use":
 		if toolCount != 1 || textCount != 0 {
-			return nil, status.Error(codes.InvalidArgument, "Tool Use append must contain exactly one Tool member")
+			return durableContextWrite{}, status.Error(codes.InvalidArgument, "Tool Use append must contain exactly one Tool Call")
 		}
 	case "agent.message":
 		if textCount != 1 || toolCount != 0 {
-			return nil, status.Error(codes.InvalidArgument, "message append must contain exactly one text member")
+			return durableContextWrite{}, status.Error(codes.InvalidArgument, "message append must contain exactly one text member")
 		}
 	case "model_request":
 		if toolCount != 0 || textCount != 0 {
-			return nil, status.Error(codes.InvalidArgument, "request-end append may contain only reasoning boundaries")
+			return durableContextWrite{}, status.Error(codes.InvalidArgument, "request-end append may contain only reasoning context")
 		}
-		message["status"] = "completed"
+	case "internal_tool_repair":
+		if toolCount != 1 || len(declaredParts) != 2 || declaredParts[1]["type"] != "tool_result" {
+			return durableContextWrite{}, status.Error(codes.InvalidArgument, "internal Tool repair must contain one Tool Call and one Tool result")
+		}
 	}
 	if err := validateStableReasoningBudget(existingParts); err != nil {
-		return nil, err
+		return durableContextWrite{}, err
 	}
-	timestamp := now.UTC().Format(time.RFC3339Nano)
-	createdAt := messageCreated.UTC().Format(time.RFC3339Nano)
-	message["id"] = messageID
-	message["sessionId"] = scope.GetSessionId()
-	message["sequence"] = messageSequence
-	message["createdAt"] = createdAt
-	message["updatedAt"] = timestamp
-	message["parts"] = existingParts
-	dataJSON, err := json.Marshal(message)
+	stored["parts"] = existingParts
+	dataJSON, err := json.Marshal(stored)
 	if err != nil {
-		return nil, err
+		return durableContextWrite{}, err
 	}
 	if insertMessage {
 		if _, err := tx.Exec(ctx,
@@ -1121,7 +850,7 @@ func appendRuntimeAssistantMembersTx(
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
 			messageID, messageSequence, string(dataJSON), eventID, modelRequestID, now,
 		); err != nil {
-			return nil, err
+			return durableContextWrite{}, err
 		}
 	} else {
 		result, err := tx.Exec(ctx,
@@ -1133,17 +862,13 @@ func appendRuntimeAssistantMembersTx(
 			messageID, string(dataJSON), now, modelRequestID,
 		)
 		if err != nil {
-			return nil, err
+			return durableContextWrite{}, err
 		}
 		if !rowsAffected(result) {
-			return nil, status.Error(codes.FailedPrecondition, "assistant append lost its durable message")
+			return durableContextWrite{}, status.Error(codes.FailedPrecondition, "assistant append lost its durable context")
 		}
 	}
-	return &bridgev1.DurableMessageStamp{
-		SessionThreadId: scope.GetSessionThreadId(),
-		MessageId:       messageID, MessageSequence: messageSequence,
-		CreatedAt: createdAt, UpdatedAt: timestamp, Disposition: disposition, Parts: partStamps,
-	}, nil
+	return durableContextWrite{MessageID: messageID, MessageSequence: messageSequence, CreatedToolUseEventIDs: createdToolIDs}, nil
 }
 
 func settleRuntimeToolPartTx(
@@ -1157,160 +882,127 @@ func settleRuntimeToolPartTx(
 	if modelRequestID == "" || settlement == nil || settlement.GetToolUseEventId() == "" {
 		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime Tool settlement is incomplete")
 	}
-	var messageID, dataJSON string
+	var eventType string
 	if err := tx.QueryRow(ctx,
-		`SELECT message_id, data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND model_request_id = $4 AND kind = 'assistant'
+		`SELECT type FROM session_events
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		    AND event_id=$4 AND type IN ('agent.tool_use','agent.mcp_tool_use')
 		  FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&messageID, &dataJSON); dbconnect.IsNoRows(err) {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement has no Assistant message")
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), settlement.GetToolUseEventId(),
+	).Scan(&eventType); dbconnect.IsNoRows(err) {
+		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is missing")
 	} else if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
-	var message map[string]any
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil || message == nil {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Assistant message is invalid")
-	}
-	parts, ok := message["parts"].([]any)
-	if !ok {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Assistant parts are invalid")
-	}
-	var selected map[string]any
-	selectedIndex := -1
-	for index, rawPart := range parts {
-		part, ok := rawPart.(map[string]any)
-		if !ok || part["type"] != "tool" || part["toolUseEventId"] != settlement.GetToolUseEventId() {
-			continue
-		}
-		if selected != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is ambiguous")
-		}
-		selected = part
-		selectedIndex = index
-	}
-	if selected == nil {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is missing")
-	}
-	state, ok := selected["state"].(map[string]any)
-	if !ok {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Tool state is invalid")
-	}
-	switch state["status"] {
-	case "completed", "error", "cancelled":
-		return runtimeToolProjectionPayload{}, status.Error(codes.AlreadyExists, "Tool Use already has a terminal settlement")
-	}
-	nextState := map[string]any{}
-	toolEvent, _ := selected["toolEvent"].(map[string]any)
-	isMCPTool := toolEvent["kind"] == "mcp"
-	if input, present := state["input"]; present {
-		nextState["input"] = input
-	}
-	switch outcome := settlement.GetOutcome().(type) {
-	case *bridgev1.RuntimeToolSettlement_Completed:
-		var output any
-		if err := json.Unmarshal([]byte(outcome.Completed.GetOutputJson()), &output); err != nil || output == nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool completion output is invalid")
-		}
-		nextState["status"] = "completed"
-		nextState["output"] = output
-	case *bridgev1.RuntimeToolSettlement_Error:
-		normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Error.GetErrorJson(), isMCPTool)
-		if err != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool error is invalid")
-		}
-		nextState["status"] = "error"
-		nextState["error"] = normalizedError
-	case *bridgev1.RuntimeToolSettlement_Cancelled:
-		nextState["status"] = "cancelled"
-		if outcome.Cancelled.ErrorJson != nil {
-			normalizedError, err := runtimeDeclaredToolErrorFromFailureJSON(outcome.Cancelled.GetErrorJson(), isMCPTool)
-			if err != nil {
-				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool cancellation error is invalid")
-			}
-			nextState["error"] = normalizedError
-		}
-	default:
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
-	}
-	selected["state"] = nextState
-	selected["updatedAt"] = now.UTC().Format(time.RFC3339Nano)
-	parts[selectedIndex] = selected
-	message["parts"] = parts
-	message["updatedAt"] = now.UTC().Format(time.RFC3339Nano)
-	updatedJSON, err := json.Marshal(message)
+	tool, err := loadDurableToolExecutionTx(ctx, tx, scope, settlement.GetToolUseEventId(), eventType, false)
 	if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
-	result, err := tx.Exec(ctx,
+	if tool.ModelRequestID != modelRequestID {
+		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement request identity is inconsistent")
+	}
+	result := &bridgev1.RuntimeContextToolResult{ModelToolCallId: tool.ModelToolCallID}
+	switch outcome := settlement.GetOutcome().(type) {
+	case *bridgev1.RuntimeToolSettlement_Completed:
+		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		if err != nil || validateRuntimeBoundedText(output) != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
+		}
+		outputObject := output.(map[string]any)
+		contextOutputJSON, err := marshalBridgeJSON(map[string]any{"text": outputObject["text"]})
+		if err != nil {
+			return runtimeToolProjectionPayload{}, err
+		}
+		result.Outcome = &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeContextToolCompleted{OutputJson: contextOutputJSON}}
+	case *bridgev1.RuntimeToolSettlement_Error:
+		result.Outcome = &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: outcome.Error.GetErrorJson()}}
+	case *bridgev1.RuntimeToolSettlement_Cancelled:
+		result.Outcome = &bridgev1.RuntimeContextToolResult_Cancelled{Cancelled: &bridgev1.RuntimeContextToolCancelled{}}
+	default:
+		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
+	}
+	resultValue, err := canonicalRuntimeToolResultOutcome(result)
+	if err != nil {
+		return runtimeToolProjectionPayload{}, err
+	}
+	resultPartsJSON, err := json.Marshal([]map[string]any{{
+		"type": "tool_result", "modelToolCallId": tool.ModelToolCallID, "result": resultValue,
+	}})
+	if err != nil {
+		return runtimeToolProjectionPayload{}, err
+	}
+	updateResult, err := tx.Exec(ctx,
 		`UPDATE session_messages
-		    SET data_json = $5, updated_at = $6
+		    SET data_json = jsonb_set(
+		          data_json::jsonb,
+		          '{parts}',
+		          (data_json::jsonb -> 'parts') || $5::jsonb
+		        )::text,
+		        updated_at = $6
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND message_id = $4 AND model_request_id = $7`,
+		    AND model_request_id = $4 AND kind = 'assistant'
+		    AND jsonb_typeof(data_json::jsonb -> 'parts') = 'array'`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		messageID, string(updatedJSON), now, modelRequestID,
+		modelRequestID, string(resultPartsJSON), now,
 	)
 	if err != nil {
 		return runtimeToolProjectionPayload{}, err
 	}
-	if !rowsAffected(result) {
+	if !rowsAffected(updateResult) {
 		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement lost its durable message")
 	}
-	return runtimeToolProjectionFromDurablePart(messageID, selected), nil
+	return runtimeToolProjectionFromSettlement(tool, settlement)
 }
 
-// Runtime failures carry lifecycle diagnostics that belong to the declaration
-// receipt, while durable Tool parts expose only the stable model-visible error.
-// Other Tool owners already declare their durable error object directly.
-func runtimeDeclaredToolErrorFromFailureJSON(raw string, normalizeMCP bool) (map[string]any, error) {
-	var declared map[string]any
-	if err := json.Unmarshal([]byte(raw), &declared); err != nil || declared == nil {
-		return nil, fmt.Errorf("invalid Runtime failure")
-	}
-	if !normalizeMCP {
-		return declared, nil
-	}
-	code, hasCode := declared["code"].(string)
-	message, hasMessage := declared["message"].(string)
-	retryable, hasRetryable := declared["retryable"].(bool)
-	if !hasCode {
-		return declared, nil
-	}
-	if code == "" || !hasMessage || message == "" || !hasRetryable {
-		return nil, fmt.Errorf("invalid Runtime failure")
-	}
-	return map[string]any{
-		"type":      code,
-		"message":   message,
-		"retryable": retryable,
-	}, nil
-}
-
-func runtimeToolProjectionFromDurablePart(messageID string, part map[string]any) runtimeToolProjectionPayload {
-	projection := runtimeToolProjectionPayload{MessageID: messageID}
-	projection.PartID, _ = part["id"].(string)
-	if sequence, ok := part["sequence"].(float64); ok {
-		projection.PartSequence = int(sequence)
-	} else if sequence, ok := part["sequence"].(int64); ok {
-		projection.PartSequence = int(sequence)
-	}
-	projection.ModelToolCallID, _ = part["toolCallId"].(string)
-	projection.ToolName, _ = part["toolName"].(string)
-	if toolEvent, ok := part["toolEvent"].(map[string]any); ok && toolEvent["kind"] == "mcp" {
-		projection.MCPServerName, _ = toolEvent["mcpServerName"].(string)
-	}
-	if state, ok := part["state"].(map[string]any); ok {
-		projection.State, _ = state["status"].(string)
-		if input, present := state["input"]; present {
-			if bounded, ok := input.(map[string]any); ok {
-				if value, present := bounded["value"]; present {
-					projection.Input, _ = json.Marshal(value)
-				}
-			}
+func runtimeToolProjectionFromSettlement(tool durableToolExecution, settlement *bridgev1.RuntimeToolSettlement) (runtimeToolProjectionPayload, error) {
+	var result map[string]any
+	switch outcome := settlement.GetOutcome().(type) {
+	case *bridgev1.RuntimeToolSettlement_Completed:
+		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		if err != nil || validateRuntimeBoundedText(output) != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
 		}
-		if output, ok := state["output"].(map[string]any); ok {
+		result = map[string]any{"type": "completed", "output": output}
+	case *bridgev1.RuntimeToolSettlement_Error:
+		toolError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
+		if err != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool error is invalid")
+		}
+		result = map[string]any{"type": "error", "error": toolError}
+	case *bridgev1.RuntimeToolSettlement_Cancelled:
+		result = map[string]any{"type": "cancelled"}
+		if outcome.Cancelled.ErrorJson != nil {
+			toolError, err := decodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
+			if err != nil {
+				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
+			}
+			result["error"] = toolError
+		}
+	default:
+		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
+	}
+	return runtimeToolProjectionFromDurableTool(tool, result), nil
+}
+
+// Runtime owns failure projection; Bridge accepts and stores only the strict
+// durable Tool error contract used by Tool settlement and repair declarations.
+func decodeRuntimeToolErrorJSON(raw string) (map[string]any, error) {
+	declared, err := decodeRuntimeDeclarationObject(raw)
+	if err != nil || validateRuntimeToolError(declared) != nil {
+		return nil, fmt.Errorf("invalid durable Tool error")
+	}
+	return declared, nil
+}
+
+func runtimeToolProjectionFromDurableTool(tool durableToolExecution, result map[string]any) runtimeToolProjectionPayload {
+	projection := runtimeToolProjectionPayload{
+		ModelToolCallID: tool.ModelToolCallID,
+		ToolName:        tool.ToolName,
+		Input:           json.RawMessage(tool.InputJSON),
+	}
+	if result != nil {
+		projection.State, _ = result["type"].(string)
+		if output, ok := result["output"].(map[string]any); ok {
 			encoded, _ := json.Marshal(output)
 			var bounded struct {
 				Text      string `json:"text"`
@@ -1320,7 +1012,7 @@ func runtimeToolProjectionFromDurablePart(messageID string, part map[string]any)
 				projection.Output = &bounded
 			}
 		}
-		if normalizedError, ok := state["error"].(map[string]any); ok {
+		if normalizedError, ok := result["error"].(map[string]any); ok {
 			encoded, _ := json.Marshal(normalizedError)
 			var failure struct {
 				Type      string `json:"type"`
@@ -1332,80 +1024,7 @@ func runtimeToolProjectionFromDurablePart(messageID string, part map[string]any)
 			}
 		}
 	}
-	if len(projection.Input) == 0 {
-		projection.Input = json.RawMessage(`{}`)
-	}
 	return projection
-}
-
-func stableReasoningLedgerTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	modelRequestID string,
-) (normalizedStableReasoningSet, error) {
-	var dataJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND model_request_id = $4 AND kind = 'assistant'
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&dataJSON); dbconnect.IsNoRows(err) {
-		return normalizedStableReasoningSet{CanonicalJSON: "[]", StrictlyOrdered: true}, nil
-	} else if err != nil {
-		return normalizedStableReasoningSet{}, err
-	}
-	var message struct {
-		Parts []map[string]any `json:"parts"`
-	}
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
-		return normalizedStableReasoningSet{}, status.Error(codes.FailedPrecondition, "durable Assistant message is invalid")
-	}
-	result := normalizedStableReasoningSet{StrictlyOrdered: true}
-	aggregateBytes := 0
-	for _, part := range message.Parts {
-		if part["type"] != "reasoning" {
-			continue
-		}
-		sequenceValue, ok := part["sequence"].(float64)
-		if !ok || sequenceValue < 0 || sequenceValue != float64(int64(sequenceValue)) {
-			return normalizedStableReasoningSet{}, status.Error(codes.FailedPrecondition, "durable reasoning sequence is invalid")
-		}
-		sequence := int64(sequenceValue)
-		textValue, _ := part["text"].(string)
-		providerPartID, _ := part["providerPartId"].(string)
-		metadata, _ := part["providerMetadata"].(map[string]any)
-		if metadata == nil {
-			metadata = map[string]any{}
-		}
-		metadataJSON, err := marshalBridgeDataJSON(metadata)
-		if err != nil {
-			return normalizedStableReasoningSet{}, status.Error(codes.FailedPrecondition, "durable reasoning metadata is invalid")
-		}
-		aggregateBytes += len(textValue) + len(metadataJSON)
-		result.Parts = append(result.Parts, normalizedStableReasoningPart{
-			ReasoningPartID: stableRuntimeID(
-				"reasoning_ledger_part", scope.GetWorkspaceId(), scope.GetSessionId(),
-				scope.GetSessionThreadId(), modelRequestID, strconv.FormatInt(sequence, 10),
-			),
-			ProviderPartID: providerPartID,
-			PartSequence:   int32(sequence), // #nosec G115 -- bounded by the per-request part count below.
-			Text:           textValue,
-			Metadata:       metadata,
-			Truncated:      part["truncated"] == true,
-		})
-	}
-	if len(result.Parts) > MaxStableReasoningPartsPerRequest || aggregateBytes > MaxStableReasoningBytesPerRequest {
-		return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning exceeds per-request budget")
-	}
-	canonical, err := marshalBridgeDataJSON(result.Parts)
-	if err != nil {
-		return normalizedStableReasoningSet{}, err
-	}
-	result.CanonicalJSON = canonical
-	return result, nil
 }
 
 func lockThreadMutationOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
@@ -1413,55 +1032,22 @@ func lockThreadMutationOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *brid
 	return err
 }
 
-type runtimeMessageCreateRoute struct {
-	Kind        bridgev1.RuntimeMessageCreateKind
-	MessageKind string
-}
-
-func runtimeMessageCreateKindForSource(sourceKind string) (runtimeMessageCreateRoute, bool) {
-	switch sourceKind {
-	case "messages":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT, "user"}, true
-	case "tool_confirmation":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT, "user"}, true
-	case "approval_review":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT, "user"}, true
-	case "agent_mail":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT, "user"}, true
-	case "rejection":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION, "assistant"}, true
-	case "task_notification":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION, "runtime_notification"}, true
-	case "completion_mail":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL, "runtime_notification"}, true
-	case "agent.thread_context_compacted":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT, "compaction"}, true
-	case "internal_tool_repair":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR, "assistant"}, true
-	case "termination":
-		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TERMINATION, "assistant"}, true
-	default:
-		return runtimeMessageCreateRoute{}, false
-	}
-}
-
-func insertRuntimeMessageCreateTx(
+func insertCompactionContextEntryTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	sourceKind string,
 	sourceEventID string,
 	modelRequestID *string,
-	create *bridgev1.RuntimeMessageCreate,
+	delta *bridgev1.RuntimeContextDelta,
 	now time.Time,
-) (*bridgev1.DurableMessageStamp, error) {
-	class, ok := runtimeMessageCreateKindForSource(sourceKind)
-	if !ok || create == nil || create.GetMessageKind() != class.Kind {
-		return nil, status.Error(codes.InvalidArgument, "runtime message create identity is invalid")
+) (durableContextWrite, error) {
+	if delta == nil {
+		return durableContextWrite{}, status.Error(codes.InvalidArgument, "runtime context create identity is invalid")
 	}
-	message, err := validateRuntimeMessageCreate(create)
+	const contextKind = "compaction"
+	parts, err := canonicalRuntimeContextParts(delta)
 	if err != nil {
-		return nil, err
+		return durableContextWrite{}, err
 	}
 	var messageSequence int64
 	if err := tx.QueryRow(ctx,
@@ -1470,40 +1056,12 @@ func insertRuntimeMessageCreateTx(
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
 	).Scan(&messageSequence); err != nil {
-		return nil, err
+		return durableContextWrite{}, err
 	}
 	messageID := id.New("msg_")
-	timestamp := now.UTC().Format(time.RFC3339Nano)
-	parts := make([]any, 0, len(create.GetParts()))
-	partStamps := make([]*bridgev1.DurablePartStamp, 0, len(create.GetParts()))
-	for index, partCreate := range create.GetParts() {
-		part, err := validateRuntimePartCreate(partCreate)
-		if err != nil {
-			return nil, err
-		}
-		partID := id.New("part_")
-		part["id"] = partID
-		part["sessionId"] = scope.GetSessionId()
-		part["messageId"] = messageID
-		part["sequence"] = index
-		part["createdAt"] = timestamp
-		part["updatedAt"] = timestamp
-		parts = append(parts, part)
-		partStamps = append(partStamps, &bridgev1.DurablePartStamp{
-			PartId: partID, MessageId: messageID, PartSequence: int64(index),
-			CreatedAt: timestamp, UpdatedAt: timestamp,
-			Disposition: bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
-		})
-	}
-	message["id"] = messageID
-	message["sessionId"] = scope.GetSessionId()
-	message["sequence"] = messageSequence
-	message["createdAt"] = timestamp
-	message["updatedAt"] = timestamp
-	message["parts"] = parts
-	dataJSON, err := json.Marshal(message)
+	dataJSON, err := runtimeContextDataJSON(parts)
 	if err != nil {
-		return nil, err
+		return durableContextWrite{}, err
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_messages (
@@ -1511,100 +1069,57 @@ func insertRuntimeMessageCreateTx(
 			data_json, source_event_id, model_request_id, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		messageID, messageSequence, class.MessageKind, string(dataJSON), sourceEventID, modelRequestID, now,
+		messageID, messageSequence, contextKind, dataJSON, sourceEventID, modelRequestID, now,
 	); err != nil {
-		return nil, err
+		return durableContextWrite{}, err
 	}
-	return &bridgev1.DurableMessageStamp{
-		SessionThreadId: scope.GetSessionThreadId(),
-		MessageId:       messageID, MessageSequence: messageSequence,
-		CreatedAt: timestamp, UpdatedAt: timestamp,
-		Disposition: bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
-		Parts:       partStamps,
-	}, nil
+	return durableContextWrite{MessageID: messageID, MessageSequence: messageSequence}, nil
 }
 
-func commitInternalToolRepairCreateTx(
+type internalToolRepairDurableFacts struct {
+	RepairEventID           string `json:"repairEventId"`
+	AssignedMessageSequence int64  `json:"assignedMessageSequence"`
+}
+
+func commitInternalToolRepairContextTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	repairKey string,
 	eventID string,
-	eventSequence int64,
+	modelRequestID string,
 	modelToolCallID string,
 	toolName string,
-	create *bridgev1.RuntimeMessageCreate,
+	canonicalInputJSON string,
+	toolError *bridgev1.RuntimeToolError,
 	now time.Time,
-) (*bridgev1.DeclarationReceipt, error) {
-	if create == nil || len(create.GetParts()) != 1 {
-		return nil, status.Error(codes.InvalidArgument, "internal Tool repair create is invalid")
+) (internalToolRepairDurableFacts, error) {
+	if toolError == nil {
+		return internalToolRepairDurableFacts{}, status.Error(codes.InvalidArgument, "internal Tool repair error is missing")
 	}
-	var part map[string]any
-	if err := json.Unmarshal([]byte(create.GetParts()[0].GetPartJson()), &part); err != nil {
-		return nil, status.Error(codes.InvalidArgument, "internal Tool repair part is invalid")
-	}
-	state, _ := part["state"].(map[string]any)
-	if create.GetParts()[0].GetPartKind() != "tool" || part["toolCallId"] != modelToolCallID ||
-		part["toolName"] != toolName || state["status"] != "error" {
-		return nil, status.Error(codes.InvalidArgument, "internal Tool repair payload does not match request")
-	}
-	stamp, err := insertRuntimeMessageCreateTx(
-		ctx, tx, scope, "internal_tool_repair", eventID, nil, create, now,
+	delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{
+		{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
+			ModelToolCallId: modelToolCallID, ToolName: toolName, CanonicalInputJson: canonicalInputJSON,
+		}}},
+		{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{
+			ModelToolCallId: modelToolCallID,
+			Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{
+				ErrorJson: toolError.GetErrorJson(),
+			}},
+		}}},
+	}}
+	write, err := appendRuntimeAssistantContextTx(
+		ctx, tx, scope, "internal_tool_repair", eventID, modelRequestID, delta, now,
 	)
 	if err != nil {
-		return nil, err
+		return internalToolRepairDurableFacts{}, err
 	}
-	result, err := tx.Exec(ctx,
-		`UPDATE session_messages SET repair_key = $5
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND message_id = $4`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), stamp.GetMessageId(), repairKey,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if !rowsAffected(result) {
-		return nil, status.Error(codes.FailedPrecondition, "internal Tool repair message is missing")
-	}
-	return &bridgev1.DeclarationReceipt{
-		SessionThreadId: scope.GetSessionThreadId(), OperationKind: bridgeOpCommitInternalToolRepair,
-		SourceKind: "internal_tool_repair", OperationId: repairKey,
-		Events: []*bridgev1.DurableEventStamp{{
-			SessionThreadId: scope.GetSessionThreadId(), EventId: eventID, EventSequence: eventSequence,
-			Disposition: bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-		}},
-		Messages: []*bridgev1.DurableMessageStamp{stamp},
-	}, nil
-}
-
-func validRuntimePartKind(kind string) bool {
-	switch kind {
-	case "text", "reasoning", "tool", "step-start", "step-finish":
-		return true
-	default:
-		return false
-	}
-}
-
-func marshalDeclarationReceipt(receipt *bridgev1.DeclarationReceipt) (string, error) {
-	raw, err := protojson.Marshal(receipt)
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
-}
-
-func unmarshalDeclarationReceipt(raw string) (*bridgev1.DeclarationReceipt, error) {
-	receipt := new(bridgev1.DeclarationReceipt)
-	if err := protojson.Unmarshal([]byte(raw), receipt); err != nil {
-		return nil, err
-	}
-	return receipt, nil
+	return internalToolRepairDurableFacts{RepairEventID: eventID, AssignedMessageSequence: write.MessageSequence}, nil
 }
 
 type declarationApplicationObservation struct {
 	BindingID         string
 	BindingGeneration int64
-	Disposition       bridgev1.ReceiptApplicationDisposition
+	Current           bool
 }
 
 func logRuntimeDeclaration(
@@ -1614,10 +1129,10 @@ func logRuntimeDeclaration(
 	sourceKind string,
 	operationID string,
 	declarationDigest string,
-	ack *bridgev1.BridgeWriteAck,
+	duplicate bool,
 	observation declarationApplicationObservation,
 ) {
-	if logger == nil || scope == nil || ack == nil {
+	if logger == nil || scope == nil {
 		return
 	}
 	defer func() {
@@ -1625,7 +1140,7 @@ func logRuntimeDeclaration(
 	}()
 	eventKind := "runtime_declaration_committed"
 	outcome := "committed"
-	if ack.GetStatus() == bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+	if duplicate {
 		eventKind = "runtime_declaration_replayed"
 		outcome = "replayed"
 	}
@@ -1640,7 +1155,7 @@ func logRuntimeDeclaration(
 		slog.String("declaration.source.kind", sourceKind),
 		slog.String("operation.id", operationID),
 		slog.String("declaration.digest", declarationDigest),
-		slog.String("receipt.application_disposition", strings.ToLower(strings.TrimPrefix(observation.Disposition.String(), "RECEIPT_APPLICATION_DISPOSITION_"))),
+		slog.Bool("runtime.binding.current", observation.Current),
 		slog.String("binding.id", observation.BindingID),
 		slog.Int64("binding.generation", observation.BindingGeneration),
 		slog.String("outcome", outcome),
@@ -1648,7 +1163,6 @@ func logRuntimeDeclaration(
 }
 
 type runtimeDeclarationRejectionEvidence struct {
-	Active        bool
 	Kind          string
 	Operation     string
 	OperationID   string
@@ -1657,7 +1171,7 @@ type runtimeDeclarationRejectionEvidence struct {
 }
 
 func logRuntimeDeclarationRejected(logger *slog.Logger, scope *bridgev1.RuntimeScope, evidence runtimeDeclarationRejectionEvidence, rejection error) {
-	if logger == nil || rejection == nil || !evidence.Active {
+	if logger == nil || rejection == nil {
 		return
 	}
 	defer func() {
@@ -1682,24 +1196,26 @@ func logRuntimeDeclarationRejected(logger *slog.Logger, scope *bridgev1.RuntimeS
 		slog.String("operation", evidence.Operation),
 		slog.String("event.kind", "runtime_declaration_rejected"),
 		slog.String("component", ServiceNameBridgeAPI),
+		slog.String("phase", "declaration_validation"),
+		slog.String("reason", kind),
 		slog.String("rejection.kind", kind),
 		slog.String("rpc.grpc.status_name", status.Code(rejection).String()),
 	}
 	if scope != nil {
 		attributes = append(attributes,
-			slog.String("workspace.id", scope.GetWorkspaceId()),
-			slog.String("session.id", scope.GetSessionId()),
-			slog.String("thread.id", scope.GetSessionThreadId()),
+			slog.String("workspace.id", safeActorDiagnosticIdentity(scope.GetWorkspaceId())),
+			slog.String("session.id", safeActorDiagnosticIdentity(scope.GetSessionId())),
+			slog.String("thread.id", safeActorDiagnosticIdentity(scope.GetSessionThreadId())),
 		)
 	}
 	if evidence.OperationID != "" {
-		attributes = append(attributes, slog.String("operation.id", evidence.OperationID))
+		attributes = append(attributes, slog.String("operation.id", safeActorDiagnosticIdentity(evidence.OperationID)))
 	}
 	if evidence.MessageOrPart != "" {
 		attributes = append(attributes, slog.String("declaration.kind", evidence.MessageOrPart))
 	}
 	if evidence.ThreadRole != "" {
-		attributes = append(attributes, slog.String("thread.role", evidence.ThreadRole))
+		attributes = append(attributes, slog.String("thread.role", safeActorDiagnosticIdentity(evidence.ThreadRole)))
 	}
 	logger.Error("runtime declaration rejected", attributes...)
 }
@@ -1733,7 +1249,6 @@ func declarationApplicationObservationTx(
 		scope.GetSessionId(),
 	).Scan(&observation.BindingID, &observation.BindingGeneration, &podUID)
 	if dbconnect.IsNoRows(err) {
-		observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
 		return observation, nil
 	}
 	if err != nil {
@@ -1742,9 +1257,12 @@ func declarationApplicationObservationTx(
 	if observation.BindingID == scope.GetBinding().GetBindingId() &&
 		observation.BindingGeneration == scope.GetBinding().GetBindingGeneration() &&
 		podUID == scope.GetBinding().GetTargetPodUid() {
-		observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY
-	} else {
-		observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
+		observation.Current = true
 	}
 	return observation, nil
+}
+
+func (s *PostgreSQLBridgeAPIStore) runtimeScopeApplicationCurrent(ctx context.Context, scope *bridgev1.RuntimeScope) (bool, error) {
+	observation, err := s.declarationApplicationObservation(ctx, scope)
+	return observation.Current, err
 }

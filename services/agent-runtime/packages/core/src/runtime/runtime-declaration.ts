@@ -1,832 +1,489 @@
 /**
- * Builds identity-free Runtime declarations and applies Bridge-owned durable
- * stamps by request position. Message creation, Assistant member append, and
- * Tool settlement intentionally have separate applicators so no caller can
- * reconstruct an old Assistant snapshot at this boundary.
+ * Applies operation-specific Bridge results to Runtime-owned context. Every
+ * applicator combines an immutable request/draft with only Bridge-generated
+ * facts; no generic result base, database stamp, or caller-payload echo is used.
  */
-
+import type {
+	RuntimeAssistantContextAppend,
+	RuntimeAssistantDraftPart,
+	RuntimeContextEntry,
+	RuntimeContextKind,
+	RuntimeContextPart,
+	RuntimeInterruptToolResult,
+	RuntimeJsonValue,
+	RuntimeOpenRequestDraft,
+	RuntimeToolSettlementDeclaration,
+} from "../contracts/runtime.js";
 import {
-  DurableRuntimeMessageSchema,
-  RuntimeAssistantPartAppendSchema,
-  RuntimeMessageCreateSchema,
-  RuntimeMessageSchema,
-  RuntimePartCreateSchema,
-  RuntimeToolSettlementDeclarationSchema,
+	finalizeRuntimeToolOutput,
+	RuntimeAssistantContextAppendSchema,
+	RuntimeContextEntrySchema,
+	RuntimeOpenRequestDraftSchema,
+	runtimeToolErrorFromFailure,
 } from "../contracts/runtime.js";
 import type {
-  DurableRuntimeMessage,
-  RuntimeAssistantPartAppend,
-  RuntimeDeclarationReceipt,
-  RuntimeFailure,
-  RuntimeMessage,
-  RuntimeMessageCreate,
-  RuntimePart,
-  RuntimePartCreate,
-  RuntimeToolSettlementDeclaration,
-} from "../contracts/runtime.js";
-import type {
-  RuntimeAcceptedInputState,
-  RuntimePendingApprovalToolJobState,
+	RuntimeAcceptedInputState,
+	RuntimePendingApprovalToolJobState,
 } from "../thread-loop/thread-state.js";
 import { stableRuntimeID } from "./runtime-identity.js";
 
-export type { RuntimeDeclarationReceipt } from "../contracts/runtime.js";
-
-type ToolRuntimePart = Extract<RuntimePart, { readonly type: "tool" }>;
-
-function assertOrdinaryDeclarationReceipt(receipt: RuntimeDeclarationReceipt): void {
-  if (receipt.compactedThroughMessageSequence !== undefined) {
-    throw new Error("ordinary declaration receipt cannot carry a compaction boundary");
-  }
+export interface RuntimeContextDraft {
+	readonly contextKind: RuntimeContextKind;
+	readonly parts: readonly RuntimeContextPart[];
 }
 
-function assertReceiptIdentity(
-  receipt: RuntimeDeclarationReceipt,
-  expected: {
-    readonly sessionThreadId: string;
-    readonly operationKind: string;
-    readonly sourceKind: string;
-    readonly operationId: string;
-  },
-): void {
-  if (
-    receipt.sessionThreadId !== expected.sessionThreadId ||
-    receipt.operationKind !== expected.operationKind ||
-    receipt.sourceKind !== expected.sourceKind ||
-    receipt.operationId !== expected.operationId ||
-    receipt.declarationDigest.length === 0
-  ) {
-    throw new Error("declaration receipt identity does not match");
-  }
+export interface AssistantAppendResult {
+	readonly messageSequence: number;
+	readonly createdToolUseEventIds: readonly string[];
 }
 
-/** Derives the stable declaration identity for one durable running interval. */
 export function runtimeTurnOpenWriteId(input: {
-  readonly workspaceId: string;
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly openingSourceKind: string;
-  readonly openingSourceId: string;
+	readonly workspaceId: string;
+	readonly sessionId: string;
+	readonly sessionThreadId: string;
+	readonly openingSourceKind: string;
+	readonly openingSourceId: string;
 }): string {
-  return stableRuntimeID(
-    "turn_open",
-    input.workspaceId,
-    input.sessionId,
-    input.sessionThreadId,
-    input.openingSourceKind,
-    input.openingSourceId,
-  );
+	return stableRuntimeID(
+		"turn_open",
+		input.workspaceId,
+		input.sessionId,
+		input.sessionThreadId,
+		input.openingSourceKind,
+		input.openingSourceId,
+	);
 }
 
-/** Maps an internal accepted-input kind to the declaration source kind. */
-export function acceptedInputDeclarationKind(input: RuntimeAcceptedInputState): string {
-  return input.kind === "inter_agent_message" ? "agent_mail" : input.kind;
+export function acceptedInputDeclarationKind(
+	input: RuntimeAcceptedInputState,
+): string {
+	return input.kind === "inter_agent_message" ? "agent_mail" : input.kind;
 }
 
-/** Converts one accepted command's semantic messages into ordered creates. */
-export function acceptedInputCreates(input: RuntimeAcceptedInputState): readonly RuntimeMessageCreate[] {
-  if (input.kind === "task_notification") {
-    return [taskNotificationCreate({ payloadJson: input.payloadJson })];
-  }
-  if (input.kind === "rejection") {
-    if (input.eventIds.length === 0) {
-      throw new Error("rejection input must name at least one source event");
-    }
-    return input.eventIds.map(() => RuntimeMessageCreateSchema.parse({
-      messageKind: "rejection",
-      role: "assistant",
-      origin: "agent",
-      status: "completed",
-      parts: [{
-        type: "text",
-        text: "The session runtime could not accept this input.",
-        truncated: false,
-        status: "completed",
-      }],
-    }));
-  }
-  const messages = acceptedInputMessages(input);
-  const messageKind = acceptedInputMessageKind(input);
-  if (messages.length !== input.eventIds.length) {
-    throw new Error("accepted input message and source event counts differ");
-  }
-  return messages.map((message) => RuntimeMessageCreateSchema.parse({
-    ...messageCreateInfo(message),
-    messageKind,
-    parts: message.parts.map(partCreateFromDurable),
-  }));
+export function acceptedInputContextDrafts(
+	input: RuntimeAcceptedInputState,
+): readonly RuntimeContextDraft[] {
+	switch (input.kind) {
+		case "task_notification":
+			return [textDraft("runtime_notification", input.notificationJson)];
+		case "rejection":
+			return [
+				textDraft(
+					"assistant",
+					"The session runtime could not accept this input.",
+				),
+			];
+		case "inter_agent_message":
+			return [textDraft("user", input.content)];
+		case "approval_review":
+			return input.promptText.map((text) => textDraft("user", text));
+		case "messages":
+			return parseAcceptedMessageContent(input.contentJson);
+	}
 }
 
-/** Applies an accepted-input receipt by message and part position. */
-export function applyAcceptedInputReceipt(
-  input: RuntimeAcceptedInputState,
-  creates: readonly RuntimeMessageCreate[],
-  receipt: RuntimeDeclarationReceipt,
-): readonly DurableRuntimeMessage[] {
-  if (input.kind === "task_notification") {
-    const create = creates[0];
-    if (creates.length !== 1 || create === undefined) {
-      throw new Error("task notification declaration must contain one message create");
-    }
-    return [applyTaskNotificationReceipt({
-      sessionId: input.sessionId,
-      sessionThreadId: input.sessionThreadId,
-      operationId: taskNotificationOperationId(input.runtimeInputId, input.taskId),
-      create,
-    }, receipt)];
-  }
-  assertOrdinaryDeclarationReceipt(receipt);
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_inputs",
-    sourceKind: acceptedInputDeclarationKind(input),
-    operationId: input.runtimeInputId,
-  });
-  if (receipt.events.length !== input.eventIds.length) {
-    throw new Error("accepted input event stamp count does not match");
-  }
-  const expectedDisposition = input.kind === "approval_review" ? "created" : "existing";
-  receipt.events.forEach((stamp, index) => {
-    if (
-      stamp.sessionThreadId !== input.sessionThreadId ||
-      stamp.eventId !== input.eventIds[index] ||
-      stamp.disposition !== expectedDisposition
-    ) {
-      throw new Error("accepted input event stamp is invalid");
-    }
-  });
-  return applyMessageCreateStamps({
-    sessionId: input.sessionId,
-    sessionThreadId: input.sessionThreadId,
-    creates,
-    eventStamps: receipt.events,
-    messageStamps: receipt.messages,
-  });
+export function applyAcceptedInputResult(
+	drafts: readonly RuntimeContextDraft[],
+	assignedContextSequences: readonly number[],
+): readonly RuntimeContextEntry[] {
+	if (drafts.length !== assignedContextSequences.length) {
+		throw new Error(
+			"accepted input assigned sequence count does not match its context drafts",
+		);
+	}
+	return drafts.map((draft, index) =>
+		RuntimeContextEntrySchema.parse({
+			messageSequence: assignedContextSequences[index],
+			contextKind: draft.contextKind,
+			parts: draft.parts,
+		}),
+	);
 }
 
-/** Validates one admitted interrupt and returns its Bridge-authored projections. */
-export function applyInterruptInputReceipt(
-  input: {
-    readonly sessionThreadId: string;
-    readonly runtimeInputId: string;
-    readonly eventIds: readonly string[];
-    readonly expectedToolUseEventIds: readonly string[];
-  },
-  receipt: RuntimeDeclarationReceipt,
-): readonly RuntimeDeclarationReceipt["interruptToolProjections"][number][] {
-  assertOrdinaryDeclarationReceipt(receipt);
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_inputs",
-    sourceKind: "interrupt_control",
-    operationId: input.runtimeInputId,
-  });
-  if (input.eventIds.length !== 1 || receipt.events.length !== 1 || receipt.messages.length !== 0) {
-    throw new Error("interrupt receipt carrier set is invalid");
-  }
-  const interruptEvent = receipt.events[0]!;
-  if (
-    interruptEvent.sessionThreadId !== input.sessionThreadId ||
-    interruptEvent.eventId !== input.eventIds[0] ||
-    interruptEvent.disposition !== "existing"
-  ) {
-    throw new Error("interrupt event stamp is invalid");
-  }
-  if (receipt.interruptToolProjections.length !== input.expectedToolUseEventIds.length) {
-    throw new Error("interrupt Tool projection census is incomplete");
-  }
-  let previousSequence = -1;
-  receipt.interruptToolProjections.forEach((projection, index) => {
-    if (
-      projection.toolUseEventId !== input.expectedToolUseEventIds[index] ||
-      projection.resultEvent.sessionThreadId !== input.sessionThreadId ||
-      projection.resultEvent.disposition !== "created" ||
-      projection.resultEvent.eventSequence <= previousSequence
-    ) {
-      throw new Error("interrupt Tool projection is invalid");
-    }
-    previousSequence = projection.resultEvent.eventSequence;
-  });
-  return [...receipt.interruptToolProjections];
+export function toolConfirmationContext(input: {
+	readonly toolUseEventId: string;
+	readonly pendingTool: RuntimePendingApprovalToolJobState;
+	readonly decision: "allow" | "deny";
+	readonly denyMessage?: string | undefined;
+}): RuntimeContextDraft {
+	if (
+		input.pendingTool.toolUseEventId !== input.toolUseEventId ||
+		input.pendingTool.toolPart.toolUseEventId !== input.toolUseEventId
+	) {
+		throw new Error("tool confirmation does not identify the pending tool");
+	}
+	const text =
+		input.decision === "allow"
+			? "Approval allowed"
+			: input.denyMessage === undefined || input.denyMessage.length === 0
+				? "Approval denied"
+				: `Approval denied: ${input.denyMessage}`;
+	return textDraft("user", text);
 }
 
-/** Applies a fully validated Bridge-authored interrupt census atomically to hot messages. */
-export function applyInterruptToolProjections(
-  messages: readonly RuntimeMessage[],
-  projections: RuntimeDeclarationReceipt["interruptToolProjections"],
-): readonly RuntimeMessage[] {
-  const unfinished = messages.flatMap((message) => message.parts
-    .filter((part): part is ToolRuntimePart =>
-      part.type === "tool" && part.toolUseEventId !== undefined &&
-      part.state.status !== "completed" && part.state.status !== "error" && part.state.status !== "cancelled",
-    )
-    .map((part) => ({ messageId: message.id, part })))
-    .sort((left, right) => left.part.sequence - right.part.sequence);
-  if (
-    unfinished.length !== projections.length ||
-    unfinished.some((entry, index) => entry.part.toolUseEventId !== projections[index]?.toolUseEventId)
-  ) {
-    throw new Error("interrupt projection census does not match hot unfinished Tools");
-  }
-  const stateByPartId = new Map<string, ToolRuntimePart["state"]>();
-  unfinished.forEach(({ part }, index) => {
-    const projection = projections[index]!;
-    const input = part.state.status === "running" ? { input: part.state.input } : {};
-    stateByPartId.set(part.id, projection.terminalState.type === "error"
-      ? { status: "error", ...input, error: failureToolError(projection.terminalState.error) }
-      : { status: "cancelled", ...input, ...(projection.terminalState.error === undefined ? {} : { error: failureToolError(projection.terminalState.error) }) });
-  });
-  return messages.map((message) => {
-    const projected = {
-      ...message,
-      parts: message.parts.map((part) => {
-      const state = stateByPartId.get(part.id);
-      return state === undefined || part.type !== "tool" ? part : { ...part, state };
-      }),
-    };
-    return DurableRuntimeMessageSchema.parse(projected);
-  });
+export function taskNotificationContext(
+	payloadJson: string,
+): RuntimeContextDraft {
+	return textDraft("runtime_notification", payloadJson);
 }
 
-/** Applies one Bridge-acknowledged target Tool settlement without rebuilding its Assistant Message. */
-export function applyToolSettlementProjection(
-  messages: readonly RuntimeMessage[],
-  toolUseEventId: string,
-  settlement: RuntimeToolSettlementDeclaration["outcome"],
-  completedAt: string,
-): readonly RuntimeMessage[] {
-  let matches = 0;
-  const projected = messages.map((message) => {
-    let changed = false;
-    const parts = message.parts.map((part) => {
-      if (part.type !== "tool" || part.toolUseEventId !== toolUseEventId) return part;
-      matches += 1;
-      if (part.state.status !== "running") {
-        throw new Error("Tool settlement target is already terminal");
-      }
-      changed = true;
-      const state = settlement.type === "completed"
-        ? { status: "completed" as const, input: part.state.input, output: settlement.output }
-        : settlement.type === "error"
-          ? { status: "error" as const, input: part.state.input, error: failureToolError(settlement.error) }
-          : {
-              status: "cancelled" as const,
-              input: part.state.input,
-              ...(settlement.error === undefined ? {} : { error: failureToolError(settlement.error) }),
-            };
-      return { ...part, state, completedAt };
-    });
-    if (!changed) return message;
-    const next = { ...message, parts };
-    return DurableRuntimeMessageSchema.parse(next);
-  });
-  if (matches !== 1) {
-    throw new Error("Tool settlement must name exactly one unfinished hot Tool");
-  }
-  return projected;
+export function completionMailText(envelope: string): string {
+	return envelope;
 }
 
-/** Builds the sole user message created for an approval decision. */
-export function toolConfirmationCreate(input: {
-  readonly sourceEventId: string;
-  readonly toolUseEventId: string;
-  readonly pendingTool: RuntimePendingApprovalToolJobState;
-  readonly decision: "allow" | "deny";
-  readonly denyMessage?: string | undefined;
-}): RuntimeMessageCreate {
-  if (
-    input.pendingTool.toolUseEventId !== input.toolUseEventId ||
-    input.pendingTool.toolPart.toolUseEventId !== input.toolUseEventId
-  ) {
-    throw new Error("tool confirmation does not identify the pending tool");
-  }
-  const text = input.decision === "allow"
-    ? "Approval allowed"
-    : input.denyMessage === undefined || input.denyMessage.length === 0
-      ? "Approval denied"
-      : `Approval denied: ${input.denyMessage}`;
-  return RuntimeMessageCreateSchema.parse({
-    messageKind: "approval_input",
-    role: "user",
-    origin: "user",
-    status: "completed",
-    parts: [{ type: "text", text, truncated: false, status: "completed" }],
-  });
+export function compactionContext(text: string): RuntimeContextDraft {
+	return textDraft("compaction", text);
 }
 
-/** Applies the database stamp for one admitted approval decision. */
-export function applyToolConfirmationReceipt(input: {
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly runtimeInputId: string;
-  readonly sourceEventId: string;
-  readonly create: RuntimeMessageCreate;
-}, receipt: RuntimeDeclarationReceipt): DurableRuntimeMessage {
-  assertOrdinaryDeclarationReceipt(receipt);
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_inputs",
-    sourceKind: "tool_confirmation",
-    operationId: input.runtimeInputId,
-  });
-  if (receipt.events.length !== 1 || receipt.events[0]?.eventId !== input.sourceEventId || receipt.events[0].disposition !== "existing") {
-    throw new Error("tool confirmation event stamp is invalid");
-  }
-  return applyMessageCreateStamps({
-    sessionId: input.sessionId,
-    sessionThreadId: input.sessionThreadId,
-    creates: [input.create],
-    eventStamps: receipt.events,
-    messageStamps: receipt.messages,
-  })[0]!;
+export function taskNotificationOperationId(
+	runtimeInputId: string,
+	taskId: string,
+): string {
+	return stableRuntimeID("task_notification", runtimeInputId, taskId);
 }
 
-/** Builds the task-notification message created by its dedicated RPC. */
-export function taskNotificationCreate(input: { readonly payloadJson: string }): RuntimeMessageCreate {
-  return RuntimeMessageCreateSchema.parse({
-    messageKind: "task_notification",
-    role: "user",
-    origin: "runtime",
-    status: "completed",
-    parts: [{ type: "text", text: input.payloadJson, truncated: false, status: "completed" }],
-  });
+export function assistantAppendFromDraftParts(
+	parts: readonly RuntimeAssistantDraftPart[],
+): RuntimeAssistantContextAppend {
+	return RuntimeAssistantContextAppendSchema.parse({ parts });
 }
 
-/** Derives the replay identity shared by task notification commit and receipt. */
-export function taskNotificationOperationId(runtimeInputId: string, taskId: string): string {
-  return stableRuntimeID("task_notification", runtimeInputId, taskId);
+export function applyAssistantAppendResult(input: {
+	readonly modelRequestId: string;
+	readonly append: RuntimeAssistantContextAppend;
+	readonly existingDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly result: AssistantAppendResult;
+}): {
+	readonly draft: RuntimeOpenRequestDraft;
+	readonly activeToolParts: readonly Extract<
+		RuntimeAssistantDraftPart,
+		{ readonly type: "tool" }
+	>[];
+} {
+	if (
+		input.existingDraft !== undefined &&
+		(input.existingDraft.modelRequestId !== input.modelRequestId ||
+			input.existingDraft.messageSequence !== input.result.messageSequence)
+	) {
+		throw new Error("Assistant append changed the open Request draft identity");
+	}
+	const callParts = input.append.parts.filter(
+		(
+			part,
+		): part is Extract<RuntimeAssistantDraftPart, { readonly type: "tool" }> =>
+			part.type === "tool",
+	);
+	if (callParts.length !== input.result.createdToolUseEventIds.length) {
+		throw new Error("Assistant append Tool identity count does not match");
+	}
+	let toolIndex = 0;
+	const activeToolParts: Extract<
+		RuntimeAssistantDraftPart,
+		{ readonly type: "tool" }
+	>[] = [];
+	const contextParts = input.append.parts.map((part): RuntimeContextPart => {
+		if (part.type === "text") return { type: "text", text: part.text };
+		if (part.type === "reasoning") {
+			return {
+				type: "reasoning",
+				text: part.text,
+				...(part.providerMetadata === undefined
+					? {}
+					: { providerMetadata: part.providerMetadata }),
+			};
+		}
+		const toolUseEventId = input.result.createdToolUseEventIds[toolIndex++];
+		if (
+			toolUseEventId === undefined ||
+			!("input" in part.state) ||
+			part.state.input === undefined
+		) {
+			throw new Error(
+				"Assistant Tool call lacks its durable identity or canonical input",
+			);
+		}
+		activeToolParts.push({ ...part, toolUseEventId });
+		return {
+			type: "tool_call",
+			modelToolCallId: part.modelToolCallId,
+			toolName: part.toolName,
+			canonicalInput: part.state.input.value,
+		};
+	});
+	const draft = RuntimeOpenRequestDraftSchema.parse({
+		modelRequestId: input.modelRequestId,
+		messageSequence: input.result.messageSequence,
+		parts: [...(input.existingDraft?.parts ?? []), ...contextParts],
+	});
+	return { draft, activeToolParts };
 }
 
-/** Applies the database stamp for a task notification. */
-export function applyTaskNotificationReceipt(input: {
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly operationId: string;
-  readonly create: RuntimeMessageCreate;
-}, receipt: RuntimeDeclarationReceipt): DurableRuntimeMessage {
-  assertOrdinaryDeclarationReceipt(receipt);
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_task_notification_result",
-    sourceKind: "task_notification",
-    operationId: input.operationId,
-  });
-  if (receipt.events.length !== 1 || receipt.events[0]?.disposition !== "created") {
-    throw new Error("task notification event stamp is invalid");
-  }
-  return applyMessageCreateStamps({
-    sessionId: input.sessionId,
-    sessionThreadId: input.sessionThreadId,
-    creates: [input.create],
-    eventStamps: receipt.events,
-    messageStamps: receipt.messages,
-  })[0]!;
+export function sealAssistantDraft(
+	draft: RuntimeOpenRequestDraft,
+	trailingParts: readonly RuntimeContextPart[] = [],
+): RuntimeContextEntry {
+	return RuntimeContextEntrySchema.parse({
+		messageSequence: draft.messageSequence,
+		contextKind: "assistant",
+		parts: [...draft.parts, ...trailingParts],
+	});
 }
 
-/** Builds the child completion envelope created by FinishIdle. */
-export function completionMailCreate(input: { readonly envelope: string }): RuntimeMessageCreate {
-  return RuntimeMessageCreateSchema.parse({
-    messageKind: "completion_mail",
-    role: "user",
-    origin: "runtime",
-    status: "completed",
-    parts: [{ type: "text", text: input.envelope, truncated: false, status: "completed" }],
-  });
+export function applyToolSettlementToContext(input: {
+	readonly entries: readonly RuntimeContextEntry[];
+	readonly assistantMessageSequence: number;
+	readonly modelToolCallId: string;
+	readonly settlement: RuntimeToolSettlementDeclaration["outcome"];
+}): readonly RuntimeContextEntry[] {
+	let matched = false;
+	const entries = input.entries.map((entry) => {
+		if (entry.messageSequence !== input.assistantMessageSequence) return entry;
+		if (entry.contextKind !== "assistant")
+			throw new Error("Tool settlement target is not Assistant context");
+		const callCount = entry.parts.filter(
+			(part) =>
+				part.type === "tool_call" &&
+				part.modelToolCallId === input.modelToolCallId,
+		).length;
+		const resultCount = entry.parts.filter(
+			(part) =>
+				part.type === "tool_result" &&
+				part.modelToolCallId === input.modelToolCallId,
+		).length;
+		if (callCount !== 1 || resultCount !== 0)
+			throw new Error("Tool settlement target is missing or already terminal");
+		matched = true;
+		return RuntimeContextEntrySchema.parse({
+			...entry,
+			parts: [
+				...entry.parts,
+				contextToolResultFromSettlement(
+					input.modelToolCallId,
+					input.settlement,
+				),
+			],
+		});
+	});
+	if (!matched)
+		throw new Error("Tool settlement must name one Assistant context entry");
+	return entries;
 }
 
-/** Builds the same completion envelope for abnormal runtime closeout. */
-export function runtimeTerminationCompletionMailCreate(input: { readonly envelope: string }): RuntimeMessageCreate {
-  return completionMailCreate(input);
+export function appendToolResultToOpenRequestDraft(
+	draft: RuntimeOpenRequestDraft,
+	resultPart: Extract<RuntimeContextPart, { readonly type: "tool_result" }>,
+): RuntimeOpenRequestDraft {
+	const callCount = draft.parts.filter(
+		(part) =>
+			part.type === "tool_call" &&
+			part.modelToolCallId === resultPart.modelToolCallId,
+	).length;
+	const resultCount = draft.parts.filter(
+		(part) =>
+			part.type === "tool_result" &&
+			part.modelToolCallId === resultPart.modelToolCallId,
+	).length;
+	if (callCount !== 1 || resultCount !== 0) {
+		throw new Error(
+			"Tool result target is missing or already terminal in the open Request draft",
+		);
+	}
+	return RuntimeOpenRequestDraftSchema.parse({
+		...draft,
+		parts: [...draft.parts, resultPart],
+	});
 }
 
-/** Builds exhaustive deterministic terminal settlements for runtime termination. */
-export function runtimeTerminationToolSettlements(input: {
-  readonly pendingTools: readonly { readonly toolUseEventId: string }[];
-  readonly failure: RuntimeFailure;
-}): readonly RuntimeToolSettlementDeclaration[] {
-  const seen = new Set<string>();
-  return input.pendingTools.map((pending) => {
-    if (seen.has(pending.toolUseEventId)) throw new Error("runtime termination Tool census is duplicated");
-    seen.add(pending.toolUseEventId);
-    return RuntimeToolSettlementDeclarationSchema.parse({
-      toolUseEventId: pending.toolUseEventId,
-      outcome: { type: "cancelled", error: input.failure },
-    });
-  });
+export function applyInterruptToolResults(input: {
+	readonly entries: readonly RuntimeContextEntry[];
+	readonly routes: readonly {
+		readonly toolUseEventId: string;
+		readonly assistantMessageSequence: number;
+		readonly modelToolCallId: string;
+	}[];
+	readonly results: readonly RuntimeInterruptToolResult[];
+}): readonly RuntimeContextEntry[] {
+	let entries = input.entries;
+	for (const result of input.results) {
+		const route = input.routes.find(
+			(candidate) => candidate.toolUseEventId === result.toolUseEventId,
+		);
+		if (route === undefined)
+			throw new Error("interrupt Tool result has no active route");
+		entries = appendToolResultPart(entries, route.assistantMessageSequence, {
+			type: "tool_result",
+			modelToolCallId: route.modelToolCallId,
+			result: result.result,
+		});
+	}
+	return entries;
 }
 
-/** Validates the positional Tool-result and terminal event stamps for termination. */
-export function validateRuntimeTerminationReceipt(input: {
-  readonly sessionThreadId: string;
-  readonly operationId: string;
-  readonly toolSettlements: readonly RuntimeToolSettlementDeclaration[];
-  readonly completionMailCreate?: RuntimeMessageCreate | undefined;
-}, receipt: RuntimeDeclarationReceipt): { readonly failureEventId: string; readonly closeoutEventId: string } {
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_runtime_termination",
-    sourceKind: "runtime_termination",
-    operationId: input.operationId,
-  });
-  const completionCount = input.completionMailCreate === undefined ? 0 : 1;
-  if (
-    receipt.events.length !== input.toolSettlements.length + completionCount + 2 ||
-    receipt.messages.length !== completionCount ||
-    receipt.interruptToolProjections.length !== 0 ||
-    receipt.pendingAttachmentDelta.length !== 0 ||
-    receipt.prefixConsumptions.length !== 0 ||
-    receipt.requestReschedule !== undefined ||
-    receipt.idleCloseout !== undefined ||
-    receipt.compactedThroughMessageSequence !== undefined
-  ) {
-    throw new Error("runtime termination receipt carrier set is incomplete");
-  }
-  assertCreatedEvents(receipt.events, input.sessionThreadId);
-  if (input.completionMailCreate !== undefined) {
-    const completionEvent = receipt.events[input.toolSettlements.length];
-    applyMessageCreateStamps({
-      sessionId: "runtime-termination-validation",
-      sessionThreadId: input.sessionThreadId,
-      creates: [input.completionMailCreate],
-      eventStamps: completionEvent === undefined ? [] : [completionEvent],
-      messageStamps: receipt.messages,
-      skipSessionValidation: true,
-    });
-  }
-  const terminalStart = input.toolSettlements.length + completionCount;
-  return {
-    failureEventId: receipt.events[terminalStart]!.eventId,
-    closeoutEventId: receipt.events[terminalStart + 1]!.eventId,
-  };
+function appendToolResultPart(
+	entries: readonly RuntimeContextEntry[],
+	assistantMessageSequence: number,
+	resultPart: Extract<RuntimeContextPart, { readonly type: "tool_result" }>,
+): readonly RuntimeContextEntry[] {
+	let matched = false;
+	const updated = entries.map((entry) => {
+		if (entry.messageSequence !== assistantMessageSequence) return entry;
+		if (entry.contextKind !== "assistant")
+			throw new Error("Tool result target is not Assistant context");
+		const callCount = entry.parts.filter(
+			(part) =>
+				part.type === "tool_call" &&
+				part.modelToolCallId === resultPart.modelToolCallId,
+		).length;
+		const resultCount = entry.parts.filter(
+			(part) =>
+				part.type === "tool_result" &&
+				part.modelToolCallId === resultPart.modelToolCallId,
+		).length;
+		if (callCount !== 1 || resultCount !== 0)
+			throw new Error("Tool result target is missing or already terminal");
+		matched = true;
+		return RuntimeContextEntrySchema.parse({
+			...entry,
+			parts: [...entry.parts, resultPart],
+		});
+	});
+	if (!matched)
+		throw new Error("Tool result must name one Assistant context entry");
+	return updated;
 }
 
-/** Validates an idle closeout and its optional child completion create. */
-export function validateFinishIdleReceipt(input: {
-  readonly sessionThreadId: string;
-  readonly durableTurnId: string;
-  readonly completionMailCreate?: RuntimeMessageCreate | undefined;
-}, receipt: RuntimeDeclarationReceipt): void {
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "finish_idle",
-    sourceKind: "turn_closeout",
-    operationId: input.durableTurnId,
-  });
-  const completionCount = input.completionMailCreate === undefined ? 0 : 1;
-  if (
-    receipt.events.length !== completionCount + 1 ||
-    receipt.messages.length !== completionCount ||
-    receipt.interruptToolProjections.length !== 0 ||
-    receipt.pendingAttachmentDelta.length !== 0 ||
-    receipt.prefixConsumptions.length !== 0 ||
-    receipt.requestReschedule !== undefined ||
-    receipt.compactedThroughMessageSequence !== undefined
-  ) {
-    throw new Error("finish idle receipt carrier set is invalid");
-  }
-  const idleEvent = receipt.events[0];
-  const closeout = receipt.idleCloseout;
-  if (
-    idleEvent === undefined || closeout === undefined ||
-    idleEvent.sessionThreadId !== input.sessionThreadId ||
-    idleEvent.eventId !== closeout.idleEventId ||
-    idleEvent.eventSequence !== closeout.idleEventSequence ||
-    idleEvent.disposition !== "created" ||
-    closeout.durableTurnId !== input.durableTurnId ||
-    closeout.committedIdleAt.length === 0
-  ) {
-    throw new Error("finish idle closeout stamp is invalid");
-  }
-  if (input.completionMailCreate !== undefined) {
-    applyMessageCreateStamps({
-      sessionId: "finish-idle-validation",
-      sessionThreadId: input.sessionThreadId,
-      creates: [input.completionMailCreate],
-      eventStamps: [receipt.events[1]!],
-      messageStamps: receipt.messages,
-      skipSessionValidation: true,
-    });
-  }
+export function appendToolResultToContext(
+	entries: readonly RuntimeContextEntry[],
+	assistantMessageSequence: number,
+	resultPart: Extract<RuntimeContextPart, { readonly type: "tool_result" }>,
+): readonly RuntimeContextEntry[] {
+	return appendToolResultPart(entries, assistantMessageSequence, resultPart);
 }
 
-/** Builds the sole checkpoint message for a successful compaction. */
-export function compactionCheckpointCreate(input: { readonly text: string }): RuntimeMessageCreate {
-  return RuntimeMessageCreateSchema.parse({
-    messageKind: "compaction_checkpoint",
-    role: "user",
-    origin: "runtime",
-    status: "completed",
-    parts: [{ type: "text", text: input.text, truncated: false, status: "completed" }],
-  });
+export function internalToolRepairContext(input: {
+	readonly modelToolCallId: string;
+	readonly toolName: string;
+	readonly canonicalInput: RuntimeJsonValue;
+	readonly error: Parameters<typeof runtimeToolErrorFromFailure>[0];
+}): RuntimeContextDraft {
+	return {
+		contextKind: "assistant",
+		parts: [
+			{
+				type: "tool_call",
+				modelToolCallId: input.modelToolCallId,
+				toolName: input.toolName,
+				canonicalInput: input.canonicalInput,
+			},
+			{
+				type: "tool_result",
+				modelToolCallId: input.modelToolCallId,
+				result: {
+					type: "error",
+					error: runtimeToolErrorFromFailure(input.error),
+				},
+			},
+		],
+	};
 }
 
-/** Applies the successful compaction create and prefix-consumption stamp. */
-export function applyCompactionReceipt(input: {
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly modelRequestId: string;
-  readonly requestEndEventId: string;
-  readonly compactedThroughMessageSequence: number;
-  readonly create: RuntimeMessageCreate;
-  readonly prefixConsumption?: { readonly childThreadId: string; readonly parentBoundaryEventId: string } | undefined;
-}, receipt: RuntimeDeclarationReceipt): DurableRuntimeMessage {
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "write_request_end",
-    sourceKind: "model_request",
-    operationId: input.modelRequestId,
-  });
-  if (
-    receipt.events.length !== 2 || receipt.messages.length !== 1 ||
-    receipt.events[0]?.eventId !== input.requestEndEventId ||
-    receipt.compactedThroughMessageSequence !== input.compactedThroughMessageSequence
-  ) {
-    throw new Error("compaction receipt identity is invalid");
-  }
-  const checkpoint = applyMessageCreateStamps({
-    sessionId: input.sessionId,
-    sessionThreadId: input.sessionThreadId,
-    creates: [input.create],
-    eventStamps: [receipt.events[1]!],
-    messageStamps: receipt.messages,
-  })[0]!;
-  if (checkpoint.sequence !== input.compactedThroughMessageSequence + 1) {
-    throw new Error("compaction checkpoint message sequence is not contiguous");
-  }
-  const prefixStamp = receipt.prefixConsumptions[0];
-  if (input.prefixConsumption === undefined) {
-    if (receipt.prefixConsumptions.length !== 0) {
-      throw new Error("compaction receipt contains an unsolicited prefix consumption");
-    }
-  } else if (
-    receipt.prefixConsumptions.length !== 1 || prefixStamp === undefined ||
-    prefixStamp.childThreadId !== input.prefixConsumption.childThreadId ||
-    prefixStamp.parentBoundaryEventId !== input.prefixConsumption.parentBoundaryEventId ||
-    prefixStamp.checkpointMessageId !== checkpoint.id ||
-    prefixStamp.disposition !== "consumed"
-  ) {
-    throw new Error("compaction prefix consumption stamp is invalid");
-  }
-  return checkpoint;
+export function applyInternalToolRepairResult(input: {
+	readonly modelRequestId: string;
+	readonly existingDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly assignedMessageSequence: number;
+	readonly context: RuntimeContextDraft;
+}): RuntimeOpenRequestDraft {
+	if (input.context.contextKind !== "assistant") {
+		throw new Error("internal Tool repair context must be Assistant context");
+	}
+	if (
+		input.existingDraft !== undefined &&
+		(input.existingDraft.modelRequestId !== input.modelRequestId ||
+			input.existingDraft.messageSequence !== input.assignedMessageSequence)
+	) {
+		throw new Error(
+			"internal Tool repair changed the open Request draft identity",
+		);
+	}
+	return RuntimeOpenRequestDraftSchema.parse({
+		modelRequestId: input.modelRequestId,
+		messageSequence: input.assignedMessageSequence,
+		parts: [...(input.existingDraft?.parts ?? []), ...input.context.parts],
+	});
 }
 
-/** Creates the sole message for one invalid provider Tool call repair. */
-export function runtimeInternalToolRepairCreate(input: { readonly part: RuntimePartCreate }): RuntimeMessageCreate {
-  if (input.part.type !== "tool" || input.part.state.status !== "error" || input.part.toolUseEventId !== undefined) {
-    throw new Error("internal Tool repair requires one unexposed terminal Tool part");
-  }
-  return RuntimeMessageCreateSchema.parse({
-    messageKind: "internal_tool_repair",
-    role: "assistant",
-    origin: "agent",
-    status: "completed",
-    parts: [input.part],
-  });
+function parseAcceptedMessageContent(
+	contentJson: string,
+): readonly RuntimeContextDraft[] {
+	const parsed = JSON.parse(contentJson) as unknown;
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error("accepted input payload must be a JSON object");
+	}
+	const content = parsed as { readonly messages?: unknown };
+	if (!Array.isArray(content.messages))
+		throw new Error("accepted input payload has no content");
+	return content.messages.flatMap((message): RuntimeContextDraft[] => {
+		if (
+			typeof message !== "object" ||
+			message === null ||
+			Array.isArray(message)
+		) {
+			throw new Error("accepted input message is invalid");
+		}
+		const value = message as { readonly parts?: unknown };
+		if (!Array.isArray(value.parts))
+			throw new Error("accepted input message has no parts");
+		const parts: RuntimeContextPart[] = value.parts.flatMap(
+			(part): RuntimeContextPart[] => {
+				if (typeof part !== "object" || part === null || Array.isArray(part))
+					return [];
+				const value = part as {
+					readonly type?: unknown;
+					readonly text?: unknown;
+				};
+				return value.type === "text" && typeof value.text === "string"
+					? [{ type: "text", text: value.text }]
+					: [];
+			},
+		);
+		return parts.length === 0
+			? []
+			: [{ contextKind: "user" as const, parts }];
+	});
 }
 
-/** Applies the database identities returned for one internal repair create. */
-export function applyInternalToolRepairReceipt(input: {
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly repairKey: string;
-  readonly eventId: string;
-  readonly create: RuntimeMessageCreate;
-}, receipt: RuntimeDeclarationReceipt): DurableRuntimeMessage {
-  assertOrdinaryDeclarationReceipt(receipt);
-  assertReceiptIdentity(receipt, {
-    sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_internal_tool_repair",
-    sourceKind: "internal_tool_repair",
-    operationId: input.repairKey,
-  });
-  if (receipt.events.length !== 1 || receipt.events[0]?.eventId !== input.eventId) {
-    throw new Error("internal Tool repair event stamp is invalid");
-  }
-  return applyMessageCreateStamps({
-    sessionId: input.sessionId,
-    sessionThreadId: input.sessionThreadId,
-    creates: [input.create],
-    eventStamps: receipt.events,
-    messageStamps: receipt.messages,
-  })[0]!;
+function textDraft(
+	contextKind: RuntimeContextKind,
+	text: string,
+): RuntimeContextDraft {
+	return { contextKind, parts: [{ type: "text", text }] };
 }
 
-/** Applies one identity-free Assistant append to the current durable message. */
-export function applyAssistantPartAppendReceipt(input: {
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly operationKind: "write_event" | "write_request_end";
-  readonly sourceKind: string;
-  readonly operationId: string;
-  readonly eventId: string;
-  readonly append: RuntimeAssistantPartAppend;
-  readonly existingMessage?: DurableRuntimeMessage | undefined;
-}, receipt: RuntimeDeclarationReceipt): DurableRuntimeMessage {
-  assertOrdinaryDeclarationReceipt(receipt);
-  assertReceiptIdentity(receipt, input);
-  if (receipt.events.length !== 1 || receipt.events[0]?.eventId !== input.eventId || receipt.messages.length !== 1) {
-    throw new Error("Assistant append receipt carrier set is invalid");
-  }
-  const eventStamp = receipt.events[0]!;
-  const messageStamp = receipt.messages[0]!;
-  const append = RuntimeAssistantPartAppendSchema.parse(input.append);
-  if (
-    eventStamp.sessionThreadId !== input.sessionThreadId ||
-    eventStamp.disposition !== "created" ||
-    messageStamp.sessionThreadId !== input.sessionThreadId ||
-    messageStamp.parts.length !== append.parts.length
-  ) {
-    throw new Error("Assistant append receipt stamp is invalid");
-  }
-  const existing = input.existingMessage;
-  if (existing !== undefined && (
-    existing.id !== messageStamp.messageId ||
-    existing.sequence !== messageStamp.messageSequence ||
-    messageStamp.disposition !== "updated"
-  )) {
-    throw new Error("Assistant append changed its durable message identity");
-  }
-  if (existing === undefined && messageStamp.disposition !== "created") {
-    throw new Error("first Assistant append did not create its message");
-  }
-  const expectedFirstPartSequence = existing === undefined
-    ? 0
-    : Math.max(-1, ...existing.parts.map((part) => part.sequence)) + 1;
-  const parts = append.parts.map((part, index) => durablePartFromStamp(
-    input.sessionId,
-    messageStamp.messageId,
-    part,
-    messageStamp.parts[index]!,
-    expectedFirstPartSequence === undefined ? undefined : expectedFirstPartSequence + index,
-  ));
-  return DurableRuntimeMessageSchema.parse({
-    id: messageStamp.messageId,
-    sessionId: input.sessionId,
-    role: "assistant",
-    origin: "agent",
-    sequence: messageStamp.messageSequence,
-    status: existing?.status ?? "streaming",
-    createdAt: messageStamp.createdAt,
-    ...(messageStamp.updatedAt.length > 0 ? { updatedAt: messageStamp.updatedAt } : {}),
-    ...(existing?.error === undefined ? {} : { error: existing.error }),
-    ...(existing?.finishReason === undefined ? {} : { finishReason: existing.finishReason }),
-    ...(existing?.usage === undefined ? {} : { usage: existing.usage }),
-    ...(existing?.responseId === undefined ? {} : { responseId: existing.responseId }),
-    parts: [...(existing?.parts ?? []), ...parts],
-  });
-}
-
-/** Validates an ordinary target settlement ACK and returns its result event. */
-export function applyToolSettlementReceipt(input: {
-  readonly sessionThreadId: string;
-  readonly operationKind: "write_event" | "commit_runtime_termination";
-  readonly sourceKind: string;
-  readonly operationId: string;
-  readonly eventId: string;
-  readonly settlement: RuntimeToolSettlementDeclaration;
-}, receipt: RuntimeDeclarationReceipt): RuntimeDeclarationReceipt["events"][number] {
-  assertOrdinaryDeclarationReceipt(receipt);
-  RuntimeToolSettlementDeclarationSchema.parse(input.settlement);
-  assertReceiptIdentity(receipt, input);
-  if (receipt.messages.length !== 0 || receipt.events.length !== 1 || receipt.interruptToolProjections.length !== 0) {
-    throw new Error("Tool settlement receipt carrier set is invalid");
-  }
-  const stamp = receipt.events[0]!;
-  if (stamp.sessionThreadId !== input.sessionThreadId || stamp.eventId !== input.eventId || stamp.disposition !== "created") {
-    throw new Error("Tool settlement event stamp is invalid");
-  }
-  return stamp;
-}
-
-function applyMessageCreateStamps(input: {
-  readonly sessionId: string;
-  readonly sessionThreadId: string;
-  readonly creates: readonly RuntimeMessageCreate[];
-  readonly eventStamps: RuntimeDeclarationReceipt["events"];
-  readonly messageStamps: RuntimeDeclarationReceipt["messages"];
-  readonly skipSessionValidation?: boolean | undefined;
-}): DurableRuntimeMessage[] {
-  if (input.creates.length !== input.messageStamps.length) {
-    throw new Error("message create stamp count does not match");
-  }
-  let previousMessageSequence = -1;
-  return input.creates.map((rawCreate, index) => {
-    const create = RuntimeMessageCreateSchema.parse(rawCreate);
-    const stamp = input.messageStamps[index]!;
-    const owningEvent = input.eventStamps[index];
-    if (
-      stamp.sessionThreadId !== input.sessionThreadId ||
-      stamp.disposition !== "created" ||
-      owningEvent === undefined || owningEvent.sessionThreadId !== input.sessionThreadId ||
-      (index > 0 && stamp.messageSequence !== previousMessageSequence + 1) ||
-      stamp.parts.length !== create.parts.length
-    ) {
-      throw new Error("message create stamp is invalid");
-    }
-    previousMessageSequence = stamp.messageSequence;
-    const parts = create.parts.map((part, partIndex) => durablePartFromStamp(
-      input.sessionId,
-      stamp.messageId,
-      part,
-      stamp.parts[partIndex]!,
-      partIndex === 0 ? 0 : stamp.parts[partIndex - 1]!.partSequence + 1,
-    ));
-    return DurableRuntimeMessageSchema.parse({
-      id: stamp.messageId,
-      sessionId: input.skipSessionValidation ? input.sessionId : input.sessionId,
-      role: create.role,
-      origin: create.origin,
-      sequence: stamp.messageSequence,
-      status: create.status,
-      createdAt: stamp.createdAt,
-      ...(stamp.updatedAt.length > 0 ? { updatedAt: stamp.updatedAt } : {}),
-      ...(create.error === undefined ? {} : { error: create.error }),
-      ...(create.finishReason === undefined ? {} : { finishReason: create.finishReason }),
-      ...(create.usage === undefined ? {} : { usage: create.usage }),
-      ...(create.responseId === undefined ? {} : { responseId: create.responseId }),
-      parts,
-    });
-  });
-}
-
-function durablePartFromStamp(
-  sessionId: string,
-  messageId: string,
-  rawPart: RuntimePartCreate,
-  stamp: RuntimeDeclarationReceipt["messages"][number]["parts"][number],
-  expectedSequence: number | undefined,
-): RuntimePart {
-  const part = RuntimePartCreateSchema.parse(rawPart);
-  if (
-    stamp === undefined || stamp.messageId !== messageId ||
-    stamp.disposition !== "created" ||
-    (expectedSequence !== undefined && stamp.partSequence !== expectedSequence)
-  ) {
-    throw new Error("message part stamp is invalid or non-contiguous");
-  }
-  return {
-    ...part,
-    id: stamp.partId,
-    sessionId,
-    messageId,
-    sequence: stamp.partSequence,
-    createdAt: stamp.createdAt,
-    ...(stamp.updatedAt.length > 0 ? { updatedAt: stamp.updatedAt } : {}),
-  } as RuntimePart;
-}
-
-function messageCreateInfo(message: RuntimeMessage): Omit<RuntimeMessageCreate, "messageKind" | "parts"> {
-  return {
-    role: message.role,
-    origin: message.origin,
-    status: message.status,
-    ...(message.error === undefined ? {} : { error: message.error }),
-    ...(message.finishReason === undefined ? {} : { finishReason: message.finishReason }),
-    ...(message.usage === undefined ? {} : { usage: message.usage }),
-    ...(message.responseId === undefined ? {} : { responseId: message.responseId }),
-  };
-}
-
-function partCreateFromDurable(part: RuntimePart): RuntimePartCreate {
-  const { id: _id, sessionId: _sessionId, messageId: _messageId, sequence: _sequence, createdAt: _createdAt, updatedAt: _updatedAt, ...create } = part;
-  return RuntimePartCreateSchema.parse(create);
-}
-
-function acceptedInputMessages(input: RuntimeAcceptedInputState): readonly RuntimeMessage[] {
-  if (input.kind === "task_notification") return [];
-  if (input.kind === "inter_agent_message") return [RuntimeMessageSchema.parse(input.message)];
-  if (input.kind === "approval_review") return input.promptItems.map((message) => RuntimeMessageSchema.parse(message));
-  if (input.kind !== "messages") return [];
-  const parsed = JSON.parse(input.payloadJson) as { readonly messages?: unknown };
-  if (!Array.isArray(parsed.messages)) throw new Error("accepted input payload has no messages");
-  return parsed.messages.map((message) => RuntimeMessageSchema.parse(message));
-}
-
-function acceptedInputMessageKind(input: RuntimeAcceptedInputState): RuntimeMessageCreate["messageKind"] {
-  switch (input.kind) {
-    case "messages": return "user_input";
-    case "inter_agent_message": return "agent_mail_input";
-    case "approval_review": return "reviewer_input";
-    case "rejection": return "rejection";
-    case "task_notification": throw new Error("task notification uses its dedicated message kind");
-  }
-}
-
-function assertCreatedEvents(events: RuntimeDeclarationReceipt["events"], sessionThreadId: string): void {
-  const ids = new Set<string>();
-  let previousSequence = -1;
-  for (const event of events) {
-    if (
-      event.sessionThreadId !== sessionThreadId || event.disposition !== "created" ||
-      ids.has(event.eventId) || event.eventSequence <= previousSequence
-    ) {
-      throw new Error("created event stamp order is invalid");
-    }
-    ids.add(event.eventId);
-    previousSequence = event.eventSequence;
-  }
-}
-
-function failureToolError(failure: RuntimeFailure): { readonly type: string; readonly message: string; readonly retryable: boolean } {
-  return { type: failure.code, message: failure.message, retryable: failure.retryable };
+export function contextToolResultFromSettlement(
+	modelToolCallId: string,
+	settlement: RuntimeToolSettlementDeclaration["outcome"],
+): Extract<RuntimeContextPart, { readonly type: "tool_result" }> {
+	if (settlement.type === "completed") {
+		const output = finalizeRuntimeToolOutput(settlement.output);
+		return {
+			type: "tool_result",
+			modelToolCallId,
+			result: { type: "completed", output: { text: output.text } },
+		};
+	}
+	if (settlement.type === "error") {
+		return {
+			type: "tool_result",
+			modelToolCallId,
+			result: {
+				type: "error",
+				error: runtimeToolErrorFromFailure(settlement.error),
+			},
+		};
+	}
+	return {
+		type: "tool_result",
+		modelToolCallId,
+		result: { type: "cancelled" },
+	};
 }

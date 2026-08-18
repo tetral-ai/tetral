@@ -220,9 +220,10 @@ retain a second permanent copy of the result body after that commit.
 Activation-budget exhaustion is private lifecycle state. Its Sandbox
 settlement and Bridge wait response carry the internal exhaustion kind with the
 fixed message `sandbox activation could not be completed`; Runtime maps every
-Sandbox Tool family to one error text block containing exactly that message.
-Provider capacity diagnosis, route envelopes, partial output, attempt counts,
-and Runtime error codes are not projected into public Tool Results.
+Sandbox Tool family to one provider-neutral error text block containing exactly
+`The requested operation could not be completed.` Provider capacity diagnosis,
+Sandbox architecture, route envelopes, partial output, attempt counts, and
+Runtime error codes are not projected into public Tool Results.
 
 ## Configuration
 
@@ -256,8 +257,9 @@ job becoming available to being leased. Sandbox provider completion lines
 use `sandbox.provider.operation_completed` with `operation`, `outcome`,
 `duration.ms`, available workspace/Session/thread/operation/provider IDs, and a
 normalized error class and code. Activation lifecycle lines separately record
-stable-name resolution, final Queue-authority loss, and the durable outcome of
-each current attempt. Materialization arm operations identify helper health,
+stable-name resolution, final Queue-authority loss, and the durable outcome,
+normalized error code, and Queue attempt N/M of each current attempt.
+Materialization arm operations identify helper health,
 base directories, credential mint, file staging, mount/bind verification,
 skills, memory projection, and repository checkout separately.
 
@@ -276,6 +278,14 @@ Focused tests live in `services/sandbox`, `internal/sandbox`, and
 execution tests require `TETRAL_TEST_DATABASE_URL`. The Kubernetes and Helm
 packages verify that the canonical, service-local, and rendered deployment
 surfaces stay aligned.
+
+The published-image Daytona smoke is selected only by the Engine release
+workflow after the Sandbox image has been pushed. That job passes the build's
+immutable OCI digest to the production artifact builder, uses release-
+environment Daytona credentials, and gates chart publication. The build tag
+keeps ordinary `go test ./...`, pull requests, and main-branch CI free of
+Daytona credentials and calls. The resource-projection live smoke remains a
+separate operator-triggered external check.
 
 ## Boundaries
 

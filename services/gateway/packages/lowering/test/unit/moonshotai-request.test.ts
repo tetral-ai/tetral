@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   ProviderRequestKind,
-  RuntimeMessageRole,
-  RuntimeToolPartState,
+  ProviderContextRole,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { ProviderRequest, RuntimeMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest, ProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { lowerProviderRequest, type ResolvedProviderRequestAttachment } from "../../src/request.js";
 import { MoonshotKimiK3Rules } from "../../src/rules/moonshotai.js";
 
@@ -19,24 +18,21 @@ describe("moonshotai Kimi request lowering", () => {
     });
 
     const lowered = lowerKimiRequest(kimiRequest({
-      messages: [{
-        id: "msg_tool",
-        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
-        status: "completed",
-        origin: "agent",
-        parts: [
-          { id: "signed", reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) } },
-          {
-            id: "tool_part",
-            tool: {
-              callId: "call:with/slashes and spaces",
+      context: [{
+        role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+        content: [
+          { reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) } },
+          { toolCall: {
+              modelToolCallId: "call:with/slashes and spaces",
               name: "Read",
-              toolUseEventId: "sevt_1",
-              state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
               inputJson: JSON.stringify({ path: "/tmp/a" }),
-              outputOrErrorJson: JSON.stringify({ text: "ok" }),
-            },
-          },
+          } },
+          { toolResult: {
+              modelToolCallId: "call:with/slashes and spaces",
+              completed: { outputJson: JSON.stringify({ text: "ok" }) },
+              error: undefined,
+              cancelled: undefined,
+          } },
         ],
       }],
     }));
@@ -45,14 +41,11 @@ describe("moonshotai Kimi request lowering", () => {
       role: "assistant",
       content: [
         { type: "reasoning", text: "", providerMetadata: { anthropic: { signature: "sig_1" } } },
+        { type: "tool-call", toolCallId: "call:with/slashes and spaces" },
         { type: "text", text: " " },
       ],
     });
     expect(lowered.messages[2]).toMatchObject({
-      role: "assistant",
-      content: [{ type: "tool-call", toolCallId: "call:with/slashes and spaces" }],
-    });
-    expect(lowered.messages[3]).toMatchObject({
       role: "tool",
       content: [{ type: "tool-result", toolCallId: "call:with/slashes and spaces" }],
     });
@@ -100,10 +93,10 @@ describe("moonshotai Kimi request lowering", () => {
         { kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_AGENT, text: "stable two", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_SESSION },
         { kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_SKILL, text: "stable three", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE },
       ],
-      messages: [
-        textMessage("msg_1", "first"),
-        textMessage("msg_2", "second"),
-        multipartUserMessage("msg_3", ["third-a", "third-b"]),
+      context: [
+        textMessage("first"),
+        textMessage("second"),
+        multipartUserMessage(["third-a", "third-b"]),
       ],
     }));
 
@@ -227,13 +220,12 @@ function kimiRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest 
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
-    parentThreadId: undefined,
     bindingId: "bind_1",
     bindingGeneration: 1,
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "moonshotai", modelId: "kimi-k3", variant: "" },
     system: [{ kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE, text: "You are concise.", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE }],
-    messages: [textMessage("msg_1", "hello")],
+    context: [textMessage("hello")],
     tools: [],
     attachments: [],
     limits: { maxOutputTokens: 2048, timeoutMs: 30_000 },
@@ -241,13 +233,10 @@ function kimiRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest 
   };
 }
 
-function textMessage(id: string, text: string): RuntimeMessage {
+function textMessage(text: string): ProviderContextEntry {
   return {
-    id,
-    role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-    status: "completed",
-    origin: "user",
-    parts: [{ id: `${id}_part`, text: { text } }],
+    role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+    content: [{ text: { text } }],
   };
 }
 
@@ -267,20 +256,16 @@ function resolvedAttachment(
 function transientOrigin(attachmentRef: string): NonNullable<ResolvedProviderRequestAttachment["transient"]> {
   return {
     attachmentRef,
-    sourceToolUseEventId: "sevt_1",
     sourcePath: "/tmp/image.png",
     pageRange: "",
     detail: "auto",
   };
 }
 
-function multipartUserMessage(id: string, texts: readonly string[]): RuntimeMessage {
+function multipartUserMessage(texts: readonly string[]): ProviderContextEntry {
   return {
-    id,
-    role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
-    status: "completed",
-    origin: "user",
-    parts: texts.map((text, index) => ({ id: `${id}_part_${index}`, text: { text } })),
+    role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+    content: texts.map((text) => ({ text: { text } })),
   };
 }
 

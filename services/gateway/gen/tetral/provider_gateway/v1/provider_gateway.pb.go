@@ -189,105 +189,53 @@ func (SystemCacheHint) EnumDescriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{2}
 }
 
-type RuntimeMessageRole int32
+type ProviderContextRole int32
 
 const (
-	RuntimeMessageRole_RUNTIME_MESSAGE_ROLE_UNSPECIFIED RuntimeMessageRole = 0
-	RuntimeMessageRole_RUNTIME_MESSAGE_ROLE_USER        RuntimeMessageRole = 1
-	RuntimeMessageRole_RUNTIME_MESSAGE_ROLE_ASSISTANT   RuntimeMessageRole = 2
+	ProviderContextRole_PROVIDER_CONTEXT_ROLE_UNSPECIFIED ProviderContextRole = 0
+	ProviderContextRole_PROVIDER_CONTEXT_ROLE_USER        ProviderContextRole = 1
+	ProviderContextRole_PROVIDER_CONTEXT_ROLE_ASSISTANT   ProviderContextRole = 2
 )
 
-// Enum value maps for RuntimeMessageRole.
+// Enum value maps for ProviderContextRole.
 var (
-	RuntimeMessageRole_name = map[int32]string{
-		0: "RUNTIME_MESSAGE_ROLE_UNSPECIFIED",
-		1: "RUNTIME_MESSAGE_ROLE_USER",
-		2: "RUNTIME_MESSAGE_ROLE_ASSISTANT",
+	ProviderContextRole_name = map[int32]string{
+		0: "PROVIDER_CONTEXT_ROLE_UNSPECIFIED",
+		1: "PROVIDER_CONTEXT_ROLE_USER",
+		2: "PROVIDER_CONTEXT_ROLE_ASSISTANT",
 	}
-	RuntimeMessageRole_value = map[string]int32{
-		"RUNTIME_MESSAGE_ROLE_UNSPECIFIED": 0,
-		"RUNTIME_MESSAGE_ROLE_USER":        1,
-		"RUNTIME_MESSAGE_ROLE_ASSISTANT":   2,
+	ProviderContextRole_value = map[string]int32{
+		"PROVIDER_CONTEXT_ROLE_UNSPECIFIED": 0,
+		"PROVIDER_CONTEXT_ROLE_USER":        1,
+		"PROVIDER_CONTEXT_ROLE_ASSISTANT":   2,
 	}
 )
 
-func (x RuntimeMessageRole) Enum() *RuntimeMessageRole {
-	p := new(RuntimeMessageRole)
+func (x ProviderContextRole) Enum() *ProviderContextRole {
+	p := new(ProviderContextRole)
 	*p = x
 	return p
 }
 
-func (x RuntimeMessageRole) String() string {
+func (x ProviderContextRole) String() string {
 	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
 }
 
-func (RuntimeMessageRole) Descriptor() protoreflect.EnumDescriptor {
+func (ProviderContextRole) Descriptor() protoreflect.EnumDescriptor {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[3].Descriptor()
 }
 
-func (RuntimeMessageRole) Type() protoreflect.EnumType {
+func (ProviderContextRole) Type() protoreflect.EnumType {
 	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[3]
 }
 
-func (x RuntimeMessageRole) Number() protoreflect.EnumNumber {
+func (x ProviderContextRole) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use RuntimeMessageRole.Descriptor instead.
-func (RuntimeMessageRole) EnumDescriptor() ([]byte, []int) {
+// Deprecated: Use ProviderContextRole.Descriptor instead.
+func (ProviderContextRole) EnumDescriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{3}
-}
-
-type RuntimeToolPartState int32
-
-const (
-	RuntimeToolPartState_RUNTIME_TOOL_PART_STATE_UNSPECIFIED RuntimeToolPartState = 0
-	RuntimeToolPartState_RUNTIME_TOOL_PART_STATE_COMPLETED   RuntimeToolPartState = 1
-	RuntimeToolPartState_RUNTIME_TOOL_PART_STATE_ERROR       RuntimeToolPartState = 2
-	RuntimeToolPartState_RUNTIME_TOOL_PART_STATE_CANCELLED   RuntimeToolPartState = 3
-)
-
-// Enum value maps for RuntimeToolPartState.
-var (
-	RuntimeToolPartState_name = map[int32]string{
-		0: "RUNTIME_TOOL_PART_STATE_UNSPECIFIED",
-		1: "RUNTIME_TOOL_PART_STATE_COMPLETED",
-		2: "RUNTIME_TOOL_PART_STATE_ERROR",
-		3: "RUNTIME_TOOL_PART_STATE_CANCELLED",
-	}
-	RuntimeToolPartState_value = map[string]int32{
-		"RUNTIME_TOOL_PART_STATE_UNSPECIFIED": 0,
-		"RUNTIME_TOOL_PART_STATE_COMPLETED":   1,
-		"RUNTIME_TOOL_PART_STATE_ERROR":       2,
-		"RUNTIME_TOOL_PART_STATE_CANCELLED":   3,
-	}
-)
-
-func (x RuntimeToolPartState) Enum() *RuntimeToolPartState {
-	p := new(RuntimeToolPartState)
-	*p = x
-	return p
-}
-
-func (x RuntimeToolPartState) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (RuntimeToolPartState) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[4].Descriptor()
-}
-
-func (RuntimeToolPartState) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[4]
-}
-
-func (x RuntimeToolPartState) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use RuntimeToolPartState.Descriptor instead.
-func (RuntimeToolPartState) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{4}
 }
 
 type ProviderStreamEventType int32
@@ -356,11 +304,11 @@ func (x ProviderStreamEventType) String() string {
 }
 
 func (ProviderStreamEventType) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[4].Descriptor()
 }
 
 func (ProviderStreamEventType) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[4]
 }
 
 func (x ProviderStreamEventType) Number() protoreflect.EnumNumber {
@@ -369,7 +317,7 @@ func (x ProviderStreamEventType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProviderStreamEventType.Descriptor instead.
 func (ProviderStreamEventType) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{5}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{4}
 }
 
 type ProviderAttachmentRejectionReason int32
@@ -405,11 +353,11 @@ func (x ProviderAttachmentRejectionReason) String() string {
 }
 
 func (ProviderAttachmentRejectionReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5].Descriptor()
 }
 
 func (ProviderAttachmentRejectionReason) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[5]
 }
 
 func (x ProviderAttachmentRejectionReason) Number() protoreflect.EnumNumber {
@@ -418,7 +366,7 @@ func (x ProviderAttachmentRejectionReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProviderAttachmentRejectionReason.Descriptor instead.
 func (ProviderAttachmentRejectionReason) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{6}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{5}
 }
 
 type ProviderFinishReason int32
@@ -469,11 +417,11 @@ func (x ProviderFinishReason) String() string {
 }
 
 func (ProviderFinishReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6].Descriptor()
 }
 
 func (ProviderFinishReason) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[6]
 }
 
 func (x ProviderFinishReason) Number() protoreflect.EnumNumber {
@@ -482,7 +430,7 @@ func (x ProviderFinishReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProviderFinishReason.Descriptor instead.
 func (ProviderFinishReason) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{7}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{6}
 }
 
 type RunWebStatus int32
@@ -521,11 +469,11 @@ func (x RunWebStatus) String() string {
 }
 
 func (RunWebStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7].Descriptor()
 }
 
 func (RunWebStatus) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[7]
 }
 
 func (x RunWebStatus) Number() protoreflect.EnumNumber {
@@ -534,7 +482,7 @@ func (x RunWebStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RunWebStatus.Descriptor instead.
 func (RunWebStatus) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{8}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{7}
 }
 
 type RunMcpToolStatus int32
@@ -573,11 +521,11 @@ func (x RunMcpToolStatus) String() string {
 }
 
 func (RunMcpToolStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8].Descriptor()
 }
 
 func (RunMcpToolStatus) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[8]
 }
 
 func (x RunMcpToolStatus) Number() protoreflect.EnumNumber {
@@ -586,7 +534,7 @@ func (x RunMcpToolStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RunMcpToolStatus.Descriptor instead.
 func (RunMcpToolStatus) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{9}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{8}
 }
 
 type McpErrorKind int32
@@ -649,11 +597,11 @@ func (x McpErrorKind) String() string {
 }
 
 func (McpErrorKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9].Descriptor()
 }
 
 func (McpErrorKind) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[9]
 }
 
 func (x McpErrorKind) Number() protoreflect.EnumNumber {
@@ -662,7 +610,7 @@ func (x McpErrorKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use McpErrorKind.Descriptor instead.
 func (McpErrorKind) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{10}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{9}
 }
 
 type McpRetryStatus int32
@@ -701,11 +649,11 @@ func (x McpRetryStatus) String() string {
 }
 
 func (McpRetryStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[11].Descriptor()
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10].Descriptor()
 }
 
 func (McpRetryStatus) Type() protoreflect.EnumType {
-	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[11]
+	return &file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes[10]
 }
 
 func (x McpRetryStatus) Number() protoreflect.EnumNumber {
@@ -714,7 +662,7 @@ func (x McpRetryStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use McpRetryStatus.Descriptor instead.
 func (McpRetryStatus) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{11}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{10}
 }
 
 type ProviderRequest struct {
@@ -725,13 +673,12 @@ type ProviderRequest struct {
 	WorkspaceId         string                       `protobuf:"bytes,4,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
 	SessionId           string                       `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	SessionThreadId     string                       `protobuf:"bytes,6,opt,name=session_thread_id,json=sessionThreadId,proto3" json:"session_thread_id,omitempty"`
-	ParentThreadId      *string                      `protobuf:"bytes,7,opt,name=parent_thread_id,json=parentThreadId,proto3,oneof" json:"parent_thread_id,omitempty"`
 	BindingId           string                       `protobuf:"bytes,8,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
 	BindingGeneration   int64                        `protobuf:"varint,9,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
 	RuntimeBindingToken string                       `protobuf:"bytes,10,opt,name=runtime_binding_token,json=runtimeBindingToken,proto3" json:"runtime_binding_token,omitempty"`
 	Model               *ModelRef                    `protobuf:"bytes,11,opt,name=model,proto3" json:"model,omitempty"`
 	System              []*SystemSegment             `protobuf:"bytes,12,rep,name=system,proto3" json:"system,omitempty"`
-	Messages            []*RuntimeMessage            `protobuf:"bytes,13,rep,name=messages,proto3" json:"messages,omitempty"`
+	Context             []*ProviderContextEntry      `protobuf:"bytes,13,rep,name=context,proto3" json:"context,omitempty"`
 	Tools               []*RuntimeToolDefinition     `protobuf:"bytes,14,rep,name=tools,proto3" json:"tools,omitempty"`
 	Attachments         []*ProviderRequestAttachment `protobuf:"bytes,15,rep,name=attachments,proto3" json:"attachments,omitempty"`
 	Limits              *ProviderRequestLimits       `protobuf:"bytes,16,opt,name=limits,proto3" json:"limits,omitempty"`
@@ -812,13 +759,6 @@ func (x *ProviderRequest) GetSessionThreadId() string {
 	return ""
 }
 
-func (x *ProviderRequest) GetParentThreadId() string {
-	if x != nil && x.ParentThreadId != nil {
-		return *x.ParentThreadId
-	}
-	return ""
-}
-
 func (x *ProviderRequest) GetBindingId() string {
 	if x != nil {
 		return x.BindingId
@@ -854,9 +794,9 @@ func (x *ProviderRequest) GetSystem() []*SystemSegment {
 	return nil
 }
 
-func (x *ProviderRequest) GetMessages() []*RuntimeMessage {
+func (x *ProviderRequest) GetContext() []*ProviderContextEntry {
 	if x != nil {
-		return x.Messages
+		return x.Context
 	}
 	return nil
 }
@@ -1009,31 +949,28 @@ func (x *SystemSegment) GetCacheHint() SystemCacheHint {
 	return SystemCacheHint_SYSTEM_CACHE_HINT_UNSPECIFIED
 }
 
-type RuntimeMessage struct {
+type ProviderContextEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Role          RuntimeMessageRole     `protobuf:"varint,2,opt,name=role,proto3,enum=tetral.provider_gateway.v1.RuntimeMessageRole" json:"role,omitempty"`
-	Parts         []*RuntimePart         `protobuf:"bytes,3,rep,name=parts,proto3" json:"parts,omitempty"`
-	Status        string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
-	Origin        string                 `protobuf:"bytes,5,opt,name=origin,proto3" json:"origin,omitempty"`
+	Role          ProviderContextRole    `protobuf:"varint,1,opt,name=role,proto3,enum=tetral.provider_gateway.v1.ProviderContextRole" json:"role,omitempty"`
+	Content       []*ProviderContextItem `protobuf:"bytes,2,rep,name=content,proto3" json:"content,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RuntimeMessage) Reset() {
-	*x = RuntimeMessage{}
+func (x *ProviderContextEntry) Reset() {
+	*x = ProviderContextEntry{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RuntimeMessage) String() string {
+func (x *ProviderContextEntry) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RuntimeMessage) ProtoMessage() {}
+func (*ProviderContextEntry) ProtoMessage() {}
 
-func (x *RuntimeMessage) ProtoReflect() protoreflect.Message {
+func (x *ProviderContextEntry) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1045,73 +982,52 @@ func (x *RuntimeMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RuntimeMessage.ProtoReflect.Descriptor instead.
-func (*RuntimeMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderContextEntry.ProtoReflect.Descriptor instead.
+func (*ProviderContextEntry) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *RuntimeMessage) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-func (x *RuntimeMessage) GetRole() RuntimeMessageRole {
+func (x *ProviderContextEntry) GetRole() ProviderContextRole {
 	if x != nil {
 		return x.Role
 	}
-	return RuntimeMessageRole_RUNTIME_MESSAGE_ROLE_UNSPECIFIED
+	return ProviderContextRole_PROVIDER_CONTEXT_ROLE_UNSPECIFIED
 }
 
-func (x *RuntimeMessage) GetParts() []*RuntimePart {
+func (x *ProviderContextEntry) GetContent() []*ProviderContextItem {
 	if x != nil {
-		return x.Parts
+		return x.Content
 	}
 	return nil
 }
 
-func (x *RuntimeMessage) GetStatus() string {
-	if x != nil {
-		return x.Status
-	}
-	return ""
-}
-
-func (x *RuntimeMessage) GetOrigin() string {
-	if x != nil {
-		return x.Origin
-	}
-	return ""
-}
-
-type RuntimePart struct {
+type ProviderContextItem struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Types that are valid to be assigned to Value:
 	//
-	//	*RuntimePart_Text
-	//	*RuntimePart_Reasoning
-	//	*RuntimePart_Tool
-	Value         isRuntimePart_Value `protobuf_oneof:"value"`
+	//	*ProviderContextItem_Text
+	//	*ProviderContextItem_Reasoning
+	//	*ProviderContextItem_ToolCall
+	//	*ProviderContextItem_ToolResult
+	Value         isProviderContextItem_Value `protobuf_oneof:"value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RuntimePart) Reset() {
-	*x = RuntimePart{}
+func (x *ProviderContextItem) Reset() {
+	*x = ProviderContextItem{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RuntimePart) String() string {
+func (x *ProviderContextItem) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RuntimePart) ProtoMessage() {}
+func (*ProviderContextItem) ProtoMessage() {}
 
-func (x *RuntimePart) ProtoReflect() protoreflect.Message {
+func (x *ProviderContextItem) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1123,95 +1039,103 @@ func (x *RuntimePart) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RuntimePart.ProtoReflect.Descriptor instead.
-func (*RuntimePart) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderContextItem.ProtoReflect.Descriptor instead.
+func (*ProviderContextItem) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *RuntimePart) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-func (x *RuntimePart) GetValue() isRuntimePart_Value {
+func (x *ProviderContextItem) GetValue() isProviderContextItem_Value {
 	if x != nil {
 		return x.Value
 	}
 	return nil
 }
 
-func (x *RuntimePart) GetText() *RuntimeTextPart {
+func (x *ProviderContextItem) GetText() *ProviderContextText {
 	if x != nil {
-		if x, ok := x.Value.(*RuntimePart_Text); ok {
+		if x, ok := x.Value.(*ProviderContextItem_Text); ok {
 			return x.Text
 		}
 	}
 	return nil
 }
 
-func (x *RuntimePart) GetReasoning() *RuntimeReasoningPart {
+func (x *ProviderContextItem) GetReasoning() *ProviderContextReasoning {
 	if x != nil {
-		if x, ok := x.Value.(*RuntimePart_Reasoning); ok {
+		if x, ok := x.Value.(*ProviderContextItem_Reasoning); ok {
 			return x.Reasoning
 		}
 	}
 	return nil
 }
 
-func (x *RuntimePart) GetTool() *RuntimeToolPart {
+func (x *ProviderContextItem) GetToolCall() *ProviderToolCall {
 	if x != nil {
-		if x, ok := x.Value.(*RuntimePart_Tool); ok {
-			return x.Tool
+		if x, ok := x.Value.(*ProviderContextItem_ToolCall); ok {
+			return x.ToolCall
 		}
 	}
 	return nil
 }
 
-type isRuntimePart_Value interface {
-	isRuntimePart_Value()
+func (x *ProviderContextItem) GetToolResult() *ProviderToolResult {
+	if x != nil {
+		if x, ok := x.Value.(*ProviderContextItem_ToolResult); ok {
+			return x.ToolResult
+		}
+	}
+	return nil
 }
 
-type RuntimePart_Text struct {
-	Text *RuntimeTextPart `protobuf:"bytes,2,opt,name=text,proto3,oneof"`
+type isProviderContextItem_Value interface {
+	isProviderContextItem_Value()
 }
 
-type RuntimePart_Reasoning struct {
-	Reasoning *RuntimeReasoningPart `protobuf:"bytes,3,opt,name=reasoning,proto3,oneof"`
+type ProviderContextItem_Text struct {
+	Text *ProviderContextText `protobuf:"bytes,1,opt,name=text,proto3,oneof"`
 }
 
-type RuntimePart_Tool struct {
-	Tool *RuntimeToolPart `protobuf:"bytes,4,opt,name=tool,proto3,oneof"`
+type ProviderContextItem_Reasoning struct {
+	Reasoning *ProviderContextReasoning `protobuf:"bytes,2,opt,name=reasoning,proto3,oneof"`
 }
 
-func (*RuntimePart_Text) isRuntimePart_Value() {}
+type ProviderContextItem_ToolCall struct {
+	ToolCall *ProviderToolCall `protobuf:"bytes,3,opt,name=tool_call,json=toolCall,proto3,oneof"`
+}
 
-func (*RuntimePart_Reasoning) isRuntimePart_Value() {}
+type ProviderContextItem_ToolResult struct {
+	ToolResult *ProviderToolResult `protobuf:"bytes,4,opt,name=tool_result,json=toolResult,proto3,oneof"`
+}
 
-func (*RuntimePart_Tool) isRuntimePart_Value() {}
+func (*ProviderContextItem_Text) isProviderContextItem_Value() {}
 
-type RuntimeTextPart struct {
+func (*ProviderContextItem_Reasoning) isProviderContextItem_Value() {}
+
+func (*ProviderContextItem_ToolCall) isProviderContextItem_Value() {}
+
+func (*ProviderContextItem_ToolResult) isProviderContextItem_Value() {}
+
+type ProviderContextText struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RuntimeTextPart) Reset() {
-	*x = RuntimeTextPart{}
+func (x *ProviderContextText) Reset() {
+	*x = ProviderContextText{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RuntimeTextPart) String() string {
+func (x *ProviderContextText) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RuntimeTextPart) ProtoMessage() {}
+func (*ProviderContextText) ProtoMessage() {}
 
-func (x *RuntimeTextPart) ProtoReflect() protoreflect.Message {
+func (x *ProviderContextText) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1223,19 +1147,19 @@ func (x *RuntimeTextPart) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RuntimeTextPart.ProtoReflect.Descriptor instead.
-func (*RuntimeTextPart) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderContextText.ProtoReflect.Descriptor instead.
+func (*ProviderContextText) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *RuntimeTextPart) GetText() string {
+func (x *ProviderContextText) GetText() string {
 	if x != nil {
 		return x.Text
 	}
 	return ""
 }
 
-type RuntimeReasoningPart struct {
+type ProviderContextReasoning struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
 	MetadataJson  string                 `protobuf:"bytes,2,opt,name=metadata_json,json=metadataJson,proto3" json:"metadata_json,omitempty"`
@@ -1243,20 +1167,20 @@ type RuntimeReasoningPart struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RuntimeReasoningPart) Reset() {
-	*x = RuntimeReasoningPart{}
+func (x *ProviderContextReasoning) Reset() {
+	*x = ProviderContextReasoning{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RuntimeReasoningPart) String() string {
+func (x *ProviderContextReasoning) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RuntimeReasoningPart) ProtoMessage() {}
+func (*ProviderContextReasoning) ProtoMessage() {}
 
-func (x *RuntimeReasoningPart) ProtoReflect() protoreflect.Message {
+func (x *ProviderContextReasoning) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1268,51 +1192,48 @@ func (x *RuntimeReasoningPart) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RuntimeReasoningPart.ProtoReflect.Descriptor instead.
-func (*RuntimeReasoningPart) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderContextReasoning.ProtoReflect.Descriptor instead.
+func (*ProviderContextReasoning) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *RuntimeReasoningPart) GetText() string {
+func (x *ProviderContextReasoning) GetText() string {
 	if x != nil {
 		return x.Text
 	}
 	return ""
 }
 
-func (x *RuntimeReasoningPart) GetMetadataJson() string {
+func (x *ProviderContextReasoning) GetMetadataJson() string {
 	if x != nil {
 		return x.MetadataJson
 	}
 	return ""
 }
 
-type RuntimeToolPart struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	CallId            string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
-	Name              string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	ToolUseEventId    *string                `protobuf:"bytes,3,opt,name=tool_use_event_id,json=toolUseEventId,proto3,oneof" json:"tool_use_event_id,omitempty"`
-	State             RuntimeToolPartState   `protobuf:"varint,4,opt,name=state,proto3,enum=tetral.provider_gateway.v1.RuntimeToolPartState" json:"state,omitempty"`
-	InputJson         string                 `protobuf:"bytes,5,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
-	OutputOrErrorJson string                 `protobuf:"bytes,6,opt,name=output_or_error_json,json=outputOrErrorJson,proto3" json:"output_or_error_json,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+type ProviderToolCall struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ModelToolCallId string                 `protobuf:"bytes,1,opt,name=model_tool_call_id,json=modelToolCallId,proto3" json:"model_tool_call_id,omitempty"`
+	Name            string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	InputJson       string                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
-func (x *RuntimeToolPart) Reset() {
-	*x = RuntimeToolPart{}
+func (x *ProviderToolCall) Reset() {
+	*x = ProviderToolCall{}
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RuntimeToolPart) String() string {
+func (x *ProviderToolCall) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RuntimeToolPart) ProtoMessage() {}
+func (*ProviderToolCall) ProtoMessage() {}
 
-func (x *RuntimeToolPart) ProtoReflect() protoreflect.Message {
+func (x *ProviderToolCall) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1324,51 +1245,260 @@ func (x *RuntimeToolPart) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RuntimeToolPart.ProtoReflect.Descriptor instead.
-func (*RuntimeToolPart) Descriptor() ([]byte, []int) {
+// Deprecated: Use ProviderToolCall.ProtoReflect.Descriptor instead.
+func (*ProviderToolCall) Descriptor() ([]byte, []int) {
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *RuntimeToolPart) GetCallId() string {
+func (x *ProviderToolCall) GetModelToolCallId() string {
 	if x != nil {
-		return x.CallId
+		return x.ModelToolCallId
 	}
 	return ""
 }
 
-func (x *RuntimeToolPart) GetName() string {
+func (x *ProviderToolCall) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *RuntimeToolPart) GetToolUseEventId() string {
-	if x != nil && x.ToolUseEventId != nil {
-		return *x.ToolUseEventId
-	}
-	return ""
-}
-
-func (x *RuntimeToolPart) GetState() RuntimeToolPartState {
-	if x != nil {
-		return x.State
-	}
-	return RuntimeToolPartState_RUNTIME_TOOL_PART_STATE_UNSPECIFIED
-}
-
-func (x *RuntimeToolPart) GetInputJson() string {
+func (x *ProviderToolCall) GetInputJson() string {
 	if x != nil {
 		return x.InputJson
 	}
 	return ""
 }
 
-func (x *RuntimeToolPart) GetOutputOrErrorJson() string {
+type ProviderToolResult struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ModelToolCallId string                 `protobuf:"bytes,1,opt,name=model_tool_call_id,json=modelToolCallId,proto3" json:"model_tool_call_id,omitempty"`
+	// Types that are valid to be assigned to Outcome:
+	//
+	//	*ProviderToolResult_Completed
+	//	*ProviderToolResult_Error
+	//	*ProviderToolResult_Cancelled
+	Outcome       isProviderToolResult_Outcome `protobuf_oneof:"outcome"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProviderToolResult) Reset() {
+	*x = ProviderToolResult{}
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProviderToolResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProviderToolResult) ProtoMessage() {}
+
+func (x *ProviderToolResult) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[8]
 	if x != nil {
-		return x.OutputOrErrorJson
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProviderToolResult.ProtoReflect.Descriptor instead.
+func (*ProviderToolResult) Descriptor() ([]byte, []int) {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ProviderToolResult) GetModelToolCallId() string {
+	if x != nil {
+		return x.ModelToolCallId
 	}
 	return ""
+}
+
+func (x *ProviderToolResult) GetOutcome() isProviderToolResult_Outcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return nil
+}
+
+func (x *ProviderToolResult) GetCompleted() *ProviderCompletedToolResult {
+	if x != nil {
+		if x, ok := x.Outcome.(*ProviderToolResult_Completed); ok {
+			return x.Completed
+		}
+	}
+	return nil
+}
+
+func (x *ProviderToolResult) GetError() *ProviderErrorToolResult {
+	if x != nil {
+		if x, ok := x.Outcome.(*ProviderToolResult_Error); ok {
+			return x.Error
+		}
+	}
+	return nil
+}
+
+func (x *ProviderToolResult) GetCancelled() *ProviderCancelledToolResult {
+	if x != nil {
+		if x, ok := x.Outcome.(*ProviderToolResult_Cancelled); ok {
+			return x.Cancelled
+		}
+	}
+	return nil
+}
+
+type isProviderToolResult_Outcome interface {
+	isProviderToolResult_Outcome()
+}
+
+type ProviderToolResult_Completed struct {
+	Completed *ProviderCompletedToolResult `protobuf:"bytes,2,opt,name=completed,proto3,oneof"`
+}
+
+type ProviderToolResult_Error struct {
+	Error *ProviderErrorToolResult `protobuf:"bytes,3,opt,name=error,proto3,oneof"`
+}
+
+type ProviderToolResult_Cancelled struct {
+	Cancelled *ProviderCancelledToolResult `protobuf:"bytes,4,opt,name=cancelled,proto3,oneof"`
+}
+
+func (*ProviderToolResult_Completed) isProviderToolResult_Outcome() {}
+
+func (*ProviderToolResult_Error) isProviderToolResult_Outcome() {}
+
+func (*ProviderToolResult_Cancelled) isProviderToolResult_Outcome() {}
+
+type ProviderCompletedToolResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OutputJson    string                 `protobuf:"bytes,1,opt,name=output_json,json=outputJson,proto3" json:"output_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProviderCompletedToolResult) Reset() {
+	*x = ProviderCompletedToolResult{}
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProviderCompletedToolResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProviderCompletedToolResult) ProtoMessage() {}
+
+func (x *ProviderCompletedToolResult) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProviderCompletedToolResult.ProtoReflect.Descriptor instead.
+func (*ProviderCompletedToolResult) Descriptor() ([]byte, []int) {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ProviderCompletedToolResult) GetOutputJson() string {
+	if x != nil {
+		return x.OutputJson
+	}
+	return ""
+}
+
+type ProviderErrorToolResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ErrorJson     string                 `protobuf:"bytes,1,opt,name=error_json,json=errorJson,proto3" json:"error_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProviderErrorToolResult) Reset() {
+	*x = ProviderErrorToolResult{}
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProviderErrorToolResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProviderErrorToolResult) ProtoMessage() {}
+
+func (x *ProviderErrorToolResult) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProviderErrorToolResult.ProtoReflect.Descriptor instead.
+func (*ProviderErrorToolResult) Descriptor() ([]byte, []int) {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ProviderErrorToolResult) GetErrorJson() string {
+	if x != nil {
+		return x.ErrorJson
+	}
+	return ""
+}
+
+type ProviderCancelledToolResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProviderCancelledToolResult) Reset() {
+	*x = ProviderCancelledToolResult{}
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProviderCancelledToolResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProviderCancelledToolResult) ProtoMessage() {}
+
+func (x *ProviderCancelledToolResult) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProviderCancelledToolResult.ProtoReflect.Descriptor instead.
+func (*ProviderCancelledToolResult) Descriptor() ([]byte, []int) {
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{11}
 }
 
 type RuntimeToolDefinition struct {
@@ -1386,7 +1516,7 @@ type RuntimeToolDefinition struct {
 
 func (x *RuntimeToolDefinition) Reset() {
 	*x = RuntimeToolDefinition{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[8]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1398,7 +1528,7 @@ func (x *RuntimeToolDefinition) String() string {
 func (*RuntimeToolDefinition) ProtoMessage() {}
 
 func (x *RuntimeToolDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[8]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1411,7 +1541,7 @@ func (x *RuntimeToolDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeToolDefinition.ProtoReflect.Descriptor instead.
 func (*RuntimeToolDefinition) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{8}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RuntimeToolDefinition) GetName() string {
@@ -1479,7 +1609,7 @@ type RuntimeFunctionToolDefinition struct {
 
 func (x *RuntimeFunctionToolDefinition) Reset() {
 	*x = RuntimeFunctionToolDefinition{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[9]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1491,7 +1621,7 @@ func (x *RuntimeFunctionToolDefinition) String() string {
 func (*RuntimeFunctionToolDefinition) ProtoMessage() {}
 
 func (x *RuntimeFunctionToolDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[9]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1504,7 +1634,7 @@ func (x *RuntimeFunctionToolDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeFunctionToolDefinition.ProtoReflect.Descriptor instead.
 func (*RuntimeFunctionToolDefinition) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{9}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RuntimeFunctionToolDefinition) GetInputSchemaJson() string {
@@ -1530,7 +1660,7 @@ type RuntimeFreeformToolDefinition struct {
 
 func (x *RuntimeFreeformToolDefinition) Reset() {
 	*x = RuntimeFreeformToolDefinition{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[10]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1542,7 +1672,7 @@ func (x *RuntimeFreeformToolDefinition) String() string {
 func (*RuntimeFreeformToolDefinition) ProtoMessage() {}
 
 func (x *RuntimeFreeformToolDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[10]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1555,7 +1685,7 @@ func (x *RuntimeFreeformToolDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeFreeformToolDefinition.ProtoReflect.Descriptor instead.
 func (*RuntimeFreeformToolDefinition) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{10}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RuntimeFreeformToolDefinition) GetLarkGrammar() string {
@@ -1580,7 +1710,7 @@ type ProviderRequestAttachment struct {
 
 func (x *ProviderRequestAttachment) Reset() {
 	*x = ProviderRequestAttachment{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[11]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1592,7 +1722,7 @@ func (x *ProviderRequestAttachment) String() string {
 func (*ProviderRequestAttachment) ProtoMessage() {}
 
 func (x *ProviderRequestAttachment) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[11]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1605,7 +1735,7 @@ func (x *ProviderRequestAttachment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderRequestAttachment.ProtoReflect.Descriptor instead.
 func (*ProviderRequestAttachment) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{11}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ProviderRequestAttachment) GetOrigin() isProviderRequestAttachment_Origin {
@@ -1664,19 +1794,18 @@ func (*ProviderRequestAttachment_Transient) isProviderRequestAttachment_Origin()
 func (*ProviderRequestAttachment_FileBacked) isProviderRequestAttachment_Origin() {}
 
 type ProviderRequestTransientAttachment struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	AttachmentRef        string                 `protobuf:"bytes,1,opt,name=attachment_ref,json=attachmentRef,proto3" json:"attachment_ref,omitempty"`
-	SourceToolUseEventId string                 `protobuf:"bytes,2,opt,name=source_tool_use_event_id,json=sourceToolUseEventId,proto3" json:"source_tool_use_event_id,omitempty"`
-	SourcePath           string                 `protobuf:"bytes,3,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
-	PageRange            string                 `protobuf:"bytes,4,opt,name=page_range,json=pageRange,proto3" json:"page_range,omitempty"`
-	Detail               string                 `protobuf:"bytes,5,opt,name=detail,proto3" json:"detail,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AttachmentRef string                 `protobuf:"bytes,1,opt,name=attachment_ref,json=attachmentRef,proto3" json:"attachment_ref,omitempty"`
+	SourcePath    string                 `protobuf:"bytes,2,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
+	PageRange     string                 `protobuf:"bytes,3,opt,name=page_range,json=pageRange,proto3" json:"page_range,omitempty"`
+	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ProviderRequestTransientAttachment) Reset() {
 	*x = ProviderRequestTransientAttachment{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[12]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1688,7 +1817,7 @@ func (x *ProviderRequestTransientAttachment) String() string {
 func (*ProviderRequestTransientAttachment) ProtoMessage() {}
 
 func (x *ProviderRequestTransientAttachment) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[12]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1701,19 +1830,12 @@ func (x *ProviderRequestTransientAttachment) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use ProviderRequestTransientAttachment.ProtoReflect.Descriptor instead.
 func (*ProviderRequestTransientAttachment) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{12}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ProviderRequestTransientAttachment) GetAttachmentRef() string {
 	if x != nil {
 		return x.AttachmentRef
-	}
-	return ""
-}
-
-func (x *ProviderRequestTransientAttachment) GetSourceToolUseEventId() string {
-	if x != nil {
-		return x.SourceToolUseEventId
 	}
 	return ""
 }
@@ -1749,7 +1871,7 @@ type ProviderRequestFileAttachment struct {
 
 func (x *ProviderRequestFileAttachment) Reset() {
 	*x = ProviderRequestFileAttachment{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[13]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1761,7 +1883,7 @@ func (x *ProviderRequestFileAttachment) String() string {
 func (*ProviderRequestFileAttachment) ProtoMessage() {}
 
 func (x *ProviderRequestFileAttachment) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[13]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1774,7 +1896,7 @@ func (x *ProviderRequestFileAttachment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderRequestFileAttachment.ProtoReflect.Descriptor instead.
 func (*ProviderRequestFileAttachment) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{13}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ProviderRequestFileAttachment) GetSourceEventId() string {
@@ -1801,7 +1923,7 @@ type ProviderRequestLimits struct {
 
 func (x *ProviderRequestLimits) Reset() {
 	*x = ProviderRequestLimits{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[14]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1813,7 +1935,7 @@ func (x *ProviderRequestLimits) String() string {
 func (*ProviderRequestLimits) ProtoMessage() {}
 
 func (x *ProviderRequestLimits) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[14]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1826,7 +1948,7 @@ func (x *ProviderRequestLimits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderRequestLimits.ProtoReflect.Descriptor instead.
 func (*ProviderRequestLimits) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{14}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ProviderRequestLimits) GetMaxOutputTokens() int32 {
@@ -1844,10 +1966,8 @@ func (x *ProviderRequestLimits) GetTimeoutMs() int32 {
 }
 
 type ProviderStreamEvent struct {
-	state          protoimpl.MessageState  `protogen:"open.v1"`
-	RequestId      string                  `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	ModelRequestId string                  `protobuf:"bytes,2,opt,name=model_request_id,json=modelRequestId,proto3" json:"model_request_id,omitempty"`
-	Type           ProviderStreamEventType `protobuf:"varint,3,opt,name=type,proto3,enum=tetral.provider_gateway.v1.ProviderStreamEventType" json:"type,omitempty"`
+	state protoimpl.MessageState  `protogen:"open.v1"`
+	Type  ProviderStreamEventType `protobuf:"varint,3,opt,name=type,proto3,enum=tetral.provider_gateway.v1.ProviderStreamEventType" json:"type,omitempty"`
 	// Types that are valid to be assigned to Payload:
 	//
 	//	*ProviderStreamEvent_Text
@@ -1864,7 +1984,7 @@ type ProviderStreamEvent struct {
 
 func (x *ProviderStreamEvent) Reset() {
 	*x = ProviderStreamEvent{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[15]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1876,7 +1996,7 @@ func (x *ProviderStreamEvent) String() string {
 func (*ProviderStreamEvent) ProtoMessage() {}
 
 func (x *ProviderStreamEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[15]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1889,21 +2009,7 @@ func (x *ProviderStreamEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderStreamEvent.ProtoReflect.Descriptor instead.
 func (*ProviderStreamEvent) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *ProviderStreamEvent) GetRequestId() string {
-	if x != nil {
-		return x.RequestId
-	}
-	return ""
-}
-
-func (x *ProviderStreamEvent) GetModelRequestId() string {
-	if x != nil {
-		return x.ModelRequestId
-	}
-	return ""
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ProviderStreamEvent) GetType() ProviderStreamEventType {
@@ -2033,7 +2139,7 @@ type ProviderAttachmentRejection struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Origin:
 	//
-	//	*ProviderAttachmentRejection_Transient
+	//	*ProviderAttachmentRejection_TransientAttachmentRef
 	//	*ProviderAttachmentRejection_FileBacked
 	Origin        isProviderAttachmentRejection_Origin `protobuf_oneof:"origin"`
 	Reason        ProviderAttachmentRejectionReason    `protobuf:"varint,3,opt,name=reason,proto3,enum=tetral.provider_gateway.v1.ProviderAttachmentRejectionReason" json:"reason,omitempty"`
@@ -2043,7 +2149,7 @@ type ProviderAttachmentRejection struct {
 
 func (x *ProviderAttachmentRejection) Reset() {
 	*x = ProviderAttachmentRejection{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[16]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2055,7 +2161,7 @@ func (x *ProviderAttachmentRejection) String() string {
 func (*ProviderAttachmentRejection) ProtoMessage() {}
 
 func (x *ProviderAttachmentRejection) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[16]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2068,7 +2174,7 @@ func (x *ProviderAttachmentRejection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderAttachmentRejection.ProtoReflect.Descriptor instead.
 func (*ProviderAttachmentRejection) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{16}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ProviderAttachmentRejection) GetOrigin() isProviderAttachmentRejection_Origin {
@@ -2078,13 +2184,13 @@ func (x *ProviderAttachmentRejection) GetOrigin() isProviderAttachmentRejection_
 	return nil
 }
 
-func (x *ProviderAttachmentRejection) GetTransient() *ProviderRequestTransientAttachment {
+func (x *ProviderAttachmentRejection) GetTransientAttachmentRef() string {
 	if x != nil {
-		if x, ok := x.Origin.(*ProviderAttachmentRejection_Transient); ok {
-			return x.Transient
+		if x, ok := x.Origin.(*ProviderAttachmentRejection_TransientAttachmentRef); ok {
+			return x.TransientAttachmentRef
 		}
 	}
-	return nil
+	return ""
 }
 
 func (x *ProviderAttachmentRejection) GetFileBacked() *ProviderRequestFileAttachment {
@@ -2107,15 +2213,15 @@ type isProviderAttachmentRejection_Origin interface {
 	isProviderAttachmentRejection_Origin()
 }
 
-type ProviderAttachmentRejection_Transient struct {
-	Transient *ProviderRequestTransientAttachment `protobuf:"bytes,1,opt,name=transient,proto3,oneof"`
+type ProviderAttachmentRejection_TransientAttachmentRef struct {
+	TransientAttachmentRef string `protobuf:"bytes,1,opt,name=transient_attachment_ref,json=transientAttachmentRef,proto3,oneof"`
 }
 
 type ProviderAttachmentRejection_FileBacked struct {
 	FileBacked *ProviderRequestFileAttachment `protobuf:"bytes,2,opt,name=file_backed,json=fileBacked,proto3,oneof"`
 }
 
-func (*ProviderAttachmentRejection_Transient) isProviderAttachmentRejection_Origin() {}
+func (*ProviderAttachmentRejection_TransientAttachmentRef) isProviderAttachmentRejection_Origin() {}
 
 func (*ProviderAttachmentRejection_FileBacked) isProviderAttachmentRejection_Origin() {}
 
@@ -2128,7 +2234,7 @@ type ProviderAttachmentRejectionsPayload struct {
 
 func (x *ProviderAttachmentRejectionsPayload) Reset() {
 	*x = ProviderAttachmentRejectionsPayload{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[17]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2140,7 +2246,7 @@ func (x *ProviderAttachmentRejectionsPayload) String() string {
 func (*ProviderAttachmentRejectionsPayload) ProtoMessage() {}
 
 func (x *ProviderAttachmentRejectionsPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[17]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2153,7 +2259,7 @@ func (x *ProviderAttachmentRejectionsPayload) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use ProviderAttachmentRejectionsPayload.ProtoReflect.Descriptor instead.
 func (*ProviderAttachmentRejectionsPayload) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{17}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ProviderAttachmentRejectionsPayload) GetRejections() []*ProviderAttachmentRejection {
@@ -2174,7 +2280,7 @@ type ProviderTextPayload struct {
 
 func (x *ProviderTextPayload) Reset() {
 	*x = ProviderTextPayload{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[18]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2186,7 +2292,7 @@ func (x *ProviderTextPayload) String() string {
 func (*ProviderTextPayload) ProtoMessage() {}
 
 func (x *ProviderTextPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[18]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2199,7 +2305,7 @@ func (x *ProviderTextPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderTextPayload.ProtoReflect.Descriptor instead.
 func (*ProviderTextPayload) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{18}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ProviderTextPayload) GetId() string {
@@ -2234,7 +2340,7 @@ type ProviderReasoningPayload struct {
 
 func (x *ProviderReasoningPayload) Reset() {
 	*x = ProviderReasoningPayload{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[19]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2246,7 +2352,7 @@ func (x *ProviderReasoningPayload) String() string {
 func (*ProviderReasoningPayload) ProtoMessage() {}
 
 func (x *ProviderReasoningPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[19]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2259,7 +2365,7 @@ func (x *ProviderReasoningPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderReasoningPayload.ProtoReflect.Descriptor instead.
 func (*ProviderReasoningPayload) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{19}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ProviderReasoningPayload) GetId() string {
@@ -2295,7 +2401,7 @@ type ProviderToolInputPayload struct {
 
 func (x *ProviderToolInputPayload) Reset() {
 	*x = ProviderToolInputPayload{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[20]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2307,7 +2413,7 @@ func (x *ProviderToolInputPayload) String() string {
 func (*ProviderToolInputPayload) ProtoMessage() {}
 
 func (x *ProviderToolInputPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[20]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2320,7 +2426,7 @@ func (x *ProviderToolInputPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderToolInputPayload.ProtoReflect.Descriptor instead.
 func (*ProviderToolInputPayload) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{20}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ProviderToolInputPayload) GetId() string {
@@ -2363,7 +2469,7 @@ type ProviderToolCallPayload struct {
 
 func (x *ProviderToolCallPayload) Reset() {
 	*x = ProviderToolCallPayload{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[21]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2375,7 +2481,7 @@ func (x *ProviderToolCallPayload) String() string {
 func (*ProviderToolCallPayload) ProtoMessage() {}
 
 func (x *ProviderToolCallPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[21]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2388,7 +2494,7 @@ func (x *ProviderToolCallPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderToolCallPayload.ProtoReflect.Descriptor instead.
 func (*ProviderToolCallPayload) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{21}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ProviderToolCallPayload) GetId() string {
@@ -2435,7 +2541,7 @@ type RequestUsage struct {
 
 func (x *RequestUsage) Reset() {
 	*x = RequestUsage{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[22]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2447,7 +2553,7 @@ func (x *RequestUsage) String() string {
 func (*RequestUsage) ProtoMessage() {}
 
 func (x *RequestUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[22]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2460,7 +2566,7 @@ func (x *RequestUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestUsage.ProtoReflect.Descriptor instead.
 func (*RequestUsage) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{22}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *RequestUsage) GetInputTotalTokens() int64 {
@@ -2533,7 +2639,7 @@ type ProviderFinishPayload struct {
 
 func (x *ProviderFinishPayload) Reset() {
 	*x = ProviderFinishPayload{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[23]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2545,7 +2651,7 @@ func (x *ProviderFinishPayload) String() string {
 func (*ProviderFinishPayload) ProtoMessage() {}
 
 func (x *ProviderFinishPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[23]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2558,7 +2664,7 @@ func (x *ProviderFinishPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderFinishPayload.ProtoReflect.Descriptor instead.
 func (*ProviderFinishPayload) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{23}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ProviderFinishPayload) GetReason() ProviderFinishReason {
@@ -2617,7 +2723,7 @@ type ProviderError struct {
 
 func (x *ProviderError) Reset() {
 	*x = ProviderError{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[24]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2629,7 +2735,7 @@ func (x *ProviderError) String() string {
 func (*ProviderError) ProtoMessage() {}
 
 func (x *ProviderError) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[24]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2642,7 +2748,7 @@ func (x *ProviderError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderError.ProtoReflect.Descriptor instead.
 func (*ProviderError) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{24}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ProviderError) GetCode() string {
@@ -2697,7 +2803,7 @@ type ProviderErrorPayload struct {
 
 func (x *ProviderErrorPayload) Reset() {
 	*x = ProviderErrorPayload{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[25]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2709,7 +2815,7 @@ func (x *ProviderErrorPayload) String() string {
 func (*ProviderErrorPayload) ProtoMessage() {}
 
 func (x *ProviderErrorPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[25]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2722,7 +2828,7 @@ func (x *ProviderErrorPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderErrorPayload.ProtoReflect.Descriptor instead.
 func (*ProviderErrorPayload) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{25}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ProviderErrorPayload) GetError() *ProviderError {
@@ -2755,7 +2861,7 @@ type RunWebRequest struct {
 
 func (x *RunWebRequest) Reset() {
 	*x = RunWebRequest{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[26]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2767,7 +2873,7 @@ func (x *RunWebRequest) String() string {
 func (*RunWebRequest) ProtoMessage() {}
 
 func (x *RunWebRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[26]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2780,7 +2886,7 @@ func (x *RunWebRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunWebRequest.ProtoReflect.Descriptor instead.
 func (*RunWebRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{26}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *RunWebRequest) GetWorkspaceId() string {
@@ -2854,7 +2960,7 @@ type RunWebResponse struct {
 
 func (x *RunWebResponse) Reset() {
 	*x = RunWebResponse{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[27]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2866,7 +2972,7 @@ func (x *RunWebResponse) String() string {
 func (*RunWebResponse) ProtoMessage() {}
 
 func (x *RunWebResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[27]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2879,7 +2985,7 @@ func (x *RunWebResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunWebResponse.ProtoReflect.Descriptor instead.
 func (*RunWebResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{27}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *RunWebResponse) GetStatus() RunWebStatus {
@@ -2946,7 +3052,7 @@ type WebUsage struct {
 
 func (x *WebUsage) Reset() {
 	*x = WebUsage{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[28]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2958,7 +3064,7 @@ func (x *WebUsage) String() string {
 func (*WebUsage) ProtoMessage() {}
 
 func (x *WebUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[28]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2971,7 +3077,7 @@ func (x *WebUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebUsage.ProtoReflect.Descriptor instead.
 func (*WebUsage) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{28}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *WebUsage) GetOperation() string {
@@ -3034,7 +3140,7 @@ type WebToolInput struct {
 
 func (x *WebToolInput) Reset() {
 	*x = WebToolInput{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[29]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3046,7 +3152,7 @@ func (x *WebToolInput) String() string {
 func (*WebToolInput) ProtoMessage() {}
 
 func (x *WebToolInput) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[29]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3059,7 +3165,7 @@ func (x *WebToolInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebToolInput.ProtoReflect.Descriptor instead.
 func (*WebToolInput) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{29}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *WebToolInput) GetSearchQuery() []*WebSearchQuery {
@@ -3093,7 +3199,7 @@ type WebSearchQuery struct {
 
 func (x *WebSearchQuery) Reset() {
 	*x = WebSearchQuery{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[30]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3105,7 +3211,7 @@ func (x *WebSearchQuery) String() string {
 func (*WebSearchQuery) ProtoMessage() {}
 
 func (x *WebSearchQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[30]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3118,7 +3224,7 @@ func (x *WebSearchQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebSearchQuery.ProtoReflect.Descriptor instead.
 func (*WebSearchQuery) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{30}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *WebSearchQuery) GetQ() string {
@@ -3146,7 +3252,7 @@ type WebOpenRequest struct {
 
 func (x *WebOpenRequest) Reset() {
 	*x = WebOpenRequest{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[31]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3158,7 +3264,7 @@ func (x *WebOpenRequest) String() string {
 func (*WebOpenRequest) ProtoMessage() {}
 
 func (x *WebOpenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[31]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3171,7 +3277,7 @@ func (x *WebOpenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebOpenRequest.ProtoReflect.Descriptor instead.
 func (*WebOpenRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{31}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *WebOpenRequest) GetUrl() string {
@@ -3205,7 +3311,7 @@ type WebFindRequest struct {
 
 func (x *WebFindRequest) Reset() {
 	*x = WebFindRequest{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[32]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3217,7 +3323,7 @@ func (x *WebFindRequest) String() string {
 func (*WebFindRequest) ProtoMessage() {}
 
 func (x *WebFindRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[32]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3230,7 +3336,7 @@ func (x *WebFindRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebFindRequest.ProtoReflect.Descriptor instead.
 func (*WebFindRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{32}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *WebFindRequest) GetRefId() string {
@@ -3261,7 +3367,7 @@ type WebRef struct {
 
 func (x *WebRef) Reset() {
 	*x = WebRef{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[33]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3273,7 +3379,7 @@ func (x *WebRef) String() string {
 func (*WebRef) ProtoMessage() {}
 
 func (x *WebRef) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[33]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3286,7 +3392,7 @@ func (x *WebRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebRef.ProtoReflect.Descriptor instead.
 func (*WebRef) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{33}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *WebRef) GetRefId() string {
@@ -3333,14 +3439,10 @@ func (x *WebRef) GetTotalLines() int32 {
 
 type RunMcpToolRequest struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
-	RequestId           string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	WorkspaceId         string                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
 	SessionId           string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	SessionThreadId     string                 `protobuf:"bytes,4,opt,name=session_thread_id,json=sessionThreadId,proto3" json:"session_thread_id,omitempty"`
 	ToolUseEventId      string                 `protobuf:"bytes,5,opt,name=tool_use_event_id,json=toolUseEventId,proto3" json:"tool_use_event_id,omitempty"`
-	McpServerName       string                 `protobuf:"bytes,6,opt,name=mcp_server_name,json=mcpServerName,proto3" json:"mcp_server_name,omitempty"`
-	ToolName            string                 `protobuf:"bytes,7,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
-	InputJson           string                 `protobuf:"bytes,8,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
 	BindingId           string                 `protobuf:"bytes,9,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
 	BindingGeneration   int64                  `protobuf:"varint,10,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
 	RuntimeBindingToken string                 `protobuf:"bytes,11,opt,name=runtime_binding_token,json=runtimeBindingToken,proto3" json:"runtime_binding_token,omitempty"`
@@ -3350,7 +3452,7 @@ type RunMcpToolRequest struct {
 
 func (x *RunMcpToolRequest) Reset() {
 	*x = RunMcpToolRequest{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[34]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3362,7 +3464,7 @@ func (x *RunMcpToolRequest) String() string {
 func (*RunMcpToolRequest) ProtoMessage() {}
 
 func (x *RunMcpToolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[34]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3375,14 +3477,7 @@ func (x *RunMcpToolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunMcpToolRequest.ProtoReflect.Descriptor instead.
 func (*RunMcpToolRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{34}
-}
-
-func (x *RunMcpToolRequest) GetRequestId() string {
-	if x != nil {
-		return x.RequestId
-	}
-	return ""
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *RunMcpToolRequest) GetWorkspaceId() string {
@@ -3413,27 +3508,6 @@ func (x *RunMcpToolRequest) GetToolUseEventId() string {
 	return ""
 }
 
-func (x *RunMcpToolRequest) GetMcpServerName() string {
-	if x != nil {
-		return x.McpServerName
-	}
-	return ""
-}
-
-func (x *RunMcpToolRequest) GetToolName() string {
-	if x != nil {
-		return x.ToolName
-	}
-	return ""
-}
-
-func (x *RunMcpToolRequest) GetInputJson() string {
-	if x != nil {
-		return x.InputJson
-	}
-	return ""
-}
-
 func (x *RunMcpToolRequest) GetBindingId() string {
 	if x != nil {
 		return x.BindingId
@@ -3456,20 +3530,19 @@ func (x *RunMcpToolRequest) GetRuntimeBindingToken() string {
 }
 
 type RunMcpToolResponse struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	Status                RunMcpToolStatus       `protobuf:"varint,1,opt,name=status,proto3,enum=tetral.provider_gateway.v1.RunMcpToolStatus" json:"status,omitempty"`
-	ResultText            string                 `protobuf:"bytes,2,opt,name=result_text,json=resultText,proto3" json:"result_text,omitempty"`
-	Attachments           []*McpAttachmentRef    `protobuf:"bytes,3,rep,name=attachments,proto3" json:"attachments,omitempty"`
-	ErrorKind             *McpErrorKind          `protobuf:"varint,4,opt,name=error_kind,json=errorKind,proto3,enum=tetral.provider_gateway.v1.McpErrorKind,oneof" json:"error_kind,omitempty"`
-	RetryStatus           *McpRetryStatus        `protobuf:"varint,5,opt,name=retry_status,json=retryStatus,proto3,enum=tetral.provider_gateway.v1.McpRetryStatus,oneof" json:"retry_status,omitempty"`
-	MaterializationHandle *string                `protobuf:"bytes,6,opt,name=materialization_handle,json=materializationHandle,proto3,oneof" json:"materialization_handle,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        RunMcpToolStatus       `protobuf:"varint,1,opt,name=status,proto3,enum=tetral.provider_gateway.v1.RunMcpToolStatus" json:"status,omitempty"`
+	ResultText    string                 `protobuf:"bytes,2,opt,name=result_text,json=resultText,proto3" json:"result_text,omitempty"`
+	Attachments   []*McpAttachmentRef    `protobuf:"bytes,3,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	ErrorKind     *McpErrorKind          `protobuf:"varint,4,opt,name=error_kind,json=errorKind,proto3,enum=tetral.provider_gateway.v1.McpErrorKind,oneof" json:"error_kind,omitempty"`
+	RetryStatus   *McpRetryStatus        `protobuf:"varint,5,opt,name=retry_status,json=retryStatus,proto3,enum=tetral.provider_gateway.v1.McpRetryStatus,oneof" json:"retry_status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunMcpToolResponse) Reset() {
 	*x = RunMcpToolResponse{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[35]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3481,7 +3554,7 @@ func (x *RunMcpToolResponse) String() string {
 func (*RunMcpToolResponse) ProtoMessage() {}
 
 func (x *RunMcpToolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[35]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3494,7 +3567,7 @@ func (x *RunMcpToolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunMcpToolResponse.ProtoReflect.Descriptor instead.
 func (*RunMcpToolResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{35}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *RunMcpToolResponse) GetStatus() RunMcpToolStatus {
@@ -3532,13 +3605,6 @@ func (x *RunMcpToolResponse) GetRetryStatus() McpRetryStatus {
 	return McpRetryStatus_MCP_RETRY_STATUS_UNSPECIFIED
 }
 
-func (x *RunMcpToolResponse) GetMaterializationHandle() string {
-	if x != nil && x.MaterializationHandle != nil {
-		return *x.MaterializationHandle
-	}
-	return ""
-}
-
 type McpAttachmentRef struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	AttachmentRef     string                 `protobuf:"bytes,1,opt,name=attachment_ref,json=attachmentRef,proto3" json:"attachment_ref,omitempty"`
@@ -3551,7 +3617,7 @@ type McpAttachmentRef struct {
 
 func (x *McpAttachmentRef) Reset() {
 	*x = McpAttachmentRef{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[36]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3563,7 +3629,7 @@ func (x *McpAttachmentRef) String() string {
 func (*McpAttachmentRef) ProtoMessage() {}
 
 func (x *McpAttachmentRef) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[36]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3576,7 +3642,7 @@ func (x *McpAttachmentRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use McpAttachmentRef.ProtoReflect.Descriptor instead.
 func (*McpAttachmentRef) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{36}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *McpAttachmentRef) GetAttachmentRef() string {
@@ -3618,7 +3684,7 @@ type ListMcpToolsRequest struct {
 
 func (x *ListMcpToolsRequest) Reset() {
 	*x = ListMcpToolsRequest{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[37]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3630,7 +3696,7 @@ func (x *ListMcpToolsRequest) String() string {
 func (*ListMcpToolsRequest) ProtoMessage() {}
 
 func (x *ListMcpToolsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[37]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3643,7 +3709,7 @@ func (x *ListMcpToolsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMcpToolsRequest.ProtoReflect.Descriptor instead.
 func (*ListMcpToolsRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{37}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ListMcpToolsRequest) GetWorkspaceId() string {
@@ -3678,7 +3744,7 @@ type ListMcpToolsResponse struct {
 
 func (x *ListMcpToolsResponse) Reset() {
 	*x = ListMcpToolsResponse{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[38]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3690,7 +3756,7 @@ func (x *ListMcpToolsResponse) String() string {
 func (*ListMcpToolsResponse) ProtoMessage() {}
 
 func (x *ListMcpToolsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[38]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3703,7 +3769,7 @@ func (x *ListMcpToolsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMcpToolsResponse.ProtoReflect.Descriptor instead.
 func (*ListMcpToolsResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{38}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ListMcpToolsResponse) GetTools() []*McpToolDefinition {
@@ -3738,7 +3804,7 @@ type McpToolDefinition struct {
 
 func (x *McpToolDefinition) Reset() {
 	*x = McpToolDefinition{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[39]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3750,7 +3816,7 @@ func (x *McpToolDefinition) String() string {
 func (*McpToolDefinition) ProtoMessage() {}
 
 func (x *McpToolDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[39]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3763,7 +3829,7 @@ func (x *McpToolDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use McpToolDefinition.ProtoReflect.Descriptor instead.
 func (*McpToolDefinition) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{39}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *McpToolDefinition) GetName() string {
@@ -3797,7 +3863,7 @@ type McpOmittedTool struct {
 
 func (x *McpOmittedTool) Reset() {
 	*x = McpOmittedTool{}
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[40]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3809,7 +3875,7 @@ func (x *McpOmittedTool) String() string {
 func (*McpOmittedTool) ProtoMessage() {}
 
 func (x *McpOmittedTool) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[40]
+	mi := &file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3822,7 +3888,7 @@ func (x *McpOmittedTool) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use McpOmittedTool.ProtoReflect.Descriptor instead.
 func (*McpOmittedTool) Descriptor() ([]byte, []int) {
-	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{40}
+	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *McpOmittedTool) GetName() string {
@@ -3843,7 +3909,7 @@ var File_tetral_provider_gateway_v1_provider_gateway_proto protoreflect.FileDesc
 
 const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\n" +
-	"1tetral/provider_gateway/v1/provider_gateway.proto\x12\x1atetral.provider_gateway.v1\"\xe0\a\n" +
+	"1tetral/provider_gateway/v1/provider_gateway.proto\x12\x1atetral.provider_gateway.v1\"\xb8\a\n" +
 	"\x0fProviderRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12(\n" +
@@ -3852,22 +3918,20 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\fworkspace_id\x18\x04 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x05 \x01(\tR\tsessionId\x12*\n" +
-	"\x11session_thread_id\x18\x06 \x01(\tR\x0fsessionThreadId\x12-\n" +
-	"\x10parent_thread_id\x18\a \x01(\tH\x00R\x0eparentThreadId\x88\x01\x01\x12\x1d\n" +
+	"\x11session_thread_id\x18\x06 \x01(\tR\x0fsessionThreadId\x12\x1d\n" +
 	"\n" +
 	"binding_id\x18\b \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\t \x01(\x03R\x11bindingGeneration\x122\n" +
 	"\x15runtime_binding_token\x18\n" +
 	" \x01(\tR\x13runtimeBindingToken\x12:\n" +
 	"\x05model\x18\v \x01(\v2$.tetral.provider_gateway.v1.ModelRefR\x05model\x12A\n" +
-	"\x06system\x18\f \x03(\v2).tetral.provider_gateway.v1.SystemSegmentR\x06system\x12F\n" +
-	"\bmessages\x18\r \x03(\v2*.tetral.provider_gateway.v1.RuntimeMessageR\bmessages\x12G\n" +
+	"\x06system\x18\f \x03(\v2).tetral.provider_gateway.v1.SystemSegmentR\x06system\x12J\n" +
+	"\acontext\x18\r \x03(\v20.tetral.provider_gateway.v1.ProviderContextEntryR\acontext\x12G\n" +
 	"\x05tools\x18\x0e \x03(\v21.tetral.provider_gateway.v1.RuntimeToolDefinitionR\x05tools\x12W\n" +
 	"\vattachments\x18\x0f \x03(\v25.tetral.provider_gateway.v1.ProviderRequestAttachmentR\vattachments\x12I\n" +
 	"\x06limits\x18\x10 \x01(\v21.tetral.provider_gateway.v1.ProviderRequestLimitsR\x06limits\x121\n" +
-	"\x12output_schema_json\x18\x11 \x01(\tH\x01R\x10outputSchemaJson\x88\x01\x01B\x13\n" +
-	"\x11_parent_thread_idB\x15\n" +
-	"\x13_output_schema_json\"`\n" +
+	"\x12output_schema_json\x18\x11 \x01(\tH\x00R\x10outputSchemaJson\x88\x01\x01B\x15\n" +
+	"\x13_output_schema_jsonJ\x04\b\a\x10\bR\x10parent_thread_id\"`\n" +
 	"\bModelRef\x12\x1f\n" +
 	"\vprovider_id\x18\x01 \x01(\tR\n" +
 	"providerId\x12\x19\n" +
@@ -3877,33 +3941,40 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x04kind\x18\x01 \x01(\x0e2-.tetral.provider_gateway.v1.SystemSegmentKindR\x04kind\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12J\n" +
 	"\n" +
-	"cache_hint\x18\x03 \x01(\x0e2+.tetral.provider_gateway.v1.SystemCacheHintR\tcacheHint\"\xd3\x01\n" +
-	"\x0eRuntimeMessage\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12B\n" +
-	"\x04role\x18\x02 \x01(\x0e2..tetral.provider_gateway.v1.RuntimeMessageRoleR\x04role\x12=\n" +
-	"\x05parts\x18\x03 \x03(\v2'.tetral.provider_gateway.v1.RuntimePartR\x05parts\x12\x16\n" +
-	"\x06status\x18\x04 \x01(\tR\x06status\x12\x16\n" +
-	"\x06origin\x18\x05 \x01(\tR\x06origin\"\xfe\x01\n" +
-	"\vRuntimePart\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12A\n" +
-	"\x04text\x18\x02 \x01(\v2+.tetral.provider_gateway.v1.RuntimeTextPartH\x00R\x04text\x12P\n" +
-	"\treasoning\x18\x03 \x01(\v20.tetral.provider_gateway.v1.RuntimeReasoningPartH\x00R\treasoning\x12A\n" +
-	"\x04tool\x18\x04 \x01(\v2+.tetral.provider_gateway.v1.RuntimeToolPartH\x00R\x04toolB\a\n" +
-	"\x05value\"%\n" +
-	"\x0fRuntimeTextPart\x12\x12\n" +
-	"\x04text\x18\x01 \x01(\tR\x04text\"O\n" +
-	"\x14RuntimeReasoningPart\x12\x12\n" +
+	"cache_hint\x18\x03 \x01(\x0e2+.tetral.provider_gateway.v1.SystemCacheHintR\tcacheHint\"\xa6\x01\n" +
+	"\x14ProviderContextEntry\x12C\n" +
+	"\x04role\x18\x01 \x01(\x0e2/.tetral.provider_gateway.v1.ProviderContextRoleR\x04role\x12I\n" +
+	"\acontent\x18\x02 \x03(\v2/.tetral.provider_gateway.v1.ProviderContextItemR\acontent\"\xdb\x02\n" +
+	"\x13ProviderContextItem\x12E\n" +
+	"\x04text\x18\x01 \x01(\v2/.tetral.provider_gateway.v1.ProviderContextTextH\x00R\x04text\x12T\n" +
+	"\treasoning\x18\x02 \x01(\v24.tetral.provider_gateway.v1.ProviderContextReasoningH\x00R\treasoning\x12K\n" +
+	"\ttool_call\x18\x03 \x01(\v2,.tetral.provider_gateway.v1.ProviderToolCallH\x00R\btoolCall\x12Q\n" +
+	"\vtool_result\x18\x04 \x01(\v2..tetral.provider_gateway.v1.ProviderToolResultH\x00R\n" +
+	"toolResultB\a\n" +
+	"\x05value\")\n" +
+	"\x13ProviderContextText\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"S\n" +
+	"\x18ProviderContextReasoning\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12#\n" +
-	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"\x9c\x02\n" +
-	"\x0fRuntimeToolPart\x12\x17\n" +
-	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12.\n" +
-	"\x11tool_use_event_id\x18\x03 \x01(\tH\x00R\x0etoolUseEventId\x88\x01\x01\x12F\n" +
-	"\x05state\x18\x04 \x01(\x0e20.tetral.provider_gateway.v1.RuntimeToolPartStateR\x05state\x12\x1d\n" +
+	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"r\n" +
+	"\x10ProviderToolCall\x12+\n" +
+	"\x12model_tool_call_id\x18\x01 \x01(\tR\x0fmodelToolCallId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
-	"input_json\x18\x05 \x01(\tR\tinputJson\x12/\n" +
-	"\x14output_or_error_json\x18\x06 \x01(\tR\x11outputOrErrorJsonB\x14\n" +
-	"\x12_tool_use_event_id\"\x8e\x02\n" +
+	"input_json\x18\x03 \x01(\tR\tinputJson\"\xcb\x02\n" +
+	"\x12ProviderToolResult\x12+\n" +
+	"\x12model_tool_call_id\x18\x01 \x01(\tR\x0fmodelToolCallId\x12W\n" +
+	"\tcompleted\x18\x02 \x01(\v27.tetral.provider_gateway.v1.ProviderCompletedToolResultH\x00R\tcompleted\x12K\n" +
+	"\x05error\x18\x03 \x01(\v23.tetral.provider_gateway.v1.ProviderErrorToolResultH\x00R\x05error\x12W\n" +
+	"\tcancelled\x18\x04 \x01(\v27.tetral.provider_gateway.v1.ProviderCancelledToolResultH\x00R\tcancelledB\t\n" +
+	"\aoutcome\">\n" +
+	"\x1bProviderCompletedToolResult\x12\x1f\n" +
+	"\voutput_json\x18\x01 \x01(\tR\n" +
+	"outputJson\"8\n" +
+	"\x17ProviderErrorToolResult\x12\x1d\n" +
+	"\n" +
+	"error_json\x18\x01 \x01(\tR\terrorJson\"\x1d\n" +
+	"\x1bProviderCancelledToolResult\"\x8e\x02\n" +
 	"\x15RuntimeToolDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12W\n" +
@@ -3922,26 +3993,22 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"fileBacked\x12\x12\n" +
 	"\x04mime\x18\x03 \x01(\tR\x04mime\x12\x1a\n" +
 	"\bfilename\x18\x04 \x01(\tR\bfilenameB\b\n" +
-	"\x06origin\"\xdb\x01\n" +
+	"\x06origin\"\xa3\x01\n" +
 	"\"ProviderRequestTransientAttachment\x12%\n" +
-	"\x0eattachment_ref\x18\x01 \x01(\tR\rattachmentRef\x126\n" +
-	"\x18source_tool_use_event_id\x18\x02 \x01(\tR\x14sourceToolUseEventId\x12\x1f\n" +
-	"\vsource_path\x18\x03 \x01(\tR\n" +
+	"\x0eattachment_ref\x18\x01 \x01(\tR\rattachmentRef\x12\x1f\n" +
+	"\vsource_path\x18\x02 \x01(\tR\n" +
 	"sourcePath\x12\x1d\n" +
 	"\n" +
-	"page_range\x18\x04 \x01(\tR\tpageRange\x12\x16\n" +
-	"\x06detail\x18\x05 \x01(\tR\x06detail\"`\n" +
+	"page_range\x18\x03 \x01(\tR\tpageRange\x12\x16\n" +
+	"\x06detail\x18\x04 \x01(\tR\x06detail\"`\n" +
 	"\x1dProviderRequestFileAttachment\x12&\n" +
 	"\x0fsource_event_id\x18\x01 \x01(\tR\rsourceEventId\x12\x17\n" +
 	"\afile_id\x18\x02 \x01(\tR\x06fileId\"b\n" +
 	"\x15ProviderRequestLimits\x12*\n" +
 	"\x11max_output_tokens\x18\x01 \x01(\x05R\x0fmaxOutputTokens\x12\x1d\n" +
 	"\n" +
-	"timeout_ms\x18\x02 \x01(\x05R\ttimeoutMs\"\x9a\x06\n" +
-	"\x13ProviderStreamEvent\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\tR\trequestId\x12(\n" +
-	"\x10model_request_id\x18\x02 \x01(\tR\x0emodelRequestId\x12G\n" +
+	"timeout_ms\x18\x02 \x01(\x05R\ttimeoutMs\"\xfb\x05\n" +
+	"\x13ProviderStreamEvent\x12G\n" +
 	"\x04type\x18\x03 \x01(\x0e23.tetral.provider_gateway.v1.ProviderStreamEventTypeR\x04type\x12E\n" +
 	"\x04text\x18\x04 \x01(\v2/.tetral.provider_gateway.v1.ProviderTextPayloadH\x00R\x04text\x12T\n" +
 	"\treasoning\x18\x05 \x01(\v24.tetral.provider_gateway.v1.ProviderReasoningPayloadH\x00R\treasoning\x12U\n" +
@@ -3952,9 +4019,10 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x0eprovider_error\x18\t \x01(\v20.tetral.provider_gateway.v1.ProviderErrorPayloadH\x00R\rproviderError\x12v\n" +
 	"\x15attachment_rejections\x18\n" +
 	" \x01(\v2?.tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayloadH\x00R\x14attachmentRejectionsB\t\n" +
-	"\apayload\"\xbc\x02\n" +
-	"\x1bProviderAttachmentRejection\x12^\n" +
-	"\ttransient\x18\x01 \x01(\v2>.tetral.provider_gateway.v1.ProviderRequestTransientAttachmentH\x00R\ttransient\x12\\\n" +
+	"\apayloadJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03R\n" +
+	"request_idR\x10model_request_id\"\x98\x02\n" +
+	"\x1bProviderAttachmentRejection\x12:\n" +
+	"\x18transient_attachment_ref\x18\x01 \x01(\tH\x00R\x16transientAttachmentRef\x12\\\n" +
 	"\vfile_backed\x18\x02 \x01(\v29.tetral.provider_gateway.v1.ProviderRequestFileAttachmentH\x00R\n" +
 	"fileBacked\x12U\n" +
 	"\x06reason\x18\x03 \x01(\x0e2=.tetral.provider_gateway.v1.ProviderAttachmentRejectionReasonR\x06reasonB\b\n" +
@@ -4079,24 +4147,20 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x06_titleB\r\n" +
 	"\v_line_startB\v\n" +
 	"\t_line_endB\x0e\n" +
-	"\f_total_lines\"\xb1\x03\n" +
-	"\x11RunMcpToolRequest\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\tR\trequestId\x12!\n" +
+	"\f_total_lines\"\xfa\x02\n" +
+	"\x11RunMcpToolRequest\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x03 \x01(\tR\tsessionId\x12*\n" +
 	"\x11session_thread_id\x18\x04 \x01(\tR\x0fsessionThreadId\x12)\n" +
-	"\x11tool_use_event_id\x18\x05 \x01(\tR\x0etoolUseEventId\x12&\n" +
-	"\x0fmcp_server_name\x18\x06 \x01(\tR\rmcpServerName\x12\x1b\n" +
-	"\ttool_name\x18\a \x01(\tR\btoolName\x12\x1d\n" +
-	"\n" +
-	"input_json\x18\b \x01(\tR\tinputJson\x12\x1d\n" +
+	"\x11tool_use_event_id\x18\x05 \x01(\tR\x0etoolUseEventId\x12\x1d\n" +
 	"\n" +
 	"binding_id\x18\t \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\n" +
 	" \x01(\x03R\x11bindingGeneration\x122\n" +
-	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingToken\"\xe4\x03\n" +
+	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingTokenJ\x04\b\x01\x10\x02J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tR\n" +
+	"request_idR\x0fmcp_server_nameR\ttool_nameR\n" +
+	"input_json\"\xab\x03\n" +
 	"\x12RunMcpToolResponse\x12D\n" +
 	"\x06status\x18\x01 \x01(\x0e2,.tetral.provider_gateway.v1.RunMcpToolStatusR\x06status\x12\x1f\n" +
 	"\vresult_text\x18\x02 \x01(\tR\n" +
@@ -4104,11 +4168,9 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\vattachments\x18\x03 \x03(\v2,.tetral.provider_gateway.v1.McpAttachmentRefR\vattachments\x12L\n" +
 	"\n" +
 	"error_kind\x18\x04 \x01(\x0e2(.tetral.provider_gateway.v1.McpErrorKindH\x00R\terrorKind\x88\x01\x01\x12R\n" +
-	"\fretry_status\x18\x05 \x01(\x0e2*.tetral.provider_gateway.v1.McpRetryStatusH\x01R\vretryStatus\x88\x01\x01\x12:\n" +
-	"\x16materialization_handle\x18\x06 \x01(\tH\x02R\x15materializationHandle\x88\x01\x01B\r\n" +
+	"\fretry_status\x18\x05 \x01(\x0e2*.tetral.provider_gateway.v1.McpRetryStatusH\x01R\vretryStatus\x88\x01\x01B\r\n" +
 	"\v_error_kindB\x0f\n" +
-	"\r_retry_statusB\x19\n" +
-	"\x17_materialization_handle\"\x9b\x01\n" +
+	"\r_retry_statusJ\x04\b\x06\x10\aR\x16materialization_handle\"\x9b\x01\n" +
 	"\x10McpAttachmentRef\x12%\n" +
 	"\x0eattachment_ref\x18\x01 \x01(\tR\rattachmentRef\x12\x12\n" +
 	"\x04mime\x18\x02 \x01(\tR\x04mime\x12\x1d\n" +
@@ -4149,16 +4211,11 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x1dSYSTEM_CACHE_HINT_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18SYSTEM_CACHE_HINT_STABLE\x10\x01\x12\x1d\n" +
 	"\x19SYSTEM_CACHE_HINT_SESSION\x10\x02\x12\x1a\n" +
-	"\x16SYSTEM_CACHE_HINT_NONE\x10\x03*}\n" +
-	"\x12RuntimeMessageRole\x12$\n" +
-	" RUNTIME_MESSAGE_ROLE_UNSPECIFIED\x10\x00\x12\x1d\n" +
-	"\x19RUNTIME_MESSAGE_ROLE_USER\x10\x01\x12\"\n" +
-	"\x1eRUNTIME_MESSAGE_ROLE_ASSISTANT\x10\x02*\xb0\x01\n" +
-	"\x14RuntimeToolPartState\x12'\n" +
-	"#RUNTIME_TOOL_PART_STATE_UNSPECIFIED\x10\x00\x12%\n" +
-	"!RUNTIME_TOOL_PART_STATE_COMPLETED\x10\x01\x12!\n" +
-	"\x1dRUNTIME_TOOL_PART_STATE_ERROR\x10\x02\x12%\n" +
-	"!RUNTIME_TOOL_PART_STATE_CANCELLED\x10\x03*\x99\x05\n" +
+	"\x16SYSTEM_CACHE_HINT_NONE\x10\x03*\x81\x01\n" +
+	"\x13ProviderContextRole\x12%\n" +
+	"!PROVIDER_CONTEXT_ROLE_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aPROVIDER_CONTEXT_ROLE_USER\x10\x01\x12#\n" +
+	"\x1fPROVIDER_CONTEXT_ROLE_ASSISTANT\x10\x02*\x99\x05\n" +
 	"\x17ProviderStreamEventType\x12*\n" +
 	"&PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED\x10\x00\x12)\n" +
 	"%PROVIDER_STREAM_EVENT_TYPE_TEXT_START\x10\x01\x12)\n" +
@@ -4237,124 +4294,129 @@ func file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescGZIP() []byte
 	return file_tetral_provider_gateway_v1_provider_gateway_proto_rawDescData
 }
 
-var file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
+var file_tetral_provider_gateway_v1_provider_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
+var file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_tetral_provider_gateway_v1_provider_gateway_proto_goTypes = []any{
 	(ProviderRequestKind)(0),                    // 0: tetral.provider_gateway.v1.ProviderRequestKind
 	(SystemSegmentKind)(0),                      // 1: tetral.provider_gateway.v1.SystemSegmentKind
 	(SystemCacheHint)(0),                        // 2: tetral.provider_gateway.v1.SystemCacheHint
-	(RuntimeMessageRole)(0),                     // 3: tetral.provider_gateway.v1.RuntimeMessageRole
-	(RuntimeToolPartState)(0),                   // 4: tetral.provider_gateway.v1.RuntimeToolPartState
-	(ProviderStreamEventType)(0),                // 5: tetral.provider_gateway.v1.ProviderStreamEventType
-	(ProviderAttachmentRejectionReason)(0),      // 6: tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
-	(ProviderFinishReason)(0),                   // 7: tetral.provider_gateway.v1.ProviderFinishReason
-	(RunWebStatus)(0),                           // 8: tetral.provider_gateway.v1.RunWebStatus
-	(RunMcpToolStatus)(0),                       // 9: tetral.provider_gateway.v1.RunMcpToolStatus
-	(McpErrorKind)(0),                           // 10: tetral.provider_gateway.v1.McpErrorKind
-	(McpRetryStatus)(0),                         // 11: tetral.provider_gateway.v1.McpRetryStatus
-	(*ProviderRequest)(nil),                     // 12: tetral.provider_gateway.v1.ProviderRequest
-	(*ModelRef)(nil),                            // 13: tetral.provider_gateway.v1.ModelRef
-	(*SystemSegment)(nil),                       // 14: tetral.provider_gateway.v1.SystemSegment
-	(*RuntimeMessage)(nil),                      // 15: tetral.provider_gateway.v1.RuntimeMessage
-	(*RuntimePart)(nil),                         // 16: tetral.provider_gateway.v1.RuntimePart
-	(*RuntimeTextPart)(nil),                     // 17: tetral.provider_gateway.v1.RuntimeTextPart
-	(*RuntimeReasoningPart)(nil),                // 18: tetral.provider_gateway.v1.RuntimeReasoningPart
-	(*RuntimeToolPart)(nil),                     // 19: tetral.provider_gateway.v1.RuntimeToolPart
-	(*RuntimeToolDefinition)(nil),               // 20: tetral.provider_gateway.v1.RuntimeToolDefinition
-	(*RuntimeFunctionToolDefinition)(nil),       // 21: tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
-	(*RuntimeFreeformToolDefinition)(nil),       // 22: tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
-	(*ProviderRequestAttachment)(nil),           // 23: tetral.provider_gateway.v1.ProviderRequestAttachment
-	(*ProviderRequestTransientAttachment)(nil),  // 24: tetral.provider_gateway.v1.ProviderRequestTransientAttachment
-	(*ProviderRequestFileAttachment)(nil),       // 25: tetral.provider_gateway.v1.ProviderRequestFileAttachment
-	(*ProviderRequestLimits)(nil),               // 26: tetral.provider_gateway.v1.ProviderRequestLimits
-	(*ProviderStreamEvent)(nil),                 // 27: tetral.provider_gateway.v1.ProviderStreamEvent
-	(*ProviderAttachmentRejection)(nil),         // 28: tetral.provider_gateway.v1.ProviderAttachmentRejection
-	(*ProviderAttachmentRejectionsPayload)(nil), // 29: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
-	(*ProviderTextPayload)(nil),                 // 30: tetral.provider_gateway.v1.ProviderTextPayload
-	(*ProviderReasoningPayload)(nil),            // 31: tetral.provider_gateway.v1.ProviderReasoningPayload
-	(*ProviderToolInputPayload)(nil),            // 32: tetral.provider_gateway.v1.ProviderToolInputPayload
-	(*ProviderToolCallPayload)(nil),             // 33: tetral.provider_gateway.v1.ProviderToolCallPayload
-	(*RequestUsage)(nil),                        // 34: tetral.provider_gateway.v1.RequestUsage
-	(*ProviderFinishPayload)(nil),               // 35: tetral.provider_gateway.v1.ProviderFinishPayload
-	(*ProviderError)(nil),                       // 36: tetral.provider_gateway.v1.ProviderError
-	(*ProviderErrorPayload)(nil),                // 37: tetral.provider_gateway.v1.ProviderErrorPayload
-	(*RunWebRequest)(nil),                       // 38: tetral.provider_gateway.v1.RunWebRequest
-	(*RunWebResponse)(nil),                      // 39: tetral.provider_gateway.v1.RunWebResponse
-	(*WebUsage)(nil),                            // 40: tetral.provider_gateway.v1.WebUsage
-	(*WebToolInput)(nil),                        // 41: tetral.provider_gateway.v1.WebToolInput
-	(*WebSearchQuery)(nil),                      // 42: tetral.provider_gateway.v1.WebSearchQuery
-	(*WebOpenRequest)(nil),                      // 43: tetral.provider_gateway.v1.WebOpenRequest
-	(*WebFindRequest)(nil),                      // 44: tetral.provider_gateway.v1.WebFindRequest
-	(*WebRef)(nil),                              // 45: tetral.provider_gateway.v1.WebRef
-	(*RunMcpToolRequest)(nil),                   // 46: tetral.provider_gateway.v1.RunMcpToolRequest
-	(*RunMcpToolResponse)(nil),                  // 47: tetral.provider_gateway.v1.RunMcpToolResponse
-	(*McpAttachmentRef)(nil),                    // 48: tetral.provider_gateway.v1.McpAttachmentRef
-	(*ListMcpToolsRequest)(nil),                 // 49: tetral.provider_gateway.v1.ListMcpToolsRequest
-	(*ListMcpToolsResponse)(nil),                // 50: tetral.provider_gateway.v1.ListMcpToolsResponse
-	(*McpToolDefinition)(nil),                   // 51: tetral.provider_gateway.v1.McpToolDefinition
-	(*McpOmittedTool)(nil),                      // 52: tetral.provider_gateway.v1.McpOmittedTool
+	(ProviderContextRole)(0),                    // 3: tetral.provider_gateway.v1.ProviderContextRole
+	(ProviderStreamEventType)(0),                // 4: tetral.provider_gateway.v1.ProviderStreamEventType
+	(ProviderAttachmentRejectionReason)(0),      // 5: tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
+	(ProviderFinishReason)(0),                   // 6: tetral.provider_gateway.v1.ProviderFinishReason
+	(RunWebStatus)(0),                           // 7: tetral.provider_gateway.v1.RunWebStatus
+	(RunMcpToolStatus)(0),                       // 8: tetral.provider_gateway.v1.RunMcpToolStatus
+	(McpErrorKind)(0),                           // 9: tetral.provider_gateway.v1.McpErrorKind
+	(McpRetryStatus)(0),                         // 10: tetral.provider_gateway.v1.McpRetryStatus
+	(*ProviderRequest)(nil),                     // 11: tetral.provider_gateway.v1.ProviderRequest
+	(*ModelRef)(nil),                            // 12: tetral.provider_gateway.v1.ModelRef
+	(*SystemSegment)(nil),                       // 13: tetral.provider_gateway.v1.SystemSegment
+	(*ProviderContextEntry)(nil),                // 14: tetral.provider_gateway.v1.ProviderContextEntry
+	(*ProviderContextItem)(nil),                 // 15: tetral.provider_gateway.v1.ProviderContextItem
+	(*ProviderContextText)(nil),                 // 16: tetral.provider_gateway.v1.ProviderContextText
+	(*ProviderContextReasoning)(nil),            // 17: tetral.provider_gateway.v1.ProviderContextReasoning
+	(*ProviderToolCall)(nil),                    // 18: tetral.provider_gateway.v1.ProviderToolCall
+	(*ProviderToolResult)(nil),                  // 19: tetral.provider_gateway.v1.ProviderToolResult
+	(*ProviderCompletedToolResult)(nil),         // 20: tetral.provider_gateway.v1.ProviderCompletedToolResult
+	(*ProviderErrorToolResult)(nil),             // 21: tetral.provider_gateway.v1.ProviderErrorToolResult
+	(*ProviderCancelledToolResult)(nil),         // 22: tetral.provider_gateway.v1.ProviderCancelledToolResult
+	(*RuntimeToolDefinition)(nil),               // 23: tetral.provider_gateway.v1.RuntimeToolDefinition
+	(*RuntimeFunctionToolDefinition)(nil),       // 24: tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
+	(*RuntimeFreeformToolDefinition)(nil),       // 25: tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
+	(*ProviderRequestAttachment)(nil),           // 26: tetral.provider_gateway.v1.ProviderRequestAttachment
+	(*ProviderRequestTransientAttachment)(nil),  // 27: tetral.provider_gateway.v1.ProviderRequestTransientAttachment
+	(*ProviderRequestFileAttachment)(nil),       // 28: tetral.provider_gateway.v1.ProviderRequestFileAttachment
+	(*ProviderRequestLimits)(nil),               // 29: tetral.provider_gateway.v1.ProviderRequestLimits
+	(*ProviderStreamEvent)(nil),                 // 30: tetral.provider_gateway.v1.ProviderStreamEvent
+	(*ProviderAttachmentRejection)(nil),         // 31: tetral.provider_gateway.v1.ProviderAttachmentRejection
+	(*ProviderAttachmentRejectionsPayload)(nil), // 32: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
+	(*ProviderTextPayload)(nil),                 // 33: tetral.provider_gateway.v1.ProviderTextPayload
+	(*ProviderReasoningPayload)(nil),            // 34: tetral.provider_gateway.v1.ProviderReasoningPayload
+	(*ProviderToolInputPayload)(nil),            // 35: tetral.provider_gateway.v1.ProviderToolInputPayload
+	(*ProviderToolCallPayload)(nil),             // 36: tetral.provider_gateway.v1.ProviderToolCallPayload
+	(*RequestUsage)(nil),                        // 37: tetral.provider_gateway.v1.RequestUsage
+	(*ProviderFinishPayload)(nil),               // 38: tetral.provider_gateway.v1.ProviderFinishPayload
+	(*ProviderError)(nil),                       // 39: tetral.provider_gateway.v1.ProviderError
+	(*ProviderErrorPayload)(nil),                // 40: tetral.provider_gateway.v1.ProviderErrorPayload
+	(*RunWebRequest)(nil),                       // 41: tetral.provider_gateway.v1.RunWebRequest
+	(*RunWebResponse)(nil),                      // 42: tetral.provider_gateway.v1.RunWebResponse
+	(*WebUsage)(nil),                            // 43: tetral.provider_gateway.v1.WebUsage
+	(*WebToolInput)(nil),                        // 44: tetral.provider_gateway.v1.WebToolInput
+	(*WebSearchQuery)(nil),                      // 45: tetral.provider_gateway.v1.WebSearchQuery
+	(*WebOpenRequest)(nil),                      // 46: tetral.provider_gateway.v1.WebOpenRequest
+	(*WebFindRequest)(nil),                      // 47: tetral.provider_gateway.v1.WebFindRequest
+	(*WebRef)(nil),                              // 48: tetral.provider_gateway.v1.WebRef
+	(*RunMcpToolRequest)(nil),                   // 49: tetral.provider_gateway.v1.RunMcpToolRequest
+	(*RunMcpToolResponse)(nil),                  // 50: tetral.provider_gateway.v1.RunMcpToolResponse
+	(*McpAttachmentRef)(nil),                    // 51: tetral.provider_gateway.v1.McpAttachmentRef
+	(*ListMcpToolsRequest)(nil),                 // 52: tetral.provider_gateway.v1.ListMcpToolsRequest
+	(*ListMcpToolsResponse)(nil),                // 53: tetral.provider_gateway.v1.ListMcpToolsResponse
+	(*McpToolDefinition)(nil),                   // 54: tetral.provider_gateway.v1.McpToolDefinition
+	(*McpOmittedTool)(nil),                      // 55: tetral.provider_gateway.v1.McpOmittedTool
 }
 var file_tetral_provider_gateway_v1_provider_gateway_proto_depIdxs = []int32{
 	0,  // 0: tetral.provider_gateway.v1.ProviderRequest.request_kind:type_name -> tetral.provider_gateway.v1.ProviderRequestKind
-	13, // 1: tetral.provider_gateway.v1.ProviderRequest.model:type_name -> tetral.provider_gateway.v1.ModelRef
-	14, // 2: tetral.provider_gateway.v1.ProviderRequest.system:type_name -> tetral.provider_gateway.v1.SystemSegment
-	15, // 3: tetral.provider_gateway.v1.ProviderRequest.messages:type_name -> tetral.provider_gateway.v1.RuntimeMessage
-	20, // 4: tetral.provider_gateway.v1.ProviderRequest.tools:type_name -> tetral.provider_gateway.v1.RuntimeToolDefinition
-	23, // 5: tetral.provider_gateway.v1.ProviderRequest.attachments:type_name -> tetral.provider_gateway.v1.ProviderRequestAttachment
-	26, // 6: tetral.provider_gateway.v1.ProviderRequest.limits:type_name -> tetral.provider_gateway.v1.ProviderRequestLimits
+	12, // 1: tetral.provider_gateway.v1.ProviderRequest.model:type_name -> tetral.provider_gateway.v1.ModelRef
+	13, // 2: tetral.provider_gateway.v1.ProviderRequest.system:type_name -> tetral.provider_gateway.v1.SystemSegment
+	14, // 3: tetral.provider_gateway.v1.ProviderRequest.context:type_name -> tetral.provider_gateway.v1.ProviderContextEntry
+	23, // 4: tetral.provider_gateway.v1.ProviderRequest.tools:type_name -> tetral.provider_gateway.v1.RuntimeToolDefinition
+	26, // 5: tetral.provider_gateway.v1.ProviderRequest.attachments:type_name -> tetral.provider_gateway.v1.ProviderRequestAttachment
+	29, // 6: tetral.provider_gateway.v1.ProviderRequest.limits:type_name -> tetral.provider_gateway.v1.ProviderRequestLimits
 	1,  // 7: tetral.provider_gateway.v1.SystemSegment.kind:type_name -> tetral.provider_gateway.v1.SystemSegmentKind
 	2,  // 8: tetral.provider_gateway.v1.SystemSegment.cache_hint:type_name -> tetral.provider_gateway.v1.SystemCacheHint
-	3,  // 9: tetral.provider_gateway.v1.RuntimeMessage.role:type_name -> tetral.provider_gateway.v1.RuntimeMessageRole
-	16, // 10: tetral.provider_gateway.v1.RuntimeMessage.parts:type_name -> tetral.provider_gateway.v1.RuntimePart
-	17, // 11: tetral.provider_gateway.v1.RuntimePart.text:type_name -> tetral.provider_gateway.v1.RuntimeTextPart
-	18, // 12: tetral.provider_gateway.v1.RuntimePart.reasoning:type_name -> tetral.provider_gateway.v1.RuntimeReasoningPart
-	19, // 13: tetral.provider_gateway.v1.RuntimePart.tool:type_name -> tetral.provider_gateway.v1.RuntimeToolPart
-	4,  // 14: tetral.provider_gateway.v1.RuntimeToolPart.state:type_name -> tetral.provider_gateway.v1.RuntimeToolPartState
-	21, // 15: tetral.provider_gateway.v1.RuntimeToolDefinition.function:type_name -> tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
-	22, // 16: tetral.provider_gateway.v1.RuntimeToolDefinition.freeform:type_name -> tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
-	24, // 17: tetral.provider_gateway.v1.ProviderRequestAttachment.transient:type_name -> tetral.provider_gateway.v1.ProviderRequestTransientAttachment
-	25, // 18: tetral.provider_gateway.v1.ProviderRequestAttachment.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
-	5,  // 19: tetral.provider_gateway.v1.ProviderStreamEvent.type:type_name -> tetral.provider_gateway.v1.ProviderStreamEventType
-	30, // 20: tetral.provider_gateway.v1.ProviderStreamEvent.text:type_name -> tetral.provider_gateway.v1.ProviderTextPayload
-	31, // 21: tetral.provider_gateway.v1.ProviderStreamEvent.reasoning:type_name -> tetral.provider_gateway.v1.ProviderReasoningPayload
-	32, // 22: tetral.provider_gateway.v1.ProviderStreamEvent.tool_input:type_name -> tetral.provider_gateway.v1.ProviderToolInputPayload
-	33, // 23: tetral.provider_gateway.v1.ProviderStreamEvent.tool_call:type_name -> tetral.provider_gateway.v1.ProviderToolCallPayload
-	35, // 24: tetral.provider_gateway.v1.ProviderStreamEvent.finish:type_name -> tetral.provider_gateway.v1.ProviderFinishPayload
-	37, // 25: tetral.provider_gateway.v1.ProviderStreamEvent.provider_error:type_name -> tetral.provider_gateway.v1.ProviderErrorPayload
-	29, // 26: tetral.provider_gateway.v1.ProviderStreamEvent.attachment_rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
-	24, // 27: tetral.provider_gateway.v1.ProviderAttachmentRejection.transient:type_name -> tetral.provider_gateway.v1.ProviderRequestTransientAttachment
-	25, // 28: tetral.provider_gateway.v1.ProviderAttachmentRejection.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
-	6,  // 29: tetral.provider_gateway.v1.ProviderAttachmentRejection.reason:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
-	28, // 30: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload.rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejection
-	7,  // 31: tetral.provider_gateway.v1.ProviderFinishPayload.reason:type_name -> tetral.provider_gateway.v1.ProviderFinishReason
-	34, // 32: tetral.provider_gateway.v1.ProviderFinishPayload.usage:type_name -> tetral.provider_gateway.v1.RequestUsage
-	36, // 33: tetral.provider_gateway.v1.ProviderErrorPayload.error:type_name -> tetral.provider_gateway.v1.ProviderError
-	41, // 34: tetral.provider_gateway.v1.RunWebRequest.input:type_name -> tetral.provider_gateway.v1.WebToolInput
-	8,  // 35: tetral.provider_gateway.v1.RunWebResponse.status:type_name -> tetral.provider_gateway.v1.RunWebStatus
-	45, // 36: tetral.provider_gateway.v1.RunWebResponse.refs:type_name -> tetral.provider_gateway.v1.WebRef
-	40, // 37: tetral.provider_gateway.v1.RunWebResponse.usage:type_name -> tetral.provider_gateway.v1.WebUsage
-	42, // 38: tetral.provider_gateway.v1.WebToolInput.search_query:type_name -> tetral.provider_gateway.v1.WebSearchQuery
-	43, // 39: tetral.provider_gateway.v1.WebToolInput.open:type_name -> tetral.provider_gateway.v1.WebOpenRequest
-	44, // 40: tetral.provider_gateway.v1.WebToolInput.find:type_name -> tetral.provider_gateway.v1.WebFindRequest
-	9,  // 41: tetral.provider_gateway.v1.RunMcpToolResponse.status:type_name -> tetral.provider_gateway.v1.RunMcpToolStatus
-	48, // 42: tetral.provider_gateway.v1.RunMcpToolResponse.attachments:type_name -> tetral.provider_gateway.v1.McpAttachmentRef
-	10, // 43: tetral.provider_gateway.v1.RunMcpToolResponse.error_kind:type_name -> tetral.provider_gateway.v1.McpErrorKind
-	11, // 44: tetral.provider_gateway.v1.RunMcpToolResponse.retry_status:type_name -> tetral.provider_gateway.v1.McpRetryStatus
-	51, // 45: tetral.provider_gateway.v1.ListMcpToolsResponse.tools:type_name -> tetral.provider_gateway.v1.McpToolDefinition
-	52, // 46: tetral.provider_gateway.v1.ListMcpToolsResponse.omitted_tools:type_name -> tetral.provider_gateway.v1.McpOmittedTool
-	12, // 47: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:input_type -> tetral.provider_gateway.v1.ProviderRequest
-	38, // 48: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:input_type -> tetral.provider_gateway.v1.RunWebRequest
-	46, // 49: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:input_type -> tetral.provider_gateway.v1.RunMcpToolRequest
-	49, // 50: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:input_type -> tetral.provider_gateway.v1.ListMcpToolsRequest
-	27, // 51: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:output_type -> tetral.provider_gateway.v1.ProviderStreamEvent
-	39, // 52: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:output_type -> tetral.provider_gateway.v1.RunWebResponse
-	47, // 53: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:output_type -> tetral.provider_gateway.v1.RunMcpToolResponse
-	50, // 54: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:output_type -> tetral.provider_gateway.v1.ListMcpToolsResponse
-	51, // [51:55] is the sub-list for method output_type
-	47, // [47:51] is the sub-list for method input_type
-	47, // [47:47] is the sub-list for extension type_name
-	47, // [47:47] is the sub-list for extension extendee
-	0,  // [0:47] is the sub-list for field type_name
+	3,  // 9: tetral.provider_gateway.v1.ProviderContextEntry.role:type_name -> tetral.provider_gateway.v1.ProviderContextRole
+	15, // 10: tetral.provider_gateway.v1.ProviderContextEntry.content:type_name -> tetral.provider_gateway.v1.ProviderContextItem
+	16, // 11: tetral.provider_gateway.v1.ProviderContextItem.text:type_name -> tetral.provider_gateway.v1.ProviderContextText
+	17, // 12: tetral.provider_gateway.v1.ProviderContextItem.reasoning:type_name -> tetral.provider_gateway.v1.ProviderContextReasoning
+	18, // 13: tetral.provider_gateway.v1.ProviderContextItem.tool_call:type_name -> tetral.provider_gateway.v1.ProviderToolCall
+	19, // 14: tetral.provider_gateway.v1.ProviderContextItem.tool_result:type_name -> tetral.provider_gateway.v1.ProviderToolResult
+	20, // 15: tetral.provider_gateway.v1.ProviderToolResult.completed:type_name -> tetral.provider_gateway.v1.ProviderCompletedToolResult
+	21, // 16: tetral.provider_gateway.v1.ProviderToolResult.error:type_name -> tetral.provider_gateway.v1.ProviderErrorToolResult
+	22, // 17: tetral.provider_gateway.v1.ProviderToolResult.cancelled:type_name -> tetral.provider_gateway.v1.ProviderCancelledToolResult
+	24, // 18: tetral.provider_gateway.v1.RuntimeToolDefinition.function:type_name -> tetral.provider_gateway.v1.RuntimeFunctionToolDefinition
+	25, // 19: tetral.provider_gateway.v1.RuntimeToolDefinition.freeform:type_name -> tetral.provider_gateway.v1.RuntimeFreeformToolDefinition
+	27, // 20: tetral.provider_gateway.v1.ProviderRequestAttachment.transient:type_name -> tetral.provider_gateway.v1.ProviderRequestTransientAttachment
+	28, // 21: tetral.provider_gateway.v1.ProviderRequestAttachment.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
+	4,  // 22: tetral.provider_gateway.v1.ProviderStreamEvent.type:type_name -> tetral.provider_gateway.v1.ProviderStreamEventType
+	33, // 23: tetral.provider_gateway.v1.ProviderStreamEvent.text:type_name -> tetral.provider_gateway.v1.ProviderTextPayload
+	34, // 24: tetral.provider_gateway.v1.ProviderStreamEvent.reasoning:type_name -> tetral.provider_gateway.v1.ProviderReasoningPayload
+	35, // 25: tetral.provider_gateway.v1.ProviderStreamEvent.tool_input:type_name -> tetral.provider_gateway.v1.ProviderToolInputPayload
+	36, // 26: tetral.provider_gateway.v1.ProviderStreamEvent.tool_call:type_name -> tetral.provider_gateway.v1.ProviderToolCallPayload
+	38, // 27: tetral.provider_gateway.v1.ProviderStreamEvent.finish:type_name -> tetral.provider_gateway.v1.ProviderFinishPayload
+	40, // 28: tetral.provider_gateway.v1.ProviderStreamEvent.provider_error:type_name -> tetral.provider_gateway.v1.ProviderErrorPayload
+	32, // 29: tetral.provider_gateway.v1.ProviderStreamEvent.attachment_rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload
+	28, // 30: tetral.provider_gateway.v1.ProviderAttachmentRejection.file_backed:type_name -> tetral.provider_gateway.v1.ProviderRequestFileAttachment
+	5,  // 31: tetral.provider_gateway.v1.ProviderAttachmentRejection.reason:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejectionReason
+	31, // 32: tetral.provider_gateway.v1.ProviderAttachmentRejectionsPayload.rejections:type_name -> tetral.provider_gateway.v1.ProviderAttachmentRejection
+	6,  // 33: tetral.provider_gateway.v1.ProviderFinishPayload.reason:type_name -> tetral.provider_gateway.v1.ProviderFinishReason
+	37, // 34: tetral.provider_gateway.v1.ProviderFinishPayload.usage:type_name -> tetral.provider_gateway.v1.RequestUsage
+	39, // 35: tetral.provider_gateway.v1.ProviderErrorPayload.error:type_name -> tetral.provider_gateway.v1.ProviderError
+	44, // 36: tetral.provider_gateway.v1.RunWebRequest.input:type_name -> tetral.provider_gateway.v1.WebToolInput
+	7,  // 37: tetral.provider_gateway.v1.RunWebResponse.status:type_name -> tetral.provider_gateway.v1.RunWebStatus
+	48, // 38: tetral.provider_gateway.v1.RunWebResponse.refs:type_name -> tetral.provider_gateway.v1.WebRef
+	43, // 39: tetral.provider_gateway.v1.RunWebResponse.usage:type_name -> tetral.provider_gateway.v1.WebUsage
+	45, // 40: tetral.provider_gateway.v1.WebToolInput.search_query:type_name -> tetral.provider_gateway.v1.WebSearchQuery
+	46, // 41: tetral.provider_gateway.v1.WebToolInput.open:type_name -> tetral.provider_gateway.v1.WebOpenRequest
+	47, // 42: tetral.provider_gateway.v1.WebToolInput.find:type_name -> tetral.provider_gateway.v1.WebFindRequest
+	8,  // 43: tetral.provider_gateway.v1.RunMcpToolResponse.status:type_name -> tetral.provider_gateway.v1.RunMcpToolStatus
+	51, // 44: tetral.provider_gateway.v1.RunMcpToolResponse.attachments:type_name -> tetral.provider_gateway.v1.McpAttachmentRef
+	9,  // 45: tetral.provider_gateway.v1.RunMcpToolResponse.error_kind:type_name -> tetral.provider_gateway.v1.McpErrorKind
+	10, // 46: tetral.provider_gateway.v1.RunMcpToolResponse.retry_status:type_name -> tetral.provider_gateway.v1.McpRetryStatus
+	54, // 47: tetral.provider_gateway.v1.ListMcpToolsResponse.tools:type_name -> tetral.provider_gateway.v1.McpToolDefinition
+	55, // 48: tetral.provider_gateway.v1.ListMcpToolsResponse.omitted_tools:type_name -> tetral.provider_gateway.v1.McpOmittedTool
+	11, // 49: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:input_type -> tetral.provider_gateway.v1.ProviderRequest
+	41, // 50: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:input_type -> tetral.provider_gateway.v1.RunWebRequest
+	49, // 51: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:input_type -> tetral.provider_gateway.v1.RunMcpToolRequest
+	52, // 52: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:input_type -> tetral.provider_gateway.v1.ListMcpToolsRequest
+	30, // 53: tetral.provider_gateway.v1.ProviderGatewayService.StreamProviderRequest:output_type -> tetral.provider_gateway.v1.ProviderStreamEvent
+	42, // 54: tetral.provider_gateway.v1.ProviderGatewayService.RunWeb:output_type -> tetral.provider_gateway.v1.RunWebResponse
+	50, // 55: tetral.provider_gateway.v1.McpConnectorService.RunMcpTool:output_type -> tetral.provider_gateway.v1.RunMcpToolResponse
+	53, // 56: tetral.provider_gateway.v1.McpConnectorService.ListMcpTools:output_type -> tetral.provider_gateway.v1.ListMcpToolsResponse
+	53, // [53:57] is the sub-list for method output_type
+	49, // [49:53] is the sub-list for method input_type
+	49, // [49:49] is the sub-list for extension type_name
+	49, // [49:49] is the sub-list for extension extendee
+	0,  // [0:49] is the sub-list for field type_name
 }
 
 func init() { file_tetral_provider_gateway_v1_provider_gateway_proto_init() }
@@ -4364,21 +4426,26 @@ func file_tetral_provider_gateway_v1_provider_gateway_proto_init() {
 	}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[0].OneofWrappers = []any{}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[4].OneofWrappers = []any{
-		(*RuntimePart_Text)(nil),
-		(*RuntimePart_Reasoning)(nil),
-		(*RuntimePart_Tool)(nil),
+		(*ProviderContextItem_Text)(nil),
+		(*ProviderContextItem_Reasoning)(nil),
+		(*ProviderContextItem_ToolCall)(nil),
+		(*ProviderContextItem_ToolResult)(nil),
 	}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[7].OneofWrappers = []any{}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[8].OneofWrappers = []any{
+		(*ProviderToolResult_Completed)(nil),
+		(*ProviderToolResult_Error)(nil),
+		(*ProviderToolResult_Cancelled)(nil),
+	}
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[12].OneofWrappers = []any{
 		(*RuntimeToolDefinition_Function)(nil),
 		(*RuntimeToolDefinition_Freeform)(nil),
 	}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[9].OneofWrappers = []any{}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[11].OneofWrappers = []any{
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[13].OneofWrappers = []any{}
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[15].OneofWrappers = []any{
 		(*ProviderRequestAttachment_Transient)(nil),
 		(*ProviderRequestAttachment_FileBacked)(nil),
 	}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[15].OneofWrappers = []any{
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[19].OneofWrappers = []any{
 		(*ProviderStreamEvent_Text)(nil),
 		(*ProviderStreamEvent_Reasoning)(nil),
 		(*ProviderStreamEvent_ToolInput)(nil),
@@ -4387,24 +4454,24 @@ func file_tetral_provider_gateway_v1_provider_gateway_proto_init() {
 		(*ProviderStreamEvent_ProviderError)(nil),
 		(*ProviderStreamEvent_AttachmentRejections)(nil),
 	}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[16].OneofWrappers = []any{
-		(*ProviderAttachmentRejection_Transient)(nil),
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[20].OneofWrappers = []any{
+		(*ProviderAttachmentRejection_TransientAttachmentRef)(nil),
 		(*ProviderAttachmentRejection_FileBacked)(nil),
 	}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[22].OneofWrappers = []any{}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[23].OneofWrappers = []any{}
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[26].OneofWrappers = []any{}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[27].OneofWrappers = []any{}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[28].OneofWrappers = []any{}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[31].OneofWrappers = []any{}
-	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[33].OneofWrappers = []any{}
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[32].OneofWrappers = []any{}
 	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[35].OneofWrappers = []any{}
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[37].OneofWrappers = []any{}
+	file_tetral_provider_gateway_v1_provider_gateway_proto_msgTypes[39].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc), len(file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc)),
-			NumEnums:      12,
-			NumMessages:   41,
+			NumEnums:      11,
+			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

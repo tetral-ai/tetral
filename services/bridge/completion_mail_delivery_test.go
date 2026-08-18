@@ -11,8 +11,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func seedCompletionMailSentAt(
@@ -27,12 +25,7 @@ func seedCompletionMailSentAt(
 ) {
 	t.Helper()
 	eventID := "evt_" + deliveryID
-	messageJSON := bridgeRuntimeNotificationMessageJSON(
-		t,
-		sessionID,
-		"msg_"+deliveryID,
-		completionMailEnvelope("main", "sender", deliveryID),
-	)
+	messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "sender", deliveryID))
 	seedBridgeAPIEvent(
 		t,
 		db,
@@ -182,7 +175,7 @@ func TestPostgreSQLCompletionMailWakeAcceptsEveryStaleRecipientArm(t *testing.T)
 			if err != nil {
 				t.Fatalf("prepare stale completion-mail wake: %v", err)
 			}
-			if !plan.StaleAccepted || plan.Request != nil {
+			if !plan.StaleAccepted || plan.hasCommand() {
 				t.Fatalf("stale completion-mail plan = %#v; want accepted no-op", plan)
 			}
 		})
@@ -231,12 +224,7 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 			deliveryID := "delivery_completion_mail_finalize_stale_" + suffix
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
-			messageJSON := bridgeRuntimeNotificationMessageJSON(
-				t,
-				sessionID,
-				"msg_completion_mail_finalize_stale_"+suffix,
-				completionMailEnvelope("main", "task_"+childID, "completion"),
-			)
+			messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "completion"))
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_completion_mail_finalize_stale_sent_"+suffix, 1,
 				"agent.thread_message_sent",
 				bridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "sevt_completion_mail_finalize_stale_"+suffix, messageJSON))
@@ -251,11 +239,11 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 			)
 
 			plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-			if err != nil || plan.Request == nil || plan.StaleAccepted {
+			if err != nil || plan.AcceptAgentMail == nil || plan.StaleAccepted {
 				t.Fatalf("prepare completion-mail race fixture = %#v/%v; want live request", plan, err)
 			}
 			test.mutate(t, admin, sessionID, threadID)
-			exhaustion := runtimeDeliveryResultWithAttemptedBinding(retryableExhaustionResult(), plan.Request)
+			exhaustion := runtimeDeliveryResultWithAttemptedBinding(retryableExhaustionResult(), plan.AttemptedBinding)
 
 			for attempt := 0; attempt < 2; attempt++ {
 				finalized, err := store.FinalizeRuntimeDelivery(context.Background(), job, exhaustion)
@@ -294,16 +282,6 @@ func TestPostgreSQLAgentMailPrepareLocksSessionBeforeInbox(t *testing.T) {
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedCompletionMailSentAt(t, admin, sessionID, mainID, childID, delivery, 1, "2026-01-01T00:00:00Z")
-	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	apiStore.Clock = func() time.Time { return now }
-	apiStore.RuntimeBindingTokenHMACKey = []byte("agent-mail-lock-order-key-32b")
-	if _, err := apiStore.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-		ChildThreadId: childID,
-		DeliveryId:    delivery,
-	}); err != nil {
-		t.Fatalf("resolve lock-order mail: %v", err)
-	}
 
 	blocker, blockerPID := lockPostgreSQLFinalizationFence(t, admin,
 		`SELECT id FROM sessions WHERE workspace_id='default' AND id=$1 FOR UPDATE`,
@@ -344,7 +322,7 @@ func TestPostgreSQLAgentMailPrepareLocksSessionBeforeInbox(t *testing.T) {
 	if lockedInputID != completionRuntimeInputID(delivery) {
 		t.Fatalf("lock-order probe input = %q; want %q", lockedInputID, completionRuntimeInputID(delivery))
 	}
-	if result.err != nil || result.plan.Request == nil {
+	if result.err != nil || result.plan.AcceptAgentMail == nil {
 		t.Fatalf("prepare after lock-order probe = %#v/%v; want Runtime command", result.plan, result.err)
 	}
 }
@@ -359,7 +337,6 @@ func completionMailRuntimeJob(sessionID string, threadID string, runtimeInputID 
 		SessionThreadID: threadID,
 		RuntimeInputID:  runtimeInputID,
 		InputKind:       "agent_mail",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_AGENT_MAIL,
 		PayloadJSON:     "{}",
 	}
 }

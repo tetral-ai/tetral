@@ -2,12 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { credentials, Metadata, status } from "@grpc/grpc-js";
 import {
   AgentRuntimePodServiceClient,
-  RuntimeCommandKind,
-  RuntimeCommandStatus,
+  CleanupSessionReason,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type {
-  RuntimeInputCommandRequest,
-  RuntimeInputCommandResponse,
+  AcceptInputRequest,
+  AcceptInputResponse,
+  CleanupSessionRequest,
+  CleanupSessionResponse,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { createRuntimePodApp } from "../../src/app.js";
 import type { RuntimeTokenReviewClient } from "../../src/auth.js";
@@ -30,11 +31,7 @@ describe("RuntimePodApp production composition", () => {
       expect(fixture.app.lifecycle.ready()).toEqual({ ready: false });
       await expectProbeStoppedOrNotReady(fixture.httpUrl, "/ready");
       acceptGate.resolve();
-      await expect(inFlight).resolves.toMatchObject({
-        status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED,
-        sessionId: "sesn_1",
-        runtimeInputId: "rin_probe",
-      });
+      await expect(inFlight).resolves.toEqual({ accepted: {} });
       await shutdown;
     } finally {
       await fixture.stop();
@@ -55,13 +52,7 @@ describe("RuntimePodApp production composition", () => {
       void newGrpcCall.catch(() => undefined);
       acceptGate.resolve();
 
-      await expect(inFlight).resolves.toMatchObject({
-        status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED,
-        sessionId: "sesn_1",
-        runtimeInputId: "rin_inflight",
-        bindingId: "bind_1",
-        bindingGeneration: 42,
-      });
+      await expect(inFlight).resolves.toEqual({ accepted: {} });
       await expectGrpcCodeOneOf(newGrpcCall, [
         status.FAILED_PRECONDITION,
         status.UNAVAILABLE,
@@ -77,7 +68,7 @@ describe("RuntimePodApp production composition", () => {
     const cleanupHost = new RecordingCleanupHost(cleanupGate.promise);
     const fixture = await startAppFixture({ cleanupRunHost: cleanupHost });
     try {
-      const responsePromise = cleanup(fixture.client, validCleanupCommand("rin_cleanup"), authMetadata());
+      const responsePromise = cleanup(fixture.client, validCleanupCommand("cleanup_1"), authMetadata());
       await waitFor(() => cleanupHost.sessionIds.length === 1);
       let settled = false;
       void responsePromise.then(() => {
@@ -88,14 +79,8 @@ describe("RuntimePodApp production composition", () => {
 
       cleanupGate.resolve({ ok: true, sessionId: "sesn_1", cleaned: true });
       const response = await responsePromise;
-      expect(response).toMatchObject({
-        status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED,
-        sessionId: "sesn_1",
-        runtimeInputId: "rin_cleanup",
-        bindingId: "bind_1",
-        bindingGeneration: 42,
-      });
-      expect(cleanupHost.scopes).toEqual([expect.objectContaining({ sessionId: "sesn_1", sessionThreadId: "thrd_1" })]);
+      expect(response).toEqual({ completed: {} });
+      expect(cleanupHost.scopes).toEqual([expect.objectContaining({ sessionId: "sesn_1", cleanupOperationId: "cleanup_1" })]);
       await waitFor(() => cleanupHost.completed);
     } finally {
       await fixture.stop();
@@ -165,33 +150,29 @@ function validConfig(): RuntimePodConfig {
   };
 }
 
-function validCommand(runtimeInputId: string): RuntimeInputCommandRequest {
+function validCommand(runtimeInputId: string): AcceptInputRequest {
   return {
-    requestId: `req_${runtimeInputId}`,
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
-    targetPodNamespace: "engine",
-    targetPodName: "runtime-pod-a",
     targetPodUid: "uid-a",
-    targetPodIp: "10.0.0.1",
     runtimeInputId,
-    eventIds: ["sevt_1"],
-    sequenceFrom: 1,
-    sequenceTo: 1,
-    commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_MESSAGES,
-    payloadJson: "",
+    inputOrder: 1,
+    messagesJson: "{\"messages\":[]}",
   };
 }
 
-function validCleanupCommand(runtimeInputId: string): RuntimeInputCommandRequest {
+function validCleanupCommand(cleanupOperationId: string): CleanupSessionRequest {
   return {
-    ...validCommand(runtimeInputId),
-    eventIds: [],
-    commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
-    payloadJson: JSON.stringify({ reason: "expired" }),
+    workspaceId: "wksp_1",
+    sessionId: "sesn_1",
+    bindingId: "bind_1",
+    bindingGeneration: 42,
+    targetPodUid: "uid-a",
+    cleanupOperationId,
+    reason: CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED,
   };
 }
 
@@ -201,20 +182,20 @@ function authMetadata(): Metadata {
   return metadata;
 }
 
-async function acceptInput(client: AgentRuntimePodServiceClient, request: RuntimeInputCommandRequest, metadata: Metadata) {
-  return await unary((callback) => {
+async function acceptInput(client: AgentRuntimePodServiceClient, request: AcceptInputRequest, metadata: Metadata) {
+  return await unary<AcceptInputResponse>((callback) => {
     client.acceptInput(request, metadata, { deadline: Date.now() + 2_000 }, callback);
   });
 }
 
-async function cleanup(client: AgentRuntimePodServiceClient, request: RuntimeInputCommandRequest, metadata: Metadata) {
-  return await unary((callback) => {
+async function cleanup(client: AgentRuntimePodServiceClient, request: CleanupSessionRequest, metadata: Metadata) {
+  return await unary<CleanupSessionResponse>((callback) => {
     client.cleanupSession(request, metadata, { deadline: Date.now() + 2_000 }, callback);
   });
 }
 
-async function unary(invoke: (callback: (error: Error | null, response: RuntimeInputCommandResponse) => void) => void) {
-  return await new Promise<RuntimeInputCommandResponse>((resolve, reject) => {
+async function unary<Response>(invoke: (callback: (error: Error | null, response: Response) => void) => void) {
+  return await new Promise<Response>((resolve, reject) => {
     invoke((error, response) => {
       if (error !== null) {
         reject(error);

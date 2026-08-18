@@ -648,7 +648,6 @@ func TestSessionEventsSchemaMatchesDraftLedger(t *testing.T) {
 		"insert_stream_position",
 		"runtime_write_id",
 		"model_request_id",
-		"stable_reasoning_json",
 		"projection_json",
 		"created_at",
 		"updated_at",
@@ -744,7 +743,7 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			"helper_recovery_count", "background_task_started", "task_id",
 			"background_operation_kind", "background_operation_state", "background_request_id",
 			"background_task_id", "background_max_output_tokens", "background_write_sequence",
-			"memory_projection_state", "mcp_claim_status", "mcp_claim_owner_request_id",
+			"memory_projection_state", "mcp_claim_status", "mcp_claim_id",
 			"mcp_claim_lease_expires_at", "created_at", "updated_at",
 		},
 		"session_git_tickets": {
@@ -1269,24 +1268,24 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 		t.Fatalf("insert non-MCP row with null claim state: %v", err)
 	}
 	var claimStatus sql.NullString
-	var claimOwner sql.NullString
+	var claimID sql.NullString
 	var claimLease sql.NullString
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
+		`SELECT mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = 'workspace_mcp_claim'
 		    AND session_id = 'sesn_mcp_claim'
-		    AND tool_use_event_id = 'tool_memory_null_claim'`).Scan(&claimStatus, &claimOwner, &claimLease); err != nil {
+		    AND tool_use_event_id = 'tool_memory_null_claim'`).Scan(&claimStatus, &claimID, &claimLease); err != nil {
 		t.Fatalf("read non-MCP claim state: %v", err)
 	}
-	if claimStatus.Valid || claimOwner.Valid || claimLease.Valid {
-		t.Fatalf("non-MCP claim state = status=%+v owner=%+v lease=%+v; want all NULL", claimStatus, claimOwner, claimLease)
+	if claimStatus.Valid || claimID.Valid || claimLease.Valid {
+		t.Fatalf("non-MCP claim state = status=%+v claim=%+v lease=%+v; want all NULL", claimStatus, claimID, claimLease)
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
-			mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at,
+			mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at,
 			created_at, updated_at
 		) VALUES (
 			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_mcp_all_null', 'mcp',
@@ -1300,7 +1299,7 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
-			mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at,
+			mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at,
 			created_at, updated_at
 		) VALUES (
 			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_mcp_claim', 'mcp',
@@ -1326,7 +1325,7 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
-			mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at,
+			mcp_claim_status, mcp_claim_id, mcp_claim_lease_expires_at,
 			created_at, updated_at
 		) VALUES (
 			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_memory_claim', 'memory',

@@ -3,10 +3,8 @@ package agentruntimebridge
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"time"
-	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -20,10 +18,6 @@ import (
 )
 
 // This file owns cleanup-session and delete-cleanup state transitions.
-
-// UPDATE-WITH: services/agent-runtime/packages/core/src/llm/llm-event.ts
-// (RuntimePreviewTextMaxBytes); cleanupRuntimeBoundedJSON.
-const cleanupRuntimeInputPreviewMaxBytes = 8 * 1024
 
 func (s *PostgreSQLRuntimeDeliveryStore) cleanupTargetProvenGone(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, claim cleanupSessionClaim) (bool, error) {
 	prover, ok := s.TargetResolver.(RuntimeCleanupTargetProver)
@@ -102,18 +96,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareSessionDeleteCleanupCommandTx(ct
 	if !rowsAffected(result) {
 		return RuntimeCommandPlan{StaleAccepted: true}, nil
 	}
-	payloadJSON, err := cleanupSessionPayloadJSON(job.DeleteCleanupID)
-	if err != nil {
-		return RuntimeCommandPlan{}, err
-	}
 	return RuntimeCommandPlan{
-		Target: RuntimePodTarget{Namespace: state.Binding.Namespace, PodName: state.Binding.PodName, PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, Port: port},
-		Request: &agentruntimev1.RuntimeInputCommandRequest{
-			RequestId: job.JobID + ":" + job.LeaseToken, WorkspaceId: job.WorkspaceID, SessionId: job.SessionID,
-			SessionThreadId: state.SessionThreadID, BindingId: state.Binding.BindingID,
-			BindingGeneration: state.Binding.BindingGeneration, TargetPodNamespace: state.Binding.Namespace,
-			TargetPodName: state.Binding.PodName, TargetPodUid: state.Binding.PodUID, TargetPodIp: state.Binding.PodIP,
-			RuntimeInputId: job.RuntimeInputID, CommandKind: job.CommandKind, PayloadJson: payloadJSON,
+		Target:           RuntimePodTarget{Namespace: state.Binding.Namespace, PodName: state.Binding.PodName, PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, Port: port},
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: state.Binding.BindingID, Generation: state.Binding.BindingGeneration, TargetPodUID: state.Binding.PodUID},
+		CleanupSession: &agentruntimev1.CleanupSessionRequest{
+			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, BindingId: state.Binding.BindingID,
+			BindingGeneration: state.Binding.BindingGeneration, TargetPodUid: state.Binding.PodUID,
+			CleanupOperationId: job.DeleteCleanupID, Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_OPERATOR_REQUESTED,
 		},
 	}, nil
 }
@@ -163,10 +152,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareCleanupSessionCommandTx(ctx cont
 	if provenGone {
 		return RuntimeCommandPlan{CleanupTargetGone: true}, nil
 	}
-	payloadJSON, err := cleanupSessionPayloadJSON(job.CleanupJobID)
-	if err != nil {
-		return RuntimeCommandPlan{}, err
-	}
 	return RuntimeCommandPlan{
 		Target: RuntimePodTarget{
 			Namespace: claim.Namespace,
@@ -175,20 +160,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareCleanupSessionCommandTx(ctx cont
 			PodIP:     claim.PodIP,
 			Port:      port,
 		},
-		Request: &agentruntimev1.RuntimeInputCommandRequest{
-			RequestId:          job.JobID + ":" + job.LeaseToken,
-			WorkspaceId:        job.WorkspaceID,
-			SessionId:          job.SessionID,
-			SessionThreadId:    claim.SessionThreadID,
-			BindingId:          claim.BindingID,
-			BindingGeneration:  claim.BindingGeneration,
-			TargetPodNamespace: claim.Namespace,
-			TargetPodName:      claim.PodName,
-			TargetPodUid:       claim.PodUID,
-			TargetPodIp:        claim.PodIP,
-			RuntimeInputId:     job.RuntimeInputID,
-			CommandKind:        job.CommandKind,
-			PayloadJson:        payloadJSON,
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: claim.BindingID, Generation: claim.BindingGeneration, TargetPodUID: claim.PodUID},
+		CleanupSession: &agentruntimev1.CleanupSessionRequest{
+			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, BindingId: claim.BindingID,
+			BindingGeneration: claim.BindingGeneration, TargetPodUid: claim.PodUID,
+			CleanupOperationId: job.CleanupJobID, Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_EXPIRED,
 		},
 	}, nil
 }
@@ -414,13 +390,6 @@ func cleanupHasNewerUnprocessedInputTx(ctx context.Context, tx *dbconnect.Tx, wo
 		idleStreamPosition,
 	).Scan(&exists)
 	return exists, err
-}
-
-func cleanupSessionPayloadJSON(cleanupJobID string) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"cleanup_job_id": cleanupJobID,
-		"reason":         "expired",
-	})
 }
 
 // FinalizeRuntimeCleanup settles hot Runtime custody and releases only the
@@ -739,7 +708,7 @@ func loadClaimedCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, job Runt
 
 func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, claim cleanupSessionClaim, now time.Time) error {
 	rows, err := tx.Query(ctx,
-		`SELECT r.session_thread_id, r.tool_use_event_id, r.model_tool_call_id, r.tool_name, r.input_json
+		`SELECT r.session_thread_id, r.tool_use_event_id, e.model_request_id, r.model_tool_call_id
 		   FROM session_runtime_tool_results r
 		   JOIN session_events e
 		     ON e.workspace_id = r.workspace_id
@@ -775,9 +744,8 @@ func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, cla
 		if err := rows.Scan(
 			&execution.ThreadID,
 			&execution.ToolUseEventID,
+			&execution.ModelRequestID,
 			&execution.ModelToolCallID,
-			&execution.ToolName,
-			&execution.InputJSON,
 		); err != nil {
 			return err
 		}
@@ -804,9 +772,8 @@ func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, cla
 		}
 		if !settled {
 			eventID, err = insertPendingToolTerminalResultTx(ctx, tx, scope, execution, pendingToolTerminal{
-				PartStatus: "error",
-				ErrorType:  "cleanup_expired",
-				Message:    "Sandbox tool execution expired during session cleanup.",
+				ErrorType: "cleanup_expired",
+				Message:   "Sandbox tool execution expired during session cleanup.",
 			}, now)
 			if err != nil {
 				return err
@@ -867,32 +834,6 @@ func finalizeCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, claim clean
 		return runtimeDeliveryPrepareError{kind: "cleanup_finalize_stale", message: "cleanup finalization fence is stale", retryable: false}
 	}
 	return nil
-}
-
-func cleanupRuntimeBoundedJSON(inputJSON string) map[string]any {
-	canonical := inputJSON
-	if canonical == "" {
-		canonical = "{}"
-	}
-	var value any
-	if err := json.Unmarshal([]byte(canonical), &value); err != nil {
-		value = map[string]any{}
-		canonical = "{}"
-	}
-	preview := canonical
-	truncated := len([]byte(preview)) > cleanupRuntimeInputPreviewMaxBytes
-	if truncated {
-		previewBytes := []byte(preview)[:cleanupRuntimeInputPreviewMaxBytes]
-		for len(previewBytes) > 0 && !utf8.Valid(previewBytes) {
-			previewBytes = previewBytes[:len(previewBytes)-1]
-		}
-		preview = string(previewBytes)
-	}
-	return map[string]any{
-		"value":     value,
-		"preview":   preview,
-		"truncated": truncated,
-	}
 }
 
 func (r KubernetesRuntimeTargetResolver) CleanupTargetProvenGone(_ context.Context, _ *dbconnect.Tx, _ RuntimeJob, binding runtimeBindingForDelivery) (bool, error) {

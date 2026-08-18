@@ -20,23 +20,32 @@ import type { ListMcpToolsRequest, ListMcpToolsResponse, RunMcpToolRequest, RunM
 import type { ValidationResult } from "@tetral/gateway-protocol/src/bounds.js";
 import { MCP_BLOB_MAX_BYTES } from "./formatter.js";
 import type { PendingRunMcpToolResponse } from "./idempotency.js";
+import type { McpExecutorPayload } from "./idempotency.js";
 
 const MaxManifestEtagBytes = 64;
 
-/** Validates identity, binding, server, tool, token, and object-JSON fields for one MCP tool call. */
+/** Validates the Runtime scope and binding that select one durable MCP Tool Use. */
 export function validateRunMcpToolRequest(request: RunMcpToolRequest): ValidationResult {
   if (
-    invalidBytes(request.requestId, MaxIdBytes) ||
     invalidBytes(request.workspaceId, MaxIdBytes) ||
     invalidBytes(request.sessionId, MaxIdBytes) ||
     invalidBytes(request.sessionThreadId, MaxIdBytes) ||
     invalidBytes(request.toolUseEventId, MaxIdBytes) ||
-    invalidBytes(request.mcpServerName, MaxIdBytes) ||
-    invalidBytes(request.toolName, MaxIdBytes) ||
     invalidBytes(request.bindingId, MaxIdBytes) ||
     invalidBindingGeneration(request.bindingGeneration) ||
-    invalidBytes(request.runtimeBindingToken, MaxTokenBytes) ||
-    !validJsonObject(request.inputJson, MaxMcpToolInputJsonBytes)
+    invalidBytes(request.runtimeBindingToken, MaxTokenBytes)
+  ) {
+    return invalidRequest();
+  }
+  return { ok: true };
+}
+
+/** Validates the provider executor facts returned by Bridge from the durable Tool declaration. */
+export function validateMcpExecutorPayload(payload: McpExecutorPayload): ValidationResult {
+  if (
+    invalidBytes(payload.mcpServerName, MaxIdBytes) ||
+    invalidBytes(payload.toolName, MaxIdBytes) ||
+    !validJsonObject(payload.inputJson, MaxMcpToolInputJsonBytes)
   ) {
     return invalidRequest();
   }

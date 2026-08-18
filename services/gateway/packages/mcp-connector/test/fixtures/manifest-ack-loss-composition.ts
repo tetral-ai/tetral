@@ -93,7 +93,7 @@ service = new McpConnectorServiceShell({
   logger: { info: () => undefined, error: () => undefined },
   ready: () => true,
   client,
-  idempotencyStore: new InMemoryMcpIdempotencyStore(),
+  idempotencyStore: new InMemoryMcpIdempotencyStore({ mcpServerName: "github", toolName: "create_issue", inputJson: "{}" }),
   manifestChangeNotifier: new BridgeAPIManifestChangeNotifier({
     address: bridgeAddress,
     tokenPath,

@@ -24,7 +24,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 )
 
 func TestPostgreSQLRuntimePodLossSweepClosesActiveTurnWithoutInputAndIsIdempotent(t *testing.T) {
@@ -99,6 +98,51 @@ func TestPostgreSQLRuntimePodLossSweepClosesActiveTurnWithoutInputAndIsIdempoten
 	}
 	if len(summaries) != 2 || summaries[0]["level"] != "INFO" || summaries[0]["outcome"] != "completed" || summaries[0]["candidate.count"] != float64(1) || summaries[0]["repaired.count"] != float64(1) || summaries[1]["candidate.count"] != float64(0) || summaries[1]["repaired.count"] != float64(0) {
 		t.Fatalf("idempotent pod-loss summaries = %#v; want one repair then no work", summaries)
+	}
+}
+
+func TestPostgreSQLRuntimePodLossRepairsRequestUnderExactInterruptBarrier(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 81, "Write", "idle", false, false, false, false, true)
+	const interruptID = "rin_pod_loss_interrupt_barrier"
+	seedBridgeAPIEvent(t, admin, "default", fixture.sessionID, fixture.parentThreadID, "evt_pod_loss_interrupt_barrier", 3, "user.interrupt", `{}`)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
+		sequence_from,sequence_to,status,created_at,updated_at
+	) VALUES ('default',$1,$2,$3,'interrupt_control','["evt_pod_loss_interrupt_barrier"]',2,2,'queued',clock_timestamp(),clock_timestamp())`,
+		fixture.sessionID, fixture.parentThreadID, interruptID); err != nil {
+		t.Fatalf("seed interrupt barrier Inbox: %v", err)
+	}
+	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+
+	repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+	if err != nil || repaired != 1 {
+		t.Fatalf("pod-loss repair under interrupt = %d/%v; want 1/nil", repaired, err)
+	}
+	var requestEnds, bindingRows int
+	var interruptStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end'
+		  AND payload_json::jsonb ->> 'error_kind'='runtime_pod_lost'`, fixture.sessionID).Scan(&requestEnds); err != nil {
+		t.Fatalf("count interrupt-fenced request end: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID).Scan(&bindingRows); err != nil {
+		t.Fatalf("count interrupt-fenced old binding: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptID).Scan(&interruptStatus); err != nil {
+		t.Fatalf("read continuing interrupt custody: %v", err)
+	}
+	if requestEnds != 1 || bindingRows != 0 || interruptStatus != "queued" {
+		t.Fatalf("interrupt-fenced repair = ends:%d bindings:%d interrupt:%s; want 1/0/queued", requestEnds, bindingRows, interruptStatus)
+	}
+	if err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, fixture.binding, time.Now().UTC()); err == nil {
+		t.Fatal("stale old-binding repair unexpectedly retained authority")
+	} else if runtimeJobPreparationErrorKind(err) != "runtime_pod_lost_claim_stale" {
+		t.Fatalf("stale old-binding repair error = %v; want pod-loss stale fence", err)
 	}
 }
 
@@ -196,7 +240,6 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 		SequenceFrom:    1,
 		SequenceTo:      1,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"` + candidate.sessionID + `","session_thread_id":"` + candidate.threadID + `","runtime_input_id":"rin_idle_rebind","event_ids":["evt_idle_rebind_input"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -204,8 +247,8 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 	if err != nil {
 		t.Fatalf("idle input-triggered rebind: %v", err)
 	}
-	if plan.Request == nil || plan.Request.GetTargetPodUid() != replacement.PodUID || plan.Request.GetBindingId() == candidate.binding.BindingID || plan.Request.GetBindingGeneration() <= candidate.binding.BindingGeneration {
-		t.Fatalf("idle rebind request = %#v; want a new replacement binding after generation %d", plan.Request, candidate.binding.BindingGeneration)
+	if plan.AcceptInput == nil || plan.AcceptInput.GetTargetPodUid() != replacement.PodUID || plan.AttemptedBinding.BindingID == candidate.binding.BindingID || plan.AttemptedBinding.Generation <= candidate.binding.BindingGeneration {
+		t.Fatalf("idle rebind request = %#v; want a new replacement binding after generation %d", plan.AcceptInput, candidate.binding.BindingGeneration)
 	}
 	var errorEvents int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'`, candidate.sessionID).Scan(&errorEvents); err != nil {
@@ -555,7 +598,6 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 		SequenceFrom:    3,
 		SequenceTo:      3,
 		InputKind:       "messages",
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -577,7 +619,7 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 		if !errors.As(input.err, &stale) || stale.kind != "runtime_pod_lost_claim_stale" {
 			t.Fatalf("racing input error = %v; want successful replacement or stale fence", input.err)
 		}
-	} else if input.plan.Request == nil || input.plan.Request.GetTargetPodUid() != replacement.PodUID {
+	} else if input.plan.AcceptInput == nil || input.plan.AcceptInput.GetTargetPodUid() != replacement.PodUID {
 		t.Fatalf("racing input plan = %#v; want replacement target", input.plan)
 	}
 	var requestEnds, toolResults int

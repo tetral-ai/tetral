@@ -225,12 +225,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	const completionDeliveryID = "delivery_pod_loss_wait_completion"
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_opener", 1,
 		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
-	messageJSON := bridgeRuntimeNotificationMessageJSON(
-		t,
-		fixture.sessionID,
-		"msg_pod_loss_wait_completion",
-		completionMailEnvelope("main", "worker", "current completion"),
-	)
+	messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "worker", "current completion"))
 	sentPayload := bridgeInterAgentSentEventJSON(
 		t,
 		completionDeliveryID,
@@ -283,8 +278,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	}
 
 	current, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:          scope,
-		RuntimeInputId: "rin_pod_loss_wait_current",
+		Scope: scope,
 	})
 	if err != nil {
 		t.Fatalf("load current completion after pod loss: %v", err)
@@ -300,8 +294,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_newer_opener", 3,
 		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
 	superseded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:          scope,
-		RuntimeInputId: "rin_pod_loss_wait_superseded",
+		Scope: scope,
 	})
 	if err != nil {
 		t.Fatalf("load superseded completion after pod loss: %v", err)
@@ -455,7 +448,7 @@ func seedRuntimePodLostDeliveryFixture(
 	)
 	sequence++
 	if withSent {
-		messageJSON := bridgeRuntimeUserMessageJSON(t, fixture.sessionID, "msg_"+fixture.deliveryID, "hello worker")
+		messageJSON := bridgePublicMessageJSONForTest(t, "hello worker")
 		sentPayload := bridgeInterAgentSentEventJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.childThreadID, "worker", fixture.toolUseEventID, messageJSON)
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, "public", true)
 		seedAgentMailCustody(t, db, fixture.sessionID, fixture.childThreadID, fixture.deliveryID, fixture.now)

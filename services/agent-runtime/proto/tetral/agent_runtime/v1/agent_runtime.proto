@@ -5,74 +5,326 @@ package tetral.agent_runtime.v1;
 option go_package = "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1;agentruntimev1";
 
 service AgentRuntimePodService {
-  rpc AcceptInput(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
-  rpc AcceptAgentMail(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
-  rpc AcceptTaskNotification(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
-  rpc Interrupt(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
-  rpc ResolveToolConfirmation(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
-  rpc ApplyRuntimeConfig(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
-  rpc CleanupSession(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+  rpc AcceptInput(AcceptInputRequest) returns (AcceptInputResponse);
+  rpc AcceptAgentMail(AcceptAgentMailRequest) returns (AcceptAgentMailResponse);
+  rpc AcceptTaskNotification(AcceptTaskNotificationRequest) returns (AcceptTaskNotificationResponse);
+  rpc Interrupt(InterruptRequest) returns (InterruptResponse);
+  rpc ResolveToolConfirmation(ResolveToolConfirmationRequest) returns (ResolveToolConfirmationResponse);
+  rpc ApplyRuntimeConfig(ApplyRuntimeConfigRequest) returns (ApplyRuntimeConfigResponse);
+  rpc CleanupSession(CleanupSessionRequest) returns (CleanupSessionResponse);
 }
 
-enum RuntimeCommandKind {
-  RUNTIME_COMMAND_KIND_UNSPECIFIED = 0;
-  RUNTIME_COMMAND_KIND_MESSAGES = 1;
-  RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL = 2;
-  RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION = 3;
-  RUNTIME_COMMAND_KIND_TASK_NOTIFICATION = 4;
-  RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH = 5;
-  RUNTIME_COMMAND_KIND_CLEANUP_SESSION = 6;
-  RUNTIME_COMMAND_KIND_AGENT_MAIL = 7;
+message AcceptInputRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string binding_id = 4;
+  int64 binding_generation = 5;
+  string target_pod_uid = 6;
+  string runtime_input_id = 7;
+  int64 input_order = 8;
+  oneof content {
+    string messages_json = 9;
+    AcceptInputRejection rejection = 10;
+  }
 }
 
-enum RuntimeCommandStatus {
-  RUNTIME_COMMAND_STATUS_UNSPECIFIED = 0;
-  RUNTIME_COMMAND_STATUS_ACCEPTED = 1;
-  RUNTIME_COMMAND_STATUS_DUPLICATE = 2;
-  RUNTIME_COMMAND_STATUS_REJECTED = 3;
+message AcceptInputRejection {
+  AcceptInputRejectionReason reason = 1;
 }
 
-enum RuntimeInputErrorCode {
-  RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED = 0;
-  RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH = 1;
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT = 2;
-  RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH = 3;
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE = 4;
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED = 5;
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE = 6;
-  RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID = 7;
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT = 8;
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED = 9;
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED = 10;
-  RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT = 11;
-  RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY = 12;
+enum AcceptInputRejectionReason {
+  ACCEPT_INPUT_REJECTION_REASON_UNSPECIFIED = 0;
+  ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE = 1;
+  ACCEPT_INPUT_REJECTION_REASON_RUNTIME_REJECTED = 2;
 }
 
-message RuntimeInputCommandRequest {
-  string request_id = 1;
-  string workspace_id = 2;
-  string session_id = 3;
-  string session_thread_id = 4;
-  string binding_id = 5;
-  int64 binding_generation = 6;
-  string target_pod_namespace = 7;
-  string target_pod_name = 8;
-  string target_pod_uid = 9;
-  string target_pod_ip = 10;
-  string runtime_input_id = 11;
-  repeated string event_ids = 12;
-  int64 sequence_from = 13;
-  int64 sequence_to = 14;
-  RuntimeCommandKind command_kind = 15;
-  string payload_json = 16;
+message AcceptInputResponse {
+  oneof outcome {
+    AcceptInputAccepted accepted = 1;
+    AcceptInputDuplicate duplicate = 2;
+    AcceptInputRejected rejected = 3;
+  }
 }
 
-message RuntimeInputCommandResponse {
-  RuntimeCommandStatus status = 1;
+message AcceptInputAccepted {}
+message AcceptInputDuplicate {}
+message AcceptInputRejected {
+  AcceptInputFailure reason = 1;
   bool retryable = 2;
-  RuntimeInputErrorCode error_code = 3;
-  string session_id = 4;
-  string runtime_input_id = 5;
-  string binding_id = 6;
-  int64 binding_generation = 7;
+}
+
+enum AcceptInputFailure {
+  ACCEPT_INPUT_FAILURE_UNSPECIFIED = 0;
+  ACCEPT_INPUT_FAILURE_SELECTED_POD_MISMATCH = 1;
+  ACCEPT_INPUT_FAILURE_BINDING_MISMATCH = 2;
+  ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT = 3;
+  ACCEPT_INPUT_FAILURE_CONTEXT_LOAD_FAILED = 4;
+  ACCEPT_INPUT_FAILURE_REJECTED_INPUT = 5;
+  ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 6;
+}
+
+message AcceptAgentMailRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string binding_id = 4;
+  int64 binding_generation = 5;
+  string target_pod_uid = 6;
+  string runtime_input_id = 7;
+  string delivery_id = 8;
+  string content = 9;
+}
+
+message AcceptAgentMailResponse {
+  oneof outcome {
+    AcceptAgentMailAccepted accepted = 1;
+    AcceptAgentMailDuplicate duplicate = 2;
+    AcceptAgentMailRejected rejected = 3;
+  }
+}
+
+message AcceptAgentMailAccepted {}
+message AcceptAgentMailDuplicate {}
+message AcceptAgentMailRejected {
+  AcceptAgentMailFailure reason = 1;
+  bool retryable = 2;
+}
+
+enum AcceptAgentMailFailure {
+  ACCEPT_AGENT_MAIL_FAILURE_UNSPECIFIED = 0;
+  ACCEPT_AGENT_MAIL_FAILURE_SELECTED_POD_MISMATCH = 1;
+  ACCEPT_AGENT_MAIL_FAILURE_BINDING_MISMATCH = 2;
+  ACCEPT_AGENT_MAIL_FAILURE_IDENTITY_CONFLICT = 3;
+  ACCEPT_AGENT_MAIL_FAILURE_TARGET_NOT_RECEIVABLE = 4;
+  ACCEPT_AGENT_MAIL_FAILURE_CONTEXT_LOAD_FAILED = 5;
+  ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 6;
+}
+
+message AcceptTaskNotificationRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string binding_id = 4;
+  int64 binding_generation = 5;
+  string target_pod_uid = 6;
+  string runtime_input_id = 7;
+  int64 input_order = 8;
+  string notification_json = 9;
+}
+
+message AcceptTaskNotificationResponse {
+  oneof outcome {
+    AcceptTaskNotificationAccepted accepted = 1;
+    AcceptTaskNotificationDuplicate duplicate = 2;
+    AcceptTaskNotificationRejected rejected = 3;
+  }
+}
+
+message AcceptTaskNotificationAccepted {}
+message AcceptTaskNotificationDuplicate {}
+message AcceptTaskNotificationRejected {
+  AcceptTaskNotificationFailure reason = 1;
+  bool retryable = 2;
+}
+
+enum AcceptTaskNotificationFailure {
+  ACCEPT_TASK_NOTIFICATION_FAILURE_UNSPECIFIED = 0;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_SELECTED_POD_MISMATCH = 1;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_BINDING_MISMATCH = 2;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_IDENTITY_CONFLICT = 3;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY = 4;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT = 5;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED = 6;
+  ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 7;
+}
+
+message InterruptRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string binding_id = 4;
+  int64 binding_generation = 5;
+  string target_pod_uid = 6;
+  string runtime_input_id = 7;
+  reserved 8;
+  reserved "input_order";
+  InterruptOrigin origin = 9;
+  InterruptLeaseRef interrupt_lease_ref = 10;
+}
+
+message InterruptLeaseRef {
+  string job_id = 1;
+  string lease_token = 2;
+  string partition_key = 3;
+  string dedupe_key = 4;
+}
+
+enum InterruptOrigin {
+  INTERRUPT_ORIGIN_UNSPECIFIED = 0;
+  INTERRUPT_ORIGIN_USER = 1;
+  INTERRUPT_ORIGIN_AGENT = 2;
+}
+
+message InterruptResponse {
+  oneof outcome {
+    InterruptAccepted accepted = 1;
+    InterruptDuplicate duplicate = 2;
+    InterruptRejected rejected = 3;
+  }
+}
+
+message InterruptAccepted {}
+message InterruptDuplicate {}
+message InterruptRejected {
+  InterruptFailure reason = 1;
+  bool retryable = 2;
+}
+
+enum InterruptFailure {
+  INTERRUPT_FAILURE_UNSPECIFIED = 0;
+  INTERRUPT_FAILURE_SELECTED_POD_MISMATCH = 1;
+  INTERRUPT_FAILURE_BINDING_MISMATCH = 2;
+  INTERRUPT_FAILURE_IDENTITY_CONFLICT = 3;
+  INTERRUPT_FAILURE_CONTROL_BUSY = 4;
+  INTERRUPT_FAILURE_CONTEXT_LOAD_FAILED = 5;
+  INTERRUPT_FAILURE_DURABLE_COMMIT_UNAVAILABLE = 6;
+  INTERRUPT_FAILURE_DURABLE_COMMIT_REJECTED = 7;
+}
+
+message ResolveToolConfirmationRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string binding_id = 4;
+  int64 binding_generation = 5;
+  string target_pod_uid = 6;
+  string runtime_input_id = 7;
+  string tool_use_event_id = 8;
+  ToolConfirmationDecision decision = 9;
+  optional string deny_message = 10;
+}
+
+enum ToolConfirmationDecision {
+  TOOL_CONFIRMATION_DECISION_UNSPECIFIED = 0;
+  TOOL_CONFIRMATION_DECISION_ALLOW = 1;
+  TOOL_CONFIRMATION_DECISION_DENY = 2;
+}
+
+message ResolveToolConfirmationResponse {
+  oneof outcome {
+    ResolveToolConfirmationAccepted accepted = 1;
+    ResolveToolConfirmationDuplicate duplicate = 2;
+    ResolveToolConfirmationStale stale = 3;
+    ResolveToolConfirmationRejected rejected = 4;
+  }
+}
+
+message ResolveToolConfirmationAccepted {}
+message ResolveToolConfirmationDuplicate {}
+message ResolveToolConfirmationStale {}
+message ResolveToolConfirmationRejected {
+  ResolveToolConfirmationFailure reason = 1;
+  bool retryable = 2;
+}
+
+enum ResolveToolConfirmationFailure {
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_UNSPECIFIED = 0;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_SELECTED_POD_MISMATCH = 1;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_BINDING_MISMATCH = 2;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_IDENTITY_CONFLICT = 3;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTROL_CONFLICT = 4;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_CONTEXT_LOAD_FAILED = 5;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_UNAVAILABLE = 6;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_DURABLE_COMMIT_REJECTED = 7;
+  RESOLVE_TOOL_CONFIRMATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE = 8;
+}
+
+message ApplyRuntimeConfigRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string binding_id = 3;
+  int64 binding_generation = 4;
+  string target_pod_uid = 5;
+  oneof config {
+    RuntimeSessionConfig session_config = 6;
+    RuntimeMcpManifestConfig mcp_manifest = 7;
+  }
+}
+
+message RuntimeSessionConfig {
+  int64 generation = 1;
+  string content_json = 2;
+}
+
+message RuntimeMcpManifestConfig {
+  string mcp_server_name = 1;
+  int64 generation = 2;
+  string content_json = 3;
+}
+
+message ApplyRuntimeConfigResponse {
+  oneof outcome {
+    ApplyRuntimeConfigApplied applied = 1;
+    ApplyRuntimeConfigDuplicate duplicate = 2;
+    ApplyRuntimeConfigNoResidency no_residency = 3;
+    ApplyRuntimeConfigRejected rejected = 4;
+  }
+}
+
+message ApplyRuntimeConfigApplied {}
+message ApplyRuntimeConfigDuplicate {}
+message ApplyRuntimeConfigNoResidency {}
+message ApplyRuntimeConfigRejected {
+  ApplyRuntimeConfigFailure reason = 1;
+  bool retryable = 2;
+}
+
+enum ApplyRuntimeConfigFailure {
+  APPLY_RUNTIME_CONFIG_FAILURE_UNSPECIFIED = 0;
+  APPLY_RUNTIME_CONFIG_FAILURE_SELECTED_POD_MISMATCH = 1;
+  APPLY_RUNTIME_CONFIG_FAILURE_BINDING_MISMATCH = 2;
+  APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT = 3;
+  APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY = 4;
+  APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_CONFLICT = 5;
+  APPLY_RUNTIME_CONFIG_FAILURE_CONTEXT_LOAD_FAILED = 6;
+}
+
+message CleanupSessionRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string binding_id = 3;
+  int64 binding_generation = 4;
+  string target_pod_uid = 5;
+  string cleanup_operation_id = 6;
+  CleanupSessionReason reason = 7;
+}
+
+enum CleanupSessionReason {
+  CLEANUP_SESSION_REASON_UNSPECIFIED = 0;
+  CLEANUP_SESSION_REASON_EXPIRED = 1;
+  CLEANUP_SESSION_REASON_OPERATOR_REQUESTED = 2;
+}
+
+message CleanupSessionResponse {
+  oneof outcome {
+    CleanupSessionCompleted completed = 1;
+    CleanupSessionDuplicate duplicate = 2;
+    CleanupSessionRejected rejected = 3;
+  }
+}
+
+message CleanupSessionCompleted {}
+message CleanupSessionDuplicate {}
+message CleanupSessionRejected {
+  CleanupSessionFailure reason = 1;
+  bool retryable = 2;
+}
+
+enum CleanupSessionFailure {
+  CLEANUP_SESSION_FAILURE_UNSPECIFIED = 0;
+  CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH = 1;
+  CLEANUP_SESSION_FAILURE_BINDING_MISMATCH = 2;
+  CLEANUP_SESSION_FAILURE_SESSION_BUSY = 3;
+  CLEANUP_SESSION_FAILURE_CLEANUP_FAILED = 4;
 }

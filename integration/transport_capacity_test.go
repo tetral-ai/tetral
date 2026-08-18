@@ -163,22 +163,23 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 }
 
 type settlingTransportSender struct {
+	agentruntimebridge.RuntimeCommandSender
 	transport *agentruntimebridge.RuntimePodCommandClient
 	bridge    *agentruntimebridge.PostgreSQLBridgeAPIStore
 	threadID  string
 	bindingID string
 	podUID    string
 	suffix    string
-	request   *agentruntimev1.RuntimeInputCommandRequest
+	request   *agentruntimev1.AcceptInputRequest
 }
 
-func (s *settlingTransportSender) SendRuntimeCommand(
+func (s *settlingTransportSender) AcceptInput(
 	ctx context.Context,
 	target agentruntimebridge.RuntimePodTarget,
-	request *agentruntimev1.RuntimeInputCommandRequest,
-) (*agentruntimev1.RuntimeInputCommandResponse, error) {
+	request *agentruntimev1.AcceptInputRequest,
+) (*agentruntimev1.AcceptInputResponse, error) {
 	s.request = request
-	response, err := s.transport.SendRuntimeCommand(ctx, target, request)
+	response, err := s.transport.AcceptInput(ctx, target, request)
 	if err != nil {
 		return nil, err
 	}
@@ -190,14 +191,13 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 			} `json:"parts"`
 		} `json:"messages"`
 	}
-	if err := json.Unmarshal([]byte(request.GetPayloadJson()), &payload); err != nil {
+	if err := json.Unmarshal([]byte(request.GetMessagesJson()), &payload); err != nil {
 		return nil, err
 	}
 	if len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 1 || payload.Messages[0].Parts[0].Type != "text" {
 		return nil, fmt.Errorf("runtime input payload does not contain one text message")
 	}
 	scope := &bridgev1.RuntimeScope{
-		RequestId:       "req_transport_" + s.suffix,
 		WorkspaceId:     request.GetWorkspaceId(),
 		SessionId:       request.GetSessionId(),
 		SessionThreadId: s.threadID,
@@ -210,32 +210,20 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
 		Scope:          scope,
 		RuntimeInputId: request.GetRuntimeInputId(),
-		InputKind:      "messages",
-		EventIds:       request.GetEventIds(),
-		SequenceFrom:   request.GetSequenceFrom(),
-		SequenceTo:     request.GetSequenceTo(),
-		MessageCreates: []*bridgev1.RuntimeMessageCreate{{
-			MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT,
-			MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
-			Parts: []*bridgev1.RuntimePartCreate{{
-				PartKind: "text",
-				PartJson: fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, payload.Messages[0].Parts[0].Text),
-			}},
-		}},
 	})
 	if err != nil {
 		return nil, err
 	}
-	receipts := committed.GetDeclaration().GetReceipts()
-	if len(receipts) != 1 || len(receipts[0].GetMessages()) != 1 {
-		return nil, fmt.Errorf("runtime input commit did not return one durable message")
+	assignedContextSequences := committed.GetCommitted().GetContext().GetAssignedContextSequences()
+	if len(assignedContextSequences) != 1 {
+		return nil, fmt.Errorf("runtime input commit did not return one assigned context sequence")
 	}
 	modelRequestID := "mreq_transport_" + s.suffix
-	contextThroughMessageSequence := receipts[0].GetMessages()[0].GetMessageSequence()
+	contextThroughMessageSequence := assignedContextSequences[0]
 	if contextThroughMessageSequence <= 0 {
 		return nil, fmt.Errorf("runtime input commit returned invalid message sequence")
 	}
-	start, err := s.bridge.WriteEvent(ctx, &bridgev1.WriteEventRequest{
+	if _, err := s.bridge.WriteEvent(ctx, &bridgev1.WriteEventRequest{
 		Scope:                         scope,
 		RuntimeWriteId:                "rwrite_transport_start_" + s.suffix,
 		ModelRequestId:                modelRequestID,
@@ -243,17 +231,15 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 		PayloadJson:                   fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, modelRequestID),
 		RequestKind:                   "agent_provider_request",
 		ContextThroughMessageSequence: &contextThroughMessageSequence,
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
 	if _, err := s.bridge.WriteRequestEnd(ctx, &bridgev1.WriteRequestEndRequest{
-		Scope:                    scope,
-		RuntimeWriteId:           "rwrite_transport_end_" + s.suffix,
-		ModelRequestId:           modelRequestID,
-		ModelRequestStartEventId: start.GetEventId(),
-		FinishReason:             "stop",
-		UsageJson:                `{"input_tokens":1,"output_tokens":1}`,
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_transport_end_" + s.suffix,
+		ModelRequestId: modelRequestID,
+		FinishReason:   "stop",
+		UsageJson:      `{"input_tokens":1,"output_tokens":1}`,
 	}); err != nil {
 		return nil, err
 	}
@@ -325,7 +311,6 @@ func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) agentru
 		SequenceFrom:    payload.SequenceFrom,
 		SequenceTo:      payload.SequenceTo,
 		InputKind:       payload.InputKind,
-		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     payloadJSON,
 	}
 }

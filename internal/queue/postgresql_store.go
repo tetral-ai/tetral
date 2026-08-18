@@ -499,21 +499,38 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			    AND candidate.available_at <= $2
 			    AND NOT EXISTS (
 			        SELECT 1
+			          FROM queue_jobs interrupt_barrier
+			         WHERE interrupt_barrier.workspace_id = candidate.workspace_id
+			           AND interrupt_barrier.partition_key = candidate.partition_key
+			           AND interrupt_barrier.status = 'leased'
+			           AND interrupt_barrier.kind = 'runtime_input'
+			           AND interrupt_barrier.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+			           AND interrupt_barrier.id <> candidate.id
+			    )
+			    AND NOT EXISTS (
+			        SELECT 1
 			          FROM queue_jobs pending
 			         WHERE pending.workspace_id = candidate.workspace_id
 			           AND pending.partition_key = candidate.partition_key
 			           AND pending.status = 'pending'
 			           AND pending.id <> candidate.id
 			           AND (
-			                pending.available_at <= $2
-			                OR (
-			                    candidate.kind = 'runtime_input'
-			                    AND candidate.payload_json::jsonb ->> 'input_kind' IS DISTINCT FROM 'interrupt_control'
-			                    AND pending.kind = 'runtime_config_update'
-			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence
-			                )
-			           )
-			           AND (
+			                (pending.kind = 'runtime_input'
+			                 AND pending.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+			                 AND (candidate.kind <> 'runtime_input'
+			                      OR candidate.payload_json::jsonb ->> 'input_kind' <> 'interrupt_control'
+			                      OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
+			                OR ((pending.available_at <= $2
+			                     OR (
+			                         candidate.kind = 'runtime_input'
+			                         AND candidate.payload_json::jsonb ->> 'input_kind' IS DISTINCT FROM 'interrupt_control'
+			                         AND pending.kind = 'runtime_config_update'
+			                         AND pending.queue_partition_sequence < candidate.queue_partition_sequence
+			                     ))
+			                    AND NOT (candidate.kind = 'runtime_input'
+			                             AND candidate.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+			                             AND pending.queue_partition_sequence > candidate.queue_partition_sequence)
+			                    AND (
 			                (candidate.kind = 'runtime_input'
 			                 AND pending.kind = 'runtime_input'
 			                 AND (
@@ -552,7 +569,7 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			                    )
 			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
 			                OR (candidate.kind <> 'runtime_input'
-			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
+			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
 			           )
 			    )
 			  ORDER BY candidate.priority DESC, candidate.available_at ASC,
@@ -634,6 +651,9 @@ type leaseCandidateRow struct {
 
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
 	leasedAt := request.Now
+	// A reclaimed interrupt at its attempt ceiling is leased only to recover
+	// JobRunner's receipt-or-Session-termination transaction. Its counter stays
+	// capped, so recovery cannot authorize another Runtime delivery attempt.
 	row := tx.QueryRow(ctx,
 		`UPDATE queue_jobs
 		    SET status = 'leased',
@@ -641,7 +661,12 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		        lease_token = $6,
 		        leased_at = clock_timestamp(),
 		        leased_until = clock_timestamp() + ($8::bigint * interval '1 millisecond'),
-		        attempt_count = attempt_count + 1,
+		        attempt_count = CASE
+		          WHEN $3 = 'runtime_input' AND $12 = 'interrupt_control'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          THEN attempt_count
+		          ELSE attempt_count + 1
+		        END,
 		        updated_at = clock_timestamp()
 		  WHERE workspace_id = $1
 		    AND id = $2
@@ -664,15 +689,22 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		           AND pending.status = 'pending'
 		           AND pending.id <> $2
 		           AND (
-		                pending.available_at <= $7
-		                OR (
-		                    $3 = 'runtime_input'
-		                    AND $12 <> 'interrupt_control'
-		                    AND pending.kind = 'runtime_config_update'
-		                    AND pending.queue_partition_sequence < $10
-		                )
-		           )
-		           AND (
+			                (pending.kind = 'runtime_input'
+			                 AND pending.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+		                 AND ($3 <> 'runtime_input'
+		                      OR $12 <> 'interrupt_control'
+		                      OR pending.queue_partition_sequence < $10))
+			                OR ((pending.available_at <= $7
+			                     OR (
+		                         $3 = 'runtime_input'
+		                         AND $12 <> 'interrupt_control'
+		                         AND pending.kind = 'runtime_config_update'
+			                         AND pending.queue_partition_sequence < $10
+			                     ))
+			                    AND NOT ($3 = 'runtime_input'
+			                             AND $12 = 'interrupt_control'
+			                             AND pending.queue_partition_sequence > $10)
+			                    AND (
 		                ($3 = 'runtime_input'
 		                 AND pending.kind = 'runtime_input'
 		                 AND (
@@ -711,7 +743,7 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		                    )
 		                    AND pending.queue_partition_sequence < $10)
 		                OR ($3 <> 'runtime_input'
-		                    AND pending.queue_partition_sequence < $10)
+		                    AND pending.queue_partition_sequence < $10)))
 		           )
 		    )
 		  RETURNING id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
@@ -729,6 +761,7 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		candidate.partitionSequence,
 		candidate.priority,
 		candidate.inputKind,
+		defaultMaxAttempts,
 	)
 	job, err := scanJob(row)
 	if dbconnect.IsNoRows(err) {
@@ -1148,6 +1181,215 @@ func AssertActiveLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ActiveLe
 	return active, nil
 }
 
+// AssertExactLeaseTx locks and validates one complete Queue custody identity.
+// The database clock is sampled only after the row lock is acquired so a lease
+// that expires while waiting never authorizes the surrounding transaction.
+func AssertExactLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ExactLeaseRequest) (bool, error) {
+	if tx == nil {
+		return false, &ValidationError{Message: "queue transaction is required"}
+	}
+	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
+		return false, err
+	}
+	if request.Kind == "" || request.PartitionKey == "" || request.DedupeKey == "" {
+		return false, &ValidationError{Message: "complete queue lease identity is required"}
+	}
+	var leasedUntil time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT leased_until
+		   FROM queue_jobs
+		  WHERE workspace_id = $1
+		    AND id = $2
+		    AND lease_token = $3
+		    AND status = 'leased'
+		    AND kind = $4
+		    AND partition_key = $5
+		    AND dedupe_key = $6
+		  FOR UPDATE`,
+		string(request.WorkspaceID), request.JobID, request.LeaseToken,
+		request.Kind, request.PartitionKey, request.DedupeKey,
+	).Scan(&leasedUntil); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT $1::timestamptz > clock_timestamp()`, leasedUntil).Scan(&active); err != nil {
+		return false, err
+	}
+	return active, nil
+}
+
+// CancelInterruptFencedMessagesTx cancels pending message notifications only
+// while the complete interrupt Queue identity still owns a live lease. Queue
+// candidates are defined by the same cancellable Inbox identity join used by
+// both updates; accepted custody is delivery residue, not a follower. The exact
+// rows remain locked through cancellation, so lease reclaim and follower
+// mutation have one durable winner.
+func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, request InterruptFenceRequest) (bool, int, error) {
+	if request.Lease.Kind != KindRuntimeInput {
+		return false, 0, &ValidationError{Message: "interrupt fence lease kind must be runtime_input"}
+	}
+	cancelRequest := CancelRequest{
+		WorkspaceID:            request.Lease.WorkspaceID,
+		SessionID:              request.SessionID,
+		SessionThreadID:        request.SessionThreadID,
+		InterruptFenceSequence: request.InterruptFenceSequence,
+		Now:                    request.Now,
+	}
+	if err := validateCancelRequest(cancelRequest); err != nil {
+		return false, 0, err
+	}
+	if request.Lease.PartitionKey != FormatSessionPartitionKey(request.Lease.WorkspaceID, request.SessionID) {
+		return false, 0, &IntegrityError{Message: "interrupt fence lease partition does not match Session"}
+	}
+	active, err := AssertExactLeaseTx(ctx, tx, request.Lease)
+	if err != nil || !active {
+		return active, 0, err
+	}
+	var payloadSessionID, payloadThreadID, payloadInputKind string
+	var payloadSequenceTo int64
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json::jsonb ->> 'session_id',
+		        payload_json::jsonb ->> 'session_thread_id',
+		        payload_json::jsonb ->> 'input_kind',
+		        (payload_json::jsonb ->> 'sequence_to')::bigint
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID,
+	).Scan(&payloadSessionID, &payloadThreadID, &payloadInputKind, &payloadSequenceTo); err != nil {
+		return false, 0, err
+	}
+	if payloadSessionID != request.SessionID || payloadThreadID != request.SessionThreadID ||
+		payloadInputKind != "interrupt_control" || payloadSequenceTo != request.InterruptFenceSequence {
+		return false, 0, &IntegrityError{Message: "interrupt fence lease payload does not match cancellation scope"}
+	}
+	if cancelRequest.Now.IsZero() {
+		cancelRequest.Now = storage.Now()
+	}
+	var candidateQueue, selectedFollowers, cancelledQueue, cancelledInbox int
+	err = tx.QueryRow(ctx,
+		`WITH candidate_queue AS MATERIALIZED (
+		   SELECT queue.id AS job_id,
+		          queue.payload_json::jsonb ->> 'runtime_input_id' AS runtime_input_id
+		     FROM queue_jobs queue
+		     JOIN session_runtime_inbox inbox
+		       ON inbox.workspace_id = queue.workspace_id
+		      AND inbox.session_id = $6
+		      AND inbox.session_thread_id = $4
+		      AND inbox.runtime_input_id = queue.payload_json::jsonb ->> 'runtime_input_id'
+		      AND inbox.input_kind IN ('messages', 'rejection')
+		      AND inbox.status IN ('queued', 'delivering')
+		    WHERE queue.workspace_id = $1
+		      AND queue.partition_key = $2
+		      AND queue.status = 'pending'
+		      AND queue.kind = 'runtime_input'
+		      AND queue.payload_json::jsonb ->> 'session_thread_id' = $4
+		      AND queue.payload_json::jsonb ->> 'input_kind' = 'messages'
+		      AND (queue.payload_json::jsonb ->> 'sequence_to')::bigint < $5
+		    FOR UPDATE OF queue, inbox
+		), follower_identity AS MATERIALIZED (
+		   SELECT job_id, runtime_input_id
+		     FROM candidate_queue
+		), cancelled_queue AS (
+		   UPDATE queue_jobs queue
+		      SET status = 'cancelled',
+		          cancelled_at = $3,
+		          updated_at = $3
+		     FROM follower_identity follower
+		    WHERE queue.workspace_id = $1
+		      AND queue.id = follower.job_id
+		  RETURNING follower.runtime_input_id
+		), cancelled_inbox AS (
+		   UPDATE session_runtime_inbox inbox
+		      SET status = 'cancelled', updated_at = $3
+		     FROM follower_identity follower
+		    WHERE inbox.workspace_id = $1
+		      AND inbox.session_id = $6
+		      AND inbox.session_thread_id = $4
+		      AND inbox.runtime_input_id = follower.runtime_input_id
+		  RETURNING inbox.runtime_input_id
+		)
+		SELECT (SELECT count(*) FROM candidate_queue),
+		       (SELECT count(*) FROM follower_identity),
+		       (SELECT count(*) FROM cancelled_queue),
+		       (SELECT count(*) FROM cancelled_inbox)`,
+		string(cancelRequest.WorkspaceID),
+		FormatSessionPartitionKey(cancelRequest.WorkspaceID, cancelRequest.SessionID),
+		cancelRequest.Now.UTC(),
+		cancelRequest.SessionThreadID,
+		cancelRequest.InterruptFenceSequence,
+		cancelRequest.SessionID,
+	).Scan(&candidateQueue, &selectedFollowers, &cancelledQueue, &cancelledInbox)
+	if err != nil {
+		return false, 0, err
+	}
+	if candidateQueue != selectedFollowers || selectedFollowers != cancelledQueue || cancelledQueue != cancelledInbox {
+		return false, 0, &IntegrityError{Message: "interrupt fence Queue and Inbox cancellation diverged"}
+	}
+	return true, cancelledQueue, nil
+}
+
+// CancelLeasedRuntimeInputCustodyTx atomically closes the exact Queue lease and
+// its matching active Inbox after Runtime reports barrier-stale. The source
+// Event remains audit-only.
+func CancelLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, request CancelLeasedRuntimeInputRequest) (bool, error) {
+	if request.Lease.Kind != KindRuntimeInput || request.SessionID == "" || request.RuntimeInputID == "" || request.InputKind == "" {
+		return false, &ValidationError{Message: "complete barrier-stale runtime input identity is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	active, err := AssertExactLeaseTx(ctx, tx, request.Lease)
+	if err != nil || !active {
+		return active, err
+	}
+	var payloadSessionID, payloadRuntimeInputID, payloadInputKind string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json::jsonb ->> 'session_id',
+		        payload_json::jsonb ->> 'runtime_input_id',
+		        payload_json::jsonb ->> 'input_kind'
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID,
+	).Scan(&payloadSessionID, &payloadRuntimeInputID, &payloadInputKind); err != nil {
+		return false, err
+	}
+	if payloadSessionID != request.SessionID || payloadRuntimeInputID != request.RuntimeInputID || payloadInputKind != request.InputKind {
+		return false, &IntegrityError{Message: "barrier-stale Queue payload does not match Inbox custody"}
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE session_runtime_inbox
+		    SET status='cancelled', updated_at=$4
+		  WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		    AND input_kind=$5 AND status IN ('queued','delivering','accepted')`,
+		string(request.Lease.WorkspaceID), request.SessionID, request.RuntimeInputID, request.Now.UTC(), request.InputKind,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !rowsAffected(result) {
+		return false, &IntegrityError{Message: "barrier-stale Inbox custody is not active"}
+	}
+	result, err = tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status='cancelled', cancelled_at=$4,
+		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		        updated_at=$4
+		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+		    AND status='leased' AND leased_until > clock_timestamp()`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID, request.Lease.LeaseToken, request.Now.UTC(),
+	)
+	if err != nil {
+		return false, err
+	}
+	if !rowsAffected(result) {
+		return false, &IntegrityError{Message: "barrier-stale Queue lease changed during cancellation"}
+	}
+	return true, nil
+}
+
 func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (bool, error) {
 	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
 		return false, err
@@ -1210,9 +1452,12 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.retry", func(tx *dbconnect.Tx) error {
 		var attemptCount int
 		var maxAttempts int
+		var interruptBarrier bool
 		if err := tx.QueryRow(ctx,
-			`SELECT attempt_count, max_attempts
-			   FROM queue_jobs
+			`SELECT attempt_count, max_attempts,
+				        kind = 'runtime_input'
+				        AND payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+				   FROM queue_jobs
 			  WHERE workspace_id = $1
 			    AND id = $2
 			    AND lease_token = $3
@@ -1222,7 +1467,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
-		).Scan(&attemptCount, &maxAttempts); dbconnect.IsNoRows(err) {
+		).Scan(&attemptCount, &maxAttempts, &interruptBarrier); dbconnect.IsNoRows(err) {
 			return nil
 		} else if err != nil {
 			return err
@@ -1233,6 +1478,32 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			effectiveMaxAttempts = s.retryPolicy.MaxAttempts
 		}
 		if attemptCount >= effectiveMaxAttempts {
+			if interruptBarrier {
+				result, err := tx.Exec(ctx,
+					`UPDATE queue_jobs
+						    SET status = 'pending',
+						        available_at = $4,
+						        lease_token = NULL,
+						        leased_by = NULL,
+						        leased_at = NULL,
+						        leased_until = NULL,
+						        last_error_kind = $5,
+						        last_error_message = $6,
+						        updated_at = $4
+						  WHERE workspace_id = $1
+						    AND id = $2
+						    AND lease_token = $3
+						    AND status = 'leased'
+						    AND leased_until > clock_timestamp()`,
+					string(request.WorkspaceID), request.JobID, request.LeaseToken, now,
+					nullableString(request.ErrorKind), nullableString(request.ErrorMessage),
+				)
+				if err != nil {
+					return err
+				}
+				updated = rowsAffected(result)
+				return nil
+			}
 			result, err := tx.Exec(ctx,
 				`UPDATE queue_jobs
 				    SET status = 'dead_lettered',

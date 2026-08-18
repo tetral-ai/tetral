@@ -3,7 +3,7 @@
   "rule": "deepseek-effort-lowering",
   "input": {
     "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro", "variant": "high" },
-    "messages": []
+    "context": []
   },
   "expected": {
     "providerOptions": { "deepseek": { "reasoningEffort": "high" } }

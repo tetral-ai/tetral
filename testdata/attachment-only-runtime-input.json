@@ -1,0 +1,24 @@
+{
+  "acceptInput": {
+    "workspaceId": "default",
+    "sessionId": "sesn_first_queued_delivery",
+    "sessionThreadId": "thr_first_queued_delivery",
+    "bindingId": "bind_first_queued_delivery",
+    "bindingGeneration": 1,
+    "targetPodUid": "pod_first_queued_delivery",
+    "runtimeInputId": "rin_attachment_input",
+    "inputOrder": 1,
+    "messagesJson": "{\"messages\":[{\"parts\":[]}]}"
+  },
+  "commitInputs": {
+    "committed": {
+      "context": {
+        "assignedContextSequences": [],
+        "pendingAttachmentJson": [
+          "{\"filename\":\"image.png\",\"mime\":\"image/png\",\"origin\":{\"fileBacked\":{\"fileId\":\"file_first_queued_image\",\"sourceEventId\":\"sevt_attachment_input\"}}}",
+          "{\"filename\":\"notes.txt\",\"mime\":\"text/plain\",\"origin\":{\"fileBacked\":{\"fileId\":\"file_first_queued_document\",\"sourceEventId\":\"sevt_attachment_input\"}}}"
+        ]
+      }
+    }
+  }
+}

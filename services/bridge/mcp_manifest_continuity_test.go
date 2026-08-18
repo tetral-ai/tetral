@@ -13,9 +13,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestPostgreSQLBridgeAPIStoreManifestAcceptanceUsesMonotonicGenerationAcrossETagFlap(t *testing.T) {
@@ -37,25 +34,10 @@ func TestPostgreSQLBridgeAPIStoreManifestAcceptanceUsesMonotonicGenerationAcross
 	if len(lister.requests) != 3 {
 		t.Fatalf("connector list calls = %d; want 3 with current-etag duplicate skipped", len(lister.requests))
 	}
-	if first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		duplicate.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		second.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		third.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("A/A/B/A ACK statuses = %s/%s/%s/%s; want committed/duplicate/committed/committed",
-			first.GetAck().GetStatus(), duplicate.GetAck().GetStatus(), second.GetAck().GetStatus(), third.GetAck().GetStatus())
-	}
-	wantRuntimeInputIDs := []string{
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:1",
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:1",
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:2",
-		"runtime_config_update:mcp_manifest:sesn_mcp_generation_flap:github:3",
-	}
-	gotRuntimeInputIDs := []string{
-		first.GetAck().GetRuntimeInputId(), duplicate.GetAck().GetRuntimeInputId(),
-		second.GetAck().GetRuntimeInputId(), third.GetAck().GetRuntimeInputId(),
-	}
-	if stringSliceJSON(gotRuntimeInputIDs) != stringSliceJSON(wantRuntimeInputIDs) {
-		t.Fatalf("runtime input ids = %v; want %v", gotRuntimeInputIDs, wantRuntimeInputIDs)
+	if first.GetCommitted() == nil || duplicate.GetDuplicate() == nil ||
+		second.GetCommitted() == nil || third.GetCommitted() == nil {
+		t.Fatalf("A/A/B/A results = %#v/%#v/%#v/%#v; want committed/duplicate/committed/committed",
+			first, duplicate, second, third)
 	}
 
 	var etag string
@@ -112,13 +94,17 @@ func TestPostgreSQLBridgeAPIStoreConcurrentFirstManifestInsertAllocatesOneGenera
 			t.Fatalf("concurrent McpManifestChanged: %v", err)
 		}
 	}
-	statuses := map[bridgev1.BridgeWriteStatus]int{}
+	var committed, duplicate int
 	for response := range responses {
-		statuses[response.GetAck().GetStatus()]++
+		if response.GetCommitted() != nil {
+			committed++
+		}
+		if response.GetDuplicate() != nil {
+			duplicate++
+		}
 	}
-	if statuses[bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED] != 1 ||
-		statuses[bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE] != 1 {
-		t.Fatalf("concurrent ACK statuses = %v; want one committed and one duplicate", statuses)
+	if committed != 1 || duplicate != 1 {
+		t.Fatalf("concurrent results = committed %d duplicate %d; want one each", committed, duplicate)
 	}
 	var rowCount int
 	var generation int64
@@ -161,17 +147,17 @@ func TestPostgreSQLBridgeAPIStoreManifestByteBoundAcceptsExactAndPreservesAccept
 	if len([]byte(beforeTools)) != MaxMcpManifestBytes {
 		t.Fatalf("exact accepted tools bytes = %d; want %d", len([]byte(beforeTools)), MaxMcpManifestBytes)
 	}
-	_, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	firstOver, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_bytes", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("one-byte-over error = %v; want ResourceExhausted", err)
+	if err != nil || firstOver.GetCommitted() == nil {
+		t.Fatalf("one-byte-over result = %+v err %v; want committed", firstOver, err)
 	}
-	_, err = store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	replayedOver, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_bytes", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("repeated one-byte-over error = %v; want ResourceExhausted", err)
+	if err != nil || replayedOver.GetDuplicate() == nil {
+		t.Fatalf("repeated one-byte-over result = %+v err %v; want duplicate", replayedOver, err)
 	}
 	var afterTools string
 	var afterETag string
@@ -227,8 +213,8 @@ func TestPostgreSQLBridgeAPIStoreManifestTransitionLoggingIsPostCommitAndFailOpe
 		store.Logger = slog.New(panicSlogHandler{})
 
 		response := mustAcceptMCPManifestChange(t, store, "sesn_mcp_log_fail_open", "etag_log")
-		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-			t.Fatalf("ACK = %s; want committed despite logger panic", response.GetAck().GetStatus())
+		if response.GetCommitted() == nil {
+			t.Fatalf("result = %#v; want committed despite logger panic", response)
 		}
 	})
 
@@ -274,17 +260,17 @@ func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndCold
 	}}}}
 	store.MCPManifestLister = lister
 
-	_, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	first, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_first_over", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("first over-cap error = %v; want ResourceExhausted", err)
+	if err != nil || first.GetCommitted() == nil {
+		t.Fatalf("first over-cap result = %+v err %v; want committed", first, err)
 	}
-	_, err = store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+	replay, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_first_over", McpServerName: "github", ManifestEtag: "etag_over",
 	})
-	if status.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("readiness-only replay error = %v; want ResourceExhausted", err)
+	if err != nil || replay.GetDuplicate() == nil {
+		t.Fatalf("readiness-only replay result = %+v err %v; want duplicate", replay, err)
 	}
 	if lister.calls != 2 {
 		t.Fatalf("readiness-only connector reads = %d; want 2", lister.calls)
@@ -303,7 +289,7 @@ func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndCold
 		t.Fatalf("readiness-only row = tools=%v etag=%v generation=%d readiness=%q diagnostic=%q", toolsJSON, etag, generation, readiness, diagnostic.String)
 	}
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"), RuntimeInputId: "rin_mcp_first_over",
+		Scope: bridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext readiness-only row: %v", err)
@@ -338,8 +324,8 @@ func TestPostgreSQLBridgeAPIStoreStoredETagDuplicatePathsRestoreReadyAndEnqueue(
 		t.Fatalf("mark stored etag unready: %v", err)
 	}
 	restored := mustAcceptMCPManifestChange(t, store, "sesn_mcp_restore", "etag_restore")
-	if restored.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || lister.calls != 1 {
-		t.Fatalf("pre-list restore ACK/list calls = %s/%d; want committed/1", restored.GetAck().GetStatus(), lister.calls)
+	if restored.GetCommitted() == nil || lister.calls != 1 {
+		t.Fatalf("pre-list restore result/list calls = %#v/%d; want committed/1", restored, lister.calls)
 	}
 	if strings.Count(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) != 2 ||
 		!strings.Contains(logs.String(), `"mcp.manifest.previous_generation":2`) ||
@@ -449,7 +435,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 	store.MCPManifestLister = lister
 
 	first, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"), RuntimeInputId: "rin_mcp_cold",
+		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext first binding: %v", err)
@@ -469,13 +455,10 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 		t.Fatalf("replace runtime binding: %v", err)
 	}
 	second, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"), RuntimeInputId: "rin_mcp_cold",
+		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext replacement binding: %v", err)
-	}
-	if second.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("replacement binding ACK = %s; want committed fresh load", second.GetAck().GetStatus())
 	}
 	assertLoadContextMCPManifest(t, second.GetContextJson(), "etag_2", 2, "github_issue")
 	if lister.calls != 0 {

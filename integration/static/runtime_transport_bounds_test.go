@@ -77,7 +77,7 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 			t.Fatalf("TypeScript transport bounds missing %q", required)
 		}
 	}
-	if required := `export const MaxPayloadJsonBytes\s*=\s*2\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(protocolBody) {
+	if required := `export const MaxRuntimeIngressContentBytes\s*=\s*2\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(protocolBody) {
 		t.Fatalf("TypeScript protocol bounds missing %q", required)
 	}
 	for _, required := range []string{
@@ -97,7 +97,7 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 	if required := `MaxGrpcInboundMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024`; !regexp.MustCompile(required).Match(gatewayBody) {
 		t.Fatalf("Gateway transport bounds missing %q", required)
 	}
-	if required := `export const MaxProviderRequestMessagePartJsonBytes\s*=\s*16\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
+	if required := `export const MaxProviderContextTextJsonBytes\s*=\s*16\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
 		t.Fatalf("Gateway protocol bounds missing %q", required)
 	}
 	if required := `export const MaxProviderRequestToolOutputJsonBytes\s*=\s*512\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {

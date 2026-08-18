@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -74,6 +76,17 @@ func (s *PostgreSQLBridgeAPIStore) ResolveTransientAttachment(ctx context.Contex
 			},
 		}, nil
 	}
+	expectedPointer := transientAttachmentBlobPointer(request.GetScope(), request.GetAttachmentRef())
+	if row.BlobPointer != expectedPointer {
+		return nil, status.Error(codes.Internal, "transient attachment blob integrity check failed")
+	}
+	objectMetadata, err := s.AttachmentBlobStore.HeadObject(ctx, row.BlobPointer)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "transient attachment blob metadata read failed")
+	}
+	if objectMetadata.SizeBytes != row.SizeBytes {
+		return nil, status.Error(codes.Internal, "transient attachment blob integrity check failed")
+	}
 	rc, err := s.AttachmentBlobStore.Get(ctx, row.BlobPointer)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, "transient attachment blob read failed")
@@ -86,12 +99,19 @@ func (s *PostgreSQLBridgeAPIStore) ResolveTransientAttachment(ctx context.Contex
 	if len(data) > transientAttachmentMaxBytes {
 		return nil, status.Error(codes.Internal, "transient attachment blob exceeds size limit")
 	}
+	if int64(len(data)) != row.SizeBytes || transientAttachmentDigest(data) != row.Digest {
+		return nil, status.Error(codes.Internal, "transient attachment blob integrity check failed")
+	}
 	return &bridgev1.ResolveTransientAttachmentResponse{
 		Outcome: &bridgev1.ResolveTransientAttachmentResponse_Resolved{
 			Resolved: &bridgev1.ResolvedTransientAttachment{
-				Attachment: row.AttachmentRef,
-				Data:       data,
-				ExpiresAt:  row.ExpiresAt.UTC().Format(time.RFC3339Nano),
+				AttachmentRef: row.AttachmentRef,
+				Mime:          row.Mime,
+				Filename:      row.Filename,
+				SourcePath:    row.SourcePath,
+				PageRange:     row.PageRange,
+				Detail:        row.Detail,
+				Data:          data,
 			},
 		},
 	}, nil
@@ -250,8 +270,13 @@ func readFileAttachmentMetadataTx(
 		     ON o.workspace_id = f.workspace_id
 		    AND o.object_id = f.object_id
 		  WHERE f.workspace_id = $1
-		    AND f.file_id = $2`,
+		    AND f.file_id = $3
+		    AND (
+		      (f.scope_type IS NULL AND f.scope_id IS NULL)
+		      OR (f.scope_type = 'session' AND f.scope_id = $2)
+		    )`,
 		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
 		pair.GetFileId(),
 	).Scan(&filename, &mime, &deletedAt, &sizeBytes, &blobPointer)
 	if dbconnect.IsNoRows(err) || deletedAt.Valid {
@@ -508,9 +533,8 @@ func logTransientAttachmentGC(logger *slog.Logger, result TransientAttachmentGCR
 	}
 }
 
-// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/runtime-declaration-wire.ts
-// (internalProviderPayloadFields). These fields are removed before declaration
-// digesting on both sides of the receipt contract.
+// Provider execution metadata is not part of a durable Tool output or its
+// declaration digest; Bridge removes it before comparing or storing output.
 var internalProviderPayloadFields = map[string]struct{}{
 	"background_task":                {},
 	"engine_sandbox_id":              {},
@@ -570,16 +594,14 @@ func validateTransientAttachmentCreate(create transientAttachmentCreate) error {
 }
 
 func validateResolveTransientAttachmentRequest(request *bridgev1.ResolveTransientAttachmentRequest) error {
-	if request.GetAttachmentRef() == "" || request.GetSourceToolUseEventId() == "" {
+	if request.GetAttachmentRef() == "" {
 		return status.Error(codes.InvalidArgument, "invalid transient attachment resolve request")
 	}
 	if err := validateRuntimeScope(request.GetScope()); err != nil {
 		return err
 	}
-	for _, value := range []string{request.GetAttachmentRef(), request.GetSourceToolUseEventId()} {
-		if len(value) > 1024 || !utf8.ValidString(value) {
-			return status.Error(codes.InvalidArgument, "transient attachment resolve metadata is invalid")
-		}
+	if len(request.GetAttachmentRef()) > 1024 || !utf8.ValidString(request.GetAttachmentRef()) {
+		return status.Error(codes.InvalidArgument, "transient attachment resolve metadata is invalid")
 	}
 	return nil
 }
@@ -668,18 +690,50 @@ func validateFileAttachmentConsumptionsTx(
 ) error {
 	for _, pair := range pairs {
 		var eventType, payloadJSON string
+		var authorityRows, committedMessageAuthorities int
+		var alreadyConsumed bool
 		err := tx.QueryRow(ctx,
-			`SELECT type, payload_json
-			   FROM session_events
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4`,
+			`SELECT event.type,
+			        event.payload_json,
+			        authority.authority_rows,
+			        authority.committed_message_authorities,
+			        EXISTS (
+			          SELECT 1
+			            FROM session_file_attachment_consumptions consumption
+			           WHERE consumption.workspace_id = event.workspace_id
+			             AND consumption.source_event_id = event.event_id
+			             AND consumption.file_id = file.file_id
+			        )
+			   FROM session_events event
+			   JOIN files file
+			     ON file.workspace_id = event.workspace_id
+			    AND file.file_id = $5
+			    AND (
+			      (file.scope_type IS NULL AND file.scope_id IS NULL)
+			      OR (file.scope_type = 'session' AND file.scope_id = event.session_id)
+			    )
+			  CROSS JOIN LATERAL (
+			    SELECT count(*)::int AS authority_rows,
+			           count(*) FILTER (
+			             WHERE inbox.input_kind = 'messages'
+			               AND inbox.status = 'committed'
+			           )::int AS committed_message_authorities
+			      FROM session_runtime_inbox inbox
+			     WHERE inbox.workspace_id = event.workspace_id
+			       AND inbox.session_id = event.session_id
+			       AND inbox.session_thread_id = event.session_thread_id
+			       AND inbox.event_ids_json::jsonb ? event.event_id
+			  ) authority
+			  WHERE event.workspace_id = $1
+			    AND event.session_id = $2
+			    AND event.session_thread_id = $3
+			    AND event.event_id = $4`,
 			scope.GetWorkspaceId(),
 			scope.GetSessionId(),
 			scope.GetSessionThreadId(),
 			pair.GetSourceEventId(),
-		).Scan(&eventType, &payloadJSON)
+			pair.GetFileId(),
+		).Scan(&eventType, &payloadJSON, &authorityRows, &committedMessageAuthorities, &alreadyConsumed)
 		if dbconnect.IsNoRows(err) {
 			return status.Error(codes.InvalidArgument, "consumed file attachment source event is invalid")
 		}
@@ -689,8 +743,14 @@ func validateFileAttachmentConsumptionsTx(
 		if eventType != "user.message" {
 			return status.Error(codes.InvalidArgument, "consumed file attachment source event is invalid")
 		}
+		if authorityRows != 1 || committedMessageAuthorities != 1 {
+			return status.Error(codes.InvalidArgument, "consumed file attachment requires unique committed message authority")
+		}
 		if _, ok := fileAttachmentBlockType(payloadJSON, pair.GetFileId()); !ok {
 			return status.Error(codes.InvalidArgument, "consumed file attachment does not match its source event")
+		}
+		if alreadyConsumed {
+			return status.Error(codes.AlreadyExists, "file attachment was already consumed by a Request Start")
 		}
 	}
 	return nil
@@ -698,7 +758,7 @@ func validateFileAttachmentConsumptionsTx(
 
 // insertFileAttachmentConsumptionsTx records file-backed consumption durably.
 // A thread's pending file-backed media is never stored: it is always DERIVED as
-// the media blocks of committed, projected messages MINUS the rows written here.
+// the media blocks of processed user input events MINUS the rows written here.
 // That derived-not-stored invariant is what makes hot assembly (a live pod) and
 // cold LoadContext reconstruction run the identical derivation, so pod memory is
 // disposable for user media by construction.
@@ -706,19 +766,19 @@ func insertFileAttachmentConsumptionsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	requestEndEventID string,
+	requestStartEventID string,
 	pairs []*bridgev1.FileAttachmentPair,
 ) error {
 	for _, pair := range pairs {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_file_attachment_consumptions (
 				workspace_id, session_id, session_thread_id,
-				request_end_event_id, source_event_id, file_id
+				request_start_event_id, source_event_id, file_id
 			) VALUES ($1, $2, $3, $4, $5, $6)`,
 			scope.GetWorkspaceId(),
 			scope.GetSessionId(),
 			scope.GetSessionThreadId(),
-			requestEndEventID,
+			requestStartEventID,
 			pair.GetSourceEventId(),
 			pair.GetFileId(),
 		); err != nil {
@@ -743,13 +803,12 @@ func newTransientAttachmentRef(create transientAttachmentCreate) (*bridgev1.Tran
 		return nil, err
 	}
 	return &bridgev1.TransientAttachmentRef{
-		AttachmentRef:        "att_" + base64.RawURLEncoding.EncodeToString(randomBytes[:]),
-		Mime:                 create.Mime,
-		Filename:             create.Filename,
-		SourceToolUseEventId: create.SourceToolUseEventID,
-		SourcePath:           create.SourcePath,
-		PageRange:            create.PageRange,
-		Detail:               create.Detail,
+		AttachmentRef: "att_" + base64.RawURLEncoding.EncodeToString(randomBytes[:]),
+		Mime:          create.Mime,
+		Filename:      create.Filename,
+		SourcePath:    create.SourcePath,
+		PageRange:     create.PageRange,
+		Detail:        create.Detail,
 	}, nil
 }
 
@@ -814,13 +873,22 @@ type transientAttachmentMetadata struct {
 	SourcePath string `json:"source_path"`
 	PageRange  string `json:"page_range"`
 	Detail     string `json:"detail"`
+	SizeBytes  int64  `json:"size_bytes"`
+	Digest     string `json:"sha256"`
 }
 
 type transientAttachmentIndexRow struct {
-	AttachmentRef *bridgev1.TransientAttachmentRef
+	AttachmentRef string
+	Mime          string
+	Filename      string
+	SourcePath    string
+	PageRange     string
+	Detail        string
 	BlobPointer   string
 	Status        string
 	ExpiresAt     time.Time
+	SizeBytes     int64
+	Digest        string
 }
 
 func transientAttachmentMetadataJSON(create transientAttachmentCreate) (string, error) {
@@ -829,6 +897,8 @@ func transientAttachmentMetadataJSON(create transientAttachmentCreate) (string, 
 		SourcePath: create.SourcePath,
 		PageRange:  create.PageRange,
 		Detail:     create.Detail,
+		SizeBytes:  int64(len(create.Data)),
+		Digest:     transientAttachmentDigest(create.Data),
 	})
 	if err != nil {
 		return "", err
@@ -838,18 +908,22 @@ func transientAttachmentMetadataJSON(create transientAttachmentCreate) (string, 
 
 func readTransientAttachmentIndexTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ResolveTransientAttachmentRequest) (transientAttachmentIndexRow, error) {
 	row := tx.QueryRow(ctx,
-		`SELECT blob_pointer, mime, metadata_json, status, expires_at
-		   FROM session_transient_attachments
-		  WHERE workspace_id = $1
-		    AND attachment_ref = $2
-		    AND session_id = $3
-		    AND session_thread_id = $4
-		    AND source_tool_use_event_id = $5`,
+		`SELECT attachment.blob_pointer, attachment.mime, attachment.metadata_json,
+		        attachment.status, attachment.expires_at
+		   FROM session_transient_attachments AS attachment
+		   JOIN session_runtime_tool_results AS source_tool
+		     ON source_tool.workspace_id = attachment.workspace_id
+		    AND source_tool.session_id = attachment.session_id
+		    AND source_tool.session_thread_id = attachment.session_thread_id
+		    AND source_tool.tool_use_event_id = attachment.source_tool_use_event_id
+		  WHERE attachment.workspace_id = $1
+		    AND attachment.attachment_ref = $2
+		    AND attachment.session_id = $3
+		    AND attachment.session_thread_id = $4`,
 		request.GetScope().GetWorkspaceId(),
 		request.GetAttachmentRef(),
 		request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(),
-		request.GetSourceToolUseEventId(),
 	)
 	var blobPointer string
 	var mime string
@@ -865,24 +939,34 @@ func readTransientAttachmentIndexTx(ctx context.Context, tx *dbconnect.Tx, reque
 	if err := json.Unmarshal([]byte(defaultString(metadataJSON, "{}")), &metadata); err != nil {
 		return transientAttachmentIndexRow{}, err
 	}
+	if metadata.SizeBytes <= 0 || metadata.SizeBytes > transientAttachmentMaxBytes || len(metadata.Digest) != sha256.Size*2 {
+		return transientAttachmentIndexRow{}, status.Error(codes.Internal, "transient attachment blob metadata is invalid")
+	}
+	if _, err := hex.DecodeString(metadata.Digest); err != nil {
+		return transientAttachmentIndexRow{}, status.Error(codes.Internal, "transient attachment blob metadata is invalid")
+	}
 	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtRaw)
 	if err != nil {
 		return transientAttachmentIndexRow{}, status.Error(codes.Internal, "transient attachment expiry is invalid")
 	}
 	return transientAttachmentIndexRow{
-		AttachmentRef: &bridgev1.TransientAttachmentRef{
-			AttachmentRef:        request.GetAttachmentRef(),
-			Mime:                 mime,
-			Filename:             metadata.Filename,
-			SourceToolUseEventId: request.GetSourceToolUseEventId(),
-			SourcePath:           metadata.SourcePath,
-			PageRange:            metadata.PageRange,
-			Detail:               metadata.Detail,
-		},
-		BlobPointer: blobPointer,
-		Status:      statusValue,
-		ExpiresAt:   expiresAt,
+		AttachmentRef: request.GetAttachmentRef(),
+		Mime:          mime,
+		Filename:      metadata.Filename,
+		SourcePath:    metadata.SourcePath,
+		PageRange:     metadata.PageRange,
+		Detail:        metadata.Detail,
+		BlobPointer:   blobPointer,
+		Status:        statusValue,
+		ExpiresAt:     expiresAt,
+		SizeBytes:     metadata.SizeBytes,
+		Digest:        metadata.Digest,
 	}, nil
+}
+
+func transientAttachmentDigest(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 // validateTransientAttachmentsForConsumptionTx returns the subset of the

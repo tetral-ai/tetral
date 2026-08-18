@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -32,36 +33,65 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReadsActiveBlobWithSc
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
 	scope := bridgeAPIScope("sesn_bridge_attachment_resolve", "thr_bridge_attachment_resolve", "bind_bridge_attachment_resolve", 1, "pod_uid_attachment_resolve")
+	seedBridgeTransientAttachmentSourceToolForTest(t, admin, scope, "sevt_attachment_resolve")
 	created := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_resolve_write_1", "sevt_attachment_resolve", []byte("image-bytes"))
 
 	resolved, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
-		Scope:                scope,
-		AttachmentRef:        created.GetAttachmentRef(),
-		SourceToolUseEventId: "sevt_attachment_resolve",
+		Scope:         scope,
+		AttachmentRef: created.GetAttachmentRef(),
 	})
 	if err != nil {
 		t.Fatalf("ResolveTransientAttachment: %v", err)
 	}
-	if string(resolved.GetResolved().GetData()) != "image-bytes" || resolved.GetResolved().GetExpiresAt() != "2026-01-01T12:15:00Z" {
-		t.Fatalf("resolved data/expires = %q/%q; want bytes and TTL", string(resolved.GetResolved().GetData()), resolved.GetResolved().GetExpiresAt())
+	if string(resolved.GetResolved().GetData()) != "image-bytes" {
+		t.Fatalf("resolved data = %q; want image bytes", string(resolved.GetResolved().GetData()))
 	}
-	if resolved.GetResolved().GetAttachment().GetFilename() != "attachment_resolve_write_1.png" || resolved.GetResolved().GetAttachment().GetSourcePath() != "sandbox:attachment_resolve_write_1.png" {
-		t.Fatalf("resolved attachment = %+v; want metadata from Bridge index", resolved.GetResolved().GetAttachment())
+	if resolved.GetResolved().GetAttachmentRef() != created.GetAttachmentRef() || resolved.GetResolved().GetFilename() != "attachment_resolve_write_1.png" || resolved.GetResolved().GetSourcePath() != "sandbox:attachment_resolve_write_1.png" {
+		t.Fatalf("resolved attachment = %+v; want metadata from Bridge index", resolved.GetResolved())
 	}
 
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_transient_attachments SET source_tool_use_event_id = 'sevt_missing_source'
+		  WHERE workspace_id = 'default' AND attachment_ref = $1`, created.GetAttachmentRef()); err != nil {
+		t.Fatalf("detach durable source Tool: %v", err)
+	}
 	if _, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
-		Scope:                scope,
-		AttachmentRef:        created.GetAttachmentRef(),
-		SourceToolUseEventId: "sevt_other",
+		Scope:         scope,
+		AttachmentRef: created.GetAttachmentRef(),
 	}); status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("ResolveTransientAttachment wrong source err = %v; want InvalidArgument", err)
+		t.Fatalf("ResolveTransientAttachment detached source err = %v; want InvalidArgument", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_transient_attachments SET source_tool_use_event_id = 'sevt_attachment_resolve'
+		  WHERE workspace_id = 'default' AND attachment_ref = $1`, created.GetAttachmentRef()); err != nil {
+		t.Fatalf("restore durable source Tool: %v", err)
+	}
+
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_transient_attachments
+		    SET metadata_json = jsonb_set(metadata_json::jsonb, '{sha256}', to_jsonb($2::text))::text
+		  WHERE workspace_id = 'default' AND attachment_ref = $1`,
+		created.GetAttachmentRef(), strings.Repeat("0", 64)); err != nil {
+		t.Fatalf("corrupt durable attachment digest: %v", err)
+	}
+	if _, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
+		Scope:         scope,
+		AttachmentRef: created.GetAttachmentRef(),
+	}); status.Code(err) != codes.Internal {
+		t.Fatalf("ResolveTransientAttachment corrupted digest err = %v; want Internal", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_transient_attachments
+		    SET metadata_json = jsonb_set(metadata_json::jsonb, '{sha256}', to_jsonb($2::text))::text
+		  WHERE workspace_id = 'default' AND attachment_ref = $1`,
+		created.GetAttachmentRef(), transientAttachmentDigest([]byte("image-bytes"))); err != nil {
+		t.Fatalf("restore durable attachment digest: %v", err)
 	}
 
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 16, 0, 0, time.UTC) }
 	expired, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
-		Scope:                scope,
-		AttachmentRef:        created.GetAttachmentRef(),
-		SourceToolUseEventId: "sevt_attachment_resolve",
+		Scope:         scope,
+		AttachmentRef: created.GetAttachmentRef(),
 	})
 	if err != nil || expired.GetUnavailable() == nil || expired.GetResolved() != nil {
 		t.Fatalf("ResolveTransientAttachment expired = response %+v err %v; want in-band unavailable", expired, err)
@@ -78,6 +108,7 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReturnsUnavailableFor
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
 	scope := bridgeAPIScope("sesn_bridge_attachment_gc_resolve", "thr_bridge_attachment_gc_resolve", "bind_bridge_attachment_gc_resolve", 1, "pod_uid_attachment_gc_resolve")
+	seedBridgeTransientAttachmentSourceToolForTest(t, admin, scope, "sevt_attachment_gc_resolve")
 	created := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_gc_resolve", "sevt_attachment_gc_resolve", []byte("image-bytes"))
 
 	for _, attachmentStatus := range []string{"consumed", "deleting", "deleted"} {
@@ -96,9 +127,8 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReturnsUnavailableFor
 
 			readsBefore := blobStore.getCalls
 			response, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
-				Scope:                scope,
-				AttachmentRef:        created.GetAttachmentRef(),
-				SourceToolUseEventId: "sevt_attachment_gc_resolve",
+				Scope:         scope,
+				AttachmentRef: created.GetAttachmentRef(),
 			})
 			if err != nil || response.GetUnavailable() == nil || response.GetResolved() != nil {
 				t.Fatalf("ResolveTransientAttachment %s = response %+v err %v; want in-band unavailable", attachmentStatus, response, err)
@@ -135,7 +165,7 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentClassifiesAdapterOuta
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
 	scope := bridgeAPIScope("sesn_bridge_attachment_taxonomy", "thr_bridge_attachment_taxonomy", "bind_bridge_attachment_taxonomy", 1, "pod_uid_attachment_taxonomy")
 	request := &bridgev1.ResolveTransientAttachmentRequest{
-		Scope: scope, AttachmentRef: "att_taxonomy", SourceToolUseEventId: "sevt_attachment_taxonomy",
+		Scope: scope, AttachmentRef: "att_taxonomy",
 	}
 
 	if _, err := store.ResolveTransientAttachment(context.Background(), request); status.Code(err) != codes.Unavailable {
@@ -144,7 +174,8 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentClassifiesAdapterOuta
 
 	blobStore := blob.NewFakeBlobStore()
 	store.AttachmentBlobStore = blobStore
-	created := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_taxonomy", request.GetSourceToolUseEventId(), []byte("small"))
+	seedBridgeTransientAttachmentSourceToolForTest(t, admin, scope, "sevt_attachment_taxonomy")
+	created := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_taxonomy", "sevt_attachment_taxonomy", []byte("small"))
 	request.AttachmentRef = created.GetAttachmentRef()
 	oversized := bytes.Repeat([]byte("x"), transientAttachmentMaxBytes+1)
 	oversizedPointer := transientAttachmentBlobPointer(scope, created.GetAttachmentRef()) + "-oversized"
@@ -168,6 +199,24 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentClassifiesAdapterOuta
 	}
 }
 
+func seedBridgeTransientAttachmentSourceToolForTest(t *testing.T, admin *sql.DB, scope *bridgev1.RuntimeScope, toolUseEventID string) {
+	t.Helper()
+	resultJSON := `{"status":"success"}`
+	if _, err := admin.ExecContext(context.Background(), `
+		INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			model_tool_call_id, execution_state, execution_attempt_generation,
+			result_digest, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, 'sandbox_tool', $5, 'view_image', '{}', 'committed',
+			$6, $7, 'terminal_unconsumed', 1, $8, now(), now())`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+		"input_hash_"+toolUseEventID, resultJSON, "call_"+toolUseEventID, sha256Hex(resultJSON),
+	); err != nil {
+		t.Fatalf("seed transient attachment source Tool: %v", err)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidArgument(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope")
@@ -185,7 +234,7 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 	for name, call := range map[string]func() error{
 		"transient": func() error {
 			_, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
-				Scope: scope, AttachmentRef: "att_stale_scope", SourceToolUseEventId: "sevt_tool_stale_scope",
+				Scope: scope, AttachmentRef: "att_stale_scope",
 			})
 			return err
 		},

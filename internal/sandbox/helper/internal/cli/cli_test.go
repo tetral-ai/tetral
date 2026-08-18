@@ -238,12 +238,14 @@ func TestDropPrivilegesForToolSwitchesRootHelperToRuntimeUser(t *testing.T) {
 	oldSetGID := setRuntimeGID
 	oldSetUID := setRuntimeUID
 	oldClearGroups := clearRuntimeGroups
+	oldNormalizeEnv := normalizeRuntimeEnv
 	t.Cleanup(func() {
 		currentEUID = oldEUID
 		statRuntimeIdentity = oldStat
 		setRuntimeGID = oldSetGID
 		setRuntimeUID = oldSetUID
 		clearRuntimeGroups = oldClearGroups
+		normalizeRuntimeEnv = oldNormalizeEnv
 	})
 
 	currentEUID = func() int { return 0 }
@@ -251,7 +253,7 @@ func TestDropPrivilegesForToolSwitchesRootHelperToRuntimeUser(t *testing.T) {
 		if path != "/workspace" {
 			t.Fatalf("stat runtime root = %q; want workspace root", path)
 		}
-		return runtimeIdentity{uid: 1000, gid: 1000}, nil
+		return runtimeIdentity{uid: 4242, gid: 4343}, nil
 	}
 	var calls []string
 	clearRuntimeGroups = func() error {
@@ -266,12 +268,46 @@ func TestDropPrivilegesForToolSwitchesRootHelperToRuntimeUser(t *testing.T) {
 		calls = append(calls, "uid:"+strconv.Itoa(uid))
 		return nil
 	}
+	normalizeRuntimeEnv = func() error {
+		calls = append(calls, "env:normalize")
+		return nil
+	}
 
 	if toolErr := dropPrivilegesForTool("/workspace"); toolErr != nil {
 		t.Fatalf("dropPrivilegesForTool error = %+v", toolErr)
 	}
-	if strings.Join(calls, ",") != "groups:clear,gid:1000,uid:1000" {
-		t.Fatalf("drop calls = %v; want supplementary groups cleared before gid and uid", calls)
+	if strings.Join(calls, ",") != "groups:clear,gid:4343,uid:4242,env:normalize" {
+		t.Fatalf("drop calls = %v; want groups, gid, uid, then runtime environment", calls)
+	}
+}
+
+func TestDropPrivilegesForToolFailsClosedWhenRuntimeEnvironmentCannotBeNormalized(t *testing.T) {
+	oldEUID := currentEUID
+	oldStat := statRuntimeIdentity
+	oldSetGID := setRuntimeGID
+	oldSetUID := setRuntimeUID
+	oldClearGroups := clearRuntimeGroups
+	oldNormalizeEnv := normalizeRuntimeEnv
+	t.Cleanup(func() {
+		currentEUID = oldEUID
+		statRuntimeIdentity = oldStat
+		setRuntimeGID = oldSetGID
+		setRuntimeUID = oldSetUID
+		clearRuntimeGroups = oldClearGroups
+		normalizeRuntimeEnv = oldNormalizeEnv
+	})
+	currentEUID = func() int { return 0 }
+	statRuntimeIdentity = func(string) (runtimeIdentity, error) {
+		return runtimeIdentity{uid: 4242, gid: 4343}, nil
+	}
+	clearRuntimeGroups = func() error { return nil }
+	setRuntimeGID = func(int) error { return nil }
+	setRuntimeUID = func(int) error { return nil }
+	normalizeRuntimeEnv = func() error { return errors.New("environment rejected") }
+
+	toolErr := dropPrivilegesForTool("/workspace")
+	if toolErr == nil || toolErr.Kind != health.HelperFailureKind || !strings.Contains(toolErr.Message, "environment normalization") {
+		t.Fatalf("dropPrivilegesForTool error = %+v; want catastrophic environment failure", toolErr)
 	}
 }
 
@@ -290,7 +326,7 @@ func TestDropPrivilegesForToolFailsClosedWhenSupplementaryGroupsCannotBeCleared(
 	})
 	currentEUID = func() int { return 0 }
 	statRuntimeIdentity = func(string) (runtimeIdentity, error) {
-		return runtimeIdentity{uid: 1000, gid: 1000}, nil
+		return runtimeIdentity{uid: 4242, gid: 4343}, nil
 	}
 	clearRuntimeGroups = func() error { return errors.New("setgroups denied") }
 	setRuntimeGID = func(int) error { t.Fatal("setgid ran after setgroups failure"); return nil }

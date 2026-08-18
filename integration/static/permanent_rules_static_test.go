@@ -218,10 +218,9 @@ func constantGoString(expression ast.Expr, resolving map[*ast.Object]bool) (stri
 func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	want := map[string]bool{
-		"services/bridge/bridge_api_events.go:userMessageDataJSON":                 true,
+		"services/bridge/bridge_api_events.go:userMessageContextDraftJSON":         true,
 		"services/bridge/bridge_api_mcp.go:runtimeMCPManifestCommandPayload":       true,
 		"services/bridge/bridge_api_settlement.go:validateStableReasoningBudget":   true,
-		"services/bridge/runtime_declaration.go:stableReasoningLedgerTx":           true,
 		"services/bridge/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
 		"services/bridge/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
 		"services/bridge/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,
@@ -493,14 +492,17 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 	for _, required := range []string{
 		"message AcceptSandboxExecutionRequest",
 		"string tool_use_event_id = 2;",
-		"string normalized_input_hash = 3;",
-		"string model_tool_call_id = 7;",
+		"message SandboxExecutionCommitted {}",
+		"message ClaimMcpToolResultRequest",
+		"string claim_id = 3;",
+		"message McpToolClaimAcquired",
+		"message CommitMcpToolResultRequest",
 		"message RunMemoryRequest",
-		"string tool_use_event_id = 2;",
-		"string normalized_input_hash = 3;",
+		"message MemoryRunCommitted",
+		"string operation_id = 6;",
 	} {
 		if !strings.Contains(string(protoBody), required) {
-			t.Fatalf("Bridge tool protocols must expose durable execution identity field %q", required)
+			t.Fatalf("Bridge tool protocols must expose narrow durable operation contract %q", required)
 		}
 	}
 	apiBody, err := os.ReadFile(filepath.Join(bridgeRoot, "api.go")) //nolint:gosec // repository-local static test path.

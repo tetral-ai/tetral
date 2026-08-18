@@ -45,7 +45,7 @@ func settleInterruptedThreadToolsTx(
 	scope *bridgev1.RuntimeScope,
 	interruptEventID string,
 	now time.Time,
-) ([]*bridgev1.InterruptToolProjection, error) {
+) ([]*bridgev1.RuntimeInterruptToolResult, error) {
 	tools, err := lockUnfinishedRuntimeToolsTx(ctx, tx, scope)
 	if err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func settleInterruptedThreadToolsTx(
 	if err != nil {
 		return nil, err
 	}
-	projections := make([]*bridgev1.InterruptToolProjection, 0, len(tools))
+	projections := make([]*bridgev1.RuntimeInterruptToolResult, 0, len(tools))
 	var cancellationJobs []queue.EnqueueRequest
 	for _, tool := range tools {
 		settlement, safeMessage, execution, err := interruptedToolOutcomeTx(ctx, tx, scope, tool.eventID)
@@ -89,22 +89,27 @@ func settleInterruptedThreadToolsTx(
 		if err != nil {
 			return nil, err
 		}
+		durableProjection, err := settleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, settlement, now)
+		if err != nil {
+			return nil, err
+		}
+		projectionJSON, err := marshalBridgeJSON(durableProjection)
+		if err != nil {
+			return nil, err
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
 				created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '{}', $12, $12, $12)`,
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), resultEventID,
 			resultSequence, resultEventType, payloadJSON, visibility, sessionVisible,
-			stableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, now,
+			stableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, projectionJSON, now,
 		); err != nil {
 			return nil, err
 		}
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, resultEventID, visibility, sessionVisible, now); err != nil {
-			return nil, err
-		}
-		if _, err := settleRuntimeToolPartTx(ctx, tx, scope, tool.modelRequestID, settlement, now); err != nil {
 			return nil, err
 		}
 		if _, err := tx.Exec(ctx,
@@ -123,19 +128,16 @@ func settleInterruptedThreadToolsTx(
 				return nil, err
 			}
 		}
-		projection := &bridgev1.InterruptToolProjection{
-			ToolUseEventId: tool.eventID,
-			ResultEvent: &bridgev1.DurableEventStamp{
-				SessionThreadId: scope.GetSessionThreadId(), EventId: resultEventID,
-				EventSequence: resultSequence,
-				Disposition:   bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
-			},
-		}
+		projection := &bridgev1.RuntimeInterruptToolResult{ToolUseEventId: tool.eventID}
 		switch outcome := settlement.GetOutcome().(type) {
 		case *bridgev1.RuntimeToolSettlement_Error:
-			projection.TerminalState = &bridgev1.InterruptToolProjection_Error{Error: outcome.Error}
+			projection.Outcome = &bridgev1.RuntimeInterruptToolResult_Error{
+				Error: &bridgev1.RuntimeInterruptToolFailed{ErrorJson: outcome.Error.GetErrorJson()},
+			}
 		case *bridgev1.RuntimeToolSettlement_Cancelled:
-			projection.TerminalState = &bridgev1.InterruptToolProjection_Cancelled{Cancelled: outcome.Cancelled}
+			projection.Outcome = &bridgev1.RuntimeInterruptToolResult_Cancelled{
+				Cancelled: &bridgev1.RuntimeInterruptToolCancelled{ErrorJson: outcome.Cancelled.ErrorJson},
+			}
 		default:
 			return nil, status.Error(codes.Internal, "interrupt Tool outcome is not terminal")
 		}
@@ -243,7 +245,7 @@ func interruptedToolOutcomeTx(
 		}
 	}
 	if cancelledBeforeStart {
-		errorJSON := `{"type":"runtime","code":"runtime_interrupted","message":"Tool execution was cancelled before it started.","retryable":false,"fatal":false}`
+		errorJSON := `{"type":"runtime_interrupted","message":"Tool execution was cancelled before it started.","retryable":false}`
 		return &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUseEventID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{ErrorJson: &errorJSON}},
@@ -256,7 +258,7 @@ func interruptedToolOutcomeTx(
 		code = "runtime_interrupted_result_not_committed"
 	}
 	errorJSON, err := marshalBridgeJSON(map[string]any{
-		"type": "runtime", "code": code, "message": message, "retryable": false, "fatal": false,
+		"type": code, "message": message, "retryable": false,
 	})
 	if err != nil {
 		return nil, "", nil, err
