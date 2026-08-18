@@ -80,6 +80,10 @@ type malformedRuntimeInputCustodyReplacer interface {
 	ReplaceMalformedRuntimeInputCustody(context.Context, RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error)
 }
 
+type malformedRuntimeInputCustodyFinalizer interface {
+	FinalizeMalformedRuntimeInputCustody(context.Context, MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error)
+}
+
 type RuntimePodLossRepairer interface {
 	RepairLostRuntimeBindings(context.Context, string) (int, error)
 }
@@ -238,6 +242,19 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg JobRunnerConfig) error {
 	job, err := DecodeRuntimeJob(queueJob)
 	if err != nil {
+		if queueJob.GetKind() == queue.KindRuntimeInput {
+			finalizer, ok := r.Deliverer.(malformedRuntimeInputCustodyFinalizer)
+			if !ok {
+				return errors.New("malformed runtime-input custody finalizer is required")
+			}
+			outcome, finalizeErr := finalizer.FinalizeMalformedRuntimeInputCustody(ctx, malformedRuntimeInputLease(queueJob))
+			if finalizeErr != nil {
+				return finalizeErr
+			}
+			if outcome.Handled {
+				return nil
+			}
+		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId:  queueJob.GetWorkspaceId(),
 			JobId:        queueJob.GetId(),
@@ -383,6 +400,13 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 	}
 	r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(result))
 	return r.applyRuntimeDeliveryResult(ctx, job, result)
+}
+
+func malformedRuntimeInputLease(job *queuev1.QueueJob) MalformedRuntimeInputLease {
+	return MalformedRuntimeInputLease{
+		WorkspaceID: job.GetWorkspaceId(), JobID: job.GetId(), LeaseToken: job.GetLeaseToken(),
+		Kind: job.GetKind(), PartitionKey: job.GetPartitionKey(), DedupeKey: job.GetDedupeKey(),
+	}
 }
 
 func runtimeJobPreparationErrorKind(err error) string {

@@ -798,6 +798,10 @@ func (d manifestCompositionDeliverer) ReplayRuntimeDeliveryFinalization(ctx cont
 	return d.direct.ReplayRuntimeDeliveryFinalization(ctx, job)
 }
 
+func (d manifestCompositionDeliverer) FinalizeMalformedRuntimeInputCustody(ctx context.Context, lease MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	return d.direct.FinalizeMalformedRuntimeInputCustody(ctx, lease)
+}
+
 func deliverQueuedManifestPayload(t *testing.T, runtime *sql.DB, admin *sql.DB, sessionID string, generation int64) string {
 	t.Helper()
 	job := queuedManifestJob(t, admin, sessionID, generation)

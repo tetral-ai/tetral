@@ -1541,6 +1541,10 @@ func (d *recordingDeliverer) DeliverRuntimeJob(_ context.Context, job RuntimeJob
 	return d.result, d.err
 }
 
+func (d *recordingDeliverer) FinalizeMalformedRuntimeInputCustody(context.Context, MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	return MalformedRuntimeInputCustodyResult{}, nil
+}
+
 func (d *recordingDeliverer) FinalizeRuntimeDelivery(_ context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
 	d.finalizations = append(d.finalizations, recordedRuntimeFinalization{job: job, result: result})
 	if d.steps != nil {

@@ -55,6 +55,25 @@ type RuntimeDeliveryFinalizationStore interface {
 	ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error)
 }
 
+// MalformedRuntimeInputLease carries only Queue-owned lease identity. Payload
+// fields are intentionally absent: durable Queue keys and the canonical Inbox
+// relation select any business owner.
+type MalformedRuntimeInputLease struct {
+	WorkspaceID  string
+	JobID        string
+	LeaseToken   string
+	Kind         string
+	PartitionKey string
+	DedupeKey    string
+}
+
+type MalformedRuntimeInputCustodyResult struct {
+	Handled               bool
+	QueueLeaseSettled     bool
+	InterruptTerminalized bool
+	CanonicalReplacement  bool
+}
+
 type RuntimeTargetResolver interface {
 	ResolveRuntimeTarget(context.Context, *dbconnect.Tx, RuntimeJob) (runtimeBindingForDelivery, error)
 }
@@ -320,6 +339,16 @@ func (d RuntimePodDirectDeliverer) ReplaceMalformedRuntimeInputCustody(ctx conte
 		return queue.ReplaceMalformedRuntimeInputCustodyResult{}, errors.New("runtime delivery store is unavailable")
 	}
 	return replacer.ReplaceMalformedRuntimeInputCustody(ctx, job)
+}
+
+func (d RuntimePodDirectDeliverer) FinalizeMalformedRuntimeInputCustody(ctx context.Context, lease MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	finalizer, ok := d.Store.(interface {
+		FinalizeMalformedRuntimeInputCustody(context.Context, MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error)
+	})
+	if !ok || finalizer == nil {
+		return MalformedRuntimeInputCustodyResult{}, errors.New("runtime delivery store is unavailable")
+	}
+	return finalizer.FinalizeMalformedRuntimeInputCustody(ctx, lease)
 }
 
 func (d RuntimePodDirectDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
@@ -1124,6 +1153,15 @@ func finalizeInterruptDeliveryExhaustionTx(
 			kind: "runtime_inbox_status_invalid", message: "interrupt delivery attempts remain", retryable: true,
 		}
 	}
+	return finalizeInterruptDeliveryTerminalTx(ctx, tx, job, now)
+}
+
+func finalizeInterruptDeliveryTerminalTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	now time.Time,
+) (RuntimeDeliveryResult, error) {
 	var inboxStatus string
 	var inboxBindingID, inboxPodUID sql.NullString
 	var inboxBindingGeneration sql.NullInt64
@@ -1344,6 +1382,143 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplaceMalformedRuntimeInputCustody(ctx
 		LeaseToken:     job.LeaseToken,
 		Now:            now,
 	})
+}
+
+// FinalizeMalformedRuntimeInputCustody derives business custody exclusively
+// from the live Queue row's canonical keys and the unique Inbox relation. An
+// interrupt uses the existing Session-wide terminal owner in the same
+// transaction as the exact Queue lease; other input kinds retain the Queue
+// store's existing kind-specific replacement/dead-letter policy.
+func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
+	ctx context.Context,
+	lease MalformedRuntimeInputLease,
+) (MalformedRuntimeInputCustodyResult, error) {
+	if s == nil || s.Client == nil || lease.WorkspaceID == "" || lease.JobID == "" || lease.LeaseToken == "" ||
+		lease.Kind != queue.KindRuntimeInput || lease.PartitionKey == "" || lease.DedupeKey == "" {
+		return MalformedRuntimeInputCustodyResult{}, nil
+	}
+	now := storage.Now()
+	if s.Clock != nil {
+		now = s.Clock().UTC()
+	}
+	var canonical RuntimeJob
+	outcome := MalformedRuntimeInputCustodyResult{}
+	err := s.Client.WithWorkspaceTx(ctx, lease.WorkspaceID, "agentruntimebridge.finalize_malformed_runtime_input", func(tx *dbconnect.Tx) error {
+		var kind, partitionKey, dedupeKey, queueStatus, leaseToken string
+		var leaseCurrent bool
+		var attemptCount, maxAttempts int32
+		if err := tx.QueryRow(ctx, `SELECT kind, partition_key, dedupe_key, status,
+			COALESCE(lease_token, ''), COALESCE(leased_until > clock_timestamp(), false),
+			attempt_count, max_attempts
+			FROM queue_jobs WHERE workspace_id=$1 AND id=$2`,
+			lease.WorkspaceID, lease.JobID,
+		).Scan(&kind, &partitionKey, &dedupeKey, &queueStatus, &leaseToken, &leaseCurrent, &attemptCount, &maxAttempts); dbconnect.IsNoRows(err) {
+			outcome.Handled = true
+			outcome.QueueLeaseSettled = true
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if kind != lease.Kind || partitionKey != lease.PartitionKey || dedupeKey != lease.DedupeKey ||
+			queueStatus != queue.StatusLeased || leaseToken != lease.LeaseToken || !leaseCurrent {
+			outcome.Handled = true
+			outcome.QueueLeaseSettled = true
+			return nil
+		}
+
+		rows, err := tx.Query(ctx, `SELECT session_id, session_thread_id, runtime_input_id,
+			input_kind, event_ids_json, sequence_from, sequence_to
+			FROM session_runtime_inbox
+			WHERE workspace_id=$1
+			  AND $2='session:' || workspace_id || ':' || session_id
+			  AND $3='runtime_input:' || workspace_id || ':' || session_id || ':' || runtime_input_id
+			ORDER BY runtime_input_id LIMIT 2`, lease.WorkspaceID, partitionKey, dedupeKey)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		var candidates int
+		var eventIDsJSON string
+		var sequenceFrom, sequenceTo sql.NullInt64
+		for rows.Next() {
+			candidates++
+			if err := rows.Scan(&canonical.SessionID, &canonical.SessionThreadID, &canonical.RuntimeInputID,
+				&canonical.InputKind, &eventIDsJSON, &sequenceFrom, &sequenceTo); err != nil {
+				return err
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if candidates != 1 {
+			return nil
+		}
+		canonical.WorkspaceID = lease.WorkspaceID
+		canonical.JobID = lease.JobID
+		canonical.LeaseToken = lease.LeaseToken
+		canonical.Kind = lease.Kind
+		canonical.PartitionKey = partitionKey
+		canonical.DedupeKey = dedupeKey
+		canonical.AttemptCount = attemptCount
+		canonical.MaxAttempts = maxAttempts
+		if canonical.InputKind != "interrupt_control" {
+			return nil
+		}
+		if err := lockRuntimeMutationSessionTx(ctx, tx, canonical.WorkspaceID, canonical.SessionID); err != nil {
+			return err
+		}
+		var lockedThreadID, lockedInputKind, lockedEventIDsJSON string
+		var lockedSequenceFrom, lockedSequenceTo sql.NullInt64
+		if err := tx.QueryRow(ctx, `SELECT session_thread_id, input_kind, event_ids_json, sequence_from, sequence_to
+			FROM session_runtime_inbox
+			WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 FOR UPDATE`,
+			canonical.WorkspaceID, canonical.SessionID, canonical.RuntimeInputID,
+		).Scan(&lockedThreadID, &lockedInputKind, &lockedEventIDsJSON, &lockedSequenceFrom, &lockedSequenceTo); err != nil {
+			return err
+		}
+		if lockedThreadID != canonical.SessionThreadID || lockedInputKind != canonical.InputKind || lockedEventIDsJSON != eventIDsJSON ||
+			lockedSequenceFrom != sequenceFrom || lockedSequenceTo != sequenceTo {
+			return invalidRuntimeFinalizationIdentity("malformed runtime Inbox relation changed during finalization")
+		}
+		if err := json.Unmarshal([]byte(eventIDsJSON), &canonical.EventIDs); err != nil || len(canonical.EventIDs) == 0 ||
+			!sequenceFrom.Valid || !sequenceTo.Valid || sequenceFrom.Int64 <= 0 || sequenceTo.Int64 < sequenceFrom.Int64 {
+			return invalidRuntimeFinalizationIdentity("malformed interrupt Inbox event identity is invalid")
+		}
+		canonical.SequenceFrom = sequenceFrom.Int64
+		canonical.SequenceTo = sequenceTo.Int64
+		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+			WorkspaceID: workspace.ID(canonical.WorkspaceID), JobID: canonical.JobID, LeaseToken: canonical.LeaseToken,
+			Kind: canonical.Kind, PartitionKey: canonical.PartitionKey, DedupeKey: canonical.DedupeKey,
+		})
+		if err != nil {
+			return err
+		}
+		if !active {
+			outcome.Handled = true
+			outcome.QueueLeaseSettled = true
+			return nil
+		}
+		if _, err := finalizeInterruptDeliveryTerminalTx(
+			withInterruptCloseout(ctx, canonical.RuntimeInputID), tx, canonical, now,
+		); err != nil {
+			return err
+		}
+		outcome.Handled = true
+		outcome.QueueLeaseSettled = true
+		outcome.InterruptTerminalized = true
+		return nil
+	})
+	if err != nil || outcome.Handled || canonical.SessionID == "" {
+		return outcome, err
+	}
+	replaced, err := queue.NewPostgreSQLStore(s.Client).ReplaceMalformedRuntimeInputCustody(ctx, queue.ReplaceMalformedRuntimeInputCustodyRequest{
+		WorkspaceID: workspace.ID(canonical.WorkspaceID), SessionID: canonical.SessionID, RuntimeInputID: canonical.RuntimeInputID,
+		JobID: canonical.JobID, LeaseToken: canonical.LeaseToken, Now: now,
+	})
+	outcome.Handled = true
+	outcome.QueueLeaseSettled = replaced.DeadLettered
+	outcome.CanonicalReplacement = replaced.Replaced
+	return outcome, err
 }
 
 type lockedRuntimeInboxFinalization struct {

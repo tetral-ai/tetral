@@ -47,6 +47,51 @@ func TestRuntimeDeliveryExhaustionEventIDMatchesDatabaseDerivation(t *testing.T)
 	}
 }
 
+func TestPostgreSQLJobRunnerMalformedNonInterruptKeepsCanonicalReplacementOwner(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_malformed_message_replacement"
+		threadID  = "thr_malformed_message_replacement"
+		inputID   = "rin_malformed_message_replacement"
+		eventID   = "evt_malformed_message_replacement"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"recover"}]}`)
+	job := exhaustionRuntimeJob(sessionID, threadID, inputID, "messages", []string{eventID})
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queued := enqueueExhaustionJob(t, queueStore, job, time.Now().UTC().Add(-time.Minute))
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET payload_json = payload_json::jsonb - 'input_kind'
+		WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
+		t.Fatalf("malform non-interrupt Queue payload: %v", err)
+	}
+	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseOwner: "malformed-message-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run malformed non-interrupt owner: %v", err)
+	}
+	var sessionStatus, inboxStatus, oldQueueStatus string
+	var pendingReplacements, sessionErrors int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4 AND status='pending'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`,
+		sessionID, inputID, queued.ID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+	).Scan(&sessionStatus, &inboxStatus, &oldQueueStatus, &pendingReplacements, &sessionErrors); err != nil {
+		t.Fatalf("read malformed non-interrupt replacement: %v", err)
+	}
+	if sessionStatus != "idle" || inboxStatus != "queued" || oldQueueStatus != queue.StatusDeadLettered || pendingReplacements != 1 || sessionErrors != 0 || deliverer.deliveries != 0 {
+		t.Fatalf("malformed non-interrupt owner = Session %s Inbox %s old Queue %s replacements %d errors %d Runtime %d",
+			sessionStatus, inboxStatus, oldQueueStatus, pendingReplacements, sessionErrors, deliverer.deliveries)
+	}
+}
+
 func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -754,6 +799,10 @@ func (d *postgresFinalizingDeliverer) ReplayRuntimeDeliveryFinalization(ctx cont
 
 func (d *postgresFinalizingDeliverer) ReplaceMalformedRuntimeInputCustody(ctx context.Context, job RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error) {
 	return d.store.ReplaceMalformedRuntimeInputCustody(ctx, job)
+}
+
+func (d *postgresFinalizingDeliverer) FinalizeMalformedRuntimeInputCustody(ctx context.Context, lease MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	return d.store.FinalizeMalformedRuntimeInputCustody(ctx, lease)
 }
 
 var errSyntheticQueueResponseLoss = errors.New("synthetic queue response loss")

@@ -488,6 +488,307 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 	}
 }
 
+func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_malformed_interrupt_terminal"
+		threadID  = "thr_malformed_interrupt_terminal"
+		bindingID = "bind_malformed_interrupt_terminal"
+		podUID    = "pod_malformed_interrupt_terminal"
+		inputID   = "rin_malformed_interrupt_terminal"
+		eventID   = "evt_malformed_interrupt_terminal"
+	)
+	now := time.Now().UTC().Add(-time.Minute)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
+	})
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, now)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET payload_json = payload_json::jsonb - 'input_kind'
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID)); err != nil {
+		t.Fatalf("malform interrupt payload after canonical birth: %v", err)
+	}
+
+	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseOwner: "malformed-interrupt-terminal", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run malformed interrupt owner: %v", err)
+	}
+
+	var sessionStatus, threadStatus, inboxStatus, queueStatus string
+	var bindings, terminalErrors, terminalStatuses, messages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated'),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1)`,
+		sessionID, threadID, inputID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+	).Scan(&sessionStatus, &threadStatus, &inboxStatus, &queueStatus, &bindings, &terminalErrors, &terminalStatuses, &messages); err != nil {
+		t.Fatalf("read malformed interrupt atomic closeout: %v", err)
+	}
+	if sessionStatus != "terminated" || threadStatus != "failed" || inboxStatus != "cancelled" || queueStatus != queue.StatusCancelled ||
+		bindings != 0 || terminalErrors != 1 || terminalStatuses != 1 || messages != 0 || deliverer.deliveries != 0 {
+		t.Fatalf("malformed interrupt closeout = Session %s Thread %s Inbox %s Queue %s bindings/errors/statuses/messages/runtime %d/%d/%d/%d/%d",
+			sessionStatus, threadStatus, inboxStatus, queueStatus, bindings, terminalErrors, terminalStatuses, messages, deliverer.deliveries)
+	}
+}
+
+func TestPostgreSQLJobRunnerFinalInterruptFenceRejectsPostPlanLeaseTakeover(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_post_plan_takeover"
+		threadID  = "thr_interrupt_post_plan_takeover"
+		bindingID = "bind_interrupt_post_plan_takeover"
+		podUID    = "pod_interrupt_post_plan_takeover"
+		inputID   = "rin_interrupt_post_plan_takeover"
+		eventID   = "evt_interrupt_post_plan_takeover"
+	)
+	now := time.Now().UTC().Add(-time.Minute)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), "evt_interrupt_post_plan_turn")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 2, "user.interrupt", `{}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: 2, SequenceTo: 2,
+	})
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 2, 3, now)
+
+	baseStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	pausingStore := &postPlanInterruptFenceStore{
+		PostgreSQLRuntimeDeliveryStore: baseStore,
+		planned:                        make(chan struct{}), resume: make(chan struct{}),
+	}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: postPlanInterruptDeliverer{direct: RuntimePodDirectDeliverer{Store: pausingStore, Sender: sender}},
+		Config:    JobRunnerConfig{LeaseOwner: "post-plan-old", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	runResult := make(chan error, 1)
+	go func() { runResult <- runner.RunOnce(context.Background()) }()
+	select {
+	case <-pausingStore.planned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old JobRunner did not reach the final pre-send fence")
+	}
+
+	var oldJobID, oldLeaseToken string
+	if err := admin.QueryRowContext(context.Background(), `SELECT id, lease_token FROM queue_jobs
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID)).
+		Scan(&oldJobID, &oldLeaseToken); err != nil {
+		t.Fatalf("read old planned interrupt lease: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1 AND lease_token=$2`, oldJobID, oldLeaseToken); err != nil {
+		t.Fatalf("expire post-plan interrupt lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim post-plan interrupt lease = %d/%v; want 1/nil", reclaimed, err)
+	}
+	current := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "post-plan-current",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if current.ID != oldJobID || current.LeaseToken == oldLeaseToken {
+		t.Fatalf("post-plan takeover identity = %s/%s; want same job and a new token", current.ID, current.LeaseToken)
+	}
+
+	type durableSnapshot struct {
+		sessionStatus, inboxStatus, queueStatus, leaseToken, leasedBy string
+		bindings, events, messages, operations                        int
+		queueUpdatedAt                                                time.Time
+	}
+	readSnapshot := func() durableSnapshot {
+		var snapshot durableSnapshot
+		if err := admin.QueryRowContext(context.Background(), `SELECT
+			(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+			(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+			(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+			(SELECT leased_by FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+			(SELECT updated_at FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+			(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),
+			(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1),
+			(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`,
+			sessionID, inputID, oldJobID,
+		).Scan(&snapshot.sessionStatus, &snapshot.inboxStatus, &snapshot.queueStatus, &snapshot.leaseToken,
+			&snapshot.leasedBy, &snapshot.queueUpdatedAt, &snapshot.bindings, &snapshot.events, &snapshot.messages, &snapshot.operations); err != nil {
+			t.Fatalf("read post-plan takeover snapshot: %v", err)
+		}
+		return snapshot
+	}
+	beforeResume := readSnapshot()
+	close(pausingStore.resume)
+	select {
+	case err := <-runResult:
+		if err != nil {
+			t.Fatalf("old JobRunner after post-plan takeover: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("old JobRunner did not leave the final lease fence")
+	}
+	afterResume := readSnapshot()
+	if beforeResume != afterResume || afterResume.queueStatus != queue.StatusLeased || afterResume.leaseToken != current.LeaseToken ||
+		afterResume.leasedBy != "post-plan-current" || len(sender.requests) != 0 {
+		t.Fatalf("old post-plan worker mutated durable facts: before=%+v after=%+v Runtime calls=%d", beforeResume, afterResume, len(sender.requests))
+	}
+}
+
+type postPlanInterruptFenceStore struct {
+	*PostgreSQLRuntimeDeliveryStore
+	planned chan struct{}
+	resume  chan struct{}
+}
+
+type postPlanInterruptDeliverer struct {
+	direct RuntimePodDirectDeliverer
+}
+
+func (d postPlanInterruptDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return d.direct.DeliverRuntimeJob(ctx, job)
+}
+
+func (d postPlanInterruptDeliverer) FinalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	return d.direct.FinalizeRuntimeDelivery(ctx, job, result)
+}
+
+func (d postPlanInterruptDeliverer) ReplayRuntimeDeliveryFinalization(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
+	return d.direct.ReplayRuntimeDeliveryFinalization(ctx, job)
+}
+
+func (d postPlanInterruptDeliverer) ReplaceMalformedRuntimeInputCustody(ctx context.Context, job RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error) {
+	return d.direct.ReplaceMalformedRuntimeInputCustody(ctx, job)
+}
+
+func (d postPlanInterruptDeliverer) FinalizeMalformedRuntimeInputCustody(ctx context.Context, lease MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	return d.direct.FinalizeMalformedRuntimeInputCustody(ctx, lease)
+}
+
+func (s *postPlanInterruptFenceStore) InterruptDeliveryAuthorityActive(ctx context.Context, job RuntimeJob) (bool, error) {
+	close(s.planned)
+	select {
+	case <-s.resume:
+		return s.PostgreSQLRuntimeDeliveryStore.InterruptDeliveryAuthorityActive(ctx, job)
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+func TestPostgreSQLMalformedInterruptFinalizationRollbackPreservesExactLease(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_malformed_interrupt_rollback"
+		threadID  = "thr_malformed_interrupt_rollback"
+		bindingID = "bind_malformed_interrupt_rollback"
+		podUID    = "pod_malformed_interrupt_rollback"
+		inputID   = "rin_malformed_interrupt_rollback"
+		eventID   = "evt_malformed_interrupt_rollback"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
+	})
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, time.Now().UTC().Add(-time.Minute))
+	leased := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "malformed-interrupt-rollback",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_malformed_interrupt_terminal_event() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.type = 'session.error' THEN RAISE EXCEPTION 'synthetic malformed interrupt rollback'; END IF; RETURN NEW; END $$;
+		CREATE TRIGGER fail_malformed_interrupt_terminal_event BEFORE INSERT ON session_events
+		FOR EACH ROW EXECUTE FUNCTION fail_malformed_interrupt_terminal_event()`); err != nil {
+		t.Fatalf("install malformed interrupt rollback trigger: %v", err)
+	}
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	if _, err := store.FinalizeMalformedRuntimeInputCustody(context.Background(), malformedRuntimeInputLease(queueJobProto(leased))); err == nil {
+		t.Fatal("malformed interrupt finalization survived injected transaction failure")
+	}
+	var sessionStatus, inboxStatus, queueStatus, leaseToken string
+	var bindings, terminalEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('session.error','session.status_terminated'))`,
+		sessionID, inputID, leased.ID,
+	).Scan(&sessionStatus, &inboxStatus, &queueStatus, &leaseToken, &bindings, &terminalEvents); err != nil {
+		t.Fatalf("read rolled-back malformed interrupt authority: %v", err)
+	}
+	if sessionStatus != "idle" || inboxStatus != "queued" || queueStatus != queue.StatusLeased || leaseToken != leased.LeaseToken || bindings != 1 || terminalEvents != 0 {
+		t.Fatalf("rolled-back malformed interrupt = Session %s Inbox %s Queue %s/%s bindings %d terminal %d",
+			sessionStatus, inboxStatus, queueStatus, leaseToken, bindings, terminalEvents)
+	}
+}
+
+func TestPostgreSQLMalformedInterruptResponseLossReplaysTerminalResult(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_malformed_interrupt_replay"
+		threadID  = "thr_malformed_interrupt_replay"
+		bindingID = "bind_malformed_interrupt_replay"
+		podUID    = "pod_malformed_interrupt_replay"
+		inputID   = "rin_malformed_interrupt_replay"
+		eventID   = "evt_malformed_interrupt_replay"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
+	})
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, time.Now().UTC().Add(-time.Minute))
+	leased := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "malformed-interrupt-replay",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	lease := malformedRuntimeInputLease(queueJobProto(leased))
+	first, err := store.FinalizeMalformedRuntimeInputCustody(context.Background(), lease)
+	if err != nil || !first.Handled || !first.InterruptTerminalized || !first.QueueLeaseSettled {
+		t.Fatalf("first malformed interrupt terminal result = %+v/%v", first, err)
+	}
+	replay, err := store.FinalizeMalformedRuntimeInputCustody(context.Background(), lease)
+	if err != nil || !replay.Handled || !replay.QueueLeaseSettled || replay.InterruptTerminalized {
+		t.Fatalf("replayed lost malformed interrupt response = %+v/%v; want terminal durable no-op", replay, err)
+	}
+	var errorsCount, statusesCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated')`,
+		sessionID,
+	).Scan(&errorsCount, &statusesCount); err != nil {
+		t.Fatalf("read malformed interrupt replay events: %v", err)
+	}
+	if errorsCount != 1 || statusesCount != 1 {
+		t.Fatalf("malformed interrupt replay events = errors %d statuses %d; want exactly 1/1", errorsCount, statusesCount)
+	}
+}
+
 func enqueueInterruptExhaustionJob(
 	t *testing.T,
 	store *queue.PostgreSQLQueueStore,
