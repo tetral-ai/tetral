@@ -187,6 +187,100 @@ func TestPostgreSQLBridgeAPIStoreReadsBoundedOffsetFileAttachmentChunks(t *testi
 	}
 }
 
+func TestPostgreSQLBridgeFileAttachmentScopeCannotBypassHotColdOrBlobBoundaries(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionA = "sesn_bridge_attachment_scope_a"
+		sessionB = "sesn_bridge_attachment_scope_b"
+		threadA  = "thr_bridge_attachment_scope_a"
+		binding  = "bind_bridge_attachment_scope_a"
+		podUID   = "pod_bridge_attachment_scope_a"
+		eventID  = "sevt_bridge_attachment_scope_cross"
+		fileID   = "file_bridge_attachment_scope_b"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionA, threadA)
+	seedBridgeAPISession(t, admin, "default", sessionB, "thr_bridge_attachment_scope_b")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionA, binding, 1, podUID)
+	inner := blob.NewFakeBlobStore()
+	seedBridgeAPIFileAttachment(t, admin, inner, fileID, "private.png", "image/png", "private")
+	if _, err := admin.ExecContext(context.Background(), `UPDATE files
+		SET scope_type = 'session', scope_id = $2
+		WHERE workspace_id = 'default' AND file_id = $1`, fileID, sessionB); err != nil {
+		t.Fatalf("scope cross-Session file: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionA, threadA, eventID, 1, "user.message",
+		`{"content":[{"type":"image","source":{"type":"file","file_id":"`+fileID+`"}}]}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionA, threadA, "rin_bridge_attachment_scope_cross", "messages",
+		`["`+eventID+`"]`, "accepted", binding, podUID, 1, 1)
+
+	rangeStore := &rangeRecordingBlobStore{inner: inner}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.FileBlobStore = rangeStore
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-attachment-scope-token-key")
+	scope := bridgeAPIScope(sessionA, threadA, binding, 1, podUID)
+	pair := &bridgev1.FileAttachmentPair{SourceEventId: eventID, FileId: fileID}
+
+	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_attachment_scope_cross",
+	})
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("commit historical cross-Session input = %#v/%v", committed, err)
+	}
+	if attachments := committed.GetCommitted().GetContext().GetPendingAttachmentJson(); len(attachments) != 0 {
+		t.Fatalf("hot cross-Session attachment projection = %q; want none", attachments)
+	}
+
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("cold load cross-Session attachment: %v", err)
+	}
+	var contextPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &contextPayload); err != nil {
+		t.Fatalf("decode cold cross-Session context: %v", err)
+	}
+	if len(contextPayload.PendingAttachments) != 0 {
+		t.Fatalf("cold cross-Session attachment projection = %#v; want none", contextPayload.PendingAttachments)
+	}
+
+	metadata, err := store.ResolveFileAttachmentMetadata(context.Background(), &bridgev1.ResolveFileAttachmentMetadataRequest{
+		Scope: scope, Attachments: []*bridgev1.FileAttachmentPair{pair},
+	})
+	if err != nil || len(metadata.GetAttachments()) != 1 ||
+		metadata.GetAttachments()[0].GetRejected().GetReason() != bridgev1.FileAttachmentRejectionReason_FILE_ATTACHMENT_REJECTION_REASON_DELETED {
+		t.Fatalf("cross-Session metadata = %#v/%v; want in-band unavailable", metadata, err)
+	}
+	chunk, err := store.ReadFileAttachmentChunk(context.Background(), &bridgev1.ReadFileAttachmentChunkRequest{
+		Scope: scope, Attachment: pair, Offset: 0, Length: 1,
+	})
+	if err != nil || chunk.GetRejected().GetReason() != bridgev1.FileAttachmentRejectionReason_FILE_ATTACHMENT_REJECTION_REASON_DELETED {
+		t.Fatalf("cross-Session blob read = %#v/%v; want in-band unavailable", chunk, err)
+	}
+	if rangeStore.getCalls != 0 || len(rangeStore.ranges) != 0 {
+		t.Fatalf("cross-Session blob reads = full:%d ranges:%d; want zero", rangeStore.getCalls, len(rangeStore.ranges))
+	}
+
+	started, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_scope_cross",
+		ModelRequestId: "mreq_bridge_attachment_scope_cross", EventType: "span.model_request_start",
+		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
+		RequestKind: requestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
+	})
+	if status.Code(err) != codes.InvalidArgument || started != nil {
+		t.Fatalf("cross-Session Request Start = %#v/%v; want InvalidArgument", started, err)
+	}
+	var starts, consumptions, operations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = $1 AND type = 'span.model_request_start'),
+		(SELECT count(*) FROM session_file_attachment_consumptions WHERE workspace_id = 'default' AND session_id = $1),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND session_id = $1 AND operation = 'write_event')`,
+		sessionA).Scan(&starts, &consumptions, &operations); err != nil {
+		t.Fatalf("read rejected Request Start facts: %v", err)
+	}
+	if starts != 0 || consumptions != 0 || operations != 0 {
+		t.Fatalf("rejected Request Start facts = starts:%d consumptions:%d operations:%d; want zero", starts, consumptions, operations)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreLoadContextDerivesCommittedUnconsumedFileAttachments(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

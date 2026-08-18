@@ -17,8 +17,8 @@ import (
 )
 
 type FileAttachmentValidator interface {
-	ValidateEventAttachments(context.Context, files.SessionTransaction, workspace.ID, []files.EventAttachmentReference) error
-	PrimeEventAttachmentPDFCounts(context.Context, workspace.ID, []files.EventAttachmentReference) error
+	ValidateEventAttachments(context.Context, files.SessionTransaction, workspace.ID, string, []files.EventAttachmentReference) error
+	PrimeEventAttachmentPDFCounts(context.Context, workspace.ID, string, []files.EventAttachmentReference) error
 }
 
 type PostgreSQLSessionEventStore struct {
@@ -99,6 +99,7 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 					ctx,
 					sessionEventFilesTransaction{tx: tx},
 					workspaceID,
+					sessionID,
 					fileReferences,
 				); err != nil {
 					return err
@@ -222,6 +223,7 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 			if primeErr := s.fileAttachmentValidator.PrimeEventAttachmentPDFCounts(
 				ctx,
 				workspaceID,
+				sessionID,
 				fileReferences,
 			); primeErr != nil {
 				return nil, primeErr

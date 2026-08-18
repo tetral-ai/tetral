@@ -270,8 +270,13 @@ func readFileAttachmentMetadataTx(
 		     ON o.workspace_id = f.workspace_id
 		    AND o.object_id = f.object_id
 		  WHERE f.workspace_id = $1
-		    AND f.file_id = $2`,
+		    AND f.file_id = $3
+		    AND (
+		      (f.scope_type IS NULL AND f.scope_id IS NULL)
+		      OR (f.scope_type = 'session' AND f.scope_id = $2)
+		    )`,
 		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
 		pair.GetFileId(),
 	).Scan(&filename, &mime, &deletedAt, &sizeBytes, &blobPointer)
 	if dbconnect.IsNoRows(err) || deletedAt.Valid {
@@ -703,6 +708,10 @@ func validateFileAttachmentConsumptionsTx(
 			   JOIN files file
 			     ON file.workspace_id = event.workspace_id
 			    AND file.file_id = $5
+			    AND (
+			      (file.scope_type IS NULL AND file.scope_id IS NULL)
+			      OR (file.scope_type = 'session' AND file.scope_id = event.session_id)
+			    )
 			  CROSS JOIN LATERAL (
 			    SELECT count(*)::int AS authority_rows,
 			           count(*) FILTER (

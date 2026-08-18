@@ -305,6 +305,7 @@ func (s *PostgreSQLFileStore) ValidateEventAttachments(
 	ctx context.Context,
 	tx SessionTransaction,
 	ws workspace.ID,
+	sessionID string,
 	references []EventAttachmentReference,
 ) error {
 	if err := requireWorkspace(ws); err != nil {
@@ -315,7 +316,7 @@ func (s *PostgreSQLFileStore) ValidateEventAttachments(
 	}
 	var pdfBytes int64
 	var pdfPages int64
-	records, err := s.loadEventAttachmentRecords(ctx, tx, ws, references)
+	records, err := s.loadEventAttachmentRecords(ctx, tx, ws, sessionID, references)
 	if err != nil {
 		return err
 	}
@@ -367,6 +368,7 @@ func (s *PostgreSQLFileStore) ValidateEventAttachments(
 func (s *PostgreSQLFileStore) PrimeEventAttachmentPDFCounts(
 	ctx context.Context,
 	ws workspace.ID,
+	sessionID string,
 	references []EventAttachmentReference,
 ) error {
 	if err := requireWorkspace(ws); err != nil {
@@ -376,7 +378,7 @@ func (s *PostgreSQLFileStore) PrimeEventAttachmentPDFCounts(
 		return errors.New("files: store is required")
 	}
 	return s.client.WithWorkspaceTx(ctx, string(ws), "files.prime_event_pdf_counts", func(tx *dbconnect.Tx) error {
-		records, err := s.loadEventAttachmentRecords(ctx, filesSessionTransaction{tx: tx}, ws, references)
+		records, err := s.loadEventAttachmentRecords(ctx, filesSessionTransaction{tx: tx}, ws, sessionID, references)
 		if err != nil {
 			return err
 		}
@@ -464,6 +466,7 @@ func (s *PostgreSQLFileStore) loadEventAttachmentRecords(
 	ctx context.Context,
 	tx SessionTransaction,
 	ws workspace.ID,
+	sessionID string,
 	references []EventAttachmentReference,
 ) (map[string]eventAttachmentRecord, error) {
 	fileRecords := make(map[string]eventAttachmentFileRecord, len(references))
@@ -476,8 +479,12 @@ func (s *PostgreSQLFileStore) loadEventAttachmentRecords(
 			  WHERE workspace_id = $1
 			    AND file_id = $2
 			    AND deleted_at IS NULL
+			    AND (
+			      (scope_type IS NULL AND scope_id IS NULL)
+			      OR (scope_type = 'session' AND scope_id = $3)
+			    )
 			  FOR UPDATE`,
-			string(ws), fileID,
+			string(ws), fileID, sessionID,
 		).Scan(&record.objectID, &record.mimeType)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, &ValidationError{Message: "file_id is invalid"}

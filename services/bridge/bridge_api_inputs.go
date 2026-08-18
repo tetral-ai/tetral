@@ -807,18 +807,29 @@ func loadCommittedInputAttachmentDeltaTx(
 			}
 			seen[part.Source.FileID] = struct{}{}
 			var mime, filename sql.NullString
+			var authorized bool
+			var found bool
 			if err := tx.QueryRow(ctx,
-				`SELECT mime_type, filename
+				`SELECT mime_type,
+				        filename,
+				        ((scope_type IS NULL AND scope_id IS NULL)
+				          OR (scope_type = 'session' AND scope_id = $3)) AS authorized
 				   FROM files
 				  WHERE workspace_id = $1
 				    AND file_id = $2`,
 				scope.GetWorkspaceId(),
 				part.Source.FileID,
-			).Scan(&mime, &filename); dbconnect.IsNoRows(err) {
+				scope.GetSessionId(),
+			).Scan(&mime, &filename, &authorized); dbconnect.IsNoRows(err) {
 				mime = sql.NullString{}
 				filename = sql.NullString{}
 			} else if err != nil {
 				return nil, err
+			} else {
+				found = true
+			}
+			if found && !authorized {
+				continue
 			}
 			encoded, err := marshalBridgeJSON(bridgeLoadContextPendingAttachment{
 				Origin: bridgeLoadContextAttachmentOrigin{

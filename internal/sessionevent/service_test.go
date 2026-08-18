@@ -327,6 +327,77 @@ func TestAppendClientEventsRejectsInvalidFileBackedBlocksWithoutSideEffects(t *t
 	}
 }
 
+func TestAppendClientEventsRejectsFileOwnedByAnotherSessionBeforeBirth(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	const (
+		sessionA = "sesn_event_attachment_scope_a"
+		sessionB = "sesn_event_attachment_scope_b"
+	)
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionA)
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionB)
+	blobStore := blob.NewFakeBlobStore()
+	for _, file := range []struct {
+		id      string
+		object  string
+		session string
+	}{
+		{id: "file_attachment_scope_global", object: "fobj_attachment_scope_global"},
+		{id: "file_attachment_scope_a", object: "fobj_attachment_scope_a", session: sessionA},
+		{id: "file_attachment_scope_b", object: "fobj_attachment_scope_b", session: sessionB},
+	} {
+		seedSessionEventFile(t, admin, blobStore, workspace.DefaultID, file.id, file.object, file.id+".png", "image/png", []byte("image"), 5, nil)
+		if file.session != "" {
+			if _, err := admin.ExecContext(context.Background(), `UPDATE files
+				SET scope_type = 'session', scope_id = $2
+				WHERE workspace_id = $1 AND file_id = $3`, string(workspace.DefaultID), file.session, file.id); err != nil {
+				t.Fatalf("scope file %s: %v", file.id, err)
+			}
+		}
+	}
+	service := newSessionEventServiceWithFilesForTest(runtime, blobStore)
+	appendFile := func(idempotencyKey, fileID string) error {
+		_, err := service.AppendClientEvents(context.Background(), workspace.DefaultID, sessionA, idempotencyKey, AppendRequest{
+			Events: []IncomingEvent{{
+				Type: EventTypeUserMessage,
+				Content: []ContentBlock{{
+					Type:   ContentBlockTypeImage,
+					Source: &ContentSource{Type: ContentSourceTypeFile, FileID: fileID},
+				}},
+			}},
+		})
+		return err
+	}
+
+	err := appendFile("idem_attachment_scope_cross_session", "file_attachment_scope_b")
+	var validation *enginefiles.ValidationError
+	if !errors.As(err, &validation) || validation.Message != "file_id is invalid" {
+		t.Fatalf("cross-Session attachment error = %T %v; want invalid file", err, err)
+	}
+	assertSessionEventLedger(t, admin, sessionA, nil)
+	assertSessionEventIdempotencyRowCount(t, admin, sessionA, 0)
+	if jobs := readSessionEventQueueJobs(t, admin, sessionA); len(jobs) != 0 {
+		t.Fatalf("cross-Session attachment Queue births = %d; want zero", len(jobs))
+	}
+	var inboxRows, consumptions int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id = $1 AND session_id = $2),
+		(SELECT count(*) FROM session_file_attachment_consumptions WHERE workspace_id = $1 AND session_id = $2)`,
+		string(workspace.DefaultID), sessionA).Scan(&inboxRows, &consumptions); err != nil {
+		t.Fatalf("read rejected attachment custody: %v", err)
+	}
+	if inboxRows != 0 || consumptions != 0 {
+		t.Fatalf("rejected attachment custody = Inbox:%d consumptions:%d; want zero", inboxRows, consumptions)
+	}
+
+	if err := appendFile("idem_attachment_scope_global", "file_attachment_scope_global"); err != nil {
+		t.Fatalf("append Workspace-global attachment: %v", err)
+	}
+	if err := appendFile("idem_attachment_scope_owner", "file_attachment_scope_a"); err != nil {
+		t.Fatalf("append owning-Session attachment: %v", err)
+	}
+	assertSessionEventIdempotencyRowCount(t, admin, sessionA, 2)
+}
+
 func TestAppendClientEventsLazilyCountsLegacyPDFOnce(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	sessionID := "sesn_event_legacy_pdf"

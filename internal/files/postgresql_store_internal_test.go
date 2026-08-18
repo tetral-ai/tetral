@@ -27,6 +27,7 @@ func TestEventAttachmentValidationLocksFilesThenObjectsInStableOrder(t *testing.
 		context.Background(),
 		tx,
 		workspace.DefaultID,
+		"sesn_attachment_locks",
 		[]EventAttachmentReference{
 			{BlockType: "image", FileID: "file_z"},
 			{BlockType: "image", FileID: "file_a"},

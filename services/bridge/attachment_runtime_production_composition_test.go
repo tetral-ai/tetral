@@ -74,6 +74,7 @@ func TestPostgreSQLAttachmentRequestStartLostACKReplaysBeforeSingleProviderInvoc
 	sourceEventID, runtimeInputID := birthAttachmentRuntimeInput(t, admin, client, attachmentStore, sessionID, fileID)
 	baseStore := NewPostgreSQLBridgeAPIStore(client)
 	baseStore.AttachmentBlobStore = attachmentStore
+	baseStore.FileBlobStore = attachmentStore
 	baseStore.RuntimeBindingTokenHMACKey = []byte("attachment-lost-ack-composition-key")
 	lostACKStore := &attachmentStartLostACKStore{BridgeAPIStore: baseStore}
 	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, lostACKStore)
@@ -89,8 +90,8 @@ func TestPostgreSQLAttachmentRequestStartLostACKReplaysBeforeSingleProviderInvoc
 	if !dropped || len(writeIDs) != 2 || writeIDs[0] == "" || writeIDs[0] != writeIDs[1] {
 		t.Fatalf("Request Start lost-ACK replay = dropped:%t writes:%v; want two identical declarations", dropped, writeIDs)
 	}
-	if started.ProviderInvocations != 1 || started.AttachmentCount != 1 {
-		t.Fatalf("Runtime Provider invocation = %+v; want one invocation with one attachment", started)
+	if started.ProviderInvocations != 1 || started.GatewayRequests != 1 || started.AttachmentCount != 1 || started.LoweredAttachmentBytes != int64(len("attachment")) {
+		t.Fatalf("Runtime Gateway/provider invocation = %+v; want one lowered request with one attachment", started)
 	}
 	assertAttachmentRecoveryFacts(t, admin, sessionID, sourceEventID, fileID, runtimeInputID, 1, 1, 1)
 }
@@ -112,6 +113,7 @@ func TestPostgreSQLAttachmentPostStartPodLossColdLoadsWithoutSecondProviderInvoc
 	sourceEventID, runtimeInputID := birthAttachmentRuntimeInput(t, admin, client, attachmentStore, sessionID, fileID)
 	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
 	bridgeStore.AttachmentBlobStore = attachmentStore
+	bridgeStore.FileBlobStore = attachmentStore
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("attachment-pod-loss-composition-key")
 	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, bridgeStore)
 	defer stopBridge()
@@ -119,8 +121,8 @@ func TestPostgreSQLAttachmentPostStartPodLossColdLoadsWithoutSecondProviderInvoc
 	process := startAttachmentRecoveryRuntime(t, bridgeAddress, "hang", sessionID, threadID, bindingID, 1, podUID)
 	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
 	started := process.providerStart(t)
-	if started.ProviderInvocations != 1 || started.AttachmentCount != 1 {
-		t.Fatalf("started Provider invocation = %+v; want one invocation with one attachment", started)
+	if started.ProviderInvocations != 1 || started.GatewayRequests != 1 || started.AttachmentCount != 1 || started.LoweredAttachmentBytes != int64(len("attachment")) {
+		t.Fatalf("started Gateway/provider invocation = %+v; want one lowered request with one attachment", started)
 	}
 	process.kill(t)
 
@@ -289,8 +291,10 @@ func startAttachmentRecoveryRuntime(t *testing.T, bridgeAddress, mode, sessionID
 }
 
 func (p *attachmentRecoveryProcess) providerStart(t *testing.T) struct {
-	ProviderInvocations int `json:"providerInvocations"`
-	AttachmentCount     int `json:"attachmentCount"`
+	ProviderInvocations    int   `json:"providerInvocations"`
+	GatewayRequests        int   `json:"gatewayRequests"`
+	AttachmentCount        int   `json:"attachmentCount"`
+	LoweredAttachmentBytes int64 `json:"loweredAttachmentBytes"`
 } {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -298,8 +302,10 @@ func (p *attachmentRecoveryProcess) providerStart(t *testing.T) struct {
 		raw, err := os.ReadFile(p.providerStartedPath)
 		if err == nil {
 			var started struct {
-				ProviderInvocations int `json:"providerInvocations"`
-				AttachmentCount     int `json:"attachmentCount"`
+				ProviderInvocations    int   `json:"providerInvocations"`
+				GatewayRequests        int   `json:"gatewayRequests"`
+				AttachmentCount        int   `json:"attachmentCount"`
+				LoweredAttachmentBytes int64 `json:"loweredAttachmentBytes"`
 			}
 			if json.Unmarshal(raw, &started) == nil {
 				return started
@@ -311,8 +317,10 @@ func (p *attachmentRecoveryProcess) providerStart(t *testing.T) struct {
 	inspected, _ := os.ReadFile(p.inspectResultPath)
 	t.Fatalf("Provider invocation did not start: accept=%s inspect=%s output=%s", accept, inspected, p.output.String())
 	return struct {
-		ProviderInvocations int `json:"providerInvocations"`
-		AttachmentCount     int `json:"attachmentCount"`
+		ProviderInvocations    int   `json:"providerInvocations"`
+		GatewayRequests        int   `json:"gatewayRequests"`
+		AttachmentCount        int   `json:"attachmentCount"`
+		LoweredAttachmentBytes int64 `json:"loweredAttachmentBytes"`
 	}{}
 }
 

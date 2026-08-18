@@ -756,6 +756,10 @@ const loadThreadPendingFileAttachmentsSQL = `WITH scoped_inbox_events AS MATERIA
 		    AND f.file_id = block.value->'source'->>'file_id'
 		  WHERE block.value->>'type' IN ('image', 'document')
 		    AND block.value->'source'->>'type' = 'file'
+		    AND (
+		      (f.scope_type IS NULL AND f.scope_id IS NULL)
+		      OR (f.scope_type = 'session' AND f.scope_id = $2)
+		    )
 	)
 	SELECT p.event_id, p.file_id, p.mime_type, p.filename
 	  FROM ordered_pairs p
