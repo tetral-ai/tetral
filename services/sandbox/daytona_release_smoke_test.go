@@ -69,15 +69,35 @@ func TestDaytonaPublishedImageProductionAdapterSmoke(t *testing.T) {
 	}
 
 	var logBuffer bytes.Buffer
+	payloadCanary := "daytona-release-payload-" + strings.ToLower(id.New("cnry_"))
+	stdinCanary := "daytona-release-stdin-" + strings.ToLower(id.New("cnry_"))
+	commandOutputCanary := "daytona-release-output-" + strings.ToLower(id.New("cnry_"))
+	providerResponseCanary := "daytona-release-response-" + strings.ToLower(id.New("cnry_"))
 	adapter := &DaytonaAdapter{
 		Lifecycle: lifecycle,
 		Tools:     helper,
 		Logger:    slog.New(slog.NewTextHandler(&logBuffer, nil)),
 	}
-	canary := "daytona-release-smoke-payload-" + strings.ToLower(id.New("cnry_"))
+	logProviderOutcomeCompletion(context.Background(), adapter.Logger, "sandbox.provider.release_smoke_log_policy",
+		providerOperationIdentity{}, 0, ProviderOutcome[struct{}]{
+			Disposition: ProviderTerminal, ErrorKind: "provider_test_response",
+			ProviderSafeMessage: "Authorization: Bearer " + providerResponseCanary,
+		})
 	defer func() {
-		if strings.Contains(logBuffer.String(), canary) {
-			t.Error("Daytona release smoke logged registered payload content")
+		registered := []struct {
+			name  string
+			value string
+		}{
+			{name: "credential", value: cfg.DaytonaAPIKey},
+			{name: "payload", value: payloadCanary},
+			{name: "stdin", value: stdinCanary},
+			{name: "command output", value: commandOutputCanary},
+			{name: "provider response", value: providerResponseCanary},
+		}
+		for _, secret := range registered {
+			if strings.Contains(logBuffer.String(), secret.value) {
+				t.Errorf("Daytona release smoke logged registered %s content", secret.name)
+			}
 		}
 	}()
 
@@ -108,13 +128,14 @@ func TestDaytonaPublishedImageProductionAdapterSmoke(t *testing.T) {
 	}
 	assertDaytonaReleaseTool(t, ctx, adapter, handle, driver.ToolInvocation{
 		Target: target, ToolUseEventID: "sevt_daytona_release_write", ToolName: "Write",
-		InputJSON: fmt.Sprintf(`{"file_path":"/workspace/release-smoke/note.txt","content":%q}`, canary+"\n"),
+		InputJSON: fmt.Sprintf(`{"file_path":"/workspace/release-smoke/note.txt","content":%q}`, payloadCanary+"\n"),
 	})
+	identityCommand := fmt.Sprintf("set -eu; test \"$(id -u)\" -ne 0; printf 'user=%%s\\nhome=%%s\\nshell=%%s\\n' \"$(id -un)\" \"$HOME\" \"$(getent passwd \"$(id -u)\" | cut -d: -f7)\"; printf 'command-output=%%s\\n' %q; git -C /workspace/release-smoke init -q; git -C /workspace/release-smoke config user.name 'Tetral Smoke'; git -C /workspace/release-smoke config user.email smoke@tetral.invalid; git -C /workspace/release-smoke add note.txt; git -C /workspace/release-smoke status --short", commandOutputCanary)
 	identityAndGit := assertDaytonaReleaseTool(t, ctx, adapter, handle, driver.ToolInvocation{
 		Target: target, ToolUseEventID: "sevt_daytona_release_git", ToolName: "exec_command",
-		InputJSON: `{"cmd":"set -eu; test \"$(id -u)\" -ne 0; printf 'user=%s\\nhome=%s\\nshell=%s\\n' \"$(id -un)\" \"$HOME\" \"$(getent passwd \"$(id -u)\" | cut -d: -f7)\"; git -C /workspace/release-smoke init -q; git -C /workspace/release-smoke config user.name 'Tetral Smoke'; git -C /workspace/release-smoke config user.email smoke@tetral.invalid; git -C /workspace/release-smoke add note.txt; git -C /workspace/release-smoke status --short","yield_time_ms":30000,"max_output_tokens":1000}`,
+		InputJSON: fmt.Sprintf(`{"cmd":%q,"yield_time_ms":30000,"max_output_tokens":1000}`, identityCommand),
 	})
-	for _, marker := range []string{"user=daytona", "home=/home/daytona", "shell=/bin/bash", "A  note.txt"} {
+	for _, marker := range []string{"user=daytona", "home=/home/daytona", "shell=/bin/bash", "command-output=" + commandOutputCanary, "A  note.txt"} {
 		if !strings.Contains(identityAndGit, marker) {
 			t.Fatalf("published Sandbox identity/Git result is missing %q", marker)
 		}
@@ -133,7 +154,7 @@ func TestDaytonaPublishedImageProductionAdapterSmoke(t *testing.T) {
 	}
 	input := adapter.SendBackgroundInput(ctx, driver.CommandInput{
 		CommandReference: reference,
-		InputJSON:        fmt.Sprintf(`{"chars":%q,"yield_time_ms":250,"write_seq":1,"max_output_tokens":100}`, canary+"\n"),
+		InputJSON:        fmt.Sprintf(`{"chars":%q,"yield_time_ms":250,"write_seq":1,"max_output_tokens":100}`, stdinCanary+"\n"),
 	})
 	if input.Failed() {
 		t.Fatalf("fresh Daytona Helper stdin failed: kind=%s disposition=%s", input.ErrorKind, input.Disposition)

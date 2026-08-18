@@ -7,10 +7,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -19,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
@@ -33,6 +38,165 @@ type interruptRuntimeCompositionOutput struct {
 	InterruptResult             json.RawMessage `json:"interruptResult"`
 	ProviderInvocations         int             `json:"providerInvocations"`
 	DurableOperationCompletions int             `json:"durableOperationCompletions"`
+}
+
+type interruptFollowerRuntimeServer struct {
+	agentruntimev1.UnimplementedAgentRuntimePodServiceServer
+	calls atomic.Int32
+}
+
+func (s *interruptFollowerRuntimeServer) AcceptInput(context.Context, *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error) {
+	switch s.calls.Add(1) {
+	case 2:
+		return nil, status.Error(codes.InvalidArgument, "fixture-controlled deterministic rejection")
+	default:
+		return &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Rejected{Rejected: &agentruntimev1.AcceptInputRejected{
+			Reason: agentruntimev1.AcceptInputFailure_ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT, Retryable: true,
+		}}}, nil
+	}
+}
+
+func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_follower_production"
+		threadID  = "thr_interrupt_follower_production"
+		bindingID = "bind_interrupt_follower_production"
+		podUID    = "pod_interrupt_follower_production"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+
+	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-follower-production-key")
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for follower Bridge: %v", err)
+	}
+	bridgeServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeServer, bridgeStore)
+	go func() { _ = bridgeServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeServer.Stop()
+		_ = bridgeListener.Close()
+	})
+
+	fixtureListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for follower Runtime boundary: %v", err)
+	}
+	fixtureServer := grpc.NewServer()
+	followerRuntime := &interruptFollowerRuntimeServer{}
+	agentruntimev1.RegisterAgentRuntimePodServiceServer(fixtureServer, followerRuntime)
+	go func() { _ = fixtureServer.Serve(fixtureListener) }()
+	t.Cleanup(func() {
+		fixtureServer.Stop()
+		_ = fixtureListener.Close()
+	})
+	fixturePort := fixtureListener.Addr().(*net.TCPAddr).Port
+
+	client := dbconnect.NewClientForTesting(runtime)
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	appendMessage := func(idempotencyKey, content string) string {
+		t.Helper()
+		result, appendErr := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, idempotencyKey,
+			sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+				Type:    sessionevent.EventTypeUserMessage,
+				Content: []sessionevent.ContentBlock{{Type: sessionevent.ContentBlockTypeText, Text: content}},
+			}}})
+		if appendErr != nil || len(result.Data) != 1 {
+			t.Fatalf("append follower message = %#v/%v", result, appendErr)
+		}
+		var runtimeInputID string
+		if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id
+			FROM session_runtime_inbox
+			WHERE workspace_id='default' AND session_id=$1 AND event_ids_json::jsonb ? $2`, sessionID, result.Data[0].ID).Scan(&runtimeInputID); err != nil {
+			t.Fatalf("read follower Inbox identity: %v", err)
+		}
+		return runtimeInputID
+	}
+
+	queueStore := queue.NewPostgreSQLStore(client)
+	newRunner := func(port int, owner string) *JobRunner {
+		deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, port)
+		deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+				Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
+			}})
+		}}
+		return &JobRunner{
+			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+			Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+			Config:    JobRunnerConfig{LeaseOwner: owner, MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		}
+	}
+
+	retryID := appendMessage("interrupt-follower-retry", "retry before stop")
+	if active, err := newRunner(fixturePort, "interrupt-follower-retry").RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver retryable follower = active:%t err:%v", active, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, retryID)); err != nil {
+		t.Fatalf("hold retryable follower behind interrupt: %v", err)
+	}
+	rejectionID := appendMessage("interrupt-follower-rejection", "reject before stop")
+	if active, err := newRunner(fixturePort, "interrupt-follower-rejection").RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("prepare deterministic rejection follower = active:%t err:%v", active, err)
+	}
+	var retryStatus, rejectionStatus, rejectionKind string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT input_kind FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`, retryID, rejectionID).
+		Scan(&retryStatus, &rejectionStatus, &rejectionKind); err != nil {
+		t.Fatalf("read pre-interrupt follower custody: %v", err)
+	}
+	if retryStatus != "delivering" || rejectionStatus != "delivering" || rejectionKind != "rejection" || followerRuntime.calls.Load() != 3 {
+		t.Fatalf("pre-interrupt followers = retry:%s rejection:%s/%s calls:%d", retryStatus, rejectionStatus, rejectionKind, followerRuntime.calls.Load())
+	}
+
+	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, threadID, bindingID, 1, podUID)
+	interruptBirth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, "interrupt-follower-stop",
+		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}})
+	if err != nil || len(interruptBirth.Data) != 1 {
+		t.Fatalf("birth follower interrupt = %#v/%v", interruptBirth, err)
+	}
+	var interruptID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'`, sessionID).Scan(&interruptID); err != nil {
+		t.Fatalf("read follower interrupt identity: %v", err)
+	}
+	if active, err := newRunner(runtimeProcess.port, "interrupt-follower-closeout").RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver follower interrupt through real Runtime = active:%t err:%v", active, err)
+	}
+	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release follower Runtime composition: %v", err)
+	}
+	composed := runtimeProcess.wait(t)
+	if len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
+		t.Fatalf("follower interrupt Runtime composition = %+v", composed)
+	}
+	var interruptInbox, interruptQueue, retryInbox, retryQueue, rejectionInbox, rejectionQueue string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$5),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$6)`,
+		interruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
+		retryID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, retryID),
+		rejectionID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, rejectionID)).
+		Scan(&interruptInbox, &interruptQueue, &retryInbox, &retryQueue, &rejectionInbox, &rejectionQueue); err != nil {
+		t.Fatalf("read terminal follower custody: %v", err)
+	}
+	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
+		retryInbox != "cancelled" || retryQueue != queue.StatusCancelled ||
+		rejectionInbox != "cancelled" || rejectionQueue != queue.StatusCancelled {
+		t.Fatalf("terminal follower custody = interrupt:%s/%s retry:%s/%s rejection:%s/%s",
+			interruptInbox, interruptQueue, retryInbox, retryQueue, rejectionInbox, rejectionQueue)
+	}
 }
 
 func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testing.T) {
@@ -59,6 +223,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	enqueueRuntimeCompositionJob(t, queueStore, sessionID, messageJob, 0)
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-production-composition-key")
 	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for interrupt composition Bridge: %v", err)
@@ -72,7 +237,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	})
 
 	tempDir := t.TempDir()
-	runtimeProcess, paths := startInterruptRuntimeComposition(t, tempDir, bridgeListener.Addr().String(), sessionID, threadID, bindingID, podUID)
+	runtimeProcess, paths := startInterruptRuntimeComposition(t, tempDir, bridgeListener.Addr().String(), sessionID, threadID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
 		SET agent_runtime_pod_ip='127.0.0.1'
 		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
@@ -220,6 +385,378 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	}
 }
 
+func TestPostgreSQLBareInterruptColdRecoversMainWithPublicAndReviewerSiblings(t *testing.T) {
+	runPostgreSQLColdInterruptProductionCase(t, false)
+}
+
+func TestPostgreSQLExplicitChildInterruptColdRecoversOnlyChild(t *testing.T) {
+	runPostgreSQLColdInterruptProductionCase(t, true)
+}
+
+func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID    = "sesn_interrupt_pod_loss_production"
+		threadID     = "thr_interrupt_pod_loss_production"
+		oldBindingID = "bind_interrupt_pod_loss_old"
+		oldPodUID    = "pod_interrupt_pod_loss_old"
+		newBindingID = "bind_interrupt_pod_loss_new"
+		newPodUID    = "pod_interrupt_pod_loss_new"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	client := dbconnect.NewClientForTesting(runtime)
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	birth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, "interrupt-pod-loss-production",
+		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}})
+	if err != nil || len(birth.Data) != 1 {
+		t.Fatalf("birth pre-loss interrupt = %#v/%v", birth, err)
+	}
+	var interruptID, jobID string
+	var attemptsBefore int
+	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.runtime_input_id, job.id, job.attempt_count
+		FROM session_runtime_inbox inbox JOIN queue_jobs job
+		  ON job.workspace_id=inbox.workspace_id AND job.dedupe_key='runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		WHERE inbox.workspace_id='default' AND inbox.session_id=$1 AND inbox.input_kind='interrupt_control'`, sessionID).
+		Scan(&interruptID, &jobID, &attemptsBefore); err != nil {
+		t.Fatalf("read pre-loss interrupt identity: %v", err)
+	}
+
+	repairStore := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
+		t.Fatalf("repair pod loss under interrupt = %d/%v", repaired, err)
+	}
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='running', binding_id=$2, binding_generation=2, updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
+		t.Fatalf("install replacement Runtime status fence: %v", err)
+	}
+
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-pod-loss-production-key")
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for pod-loss Bridge: %v", err)
+	}
+	bridgeServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeServer, bridgeStore)
+	go func() { _ = bridgeServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeServer.Stop()
+		_ = bridgeListener.Close()
+	})
+	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, threadID, newBindingID, 2, newPodUID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
+		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, newBindingID); err != nil {
+		t.Fatalf("align replacement Runtime binding: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, runtimeProcess.port)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Config:    JobRunnerConfig{LeaseOwner: "interrupt-pod-loss-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver same interrupt after pod loss = active:%t err:%v", active, err)
+	}
+	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release pod-loss Runtime composition: %v", err)
+	}
+	composed := runtimeProcess.wait(t)
+	if len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
+		t.Fatalf("pod-loss interrupt Runtime composition = %+v", composed)
+	}
+	var finalInbox, finalQueue string
+	var attemptsAfter, lineage, receipts, activeBarriers int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$4
+		 AND source_kind='interrupt_control' AND idempotency_key=$1 AND receipt_json <> ''),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$4
+		 AND input_kind='interrupt_control' AND status IN ('queued','delivering','accepted'))`,
+		interruptID, jobID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), sessionID).
+		Scan(&finalInbox, &finalQueue, &attemptsAfter, &lineage, &receipts, &activeBarriers); err != nil {
+		t.Fatalf("read pod-loss interrupt terminal facts: %v", err)
+	}
+	if finalInbox != "committed" || finalQueue != queue.StatusAcknowledged || attemptsAfter != attemptsBefore+1 || lineage != 1 || receipts != 1 || activeBarriers != 0 {
+		t.Fatalf("pod-loss terminal facts = Inbox:%s Queue:%s attempts:%d->%d lineage:%d receipts:%d barriers:%d",
+			finalInbox, finalQueue, attemptsBefore, attemptsAfter, lineage, receipts, activeBarriers)
+	}
+}
+
+func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID     = "sesn_interrupt_actor_production"
+		mainID        = "thr_interrupt_actor_production_main"
+		siblingID     = "thr_interrupt_actor_production_sibling"
+		grandchildID  = "thr_interrupt_actor_production_grandchild"
+		bindingID     = "bind_interrupt_actor_production"
+		podUID        = "pod_interrupt_actor_production"
+		siblingSource = "evt_interrupt_actor_external_mail"
+		lateMail      = "evt_interrupt_actor_late_mail_production"
+		lateChild     = "evt_interrupt_actor_late_child_production"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, siblingID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, siblingID, grandchildID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, siblingSource, 1, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+siblingID+`","message":"external sibling mail waits"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateMail, 1, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+grandchildID+`","message":"must be stale"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateChild, 2, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"late-child","prompt":"must be stale"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, siblingID, "mreq_interrupt_actor_late", lateMail, "call_interrupt_actor_late_mail", "send_message")
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
+		SET data_json=jsonb_set(data_json::jsonb, '{parts}', (data_json::jsonb->'parts') ||
+			'[{"type":"tool_call","modelToolCallId":"call_interrupt_actor_late_child","toolName":"spawn_agent","canonicalInput":{}}]'::jsonb)::text
+		WHERE workspace_id='default' AND session_id=$1 AND source_event_id=$2`, sessionID, lateMail); err != nil {
+		t.Fatalf("add second durable actor Tool part: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET model_request_id='mreq_interrupt_actor_late', projection_json=COALESCE(projection_json, '{}')::jsonb ||
+			'{"model_tool_call_id":"call_interrupt_actor_late_child","tool_name":"spawn_agent"}'::jsonb
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, lateChild); err != nil {
+		t.Fatalf("bind second actor Tool identity: %v", err)
+	}
+
+	client := dbconnect.NewClientForTesting(runtime)
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	birth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, "interrupt-actor-production",
+		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt, SessionThreadID: siblingID}}})
+	if err != nil || len(birth.Data) != 1 {
+		t.Fatalf("birth actor interrupt = %#v/%v", birth, err)
+	}
+	var interruptID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'`, sessionID).Scan(&interruptID); err != nil {
+		t.Fatalf("read actor interrupt identity: %v", err)
+	}
+
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-actor-production-key")
+	mainScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
+	deliveryID := agentMailDeliveryID(siblingSource, siblingID)
+	if response, err := bridgeStore.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: mainScope, DeliveryId: deliveryID, TargetThreadId: siblingID,
+		SourceToolUseEventId: siblingSource, Content: "external sibling mail waits",
+	}); err != nil || response.GetCommitted() == nil {
+		t.Fatalf("external sibling mail behind barrier = %#v/%v", response, err)
+	}
+	if _, err := bridgeStore.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: siblingScope, DeliveryId: agentMailDeliveryID(lateMail, grandchildID), TargetThreadId: grandchildID,
+		SourceToolUseEventId: lateMail, Content: "must be stale",
+	}); !isSessionInterruptBarrierStaleError(err) {
+		t.Fatalf("interrupted-source mail = %v; want barrier stale", err)
+	}
+	if _, err := bridgeStore.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
+		Scope: siblingScope, SourceToolUseEventId: lateChild, TaskName: "late-child", AgentType: "worker", ForkTurns: "all",
+	}); !isSessionInterruptBarrierStaleError(err) {
+		t.Fatalf("interrupted-source child birth = %v; want barrier stale", err)
+	}
+	// The two rejected Tool sources are timing fixtures, not Runtime history.
+	// Remove them after the owning Bridge calls prove zero effects so the cold
+	// Runtime closeout loads only durable inputs that survived the barrier.
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND source_event_id=$2`, sessionID, lateMail); err != nil {
+		t.Fatalf("remove rejected actor Tool message fixture: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND event_id IN ($2,$3)`, sessionID, lateMail, lateChild); err != nil {
+		t.Fatalf("remove rejected actor Tool event fixtures: %v", err)
+	}
+	if _, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: siblingScope}); err != nil {
+		t.Fatalf("load interrupted actor context before Runtime: %v", err)
+	}
+
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for actor Bridge: %v", err)
+	}
+	bridgeServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeServer, bridgeStore)
+	go func() { _ = bridgeServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeServer.Stop()
+		_ = bridgeListener.Close()
+	})
+	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, siblingID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
+		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
+		t.Fatalf("align actor Runtime binding: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, runtimeProcess.port)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Config:    JobRunnerConfig{LeaseOwner: "interrupt-actor-closeout", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver actor interrupt through Runtime = active:%t err:%v", active, err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver released external sibling mail through Runtime = active:%t err:%v", active, err)
+	}
+	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release actor Runtime composition: %v", err)
+	}
+	composed := runtimeProcess.wait(t)
+	if len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
+		t.Fatalf("actor interrupt Runtime composition = %+v", composed)
+	}
+
+	mailRuntimeID := completionRuntimeInputID(deliveryID)
+	var interruptInbox, interruptQueue, mailInbox, mailQueue string
+	var lateOperations, lateChildren, activeBarriers int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$5 AND idempotency_key IN ($6,$7)),
+		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$5 AND task_name='late-child'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$5
+		 AND input_kind='interrupt_control' AND status IN ('queued','delivering','accepted'))`,
+		interruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
+		mailRuntimeID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, mailRuntimeID),
+		sessionID, agentMailDeliveryID(lateMail, grandchildID), lateChild).
+		Scan(&interruptInbox, &interruptQueue, &mailInbox, &mailQueue, &lateOperations, &lateChildren, &activeBarriers); err != nil {
+		t.Fatalf("read actor terminal facts: %v", err)
+	}
+	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
+		mailInbox != "committed" || mailQueue != queue.StatusAcknowledged || lateOperations != 0 || lateChildren != 0 || activeBarriers != 0 {
+		t.Fatalf("actor terminal facts = interrupt:%s/%s mail:%s/%s late:%d/%d barriers:%d Runtime:%s",
+			interruptInbox, interruptQueue, mailInbox, mailQueue, lateOperations, lateChildren, activeBarriers, composed.InterruptResult)
+	}
+}
+
+func runPostgreSQLColdInterruptProductionCase(t *testing.T, explicitChild bool) {
+	t.Helper()
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID  = "sesn_interrupt_cold_production"
+		mainID     = "thr_interrupt_cold_main"
+		childID    = "thr_interrupt_cold_child"
+		reviewerID = "thr_interrupt_cold_reviewer"
+		bindingID  = "bind_interrupt_cold_production"
+		podUID     = "pod_interrupt_cold_production"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, "evt_interrupt_cold_history", 1, "user.message", `{"content":[{"type":"text","text":"durable cold history"}]}`)
+	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, mainID, "msg_interrupt_cold_history", "evt_interrupt_cold_history", 1)
+	runtimeThreadID := mainID
+	interruptThreadID := ""
+	if explicitChild {
+		runtimeThreadID = childID
+		interruptThreadID = childID
+	}
+
+	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-cold-production-key")
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for cold interrupt Bridge: %v", err)
+	}
+	bridgeServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeServer, bridgeStore)
+	go func() { _ = bridgeServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeServer.Stop()
+		_ = bridgeListener.Close()
+	})
+
+	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, runtimeThreadID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
+		SET agent_runtime_pod_ip='127.0.0.1'
+		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
+		t.Fatalf("align cold Runtime binding: %v", err)
+	}
+
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)))
+	birth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID,
+		"interrupt-cold-production", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt, SessionThreadID: interruptThreadID}}})
+	if err != nil || len(birth.Data) != 1 {
+		t.Fatalf("birth bare cold interrupt = %#v/%v", birth, err)
+	}
+	var interruptID, targetThreadID string
+	var interruptCount, queueCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'),
+		(SELECT runtime_input_id FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'),
+		(SELECT session_thread_id FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND partition_key=$2 AND kind=$3)`,
+		sessionID, queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID), queue.KindRuntimeInput,
+	).Scan(&interruptCount, &interruptID, &targetThreadID, &queueCount); err != nil {
+		t.Fatalf("read bare cold interrupt birth: %v", err)
+	}
+	if interruptCount != 1 || queueCount != 1 || targetThreadID != runtimeThreadID {
+		t.Fatalf("cold interrupt birth = Inbox:%d Queue:%d target:%s; want one/one/%s", interruptCount, queueCount, targetThreadID, runtimeThreadID)
+	}
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runtimeProcess.port)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Config:    JobRunnerConfig{LeaseOwner: "interrupt-cold-production", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver cold interrupt through Runtime = active:%t err:%v", active, err)
+	}
+	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release cold Runtime composition: %v", err)
+	}
+	composed := runtimeProcess.wait(t)
+	if composed.ProviderInvocations != 0 || composed.DurableOperationCompletions != 0 || len(composed.InterruptResult) == 0 {
+		t.Fatalf("cold interrupt Runtime composition = %+v; want cold closeout without Provider work", composed)
+	}
+	var inboxStatus, queueStatus string
+	var receipts, activeBarriers int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$3
+		 AND operation IN ('commit_inputs','write_request_end') AND source_kind='interrupt_control' AND idempotency_key=$1 AND receipt_json <> ''),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$3
+		 AND input_kind='interrupt_control' AND status IN ('queued','delivering','accepted'))`,
+		interruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), sessionID,
+	).Scan(&inboxStatus, &queueStatus, &receipts, &activeBarriers); err != nil {
+		t.Fatalf("read cold interrupt terminal facts: %v", err)
+	}
+	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || receipts != 1 || activeBarriers != 0 {
+		t.Fatalf("cold interrupt terminal facts = Inbox:%s Queue:%s receipts:%d barriers:%d", inboxStatus, queueStatus, receipts, activeBarriers)
+	}
+}
+
 func enqueueRuntimeCompositionJob(t *testing.T, store *queue.PostgreSQLQueueStore, sessionID string, job RuntimeJob, priority int) {
 	t.Helper()
 	if _, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
@@ -240,7 +777,7 @@ type interruptRuntimeCompositionPaths struct {
 	close              string
 }
 
-func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sessionID, threadID, bindingID, podUID string) (*interruptRuntimeCompositionProcess, interruptRuntimeCompositionPaths) {
+func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID string) (*interruptRuntimeCompositionProcess, interruptRuntimeCompositionPaths) {
 	t.Helper()
 	readyPath := tempDir + "/ready.json"
 	paths := interruptRuntimeCompositionPaths{
@@ -250,7 +787,7 @@ func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sess
 	inputPath := tempDir + "/input.json"
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": bridgeAddress, "workspaceId": "default", "sessionId": sessionID,
-		"sessionThreadId": threadID, "bindingId": bindingID, "bindingGeneration": 1,
+		"sessionThreadId": threadID, "bindingId": bindingID, "bindingGeneration": bindingGeneration,
 		"targetPodUid": podUID, "readyPath": readyPath, "toolStartedPath": paths.toolStarted,
 		"acceptResultPath":              paths.acceptResult,
 		"durableOperationCompletedPath": paths.operationCompleted, "closePath": paths.close,

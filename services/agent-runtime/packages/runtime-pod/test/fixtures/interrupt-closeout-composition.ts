@@ -68,17 +68,7 @@ const hosts = await buildRuntimeCoreHosts({
 	maxLocalSessions: 2,
 	now: () => "2026-08-17T00:00:00.000Z",
 	contextLoader: {
-		loadThreadContext: async () => ({
-			contextEntries: [],
-			turnFacts: { events: [], internalRepairs: [] },
-			thread: {
-				role: "main" as const,
-				visibility: "public" as const,
-				agentType: "general" as const,
-				status: "idle" as const,
-			},
-			runtimeBindingToken: "interrupt-closeout-composition-token",
-		}),
+		loadThreadContext: bridgeLoader.loadThreadContext.bind(bridgeLoader),
 		commitAcceptedInput: bridgeLoader.commitAcceptedInput.bind(bridgeLoader),
 		refreshRuntimeBindingToken: async (identity) => identity.runtimeBindingToken,
 	},
