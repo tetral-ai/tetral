@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -23,6 +22,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"

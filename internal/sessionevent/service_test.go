@@ -1898,25 +1898,6 @@ func assertRuntimeInputQueueJobThread(t *testing.T, job sessionEventQueueJobRow,
 	}
 }
 
-func runtimeInputQueueJobsByThread(t *testing.T, jobs []sessionEventQueueJobRow) map[string]sessionEventQueueJobRow {
-	t.Helper()
-	jobsByThread := map[string]sessionEventQueueJobRow{}
-	for _, job := range jobs {
-		var payload runtimeInputQueuePayload
-		if err := json.Unmarshal([]byte(job.payloadJSON), &payload); err != nil {
-			t.Fatalf("decode runtime_input payload: %v", err)
-		}
-		if payload.SessionThreadID == "" {
-			t.Fatalf("runtime_input payload missing session_thread_id: %#v", payload)
-		}
-		if _, exists := jobsByThread[payload.SessionThreadID]; exists {
-			t.Fatalf("duplicate runtime_input job for thread %s", payload.SessionThreadID)
-		}
-		jobsByThread[payload.SessionThreadID] = job
-	}
-	return jobsByThread
-}
-
 func findRuntimeInputQueueJob(t *testing.T, jobs []sessionEventQueueJobRow, inputKind string) sessionEventQueueJobRow {
 	t.Helper()
 	for _, job := range jobs {
