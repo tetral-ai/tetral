@@ -73,8 +73,8 @@ func TestPostgreSQLInterruptFinalizerLosingLeaseAfterReclaimWritesNothing(t *tes
 	result, err := store.FinalizeRuntimeDelivery(context.Background(), staleJob, RuntimeDeliveryResult{
 		Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted",
 	})
-	if err != nil || !result.QueueLeaseSettled || result.Status != RuntimeDeliveryDuplicate {
-		t.Fatalf("stale finalizer result = %+v/%v; want successful authority-loss no-op", result, err)
+	if err != nil || result.QueueLeaseSettled || result.Status != RuntimeDeliveryAuthorityLost {
+		t.Fatalf("stale finalizer result = %+v/%v; want fenced authority loss without a false Queue settlement", result, err)
 	}
 	var sessionStatus, inboxStatus, queueStatus, leaseToken string
 	var bindings, terminalEvents int
@@ -223,8 +223,8 @@ func TestPostgreSQLInterruptLeaseLossAfterReplayStopsBeforePreparationAndSend(t 
 	if err != nil {
 		t.Fatalf("deliver stale post-replay interrupt: %v", err)
 	}
-	if result.Status != RuntimeDeliveryDuplicate || !result.QueueLeaseSettled || len(sender.requests) != 0 {
-		t.Fatalf("stale post-replay delivery = %+v with %d Runtime calls; want settled duplicate and zero calls", result, len(sender.requests))
+	if result.Status != RuntimeDeliveryAuthorityLost || result.QueueLeaseSettled || len(sender.requests) != 0 {
+		t.Fatalf("stale post-replay delivery = %+v with %d Runtime calls; want authority loss and zero calls", result, len(sender.requests))
 	}
 
 	var inboxStatus, queueStatus, leaseToken string
@@ -378,11 +378,21 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		followerEvent  = "evt_interrupt_final_exhaustion_follower"
 		secondID       = "rin_interrupt_final_exhaustion_second"
 		secondEvent    = "evt_interrupt_final_exhaustion_second"
+		reviewerID     = "thr_interrupt_final_exhaustion_reviewer"
+		reviewID       = "arvw_interrupt_final_exhaustion"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, threadID, reviewerID)
+	reviewerAdmission, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).AdmitApprovalReviewInput(
+		context.Background(),
+		&bridgev1.AdmitApprovalReviewInputRequest{Scope: scope, ReviewerThreadId: reviewerID, ReviewId: reviewID},
+	)
+	if err != nil || reviewerAdmission.GetCommitted() == nil {
+		t.Fatalf("seed final-exhaustion Reviewer custody = %#v/%v", reviewerAdmission, err)
+	}
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_status (
 		workspace_id,session_id,status,running_since,active_seconds_total,binding_id,binding_generation,created_at,updated_at
@@ -439,7 +449,7 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		t.Fatalf("final interrupt Runtime deliveries = %d; want zero after receipt miss", deliverer.deliveries)
 	}
 
-	var sessionStatus, threadStatus string
+	var sessionStatus, threadStatus, reviewerInboxStatus string
 	var bindingRows, requestEnds, toolResults, terminalErrors, terminalStatuses, messages int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
@@ -447,16 +457,18 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end' AND model_request_id=$3),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$4),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated'),
-		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND source_event_id IN ($5,$6,$7))`,
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated'),
+			(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND source_event_id IN ($5,$6,$7)),
+			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$8)`,
 		sessionID, threadID, requestID, toolUseEventID, interruptEvent, followerEvent, secondEvent,
-	).Scan(&sessionStatus, &threadStatus, &bindingRows, &requestEnds, &toolResults, &terminalErrors, &terminalStatuses, &messages); err != nil {
+		reviewerAdmission.GetCommitted().GetRuntimeInputId(),
+	).Scan(&sessionStatus, &threadStatus, &bindingRows, &requestEnds, &toolResults, &terminalErrors, &terminalStatuses, &messages, &reviewerInboxStatus); err != nil {
 		t.Fatalf("read final interrupt terminal facts: %v", err)
 	}
-	if sessionStatus != "terminated" || threadStatus != "failed" || bindingRows != 0 || requestEnds != 1 || toolResults != 1 || terminalErrors != 1 || terminalStatuses != 1 || messages != 0 {
-		t.Fatalf("terminal facts session/thread/bindings/requestEnds/toolResults/errors/statuses/messages = %s/%s/%d/%d/%d/%d/%d/%d",
-			sessionStatus, threadStatus, bindingRows, requestEnds, toolResults, terminalErrors, terminalStatuses, messages)
+	if sessionStatus != "terminated" || threadStatus != "failed" || reviewerInboxStatus != "cancelled" || bindingRows != 0 || requestEnds != 1 || toolResults != 1 || terminalErrors != 1 || terminalStatuses != 1 || messages != 0 {
+		t.Fatalf("terminal facts session/thread/reviewer/bindings/requestEnds/toolResults/errors/statuses/messages = %s/%s/%s/%d/%d/%d/%d/%d/%d",
+			sessionStatus, threadStatus, reviewerInboxStatus, bindingRows, requestEnds, toolResults, terminalErrors, terminalStatuses, messages)
 	}
 	rows, err := admin.QueryContext(context.Background(), `SELECT inbox.runtime_input_id, inbox.status, job.status, event.processed_at IS NOT NULL
 		FROM session_runtime_inbox inbox
@@ -507,11 +519,11 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 		RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
 	})
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, now)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
-		SET payload_json = payload_json::jsonb - 'input_kind'
-		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID)); err != nil {
-		t.Fatalf("malform interrupt payload after canonical birth: %v", err)
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 2, now)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+		SET event_ids_json='not-json', sequence_from=0, sequence_to=0
+		WHERE workspace_id='default' AND runtime_input_id=$1`, inputID); err != nil {
+		t.Fatalf("malform canonical interrupt metadata: %v", err)
 	}
 
 	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
@@ -520,28 +532,51 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 		Config: JobRunnerConfig{LeaseOwner: "malformed-interrupt-terminal", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run malformed interrupt owner: %v", err)
+		t.Fatalf("run first malformed interrupt attempt: %v", err)
+	}
+	var firstSessionStatus, firstInboxStatus, firstQueueStatus string
+	var firstAttempts int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3),
+		(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3)`,
+		sessionID, inputID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+	).Scan(&firstSessionStatus, &firstInboxStatus, &firstQueueStatus, &firstAttempts); err != nil {
+		t.Fatalf("read first malformed interrupt attempt: %v", err)
+	}
+	if firstSessionStatus != "idle" || firstInboxStatus != "queued" || firstQueueStatus != queue.StatusPending || firstAttempts != 1 {
+		t.Fatalf("first malformed interrupt attempt = Session %s Inbox %s Queue %s attempts %d; want idle/queued/pending/1",
+			firstSessionStatus, firstInboxStatus, firstQueueStatus, firstAttempts)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID)); err != nil {
+		t.Fatalf("make final malformed interrupt attempt available: %v", err)
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run final malformed interrupt attempt: %v", err)
 	}
 
 	var sessionStatus, threadStatus, inboxStatus, queueStatus string
-	var bindings, terminalErrors, terminalStatuses, messages int
+	var bindings, terminalErrors, terminalStatuses, messages, attempts int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$3),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
 		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated'),
-		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1)`,
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated'),
+			(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1),
+			(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4)`,
 		sessionID, threadID, inputID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
-	).Scan(&sessionStatus, &threadStatus, &inboxStatus, &queueStatus, &bindings, &terminalErrors, &terminalStatuses, &messages); err != nil {
+	).Scan(&sessionStatus, &threadStatus, &inboxStatus, &queueStatus, &bindings, &terminalErrors, &terminalStatuses, &messages, &attempts); err != nil {
 		t.Fatalf("read malformed interrupt atomic closeout: %v", err)
 	}
 	if sessionStatus != "terminated" || threadStatus != "failed" || inboxStatus != "cancelled" || queueStatus != queue.StatusCancelled ||
-		bindings != 0 || terminalErrors != 1 || terminalStatuses != 1 || messages != 0 || deliverer.deliveries != 0 {
-		t.Fatalf("malformed interrupt closeout = Session %s Thread %s Inbox %s Queue %s bindings/errors/statuses/messages/runtime %d/%d/%d/%d/%d",
-			sessionStatus, threadStatus, inboxStatus, queueStatus, bindings, terminalErrors, terminalStatuses, messages, deliverer.deliveries)
+		bindings != 0 || terminalErrors != 1 || terminalStatuses != 1 || messages != 0 || attempts != 2 || deliverer.deliveries != 0 {
+		t.Fatalf("malformed interrupt closeout = Session %s Thread %s Inbox %s Queue %s bindings/errors/statuses/messages/attempts/runtime %d/%d/%d/%d/%d/%d",
+			sessionStatus, threadStatus, inboxStatus, queueStatus, bindings, terminalErrors, terminalStatuses, messages, attempts, deliverer.deliveries)
 	}
 }
 

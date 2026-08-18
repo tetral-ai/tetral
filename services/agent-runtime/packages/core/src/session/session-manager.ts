@@ -1713,7 +1713,6 @@ export function layer(
 							{ type: "conflict" as const },
 						);
 						if (admission.type === "conflict") {
-							threadEntry.interruptLeaseRef = undefined;
 							return { ok: false, sessionId, reason: "control_busy" };
 						}
 						yield* Fiber.interrupt(runSlot.ownerFiber).pipe(

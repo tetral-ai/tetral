@@ -235,8 +235,8 @@ func TestRuntimePodDirectDelivererRevalidatesInterruptLeaseAfterPreparation(t *t
 	if err != nil {
 		t.Fatalf("DeliverRuntimeJob after authority loss: %v", err)
 	}
-	if result.Status != RuntimeDeliveryDuplicate || !result.QueueLeaseSettled {
-		t.Fatalf("post-preparation authority loss = %+v; want settled duplicate", result)
+	if result.Status != RuntimeDeliveryAuthorityLost || result.QueueLeaseSettled {
+		t.Fatalf("post-preparation authority loss = %+v; want fenced authority loss without a false Queue settlement", result)
 	}
 	if len(store.jobs) != 1 || len(sender.requests) != 0 || len(store.acceptedJobs) != 0 {
 		t.Fatalf("post-preparation authority loss preparations/sends/accepted writes = %d/%d/%d; want 1/0/0",
@@ -690,7 +690,7 @@ func (s *recordingRuntimeDeliveryStore) PrepareRuntimeCommand(_ context.Context,
 }
 
 func (s *recordingRuntimeDeliveryStore) InterruptDeliveryAuthority(_ context.Context, _ RuntimeJob) (RuntimeInterruptDeliveryAuthority, error) {
-	return RuntimeInterruptDeliveryAuthority{Active: !s.interruptAuthorityLost, QueueLeaseSettled: s.interruptAuthorityLost}, nil
+	return RuntimeInterruptDeliveryAuthority{Active: !s.interruptAuthorityLost}, nil
 }
 
 func (s *recordingRuntimeDeliveryStore) MarkRuntimeInputAccepted(_ context.Context, job RuntimeJob, _ RuntimeAttemptedBinding) (bool, error) {

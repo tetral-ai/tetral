@@ -511,7 +511,7 @@ func cancelRuntimeTerminationInputsTx(
 		     WHERE inbox.workspace_id = $1
 		       AND inbox.session_id = $2
 		       AND ($3 = '' OR inbox.session_thread_id = $3)
-		       AND inbox.input_kind <> 'approval_review'
+		       AND (inbox.input_kind <> 'approval_review' OR $3 = '')
 		       AND (
 		           inbox.status IN ('delivering', 'accepted')
 		           OR ($5 AND inbox.status IN ('queued', 'parked'))

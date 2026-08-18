@@ -274,6 +274,9 @@ interface InterruptCleanupThreadLoop {
 	readonly runs: RunRecord[];
 	readonly cleanupStarted: Promise<void>;
 	readonly releaseCleanup: () => void;
+	readonly observedInterruptLeaseRefs: Array<
+		ReturnType<ThreadLoop.ThreadLoopRunCustody["interruptLeaseRef"]>
+	>;
 	readonly layer: Layer.Layer<ThreadLoop.Service>;
 }
 
@@ -426,6 +429,9 @@ function makeInterruptRecordingThreadLoop(): InterruptRecordingThreadLoop {
 
 function makeInterruptCleanupThreadLoop(): InterruptCleanupThreadLoop {
 	const runs: RunRecord[] = [];
+	const observedInterruptLeaseRefs: Array<
+		ReturnType<ThreadLoop.ThreadLoopRunCustody["interruptLeaseRef"]>
+	> = [];
 	let cleanupStartedResolve: () => void = () => {};
 	let releaseCleanupResolve: () => void = () => {};
 	const cleanupStarted = new Promise<void>((resolve) => {
@@ -437,7 +443,7 @@ function makeInterruptCleanupThreadLoop(): InterruptCleanupThreadLoop {
 	const layer = Layer.succeed(
 		ThreadLoop.Service,
 		threadLoopService({
-			run: (session) => {
+			run: (session, custody) => {
 				const runIndex = runs.length;
 				if (runIndex === 0) {
 					return Effect.sync(() => {
@@ -460,6 +466,9 @@ function makeInterruptCleanupThreadLoop(): InterruptCleanupThreadLoop {
 									const runtimeInputId =
 										session.state.userInterruptCommand()?.runtimeInputId;
 									if (runtimeInputId !== undefined) {
+										observedInterruptLeaseRefs.push(
+											custody.interruptLeaseRef(runtimeInputId),
+										);
 										session.state.completeUserInterrupt(runtimeInputId);
 									}
 								}
@@ -482,7 +491,13 @@ function makeInterruptCleanupThreadLoop(): InterruptCleanupThreadLoop {
 			},
 		}),
 	);
-	return { runs, cleanupStarted, releaseCleanup: releaseCleanupResolve, layer };
+	return {
+		runs,
+		cleanupStarted,
+		releaseCleanup: releaseCleanupResolve,
+		observedInterruptLeaseRefs,
+		layer,
+	};
 }
 
 function makeReviewerInterruptCleanupThreadLoop(
@@ -2145,6 +2160,9 @@ describe("SessionManager", () => {
 				});
 				expect(threadLoop.runs).toHaveLength(1);
 				expect(committed).toEqual([first.runtimeInputId]);
+				expect(threadLoop.observedInterruptLeaseRefs).toEqual([
+					first.interruptLeaseRef,
+				]);
 			},
 		);
 	});

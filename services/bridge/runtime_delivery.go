@@ -75,6 +75,7 @@ type MalformedRuntimeInputLease struct {
 type MalformedRuntimeInputCustodyResult struct {
 	Handled               bool
 	QueueLeaseSettled     bool
+	Retry                 bool
 	InterruptTerminalized bool
 	CanonicalReplacement  bool
 }
@@ -397,7 +398,11 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
 	}
 	if plan.StaleAccepted {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
+		status := RuntimeDeliveryDuplicate
+		if job.InputKind == "interrupt_control" && !plan.QueueLeaseSettled {
+			status = RuntimeDeliveryAuthorityLost
+		}
+		return RuntimeDeliveryResult{Status: status, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
 	}
 	if (job.Kind == queue.KindCleanupSession || job.Kind == queue.KindSessionDeleteCleanup) && plan.CleanupTargetGone {
 		finalizer, ok := d.Store.(RuntimeCleanupFinalizer)
@@ -426,7 +431,11 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 			return runtimeDeliveryResultFromPrepareError(err), nil
 		}
 		if !authority.Active {
-			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: authority.QueueLeaseSettled}, nil
+			status := RuntimeDeliveryDuplicate
+			if !authority.QueueLeaseSettled {
+				status = RuntimeDeliveryAuthorityLost
+			}
+			return RuntimeDeliveryResult{Status: status, QueueLeaseSettled: authority.QueueLeaseSettled}, nil
 		}
 	}
 	if d.Sender == nil {
@@ -834,7 +843,7 @@ func interruptDeliveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job Run
 		return RuntimeInterruptDeliveryAuthority{}, err
 	}
 	if !live {
-		return RuntimeInterruptDeliveryAuthority{QueueLeaseSettled: true}, nil
+		return RuntimeInterruptDeliveryAuthority{}, nil
 	}
 	barrier, barrierActive, err := activeSessionInterruptBarrierTx(ctx, tx, job.WorkspaceID, job.SessionID)
 	if err != nil {
@@ -1065,7 +1074,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			}
 			finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale, QueueLeaseSettled: true}
 			if !active {
-				finalized.Status = RuntimeDeliveryDuplicate
+				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
 			}
 			return nil
 		}
@@ -1079,9 +1088,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 				return err
 			}
 			if !active {
-				// Authority loss is a successful no-op. QueueLeaseSettled tells the
-				// stale JobRunner not to attempt any transition with its old token.
-				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
+				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
 				return nil
 			}
 			finalized, err = finalizeInterruptDeliveryExhaustionTx(withInterruptCloseout(ctx, job.RuntimeInputID), tx, job, now)
@@ -1362,7 +1369,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 			}
 			// Replay is the first production step for every interrupt lease. Fence
 			// pending messages only after locking the Session and exact live Queue
-			// identity; a reclaimed worker returns a settled no-op before either
+			// identity; a reclaimed worker returns an authority-loss no-op before either
 			// Queue followers or Session receipt facts can change.
 			if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 				return err
@@ -1380,7 +1387,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 				return err
 			}
 			if !active {
-				result = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
+				result = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
 				found = true
 				return nil
 			}
@@ -1445,10 +1452,17 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 		} else if err != nil {
 			return err
 		}
-		if kind != lease.Kind || partitionKey != lease.PartitionKey || dedupeKey != lease.DedupeKey ||
-			queueStatus != queue.StatusLeased || leaseToken != lease.LeaseToken || !leaseCurrent {
+		if kind != lease.Kind || partitionKey != lease.PartitionKey || dedupeKey != lease.DedupeKey {
+			outcome.Handled = true
+			return nil
+		}
+		if queueStatus == queue.StatusAcknowledged || queueStatus == queue.StatusCancelled || queueStatus == queue.StatusDeadLettered {
 			outcome.Handled = true
 			outcome.QueueLeaseSettled = true
+			return nil
+		}
+		if queueStatus != queue.StatusLeased || leaseToken != lease.LeaseToken || !leaseCurrent {
+			outcome.Handled = true
 			return nil
 		}
 
@@ -1490,6 +1504,37 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 		if canonical.InputKind != "interrupt_control" {
 			return nil
 		}
+		var canonicalEventIDs []string
+		eventIDsValid := json.Unmarshal([]byte(eventIDsJSON), &canonicalEventIDs) == nil && len(canonicalEventIDs) > 0
+		sequenceValid := sequenceFrom.Valid && sequenceTo.Valid && sequenceFrom.Int64 > 0 && sequenceTo.Int64 >= sequenceFrom.Int64
+		effectiveMaxAttempts := maxAttempts
+		if effectiveMaxAttempts <= 0 {
+			effectiveMaxAttempts = queue.DefaultMaxAttempts
+		}
+		if attemptCount < effectiveMaxAttempts {
+			payload, err := json.Marshal(runtimeInputQueuePayload{
+				WorkspaceID: canonical.WorkspaceID, SessionID: canonical.SessionID, SessionThreadID: canonical.SessionThreadID,
+				RuntimeInputID: canonical.RuntimeInputID, EventIDs: canonicalEventIDs,
+				SequenceFrom: sequenceFrom.Int64, SequenceTo: sequenceTo.Int64, InputKind: canonical.InputKind,
+			})
+			if err != nil {
+				return err
+			}
+			updated, err := tx.Exec(ctx, `UPDATE queue_jobs
+				SET payload_json=$4, payload_version=1, updated_at=$5
+				WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+				  AND status='leased' AND leased_until > clock_timestamp()`,
+				canonical.WorkspaceID, canonical.JobID, canonical.LeaseToken, string(payload), now)
+			if err != nil {
+				return err
+			}
+			if !rowsAffected(updated) {
+				return invalidRuntimeFinalizationIdentity("malformed interrupt Queue authority changed during retry preparation")
+			}
+			outcome.Handled = true
+			outcome.Retry = true
+			return nil
+		}
 		if err := lockRuntimeMutationSessionTx(ctx, tx, canonical.WorkspaceID, canonical.SessionID); err != nil {
 			return err
 		}
@@ -1506,12 +1551,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 			lockedSequenceFrom != sequenceFrom || lockedSequenceTo != sequenceTo {
 			return invalidRuntimeFinalizationIdentity("malformed runtime Inbox relation changed during finalization")
 		}
-		if err := json.Unmarshal([]byte(eventIDsJSON), &canonical.EventIDs); err != nil || len(canonical.EventIDs) == 0 ||
-			!sequenceFrom.Valid || !sequenceTo.Valid || sequenceFrom.Int64 <= 0 || sequenceTo.Int64 < sequenceFrom.Int64 {
-			return invalidRuntimeFinalizationIdentity("malformed interrupt Inbox event identity is invalid")
+		if eventIDsValid && sequenceValid {
+			canonical.EventIDs = canonicalEventIDs
+			canonical.SequenceFrom = sequenceFrom.Int64
+			canonical.SequenceTo = sequenceTo.Int64
 		}
-		canonical.SequenceFrom = sequenceFrom.Int64
-		canonical.SequenceTo = sequenceTo.Int64
 		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
 			WorkspaceID: workspace.ID(canonical.WorkspaceID), JobID: canonical.JobID, LeaseToken: canonical.LeaseToken,
 			Kind: canonical.Kind, PartitionKey: canonical.PartitionKey, DedupeKey: canonical.DedupeKey,
@@ -1521,7 +1565,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 		}
 		if !active {
 			outcome.Handled = true
-			outcome.QueueLeaseSettled = true
 			return nil
 		}
 		if _, err := finalizeInterruptDeliveryTerminalTx(

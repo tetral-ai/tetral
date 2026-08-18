@@ -124,10 +124,11 @@ type RuntimeJob struct {
 type RuntimeDeliveryStatus string
 
 const (
-	RuntimeDeliveryAccepted     RuntimeDeliveryStatus = "accepted"
-	RuntimeDeliveryDuplicate    RuntimeDeliveryStatus = "duplicate"
-	RuntimeDeliveryRejected     RuntimeDeliveryStatus = "rejected"
-	RuntimeDeliveryBarrierStale RuntimeDeliveryStatus = "barrier_stale"
+	RuntimeDeliveryAccepted      RuntimeDeliveryStatus = "accepted"
+	RuntimeDeliveryDuplicate     RuntimeDeliveryStatus = "duplicate"
+	RuntimeDeliveryRejected      RuntimeDeliveryStatus = "rejected"
+	RuntimeDeliveryBarrierStale  RuntimeDeliveryStatus = "barrier_stale"
+	RuntimeDeliveryAuthorityLost RuntimeDeliveryStatus = "authority_lost"
 )
 
 type RuntimeDeliveryResult struct {
@@ -250,6 +251,15 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			outcome, finalizeErr := finalizer.FinalizeMalformedRuntimeInputCustody(ctx, malformedRuntimeInputLease(queueJob))
 			if finalizeErr != nil {
 				return finalizeErr
+			}
+			if outcome.Retry {
+				return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+					WorkspaceId:  queueJob.GetWorkspaceId(),
+					JobId:        queueJob.GetId(),
+					LeaseToken:   queueJob.GetLeaseToken(),
+					ErrorKind:    "invalid_runtime_job_payload",
+					ErrorMessage: "runtime queue payload is invalid",
+				}))
 			}
 			if outcome.Handled {
 				return nil
@@ -476,6 +486,15 @@ func (r *JobRunner) settleInvalidRuntimeJobPayload(ctx context.Context, job Runt
 	if err != nil {
 		return err
 	}
+	if outcome.Retry {
+		return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+			WorkspaceId:  job.WorkspaceID,
+			JobId:        job.JobID,
+			LeaseToken:   job.LeaseToken,
+			ErrorKind:    "invalid_runtime_job_payload",
+			ErrorMessage: "runtime queue payload is invalid",
+		}))
+	}
 	if outcome.Handled {
 		disposition := "invalid_interrupt_terminalized"
 		if !outcome.InterruptTerminalized {
@@ -626,6 +645,8 @@ func (r *JobRunner) applyRuntimeDeliveryResult(ctx context.Context, job RuntimeJ
 		return nil
 	}
 	switch result.Status {
+	case RuntimeDeliveryAuthorityLost:
+		return nil
 	case RuntimeDeliveryAccepted, RuntimeDeliveryDuplicate:
 		return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
 			WorkspaceId: job.WorkspaceID,
