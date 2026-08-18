@@ -452,6 +452,14 @@ jobs:
       - name: Install Gateway Service dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install Agent Runtime dependencies
+        # The gateway typecheck graph includes cross-service composition
+        # fixtures that import agent-runtime sources; those files resolve
+        # @tetral/gateway-protocol through agent-runtime's file: link, which
+        # only exists after an install on the agent-runtime side.
+        working-directory: ${{ github.workspace }}/services/agent-runtime
+        run: bun install --frozen-lockfile
+
       - name: Start Gateway PostgreSQL test service
         working-directory: ${{ github.workspace }}
         env:
