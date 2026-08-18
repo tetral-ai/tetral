@@ -6210,11 +6210,10 @@ type WriteRequestEndCommitted struct {
 	//	*WriteRequestEndCommitted_Ordinary
 	//	*WriteRequestEndCommitted_Rescheduled
 	//	*WriteRequestEndCommitted_Compacted
-	Disposition           isWriteRequestEndCommitted_Disposition `protobuf_oneof:"disposition"`
-	InterruptToolResults  []*RuntimeInterruptToolResult          `protobuf:"bytes,5,rep,name=interrupt_tool_results,json=interruptToolResults,proto3" json:"interrupt_tool_results,omitempty"`
-	PendingAttachmentJson []string                               `protobuf:"bytes,6,rep,name=pending_attachment_json,json=pendingAttachmentJson,proto3" json:"pending_attachment_json,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	Disposition          isWriteRequestEndCommitted_Disposition `protobuf_oneof:"disposition"`
+	InterruptToolResults []*RuntimeInterruptToolResult          `protobuf:"bytes,5,rep,name=interrupt_tool_results,json=interruptToolResults,proto3" json:"interrupt_tool_results,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *WriteRequestEndCommitted) Reset() {
@@ -6295,13 +6294,6 @@ func (x *WriteRequestEndCommitted) GetInterruptToolResults() []*RuntimeInterrupt
 	return nil
 }
 
-func (x *WriteRequestEndCommitted) GetPendingAttachmentJson() []string {
-	if x != nil {
-		return x.PendingAttachmentJson
-	}
-	return nil
-}
-
 type isWriteRequestEndCommitted_Disposition interface {
 	isWriteRequestEndCommitted_Disposition()
 }
@@ -6332,11 +6324,10 @@ type WriteRequestEndDuplicate struct {
 	//	*WriteRequestEndDuplicate_Ordinary
 	//	*WriteRequestEndDuplicate_Rescheduled
 	//	*WriteRequestEndDuplicate_Compacted
-	Disposition           isWriteRequestEndDuplicate_Disposition `protobuf_oneof:"disposition"`
-	InterruptToolResults  []*RuntimeInterruptToolResult          `protobuf:"bytes,5,rep,name=interrupt_tool_results,json=interruptToolResults,proto3" json:"interrupt_tool_results,omitempty"`
-	PendingAttachmentJson []string                               `protobuf:"bytes,6,rep,name=pending_attachment_json,json=pendingAttachmentJson,proto3" json:"pending_attachment_json,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	Disposition          isWriteRequestEndDuplicate_Disposition `protobuf_oneof:"disposition"`
+	InterruptToolResults []*RuntimeInterruptToolResult          `protobuf:"bytes,5,rep,name=interrupt_tool_results,json=interruptToolResults,proto3" json:"interrupt_tool_results,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *WriteRequestEndDuplicate) Reset() {
@@ -6413,13 +6404,6 @@ func (x *WriteRequestEndDuplicate) GetCompacted() *RequestEndCompacted {
 func (x *WriteRequestEndDuplicate) GetInterruptToolResults() []*RuntimeInterruptToolResult {
 	if x != nil {
 		return x.InterruptToolResults
-	}
-	return nil
-}
-
-func (x *WriteRequestEndDuplicate) GetPendingAttachmentJson() []string {
-	if x != nil {
-		return x.PendingAttachmentJson
 	}
 	return nil
 }
@@ -12282,23 +12266,21 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\tcommitted\x18\x01 \x01(\v2*.tetral.bridge.v1.WriteRequestEndCommittedH\x00R\tcommitted\x12J\n" +
 	"\tduplicate\x18\x02 \x01(\v2*.tetral.bridge.v1.WriteRequestEndDuplicateH\x00R\tduplicate\x12>\n" +
 	"\x05stale\x18\x03 \x01(\v2&.tetral.bridge.v1.WriteRequestEndStaleH\x00R\x05staleB\t\n" +
-	"\aoutcome\"\xce\x03\n" +
+	"\aoutcome\"\xb5\x03\n" +
 	"\x18WriteRequestEndCommitted\x12/\n" +
 	"\x14request_end_event_id\x18\x01 \x01(\tR\x11requestEndEventId\x12B\n" +
 	"\bordinary\x18\x02 \x01(\v2$.tetral.bridge.v1.RequestEndOrdinaryH\x00R\bordinary\x12K\n" +
 	"\vrescheduled\x18\x03 \x01(\v2'.tetral.bridge.v1.RequestEndRescheduledH\x00R\vrescheduled\x12E\n" +
 	"\tcompacted\x18\x04 \x01(\v2%.tetral.bridge.v1.RequestEndCompactedH\x00R\tcompacted\x12b\n" +
-	"\x16interrupt_tool_results\x18\x05 \x03(\v2,.tetral.bridge.v1.RuntimeInterruptToolResultR\x14interruptToolResults\x126\n" +
-	"\x17pending_attachment_json\x18\x06 \x03(\tR\x15pendingAttachmentJsonB\r\n" +
-	"\vdisposition\"\xce\x03\n" +
+	"\x16interrupt_tool_results\x18\x05 \x03(\v2,.tetral.bridge.v1.RuntimeInterruptToolResultR\x14interruptToolResultsB\r\n" +
+	"\vdispositionJ\x04\b\x06\x10\aR\x17pending_attachment_json\"\xb5\x03\n" +
 	"\x18WriteRequestEndDuplicate\x12/\n" +
 	"\x14request_end_event_id\x18\x01 \x01(\tR\x11requestEndEventId\x12B\n" +
 	"\bordinary\x18\x02 \x01(\v2$.tetral.bridge.v1.RequestEndOrdinaryH\x00R\bordinary\x12K\n" +
 	"\vrescheduled\x18\x03 \x01(\v2'.tetral.bridge.v1.RequestEndRescheduledH\x00R\vrescheduled\x12E\n" +
 	"\tcompacted\x18\x04 \x01(\v2%.tetral.bridge.v1.RequestEndCompactedH\x00R\tcompacted\x12b\n" +
-	"\x16interrupt_tool_results\x18\x05 \x03(\v2,.tetral.bridge.v1.RuntimeInterruptToolResultR\x14interruptToolResults\x126\n" +
-	"\x17pending_attachment_json\x18\x06 \x03(\tR\x15pendingAttachmentJsonB\r\n" +
-	"\vdisposition\"\x16\n" +
+	"\x16interrupt_tool_results\x18\x05 \x03(\v2,.tetral.bridge.v1.RuntimeInterruptToolResultR\x14interruptToolResultsB\r\n" +
+	"\vdispositionJ\x04\b\x06\x10\aR\x17pending_attachment_json\"\x16\n" +
 	"\x14WriteRequestEndStale\"m\n" +
 	"\x12RequestEndOrdinary\x12;\n" +
 	"\x17sealed_message_sequence\x18\x01 \x01(\x03H\x00R\x15sealedMessageSequence\x88\x01\x01B\x1a\n" +

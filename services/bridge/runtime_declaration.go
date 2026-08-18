@@ -505,7 +505,6 @@ type requestEndDurableFacts struct {
 	CompactionEventID         string
 	CheckpointMessageSequence int64
 	InterruptToolResults      []*bridgev1.RuntimeInterruptToolResult
-	PendingAttachmentJSON     []string
 }
 
 func commitWriteRequestEndContextTx(
@@ -517,7 +516,7 @@ func commitWriteRequestEndContextTx(
 	requestEndEventID string,
 	now time.Time,
 ) (requestEndDurableFacts, error) {
-	facts := requestEndDurableFacts{RequestEndEventID: requestEndEventID, PendingAttachmentJSON: []string{}}
+	facts := requestEndDurableFacts{RequestEndEventID: requestEndEventID}
 	if requestKind != requestKindCompactionSummary {
 		if request.GetCompactionContext() != nil || request.GetPrefixConsumption() != nil ||
 			request.CompactedThroughMessageSequence != nil ||

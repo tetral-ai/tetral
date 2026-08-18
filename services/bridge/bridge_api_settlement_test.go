@@ -97,7 +97,7 @@ func TestWriteRequestEndReturnsOnlyDirectDurableFacts(t *testing.T) {
 }
 
 func TestAcceptedRescheduleResultDoesNotEchoAttempt(t *testing.T) {
-	facts := requestEndDurableFacts{RequestEndEventID: "evt_end", Disposition: "rescheduled", EffectiveDeadline: "2026-08-15T01:00:00Z", PendingAttachmentJSON: []string{}}
+	facts := requestEndDurableFacts{RequestEndEventID: "evt_end", Disposition: "rescheduled", EffectiveDeadline: "2026-08-15T01:00:00Z"}
 	encoded, err := marshalRequestEndReplay(facts)
 	if err != nil {
 		t.Fatalf("marshal replay: %v", err)

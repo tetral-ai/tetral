@@ -751,7 +751,7 @@ const loadThreadPendingFileAttachmentsSQL = `WITH scoped_inbox_events AS MATERIA
 		    ON authority.event_id = e.event_id
 		  CROSS JOIN LATERAL jsonb_array_elements(e.payload_json::jsonb->'content')
 		       WITH ORDINALITY AS block(value, position)
-		   LEFT JOIN files f
+		   JOIN files f
 		     ON f.workspace_id = $1
 		    AND f.file_id = block.value->'source'->>'file_id'
 		  WHERE block.value->>'type' IN ('image', 'document')

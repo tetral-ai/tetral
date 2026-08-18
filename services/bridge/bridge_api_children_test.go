@@ -185,6 +185,14 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: operationID}); status.Code(err) != codes.DeadlineExceeded {
 		t.Fatalf("AwaitChildInterrupt durable control lookup = %v; want pending census", err)
 	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+		SET status='parked', binding_id=$2, binding_generation=1, target_pod_uid=$3
+		WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'`, sessionID, bindingID, podUID); err != nil {
+		t.Fatalf("park child interrupt custody: %v", err)
+	}
+	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: operationID}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("AwaitChildInterrupt parked interrupt = %v; want invalid-custody FailedPrecondition", err)
+	}
 }
 
 func TestPostgreSQLDeliverInterAgentMailIsAtomicAcrossGeneratedGRPCAndConcurrentReplay(t *testing.T) {

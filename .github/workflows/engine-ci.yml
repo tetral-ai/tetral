@@ -622,6 +622,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Setup Go
+        # actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.12'
+          cache-dependency-path: go.sum
+
+      - name: Helper privilege integration
+        run: sudo "$(command -v go)" test ./internal/sandbox/helper -run '^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$' -count=1 -v
+
       - name: Local Sandbox image smoke
         run: ./scripts/run-sandbox-local-image-smoke.sh
 
@@ -639,6 +649,13 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+
+      - name: Setup Go
+        # actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.12'
+          cache-dependency-path: go.sum
 
       - name: Setup Bun
         # oven-sh/setup-bun@v2
@@ -677,6 +694,16 @@ jobs:
         run: |
           echo "External smoke is operator-triggered only and requires provisioned Daytona/R2 credentials."
           go test ./services/sandbox -run 'TestLiveResourceProjection' -count=1 -v
+
+      - name: Published Sandbox image Daytona release smoke
+        if: ${{ vars.TETRAL_DAYTONA_RELEASE_SMOKE == '1' }}
+        env:
+          TETRAL_DAYTONA_RELEASE_SMOKE: ${{ vars.TETRAL_DAYTONA_RELEASE_SMOKE }}
+          TETRAL_DAYTONA_RELEASE_SMOKE_ARTIFACT_REF: ${{ vars.TETRAL_DAYTONA_RELEASE_SMOKE_ARTIFACT_REF }}
+          DAYTONA_API_URL: ${{ secrets.DAYTONA_API_URL }}
+          DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET }}
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+        run: go test -tags daytona_release_smoke ./services/sandbox -run '^TestDaytonaPublishedImageProductionAdapterSmoke$' -count=1 -v
 
       - name: Gateway live provider smoke
         working-directory: services/gateway

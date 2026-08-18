@@ -1299,7 +1299,6 @@ export type SessionEventWriterRequestEndResult =
 						readonly checkpointMessageSequence: number;
 				  };
 			readonly interruptToolResults: readonly RuntimeInterruptToolResult[];
-			readonly pendingAttachments: readonly RuntimeProviderAttachment[];
 	  }
 	| { readonly ok: true; readonly type: "stale" }
 	| { readonly ok: false; readonly error: SessionEventWriterError };

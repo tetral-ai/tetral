@@ -76,7 +76,6 @@ const writer: SessionEventWriter = {
 		requestEndEventId: `evt_${envelope.writeId}`,
 		outcome: { type: "ordinary" },
 		interruptToolResults: [],
-		pendingAttachments: [],
 	}),
 	finishIdle: async (envelope) => ({
 		ok: true,

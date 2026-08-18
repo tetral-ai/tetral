@@ -809,7 +809,6 @@ export interface WriteRequestEndCommitted {
   rescheduled?: RequestEndRescheduled | undefined;
   compacted?: RequestEndCompacted | undefined;
   interruptToolResults: RuntimeInterruptToolResult[];
-  pendingAttachmentJson: string[];
 }
 
 export interface WriteRequestEndDuplicate {
@@ -818,7 +817,6 @@ export interface WriteRequestEndDuplicate {
   rescheduled?: RequestEndRescheduled | undefined;
   compacted?: RequestEndCompacted | undefined;
   interruptToolResults: RuntimeInterruptToolResult[];
-  pendingAttachmentJson: string[];
 }
 
 export interface WriteRequestEndStale {
@@ -9690,7 +9688,6 @@ function createBaseWriteRequestEndCommitted(): WriteRequestEndCommitted {
     rescheduled: undefined,
     compacted: undefined,
     interruptToolResults: [],
-    pendingAttachmentJson: [],
   };
 }
 
@@ -9710,9 +9707,6 @@ export const WriteRequestEndCommitted: MessageFns<WriteRequestEndCommitted> = {
     }
     for (const v of message.interruptToolResults) {
       RuntimeInterruptToolResult.encode(v!, writer.uint32(42).fork()).join();
-    }
-    for (const v of message.pendingAttachmentJson) {
-      writer.uint32(50).string(v!);
     }
     return writer;
   },
@@ -9764,14 +9758,6 @@ export const WriteRequestEndCommitted: MessageFns<WriteRequestEndCommitted> = {
           message.interruptToolResults.push(RuntimeInterruptToolResult.decode(reader, reader.uint32()));
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.pendingAttachmentJson.push(reader.string());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9796,11 +9782,6 @@ export const WriteRequestEndCommitted: MessageFns<WriteRequestEndCommitted> = {
         : globalThis.Array.isArray(object?.interrupt_tool_results)
         ? object.interrupt_tool_results.map((e: any) => RuntimeInterruptToolResult.fromJSON(e))
         : [],
-      pendingAttachmentJson: globalThis.Array.isArray(object?.pendingAttachmentJson)
-        ? object.pendingAttachmentJson.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.pending_attachment_json)
-        ? object.pending_attachment_json.map((e: any) => globalThis.String(e))
-        : [],
     };
   },
 
@@ -9820,9 +9801,6 @@ export const WriteRequestEndCommitted: MessageFns<WriteRequestEndCommitted> = {
     }
     if (message.interruptToolResults?.length) {
       obj.interruptToolResults = message.interruptToolResults.map((e) => RuntimeInterruptToolResult.toJSON(e));
-    }
-    if (message.pendingAttachmentJson?.length) {
-      obj.pendingAttachmentJson = message.pendingAttachmentJson;
     }
     return obj;
   },
@@ -9844,7 +9822,6 @@ export const WriteRequestEndCommitted: MessageFns<WriteRequestEndCommitted> = {
       : undefined;
     message.interruptToolResults = object.interruptToolResults?.map((e) => RuntimeInterruptToolResult.fromPartial(e)) ||
       [];
-    message.pendingAttachmentJson = object.pendingAttachmentJson?.map((e) => e) || [];
     return message;
   },
 };
@@ -9856,7 +9833,6 @@ function createBaseWriteRequestEndDuplicate(): WriteRequestEndDuplicate {
     rescheduled: undefined,
     compacted: undefined,
     interruptToolResults: [],
-    pendingAttachmentJson: [],
   };
 }
 
@@ -9876,9 +9852,6 @@ export const WriteRequestEndDuplicate: MessageFns<WriteRequestEndDuplicate> = {
     }
     for (const v of message.interruptToolResults) {
       RuntimeInterruptToolResult.encode(v!, writer.uint32(42).fork()).join();
-    }
-    for (const v of message.pendingAttachmentJson) {
-      writer.uint32(50).string(v!);
     }
     return writer;
   },
@@ -9930,14 +9903,6 @@ export const WriteRequestEndDuplicate: MessageFns<WriteRequestEndDuplicate> = {
           message.interruptToolResults.push(RuntimeInterruptToolResult.decode(reader, reader.uint32()));
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.pendingAttachmentJson.push(reader.string());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9962,11 +9927,6 @@ export const WriteRequestEndDuplicate: MessageFns<WriteRequestEndDuplicate> = {
         : globalThis.Array.isArray(object?.interrupt_tool_results)
         ? object.interrupt_tool_results.map((e: any) => RuntimeInterruptToolResult.fromJSON(e))
         : [],
-      pendingAttachmentJson: globalThis.Array.isArray(object?.pendingAttachmentJson)
-        ? object.pendingAttachmentJson.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.pending_attachment_json)
-        ? object.pending_attachment_json.map((e: any) => globalThis.String(e))
-        : [],
     };
   },
 
@@ -9986,9 +9946,6 @@ export const WriteRequestEndDuplicate: MessageFns<WriteRequestEndDuplicate> = {
     }
     if (message.interruptToolResults?.length) {
       obj.interruptToolResults = message.interruptToolResults.map((e) => RuntimeInterruptToolResult.toJSON(e));
-    }
-    if (message.pendingAttachmentJson?.length) {
-      obj.pendingAttachmentJson = message.pendingAttachmentJson;
     }
     return obj;
   },
@@ -10010,7 +9967,6 @@ export const WriteRequestEndDuplicate: MessageFns<WriteRequestEndDuplicate> = {
       : undefined;
     message.interruptToolResults = object.interruptToolResults?.map((e) => RuntimeInterruptToolResult.fromPartial(e)) ||
       [];
-    message.pendingAttachmentJson = object.pendingAttachmentJson?.map((e) => e) || [];
     return message;
   },
 };

@@ -851,7 +851,7 @@ func loadCommittedInputAttachmentDeltaTx(
 			} else {
 				found = true
 			}
-			if found && !authorized {
+			if !found || !authorized {
 				continue
 			}
 			encoded, err := marshalBridgeJSON(bridgeLoadContextPendingAttachment{

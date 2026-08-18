@@ -625,6 +625,8 @@ message WriteRequestEndResponse {
 }
 
 message WriteRequestEndCommitted {
+  reserved 6;
+  reserved "pending_attachment_json";
   string request_end_event_id = 1;
   oneof disposition {
     RequestEndOrdinary ordinary = 2;
@@ -632,9 +634,10 @@ message WriteRequestEndCommitted {
     RequestEndCompacted compacted = 4;
   }
   repeated RuntimeInterruptToolResult interrupt_tool_results = 5;
-  repeated string pending_attachment_json = 6;
 }
 message WriteRequestEndDuplicate {
+  reserved 6;
+  reserved "pending_attachment_json";
   string request_end_event_id = 1;
   oneof disposition {
     RequestEndOrdinary ordinary = 2;
@@ -642,7 +645,6 @@ message WriteRequestEndDuplicate {
     RequestEndCompacted compacted = 4;
   }
   repeated RuntimeInterruptToolResult interrupt_tool_results = 5;
-  repeated string pending_attachment_json = 6;
 }
 message WriteRequestEndStale {}
 message RequestEndOrdinary {

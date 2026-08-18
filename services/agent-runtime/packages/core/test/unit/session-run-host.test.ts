@@ -564,7 +564,6 @@ class RecordingWriter implements SessionEventWriter {
 					: { sealedMessageSequence: assignedMessageSequence }),
 			},
 			interruptToolResults: [],
-			pendingAttachments: [],
 		};
 	}
 

@@ -24,7 +24,7 @@ export const MaxIdBytes = 128;
 export const MaxPodIdentityBytes = 253;
 /** Largest binding generation accepted by Runtime command validation. */
 export const MaxBindingGeneration = 0xffffffff;
-/** Largest exact JavaScript integer accepted for an input-order fence. */
+/** Largest exact JavaScript integer accepted for durable Runtime input order. */
 export const MaxInputOrder = Number.MAX_SAFE_INTEGER;
 
 // This fuse is above the largest admission-legal payload and protects the

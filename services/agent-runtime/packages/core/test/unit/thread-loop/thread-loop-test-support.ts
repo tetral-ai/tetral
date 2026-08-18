@@ -791,7 +791,6 @@ function requestEndResultFromAppend(
 				effectiveDeadline: envelope.reschedule.deadline,
 			},
 			interruptToolResults: [],
-			pendingAttachments: [],
 		};
 	}
 	if (envelope.compactionContext !== undefined) {
@@ -810,7 +809,6 @@ function requestEndResultFromAppend(
 				checkpointMessageSequence: sequence.messageSequence,
 			},
 			interruptToolResults: [],
-			pendingAttachments: [],
 		};
 	}
 	let sealedMessageSequence: number | undefined;
@@ -827,7 +825,6 @@ function requestEndResultFromAppend(
 			...(sealedMessageSequence === undefined ? {} : { sealedMessageSequence }),
 		},
 		interruptToolResults: [],
-		pendingAttachments: [],
 	};
 }
 
@@ -845,7 +842,6 @@ function requestEndResultForTest(
 			requestEndEventId: `bridge-${envelope.writeId}`,
 			outcome,
 			interruptToolResults: [],
-			pendingAttachments: [],
 		};
 	}
 	return requestEndResultFromAppend(

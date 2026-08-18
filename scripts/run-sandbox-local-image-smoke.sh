@@ -12,7 +12,6 @@ cleanup() {
 trap cleanup EXIT
 
 docker build --tag "$image_tag" \
-  --build-arg SANDBOX_HELPER_BASE_IMAGE=ghcr.io/tetral-ai/mirror/golang:1.25.12 \
   --file "$build_context/Dockerfile.sandbox" "$build_context"
 
 docker run --rm --entrypoint /bin/bash "$image_tag" -ceu '

@@ -468,7 +468,7 @@ export class Service extends Context.Service<Service, Interface>()(
 //   | trigger        | run_slot empty            | active (stopping=false)          | active (stopping=true)        |
 //   | -------------- | ------------------------- | -------------------------------- | ----------------------------- |
 //   | wake/new input | start run_slot(wake)      | install reducer-visible fact     | install reducer-visible fact  |
-//   | interrupt      | preflight, then idle no-op| preflight, stopping=true, unwind | already stopping              |
+//   | interrupt      | commit idle custody       | commit custody, stop, unwind     | reject concurrent custody     |
 //
 // On owner exit SessionManager clears the old slot, reduces the latest
 // ThreadProcessor projection, and starts at most one successor for an active action.
@@ -1713,6 +1713,7 @@ export function layer(
 							{ type: "conflict" as const },
 						);
 						if (admission.type === "conflict") {
+							threadEntry.interruptLeaseRef = undefined;
 							return { ok: false, sessionId, reason: "control_busy" };
 						}
 						yield* Fiber.interrupt(runSlot.ownerFiber).pipe(
@@ -1726,6 +1727,7 @@ export function layer(
 								command.runtimeInputId,
 							);
 						if (committed?.ok !== true) {
+							threadEntry.interruptLeaseRef = undefined;
 							return {
 								ok: false,
 								sessionId,
@@ -1754,6 +1756,7 @@ export function layer(
 							};
 						}
 						if (!interruptCloseoutCompleted) {
+							threadEntry.interruptLeaseRef = undefined;
 							return { ok: false, sessionId, reason: "control_busy" };
 						}
 						threadEntry.interruptLeaseRef = undefined;

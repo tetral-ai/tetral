@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,5 +284,74 @@ func TestPostgreSQLSessionInterruptBarrierRejectsSuccessorStartAndChildLifecycle
 	}
 	if starts != 0 || threads != 1 {
 		t.Fatalf("blocked lifecycle facts = starts:%d threads:%d; want 0/1", starts, threads)
+	}
+}
+
+func TestPostgreSQLSessionInterruptBarrierRejectsInternalToolRepair(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_barrier_internal_repair"
+		threadID  = "thr_interrupt_barrier_internal_repair"
+		bindingID = "bind_interrupt_barrier_internal_repair"
+		podUID    = "pod_interrupt_barrier_internal_repair"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_barrier_internal_repair", 1, "user.interrupt", `{}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_interrupt_barrier_internal_repair", InputKind: "interrupt_control",
+		EventIDs: []string{"evt_interrupt_barrier_internal_repair"}, SequenceFrom: 1, SequenceTo: 1,
+	})
+	request := &bridgev1.CommitInternalToolRepairRequest{
+		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		ModelRequestId: "mreq_interrupt_barrier_internal_repair", ModelToolCallId: "call_interrupt_barrier_internal_repair",
+		ToolName: "unknown_tool", CanonicalInputJson: `{}`,
+		RepairKey: internalToolRepairKey("mreq_interrupt_barrier_internal_repair", "call_interrupt_barrier_internal_repair", "unknown_tool"),
+		Error:     &bridgev1.RuntimeToolError{ErrorJson: `{"type":"provider_tool_protocol_error","message":"invalid tool","retryable":false}`},
+	}
+	response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInternalToolRepair(context.Background(), request)
+	if err != nil || response.GetStale() == nil {
+		t.Fatalf("internal Tool repair behind interrupt barrier = %#v/%v; want typed stale", response, err)
+	}
+	var events, messages, operations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='commit_internal_tool_repair')`, sessionID).Scan(&events, &messages, &operations); err != nil {
+		t.Fatalf("read blocked internal repair residue: %v", err)
+	}
+	if events != 0 || messages != 0 || operations != 0 {
+		t.Fatalf("blocked internal repair residue = events:%d messages:%d operations:%d; want zero", events, messages, operations)
+	}
+}
+
+func TestPostgreSQLColdLoadRemainsAvailableWhileInterruptBarrierIsActive(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_barrier_cold_load"
+		threadID  = "thr_interrupt_barrier_cold_load"
+		bindingID = "bind_interrupt_barrier_cold_load"
+		podUID    = "pod_interrupt_barrier_cold_load"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_barrier_cold_message", 1, "user.message", `{"content":[{"type":"text","text":"durable before interrupt"}]}`)
+	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_interrupt_barrier_cold", "evt_interrupt_barrier_cold_message", 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_barrier_cold_control", 2, "user.interrupt", `{}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_interrupt_barrier_cold_control", InputKind: "interrupt_control",
+		EventIDs: []string{"evt_interrupt_barrier_cold_control"}, SequenceFrom: 2, SequenceTo: 2,
+	})
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("interrupt-barrier-cold-load-key")
+	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+	})
+	if err != nil || response.GetRuntimeBindingToken() == "" ||
+		!strings.Contains(response.GetContextJson(), `"messageSequence":1`) ||
+		!strings.Contains(response.GetContextJson(), `"type":"user.interrupt"`) {
+		t.Fatalf("cold LoadContext during active interrupt barrier = %#v/%v; want durable message and interrupt custody", response, err)
 	}
 }

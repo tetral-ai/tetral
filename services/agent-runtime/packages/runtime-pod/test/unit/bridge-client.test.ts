@@ -780,7 +780,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 						requestEndEventId: "end_1",
 						ordinary: { sealedMessageSequence: 5 },
 						interruptToolResults: [],
-						pendingAttachmentJson: [],
 					},
 				},
 				expected: {
@@ -789,7 +788,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					requestEndEventId: "end_1",
 					outcome: { type: "ordinary", sealedMessageSequence: 5 },
 					interruptToolResults: [],
-					pendingAttachments: [],
 				},
 				envelope: requestEndEnvelope(),
 			},
@@ -799,7 +797,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 						requestEndEventId: "end_2",
 						rescheduled: { effectiveDeadline: "2026-08-15T00:00:00.000Z" },
 						interruptToolResults: [],
-						pendingAttachmentJson: [],
 					},
 				},
 				expected: {
@@ -811,7 +808,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 						effectiveDeadline: "2026-08-15T00:00:00.000Z",
 					},
 					interruptToolResults: [],
-					pendingAttachments: [],
 				},
 				envelope: {
 					...requestEndEnvelope(),
@@ -831,7 +827,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 							checkpointMessageSequence: 6,
 						},
 						interruptToolResults: [],
-						pendingAttachmentJson: [],
 					},
 				},
 				expected: {
@@ -844,7 +839,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 						checkpointMessageSequence: 6,
 					},
 					interruptToolResults: [],
-					pendingAttachments: [],
 				},
 				envelope: {
 					...requestEndEnvelope(),
@@ -870,7 +864,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					checkpointMessageSequence: 1,
 				},
 				interruptToolResults: [],
-				pendingAttachmentJson: [],
 			},
 		};
 		await expect(
@@ -886,7 +879,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				requestEndEventId: "end_1",
 				ordinary: { sealedMessageSequence: 4 },
 				interruptToolResults: [],
-				pendingAttachmentJson: [],
 			},
 		};
 		await writer.writeRequestEnd({
@@ -907,7 +899,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					checkpointMessageSequence: 5,
 				},
 				interruptToolResults: [],
-				pendingAttachmentJson: [],
 			},
 		};
 		await writer.writeRequestEnd({
@@ -1067,7 +1058,6 @@ class TypedBridge {
 			requestEndEventId: "end_1",
 			ordinary: {},
 			interruptToolResults: [],
-			pendingAttachmentJson: [],
 		},
 	};
 	finishIdleResponse: unknown = { committed: { idleEventId: "idle_1" } };

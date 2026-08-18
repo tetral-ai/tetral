@@ -35,7 +35,7 @@ type interruptRuntimeCompositionOutput struct {
 	DurableOperationCompletions int             `json:"durableOperationCompletions"`
 }
 
-func TestPostgreSQLInterruptCrossesRuntimeFiberAndBridgeCloseoutWithinDeliveryTimeout(t *testing.T) {
+func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID    = "sesn_interrupt_production_composition"
@@ -137,16 +137,20 @@ func TestPostgreSQLInterruptCrossesRuntimeFiberAndBridgeCloseoutWithinDeliveryTi
 	}
 
 	type deliveryResult struct {
-		active  bool
-		err     error
-		elapsed time.Duration
+		active bool
+		err    error
 	}
 	delivery := make(chan deliveryResult, 1)
-	started := time.Now()
 	go func() {
 		active, runErr := runner.RunOnceWithActivity(context.Background())
-		delivery <- deliveryResult{active: active, err: runErr, elapsed: time.Since(started)}
+		delivery <- deliveryResult{active: active, err: runErr}
 	}()
+	waitForCompositionFile(t, paths.operationCompleted, "interrupted durable operation completion", &runtimeProcess.output)
+	select {
+	case premature := <-delivery:
+		t.Fatalf("interrupt delivery returned before the blocked output-capture boundary completed: active:%t err:%v", premature.active, premature.err)
+	default:
+	}
 
 	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
 		"daytona": &bridgeMemoryProjectionProvider{},
@@ -187,11 +191,6 @@ func TestPostgreSQLInterruptCrossesRuntimeFiberAndBridgeCloseoutWithinDeliveryTi
 	if delivered.err != nil || !delivered.active {
 		t.Fatalf("deliver interrupt through Runtime closeout = active:%t err:%v", delivered.active, delivered.err)
 	}
-	elapsed := delivered.elapsed
-	if elapsed >= runtimeInterruptDeliveryTimeout {
-		t.Fatalf("production interrupt closeout elapsed %s; delivery timeout is %s: %s", elapsed, runtimeInterruptDeliveryTimeout, runtimeProcess.output.String())
-	}
-	waitForCompositionFile(t, paths.operationCompleted, "interrupted durable operation completion", &runtimeProcess.output)
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release Runtime composition: %v", err)
 	}
@@ -216,10 +215,9 @@ func TestPostgreSQLInterruptCrossesRuntimeFiberAndBridgeCloseoutWithinDeliveryTi
 		t.Fatalf("read interrupt production closeout: %v", err)
 	}
 	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || starts != 1 || ends != 1 || toolUses != 1 || toolResults != 1 || receipts != 1 {
-		t.Fatalf("production closeout = Inbox:%s Queue:%s starts:%d ends:%d tool uses/results:%d/%d receipts:%d elapsed:%s",
-			inboxStatus, queueStatus, starts, ends, toolUses, toolResults, receipts, elapsed)
+		t.Fatalf("production closeout = Inbox:%s Queue:%s starts:%d ends:%d tool uses/results:%d/%d receipts:%d",
+			inboxStatus, queueStatus, starts, ends, toolUses, toolResults, receipts)
 	}
-	t.Logf("production Runtime interrupt closeout elapsed=%s", elapsed)
 }
 
 func enqueueRuntimeCompositionJob(t *testing.T, store *queue.PostgreSQLQueueStore, sessionID string, job RuntimeJob, priority int) {

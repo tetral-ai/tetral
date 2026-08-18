@@ -5785,7 +5785,6 @@ function settleRuntimeShutdownEffect(
 					command,
 					spanEndAppend.interruptToolResults,
 				);
-				session.state.addPendingAttachments(spanEndAppend.pendingAttachments);
 				session.state.applyThreadTurnFact({
 					fact: "interrupt_committed",
 					eventId: command.runtimeInputId,
@@ -6446,7 +6445,6 @@ async function appendModelRequestEndEvent(
 				{ readonly ok: true; readonly type: "committed" | "duplicate" }
 			>["outcome"];
 			readonly interruptToolResults: readonly RuntimeInterruptToolResult[];
-			readonly pendingAttachments: readonly RuntimeProviderAttachment[];
 			readonly assistantSeal: {
 				readonly status: "completed" | "failed";
 				readonly finishReason: RuntimeFinishReason;
@@ -6457,7 +6455,6 @@ async function appendModelRequestEndEvent(
 			readonly ok: true;
 			readonly type: "stale";
 			readonly interruptToolResults: readonly [];
-			readonly pendingAttachments: readonly [];
 			readonly assistantSeal: {
 				readonly status: "completed" | "failed";
 				readonly finishReason: RuntimeFinishReason;
@@ -6560,7 +6557,6 @@ async function appendModelRequestEndEvent(
 			ok: true,
 			type: "stale",
 			interruptToolResults: [],
-			pendingAttachments: [],
 			assistantSeal,
 		};
 	}
@@ -6570,7 +6566,6 @@ async function appendModelRequestEndEvent(
 		requestEndEventId: result.requestEndEventId,
 		outcome: result.outcome,
 		interruptToolResults: result.interruptToolResults,
-		pendingAttachments: result.pendingAttachments,
 		assistantSeal,
 	};
 }
@@ -7102,7 +7097,6 @@ function acknowledgeJoinedInterruptRequestEnd(
 			}
 			session.state.contextManager.sealOpenRequestDraft();
 		}
-		session.state.addPendingAttachments(result.pendingAttachments);
 	} catch {
 		return false;
 	}

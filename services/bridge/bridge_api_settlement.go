@@ -507,9 +507,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 
 func requestEndCommittedResult(facts requestEndDurableFacts) *bridgev1.WriteRequestEndCommitted {
 	result := &bridgev1.WriteRequestEndCommitted{
-		RequestEndEventId:     facts.RequestEndEventID,
-		InterruptToolResults:  facts.InterruptToolResults,
-		PendingAttachmentJson: facts.PendingAttachmentJSON,
+		RequestEndEventId:    facts.RequestEndEventID,
+		InterruptToolResults: facts.InterruptToolResults,
 	}
 	switch facts.Disposition {
 	case "ordinary":
@@ -524,9 +523,8 @@ func requestEndCommittedResult(facts requestEndDurableFacts) *bridgev1.WriteRequ
 
 func requestEndDuplicateResult(facts requestEndDurableFacts) *bridgev1.WriteRequestEndDuplicate {
 	result := &bridgev1.WriteRequestEndDuplicate{
-		RequestEndEventId:     facts.RequestEndEventID,
-		InterruptToolResults:  facts.InterruptToolResults,
-		PendingAttachmentJson: facts.PendingAttachmentJSON,
+		RequestEndEventId:    facts.RequestEndEventID,
+		InterruptToolResults: facts.InterruptToolResults,
 	}
 	switch facts.Disposition {
 	case "ordinary":
@@ -553,9 +551,8 @@ func unmarshalRequestEndReplay(raw string) (requestEndDurableFacts, error) {
 		return requestEndDurableFacts{}, status.Error(codes.FailedPrecondition, "stored request end result is invalid")
 	}
 	facts := requestEndDurableFacts{
-		RequestEndEventID:     stored.GetRequestEndEventId(),
-		InterruptToolResults:  append([]*bridgev1.RuntimeInterruptToolResult(nil), stored.GetInterruptToolResults()...),
-		PendingAttachmentJSON: append([]string(nil), stored.GetPendingAttachmentJson()...),
+		RequestEndEventID:    stored.GetRequestEndEventId(),
+		InterruptToolResults: append([]*bridgev1.RuntimeInterruptToolResult(nil), stored.GetInterruptToolResults()...),
 	}
 	switch disposition := stored.GetDisposition().(type) {
 	case *bridgev1.WriteRequestEndCommitted_Ordinary:
@@ -600,11 +597,6 @@ func validateRequestEndDurableFacts(facts requestEndDurableFacts) error {
 		}
 	default:
 		return status.Error(codes.FailedPrecondition, "stored request end result is invalid")
-	}
-	for _, attachment := range facts.PendingAttachmentJSON {
-		if !json.Valid([]byte(attachment)) {
-			return status.Error(codes.FailedPrecondition, "stored request end result is invalid")
-		}
 	}
 	for _, toolResult := range facts.InterruptToolResults {
 		if toolResult == nil || toolResult.GetToolUseEventId() == "" || toolResult.GetOutcome() == nil {

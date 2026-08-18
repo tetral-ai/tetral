@@ -69,16 +69,12 @@ jobs:
           # narrower context cannot resolve them.
           - image: tetral
             dockerfile: Dockerfile
-            build_args: ''
           - image: sandbox
             dockerfile: Dockerfile.sandbox
-            build_args: ''
           - image: gateway
             dockerfile: services/gateway/Dockerfile
-            build_args: ''
           - image: agent-runtime
             dockerfile: services/agent-runtime/Dockerfile
-            build_args: ''
     steps:
       - name: Checkout
         # actions/checkout@v6
@@ -105,7 +101,6 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          build-args: ${{ matrix.build_args }}
           push: true
           # No `latest`: a moving tag makes a deployment unreproducible, and the
           # manifests name an exact version.

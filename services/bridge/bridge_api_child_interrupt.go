@@ -576,7 +576,7 @@ func childInterruptOutcomeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 		code := "child_interrupt_delivery_failed"
 		outcome.ErrorCode = &code
 		return outcome, false, nil
-	case "queued", "delivering", "accepted", "parked":
+	case "queued", "delivering", "accepted":
 		return outcome, true, nil
 	default:
 		return nil, false, status.Error(codes.FailedPrecondition, "child interrupt inbox status is invalid")

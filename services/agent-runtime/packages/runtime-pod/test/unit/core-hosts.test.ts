@@ -2440,7 +2440,6 @@ function requestEndResult(envelope: SessionEventWriterRequestEndEnvelope) {
 		requestEndEventId: `evt_${envelope.writeId}`,
 		outcome: { type: "ordinary" as const },
 		interruptToolResults: [],
-		pendingAttachments: [],
 	};
 }
 

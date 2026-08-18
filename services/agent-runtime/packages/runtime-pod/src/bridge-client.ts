@@ -1361,13 +1361,9 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 								}
 							: undefined;
 			let interruptToolResults: readonly RuntimeInterruptToolResult[];
-			let pendingAttachments: readonly RuntimeProviderAttachment[];
 			try {
 				interruptToolResults = parseInterruptToolResults(
 					result.interruptToolResults,
-				);
-				pendingAttachments = parsePendingAttachmentJson(
-					result.pendingAttachmentJson,
 				);
 			} catch {
 				return eventWriterOperationSchemaFailure(
@@ -1393,7 +1389,6 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				requestEndEventId: result.requestEndEventId,
 				outcome,
 				interruptToolResults,
-				pendingAttachments,
 			};
 		} catch (error) {
 			const grpcCode =

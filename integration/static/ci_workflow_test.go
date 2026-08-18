@@ -73,8 +73,8 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	}
 	// A hosted runner starts empty, so each Go toolchain keys its cache on the
 	// repository's module file.
-	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 6 {
-		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 6", got)
+	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 8 {
+		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 8", got)
 	}
 	if strings.Count(text, "persist-credentials: false") != 12 {
 		t.Fatal("each engine-ci checkout must disable credential persistence")
@@ -449,10 +449,44 @@ func TestEngineCIWorkflowRunsLocalSandboxImageSmoke(t *testing.T) {
 	for _, token := range []string{
 		"runs-on: ubuntu-latest",
 		"persist-credentials: false",
+		"name: Helper privilege integration",
+		`sudo "$(command -v go)" test ./internal/sandbox/helper -run '^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$' -count=1 -v`,
 		"run: ./scripts/run-sandbox-local-image-smoke.sh",
 	} {
 		if !strings.Contains(job, token) {
 			t.Fatalf("sandbox-local-image-smoke job missing %q; job was:\n%s", token, job)
+		}
+	}
+}
+
+func TestSandboxSmokeUsesReleaseRecipeAndRegistersPublishedDaytonaImage(t *testing.T) {
+	engineRoot := finalArchitectureEngineRoot(t)
+	smokeBody, err := os.ReadFile(filepath.Join(engineRoot, "scripts", "run-sandbox-local-image-smoke.sh")) //nolint:gosec // Repository-local script.
+	if err != nil {
+		t.Fatalf("read local Sandbox smoke: %v", err)
+	}
+	if strings.Contains(string(smokeBody), "SANDBOX_HELPER_BASE_IMAGE") || strings.Contains(string(smokeBody), "--build-arg") {
+		t.Fatal("local Sandbox smoke substitutes a release Dockerfile build argument")
+	}
+	releaseBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-release.yml")) //nolint:gosec // Repository-local workflow.
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	if strings.Contains(string(releaseBody), "build_args:") || strings.Contains(string(releaseBody), "build-args:") {
+		t.Fatal("release workflow retains an empty build-argument channel")
+	}
+	ciBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")) //nolint:gosec // Repository-local workflow.
+	if err != nil {
+		t.Fatalf("read CI workflow: %v", err)
+	}
+	external := workflowJobForStaticTest(t, string(ciBody), "external-smoke:")
+	for _, token := range []string{
+		"TETRAL_DAYTONA_RELEASE_SMOKE_ARTIFACT_REF",
+		"-tags daytona_release_smoke",
+		"TestDaytonaPublishedImageProductionAdapterSmoke",
+	} {
+		if !strings.Contains(external, token) {
+			t.Fatalf("external-smoke missing Daytona release gate token %q", token)
 		}
 	}
 }
