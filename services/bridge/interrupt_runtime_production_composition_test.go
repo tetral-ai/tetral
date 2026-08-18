@@ -45,6 +45,37 @@ type interruptFollowerRuntimeServer struct {
 	calls atomic.Int32
 }
 
+type committingInterruptRuntimeSender struct {
+	*recordingRuntimeCommandSender
+	bridge *PostgreSQLBridgeAPIStore
+}
+
+func (s *committingInterruptRuntimeSender) Interrupt(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
+	s.targets = append(s.targets, target)
+	s.requests = append(s.requests, request)
+	lease := request.GetInterruptLeaseRef()
+	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
+		Scope: bridgeAPIScope(
+			request.GetSessionId(), request.GetSessionThreadId(), request.GetBindingId(),
+			request.GetBindingGeneration(), request.GetTargetPodUid(),
+		),
+		RuntimeInputId: request.GetRuntimeInputId(),
+		InterruptLeaseRef: &bridgev1.InterruptLeaseRef{
+			JobId: lease.GetJobId(), LeaseToken: lease.GetLeaseToken(),
+			PartitionKey: lease.GetPartitionKey(), DedupeKey: lease.GetDedupeKey(),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if committed.GetCommitted().GetInterrupt() == nil {
+		return nil, status.Error(codes.FailedPrecondition, "fixture interrupt closeout was not committed")
+	}
+	return &agentruntimev1.InterruptResponse{Outcome: &agentruntimev1.InterruptResponse_Accepted{
+		Accepted: &agentruntimev1.InterruptAccepted{},
+	}}, nil
+}
+
 func (s *interruptFollowerRuntimeServer) AcceptInput(context.Context, *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error) {
 	switch s.calls.Add(1) {
 	case 2:
@@ -196,6 +227,248 @@ func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *tes
 		rejectionInbox != "cancelled" || rejectionQueue != queue.StatusCancelled {
 		t.Fatalf("terminal follower custody = interrupt:%s/%s retry:%s/%s rejection:%s/%s",
 			interruptInbox, interruptQueue, retryInbox, retryQueue, rejectionInbox, rejectionQueue)
+	}
+}
+
+func TestPostgreSQLAcceptedMessageQueueResidueDoesNotFreezeInterrupt(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_accepted_residue"
+		threadID  = "thr_interrupt_accepted_residue"
+		bindingID = "bind_interrupt_accepted_residue"
+		podUID    = "pod_interrupt_accepted_residue"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+
+	client := dbconnect.NewClientForTesting(runtime)
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	messageBirth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID,
+		"interrupt-accepted-residue-message", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+			Type:    sessionevent.EventTypeUserMessage,
+			Content: []sessionevent.ContentBlock{{Type: sessionevent.ContentBlockTypeText, Text: "accepted before stop"}},
+		}}})
+	if err != nil || len(messageBirth.Data) != 1 {
+		t.Fatalf("birth accepted-residue message = %#v/%v", messageBirth, err)
+	}
+	var messageID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND event_ids_json::jsonb ? $2`, sessionID, messageBirth.Data[0].ID).
+		Scan(&messageID); err != nil {
+		t.Fatalf("read accepted-residue message identity: %v", err)
+	}
+
+	queueStore := queue.NewPostgreSQLStore(client)
+	messageLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "accepted-residue-delivery",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	messageJob, err := DecodeRuntimeJob(queueJobProto(messageLease))
+	if err != nil {
+		t.Fatalf("decode accepted-residue message lease: %v", err)
+	}
+	apiStore := NewPostgreSQLBridgeAPIStore(client)
+	apiStore.RuntimeBindingTokenHMACKey = []byte("interrupt-accepted-residue-key")
+	sender := &committingInterruptRuntimeSender{
+		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
+		bridge:                        apiStore,
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "engine", PodName: "runtime-accepted-residue", PodUID: podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	direct := RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}
+	if result, err := direct.DeliverRuntimeJob(context.Background(), messageJob); err != nil || result.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("deliver accepted-residue message = %+v/%v", result, err)
+	}
+	var messageInbox, messageQueue string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2)`, messageID, messageLease.ID).
+		Scan(&messageInbox, &messageQueue); err != nil {
+		t.Fatalf("read accepted message before Queue reclaim: %v", err)
+	}
+	if messageInbox != "accepted" || messageQueue != queue.StatusLeased || len(sender.requests) != 1 {
+		t.Fatalf("pre-reclaim accepted message = Inbox:%s Queue:%s Runtime calls:%d", messageInbox, messageQueue, len(sender.requests))
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET leased_until=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND id=$1`, messageLease.ID); err != nil {
+		t.Fatalf("expire accepted message Queue ACK window: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim accepted message Queue residue = %d/%v; want 1/nil", reclaimed, err)
+	}
+
+	interruptBirth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID,
+		"interrupt-accepted-residue-stop", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}})
+	if err != nil || len(interruptBirth.Data) != 1 {
+		t.Fatalf("birth interrupt behind accepted Queue residue = %#v/%v", interruptBirth, err)
+	}
+	var interruptID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND event_ids_json::jsonb ? $2`, sessionID, interruptBirth.Data[0].ID).
+		Scan(&interruptID); err != nil {
+		t.Fatalf("read accepted-residue interrupt identity: %v", err)
+	}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: direct,
+		Config: JobRunnerConfig{LeaseOwner: "accepted-residue-closeout", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver interrupt ahead of accepted Queue residue = active:%t err:%v", active, err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("settle accepted Queue residue by accepted replay = active:%t err:%v", active, err)
+	}
+	var interruptInbox, interruptQueue string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$4)`,
+		interruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), messageID, messageLease.ID).
+		Scan(&interruptInbox, &interruptQueue, &messageInbox, &messageQueue); err != nil {
+		t.Fatalf("read accepted-residue terminal custody: %v", err)
+	}
+	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
+		messageInbox != "accepted" || messageQueue != queue.StatusAcknowledged || len(sender.requests) != 2 {
+		t.Fatalf("accepted-residue terminal custody = interrupt:%s/%s message:%s/%s Runtime calls:%d",
+			interruptInbox, interruptQueue, messageInbox, messageQueue, len(sender.requests))
+	}
+	if _, ok := sender.requests[0].(*agentruntimev1.AcceptInputRequest); !ok {
+		t.Fatalf("first Runtime call = %T; want AcceptInput", sender.requests[0])
+	}
+	if _, ok := sender.requests[1].(*agentruntimev1.InterruptRequest); !ok {
+		t.Fatalf("second Runtime call = %T; want Interrupt", sender.requests[1])
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || active {
+		t.Fatalf("accepted-residue partition after replay = active:%t err:%v; want drained", active, err)
+	}
+}
+
+func TestPostgreSQLInterruptBarrierFollowsSessionQueueOrderAcrossThreads(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_queue_order"
+		mainID    = "thr_interrupt_queue_order_main"
+		childID   = "thr_interrupt_queue_order_child"
+		bindingID = "bind_interrupt_queue_order"
+		podUID    = "pod_interrupt_queue_order"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_interrupt_queue_order_child_history", 9,
+		"session.status", `{"type":"session.status"}`)
+
+	client := dbconnect.NewClientForTesting(runtime)
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	childBirth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID,
+		"interrupt-queue-order-child", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+			Type: sessionevent.EventTypeUserInterrupt, SessionThreadID: childID,
+		}}})
+	if err != nil || len(childBirth.Data) != 1 {
+		t.Fatalf("birth first explicit child interrupt = %#v/%v", childBirth, err)
+	}
+	mainBirth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID,
+		"interrupt-queue-order-main", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}})
+	if err != nil || len(mainBirth.Data) != 1 {
+		t.Fatalf("birth second bare main interrupt = %#v/%v", mainBirth, err)
+	}
+	var childInterruptID, mainInterruptID string
+	var childSequence, mainSequence, childQueueSequence, mainQueueSequence int64
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		child.runtime_input_id, main.runtime_input_id, child.sequence_to, main.sequence_to,
+		child_job.queue_partition_sequence, main_job.queue_partition_sequence
+		FROM session_runtime_inbox child
+		JOIN session_runtime_inbox main ON main.workspace_id=child.workspace_id AND main.session_id=child.session_id
+		JOIN queue_jobs child_job ON child_job.workspace_id=child.workspace_id
+		 AND child_job.dedupe_key='runtime_input:' || child.workspace_id || ':' || child.session_id || ':' || child.runtime_input_id
+		JOIN queue_jobs main_job ON main_job.workspace_id=main.workspace_id
+		 AND main_job.dedupe_key='runtime_input:' || main.workspace_id || ':' || main.session_id || ':' || main.runtime_input_id
+		WHERE child.workspace_id='default' AND child.session_id=$1
+		 AND child.event_ids_json::jsonb ? $2 AND main.event_ids_json::jsonb ? $3`,
+		sessionID, childBirth.Data[0].ID, mainBirth.Data[0].ID).
+		Scan(&childInterruptID, &mainInterruptID, &childSequence, &mainSequence, &childQueueSequence, &mainQueueSequence); err != nil {
+		t.Fatalf("read cross-thread interrupt order: %v", err)
+	}
+	if childSequence <= mainSequence || childQueueSequence >= mainQueueSequence {
+		t.Fatalf("interrupt order fixture = thread sequences child/main %d/%d, Queue sequences child/main %d/%d; want inverted",
+			childSequence, mainSequence, childQueueSequence, mainQueueSequence)
+	}
+
+	apiStore := NewPostgreSQLBridgeAPIStore(client)
+	apiStore.RuntimeBindingTokenHMACKey = []byte("interrupt-queue-order-key")
+	sender := &committingInterruptRuntimeSender{
+		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
+		bridge:                        apiStore,
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "engine", PodName: "runtime-interrupt-queue-order", PodUID: podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:    JobRunnerConfig{LeaseOwner: "interrupt-queue-order", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("process first-born child interrupt = active:%t err:%v", active, err)
+	}
+	if len(sender.requests) != 1 {
+		t.Fatalf("first Runtime interrupt = %#v; want child %s", sender.requests, childInterruptID)
+	}
+	firstInterrupt, ok := sender.requests[0].(*agentruntimev1.InterruptRequest)
+	if !ok || firstInterrupt.GetRuntimeInputId() != childInterruptID {
+		t.Fatalf("first Runtime interrupt = %#v; want child %s", sender.requests[0], childInterruptID)
+	}
+	var childInbox, childQueue, mainInbox, mainQueue string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4)`,
+		childInterruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, childInterruptID),
+		mainInterruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, mainInterruptID)).
+		Scan(&childInbox, &childQueue, &mainInbox, &mainQueue); err != nil {
+		t.Fatalf("read custody after child interrupt: %v", err)
+	}
+	if childInbox != "committed" || childQueue != queue.StatusAcknowledged || mainInbox != "queued" || mainQueue != queue.StatusPending {
+		t.Fatalf("custody after child interrupt = child:%s/%s main:%s/%s", childInbox, childQueue, mainInbox, mainQueue)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("process second-born main interrupt = active:%t err:%v", active, err)
+	}
+	if len(sender.requests) != 2 {
+		t.Fatalf("second Runtime interrupt = %#v; want main %s", sender.requests, mainInterruptID)
+	}
+	secondInterrupt, ok := sender.requests[1].(*agentruntimev1.InterruptRequest)
+	if !ok || secondInterrupt.GetRuntimeInputId() != mainInterruptID {
+		t.Fatalf("second Runtime interrupt = %#v; want main %s", sender.requests[1], mainInterruptID)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4)`,
+		childInterruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, childInterruptID),
+		mainInterruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, mainInterruptID)).
+		Scan(&childInbox, &childQueue, &mainInbox, &mainQueue); err != nil {
+		t.Fatalf("read terminal ordered interrupt custody: %v", err)
+	}
+	if childInbox != "committed" || childQueue != queue.StatusAcknowledged || mainInbox != "committed" || mainQueue != queue.StatusAcknowledged {
+		t.Fatalf("terminal ordered interrupt custody = child:%s/%s main:%s/%s", childInbox, childQueue, mainInbox, mainQueue)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || active {
+		t.Fatalf("ordered interrupt partition after closeout = active:%t err:%v; want drained", active, err)
 	}
 }
 

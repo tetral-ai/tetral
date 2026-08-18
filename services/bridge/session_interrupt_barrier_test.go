@@ -113,7 +113,15 @@ func TestPostgreSQLSupersededInterruptSettlesItsExactQueueLease(t *testing.T) {
 		RuntimeInputID: staleID, InputKind: "interrupt_control", EventIDs: []string{"evt_superseded_interrupt_stale"}, SequenceFrom: 2, SequenceTo: 2,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, staleJob)
-	payload, err := json.Marshal(map[string]any{
+	activePayload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": activeID, "event_ids": []string{"evt_superseded_interrupt_active"},
+		"sequence_from": 1, "sequence_to": 1, "input_kind": "interrupt_control",
+	})
+	if err != nil {
+		t.Fatalf("marshal active interrupt payload: %v", err)
+	}
+	stalePayload, err := json.Marshal(map[string]any{
 		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
 		"runtime_input_id": staleID, "event_ids": []string{"evt_superseded_interrupt_stale"},
 		"sequence_from": 2, "sequence_to": 2, "input_kind": "interrupt_control",
@@ -123,24 +131,35 @@ func TestPostgreSQLSupersededInterruptSettlesItsExactQueueLease(t *testing.T) {
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	now := time.Now().UTC()
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, activeID),
+		PayloadVersion: 1, PayloadJSON: activePayload, Priority: 100, Now: now,
+	}); err != nil {
+		t.Fatalf("enqueue active interrupt: %v", err)
+	}
 	created, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
 		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
 		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
 		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, staleID),
-		PayloadVersion: 1, PayloadJSON: payload, Priority: 100, Now: now,
+		PayloadVersion: 1, PayloadJSON: stalePayload, Priority: 100, Now: now.Add(time.Microsecond),
 	})
 	if err != nil {
 		t.Fatalf("enqueue stale interrupt: %v", err)
 	}
-	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
-		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "stale-interrupt-owner",
-		MaxJobs: 1, LeaseDuration: time.Minute, Now: now,
-	})
-	if err != nil || len(leased) != 1 {
-		t.Fatalf("lease stale interrupt = %#v/%v", leased, err)
+	leaseToken, err := queue.NewLeaseToken()
+	if err != nil {
+		t.Fatalf("create superseded interrupt lease token: %v", err)
 	}
-	staleJob.JobID, staleJob.LeaseToken, staleJob.Kind = leased[0].ID, leased[0].LeaseToken, leased[0].Kind
-	staleJob.PartitionKey, staleJob.DedupeKey = leased[0].PartitionKey, leased[0].DedupeKey
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET status='leased', leased_by='stale-interrupt-owner', lease_token=$2,
+		    leased_at=clock_timestamp(), leased_until=clock_timestamp()+interval '1 minute', updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND id=$1`, created.ID, leaseToken); err != nil {
+		t.Fatalf("install superseded interrupt lease: %v", err)
+	}
+	staleJob.JobID, staleJob.LeaseToken, staleJob.Kind = created.ID, leaseToken, created.Kind
+	staleJob.PartitionKey, staleJob.DedupeKey = created.PartitionKey, created.DedupeKey
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	plan, err := store.PrepareRuntimeCommand(context.Background(), staleJob)
 	if err != nil || !plan.StaleAccepted || !plan.QueueLeaseSettled {

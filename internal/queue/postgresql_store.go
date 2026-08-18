@@ -1222,9 +1222,11 @@ func AssertExactLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ExactLeas
 }
 
 // CancelInterruptFencedMessagesTx cancels pending message notifications only
-// while the complete interrupt Queue identity still owns a live lease. The
-// exact job row remains locked through the cancellation, so lease reclaim and
-// follower mutation have one durable winner.
+// while the complete interrupt Queue identity still owns a live lease. Queue
+// candidates are defined by the same cancellable Inbox identity join used by
+// both updates; accepted custody is delivery residue, not a follower. The exact
+// rows remain locked through cancellation, so lease reclaim and follower
+// mutation have one durable winner.
 func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, request InterruptFenceRequest) (bool, int, error) {
 	if request.Lease.Kind != KindRuntimeInput {
 		return false, 0, &ValidationError{Message: "interrupt fence lease kind must be runtime_input"}
@@ -1272,6 +1274,13 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 		   SELECT queue.id AS job_id,
 		          queue.payload_json::jsonb ->> 'runtime_input_id' AS runtime_input_id
 		     FROM queue_jobs queue
+		     JOIN session_runtime_inbox inbox
+		       ON inbox.workspace_id = queue.workspace_id
+		      AND inbox.session_id = $6
+		      AND inbox.session_thread_id = $4
+		      AND inbox.runtime_input_id = queue.payload_json::jsonb ->> 'runtime_input_id'
+		      AND inbox.input_kind IN ('messages', 'rejection')
+		      AND inbox.status IN ('queued', 'delivering')
 		    WHERE queue.workspace_id = $1
 		      AND queue.partition_key = $2
 		      AND queue.status = 'pending'
@@ -1279,18 +1288,10 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 		      AND queue.payload_json::jsonb ->> 'session_thread_id' = $4
 		      AND queue.payload_json::jsonb ->> 'input_kind' = 'messages'
 		      AND (queue.payload_json::jsonb ->> 'sequence_to')::bigint < $5
-		    FOR UPDATE
+		    FOR UPDATE OF queue, inbox
 		), follower_identity AS MATERIALIZED (
-		   SELECT candidate.job_id, candidate.runtime_input_id
-		     FROM candidate_queue candidate
-		     JOIN session_runtime_inbox inbox
-		       ON inbox.workspace_id = $1
-		      AND inbox.session_id = $6
-		      AND inbox.session_thread_id = $4
-		      AND inbox.runtime_input_id = candidate.runtime_input_id
-		      AND inbox.input_kind IN ('messages', 'rejection')
-		      AND inbox.status IN ('queued', 'delivering')
-		    FOR UPDATE OF inbox
+		   SELECT job_id, runtime_input_id
+		     FROM candidate_queue
 		), cancelled_queue AS (
 		   UPDATE queue_jobs queue
 		      SET status = 'cancelled',

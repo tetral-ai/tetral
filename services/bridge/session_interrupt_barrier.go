@@ -174,6 +174,8 @@ func activeSessionInterruptBarrierTx(
 	workspaceID string,
 	sessionID string,
 ) (sessionInterruptBarrier, bool, error) {
+	// Queue partition sequence is the Session-wide interrupt election order.
+	// Inbox sequence_to is Thread-local and cannot order custody across Threads.
 	rows, err := tx.Query(ctx,
 		`SELECT inbox.runtime_input_id,
 		        inbox.session_thread_id,
@@ -191,10 +193,15 @@ func activeSessionInterruptBarrierTx(
 		             AND operation.receipt_json <> ''
 		        ) AS has_receipt
 		   FROM session_runtime_inbox inbox
+		   LEFT JOIN queue_jobs queue
+		     ON queue.workspace_id = inbox.workspace_id
+		    AND queue.kind = 'runtime_input'
+		    AND queue.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		    AND queue.status IN ('pending', 'leased')
 		  WHERE inbox.workspace_id = $1
 		    AND inbox.session_id = $2
 		    AND inbox.input_kind = 'interrupt_control'
-		  ORDER BY inbox.sequence_to NULLS LAST, inbox.created_at, inbox.runtime_input_id
+		  ORDER BY queue.queue_partition_sequence NULLS LAST, inbox.created_at, inbox.runtime_input_id
 		  FOR UPDATE OF inbox`,
 		workspaceID,
 		sessionID,
