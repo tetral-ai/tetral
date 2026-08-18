@@ -117,6 +117,71 @@ func TestBridgeAPIServerKeepsStructuralFailureOutOfStaleUnion(t *testing.T) {
 	}
 }
 
+func TestBridgeAPIServerMapsInputSettlementScopeSupersessionToTypedStale(t *testing.T) {
+	for _, rpc := range []string{"commit_inputs", "commit_task_notification_result"} {
+		for _, staleKind := range []string{"binding_generation", "pod_uid", "session_deleted"} {
+			t.Run(rpc+"/"+staleKind, func(t *testing.T) {
+				fixture := newCloseoutSentinelFixture(t, rpc+"_"+staleKind)
+				scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+				inputID := "rin_" + fixture.sessionID
+				if rpc == "commit_inputs" {
+					seedBridgeAPIEvent(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, "evt_"+fixture.sessionID, 1, "user.message", `{"content":[{"type":"text","text":"stale"}]}`)
+					seedBridgeAPIRuntimeInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, "messages",
+						`["evt_`+fixture.sessionID+`"]`, "accepted", fixture.bindingID, fixture.podUID, 1, 1)
+				} else {
+					inputID = "task_notification:task_" + fixture.sessionID
+					seedBridgeAPITaskNotificationInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, fixture.bindingID, fixture.podUID)
+				}
+				switch staleKind {
+				case "binding_generation":
+					scope.Binding.BindingGeneration++
+				case "pod_uid":
+					scope.Binding.TargetPodUid = "pod_superseded"
+				case "session_deleted":
+					if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted'
+						WHERE workspace_id='default' AND id=$1`, fixture.sessionID); err != nil {
+						t.Fatalf("delete superseded Session: %v", err)
+					}
+				}
+				if rpc == "commit_inputs" {
+					response, err := fixture.server.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: inputID})
+					if err != nil || response.GetStale() == nil {
+						t.Fatalf("CommitInputs superseded scope = %#v/%v; want typed stale", response, err)
+					}
+				} else {
+					response, err := fixture.server.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{Scope: scope, RuntimeInputId: inputID})
+					if err != nil || response.GetStale() == nil {
+						t.Fatalf("CommitTaskNotificationResult superseded scope = %#v/%v; want typed stale", response, err)
+					}
+				}
+				var inboxStatus string
+				var operations int
+				if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+					(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+					(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`,
+					fixture.sessionID, inputID,
+				).Scan(&inboxStatus, &operations); err != nil {
+					t.Fatalf("read typed stale input facts: %v", err)
+				}
+				if inboxStatus != "accepted" || operations != 0 {
+					t.Fatalf("typed stale mutated input facts = Inbox %s operations %d", inboxStatus, operations)
+				}
+			})
+		}
+	}
+}
+
+func TestBridgeAPIServerDoesNotClassifyMalformedInputSettlementsAsStale(t *testing.T) {
+	fixture := newCloseoutSentinelFixture(t, "input_structural_control")
+	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 2, fixture.podUID)
+	if response, err := fixture.server.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{Scope: scope}); response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("malformed CommitInputs = %#v/%v; want InvalidArgument", response, err)
+	}
+	if response, err := fixture.server.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{Scope: scope}); response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("malformed CommitTaskNotificationResult = %#v/%v; want InvalidArgument", response, err)
+	}
+}
+
 func TestCloseoutTerminalChildSentinel(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "terminal_child")
 	client := dbconnect.NewClientForTesting(fixture.runtime)

@@ -104,16 +104,12 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return err
 		}
 		evidence.Kind = "transaction"
-		operationSourceKind, err := writeEventOperationSourceKindTx(ctx, tx, request.GetScope(), request.GetEventType())
-		if err != nil {
-			return err
-		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
 			request.GetScope(),
 			bridgeOpWriteEvent,
-			operationSourceKind,
+			bridgeOpWriteEvent,
 			key,
 		); err != nil {
 			return err
@@ -159,9 +155,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 				return err
 			}
 		}
-		eventType := operationSourceKind
+		eventType := writeEventDurableEventType(request.GetEventType(), threadScope)
 		eventPayloadJSON := payloadJSON
-		if operationSourceKind != request.GetEventType() {
+		if eventType != request.GetEventType() {
 			eventPayloadJSON, err = threadStatusPayloadJSON(eventType, request.GetScope(), threadScope, "")
 			if err != nil {
 				return err
@@ -293,7 +289,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			tx,
 			request.GetScope(),
 			bridgeOpWriteEvent,
-			operationSourceKind,
+			bridgeOpWriteEvent,
 			key,
 			declarationDigest,
 			resultJSON,
@@ -510,34 +506,11 @@ func verifyModelToolCallIDAvailableTx(
 	return nil
 }
 
-func writeEventOperationSourceKindTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	eventType string,
-) (string, error) {
-	if eventType != "session.status_running" {
-		return eventType, nil
+func writeEventDurableEventType(eventType string, threadScope threadMutationScope) string {
+	if eventType == "session.status_running" && threadScope.role != "main" {
+		return "session.thread_status_running"
 	}
-	var role string
-	if err := tx.QueryRow(ctx,
-		`SELECT role
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND id = $3`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&role); dbconnect.IsNoRows(err) {
-		return "", closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
-	} else if err != nil {
-		return "", err
-	}
-	if role != "main" {
-		return "session.thread_status_running", nil
-	}
-	return eventType, nil
+	return eventType
 }
 
 type stagedMCPResultIdentity struct {

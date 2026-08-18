@@ -86,7 +86,11 @@ func (s BridgeAPIServer) CommitInputs(ctx context.Context, request *bridgev1.Com
 	if err != nil {
 		return nil, err
 	}
-	return store.CommitInputs(ctx, request)
+	response, err := store.CommitInputs(ctx, request)
+	if isScopeSupersededError(err) {
+		return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Stale{Stale: &bridgev1.CommitInputsStale{}}}, nil
+	}
+	return response, err
 }
 
 func (s BridgeAPIServer) CommitTaskNotificationResult(ctx context.Context, request *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error) {
@@ -94,7 +98,11 @@ func (s BridgeAPIServer) CommitTaskNotificationResult(ctx context.Context, reque
 	if err != nil {
 		return nil, err
 	}
-	return store.CommitTaskNotificationResult(ctx, request)
+	response, err := store.CommitTaskNotificationResult(ctx, request)
+	if isScopeSupersededError(err) {
+		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Stale{Stale: &bridgev1.CommitTaskNotificationResultStale{}}}, nil
+	}
+	return response, err
 }
 
 func (s BridgeAPIServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {

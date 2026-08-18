@@ -485,6 +485,37 @@ describe("Bridge operation-specific Runtime adapters", () => {
 	test("keeps barrier-stale distinct from ordinary stale custody", async () => {
 		const bridge = new TypedBridge();
 		const committer = new BridgeAPIControlInputCommitter(options(bridge));
+		bridge.commitInputsResponse = { stale: {} };
+		await expect(
+			committer.commitControlInput({
+				scope: controlScope("rin_stale_control"),
+				inputKind: "tool_confirmation",
+			}),
+		).resolves.toEqual({ ok: true, type: "stale" });
+
+		const loader = new BridgeAPIContextLoader(options(bridge));
+		await expect(
+			loader.commitAcceptedInput({
+				...controlScope("rin_stale_message"),
+				inputOrder: 1,
+				kind: "messages",
+				contentJson: '{"messages":[]}',
+			}),
+		).resolves.toEqual({ type: "stale_custody" });
+
+		bridge.taskNotificationResponse = { stale: {} };
+		await expect(
+			loader.commitAcceptedInput({
+				...controlScope("rin_stale_task"),
+				inputOrder: 2,
+				kind: "task_notification",
+				taskId: "task_stale",
+				sourceToolUseEventId: "evt_tool_stale",
+				status: "completed",
+				notificationJson: '{"status":"completed"}',
+			}),
+		).resolves.toEqual({ type: "stale_custody" });
+
 		bridge.commitInputsResponse = { barrierStale: {} };
 		await expect(
 			committer.commitControlInput({
@@ -493,7 +524,6 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			}),
 		).resolves.toEqual({ ok: true, type: "barrier_stale" });
 
-		const loader = new BridgeAPIContextLoader(options(bridge));
 		await expect(
 			loader.commitAcceptedInput({
 				...controlScope("rin_barrier_message"),

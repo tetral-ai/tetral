@@ -115,6 +115,71 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLWriteEventUsesOneOperationNamespaceWithoutChangingChildLowering(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_write_event_namespace"
+		mainID    = "thr_write_event_namespace_main"
+		childID   = "thr_write_event_namespace_child"
+		bindingID = "bind_write_event_namespace"
+		podUID    = "pod_write_event_namespace"
+		writeID   = "rwrite_write_event_namespace"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	scope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
+	request := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: writeID, EventType: "session.status_running",
+		PayloadJson: `{"type":"session.status_running"}`,
+	}
+	committed, err := store.WriteEvent(context.Background(), request)
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("child running WriteEvent = %#v/%v; want committed", committed, err)
+	}
+	replay, err := store.WriteEvent(context.Background(), request)
+	if err != nil || replay.GetDuplicate().GetEventId() != committed.GetCommitted().GetEventId() {
+		t.Fatalf("same WriteEvent replay = %#v/%v; want one stored receipt", replay, err)
+	}
+	crossType := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: writeID, EventType: "session.error",
+		PayloadJson: `{"type":"session.error","error":{"type":"unknown_error","message":"conflict","retry_status":{"type":"terminal"}}}`,
+	}
+	if response, err := store.WriteEvent(context.Background(), crossType); response != nil || status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("cross-type WriteEvent reuse = %#v/%v; want idempotency conflict", response, err)
+	}
+	crossPayload := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: writeID, EventType: "session.status_running",
+		PayloadJson: `{"type":"session.status_running","unexpected":"conflict"}`,
+	}
+	if response, err := store.WriteEvent(context.Background(), crossPayload); response != nil || status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("cross-payload WriteEvent reuse = %#v/%v; want idempotency conflict", response, err)
+	}
+
+	var operationCount, eventCount int
+	var operationSource, eventType, payloadJSON, visibility, childStatus string
+	var sessionVisible bool
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='write_event' AND idempotency_key=$3),
+		(SELECT source_kind FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='write_event' AND idempotency_key=$3),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND runtime_write_id=$3),
+		(SELECT type FROM session_events WHERE workspace_id='default' AND session_id=$1 AND runtime_write_id=$3),
+		(SELECT payload_json FROM session_events WHERE workspace_id='default' AND session_id=$1 AND runtime_write_id=$3),
+		(SELECT visibility FROM session_events WHERE workspace_id='default' AND session_id=$1 AND runtime_write_id=$3),
+		(SELECT session_visible FROM session_events WHERE workspace_id='default' AND session_id=$1 AND runtime_write_id=$3),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2)`,
+		sessionID, childID, writeID,
+	).Scan(&operationCount, &operationSource, &eventCount, &eventType, &payloadJSON, &visibility, &sessionVisible, &childStatus); err != nil {
+		t.Fatalf("read WriteEvent namespace and child lowering facts: %v", err)
+	}
+	if operationCount != 1 || operationSource != "write_event" || eventCount != 1 || eventType != "session.thread_status_running" ||
+		!strings.Contains(payloadJSON, `"type":"session.thread_status_running"`) || visibility != "public" || !sessionVisible || childStatus != "running" {
+		t.Fatalf("WriteEvent namespace/lowering = operations %d/%s events %d/%s payload %s visibility %s/%t child %s",
+			operationCount, operationSource, eventCount, eventType, payloadJSON, visibility, sessionVisible, childStatus)
+	}
+}
+
 func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleConsumption(t *testing.T) {
 	for _, testCase := range []struct {
 		name      string
