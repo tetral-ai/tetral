@@ -110,20 +110,21 @@ const (
 )
 
 type RuntimeCommandPlan struct {
-	StaleAccepted     bool
-	SettledAccepted   bool
-	QueueLeaseSettled bool
-	CleanupTargetGone bool
-	Target            RuntimePodTarget
-	AttemptedBinding  RuntimeAttemptedBinding
-	AcceptInput       *agentruntimev1.AcceptInputRequest
-	AcceptAgentMail   *agentruntimev1.AcceptAgentMailRequest
-	AcceptTask        *agentruntimev1.AcceptTaskNotificationRequest
-	Interrupt         *agentruntimev1.InterruptRequest
-	ToolConfirmation  *agentruntimev1.ResolveToolConfirmationRequest
-	RuntimeConfig     *agentruntimev1.ApplyRuntimeConfigRequest
-	CleanupSession    *agentruntimev1.CleanupSessionRequest
-	TaskNotification  *RuntimeTaskNotificationPlan
+	StaleAccepted         bool
+	DeliveryAuthorityLost bool
+	SettledAccepted       bool
+	QueueLeaseSettled     bool
+	CleanupTargetGone     bool
+	Target                RuntimePodTarget
+	AttemptedBinding      RuntimeAttemptedBinding
+	AcceptInput           *agentruntimev1.AcceptInputRequest
+	AcceptAgentMail       *agentruntimev1.AcceptAgentMailRequest
+	AcceptTask            *agentruntimev1.AcceptTaskNotificationRequest
+	Interrupt             *agentruntimev1.InterruptRequest
+	ToolConfirmation      *agentruntimev1.ResolveToolConfirmationRequest
+	RuntimeConfig         *agentruntimev1.ApplyRuntimeConfigRequest
+	CleanupSession        *agentruntimev1.CleanupSessionRequest
+	TaskNotification      *RuntimeTaskNotificationPlan
 }
 
 type RuntimeAttemptedBinding struct {
@@ -399,7 +400,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	}
 	if plan.StaleAccepted {
 		status := RuntimeDeliveryDuplicate
-		if job.InputKind == "interrupt_control" && !plan.QueueLeaseSettled {
+		if plan.DeliveryAuthorityLost {
 			status = RuntimeDeliveryAuthorityLost
 		}
 		return RuntimeDeliveryResult{Status: status, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
@@ -673,7 +674,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 					return err
 				}
 				if !authority.Active {
-					plan = RuntimeCommandPlan{StaleAccepted: true, QueueLeaseSettled: authority.QueueLeaseSettled}
+					plan = RuntimeCommandPlan{
+						StaleAccepted:         true,
+						DeliveryAuthorityLost: !authority.QueueLeaseSettled,
+						QueueLeaseSettled:     authority.QueueLeaseSettled,
+					}
 					return nil
 				}
 			}
