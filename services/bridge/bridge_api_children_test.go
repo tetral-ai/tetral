@@ -598,6 +598,50 @@ func TestPostgreSQLAdmitApprovalReviewInputSerializesConcurrentReplayWithoutQueu
 	}
 }
 
+func TestPostgreSQLAdmitApprovalReviewInputResolvesCommittedReplayBeforeInterruptBarrier(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID  = "sesn_reviewer_admission_barrier_replay"
+		parentID   = "thr_reviewer_admission_barrier_parent"
+		reviewerID = "thr_reviewer_admission_barrier_target"
+		conflictID = "thr_reviewer_admission_barrier_conflict"
+		reviewID   = "arvw_reviewer_admission_barrier_replay"
+		bindingID  = "bind_reviewer_admission_barrier_replay"
+		podUID     = "pod_reviewer_admission_barrier_replay"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	request := &bridgev1.AdmitApprovalReviewInputRequest{
+		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
+	}
+
+	committed, err := store.AdmitApprovalReviewInput(context.Background(), request)
+	if err != nil || committed.GetCommitted().GetRuntimeInputId() == "" {
+		t.Fatalf("initial Reviewer admission = %#v/%v; want committed", committed, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, created_at, updated_at
+	) VALUES ('default', $1, $2, 'rin_reviewer_admission_barrier_interrupt', 'interrupt_control',
+		'[]', 1, 1, 'queued', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, sessionID, parentID); err != nil {
+		t.Fatalf("seed interrupt barrier after Reviewer admission: %v", err)
+	}
+
+	replay, err := store.AdmitApprovalReviewInput(context.Background(), request)
+	if err != nil || replay.GetDuplicate().GetRuntimeInputId() != committed.GetCommitted().GetRuntimeInputId() {
+		t.Fatalf("committed Reviewer admission replay behind barrier = %#v/%v; want duplicate %q",
+			replay, err, committed.GetCommitted().GetRuntimeInputId())
+	}
+	conflictRequest := &bridgev1.AdmitApprovalReviewInputRequest{
+		Scope: request.GetScope(), ReviewerThreadId: conflictID, ReviewId: reviewID,
+	}
+	if conflict, err := store.AdmitApprovalReviewInput(context.Background(), conflictRequest); status.Code(err) != codes.AlreadyExists || conflict != nil {
+		t.Fatalf("conflicting Reviewer admission replay behind barrier = %#v/%v; want AlreadyExists with no receipt", conflict, err)
+	}
+}
+
 func TestPostgreSQLAdmitApprovalReviewInputRejectsInterruptFirstWithoutCustody(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

@@ -202,7 +202,9 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 // AdmitApprovalReviewInput creates the synchronous Inbox authority consumed by
 // one hot reviewer execution. Review text remains Runtime-owned and arrives
 // later through CommitInputs; this operation owns only durable target,
-// idempotency, current binding, and accepted custody.
+// idempotency, current binding, and accepted custody. Caller and scope
+// authority are checked first, then an exact active custody replay is resolved
+// before a newly requested admission is tested against the Session barrier.
 func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context, request *bridgev1.AdmitApprovalReviewInputRequest) (response *bridgev1.AdmitApprovalReviewInputResponse, resultErr error) {
 	phase := "validate"
 	defer func() {
@@ -223,6 +225,24 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		var existingSessionID, existingReviewerThreadID, existingInputKind, existingStatus, existingBindingID, existingPodUID string
+		var existingBindingGeneration int64
+		err := tx.QueryRow(ctx, `SELECT session_id,session_thread_id,input_kind,status,binding_id,binding_generation,target_pod_uid
+			FROM session_runtime_inbox WHERE workspace_id=$1 AND runtime_input_id=$2 FOR UPDATE`,
+			request.GetScope().GetWorkspaceId(), runtimeInputID,
+		).Scan(&existingSessionID, &existingReviewerThreadID, &existingInputKind, &existingStatus, &existingBindingID, &existingBindingGeneration, &existingPodUID)
+		if err == nil {
+			if existingSessionID != request.GetScope().GetSessionId() || existingReviewerThreadID != request.GetReviewerThreadId() ||
+				existingInputKind != "approval_review" || existingBindingID != request.GetScope().GetBinding().GetBindingId() ||
+				existingBindingGeneration != request.GetScope().GetBinding().GetBindingGeneration() || existingPodUID != request.GetScope().GetBinding().GetTargetPodUid() {
+				return status.Error(codes.AlreadyExists, "approval review admission idempotency conflict")
+			}
+			if existingStatus == "accepted" || existingStatus == "committed" {
+				return nil
+			}
+		} else if !dbconnect.IsNoRows(err) {
 			return err
 		}
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {

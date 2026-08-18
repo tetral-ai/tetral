@@ -188,52 +188,6 @@ export function createRuntimeApprovalReviewer(
 			if (host === undefined) {
 				return persistenceUncertainFailure("approval reviewer is unavailable");
 			}
-			const trunkEnsureOperationId = manager.trunkEnsureOperationId(createId);
-			const trunkCreation: ApprovalReviewerThreadCreation = {
-				request,
-				reviewId,
-				isTrunk: true,
-				ensureOperationId: trunkEnsureOperationId,
-			};
-			let ensured:
-				| {
-						readonly ok: true;
-						readonly reviewerThreadId?: string;
-						readonly runtimeInputId?: string;
-				  }
-				| {
-						readonly ok: false;
-						readonly message: string;
-						readonly staleCustody?: true;
-				  };
-			ensured = yield* Effect.promise(() =>
-				options.threadCreator.createApprovalReviewerThread(trunkCreation),
-			).pipe(
-				Effect.catchCause(() =>
-					Effect.succeed({
-						ok: false as const,
-						message: "approval reviewer trunk creation failed",
-					}),
-				),
-			);
-			if (!ensured.ok) {
-				if (ensured.staleCustody === true) {
-					return { type: "stale_custody" as const };
-				}
-				return persistenceUncertainFailure(ensured.message);
-			}
-
-			if (
-				ensured.reviewerThreadId === undefined ||
-				ensured.runtimeInputId === undefined ||
-				!manager.installTrunkThreadId(ensured.reviewerThreadId)
-			) {
-				return persistenceUncertainFailure(
-					"approval reviewer trunk identity conflicts",
-				);
-			}
-			const trunkThreadId = ensured.reviewerThreadId;
-
 			const lease = manager.beginReview(reviewId);
 			const currentParentBoundaryEventId = request.parentBoundaryEventId;
 			if (currentParentBoundaryEventId.length === 0) {
@@ -242,14 +196,51 @@ export function createRuntimeApprovalReviewer(
 					"approval reviewer parent transcript has no durable boundary",
 				);
 			}
-			let executionThreadId = trunkThreadId;
-			let runtimeInputId = ensured.runtimeInputId;
-			let executionCreation: ApprovalReviewerThreadCreation = {
-				...trunkCreation,
-				reviewerThreadId: trunkThreadId,
-			};
+			let executionThreadId: string;
+			let runtimeInputId: string;
+			let executionCreation: ApprovalReviewerThreadCreation;
 			let sidecarCreated = false;
-			if (lease.kind === "sidecar") {
+			if (lease.kind === "trunk") {
+				const trunkCreation: ApprovalReviewerThreadCreation = {
+					request,
+					reviewId,
+					isTrunk: true,
+					ensureOperationId: manager.trunkEnsureOperationId(createId),
+				};
+				const ensured = yield* Effect.promise(() =>
+					options.threadCreator.createApprovalReviewerThread(trunkCreation),
+				).pipe(
+					Effect.catchCause(() =>
+						Effect.succeed({
+							ok: false as const,
+							message: "approval reviewer trunk creation failed",
+						}),
+					),
+				);
+				if (!ensured.ok) {
+					lease.release();
+					if ("staleCustody" in ensured && ensured.staleCustody === true) {
+						return { type: "stale_custody" as const };
+					}
+					return persistenceUncertainFailure(ensured.message);
+				}
+				if (
+					ensured.reviewerThreadId === undefined ||
+					ensured.runtimeInputId === undefined ||
+					!manager.installTrunkThreadId(ensured.reviewerThreadId)
+				) {
+					lease.release();
+					return persistenceUncertainFailure(
+						"approval reviewer trunk identity conflicts",
+					);
+				}
+				executionThreadId = ensured.reviewerThreadId;
+				runtimeInputId = ensured.runtimeInputId;
+				executionCreation = {
+					...trunkCreation,
+					reviewerThreadId: executionThreadId,
+				};
+			} else {
 				const sidecarRequest: ApprovalReviewerThreadCreation = {
 					request,
 					reviewId,

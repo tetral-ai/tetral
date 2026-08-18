@@ -39,6 +39,49 @@ func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testi
 	}
 }
 
+func TestPostgreSQLReviewerOutcomeWritesAreStaleBehindInterruptBarrier(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID  = "sesn_reviewer_outcome_barrier"
+		parentID   = "thr_reviewer_outcome_barrier_parent"
+		reviewerID = "thr_reviewer_outcome_barrier_reviewer"
+		bindingID  = "bind_reviewer_outcome_barrier"
+		podUID     = "pod_reviewer_outcome_barrier"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, created_at, updated_at
+	) VALUES ('default', $1, $2, 'rin_reviewer_outcome_barrier_interrupt', 'interrupt_control',
+		'[]', 1, 1, 'queued', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, sessionID, parentID); err != nil {
+		t.Fatalf("seed Reviewer outcome interrupt barrier: %v", err)
+	}
+	server := BridgeAPIServer{store: NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))}
+
+	for _, eventType := range []string{"approval_review.decision", "approval_review.failure"} {
+		writeID := "rwrite_reviewer_outcome_barrier_" + strings.TrimPrefix(eventType, "approval_review.")
+		response, err := server.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+			Scope: bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID), RuntimeWriteId: writeID,
+			ModelRequestId: "mreq_reviewer_outcome_barrier", EventType: eventType, PayloadJson: `{"type":"` + eventType + `"}`,
+		})
+		if err != nil || response.GetStale() == nil {
+			t.Fatalf("late %s behind interrupt barrier = %#v/%v; want typed stale", eventType, response, err)
+		}
+		var events, operations int
+		if err := admin.QueryRowContext(context.Background(), `SELECT
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type=$3),
+			(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND idempotency_key=$4)`,
+			sessionID, reviewerID, eventType, writeID).Scan(&events, &operations); err != nil {
+			t.Fatalf("read late %s residue: %v", eventType, err)
+		}
+		if events != 0 || operations != 0 {
+			t.Fatalf("late %s events/operations = %d/%d; want zero parent-affecting writes", eventType, events, operations)
+		}
+	}
+}
+
 func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

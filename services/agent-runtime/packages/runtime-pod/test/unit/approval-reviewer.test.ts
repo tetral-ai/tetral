@@ -823,6 +823,11 @@ describe("Runtime approval reviewer", () => {
 		if (sidecarCreation.reviewerThreadId === undefined) {
 			throw new Error("expected a Bridge-owned sidecar thread identity");
 		}
+		expect(
+			threadCreator.creations.filter(
+				(creation) => creation.reviewId === sidecarCreation.reviewId,
+			),
+		).toEqual([sidecarCreation]);
 		const sidecarInput = host.inputs.find(
 			(input) => input.sessionThreadId === sidecarCreation.reviewerThreadId,
 		);
