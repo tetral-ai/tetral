@@ -398,7 +398,9 @@ func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
 	}
 	text := string(content)
 	versionJob := workflowJobForStaticTest(t, text, "version:")
+	sandboxImageJob := workflowJobForStaticTest(t, text, "sandbox-image:")
 	imagesJob := workflowJobForStaticTest(t, text, "images:")
+	releaseSmokeJob := workflowJobForStaticTest(t, text, "daytona-release-smoke:")
 	chartJob := workflowJobForStaticTest(t, text, "chart:")
 
 	for _, token := range []string{
@@ -415,14 +417,50 @@ func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
 	}
 	for _, token := range []string{
 		"needs: version",
+		"digest: ${{ steps.build.outputs.digest }}",
+		"file: Dockerfile.sandbox",
+		"push: true",
+		"tags: ghcr.io/${{ github.repository_owner }}/sandbox:${{ needs.version.outputs.version }}",
+	} {
+		if !strings.Contains(sandboxImageJob, token) {
+			t.Errorf("release Sandbox image job missing %q", token)
+		}
+	}
+	for _, token := range []string{
+		"needs: version",
 		"${{ needs.version.outputs.version }}",
 	} {
 		if !strings.Contains(imagesJob, token) {
 			t.Errorf("release image job missing %q", token)
 		}
 	}
+	if strings.Contains(imagesJob, "- image: sandbox") || strings.Contains(imagesJob, "Dockerfile.sandbox") {
+		t.Error("generic release image matrix duplicates the separately published Sandbox image")
+	}
 	for _, token := range []string{
-		"needs: [version, images]",
+		"needs: sandbox-image",
+		"environment: release",
+		"permissions:\n      contents: read",
+		"TETRAL_DAYTONA_RELEASE_SMOKE_IMAGE: ghcr.io/${{ github.repository_owner }}/sandbox@${{ needs.sandbox-image.outputs.digest }}",
+		"DAYTONA_API_URL: ${{ secrets.DAYTONA_API_URL }}",
+		"DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}",
+		"-tags daytona_release_smoke",
+		"^TestDaytonaPublishedImageProductionAdapterSmoke$",
+	} {
+		if !strings.Contains(releaseSmokeJob, token) {
+			t.Errorf("Daytona release smoke job missing %q", token)
+		}
+	}
+	if strings.Contains(releaseSmokeJob, "packages: write") {
+		t.Error("Daytona release smoke job must not receive package write permission")
+	}
+	for _, secret := range []string{"${{ secrets.DAYTONA_API_URL }}", "${{ secrets.DAYTONA_API_KEY }}"} {
+		if count := strings.Count(text, secret); count != 1 {
+			t.Errorf("release workflow Daytona secret %q count = %d; want release smoke only", secret, count)
+		}
+	}
+	for _, token := range []string{
+		"needs: [version, images, daytona-release-smoke]",
 		"version: v4.2.0",
 		`helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION"`,
 		"helm push",
@@ -430,6 +468,64 @@ func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
 	} {
 		if !strings.Contains(chartJob, token) {
 			t.Errorf("release chart job missing %q", token)
+		}
+	}
+}
+
+func TestDaytonaPublishedImageSmokeIsReleaseOnlyAndUsesProductionAdapters(t *testing.T) {
+	engineRoot := finalArchitectureEngineRoot(t)
+	smokePath := filepath.Join(engineRoot, "services", "sandbox", "daytona_release_smoke_test.go")
+	smokeBody, err := os.ReadFile(smokePath) //nolint:gosec // Repository-local release-smoke source.
+	if err != nil {
+		t.Fatalf("read Daytona release smoke: %v", err)
+	}
+	smoke := string(smokeBody)
+	if !strings.HasPrefix(smoke, "//go:build daytona_release_smoke\n") {
+		t.Fatal("Daytona release smoke must be excluded from normal Go test selection")
+	}
+	for _, token := range []string{
+		"driver.NewDaytonaArtifactBuilderForClient(client.Snapshot, imageRef)",
+		"buildReleaseSmokeArtifact(ctx, builder, artifactRequest)",
+		"driver.NewDaytonaLifecycleProviderForSDKClient(client, cfg)",
+		"driver.NewDaytonaHelperExecutorForSDKClient(client, cfg.CommandTimeout)",
+		"lifecycle.CreateSandbox(ctx, sandbox.CreateSandboxRequest{Setup: setup})",
+		"lifecycle.InspectState(ctx, handle.SandboxID)",
+		"cleanup.cleanupSandbox(cleanupCtx, lifecycle, stableName, ownershipLabels, policy)",
+		"lifecycle.ResolveSandbox(ctx, stableName, labels)",
+		"snapshot.Name != expectedName",
+		"helper.CheckHealth(ctx, target)",
+		`ToolName: "Write"`,
+		`ToolName: "Read"`,
+		`ToolName: "exec_command"`,
+	} {
+		if !strings.Contains(smoke, token) {
+			t.Errorf("Daytona release smoke missing production-path proof %q", token)
+		}
+	}
+	for _, forbidden := range []string{
+		"t.Skip(",
+		"ProviderArtifactRef: imageRef",
+		"t.Fatalf(\"%v",
+		"t.Fatal(err)",
+		"ResultJSON)",
+	} {
+		if strings.Contains(smoke, forbidden) {
+			t.Errorf("Daytona release smoke contains unsafe or invalid pattern %q", forbidden)
+		}
+	}
+
+	ciBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")) //nolint:gosec // Repository-local workflow.
+	if err != nil {
+		t.Fatalf("read engine CI workflow: %v", err)
+	}
+	for _, forbidden := range []string{
+		"daytona-release-smoke",
+		"daytona_release_smoke",
+		"TestDaytonaPublishedImageProductionAdapterSmoke",
+		"TETRAL_DAYTONA_RELEASE_SMOKE_IMAGE",
+	} {
+		if strings.Contains(string(ciBody), forbidden) {
+			t.Errorf("engine-ci.yml must not register release-only Daytona token %q", forbidden)
 		}
 	}
 }

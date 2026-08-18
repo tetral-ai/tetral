@@ -279,6 +279,14 @@ execution tests require `TETRAL_TEST_DATABASE_URL`. The Kubernetes and Helm
 packages verify that the canonical, service-local, and rendered deployment
 surfaces stay aligned.
 
+The published-image Daytona smoke is selected only by the Engine release
+workflow after the Sandbox image has been pushed. That job passes the build's
+immutable OCI digest to the production artifact builder, uses release-
+environment Daytona credentials, and gates chart publication. The build tag
+keeps ordinary `go test ./...`, pull requests, and main-branch CI free of
+Daytona credentials and calls. The resource-projection live smoke remains a
+separate operator-triggered external check.
+
 ## Boundaries
 
 - No public SDK shape selects a Sandbox provider in this release.
