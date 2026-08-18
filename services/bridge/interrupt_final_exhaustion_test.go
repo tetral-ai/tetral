@@ -661,6 +661,92 @@ type postPlanInterruptDeliverer struct {
 	direct RuntimePodDirectDeliverer
 }
 
+type invalidFinalizationInterruptDeliverer struct {
+	direct RuntimePodDirectDeliverer
+}
+
+func (d invalidFinalizationInterruptDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return d.direct.DeliverRuntimeJob(ctx, job)
+}
+
+func (d invalidFinalizationInterruptDeliverer) FinalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	job.SessionThreadID = ""
+	return d.direct.FinalizeRuntimeDelivery(ctx, job, result)
+}
+
+func (d invalidFinalizationInterruptDeliverer) ReplayRuntimeDeliveryFinalization(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
+	return d.direct.ReplayRuntimeDeliveryFinalization(ctx, job)
+}
+
+func (d invalidFinalizationInterruptDeliverer) ReplaceMalformedRuntimeInputCustody(ctx context.Context, job RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error) {
+	return d.direct.ReplaceMalformedRuntimeInputCustody(ctx, job)
+}
+
+func (d invalidFinalizationInterruptDeliverer) FinalizeMalformedRuntimeInputCustody(ctx context.Context, lease MalformedRuntimeInputLease) (MalformedRuntimeInputCustodyResult, error) {
+	return d.direct.FinalizeMalformedRuntimeInputCustody(ctx, lease)
+}
+
+func TestJobRunnerFinalAttemptInvalidInterruptUsesExactTerminalOwner(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID   = "sesn_invalid_final_interrupt"
+		threadID    = "thr_invalid_final_interrupt"
+		bindingID   = "bind_invalid_final_interrupt"
+		podUID      = "pod_invalid_final_interrupt"
+		inputID     = "rin_invalid_final_interrupt"
+		eventID     = "evt_invalid_final_interrupt"
+		followerID  = "rin_invalid_final_interrupt_follower"
+		followerEvt = "evt_invalid_final_interrupt_follower"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, followerEvt, 2, "user.message", `{"content":[{"type":"text","text":"wait behind interrupt"}]}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: 1, SequenceTo: 1,
+	})
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: followerID, InputKind: "messages", EventIDs: []string{followerEvt}, SequenceFrom: 2, SequenceTo: 2,
+	})
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	now := time.Now().UTC().Add(-time.Minute)
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, now)
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, followerID, "messages", followerEvt, 2, queue.DefaultMaxAttempts, now.Add(time.Microsecond))
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliverer := invalidFinalizationInterruptDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseOwner: "invalid-final-interrupt-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("final-attempt invalid interrupt: %v", err)
+	}
+	var sessionStatus, interruptInbox, interruptQueue, followerInbox, followerQueue string
+	var attempts, lineage, events, messages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3 ORDER BY created_at LIMIT 1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$4),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$5 ORDER BY created_at LIMIT 1),
+		(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3 ORDER BY created_at LIMIT 1),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND event_id IN ($6,$7)),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1)`,
+		sessionID, inputID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID), followerID,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, followerID), eventID, followerEvt,
+	).Scan(&sessionStatus, &interruptInbox, &interruptQueue, &followerInbox, &followerQueue, &attempts, &lineage, &events, &messages); err != nil {
+		t.Fatalf("read final-attempt invalid interrupt disposition: %v", err)
+	}
+	if sessionStatus != "terminated" || interruptInbox != "cancelled" || interruptQueue != queue.StatusCancelled ||
+		followerInbox != "cancelled" || followerQueue != queue.StatusCancelled || attempts != 1 || lineage != 1 || events != 2 || messages != 0 {
+		t.Fatalf("invalid final interrupt = Session %s interrupt %s/%s follower %s/%s attempts %d lineage %d events %d messages %d",
+			sessionStatus, interruptInbox, interruptQueue, followerInbox, followerQueue, attempts, lineage, events, messages)
+	}
+}
+
 func (d postPlanInterruptDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
 	return d.direct.DeliverRuntimeJob(ctx, job)
 }
@@ -681,13 +767,13 @@ func (d postPlanInterruptDeliverer) FinalizeMalformedRuntimeInputCustody(ctx con
 	return d.direct.FinalizeMalformedRuntimeInputCustody(ctx, lease)
 }
 
-func (s *postPlanInterruptFenceStore) InterruptDeliveryAuthorityActive(ctx context.Context, job RuntimeJob) (bool, error) {
+func (s *postPlanInterruptFenceStore) InterruptDeliveryAuthority(ctx context.Context, job RuntimeJob) (RuntimeInterruptDeliveryAuthority, error) {
 	close(s.planned)
 	select {
 	case <-s.resume:
-		return s.PostgreSQLRuntimeDeliveryStore.InterruptDeliveryAuthorityActive(ctx, job)
+		return s.PostgreSQLRuntimeDeliveryStore.InterruptDeliveryAuthority(ctx, job)
 	case <-ctx.Done():
-		return false, ctx.Err()
+		return RuntimeInterruptDeliveryAuthority{}, ctx.Err()
 	}
 }
 

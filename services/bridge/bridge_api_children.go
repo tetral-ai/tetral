@@ -363,7 +363,6 @@ func (s *PostgreSQLBridgeAPIStore) ListChildThreads(ctx context.Context, request
 }
 
 func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, request *bridgev1.DeliverInterAgentMailRequest) (response *bridgev1.DeliverInterAgentMailResponse, resultErr error) {
-	ctx = withInterruptBarrierBirth(ctx)
 	phase := "validate"
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "deliver_inter_agent_mail", request.GetDeliveryId(), phase, resultErr)
@@ -395,6 +394,23 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 			}
 			response = &bridgev1.DeliverInterAgentMailResponse{Outcome: &bridgev1.DeliverInterAgentMailResponse_Duplicate{Duplicate: &bridgev1.DeliverInterAgentMailDuplicate{}}}
 			return nil
+		}
+		barrier, active, err := activeSessionInterruptBarrierTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId())
+		if err != nil {
+			return err
+		}
+		if active {
+			if request.GetScope().GetSessionThreadId() == barrier.sessionThreadID || request.GetTargetThreadId() != barrier.sessionThreadID {
+				return sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "session interrupt barrier is active"))
+			}
+			ctx = withInterAgentMailBarrierBirth(ctx, interAgentMailBarrierBirthAuthority{
+				workspaceID:       request.GetScope().GetWorkspaceId(),
+				sessionID:         request.GetScope().GetSessionId(),
+				runtimeInputID:    barrier.runtimeInputID,
+				interruptedThread: barrier.sessionThreadID,
+				sourceThread:      request.GetScope().GetSessionThreadId(),
+				targetThread:      request.GetTargetThreadId(),
+			})
 		}
 		envelope, err := appendSubagentMailEnvelopeTx(
 			ctx,

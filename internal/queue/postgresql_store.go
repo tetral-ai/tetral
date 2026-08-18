@@ -1266,34 +1266,53 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 	if cancelRequest.Now.IsZero() {
 		cancelRequest.Now = storage.Now()
 	}
-	var cancelledQueue, cancelledInbox int
+	var candidateQueue, selectedFollowers, cancelledQueue, cancelledInbox int
 	err = tx.QueryRow(ctx,
-		`WITH cancelled_queue AS (
-		   UPDATE queue_jobs
+		`WITH candidate_queue AS MATERIALIZED (
+		   SELECT queue.id AS job_id,
+		          queue.payload_json::jsonb ->> 'runtime_input_id' AS runtime_input_id
+		     FROM queue_jobs queue
+		    WHERE queue.workspace_id = $1
+		      AND queue.partition_key = $2
+		      AND queue.status = 'pending'
+		      AND queue.kind = 'runtime_input'
+		      AND queue.payload_json::jsonb ->> 'session_thread_id' = $4
+		      AND queue.payload_json::jsonb ->> 'input_kind' = 'messages'
+		      AND (queue.payload_json::jsonb ->> 'sequence_to')::bigint < $5
+		    FOR UPDATE
+		), follower_identity AS MATERIALIZED (
+		   SELECT candidate.job_id, candidate.runtime_input_id
+		     FROM candidate_queue candidate
+		     JOIN session_runtime_inbox inbox
+		       ON inbox.workspace_id = $1
+		      AND inbox.session_id = $6
+		      AND inbox.session_thread_id = $4
+		      AND inbox.runtime_input_id = candidate.runtime_input_id
+		      AND inbox.input_kind IN ('messages', 'rejection')
+		      AND inbox.status IN ('queued', 'delivering')
+		    FOR UPDATE OF inbox
+		), cancelled_queue AS (
+		   UPDATE queue_jobs queue
 		      SET status = 'cancelled',
 		          cancelled_at = $3,
 		          updated_at = $3
-		    WHERE workspace_id = $1
-		      AND partition_key = $2
-		      AND status = 'pending'
-		      AND kind = 'runtime_input'
-		      AND payload_json::jsonb ->> 'session_thread_id' = $4
-		      AND payload_json::jsonb ->> 'input_kind' = 'messages'
-		      AND (payload_json::jsonb ->> 'sequence_to')::bigint < $5
-		  RETURNING payload_json::jsonb ->> 'runtime_input_id' AS runtime_input_id
+		     FROM follower_identity follower
+		    WHERE queue.workspace_id = $1
+		      AND queue.id = follower.job_id
+		  RETURNING follower.runtime_input_id
 		), cancelled_inbox AS (
 		   UPDATE session_runtime_inbox inbox
 		      SET status = 'cancelled', updated_at = $3
-		     FROM cancelled_queue queue
+		     FROM follower_identity follower
 		    WHERE inbox.workspace_id = $1
 		      AND inbox.session_id = $6
 		      AND inbox.session_thread_id = $4
-		      AND inbox.runtime_input_id = queue.runtime_input_id
-		      AND inbox.input_kind = 'messages'
-		      AND inbox.status = 'queued'
+		      AND inbox.runtime_input_id = follower.runtime_input_id
 		  RETURNING inbox.runtime_input_id
 		)
-		SELECT (SELECT count(*) FROM cancelled_queue),
+		SELECT (SELECT count(*) FROM candidate_queue),
+		       (SELECT count(*) FROM follower_identity),
+		       (SELECT count(*) FROM cancelled_queue),
 		       (SELECT count(*) FROM cancelled_inbox)`,
 		string(cancelRequest.WorkspaceID),
 		FormatSessionPartitionKey(cancelRequest.WorkspaceID, cancelRequest.SessionID),
@@ -1301,11 +1320,11 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 		cancelRequest.SessionThreadID,
 		cancelRequest.InterruptFenceSequence,
 		cancelRequest.SessionID,
-	).Scan(&cancelledQueue, &cancelledInbox)
+	).Scan(&candidateQueue, &selectedFollowers, &cancelledQueue, &cancelledInbox)
 	if err != nil {
 		return false, 0, err
 	}
-	if cancelledQueue != cancelledInbox {
+	if candidateQueue != selectedFollowers || selectedFollowers != cancelledQueue || cancelledQueue != cancelledInbox {
 		return false, 0, &IntegrityError{Message: "interrupt fence Queue and Inbox cancellation diverged"}
 	}
 	return true, cancelledQueue, nil

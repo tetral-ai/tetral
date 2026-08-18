@@ -17,7 +17,8 @@ import (
 // conversation writer. Interrupt Inbox custody is the durable mutation barrier;
 // Queue ACK remains the separate delivery-barrier release owned by JobRunner.
 type sessionInterruptBarrier struct {
-	runtimeInputID string
+	runtimeInputID  string
+	sessionThreadID string
 }
 
 // activeSessionInterruptDeliveryBarrierTx extends only the input-admission
@@ -120,6 +121,26 @@ func requireSessionInputDeliveryAllowedTx(ctx context.Context, tx *dbconnect.Tx,
 
 type interruptCloseoutContextKey struct{}
 type interruptBarrierBirthContextKey struct{}
+type runtimePodLossInterruptRepairContextKey struct{}
+type interAgentMailBarrierBirthContextKey struct{}
+
+type runtimePodLossInterruptRepairAuthority struct {
+	workspaceID       string
+	sessionID         string
+	runtimeInputID    string
+	bindingID         string
+	bindingGeneration int64
+	targetPodUID      string
+}
+
+type interAgentMailBarrierBirthAuthority struct {
+	workspaceID       string
+	sessionID         string
+	runtimeInputID    string
+	interruptedThread string
+	sourceThread      string
+	targetThread      string
+}
 
 func withInterruptBarrierBirth(ctx context.Context) context.Context {
 	return context.WithValue(ctx, interruptBarrierBirthContextKey{}, true)
@@ -127,6 +148,19 @@ func withInterruptBarrierBirth(ctx context.Context) context.Context {
 
 func withInterruptCloseout(ctx context.Context, runtimeInputID string) context.Context {
 	return context.WithValue(ctx, interruptCloseoutContextKey{}, runtimeInputID)
+}
+
+func withRuntimePodLossInterruptRepair(ctx context.Context, authority runtimePodLossInterruptRepairAuthority) context.Context {
+	return context.WithValue(ctx, runtimePodLossInterruptRepairContextKey{}, authority)
+}
+
+func runtimePodLossInterruptRepairFromContext(ctx context.Context) (runtimePodLossInterruptRepairAuthority, bool) {
+	authority, ok := ctx.Value(runtimePodLossInterruptRepairContextKey{}).(runtimePodLossInterruptRepairAuthority)
+	return authority, ok
+}
+
+func withInterAgentMailBarrierBirth(ctx context.Context, authority interAgentMailBarrierBirthAuthority) context.Context {
+	return context.WithValue(ctx, interAgentMailBarrierBirthContextKey{}, authority)
 }
 
 func interruptCloseoutRuntimeInputID(ctx context.Context) string {
@@ -142,6 +176,7 @@ func activeSessionInterruptBarrierTx(
 ) (sessionInterruptBarrier, bool, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT inbox.runtime_input_id,
+		        inbox.session_thread_id,
 		        inbox.status,
 		        EXISTS (
 		          SELECT 1
@@ -171,9 +206,10 @@ func activeSessionInterruptBarrierTx(
 	var active sessionInterruptBarrier
 	for rows.Next() {
 		var runtimeInputID string
+		var sessionThreadID string
 		var statusValue string
 		var hasReceipt bool
-		if err := rows.Scan(&runtimeInputID, &statusValue, &hasReceipt); err != nil {
+		if err := rows.Scan(&runtimeInputID, &sessionThreadID, &statusValue, &hasReceipt); err != nil {
 			return sessionInterruptBarrier{}, false, err
 		}
 		switch statusValue {
@@ -183,6 +219,7 @@ func activeSessionInterruptBarrierTx(
 			}
 			if active.runtimeInputID == "" {
 				active.runtimeInputID = runtimeInputID
+				active.sessionThreadID = sessionThreadID
 			}
 		case "committed":
 			if !hasReceipt {
@@ -209,7 +246,7 @@ func requireSessionMutationAllowedTx(ctx context.Context, tx *dbconnect.Tx, scop
 	if interruptCloseoutRuntimeInputID(ctx) != "" {
 		return nil
 	}
-	_, active, err := activeSessionInterruptBarrierTx(
+	barrier, active, err := activeSessionInterruptBarrierTx(
 		ctx,
 		tx,
 		scope.GetWorkspaceId(),
@@ -217,6 +254,14 @@ func requireSessionMutationAllowedTx(ctx context.Context, tx *dbconnect.Tx, scop
 	)
 	if err != nil || !active {
 		return err
+	}
+	if authority, ok := ctx.Value(interAgentMailBarrierBirthContextKey{}).(interAgentMailBarrierBirthAuthority); ok &&
+		authority.workspaceID == scope.GetWorkspaceId() && authority.sessionID == scope.GetSessionId() &&
+		authority.runtimeInputID == barrier.runtimeInputID && authority.interruptedThread == barrier.sessionThreadID &&
+		(scope.GetSessionThreadId() == authority.sourceThread || scope.GetSessionThreadId() == authority.targetThread) &&
+		authority.sourceThread != authority.interruptedThread &&
+		authority.targetThread == authority.interruptedThread {
+		return nil
 	}
 	if allowed, _ := ctx.Value(interruptBarrierBirthContextKey{}).(bool); allowed {
 		return nil

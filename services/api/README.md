@@ -217,7 +217,7 @@ Target resolution:
 | --- | --- |
 | `user.message` | `sessions.main_thread_id`. An archived primary thread is rejected at the session fence (Thread lifecycle above). |
 | `user.interrupt` with `session_thread_id` | that one thread, validated `visibility = 'public'` (`resolveInterruptTargetThreadID`). |
-| `user.interrupt` without `session_thread_id` | fanned out at admission to every `visibility = 'public'` AND `archived_at IS NULL` thread (`listInterruptTargetThreadIDs`); Runtime receives explicit per-thread `interrupt_control` commands and never infers fanout scope. |
+| `user.interrupt` without `session_thread_id` | `sessions.main_thread_id`; one Stop creates one target-thread interrupt custody and a Session-wide delivery barrier. |
 | `user.tool_confirmation` | `session_thread_id` resolved from the referenced pending approval row — never client-chosen. |
 
 `Idempotency-Key` law:
@@ -233,8 +233,8 @@ Only digests are stored in `session_event_idempotency_keys`: the key's SHA-256
 digest plus a separate `canonical_request_hash` over the decoded batch (order,
 per-event thread selector, tool-use references, types, payloads). The selector
 in that hash is the interrupt *intent* (`session`, `thread:<id>`,
-`tool_use:<id>`, or `primary`), never the expanded thread set — idempotency
-lookup precedes fanout, so a session-wide interrupt replays identically
+`tool_use:<id>`, or `primary`), never a resolved database identifier —
+idempotency lookup precedes main-thread resolution, so a bare interrupt replays identically
 regardless of threads added or archived between attempts. The idempotency row
 is written in the same transaction as the events, after the session fence, so a
 crash before commit leaves no reservation and a retry is a fresh admission.
@@ -515,7 +515,7 @@ never added through `POST /resources`) are covered above.
 | `internal/memory/sdk_compatibility_test.go`, `internal/memory/memory_lifecycle_test.go`, `internal/memory/memory_conflict_precedence_test.go` | Memory Stores public surface, content bound, exact-and-prefix path conflict, precondition semantics |
 | `internal/files/postgresql_store_test.go`, `internal/files/postgresql_store_internal_test.go`, `internal/files/staging_test.go`, `internal/httpapi/file_handler_test.go` | upload caps and quotas, PDF page-count tri-state cache, attachment admission lock order, session-file identities, `/v1/files` routing |
 | `internal/skill/frontmatter_test.go`, `internal/skill/package_test.go`, `internal/skill/dependency_test.go`, `internal/httpapi/skill_handler_test.go` | SKILL.md frontmatter rules, normalized-package byte caps, YAML confinement, `/v1/skills` beta-gated routing |
-| `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, interrupt fanout, idempotency-key mint/replay/conflict |
+| `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key mint/replay/conflict |
 | `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the assembled process wires the real domain services and fails closed on invalid startup config |
 | `services/api/tetralapi_test.go`, `.../startup_test.go` | end-to-end service bootstrap |
 

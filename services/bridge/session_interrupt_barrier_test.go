@@ -92,6 +92,71 @@ func TestPostgreSQLSessionInterruptBarrierClosesExactInflightCustody(t *testing.
 	}
 }
 
+func TestPostgreSQLSupersededInterruptSettlesItsExactQueueLease(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_superseded_interrupt_lease"
+		threadID  = "thr_superseded_interrupt_lease"
+		activeID  = "rin_superseded_interrupt_active"
+		staleID   = "rin_superseded_interrupt_stale"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_superseded_interrupt_active", 1, "user.interrupt", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_superseded_interrupt_stale", 2, "user.interrupt", `{}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: activeID, InputKind: "interrupt_control", EventIDs: []string{"evt_superseded_interrupt_active"}, SequenceFrom: 1, SequenceTo: 1,
+	})
+	staleJob := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: staleID, InputKind: "interrupt_control", EventIDs: []string{"evt_superseded_interrupt_stale"}, SequenceFrom: 2, SequenceTo: 2,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, staleJob)
+	payload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": staleID, "event_ids": []string{"evt_superseded_interrupt_stale"},
+		"sequence_from": 2, "sequence_to": 2, "input_kind": "interrupt_control",
+	})
+	if err != nil {
+		t.Fatalf("marshal stale interrupt payload: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	now := time.Now().UTC()
+	created, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, staleID),
+		PayloadVersion: 1, PayloadJSON: payload, Priority: 100, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue stale interrupt: %v", err)
+	}
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "stale-interrupt-owner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease stale interrupt = %#v/%v", leased, err)
+	}
+	staleJob.JobID, staleJob.LeaseToken, staleJob.Kind = leased[0].ID, leased[0].LeaseToken, leased[0].Kind
+	staleJob.PartitionKey, staleJob.DedupeKey = leased[0].PartitionKey, leased[0].DedupeKey
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	plan, err := store.PrepareRuntimeCommand(context.Background(), staleJob)
+	if err != nil || !plan.StaleAccepted || !plan.QueueLeaseSettled {
+		t.Fatalf("superseded interrupt plan = %#v/%v; want settled stale", plan, err)
+	}
+	var queueStatus, inboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		created.ID, staleID).Scan(&queueStatus, &inboxStatus); err != nil {
+		t.Fatalf("read stale interrupt custody: %v", err)
+	}
+	if queueStatus != queue.StatusCancelled || inboxStatus != "cancelled" {
+		t.Fatalf("superseded interrupt custody = %s/%s; want cancelled/cancelled", queueStatus, inboxStatus)
+	}
+}
+
 func TestPostgreSQLSessionInterruptBarrierRejectsLateMessageCommit(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

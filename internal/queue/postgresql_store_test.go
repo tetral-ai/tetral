@@ -1848,6 +1848,176 @@ func TestPostgreSQLStoreAtomicallyReplacesMalformedRuntimeInputCustody(t *testin
 	}
 }
 
+func TestCancelInterruptFencedMessagesUsesCanonicalFollowerIdentity(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	const (
+		sessionID   = "sesn_interrupt_followers"
+		threadID    = "thr_interrupt_followers"
+		interruptID = "rin_interrupt_followers_control"
+	)
+	seedQueueRuntimeInbox(t, admin, sessionID, threadID, "rin_interrupt_follower_queued", "messages", `["evt_follower_queued"]`, 1, 1)
+	for _, follower := range []struct {
+		id        string
+		inboxKind string
+		status    string
+		sequence  int64
+	}{
+		{id: "rin_interrupt_follower_delivering", inboxKind: "messages", status: "delivering", sequence: 2},
+		{id: "rin_interrupt_follower_rejection", inboxKind: "rejection", status: "queued", sequence: 3},
+		{id: "rin_interrupt_follower_after", inboxKind: "messages", status: "queued", sequence: 6},
+		{id: interruptID, inboxKind: "interrupt_control", status: "queued", sequence: 5},
+	} {
+		if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_inbox (
+			workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
+			sequence_from,sequence_to,status,binding_id,binding_generation,target_pod_uid,created_at,updated_at
+		) VALUES ('default',$1,$2,$3,$4,'[]',$5,$5,$6,
+			CASE WHEN $6='delivering' THEN 'bind_interrupt_followers' END,
+			CASE WHEN $6='delivering' THEN 1 END,
+			CASE WHEN $6='delivering' THEN 'pod_interrupt_followers' END,$7,$7)`,
+			sessionID, threadID, follower.id, follower.inboxKind, follower.sequence, follower.status, now); err != nil {
+			t.Fatalf("seed follower Inbox %s: %v", follower.id, err)
+		}
+	}
+	jobs := make(map[string]*Job)
+	for _, follower := range []struct {
+		id       string
+		sequence int64
+		priority int
+	}{
+		{id: "rin_interrupt_follower_queued", sequence: 1},
+		{id: "rin_interrupt_follower_delivering", sequence: 2},
+		{id: "rin_interrupt_follower_rejection", sequence: 3},
+		{id: "rin_interrupt_follower_after", sequence: 6},
+		{id: interruptID, sequence: 5, priority: 100},
+	} {
+		inputKind := "messages"
+		if follower.id == interruptID {
+			inputKind = "interrupt_control"
+		}
+		jobs[follower.id] = mustEnqueue(t, store, EnqueueRequest{
+			WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+			PartitionKey:   FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+			DedupeKey:      FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, follower.id),
+			PayloadVersion: 1,
+			PayloadJSON:    runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, follower.id, inputKind, follower.sequence, follower.sequence),
+			Priority:       follower.priority, Now: now.Add(time.Duration(follower.sequence) * time.Microsecond),
+		})
+	}
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "interrupt-owner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if leased.ID != jobs[interruptID].ID {
+		t.Fatalf("leased job = %s; want interrupt %s", leased.ID, jobs[interruptID].ID)
+	}
+	request := InterruptFenceRequest{
+		Lease: ExactLeaseRequest{
+			WorkspaceID: workspace.DefaultID, JobID: leased.ID, LeaseToken: leased.LeaseToken,
+			Kind: leased.Kind, PartitionKey: leased.PartitionKey, DedupeKey: leased.DedupeKey,
+		},
+		SessionID: sessionID, SessionThreadID: threadID, InterruptFenceSequence: 5, Now: now.Add(2 * time.Second),
+	}
+	stale := request
+	stale.Lease.LeaseToken = "lease_stale"
+	if err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_stale_lease", func(tx *dbconnect.Tx) error {
+		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, stale)
+		if err != nil || active || cancelled != 0 {
+			t.Fatalf("stale interrupt lease cancellation = %v/%d/%v; want false/0/nil", active, cancelled, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("stale interrupt lease transaction: %v", err)
+	}
+
+	if err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_followers", func(tx *dbconnect.Tx) error {
+		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, request)
+		if err != nil || !active || cancelled != 3 {
+			t.Fatalf("interrupt follower cancellation = %v/%d/%v; want true/3/nil", active, cancelled, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("interrupt follower transaction: %v", err)
+	}
+	for _, inputID := range []string{"rin_interrupt_follower_queued", "rin_interrupt_follower_delivering", "rin_interrupt_follower_rejection"} {
+		if got := queueJobStatus(t, admin, workspace.DefaultID, jobs[inputID].ID); got != StatusCancelled {
+			t.Fatalf("Queue follower %s status = %s; want cancelled", inputID, got)
+		}
+		var inboxStatus string
+		if err := admin.QueryRowContext(ctx, `SELECT status FROM session_runtime_inbox
+			WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, inputID).Scan(&inboxStatus); err != nil {
+			t.Fatalf("read Inbox follower %s: %v", inputID, err)
+		}
+		if inboxStatus != "cancelled" {
+			t.Fatalf("Inbox follower %s status = %s; want cancelled", inputID, inboxStatus)
+		}
+	}
+	if got := queueJobStatus(t, admin, workspace.DefaultID, jobs["rin_interrupt_follower_after"].ID); got != StatusPending {
+		t.Fatalf("post-fence Queue follower status = %s; want pending", got)
+	}
+}
+
+func TestCancelInterruptFencedMessagesRollsBackBothCustodySides(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 18, 11, 0, 0, 0, time.UTC)
+	const (
+		sessionID   = "sesn_interrupt_followers_rollback"
+		threadID    = "thr_interrupt_followers_rollback"
+		followerID  = "rin_interrupt_follower_rollback"
+		interruptID = "rin_interrupt_followers_rollback_control"
+	)
+	seedQueueRuntimeInbox(t, admin, sessionID, threadID, followerID, "messages", `["evt_follower_rollback"]`, 1, 1)
+	if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
+		sequence_from,sequence_to,status,created_at,updated_at
+	) VALUES ('default',$1,$2,$3,'interrupt_control','[]',2,2,'queued',$4,$4)`, sessionID, threadID, interruptID, now); err != nil {
+		t.Fatalf("seed rollback interrupt Inbox: %v", err)
+	}
+	follower := mustEnqueue(t, store, EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+		PartitionKey:   FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, followerID),
+		PayloadVersion: 1, PayloadJSON: runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, followerID, "messages", 1, 1), Now: now,
+	})
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+		PartitionKey:   FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
+		PayloadVersion: 1, PayloadJSON: runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, interruptID, "interrupt_control", 2, 2), Priority: 100, Now: now.Add(time.Microsecond),
+	})
+	leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "rollback-owner", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second)})
+	if leased.ID != interrupt.ID {
+		t.Fatalf("leased job = %s; want interrupt %s", leased.ID, interrupt.ID)
+	}
+	rollbackErr := errors.New("force interrupt follower rollback")
+	err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_followers_rollback", func(tx *dbconnect.Tx) error {
+		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, InterruptFenceRequest{
+			Lease:     ExactLeaseRequest{WorkspaceID: workspace.DefaultID, JobID: leased.ID, LeaseToken: leased.LeaseToken, Kind: leased.Kind, PartitionKey: leased.PartitionKey, DedupeKey: leased.DedupeKey},
+			SessionID: sessionID, SessionThreadID: threadID, InterruptFenceSequence: 2, Now: now.Add(2 * time.Second),
+		})
+		if err != nil || !active || cancelled != 1 {
+			t.Fatalf("rollback cancellation = %v/%d/%v; want true/1/nil", active, cancelled, err)
+		}
+		return rollbackErr
+	})
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("rollback transaction error = %v; want %v", err, rollbackErr)
+	}
+	if got := queueJobStatus(t, admin, workspace.DefaultID, follower.ID); got != StatusPending {
+		t.Fatalf("Queue follower after rollback = %s; want pending", got)
+	}
+	var inboxStatus string
+	if err := admin.QueryRowContext(ctx, `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, followerID).Scan(&inboxStatus); err != nil {
+		t.Fatalf("read rollback Inbox follower: %v", err)
+	}
+	if inboxStatus != "queued" {
+		t.Fatalf("Inbox follower after rollback = %s; want queued", inboxStatus)
+	}
+}
+
 func TestPostgreSQLStoreRebuildsCanonicalEventlessRuntimeInputCustody(t *testing.T) {
 	for _, inputKind := range []string{"agent_mail", "task_notification"} {
 		t.Run(inputKind, func(t *testing.T) {

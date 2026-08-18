@@ -48,6 +48,7 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 }
 
 func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, int, error) {
+	_, interruptRepair := runtimePodLossInterruptRepairFromContext(ctx)
 	handedOff, err := handOffLostRuntimeAcceptedInputsTx(ctx, tx, workspaceID, sessionID, binding, now)
 	if err != nil {
 		return 0, 0, err
@@ -60,9 +61,12 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	if err != nil {
 		return 0, 0, err
 	}
-	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
-	if err != nil {
-		return 0, 0, err
+	var toolUses []runtimeOrphanToolUse
+	if !interruptRepair {
+		toolUses, err = runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
+		if err != nil {
+			return 0, 0, err
+		}
 	}
 	repaired := handedOff
 	for _, start := range starts {
@@ -73,6 +77,9 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 		if inserted {
 			repaired++
 		}
+	}
+	if interruptRepair {
+		return repaired, handedOff, nil
 	}
 	for _, toolUse := range toolUses {
 		inserted, err := insertRuntimePodLostToolResultTx(ctx, tx, workspaceID, sessionID, binding, toolUse, now)
@@ -1010,6 +1017,20 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 		// The census retains only the fence identity. Once that fence wins, the
 		// current durable row supplies the full binding facts consumed by closeout.
 		binding = current
+		barrier, barrierActive, err := activeSessionInterruptBarrierTx(ctx, tx, workspaceID, sessionID)
+		if err != nil {
+			return err
+		}
+		if barrierActive {
+			ctx = withRuntimePodLossInterruptRepair(ctx, runtimePodLossInterruptRepairAuthority{
+				workspaceID:       workspaceID,
+				sessionID:         sessionID,
+				runtimeInputID:    barrier.runtimeInputID,
+				bindingID:         binding.BindingID,
+				bindingGeneration: binding.BindingGeneration,
+				targetPodUID:      binding.PodUID,
+			})
+		}
 		if requireActive {
 			active, err := runtimePodLossSessionActiveTx(ctx, tx, workspaceID, sessionID, binding)
 			if err != nil {
@@ -1242,7 +1263,7 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 	if _, ok, err := modelRequestEndExistsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), start.SessionThreadID, start.ModelRequestID); err != nil || ok {
 		return false, err
 	}
-	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	threadScope, err := lockRuntimePodLossRequestEndMutationTx(ctx, tx, scope)
 	if err != nil {
 		return false, err
 	}
@@ -1306,6 +1327,33 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 		return false, err
 	}
 	return true, nil
+}
+
+func lockRuntimePodLossRequestEndMutationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {
+	authority, ok := runtimePodLossInterruptRepairFromContext(ctx)
+	if !ok {
+		return lockThreadMutationTx(ctx, tx, scope)
+	}
+	if authority.workspaceID != scope.GetWorkspaceId() || authority.sessionID != scope.GetSessionId() ||
+		authority.runtimeInputID == "" || authority.bindingID != scope.GetBinding().GetBindingId() ||
+		authority.bindingGeneration != scope.GetBinding().GetBindingGeneration() || authority.targetPodUID != scope.GetBinding().GetTargetPodUid() {
+		return threadMutationScope{}, sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "pod-loss interrupt repair authority is stale"))
+	}
+	barrier, active, err := activeSessionInterruptBarrierTx(ctx, tx, authority.workspaceID, authority.sessionID)
+	if err != nil {
+		return threadMutationScope{}, err
+	}
+	if !active || barrier.runtimeInputID != authority.runtimeInputID {
+		return threadMutationScope{}, sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "pod-loss interrupt repair barrier is stale"))
+	}
+	current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, authority.workspaceID, authority.sessionID)
+	if err != nil {
+		return threadMutationScope{}, err
+	}
+	if !found || current.BindingID != authority.bindingID || current.BindingGeneration != authority.bindingGeneration || current.PodUID != authority.targetPodUID {
+		return threadMutationScope{}, runtimePodLostStaleFenceError("runtime pod-loss repair binding fence is stale")
+	}
+	return lockThreadMutationRowTx(ctx, tx, scope)
 }
 
 func insertRuntimePodLostToolResultTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, now time.Time) (bool, error) {

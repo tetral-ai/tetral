@@ -826,6 +826,10 @@ func lockThreadMutationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 	if err := requireSessionMutationAllowedTx(ctx, tx, scope); err != nil {
 		return threadMutationScope{}, err
 	}
+	return lockThreadMutationRowTx(ctx, tx, scope)
+}
+
+func lockThreadMutationRowTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {
 	row := tx.QueryRow(ctx,
 		`SELECT visibility, role, status, task_name
 		   FROM session_threads

@@ -101,6 +101,51 @@ func TestPostgreSQLRuntimePodLossSweepClosesActiveTurnWithoutInputAndIsIdempoten
 	}
 }
 
+func TestPostgreSQLRuntimePodLossRepairsRequestUnderExactInterruptBarrier(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 81, "Write", "idle", false, false, false, false, true)
+	const interruptID = "rin_pod_loss_interrupt_barrier"
+	seedBridgeAPIEvent(t, admin, "default", fixture.sessionID, fixture.parentThreadID, "evt_pod_loss_interrupt_barrier", 3, "user.interrupt", `{}`)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
+		sequence_from,sequence_to,status,created_at,updated_at
+	) VALUES ('default',$1,$2,$3,'interrupt_control','["evt_pod_loss_interrupt_barrier"]',2,2,'queued',clock_timestamp(),clock_timestamp())`,
+		fixture.sessionID, fixture.parentThreadID, interruptID); err != nil {
+		t.Fatalf("seed interrupt barrier Inbox: %v", err)
+	}
+	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+
+	repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+	if err != nil || repaired != 1 {
+		t.Fatalf("pod-loss repair under interrupt = %d/%v; want 1/nil", repaired, err)
+	}
+	var requestEnds, bindingRows int
+	var interruptStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end'
+		  AND payload_json::jsonb ->> 'error_kind'='runtime_pod_lost'`, fixture.sessionID).Scan(&requestEnds); err != nil {
+		t.Fatalf("count interrupt-fenced request end: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID).Scan(&bindingRows); err != nil {
+		t.Fatalf("count interrupt-fenced old binding: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptID).Scan(&interruptStatus); err != nil {
+		t.Fatalf("read continuing interrupt custody: %v", err)
+	}
+	if requestEnds != 1 || bindingRows != 0 || interruptStatus != "queued" {
+		t.Fatalf("interrupt-fenced repair = ends:%d bindings:%d interrupt:%s; want 1/0/queued", requestEnds, bindingRows, interruptStatus)
+	}
+	if err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, fixture.binding, time.Now().UTC()); err == nil {
+		t.Fatal("stale old-binding repair unexpectedly retained authority")
+	} else if runtimeJobPreparationErrorKind(err) != "runtime_pod_lost_claim_stale" {
+		t.Fatalf("stale old-binding repair error = %v; want pod-loss stale fence", err)
+	}
+}
+
 func TestPostgreSQLRuntimePodLossSweepUsesClosedVisibilityPartition(t *testing.T) {
 	tests := []struct {
 		state enginekubernetes.BindingVisibilityState

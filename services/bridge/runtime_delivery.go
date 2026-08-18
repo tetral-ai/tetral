@@ -43,7 +43,12 @@ type RuntimeDeliveryStore interface {
 }
 
 type RuntimeInterruptDeliveryAuthorityStore interface {
-	InterruptDeliveryAuthorityActive(context.Context, RuntimeJob) (bool, error)
+	InterruptDeliveryAuthority(context.Context, RuntimeJob) (RuntimeInterruptDeliveryAuthority, error)
+}
+
+type RuntimeInterruptDeliveryAuthority struct {
+	Active            bool
+	QueueLeaseSettled bool
 }
 
 type RuntimeCleanupFinalizer interface {
@@ -416,12 +421,12 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 				ErrorMessage: "runtime interrupt delivery authority is unavailable",
 			}, nil
 		}
-		active, err := authorizer.InterruptDeliveryAuthorityActive(ctx, job)
+		authority, err := authorizer.InterruptDeliveryAuthority(ctx, job)
 		if err != nil {
 			return runtimeDeliveryResultFromPrepareError(err), nil
 		}
-		if !active {
-			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}, nil
+		if !authority.Active {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: authority.QueueLeaseSettled}, nil
 		}
 	}
 	if d.Sender == nil {
@@ -654,12 +659,12 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 				return err
 			}
 			if job.InputKind == "interrupt_control" {
-				active, err := interruptDeliveryAuthorityActiveTx(ctx, tx, job)
+				authority, err := interruptDeliveryAuthorityTx(ctx, tx, job, now)
 				if err != nil {
 					return err
 				}
-				if !active {
-					plan = RuntimeCommandPlan{StaleAccepted: true, QueueLeaseSettled: true}
+				if !authority.Active {
+					plan = RuntimeCommandPlan{StaleAccepted: true, QueueLeaseSettled: authority.QueueLeaseSettled}
 					return nil
 				}
 			}
@@ -786,48 +791,69 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 	return plan, nil
 }
 
-// InterruptDeliveryAuthorityActive is the final pre-send fence for an
+// InterruptDeliveryAuthority is the final pre-send fence for an
 // interrupt command. Preparation performs the same check before any binding or
 // Inbox work; this second transaction prevents a lease lost after planning
 // from reaching Runtime. Runtime's echoed capability and Bridge closeout
 // validation remain the final fence for a command already in transport.
-func (s *PostgreSQLRuntimeDeliveryStore) InterruptDeliveryAuthorityActive(ctx context.Context, job RuntimeJob) (bool, error) {
+func (s *PostgreSQLRuntimeDeliveryStore) InterruptDeliveryAuthority(ctx context.Context, job RuntimeJob) (RuntimeInterruptDeliveryAuthority, error) {
 	if s == nil || s.Client == nil {
-		return false, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
+		return RuntimeInterruptDeliveryAuthority{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
-	var active bool
+	now := storage.Now()
+	if s.Clock != nil {
+		now = s.Clock().UTC()
+	}
+	var authority RuntimeInterruptDeliveryAuthority
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.authorize_interrupt_delivery", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
 		var err error
-		active, err = interruptDeliveryAuthorityActiveTx(ctx, tx, job)
+		authority, err = interruptDeliveryAuthorityTx(ctx, tx, job, now)
 		return err
 	})
-	return active, err
+	return authority, err
 }
 
-func interruptDeliveryAuthorityActiveTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
+func interruptDeliveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) (RuntimeInterruptDeliveryAuthority, error) {
 	if job.Kind != queue.KindRuntimeInput || job.InputKind != "interrupt_control" || job.WorkspaceID == "" || job.SessionID == "" ||
 		job.SessionThreadID == "" || job.RuntimeInputID == "" || job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" {
-		return false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "interrupt delivery authority is incomplete", retryable: false}
+		return RuntimeInterruptDeliveryAuthority{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "interrupt delivery authority is incomplete", retryable: false}
 	}
 	workspaceID := workspace.ID(job.WorkspaceID)
 	if job.PartitionKey != queue.FormatSessionPartitionKey(workspaceID, job.SessionID) ||
 		job.DedupeKey != queue.FormatRuntimeInputDedupeKey(workspaceID, job.SessionID, job.RuntimeInputID) {
-		return false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "interrupt delivery authority binding is invalid", retryable: false}
+		return RuntimeInterruptDeliveryAuthority{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "interrupt delivery authority binding is invalid", retryable: false}
 	}
-	barrier, barrierActive, err := activeSessionInterruptBarrierTx(ctx, tx, job.WorkspaceID, job.SessionID)
-	if err != nil {
-		return false, err
-	}
-	if !barrierActive || barrier.runtimeInputID != job.RuntimeInputID {
-		return false, nil
-	}
-	return queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
 		WorkspaceID: workspaceID, JobID: job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
 		PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
 	})
+	if err != nil {
+		return RuntimeInterruptDeliveryAuthority{}, err
+	}
+	if !live {
+		return RuntimeInterruptDeliveryAuthority{QueueLeaseSettled: true}, nil
+	}
+	barrier, barrierActive, err := activeSessionInterruptBarrierTx(ctx, tx, job.WorkspaceID, job.SessionID)
+	if err != nil {
+		return RuntimeInterruptDeliveryAuthority{}, err
+	}
+	if !barrierActive || barrier.runtimeInputID != job.RuntimeInputID {
+		settled, err := queue.CancelLeasedRuntimeInputCustodyTx(ctx, tx, queue.CancelLeasedRuntimeInputRequest{
+			Lease: queue.ExactLeaseRequest{
+				WorkspaceID: workspaceID, JobID: job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
+				PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+			},
+			SessionID: job.SessionID, RuntimeInputID: job.RuntimeInputID, InputKind: job.InputKind, Now: now,
+		})
+		if err != nil {
+			return RuntimeInterruptDeliveryAuthority{}, err
+		}
+		return RuntimeInterruptDeliveryAuthority{QueueLeaseSettled: settled}, nil
+	}
+	return RuntimeInterruptDeliveryAuthority{Active: true}, nil
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Context, job RuntimeJob, attempt RuntimeAttemptedBinding) (bool, error) {

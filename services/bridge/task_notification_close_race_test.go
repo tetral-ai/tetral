@@ -190,8 +190,9 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 		Scope: parentScope, ControlOperationId: controlOperationID,
 	}
 	controlQueueSettled := false
+	controlLeaseNow := time.Now().UTC().Add(time.Hour)
 	if !admissionFirst {
-		takeoverNow := now.Add(7 * 24 * time.Hour)
+		takeoverNow := controlLeaseNow
 		if response, err := apiStore.AwaitChildInterrupt(context.Background(), awaitRequest); status.Code(err) != codes.DeadlineExceeded || response != nil {
 			t.Fatalf("await before leased notification quiescence = %#v/%v; want DeadlineExceeded", response, err)
 		}
@@ -235,12 +236,12 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	if !controlQueueSettled {
 		controlLease, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 			WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-child-close-control",
-			MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(7*24*time.Hour + 3*time.Second),
+			MaxJobs: 1, LeaseDuration: time.Minute, Now: controlLeaseNow.Add(3 * time.Second),
 		})
 		if err != nil || len(controlLease) != 1 || controlLease[0].ID == queued.ID {
 			t.Fatalf("lease committed child-close control = %#v, %v; want control job", controlLease, err)
 		}
-		commitAndACKControl(controlLease[0], now.Add(7*24*time.Hour+4*time.Second))
+		commitAndACKControl(controlLease[0], controlLeaseNow.Add(4*time.Second))
 	}
 	if _, err := apiStore.AwaitChildInterrupt(context.Background(), awaitRequest); err != nil {
 		t.Fatalf("await child-close control after notification quiescence: %v", err)

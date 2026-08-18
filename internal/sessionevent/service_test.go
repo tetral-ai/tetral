@@ -983,10 +983,10 @@ func TestRuntimeInputSegmentsBreakAcrossNonRuntimeSequenceGaps(t *testing.T) {
 	}
 }
 
-func TestAppendClientEventsSessionInterruptFansOutToPublicThreads(t *testing.T) {
+func TestAppendClientEventsSessionInterruptTargetsOnlyMainThread(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	ctx := context.Background()
-	sessionID := "sesn_event_interrupt_fanout"
+	sessionID := "sesn_event_interrupt_main"
 	mainThreadID := sessionEventMainThreadID(sessionID)
 	publicChildID := "thread_interrupt_public_child"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
@@ -996,21 +996,21 @@ func TestAppendClientEventsSessionInterruptFansOutToPublicThreads(t *testing.T) 
 	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	service := newSessionEventServiceForTest(runtime)
 
-	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_interrupt_fanout", AppendRequest{
+	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_interrupt_main", AppendRequest{
 		Events: []IncomingEvent{{Type: EventTypeUserInterrupt}},
 	})
 	if err != nil {
 		t.Fatalf("AppendClientEvents: %v", err)
 	}
-	if len(result.Data) != 2 {
-		t.Fatalf("result events = %d; want main and public child interrupts", len(result.Data))
+	if len(result.Data) != 1 {
+		t.Fatalf("result events = %d; want one main-thread interrupt", len(result.Data))
 	}
-	if result.Data[0].ThreadID != mainThreadID || result.Data[1].ThreadID != publicChildID {
-		t.Fatalf("interrupt targets = %q,%q; want %q,%q", result.Data[0].ThreadID, result.Data[1].ThreadID, mainThreadID, publicChildID)
+	if result.Data[0].ThreadID != mainThreadID {
+		t.Fatalf("interrupt target = %q; want main thread %q", result.Data[0].ThreadID, mainThreadID)
 	}
 	rows := readSessionEventLedgerRows(t, admin, sessionID)
-	if len(rows) != 2 {
-		t.Fatalf("ledger rows = %d; want 2", len(rows))
+	if len(rows) != 1 {
+		t.Fatalf("ledger rows = %d; want 1", len(rows))
 	}
 	for index, row := range rows {
 		if row.sequence != 1 || row.eventType != EventTypeUserInterrupt || row.payload != `{}` {
@@ -1020,42 +1020,34 @@ func TestAppendClientEventsSessionInterruptFansOutToPublicThreads(t *testing.T) 
 			t.Fatalf("ledger row %d processed_at = %q; want NULL runtime input", index, row.processedAt.String)
 		}
 	}
-	if rows[0].sessionThreadID != mainThreadID || rows[1].sessionThreadID != publicChildID {
-		t.Fatalf("ledger interrupt thread ids = %q,%q; want %q,%q", rows[0].sessionThreadID, rows[1].sessionThreadID, mainThreadID, publicChildID)
+	if rows[0].sessionThreadID != mainThreadID {
+		t.Fatalf("ledger interrupt thread id = %q; want %q", rows[0].sessionThreadID, mainThreadID)
 	}
 	assertSessionEventStreamChanges(t, admin, sessionID, []sessionEventStreamChange{
 		{eventID: result.Data[0].ID, sessionThreadID: mainThreadID, revision: 1, visibility: "public", sessionVisible: true},
-		{eventID: result.Data[1].ID, sessionThreadID: publicChildID, revision: 1, visibility: "public", sessionVisible: false},
 	})
 	jobs := readSessionEventQueueJobs(t, admin, sessionID)
-	if len(jobs) != 2 {
-		t.Fatalf("queue jobs = %#v; want one interrupt runtime_input per public thread", jobs)
+	if len(jobs) != 1 {
+		t.Fatalf("queue jobs = %#v; want one main-thread interrupt runtime_input", jobs)
 	}
-	jobsByThread := runtimeInputQueueJobsByThread(t, jobs)
-	if _, ok := jobsByThread[mainThreadID]; !ok {
-		t.Fatalf("missing runtime_input job for main thread %s", mainThreadID)
-	}
-	if _, ok := jobsByThread[publicChildID]; !ok {
-		t.Fatalf("missing runtime_input job for public child thread %s", publicChildID)
-	}
-	assertRuntimeInputQueueJob(t, jobsByThread[mainThreadID], RuntimeInputKindInterruptControl, 100, []string{result.Data[0].ID}, 1, 1)
-	assertRuntimeInputQueueJob(t, jobsByThread[publicChildID], RuntimeInputKindInterruptControl, 100, []string{result.Data[1].ID}, 1, 1)
+	assertRuntimeInputQueueJob(t, jobs[0], RuntimeInputKindInterruptControl, 100, []string{result.Data[0].ID}, 1, 1)
+	assertRuntimeInputQueueJobThread(t, jobs[0], mainThreadID)
 
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, "thread_interrupt_added_after_first_admission", "subagent", "public", false)
-	replay, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_interrupt_fanout", AppendRequest{
+	replay, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_interrupt_main", AppendRequest{
 		Events: []IncomingEvent{{Type: EventTypeUserInterrupt}},
 	})
 	if err != nil {
 		t.Fatalf("AppendClientEvents replay after thread change: %v", err)
 	}
-	if len(replay.Data) != 2 || replay.Data[0].ID != result.Data[0].ID || replay.Data[1].ID != result.Data[1].ID {
-		t.Fatalf("interrupt replay = %+v; want original immutable fanout response", replay.Data)
+	if len(replay.Data) != 1 || replay.Data[0].ID != result.Data[0].ID {
+		t.Fatalf("interrupt replay = %+v; want original immutable main-thread response", replay.Data)
 	}
-	if got := len(readSessionEventLedgerRows(t, admin, sessionID)); got != 2 {
-		t.Fatalf("ledger rows after fanout replay = %d; want 2", got)
+	if got := len(readSessionEventLedgerRows(t, admin, sessionID)); got != 1 {
+		t.Fatalf("ledger rows after replay = %d; want 1", got)
 	}
-	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 2 {
-		t.Fatalf("queue jobs after fanout replay = %d; want 2", got)
+	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 1 {
+		t.Fatalf("queue jobs after replay = %d; want 1", got)
 	}
 }
 
@@ -1473,7 +1465,7 @@ func TestAppendClientEventsReplaysUserInterruptWithoutDuplicatingQueueJob(t *tes
 	assertRuntimeInputQueueJob(t, jobs[0], RuntimeInputKindInterruptControl, 100, []string{firstResult.Data[0].ID}, 1, 1)
 }
 
-func TestAppendClientEventsIdempotencyHashUsesSessionInterruptSelectorBeforeFanout(t *testing.T) {
+func TestAppendClientEventsIdempotencyHashUsesSessionInterruptSelectorBeforeMainThreadResolution(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	ctx := context.Background()
 	sessionID := "sesn_event_interrupt_target_hash"
@@ -1490,8 +1482,8 @@ func TestAppendClientEventsIdempotencyHashUsesSessionInterruptSelectorBeforeFano
 	if err != nil {
 		t.Fatalf("first AppendClientEvents: %v", err)
 	}
-	if len(firstResult.Data) != 2 {
-		t.Fatalf("first interrupt events = %d; want main plus first public child", len(firstResult.Data))
+	if len(firstResult.Data) != 1 {
+		t.Fatalf("first interrupt events = %d; want one main-thread interrupt", len(firstResult.Data))
 	}
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, "thread_interrupt_hash_child_2", "subagent", "public", false)
 
@@ -1499,14 +1491,14 @@ func TestAppendClientEventsIdempotencyHashUsesSessionInterruptSelectorBeforeFano
 	if err != nil {
 		t.Fatalf("AppendClientEvents replay after target set changed: %v", err)
 	}
-	if len(replay.Data) != 2 || replay.Data[0].ID != firstResult.Data[0].ID || replay.Data[1].ID != firstResult.Data[1].ID {
-		t.Fatalf("replay events = %+v; want original fanout response", replay.Data)
+	if len(replay.Data) != 1 || replay.Data[0].ID != firstResult.Data[0].ID {
+		t.Fatalf("replay events = %+v; want original main-thread response", replay.Data)
 	}
-	if got := len(readSessionEventLedgerRows(t, admin, sessionID)); got != 2 {
-		t.Fatalf("ledger rows = %d; want original fanout only", got)
+	if got := len(readSessionEventLedgerRows(t, admin, sessionID)); got != 1 {
+		t.Fatalf("ledger rows = %d; want original interrupt only", got)
 	}
-	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 2 {
-		t.Fatalf("queue jobs = %d; want original fanout jobs only", got)
+	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 1 {
+		t.Fatalf("queue jobs = %d; want original interrupt job only", got)
 	}
 }
 

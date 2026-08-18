@@ -689,8 +689,8 @@ func (s *recordingRuntimeDeliveryStore) PrepareRuntimeCommand(_ context.Context,
 	return s.plan, s.err
 }
 
-func (s *recordingRuntimeDeliveryStore) InterruptDeliveryAuthorityActive(_ context.Context, _ RuntimeJob) (bool, error) {
-	return !s.interruptAuthorityLost, nil
+func (s *recordingRuntimeDeliveryStore) InterruptDeliveryAuthority(_ context.Context, _ RuntimeJob) (RuntimeInterruptDeliveryAuthority, error) {
+	return RuntimeInterruptDeliveryAuthority{Active: !s.interruptAuthorityLost, QueueLeaseSettled: s.interruptAuthorityLost}, nil
 }
 
 func (s *recordingRuntimeDeliveryStore) MarkRuntimeInputAccepted(_ context.Context, job RuntimeJob, _ RuntimeAttemptedBinding) (bool, error) {

@@ -278,7 +278,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 				return heartbeatErr
 			}
 			if invalidRuntimeJobPayload(err) {
-				return r.deadLetterInvalidRuntimeJob(ctx, job)
+				return r.settleInvalidRuntimeJobPayload(ctx, job)
 			}
 			return err
 		}
@@ -302,7 +302,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			}
 			if finalizeErr != nil {
 				if invalidRuntimeJobPayload(finalizeErr) {
-					return r.deadLetterInvalidRuntimeJob(ctx, job)
+					return r.settleInvalidRuntimeJobPayload(ctx, job)
 				}
 				return finalizeErr
 			}
@@ -350,7 +350,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 			if err != nil {
 				if invalidRuntimeJobPayload(err) {
-					return r.deadLetterInvalidRuntimeJob(ctx, job)
+					return r.settleInvalidRuntimeJobPayload(ctx, job)
 				}
 				return err
 			}
@@ -388,7 +388,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 		if err != nil {
 			if invalidRuntimeJobPayload(err) {
-				return r.deadLetterInvalidRuntimeJob(ctx, job)
+				return r.settleInvalidRuntimeJobPayload(ctx, job)
 			}
 			return err
 		}
@@ -455,6 +455,43 @@ func (r *JobRunner) logRuntimeJobAttempt(job RuntimeJob, preparationKind string,
 func invalidRuntimeJobPayload(err error) bool {
 	var preparation runtimeDeliveryPrepareError
 	return errors.As(err, &preparation) && preparation.kind == "invalid_runtime_job_payload" && !preparation.retryable
+}
+
+func (r *JobRunner) settleInvalidRuntimeJobPayload(ctx context.Context, job RuntimeJob) error {
+	if job.Kind != queue.KindRuntimeInput || job.InputKind != "interrupt_control" {
+		return r.deadLetterInvalidRuntimeJob(ctx, job)
+	}
+	finalizer, ok := r.Deliverer.(malformedRuntimeInputCustodyFinalizer)
+	if !ok {
+		return errors.New("malformed runtime-input custody finalizer is required")
+	}
+	outcome, err := finalizer.FinalizeMalformedRuntimeInputCustody(ctx, MalformedRuntimeInputLease{
+		WorkspaceID:  job.WorkspaceID,
+		JobID:        job.JobID,
+		LeaseToken:   job.LeaseToken,
+		Kind:         job.Kind,
+		PartitionKey: job.PartitionKey,
+		DedupeKey:    job.DedupeKey,
+	})
+	if err != nil {
+		return err
+	}
+	if outcome.Handled {
+		disposition := "invalid_interrupt_terminalized"
+		if !outcome.InterruptTerminalized {
+			disposition = "invalid_interrupt_settled"
+		}
+		r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", disposition)
+		return nil
+	}
+	r.logRuntimeJobAttempt(job, "invalid_runtime_job_payload", "invalid_interrupt_invariant_dead_lettered")
+	return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		WorkspaceId:  job.WorkspaceID,
+		JobId:        job.JobID,
+		LeaseToken:   job.LeaseToken,
+		ErrorKind:    "invalid_runtime_job_payload",
+		ErrorMessage: "interrupt runtime custody has no unique canonical Inbox",
+	}))
 }
 
 func (r *JobRunner) deadLetterInvalidRuntimeJob(ctx context.Context, job RuntimeJob) error {

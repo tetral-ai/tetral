@@ -330,6 +330,92 @@ func TestPostgreSQLDeliverInterAgentMailQueueFailureRollsBackAllMailState(t *tes
 	}
 }
 
+func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffects(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID     = "sesn_interrupt_actor_effects"
+		mainID        = "thr_interrupt_actor_main"
+		siblingID     = "thr_interrupt_actor_sibling"
+		grandchildID  = "thr_interrupt_actor_grandchild"
+		bindingID     = "bind_interrupt_actor_effects"
+		podUID        = "pod_interrupt_actor_effects"
+		interruptID   = "rin_interrupt_actor_control"
+		preSourceID   = "evt_interrupt_actor_pre_mail"
+		siblingSource = "evt_interrupt_actor_sibling_mail"
+		lateSourceID  = "evt_interrupt_actor_late_mail"
+		childSourceID = "evt_interrupt_actor_late_child"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, siblingID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, siblingID, grandchildID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, preSourceID, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+siblingID+`","message":"committed before interrupt"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, siblingSource, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+siblingID+`","message":"external sibling mail waits"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateSourceID, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID), "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+grandchildID+`","message":"must be rejected"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, childSourceID, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID), "agent.tool_use",
+		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"late-child","prompt":"must be rejected"},"evaluated_permission":"allow"}`)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	mainScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
+	preRequest := &bridgev1.DeliverInterAgentMailRequest{
+		Scope: mainScope, DeliveryId: agentMailDeliveryID(preSourceID, siblingID), TargetThreadId: siblingID,
+		SourceToolUseEventId: preSourceID, Content: "committed before interrupt",
+	}
+	if response, err := store.DeliverInterAgentMail(context.Background(), preRequest); err != nil || response.GetCommitted() == nil {
+		t.Fatalf("pre-interrupt mail = %#v/%v; want committed", response, err)
+	}
+	interruptSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, "evt_interrupt_actor_control", interruptSequence, "user.interrupt", `{}`)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
+		sequence_from,sequence_to,status,created_at,updated_at
+	) VALUES ('default',$1,$2,$3,'interrupt_control','["evt_interrupt_actor_control"]',$4,$4,'queued',clock_timestamp(),clock_timestamp())`,
+		sessionID, siblingID, interruptID, interruptSequence); err != nil {
+		t.Fatalf("seed actor interrupt barrier: %v", err)
+	}
+	if response, err := store.DeliverInterAgentMail(context.Background(), preRequest); err != nil || response.GetDuplicate() == nil {
+		t.Fatalf("pre-interrupt mail replay = %#v/%v; want duplicate", response, err)
+	}
+	siblingRequest := &bridgev1.DeliverInterAgentMailRequest{
+		Scope: mainScope, DeliveryId: agentMailDeliveryID(siblingSource, siblingID), TargetThreadId: siblingID,
+		SourceToolUseEventId: siblingSource, Content: "external sibling mail waits",
+	}
+	if response, err := store.DeliverInterAgentMail(context.Background(), siblingRequest); err != nil || response.GetCommitted() == nil {
+		t.Fatalf("sibling mail behind barrier = %#v/%v; want committed", response, err)
+	}
+	lateRequest := &bridgev1.DeliverInterAgentMailRequest{
+		Scope: siblingScope, DeliveryId: agentMailDeliveryID(lateSourceID, grandchildID), TargetThreadId: grandchildID,
+		SourceToolUseEventId: lateSourceID, Content: "must be rejected",
+	}
+	if _, err := store.DeliverInterAgentMail(context.Background(), lateRequest); !isSessionInterruptBarrierStaleError(err) {
+		t.Fatalf("interrupted-source mail error = %v; want interrupt barrier stale", err)
+	}
+	if _, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
+		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", ForkTurns: "all",
+	}); !isSessionInterruptBarrierStaleError(err) {
+		t.Fatalf("interrupted-source child error = %v; want interrupt barrier stale", err)
+	}
+	var sent, received, inbox, queued, lateOperations, lateChildren int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_received'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail'),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND partition_key=$2 AND payload_json::jsonb->>'input_kind'='agent_mail'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND idempotency_key IN ($3,$4)),
+		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND task_name='late-child')`,
+		sessionID, queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID), lateRequest.GetDeliveryId(), childSourceID,
+	).Scan(&sent, &received, &inbox, &queued, &lateOperations, &lateChildren); err != nil {
+		t.Fatalf("read interrupt actor effects: %v", err)
+	}
+	if sent != 2 || received != 2 || inbox != 2 || queued != 2 || lateOperations != 0 || lateChildren != 0 {
+		t.Fatalf("interrupt actor effects sent/received/inbox/queue/late_ops/late_children = %d/%d/%d/%d/%d/%d; want 2/2/2/2/0/0",
+			sent, received, inbox, queued, lateOperations, lateChildren)
+	}
+}
+
 func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
