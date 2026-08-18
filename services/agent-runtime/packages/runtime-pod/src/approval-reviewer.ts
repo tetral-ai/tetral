@@ -1128,6 +1128,22 @@ function closeApprovalReviewerSidecarEffect(
 				"durable_close_rejected",
 			);
 			if (durable.discardHotState === true) {
+				if (token !== undefined) {
+					const evicted = yield* evictReviewerExecutionEffect(
+						host,
+						control,
+						token,
+					);
+					if (!evicted) {
+						logApprovalReviewLifecycleFailure(
+							logger,
+							request,
+							reviewId,
+							"sidecar",
+							"hot_eviction_failed",
+						);
+					}
+				}
 				return "stale_custody" as const;
 			}
 			if (token !== undefined) {

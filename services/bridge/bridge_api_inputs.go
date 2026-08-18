@@ -309,13 +309,21 @@ func cancelAcceptedApprovalReviewInputsTx(
 	scope *bridgev1.RuntimeScope,
 	now time.Time,
 ) error {
-	_, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
-		SET status = 'cancelled', updated_at = $3
-		WHERE workspace_id = $1
-		  AND session_id = $2
-		  AND input_kind = 'approval_review'
-		  AND status = 'accepted'`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), now)
+	_, err := tx.Exec(ctx, `UPDATE session_runtime_inbox inbox
+		SET status = 'cancelled', updated_at = $4
+		WHERE inbox.workspace_id = $1
+		  AND inbox.session_id = $2
+		  AND inbox.input_kind = 'approval_review'
+		  AND inbox.status = 'accepted'
+		  AND EXISTS (
+		      SELECT 1 FROM session_threads reviewer
+		       WHERE reviewer.workspace_id = inbox.workspace_id
+		         AND reviewer.session_id = inbox.session_id
+		         AND reviewer.id = inbox.session_thread_id
+		         AND reviewer.role = 'approval_reviewer'
+		         AND reviewer.parent_thread_id = $3
+		  )`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now)
 	return err
 }
 

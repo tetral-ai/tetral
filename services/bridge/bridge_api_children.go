@@ -203,7 +203,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 // one hot reviewer execution. Review text remains Runtime-owned and arrives
 // later through CommitInputs; this operation owns only durable target,
 // idempotency, current binding, and accepted custody. Caller and scope
-// authority are checked first, then an exact active custody replay is resolved
+// authority are checked first, then an exact retained custody replay is resolved
 // before a newly requested admission is tested against the Session barrier.
 func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context, request *bridgev1.AdmitApprovalReviewInputRequest) (response *bridgev1.AdmitApprovalReviewInputResponse, resultErr error) {
 	phase := "validate"
@@ -239,7 +239,10 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 				existingBindingGeneration != request.GetScope().GetBinding().GetBindingGeneration() || existingPodUID != request.GetScope().GetBinding().GetTargetPodUid() {
 				return status.Error(codes.AlreadyExists, "approval review admission idempotency conflict")
 			}
-			if existingStatus == "accepted" || existingStatus == "committed" {
+			if _, err := validateApprovalReviewerAdmissionTargetTx(ctx, tx, request, true); err != nil {
+				return err
+			}
+			if existingStatus == "accepted" || existingStatus == "committed" || existingStatus == "cancelled" {
 				return nil
 			}
 		} else if !dbconnect.IsNoRows(err) {
@@ -248,21 +251,9 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		var parentThreadID, role, visibility, statusValue string
-		var isTrunk bool
-		if err := tx.QueryRow(ctx, `SELECT parent_thread_id,role,visibility,status,is_trunk
-			FROM session_threads
-			WHERE workspace_id=$1 AND session_id=$2 AND id=$3
-			FOR UPDATE`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetReviewerThreadId()).Scan(
-			&parentThreadID, &role, &visibility, &statusValue, &isTrunk,
-		); dbconnect.IsNoRows(err) {
-			return status.Error(codes.FailedPrecondition, "approval reviewer admission target is missing")
-		} else if err != nil {
+		isTrunk, err := validateApprovalReviewerAdmissionTargetTx(ctx, tx, request, false)
+		if err != nil {
 			return err
-		}
-		if parentThreadID != request.GetScope().GetSessionThreadId() || role != "approval_reviewer" || visibility != "internal" ||
-			statusValue == "closed_for_runtime" || statusValue == "failed" || statusValue == "terminated" {
-			return status.Error(codes.FailedPrecondition, "approval reviewer admission target is invalid")
 		}
 		if !isTrunk {
 			existing, ok, err := readBridgeOperationBySourceTx(ctx, tx, request.GetScope(), bridgeOpCreateChildThread, childCreateSourceReviewerSidecar, request.GetReviewId())
@@ -301,7 +292,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 			return err
 		}
 		if sessionID != request.GetScope().GetSessionId() || reviewerThreadID != request.GetReviewerThreadId() || inputKind != "approval_review" ||
-			(inboxStatus != "accepted" && inboxStatus != "committed") || bindingID != request.GetScope().GetBinding().GetBindingId() ||
+			(inboxStatus != "accepted" && inboxStatus != "committed" && inboxStatus != "cancelled") || bindingID != request.GetScope().GetBinding().GetBindingId() ||
 			bindingGeneration != request.GetScope().GetBinding().GetBindingGeneration() || podUID != request.GetScope().GetBinding().GetTargetPodUid() {
 			return status.Error(codes.AlreadyExists, "approval review admission idempotency conflict")
 		}
@@ -322,6 +313,31 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 
 func approvalReviewRuntimeInputID(scope *bridgev1.RuntimeScope, reviewID string) string {
 	return strings.Replace(stableRuntimeID("approval_review_input", scope.GetWorkspaceId(), scope.GetSessionId(), reviewID), "stid_", "rin_", 1)
+}
+
+func validateApprovalReviewerAdmissionTargetTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.AdmitApprovalReviewInputRequest,
+	allowTerminal bool,
+) (bool, error) {
+	var parentThreadID, role, visibility, statusValue string
+	var isTrunk bool
+	if err := tx.QueryRow(ctx, `SELECT parent_thread_id,role,visibility,status,is_trunk
+		FROM session_threads
+		WHERE workspace_id=$1 AND session_id=$2 AND id=$3
+		FOR UPDATE`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetReviewerThreadId()).Scan(
+		&parentThreadID, &role, &visibility, &statusValue, &isTrunk,
+	); dbconnect.IsNoRows(err) {
+		return false, status.Error(codes.FailedPrecondition, "approval reviewer admission target is missing")
+	} else if err != nil {
+		return false, err
+	}
+	if parentThreadID != request.GetScope().GetSessionThreadId() || role != "approval_reviewer" || visibility != "internal" ||
+		(!allowTerminal && (statusValue == "closed_for_runtime" || statusValue == "failed" || statusValue == "terminated")) {
+		return false, status.Error(codes.FailedPrecondition, "approval reviewer admission target is invalid")
+	}
+	return isTrunk, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) ResolveChildThread(ctx context.Context, request *bridgev1.ResolveChildThreadRequest) (response *bridgev1.ResolveChildThreadResponse, resultErr error) {

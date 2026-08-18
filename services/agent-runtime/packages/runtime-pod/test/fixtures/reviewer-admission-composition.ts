@@ -165,12 +165,6 @@ const reviewer = createRuntimeApprovalReviewer(() => hosts.subAgentRunHost, {
 	waitTimeoutMs: 5_000,
 });
 const trunkRequest = reviewRequest(manager, "tool_call_reviewer_trunk");
-const lostAck = await Effect.runPromise(reviewer(trunkRequest));
-if (lostAck.type !== "settlement_failed") {
-	throw new Error(
-		`lost admission ACK did not preserve uncertainty: ${JSON.stringify(lostAck)}`,
-	);
-}
 let earlyTrunkResult: unknown;
 const trunk = Effect.runPromise(reviewer(trunkRequest)).then((result) => {
 	earlyTrunkResult = result;
@@ -192,7 +186,6 @@ await hosts.close();
 
 process.stdout.write(
 	JSON.stringify({
-		lostAck,
 		trunkResult,
 		sidecar,
 		providerRequests,

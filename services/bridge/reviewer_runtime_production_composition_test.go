@@ -19,9 +19,6 @@ import (
 )
 
 type reviewerRuntimeCompositionOutput struct {
-	LostAck struct {
-		Type string `json:"type"`
-	} `json:"lostAck"`
 	TrunkResult struct {
 		Type    string `json:"type"`
 		Outcome string `json:"outcome"`
@@ -104,14 +101,14 @@ func TestPostgreSQLReviewerSelectionAdmissionAndLostACKCrossRuntimeAndBridge(t *
 	if err := json.Unmarshal(output, &composed); err != nil {
 		t.Fatalf("decode Reviewer Runtime composition: %v\n%s", err, output)
 	}
-	if composed.LostAck.Type != "settlement_failed" || composed.TrunkResult.Type != "decision" || composed.TrunkResult.Outcome != "allow" ||
+	if composed.TrunkResult.Type != "decision" || composed.TrunkResult.Outcome != "allow" ||
 		composed.Sidecar.Type != "decision" || composed.Sidecar.Outcome != "allow" || composed.ProviderRequests != 2 || composed.DurableDecisionReceipts != 2 || !composed.ManagerDisposed ||
 		len(composed.HotStateBeforeDispose.EphemeralReviewIDs) != 0 {
-		t.Fatalf("Reviewer Runtime composition = %+v; want lost-ACK uncertainty, trunk+sidecar decisions, two providers, and released manager state", composed)
+		t.Fatalf("Reviewer Runtime composition = %+v; want one-call lost-ACK recovery, trunk+sidecar decisions, two providers, and released manager state", composed)
 	}
-	if len(composed.Creations) != 3 || !composed.Creations[0].IsTrunk || !composed.Creations[1].IsTrunk || composed.Creations[2].IsTrunk ||
-		composed.Creations[0].ReviewID != composed.Creations[1].ReviewID || composed.Creations[1].ReviewID == composed.Creations[2].ReviewID {
-		t.Fatalf("Reviewer selection sequence = %+v; want one replayed trunk identity followed by one distinct sidecar identity", composed.Creations)
+	if len(composed.Creations) != 2 || !composed.Creations[0].IsTrunk || composed.Creations[1].IsTrunk ||
+		composed.Creations[0].ReviewID == composed.Creations[1].ReviewID {
+		t.Fatalf("Reviewer selection sequence = %+v; want one trunk invocation with admission replay followed by one distinct sidecar", composed.Creations)
 	}
 	for index, execution := range composed.HotStateBeforeDispose.Executions {
 		if execution != nil {
@@ -147,8 +144,8 @@ func TestPostgreSQLReviewerSelectionAdmissionAndLostACKCrossRuntimeAndBridge(t *
 			admissions++
 		}
 	}
-	if trunkEnsures != 2 || sidecarEnsures != 1 || admissions != 3 {
-		t.Fatalf("Reviewer Ensure/Admission calls = trunk:%d sidecar:%d admission:%d; want 2 replayed trunk/1 sidecar/3 including lost-ACK replay: %v",
+	if trunkEnsures != 1 || sidecarEnsures != 1 || admissions != 3 {
+		t.Fatalf("Reviewer Ensure/Admission calls = trunk:%d sidecar:%d admission:%d; want 1 trunk/1 sidecar/3 including exact admission replay: %v",
 			trunkEnsures, sidecarEnsures, admissions, calls)
 	}
 }

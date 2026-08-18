@@ -611,6 +611,7 @@ func TestPostgreSQLAdmitApprovalReviewInputResolvesCommittedReplayBeforeInterrup
 	const (
 		sessionID  = "sesn_reviewer_admission_barrier_replay"
 		parentID   = "thr_reviewer_admission_barrier_parent"
+		siblingID  = "thr_reviewer_admission_barrier_sibling"
 		reviewerID = "thr_reviewer_admission_barrier_target"
 		conflictID = "thr_reviewer_admission_barrier_conflict"
 		reviewID   = "arvw_reviewer_admission_barrier_replay"
@@ -618,6 +619,7 @@ func TestPostgreSQLAdmitApprovalReviewInputResolvesCommittedReplayBeforeInterrup
 		podUID     = "pod_reviewer_admission_barrier_replay"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, siblingID)
 	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -641,6 +643,12 @@ func TestPostgreSQLAdmitApprovalReviewInputResolvesCommittedReplayBeforeInterrup
 	if err != nil || replay.GetDuplicate().GetRuntimeInputId() != committed.GetCommitted().GetRuntimeInputId() {
 		t.Fatalf("committed Reviewer admission replay behind barrier = %#v/%v; want duplicate %q",
 			replay, err, committed.GetCommitted().GetRuntimeInputId())
+	}
+	wrongSourceRequest := &bridgev1.AdmitApprovalReviewInputRequest{
+		Scope: bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
+	}
+	if wrongSource, err := store.AdmitApprovalReviewInput(context.Background(), wrongSourceRequest); status.Code(err) != codes.FailedPrecondition || wrongSource != nil {
+		t.Fatalf("Reviewer admission replay from sibling source = %#v/%v; want FailedPrecondition with no receipt", wrongSource, err)
 	}
 	conflictRequest := &bridgev1.AdmitApprovalReviewInputRequest{
 		Scope: request.GetScope(), ReviewerThreadId: conflictID, ReviewId: reviewID,
@@ -754,9 +762,10 @@ func TestPostgreSQLInterruptCommitCancelsAdmissionFirstReviewerCustodyAtomically
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
-	admitted, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
+	admissionRequest := &bridgev1.AdmitApprovalReviewInputRequest{
 		Scope: scope, ReviewerThreadId: reviewerID, ReviewId: "arvw_reviewer_admission_first_interrupt",
-	})
+	}
+	admitted, err := store.AdmitApprovalReviewInput(context.Background(), admissionRequest)
 	if err != nil || admitted.GetCommitted() == nil {
 		t.Fatalf("admission-first Reviewer custody = %#v/%v; want committed", admitted, err)
 	}
@@ -789,6 +798,72 @@ func TestPostgreSQLInterruptCommitCancelsAdmissionFirstReviewerCustodyAtomically
 	if reviewerStatus != "cancelled" || interruptStatus != "committed" || queueStatus != "leased" {
 		t.Fatalf("admission-first interrupt statuses = Reviewer %q interrupt %q queue %q; want cancelled/committed/exact delivery lease retained",
 			reviewerStatus, interruptStatus, queueStatus)
+	}
+	replayed, err := store.AdmitApprovalReviewInput(context.Background(), admissionRequest)
+	if err != nil || replayed.GetDuplicate().GetRuntimeInputId() != admitted.GetCommitted().GetRuntimeInputId() {
+		t.Fatalf("cancelled Reviewer admission replay = %#v/%v; want duplicate %q", replayed, err, admitted.GetCommitted().GetRuntimeInputId())
+	}
+}
+
+func TestPostgreSQLTargetedInterruptCancelsOnlyItsReviewerCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID       = "sesn_reviewer_targeted_interrupt"
+		mainID          = "thr_reviewer_targeted_main"
+		childID         = "thr_reviewer_targeted_child"
+		mainReviewerID  = "thr_reviewer_targeted_main_reviewer"
+		childReviewerID = "thr_reviewer_targeted_child_reviewer"
+		bindingID       = "bind_reviewer_targeted_interrupt"
+		podUID          = "pod_reviewer_targeted_interrupt"
+		interruptID     = "rin_reviewer_targeted_interrupt"
+		interruptEvent  = "evt_reviewer_targeted_interrupt"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, mainReviewerID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, childID, childReviewerID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	mainAdmission, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
+		Scope: bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID), ReviewerThreadId: mainReviewerID, ReviewId: "arvw_reviewer_targeted_main",
+	})
+	if err != nil || mainAdmission.GetCommitted() == nil {
+		t.Fatalf("admit main Reviewer custody: %#v/%v", mainAdmission, err)
+	}
+	childAdmission, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
+		Scope: bridgeAPIScope(sessionID, childID, bindingID, 1, podUID), ReviewerThreadId: childReviewerID, ReviewId: "arvw_reviewer_targeted_child",
+	})
+	if err != nil || childAdmission.GetCommitted() == nil {
+		t.Fatalf("admit child Reviewer custody: %#v/%v", childAdmission, err)
+	}
+
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, interruptEvent, 1, "user.interrupt", `{}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, childID, interruptID, "interrupt_control",
+		`["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 1, 1)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, childID, interruptID, "interrupt_control", interruptEvent, 1, queue.DefaultMaxAttempts, time.Now().UTC())
+	interruptLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "reviewer-targeted-interrupt",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: bridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeInputId: interruptID,
+		InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+	})
+	if err != nil || committed.GetCommitted().GetInterrupt() == nil {
+		t.Fatalf("targeted child interrupt closeout = %#v/%v", committed, err)
+	}
+
+	var mainStatus, childStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		mainAdmission.GetCommitted().GetRuntimeInputId(), childAdmission.GetCommitted().GetRuntimeInputId(),
+	).Scan(&mainStatus, &childStatus); err != nil {
+		t.Fatalf("read targeted Reviewer custody: %v", err)
+	}
+	if mainStatus != "accepted" || childStatus != "cancelled" {
+		t.Fatalf("targeted Reviewer custody = main %q child %q; want accepted/cancelled", mainStatus, childStatus)
 	}
 }
 

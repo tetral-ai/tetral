@@ -907,6 +907,11 @@ describe("Runtime approval reviewer", () => {
 			),
 		).resolves.toEqual({ type: "stale_custody" });
 		expect(host.closedThreads).toHaveLength(0);
+		expect(host.reviewerEvictions).toEqual([
+			expect.objectContaining({
+				reviewerThreadId: expect.stringContaining("thrd_aprv_sidecar"),
+			}),
+		]);
 		expect(logger.records).toEqual([
 			expect.objectContaining({
 				event: "approval_review_lifecycle_failure",

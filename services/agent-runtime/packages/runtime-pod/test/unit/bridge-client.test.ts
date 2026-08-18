@@ -79,6 +79,57 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		});
 	});
 
+	test("replays an ambiguous Reviewer admission with the exact request", async () => {
+		const bridge = new TypedBridge();
+		bridge.approvalAdmissionFailures.push(
+			Object.assign(new Error("admission ACK lost"), { code: status.UNKNOWN }),
+		);
+		bridge.approvalAdmissionResponse = {
+			duplicate: { runtimeInputId: "rin_reviewer" },
+		};
+		const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+
+		await expect(
+			creator.createApprovalReviewerThread({
+				request: threadScope() as ApprovalReviewerThreadCreation["request"],
+				reviewId: "arvw_lost_admission_ack",
+				isTrunk: true,
+				ensureOperationId: "aprv_ensure_lost_admission_ack",
+			}),
+		).resolves.toEqual({
+			ok: true,
+			reviewerThreadId: "thrd_reviewer",
+			runtimeInputId: "rin_reviewer",
+		});
+		expect(bridge.approvalAdmissionRequests).toHaveLength(2);
+		expect(bridge.approvalAdmissionRequests[1]).toEqual(
+			bridge.approvalAdmissionRequests[0],
+		);
+	});
+
+	test("does not replay a definitive Reviewer admission rejection", async () => {
+		const bridge = new TypedBridge();
+		bridge.approvalAdmissionFailures.push(
+			Object.assign(new Error("invalid admission"), {
+				code: status.INVALID_ARGUMENT,
+			}),
+		);
+		const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+
+		await expect(
+			creator.createApprovalReviewerThread({
+				request: threadScope() as ApprovalReviewerThreadCreation["request"],
+				reviewId: "arvw_invalid_admission",
+				isTrunk: true,
+				ensureOperationId: "aprv_ensure_invalid_admission",
+			}),
+		).resolves.toEqual({
+			ok: false,
+			message: "approval reviewer input admission is unavailable",
+		});
+		expect(bridge.approvalAdmissionRequests).toHaveLength(1);
+	});
+
 	test("loads sealed context and the open Request draft as direct durable facts", async () => {
 		const bridge = new TypedBridge();
 		const loader = new BridgeAPIContextLoader(options(bridge));
@@ -1024,6 +1075,8 @@ describe("Bridge operation-specific Runtime adapters", () => {
 
 class TypedBridge {
 	readonly approvalAdmissionRequests: unknown[] = [];
+	readonly approvalAdmissionFailures: Array<Error & { readonly code?: number }> =
+		[];
 	readonly loadContextRequests: LoadContextRequest[] = [];
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
@@ -1098,6 +1151,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.approvalAdmissionRequests.push(request);
+				const failure = this.approvalAdmissionFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, this.approvalAdmissionResponse);
 				return grpcCall();
 			},

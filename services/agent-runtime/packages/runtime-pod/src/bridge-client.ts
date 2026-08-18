@@ -556,21 +556,36 @@ export class BridgeAPIApprovalReviewerThreadCreator
 			};
 		}
 		let admitted: AdmitApprovalReviewInputResponse;
+		const admissionRequest = {
+			scope: approvalReviewerParentScope(input),
+			reviewerThreadId,
+			reviewId: input.reviewId,
+		};
 		try {
 			admitted = await admitApprovalReviewInput(
 				this.client,
-				{
-					scope: approvalReviewerParentScope(input),
-					reviewerThreadId,
-					reviewId: input.reviewId,
-				},
+				admissionRequest,
 				metadata,
 			);
-		} catch {
-			return {
-				ok: false as const,
-				message: "approval reviewer input admission is unavailable",
-			};
+		} catch (error) {
+			if (!bridgeDeclarationTransportUnknown(error)) {
+				return {
+					ok: false as const,
+					message: "approval reviewer input admission is unavailable",
+				};
+			}
+			try {
+				admitted = await admitApprovalReviewInput(
+					this.client,
+					admissionRequest,
+					metadata,
+				);
+			} catch {
+				return {
+					ok: false as const,
+					message: "approval reviewer input admission is unavailable",
+				};
+			}
 		}
 		if (
 			!exactlyOneDefined(
