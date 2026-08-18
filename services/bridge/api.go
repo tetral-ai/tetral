@@ -186,7 +186,13 @@ func (s BridgeAPIServer) EnsureApprovalReviewerTrunk(ctx context.Context, reques
 	if err != nil {
 		return nil, err
 	}
-	return store.EnsureApprovalReviewerTrunk(ctx, request)
+	response, err := store.EnsureApprovalReviewerTrunk(ctx, request)
+	if isConversationMutationStaleError(err) {
+		return &bridgev1.EnsureApprovalReviewerTrunkResponse{Outcome: &bridgev1.EnsureApprovalReviewerTrunkResponse_Stale{
+			Stale: &bridgev1.EnsureApprovalReviewerTrunkStale{},
+		}}, nil
+	}
+	return response, err
 }
 
 func (s BridgeAPIServer) EnsureApprovalReviewerSidecar(ctx context.Context, request *bridgev1.EnsureApprovalReviewerSidecarRequest) (*bridgev1.EnsureApprovalReviewerSidecarResponse, error) {
@@ -194,7 +200,13 @@ func (s BridgeAPIServer) EnsureApprovalReviewerSidecar(ctx context.Context, requ
 	if err != nil {
 		return nil, err
 	}
-	return store.EnsureApprovalReviewerSidecar(ctx, request)
+	response, err := store.EnsureApprovalReviewerSidecar(ctx, request)
+	if isConversationMutationStaleError(err) {
+		return &bridgev1.EnsureApprovalReviewerSidecarResponse{Outcome: &bridgev1.EnsureApprovalReviewerSidecarResponse_Stale{
+			Stale: &bridgev1.EnsureApprovalReviewerSidecarStale{},
+		}}, nil
+	}
+	return response, err
 }
 
 func (s BridgeAPIServer) AdmitApprovalReviewInput(ctx context.Context, request *bridgev1.AdmitApprovalReviewInputRequest) (*bridgev1.AdmitApprovalReviewInputResponse, error) {

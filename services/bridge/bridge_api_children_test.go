@@ -551,6 +551,55 @@ func TestPostgreSQLAdmitApprovalReviewInputRejectsInterruptFirstWithoutCustody(t
 	}
 }
 
+func TestPostgreSQLReviewerEnsureRejectsInterruptFirstWithTypedStale(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID   = "sesn_reviewer_ensure_interrupt_first"
+		parentID    = "thr_reviewer_ensure_interrupt_parent"
+		bindingID   = "bind_reviewer_ensure_interrupt"
+		podUID      = "pod_reviewer_ensure_interrupt"
+		interruptID = "rin_reviewer_ensure_interrupt"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, sequence_from, sequence_to, status, created_at, updated_at
+	) VALUES ('default', $1, $2, $3, 'interrupt_control', '[]', 1, 1, 'queued',
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, sessionID, parentID, interruptID); err != nil {
+		t.Fatalf("seed interrupt-first reviewer ensure barrier: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	server := BridgeAPIServer{store: store}
+	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	trunk, err := server.EnsureApprovalReviewerTrunk(context.Background(), &bridgev1.EnsureApprovalReviewerTrunkRequest{
+		Scope: scope, EnsureOperationId: "aprv_ensure_interrupt_first",
+	})
+	if err != nil || trunk.GetStale() == nil {
+		t.Fatalf("interrupt-first Reviewer trunk ensure = %#v/%v; want typed stale", trunk, err)
+	}
+	sidecar, err := server.EnsureApprovalReviewerSidecar(context.Background(), &bridgev1.EnsureApprovalReviewerSidecarRequest{
+		Scope: scope, ReviewId: "arvw_ensure_interrupt_first",
+	})
+	if err != nil || sidecar.GetStale() == nil {
+		t.Fatalf("interrupt-first Reviewer sidecar ensure = %#v/%v; want typed stale", sidecar, err)
+	}
+
+	var reviewerThreads, operations, reviewerInputs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='approval_reviewer'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='approval_review')`,
+		sessionID,
+	).Scan(&reviewerThreads, &operations, &reviewerInputs); err != nil {
+		t.Fatalf("read interrupt-first Reviewer ensure residue: %v", err)
+	}
+	if reviewerThreads != 0 || operations != 0 || reviewerInputs != 0 {
+		t.Fatalf("interrupt-first Reviewer ensure residue threads/operations/inputs = %d/%d/%d; want zero", reviewerThreads, operations, reviewerInputs)
+	}
+}
+
 func TestPostgreSQLInterruptCommitCancelsAdmissionFirstReviewerCustodyAtomically(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

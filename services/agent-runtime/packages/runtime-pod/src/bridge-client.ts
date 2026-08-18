@@ -528,10 +528,23 @@ export class BridgeAPIApprovalReviewerThreadCreator
 				message: "approval reviewer thread creation is unavailable",
 			};
 		}
-		if (!exactlyOneDefined(response.committed, response.duplicate)) {
+		if (
+			!exactlyOneDefined(
+				response.committed,
+				response.duplicate,
+				response.stale,
+			)
+		) {
 			return {
 				ok: false as const,
 				message: "approval reviewer thread result was malformed",
+			};
+		}
+		if (response.stale !== undefined) {
+			return {
+				ok: false as const,
+				message: "approval reviewer thread creation is stale",
+				staleCustody: true as const,
 			};
 		}
 		const outcome = response.committed ?? response.duplicate;

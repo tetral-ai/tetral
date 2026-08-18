@@ -716,6 +716,7 @@ message EnsureApprovalReviewerTrunkResponse {
   oneof outcome {
     EnsureApprovalReviewerTrunkCommitted committed = 1;
     EnsureApprovalReviewerTrunkDuplicate duplicate = 2;
+    EnsureApprovalReviewerTrunkStale stale = 3;
   }
 }
 message EnsureApprovalReviewerTrunkCommitted {
@@ -724,6 +725,7 @@ message EnsureApprovalReviewerTrunkCommitted {
 message EnsureApprovalReviewerTrunkDuplicate {
   string reviewer_thread_id = 1;
 }
+message EnsureApprovalReviewerTrunkStale {}
 
 message EnsureApprovalReviewerSidecarRequest {
   RuntimeScope scope = 1;
@@ -733,6 +735,7 @@ message EnsureApprovalReviewerSidecarResponse {
   oneof outcome {
     EnsureApprovalReviewerSidecarCommitted committed = 1;
     EnsureApprovalReviewerSidecarDuplicate duplicate = 2;
+    EnsureApprovalReviewerSidecarStale stale = 3;
   }
 }
 message EnsureApprovalReviewerSidecarCommitted {
@@ -741,6 +744,7 @@ message EnsureApprovalReviewerSidecarCommitted {
 message EnsureApprovalReviewerSidecarDuplicate {
   string reviewer_thread_id = 1;
 }
+message EnsureApprovalReviewerSidecarStale {}
 
 message AdmitApprovalReviewInputRequest {
   RuntimeScope scope = 1;

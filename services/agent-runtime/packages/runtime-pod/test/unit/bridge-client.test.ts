@@ -36,6 +36,30 @@ import type {
 } from "../../src/logger.js";
 
 describe("Bridge operation-specific Runtime adapters", () => {
+	test("maps typed Reviewer ensure stale before attempting input admission", async () => {
+		for (const isTrunk of [true, false]) {
+			const bridge = new TypedBridge();
+			bridge.approvalEnsureResponse = { stale: {} };
+			const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+
+			await expect(
+				creator.createApprovalReviewerThread({
+					request: threadScope() as ApprovalReviewerThreadCreation["request"],
+					reviewId: `arvw_stale_ensure_${isTrunk ? "trunk" : "sidecar"}`,
+					isTrunk,
+					...(isTrunk
+						? { ensureOperationId: "aprv_ensure_stale" }
+						: {}),
+				}),
+			).resolves.toEqual({
+				ok: false,
+				message: "approval reviewer thread creation is stale",
+				staleCustody: true,
+			});
+			expect(bridge.approvalAdmissionRequests).toEqual([]);
+		}
+	});
+
 	test("maps typed Reviewer admission stale without classifying it as malformed", async () => {
 		const bridge = new TypedBridge();
 		bridge.approvalAdmissionResponse = { stale: {} };
@@ -1008,6 +1032,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 });
 
 class TypedBridge {
+	readonly approvalAdmissionRequests: unknown[] = [];
 	readonly loadContextRequests: LoadContextRequest[] = [];
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
@@ -1069,11 +1094,20 @@ class TypedBridge {
 				callback(null, this.approvalEnsureResponse);
 				return grpcCall();
 			},
-			admitApprovalReviewInput: (
+			ensureApprovalReviewerSidecar: (
 				_request: unknown,
 				_metadata: Metadata,
 				callback: Callback,
 			) => {
+				callback(null, this.approvalEnsureResponse);
+				return grpcCall();
+			},
+			admitApprovalReviewInput: (
+				request: unknown,
+				_metadata: Metadata,
+				callback: Callback,
+			) => {
+				this.approvalAdmissionRequests.push(request);
 				callback(null, this.approvalAdmissionResponse);
 				return grpcCall();
 			},

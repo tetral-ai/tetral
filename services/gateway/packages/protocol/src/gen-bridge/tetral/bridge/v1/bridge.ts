@@ -896,6 +896,7 @@ export interface EnsureApprovalReviewerTrunkRequest {
 export interface EnsureApprovalReviewerTrunkResponse {
   committed?: EnsureApprovalReviewerTrunkCommitted | undefined;
   duplicate?: EnsureApprovalReviewerTrunkDuplicate | undefined;
+  stale?: EnsureApprovalReviewerTrunkStale | undefined;
 }
 
 export interface EnsureApprovalReviewerTrunkCommitted {
@@ -906,6 +907,9 @@ export interface EnsureApprovalReviewerTrunkDuplicate {
   reviewerThreadId: string;
 }
 
+export interface EnsureApprovalReviewerTrunkStale {
+}
+
 export interface EnsureApprovalReviewerSidecarRequest {
   scope: RuntimeScope | undefined;
   reviewId: string;
@@ -914,6 +918,7 @@ export interface EnsureApprovalReviewerSidecarRequest {
 export interface EnsureApprovalReviewerSidecarResponse {
   committed?: EnsureApprovalReviewerSidecarCommitted | undefined;
   duplicate?: EnsureApprovalReviewerSidecarDuplicate | undefined;
+  stale?: EnsureApprovalReviewerSidecarStale | undefined;
 }
 
 export interface EnsureApprovalReviewerSidecarCommitted {
@@ -922,6 +927,9 @@ export interface EnsureApprovalReviewerSidecarCommitted {
 
 export interface EnsureApprovalReviewerSidecarDuplicate {
   reviewerThreadId: string;
+}
+
+export interface EnsureApprovalReviewerSidecarStale {
 }
 
 export interface AdmitApprovalReviewInputRequest {
@@ -11190,7 +11198,7 @@ export const EnsureApprovalReviewerTrunkRequest: MessageFns<EnsureApprovalReview
 };
 
 function createBaseEnsureApprovalReviewerTrunkResponse(): EnsureApprovalReviewerTrunkResponse {
-  return { committed: undefined, duplicate: undefined };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const EnsureApprovalReviewerTrunkResponse: MessageFns<EnsureApprovalReviewerTrunkResponse> = {
@@ -11200,6 +11208,9 @@ export const EnsureApprovalReviewerTrunkResponse: MessageFns<EnsureApprovalRevie
     }
     if (message.duplicate !== undefined) {
       EnsureApprovalReviewerTrunkDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      EnsureApprovalReviewerTrunkStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -11227,6 +11238,14 @@ export const EnsureApprovalReviewerTrunkResponse: MessageFns<EnsureApprovalRevie
           message.duplicate = EnsureApprovalReviewerTrunkDuplicate.decode(reader, reader.uint32());
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = EnsureApprovalReviewerTrunkStale.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11240,6 +11259,7 @@ export const EnsureApprovalReviewerTrunkResponse: MessageFns<EnsureApprovalRevie
     return {
       committed: isSet(object.committed) ? EnsureApprovalReviewerTrunkCommitted.fromJSON(object.committed) : undefined,
       duplicate: isSet(object.duplicate) ? EnsureApprovalReviewerTrunkDuplicate.fromJSON(object.duplicate) : undefined,
+      stale: isSet(object.stale) ? EnsureApprovalReviewerTrunkStale.fromJSON(object.stale) : undefined,
     };
   },
 
@@ -11250,6 +11270,9 @@ export const EnsureApprovalReviewerTrunkResponse: MessageFns<EnsureApprovalRevie
     }
     if (message.duplicate !== undefined) {
       obj.duplicate = EnsureApprovalReviewerTrunkDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = EnsureApprovalReviewerTrunkStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -11268,6 +11291,9 @@ export const EnsureApprovalReviewerTrunkResponse: MessageFns<EnsureApprovalRevie
       : undefined;
     message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
       ? EnsureApprovalReviewerTrunkDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? EnsureApprovalReviewerTrunkStale.fromPartial(object.stale)
       : undefined;
     return message;
   },
@@ -11409,6 +11435,53 @@ export const EnsureApprovalReviewerTrunkDuplicate: MessageFns<EnsureApprovalRevi
   },
 };
 
+function createBaseEnsureApprovalReviewerTrunkStale(): EnsureApprovalReviewerTrunkStale {
+  return {};
+}
+
+export const EnsureApprovalReviewerTrunkStale: MessageFns<EnsureApprovalReviewerTrunkStale> = {
+  encode(_: EnsureApprovalReviewerTrunkStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): EnsureApprovalReviewerTrunkStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseEnsureApprovalReviewerTrunkStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): EnsureApprovalReviewerTrunkStale {
+    return {};
+  },
+
+  toJSON(_: EnsureApprovalReviewerTrunkStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<EnsureApprovalReviewerTrunkStale>, I>>(
+    base?: I,
+  ): EnsureApprovalReviewerTrunkStale {
+    return EnsureApprovalReviewerTrunkStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<EnsureApprovalReviewerTrunkStale>, I>>(
+    _: I,
+  ): EnsureApprovalReviewerTrunkStale {
+    const message = createBaseEnsureApprovalReviewerTrunkStale();
+    return message;
+  },
+};
+
 function createBaseEnsureApprovalReviewerSidecarRequest(): EnsureApprovalReviewerSidecarRequest {
   return { scope: undefined, reviewId: "" };
 }
@@ -11496,7 +11569,7 @@ export const EnsureApprovalReviewerSidecarRequest: MessageFns<EnsureApprovalRevi
 };
 
 function createBaseEnsureApprovalReviewerSidecarResponse(): EnsureApprovalReviewerSidecarResponse {
-  return { committed: undefined, duplicate: undefined };
+  return { committed: undefined, duplicate: undefined, stale: undefined };
 }
 
 export const EnsureApprovalReviewerSidecarResponse: MessageFns<EnsureApprovalReviewerSidecarResponse> = {
@@ -11506,6 +11579,9 @@ export const EnsureApprovalReviewerSidecarResponse: MessageFns<EnsureApprovalRev
     }
     if (message.duplicate !== undefined) {
       EnsureApprovalReviewerSidecarDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      EnsureApprovalReviewerSidecarStale.encode(message.stale, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -11533,6 +11609,14 @@ export const EnsureApprovalReviewerSidecarResponse: MessageFns<EnsureApprovalRev
           message.duplicate = EnsureApprovalReviewerSidecarDuplicate.decode(reader, reader.uint32());
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.stale = EnsureApprovalReviewerSidecarStale.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11550,6 +11634,7 @@ export const EnsureApprovalReviewerSidecarResponse: MessageFns<EnsureApprovalRev
       duplicate: isSet(object.duplicate)
         ? EnsureApprovalReviewerSidecarDuplicate.fromJSON(object.duplicate)
         : undefined,
+      stale: isSet(object.stale) ? EnsureApprovalReviewerSidecarStale.fromJSON(object.stale) : undefined,
     };
   },
 
@@ -11560,6 +11645,9 @@ export const EnsureApprovalReviewerSidecarResponse: MessageFns<EnsureApprovalRev
     }
     if (message.duplicate !== undefined) {
       obj.duplicate = EnsureApprovalReviewerSidecarDuplicate.toJSON(message.duplicate);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = EnsureApprovalReviewerSidecarStale.toJSON(message.stale);
     }
     return obj;
   },
@@ -11578,6 +11666,9 @@ export const EnsureApprovalReviewerSidecarResponse: MessageFns<EnsureApprovalRev
       : undefined;
     message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
       ? EnsureApprovalReviewerSidecarDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? EnsureApprovalReviewerSidecarStale.fromPartial(object.stale)
       : undefined;
     return message;
   },
@@ -11715,6 +11806,53 @@ export const EnsureApprovalReviewerSidecarDuplicate: MessageFns<EnsureApprovalRe
   ): EnsureApprovalReviewerSidecarDuplicate {
     const message = createBaseEnsureApprovalReviewerSidecarDuplicate();
     message.reviewerThreadId = object.reviewerThreadId ?? "";
+    return message;
+  },
+};
+
+function createBaseEnsureApprovalReviewerSidecarStale(): EnsureApprovalReviewerSidecarStale {
+  return {};
+}
+
+export const EnsureApprovalReviewerSidecarStale: MessageFns<EnsureApprovalReviewerSidecarStale> = {
+  encode(_: EnsureApprovalReviewerSidecarStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): EnsureApprovalReviewerSidecarStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseEnsureApprovalReviewerSidecarStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): EnsureApprovalReviewerSidecarStale {
+    return {};
+  },
+
+  toJSON(_: EnsureApprovalReviewerSidecarStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<EnsureApprovalReviewerSidecarStale>, I>>(
+    base?: I,
+  ): EnsureApprovalReviewerSidecarStale {
+    return EnsureApprovalReviewerSidecarStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<EnsureApprovalReviewerSidecarStale>, I>>(
+    _: I,
+  ): EnsureApprovalReviewerSidecarStale {
+    const message = createBaseEnsureApprovalReviewerSidecarStale();
     return message;
   },
 };
