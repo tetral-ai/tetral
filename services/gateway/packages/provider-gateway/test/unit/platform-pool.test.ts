@@ -152,6 +152,45 @@ describe("Gateway platform key pool", () => {
     }
   });
 
+  test("classifies the verified Anthropic credit exhaustion before generic 400 request shape", () => {
+    const billingBody = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+      },
+    };
+
+    expect(classifyProviderFailure("anthropic", { statusCode: 400, body: billingBody })).toMatchObject({
+      action: "quarantine",
+      providerError: {
+        code: "provider_key_unavailable",
+        message: "Provider key is not usable.",
+        retryable: false,
+        fatal: true,
+        statusCode: 400,
+      },
+    });
+    expect(classifyProviderFailure("anthropic", {
+      statusCode: 400,
+      body: { type: "error", error: { type: "invalid_request_error", message: "messages: Input should be valid." } },
+    })).toMatchObject({
+      action: "fail-fast",
+      providerError: { code: "provider_request_invalid", retryable: false, fatal: true, statusCode: 400 },
+    });
+  });
+
+  test("classifies a status-less untagged provider failure as retryable stream transport", () => {
+    expect(classifyProviderFailure("anthropic", {})).toMatchObject({
+      action: "retryable",
+      providerError: {
+        code: "provider_stream_error",
+        retryable: true,
+        fatal: false,
+      },
+    });
+  });
+
   test("T-POOL-1 applies fallback rate-limit detection for plaintext and JSON bodies", () => {
     expect(classifyProviderFailure("openai", {
       statusCode: 429,

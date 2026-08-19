@@ -36,6 +36,7 @@ import type { GatewayLogger } from "./logger.js";
 import { lookupGatewayModel } from "./providers/catalog.js";
 import { controlProviderStream } from "./providers/stream-control.js";
 import { classifyProviderFailure, PlatformKeyPoolConstants, ProviderKeyFailureError } from "./providers/pool.js";
+import type { ProviderFailureClassification } from "./providers/pool.js";
 import type { ProviderCredentialResolver, ResolvedProviderCredential } from "./providers/credentials.js";
 import type { ProviderErrorInput } from "@tetral/gateway-lowering/src/errors.js";
 import type { ProviderStreamTimeoutKind } from "@tetral/gateway-lowering/src/errors.js";
@@ -384,14 +385,19 @@ export class ProviderGatewayServiceShell {
     const attemptedPlatformKeyIds = new Set<string>();
     let platformAttempts = 0;
     let lastPlatformProviderError: ProviderErrorInput | undefined;
+    let lastPlatformFailureAction: ProviderFailureClassification["action"] | undefined;
+    let lastPlatformFailureOrigin: "http_rejection" | "transport_failure" | undefined;
     while (true) {
       const credential = await withinProviderDeadline(
-        this.resolveCredential(request, attemptedPlatformKeyIds, lastPlatformProviderError),
+        this.resolveCredential(request, attemptedPlatformKeyIds, lastPlatformProviderError, lastPlatformFailureAction),
         abortSignal,
         providerDeadline,
         () => abortOnTimeout({ kind: "overall_timeout" }),
       );
       if (!credential.ok) {
+        if (lastPlatformProviderError !== undefined && lastPlatformFailureOrigin !== undefined) {
+          recordFailureOrigin(lastPlatformFailureOrigin);
+        }
         yield providerErrorEvent(credential.error);
         return;
       }
@@ -446,7 +452,9 @@ export class ProviderGatewayServiceShell {
                 const input = providerAttemptFailureInput(error);
                 return new ProviderKeyFailureError(
                   classifyProviderFailure(resolvedCredential.providerId, input),
-                  input.networkError === true || input.timeout === true ? "transport_failure" : "http_rejection",
+                  input.networkError === true || input.timeout === true || input.statusCode === undefined
+                    ? "transport_failure"
+                    : "http_rejection",
                 );
               })()
             : undefined;
@@ -460,7 +468,11 @@ export class ProviderGatewayServiceShell {
         }
         if (resolvedCredential?.source !== "platform" || emitted) {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(providerKeyFailure.classification.providerError);
+          yield providerErrorEvent(
+            resolvedCredential?.source === "session" && providerKeyFailure.classification.action === "quarantine"
+              ? sessionCredentialUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
           return;
         }
         const platformKeyId = resolvedCredential.platformKey.keyId;
@@ -468,9 +480,20 @@ export class ProviderGatewayServiceShell {
         attemptedPlatformKeyIds.add(platformKeyId);
         platformAttempts += 1;
         lastPlatformProviderError = providerKeyFailure.classification.providerError;
-        if (providerKeyFailure.classification.action === "fail-fast" || platformAttempts >= PlatformKeyPoolConstants.maxKeySwitchesPerTurn) {
+        lastPlatformFailureAction = providerKeyFailure.classification.action;
+        lastPlatformFailureOrigin = providerKeyFailure.origin;
+        if (providerKeyFailure.classification.action === "fail-fast") {
           recordFailureOrigin(providerKeyFailure.origin);
           yield providerErrorEvent(providerKeyFailure.classification.providerError);
+          return;
+        }
+        if (platformAttempts >= PlatformKeyPoolConstants.maxKeySwitchesPerTurn) {
+          recordFailureOrigin(providerKeyFailure.origin);
+          yield providerErrorEvent(
+            providerKeyFailure.classification.action === "quarantine"
+              ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
           return;
         }
       }
@@ -481,6 +504,7 @@ export class ProviderGatewayServiceShell {
     request: ProviderRequest,
     attemptedPlatformKeyIds: ReadonlySet<string>,
     lastPlatformProviderError: ProviderErrorInput | undefined,
+    lastPlatformFailureAction: ProviderFailureClassification["action"] | undefined,
   ): Promise<{ readonly ok: true; readonly credential: ResolvedProviderCredential | undefined } | { readonly ok: false; readonly error: ProviderErrorInput }> {
     if (this.options.credentialResolver === undefined) {
       return { ok: true, credential: undefined };
@@ -492,7 +516,12 @@ export class ProviderGatewayServiceShell {
       return resolved;
     }
     if (lastPlatformProviderError !== undefined && resolved.error.code === "platform_keys_exhausted") {
-      return { ok: false, error: lastPlatformProviderError };
+      return {
+        ok: false,
+        error: lastPlatformFailureAction === "quarantine"
+          ? platformCredentialPoolUnavailableError(lastPlatformProviderError.statusCode)
+          : lastPlatformProviderError,
+      };
     }
     return resolved;
   }
@@ -533,6 +562,26 @@ export class ProviderGatewayServiceShell {
     }
     return undefined;
   }
+}
+
+function platformCredentialPoolUnavailableError(statusCode: number | undefined): ProviderErrorInput {
+  return {
+    code: "provider_unavailable",
+    message: "Provider is unavailable.",
+    retryable: false,
+    fatal: false,
+    ...(statusCode === undefined ? {} : { statusCode }),
+  };
+}
+
+function sessionCredentialUnavailableError(statusCode: number | undefined): ProviderErrorInput {
+  return {
+    code: "provider_key_unavailable",
+    message: "The supplied provider credential is not usable.",
+    retryable: false,
+    fatal: true,
+    ...(statusCode === undefined ? {} : { statusCode }),
+  };
 }
 
 interface ProviderTimeoutObservation {

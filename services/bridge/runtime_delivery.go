@@ -1283,7 +1283,7 @@ func finalizeInterruptDeliveryTerminalTx(
 		return RuntimeDeliveryResult{}, err
 	}
 	if _, _, err := settleRuntimeTerminationTx(
-		ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, true, now,
+		ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now,
 	); err != nil {
 		return RuntimeDeliveryResult{}, err
 	}

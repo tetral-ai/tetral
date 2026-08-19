@@ -1162,7 +1162,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime termination durable turn is not open"))
 		}
 		result, custodyTransitions, err = settleRuntimeTerminationTx(
-			ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, failureJSON, false, now,
+			ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, failureJSON, now,
 		)
 		if err != nil {
 			return err
@@ -1196,9 +1196,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 
 // settleRuntimeTerminationTx is the Session termination owner shared by a
 // Runtime-declared terminal failure and Bridge's exhausted interrupt fence.
-// includeQueuedInputs is reserved for Session-wide exhaustion: it terminalizes
-// work that remained durably admitted behind the interrupt without projecting
-// those source Events into Messages.
+// Main-session termination also cancels queued and parked input: retaining the
+// binding for closeout replay must not leave delivery authority for a terminal
+// Session. Child termination remains scoped to active custody for that Thread.
 func settleRuntimeTerminationTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -1207,7 +1207,6 @@ func settleRuntimeTerminationTx(
 	runtimeWriteID string,
 	failure runtimeTerminationFailure,
 	failureJSON string,
-	includeQueuedInputs bool,
 	now time.Time,
 ) (runtimeTerminationResult, runtimeTerminationCustodyTransitions, error) {
 	if err := closeRuntimeTerminationSpansTx(ctx, tx, scope, failure, now); err != nil {
@@ -1228,7 +1227,9 @@ func settleRuntimeTerminationTx(
 			return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
 		}
 	}
-	transitions, err := cancelRuntimeTerminationInputsTx(ctx, tx, scope, threadScope.role == "main", includeQueuedInputs, now)
+	transitions, err := cancelRuntimeTerminationInputsTx(
+		ctx, tx, scope, threadScope.role == "main", threadScope.role == "main", now,
+	)
 	if err != nil {
 		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
 	}

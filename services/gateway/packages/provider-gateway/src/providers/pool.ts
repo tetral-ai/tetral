@@ -332,6 +332,9 @@ export function classifyProviderFailure(
       return providerFailureFromOpenAIError(code, openAIError);
     }
   }
+  if (providerId === "anthropic" && isAnthropicCreditExhaustion(input.statusCode, code, input.body)) {
+    return quarantine("provider_key_unavailable", "Provider key is not usable.", input.statusCode);
+  }
   if (input.timeout === true || input.networkError === true || (input.statusCode !== undefined && input.statusCode >= 500)) {
     return classification("retryable", "provider_stream_error", true, statusMessage(input.statusCode), input.statusCode);
   }
@@ -395,7 +398,20 @@ export function classifyProviderFailure(
   if (isFallbackRateLimit(input.statusCode, bodyText)) {
     return cooling(rateLimitMessage(), retryAfterMs(input.headers?.["retry-after"]) ?? resetHeaderMs(input.headers) ?? retryDelayFromTextMs(bodyText));
   }
+  if (input.statusCode === undefined) {
+    return classification("retryable", "provider_stream_error", true, "Provider stream failed.", undefined);
+  }
   return classification("fail-fast", "provider_request_failed", false, "Provider request failed.", input.statusCode);
+}
+
+function isAnthropicCreditExhaustion(statusCode: number | undefined, code: string, body: unknown): boolean {
+  if (statusCode !== 400 || code !== "invalid_request_error") {
+    return false;
+  }
+  const object = bodyObject(body);
+  const nestedError = nestedObject(object.error);
+  const message = nestedError?.message ?? object.message;
+  return typeof message === "string" && /^Your credit balance is too low(?:\s|\.|$)/i.test(message.trim());
 }
 
 function isOpenAICompatibleFamily(providerId: GatewayCatalogProviderId): boolean {

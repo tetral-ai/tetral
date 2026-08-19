@@ -1113,7 +1113,9 @@ function classifiedProviderError(providerId: GatewayCatalogProviderId, error: un
   const input = providerFailureInput(error);
   return new ProviderKeyFailureError(
     classifyProviderFailure(providerId, input),
-    input.networkError === true || input.timeout === true ? "transport_failure" : "http_rejection",
+    input.networkError === true || input.timeout === true || input.statusCode === undefined
+      ? "transport_failure"
+      : "http_rejection",
   );
 }
 

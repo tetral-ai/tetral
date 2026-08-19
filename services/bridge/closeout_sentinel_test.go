@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -83,6 +85,17 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	if err != nil || running.GetCommitted() == nil {
 		t.Fatalf("open durable Runtime turn = %#v/%v", running, err)
 	}
+	const deliveryID = "mail_termination_replay_binding"
+	seedAgentMailCustody(t, fixture.admin, fixture.sessionID, fixture.threadID, deliveryID, time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC))
+	const cleanupJobID = "cleanup_termination_replay_binding"
+	if _, err := fixture.admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_status
+		    SET cleanup_after='2026-01-01T00:30:00Z', cleanup_job_id=$2,
+		        cleanup_enqueued_at='2026-01-01T00:30:00Z', cleanup_claimed_at='2026-01-01T00:31:00Z'
+		  WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID, cleanupJobID,
+	); err != nil {
+		t.Fatalf("seed claimed cleanup custody: %v", err)
+	}
 	runtimeWriteID := running.GetCommitted().GetEventId()
 	request := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: runtimeWriteID,
@@ -91,6 +104,54 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	committed, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
 	if err != nil || committed.GetCommitted() == nil {
 		t.Fatalf("CommitRuntimeTermination = %#v/%v; want committed", committed, err)
+	}
+	var runtimeStatus, statusEventID string
+	var runningSince, idleSince, cleanupAfter, cleanupEnqueuedAt, cleanupClaimedAt sql.NullTime
+	var bindingID, storedCleanupJobID sql.NullString
+	var bindingGeneration sql.NullInt64
+	if err := fixture.admin.QueryRowContext(context.Background(),
+		`SELECT status, status_event_id, running_since, idle_since, cleanup_after,
+		        cleanup_job_id, cleanup_enqueued_at, cleanup_claimed_at,
+		        binding_id, binding_generation
+		   FROM session_runtime_status
+		  WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
+	).Scan(&runtimeStatus, &statusEventID, &runningSince, &idleSince, &cleanupAfter,
+		&storedCleanupJobID, &cleanupEnqueuedAt, &cleanupClaimedAt,
+		&bindingID, &bindingGeneration); err != nil {
+		t.Fatalf("read Runtime status after termination: %v", err)
+	}
+	if runtimeStatus != "idle" || statusEventID != committed.GetCommitted().GetCloseoutEventId() ||
+		runningSince.Valid || !idleSince.Valid || cleanupAfter.Valid || storedCleanupJobID.Valid ||
+		cleanupEnqueuedAt.Valid || cleanupClaimedAt.Valid || !bindingID.Valid ||
+		bindingID.String != fixture.bindingID || !bindingGeneration.Valid || bindingGeneration.Int64 != 1 {
+		t.Fatalf("Runtime status after termination = %q event=%q running=%+v idle=%+v cleanup=%+v/%+v/%+v/%+v binding=%+v/%+v; want closed non-resident row with exact replay binding", runtimeStatus, statusEventID, runningSince, idleSince, cleanupAfter, storedCleanupJobID, cleanupEnqueuedAt, cleanupClaimedAt, bindingID, bindingGeneration)
+	}
+	inputID := completionRuntimeInputID(deliveryID)
+	var inboxStatus, queueStatus string
+	if err := fixture.admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_runtime_inbox
+		  WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, fixture.sessionID, inputID,
+	).Scan(&inboxStatus); err != nil {
+		t.Fatalf("read queued Inbox after termination: %v", err)
+	}
+	if err := fixture.admin.QueryRowContext(context.Background(),
+		`SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1`,
+		queue.FormatRuntimeInputDedupeKey("default", fixture.sessionID, inputID),
+	).Scan(&queueStatus); err != nil {
+		t.Fatalf("read queued job after termination: %v", err)
+	}
+	if inboxStatus != "cancelled" || queueStatus != "cancelled" {
+		t.Fatalf("queued termination custody = Inbox %q Queue %q; want cancelled/cancelled", inboxStatus, queueStatus)
+	}
+	cleanupStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(fixture.runtime), 9090)
+	cleanupPlan, err := cleanupStore.PrepareRuntimeCommand(context.Background(), RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
+		JobID: "qjob_" + cleanupJobID, LeaseToken: "lease_" + cleanupJobID,
+		Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: fixture.sessionID,
+		RuntimeInputID: "cleanup_session:" + cleanupJobID, CleanupJobID: cleanupJobID,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + fixture.sessionID + `","cleanup_job_id":"` + cleanupJobID + `"}`,
+	})
+	if err != nil || !cleanupPlan.StaleAccepted || cleanupPlan.CleanupSession != nil {
+		t.Fatalf("retired cleanup custody plan = %#v/%v; want stale without Runtime command", cleanupPlan, err)
 	}
 	if _, err := fixture.admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_bindings
@@ -103,6 +164,33 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	replay, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
 	if err != nil || replay.GetStale() == nil {
 		t.Fatalf("old-Pod termination replay = %#v/%v; want stale", replay, err)
+	}
+}
+
+func TestPostgreSQLRuntimeTerminationAllowsAbsentResidencyRow(t *testing.T) {
+	fixture := newCloseoutSentinelFixture(t, "termination_absent_residency")
+	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	running, err := fixture.store.WriteEvent(context.Background(), closeoutWriteEventRequest(scope, "rwrite_termination_absent_residency"))
+	if err != nil || running.GetCommitted() == nil {
+		t.Fatalf("open durable Runtime turn = %#v/%v", running, err)
+	}
+	if _, err := fixture.admin.ExecContext(context.Background(),
+		`DELETE FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
+	); err != nil {
+		t.Fatalf("remove optional Runtime status row: %v", err)
+	}
+	committed, err := fixture.server.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
+		Scope: scope, RuntimeWriteId: running.GetCommitted().GetEventId(),
+		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
+	})
+	if err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("CommitRuntimeTermination without residency row = %#v/%v; want committed", committed, err)
+	}
+	var rows int
+	if err := fixture.admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
+	).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("Runtime status rows after absent-row termination = %d/%v; want zero", rows, err)
 	}
 }
 

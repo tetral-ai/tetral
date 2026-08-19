@@ -29,7 +29,7 @@ scheduler (claim/enqueue).
 
 | Column | Set by | Cleared / advanced by |
 |--------|--------|-----------------------|
-| `cleanup_after` | Bridge idle write, a fixed 30-minute delay past idle | Bridge finalize sets it `NULL`; a busy reschedule pushes it forward by 30 minutes |
+| `cleanup_after` | Bridge ordinary idle write, a fixed 30-minute delay past idle | Bridge finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
 | `cleanup_job_id` | this scheduler, when it claims a due row | Bridge finalize and busy reschedule set it `NULL` |
 | `cleanup_enqueued_at` | this scheduler, at claim | Bridge finalize and busy reschedule set it `NULL`; new-input admission clears it when no claim is active |
 | `cleanup_claimed_at` | Bridge Job Runner, at execution claim time | Bridge finalize and busy reschedule set it `NULL`; this scheduler resets any stale value at re-enqueue |
@@ -38,8 +38,12 @@ scheduler (claim/enqueue).
 The 30-minute delay is a fixed Bridge-side constant
 (`defaultIdleCleanupDelay`); no configuration surface wires it. The same constant
 serves both the initial idle re-arm and the busy reschedule, so the two delays
-cannot drift apart. Its length is the window a bound-but-idle session stays hot —
-before a due cleanup releases its Runtime Pod binding. Sandbox
+cannot drift apart. Its length is the window a bound-but-idle, non-terminal
+session stays hot before a due cleanup releases its Runtime Pod binding. A
+terminal Session is the exception: Bridge closes its residency row to `idle`,
+clears every cleanup marker, and retains the binding identity only for closeout
+replay. Any already-issued cleanup job then converges through the stale-job
+path and cannot target the Runtime. Sandbox
 auto-stop/auto-archive/auto-delete timing and the 30-day retention floor in
 `services/sandbox/config.go` are independent of this TTL.
 
@@ -73,7 +77,7 @@ in lockstep or the scan loses coverage.
 
 | Step | Actor | Effect |
 |------|-------|--------|
-| 1 | Bridge idle write | stamps `cleanup_after` when a run finishes |
+| 1 | Bridge ordinary idle write | stamps `cleanup_after` when a reusable run finishes |
 | 2 | scheduler `ClaimDueAcrossWorkspaces` | enumerates the `workspaces` catalog; runs the due-scan once per workspace, each in its own transaction |
 | 3 | scheduler `markCleanupEnqueuedTx` | mints a fresh `cleanup_job_id`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`; guarded re-check of the due predicate |
 | 4 | scheduler `queue.EnqueueTx` | writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted `cleanup_job_id` |

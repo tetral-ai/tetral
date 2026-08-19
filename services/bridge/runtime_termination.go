@@ -611,18 +611,6 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 		if !rowsAffected(result) {
 			return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "runtime session is stale")
 		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_runtime_status
-			    SET active_seconds_total = active_seconds_total + CASE
-			          WHEN running_since IS NULL THEN 0
-			          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($3 - running_since)))
-			        END,
-			        running_since = NULL,
-			        updated_at = $3
-			  WHERE workspace_id = $1 AND session_id = $2`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), now); err != nil {
-			return runtimeTerminationEventFact{}, err
-		}
 		result, err = tx.Exec(ctx,
 			`UPDATE session_threads
 			    SET status = 'failed',
@@ -649,7 +637,39 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 			return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "child thread status update failed")
 		}
 	}
-	return insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID, runtimeWriteID, eventType, payloadJSON, now)
+	statusStamp, err := insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID, runtimeWriteID, eventType, payloadJSON, now)
+	if err != nil {
+		return runtimeTerminationEventFact{}, err
+	}
+	if threadScope.role != "main" {
+		return statusStamp, nil
+	}
+	// Session termination closes live residency in the same transaction while
+	// retaining the binding identity needed to validate an idempotent closeout
+	// replay. The terminal sessions.status value gates future input; a null
+	// cleanup_after prevents the ordinary idle TTL owner from claiming a
+	// terminal Session that no longer has hot Runtime work.
+	_, err = tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status = 'idle',
+		        status_event_id = $3,
+		        idle_since = $4,
+		        active_seconds_total = active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($4 - running_since)))
+		        END,
+		        running_since = NULL,
+		        cleanup_after = NULL,
+		        cleanup_enqueued_at = NULL,
+		        cleanup_claimed_at = NULL,
+		        cleanup_job_id = NULL,
+		        updated_at = $4
+		  WHERE workspace_id = $1 AND session_id = $2`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), statusStamp.EventID, now)
+	if err != nil {
+		return runtimeTerminationEventFact{}, err
+	}
+	return statusStamp, nil
 }
 
 type runtimeTerminationEventFact struct {

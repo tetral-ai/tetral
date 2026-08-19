@@ -1399,6 +1399,37 @@ describe("ProviderClientRegistry provider streaming", () => {
     });
   });
 
+  test("classifies an untagged status-less Anthropic error as transport failure", async () => {
+    const request = anthropicRequest({ attachments: [] });
+    const registry = new ProviderClientRegistry({
+      anthropicProviderFactory: () => () => ({}),
+      streamText: () => streamTextResult([{
+        type: "error",
+        error: { opaque: "statusless-private-canary" },
+      }]),
+    });
+
+    let caught: unknown;
+    try {
+      await collectEvents(registry.stream({ request, credential: platformAnthropicCredential() }));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ProviderKeyFailureError);
+    expect(caught).toMatchObject({
+      origin: "transport_failure",
+      classification: {
+        action: "retryable",
+        providerError: {
+          code: "provider_stream_error",
+          retryable: true,
+          fatal: false,
+        },
+      },
+    });
+  });
+
   test("treats an Anthropic stream that closes without finish as a retryable terminal failure", async () => {
     const request = anthropicRequest({ attachments: [] });
     const registry = new ProviderClientRegistry({

@@ -633,6 +633,28 @@ describe("runtime boundary contracts", () => {
 				fatal: true,
 				retryStatus: { type: "terminal" },
 			}),
+			RuntimeFailureSchema.parse({
+				type: "provider",
+				code: "provider_unavailable",
+				message: "Provider is unavailable.",
+				retryable: false,
+				fatal: false,
+				statusCode: 400,
+				providerId: "anthropic",
+				modelId: "claude-opus-4-8",
+				retryStatus: { type: "exhausted" },
+			}),
+			RuntimeFailureSchema.parse({
+				type: "provider",
+				code: "provider_key_unavailable",
+				message: "The supplied provider credential is not usable.",
+				retryable: false,
+				fatal: true,
+				statusCode: 401,
+				providerId: "anthropic",
+				modelId: "claude-opus-4-8",
+				retryStatus: { type: "exhausted" },
+			}),
 		];
 
 		expect(
@@ -667,6 +689,22 @@ describe("runtime boundary contracts", () => {
 					type: "model_request_failed_error",
 					message: "Runtime operation failed.",
 					retry_status: { type: "terminal" },
+				},
+			},
+			{
+				type: "session.error",
+				error: {
+					type: "model_overloaded_error",
+					message: "Provider is unavailable.",
+					retry_status: { type: "exhausted" },
+				},
+			},
+			{
+				type: "session.error",
+				error: {
+					type: "model_request_failed_error",
+					message: "The supplied provider credential is not usable.",
+					retry_status: { type: "exhausted" },
 				},
 			},
 		]);

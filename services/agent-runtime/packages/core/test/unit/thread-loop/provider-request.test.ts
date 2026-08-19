@@ -2897,6 +2897,88 @@ describe("ThreadLoop", () => {
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
 		expect(session.state.contextManager.entries()).toEqual([]);
 	});
+	for (const testCase of [
+		{
+			name: "platform pool exhaustion ends only the current turn with generic unavailable",
+			error: {
+				type: "provider",
+				code: "provider_unavailable",
+				message: "Provider is unavailable.",
+				retryable: false,
+				fatal: false,
+				statusCode: 400,
+				providerId: "anthropic",
+				modelId: "claude-opus-4-8",
+			} as const,
+		},
+		{
+			name: "invalid customer credential ends only the current turn without retrying",
+			error: {
+				type: "provider",
+				code: "provider_key_unavailable",
+				message: "The supplied provider credential is not usable.",
+				retryable: false,
+				fatal: true,
+				statusCode: 401,
+				providerId: "anthropic",
+				modelId: "claude-opus-4-8",
+			} as const,
+		},
+	]) {
+		test(testCase.name, async () => {
+			const session = new ThreadRuntime("sesn_1");
+			const store = new ThreadLoopRuntimeStore([]);
+			const loader = new RecordingContextLoader([], {
+				type: "context",
+				entries: [userMessage("user-1", 0, "hello")],
+			});
+			const appended: SessionEvent[] = [];
+			const writer = writerFrom((envelope) => {
+				appended.push(envelope.event);
+				return {
+					ok: true,
+					eventId: `bridge-${envelope.writeId}`,
+					type: "committed",
+					eventSequence: 1,
+				};
+			});
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const threadLoop = yield* ThreadLoop.Service;
+					return yield* threadLoop.run(session, testRunCustody());
+				}).pipe(
+					Effect.provide(
+						runtimeThreadLoopLayer(loader, {
+							store,
+							writer,
+							events: [{ type: "provider-error", error: testCase.error }],
+						}),
+					),
+				),
+			);
+
+			expect(result).toMatchObject({
+				type: "failed",
+				error: { ...testCase.error, retryStatus: { type: "exhausted" } },
+			});
+			expect(result).not.toHaveProperty("releaseSession");
+			expect(appended.map((event) => event.type)).toEqual([
+				"session.status_running",
+				"span.model_request_start",
+				"span.model_request_end",
+				"session.error",
+				"session.status_idle",
+			]);
+			expect(appended.at(4)).toEqual({
+				type: "session.status_idle",
+				stop_reason: { type: "retries_exhausted" },
+			});
+			expect(JSON.stringify(appended)).not.toContain('"type":"retrying"');
+			expect(JSON.stringify(appended)).not.toMatch(/credit|balance|billing|platform key|raw credential/i);
+			expect(session.state.contextManager.entries().some((entry) => entry.contextKind === "assistant")).toBe(false);
+		});
+	}
+
 	test("denied provider reschedule appends one exhausted error before idle", async () => {
 		const order: string[] = [];
 		const session = new ThreadRuntime("sesn_1");

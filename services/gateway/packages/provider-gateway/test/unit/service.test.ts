@@ -702,6 +702,46 @@ describe("ProviderGatewayServiceShell", () => {
     expect(JSON.stringify(logs)).not.toContain("sk-pfk_");
   });
 
+  test("status-less provider transport uses the existing bounded stream-error path", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    let attempts = 0;
+    const logs: unknown[] = [];
+    const pool = new RecordingPlatformCredentialPool(["pfk_1"]);
+    const providerStreamer = new ProviderClientRegistry({
+      anthropicProviderFactory: () => () => ({}),
+      streamText: () => {
+        attempts += 1;
+        return {
+          fullStream: (async function* () {
+            yield { type: "error" as const, error: { opaque: "statusless-private-canary" } };
+          })(),
+        };
+      },
+    });
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      credentialResolver: platformCredentialResolver(pool),
+      providerStreamer,
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(attempts).toBe(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.providerError?.error).toMatchObject({
+      code: "provider_stream_error",
+      retryable: true,
+      fatal: false,
+    });
+    expect(logs).toEqual([expect.objectContaining({
+      event: "provider_request_streamed",
+      "error.class": "provider_transport_failure",
+      "error.code": "provider_stream_error",
+    })]);
+    expect(JSON.stringify(logs)).not.toContain("statusless-private-canary");
+  });
+
   test("T-POOL-4 does not switch platform keys after a downstream event has been emitted", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({
@@ -927,6 +967,98 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
   });
 
+  test("Anthropic billing quarantines the failed platform key and succeeds once through a healthy key", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    const attempts: string[] = [];
+    const logs: unknown[] = [];
+    const pool = new RecordingPlatformCredentialPool(["pfk_billing", "pfk_healthy"]);
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      credentialResolver: platformCredentialResolver(pool),
+      providerStreamer: {
+        stream: async function* (input) {
+          const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
+          attempts.push(keyID);
+          if (keyID === "pfk_billing") {
+            throw {
+              statusCode: 400,
+              body: {
+                type: "error",
+                error: {
+                  type: "invalid_request_error",
+                  message: "Your credit balance is too low. billing-body-canary",
+                },
+              },
+            };
+          }
+          yield finishEvent();
+        },
+      },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(attempts).toEqual(["pfk_billing", "pfk_healthy"]);
+    expect(pool.recordedFailures).toHaveLength(1);
+    expect(pool.recordedFailures[0]).toMatchObject({
+      keyId: "pfk_billing",
+      classification: { action: "quarantine", providerError: { code: "provider_key_unavailable", retryable: false, statusCode: 400 } },
+    });
+    expect(events.map((event) => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
+    expect(JSON.stringify(logs)).not.toMatch(/billing-body-canary|credit balance|pfk_billing|sk-pfk/i);
+  });
+
+  test("exhausted Anthropic billing fails one turn generically and a later turn uses a restored key", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    const keyIDs = ["pfk_billing"];
+    const attempts: string[] = [];
+    const logs: unknown[] = [];
+    const pool = new RecordingPlatformCredentialPool(keyIDs);
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      credentialResolver: platformCredentialResolver(pool),
+      providerStreamer: {
+        stream: async function* (input) {
+          const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
+          attempts.push(keyID);
+          if (keyID === "pfk_billing") {
+            throw {
+              statusCode: 400,
+              body: { error: { type: "invalid_request_error", message: "Your credit balance is too low. private-billing-canary" } },
+            };
+          }
+          yield finishEvent();
+        },
+      },
+    });
+
+    const failed = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toEqual(["pfk_billing"]);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.providerError?.error).toEqual(expect.objectContaining({
+      code: "provider_unavailable",
+      message: "Provider is unavailable.",
+      retryable: false,
+      fatal: false,
+      statusCode: 400,
+    }));
+    expect(JSON.stringify(failed)).not.toMatch(/anthropic|platform|key|balance|billing|credit|private-billing-canary/i);
+    expect(logs).toEqual([expect.objectContaining({
+      event: "provider_request_streamed",
+      "error.class": "provider_http_rejection",
+      "error.code": "provider_unavailable",
+      "provider.status_code": 400,
+    })]);
+    expect(JSON.stringify(logs)).not.toMatch(/pfk_billing|private-billing-canary|credit balance|sk-pfk/i);
+
+    keyIDs.push("pfk_restored");
+    const recovered = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toEqual(["pfk_billing", "pfk_restored"]);
+    expect(recovered.map((event) => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
+  });
+
   test("non-catalog models fail closed before credential resolution", async () => {
     const unsupportedModels = [
       { providerId: "openai", modelId: "gpt-4.1", variant: "" },
@@ -1002,7 +1134,7 @@ describe("ProviderGatewayServiceShell", () => {
     expect(streamCalls).toBe(0);
   });
 
-  test("session credential provider failures surface directly without platform key switching", async () => {
+  test("invalid session credential fails once with credential-specific safe wording and no pool action", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({
       ...base,
@@ -1014,16 +1146,19 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamer: {
         stream: async function* () {
           attempts += 1;
-          throw new ProviderKeyFailureError({
-            action: "quarantine",
-            providerError: {
-              code: "provider_key_unavailable",
-              message: "Provider key is not usable.",
-              retryable: false,
-              fatal: true,
-              statusCode: 401,
-            },
-          });
+          if (attempts === 1) {
+            throw new ProviderKeyFailureError({
+              action: "quarantine",
+              providerError: {
+                code: "provider_key_unavailable",
+                message: "raw credential rejection canary",
+                retryable: false,
+                fatal: true,
+                statusCode: 401,
+              },
+            });
+          }
+          yield finishEvent();
         },
       },
     });
@@ -1034,10 +1169,16 @@ describe("ProviderGatewayServiceShell", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.providerError?.error).toMatchObject({
       code: "provider_key_unavailable",
+      message: "The supplied provider credential is not usable.",
       retryable: false,
       fatal: true,
       statusCode: 401,
     });
+    expect(JSON.stringify(events)).not.toMatch(/raw credential rejection canary|platform|pool/i);
+
+    const recovered = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toBe(2);
+    expect(recovered.map((event) => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
   });
 
   test("rejects runtime binding tokens that do not match request fields and caller pod UID", async () => {
@@ -1595,13 +1736,14 @@ class RecordingAuthenticator implements GatewayAuthenticator {
 
 class RecordingPlatformCredentialPool implements PlatformCredentialPool {
   readonly recordedFailures: Array<{ readonly keyId: string; readonly classification: ProviderFailureClassification }> = [];
+  readonly quarantined = new Set<string>();
   selectCalls = 0;
 
   constructor(private readonly keyIds: readonly string[]) {}
 
   async select(providerId: PlatformHostedProviderId, options: PlatformKeySelectionOptions = {}) {
     this.selectCalls += 1;
-    const keyId = this.keyIds.find((candidate) => !options.excludeKeyIds?.has(candidate));
+    const keyId = this.keyIds.find((candidate) => !this.quarantined.has(candidate) && !options.excludeKeyIds?.has(candidate));
     if (keyId === undefined) {
       return {
         ok: false as const,
@@ -1630,6 +1772,9 @@ class RecordingPlatformCredentialPool implements PlatformCredentialPool {
 
   recordFailure(keyId: string, classification: ProviderFailureClassification): void {
     this.recordedFailures.push({ keyId, classification });
+    if (classification.action === "quarantine") {
+      this.quarantined.add(keyId);
+    }
   }
 }
 

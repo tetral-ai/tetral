@@ -97,7 +97,10 @@ no retry — the terminal event is forwarded and the runtime owns recovery. The
 pre-stream `attachment-rejections` event is gateway-originated and does not close
 the failover window. User-credential sessions never enter the pool (one key,
 dead is dead). An empty tier → `provider-error(code = platform_keys_exhausted,
-retryable = true, retry-after = shortest remaining cooldown)`.
+retryable = true, retry-after = shortest remaining cooldown)`. If a turn first
+quarantines an unusable key and no healthy key remains, the outward failure is
+the generic non-retryable `provider_unavailable`; the failed credential is not
+selected again, and the Runtime closes only that turn.
 
 ### Error classification (`packages/lowering/src/errors.ts`)
 
@@ -105,7 +108,9 @@ retryable = true, retry-after = shortest remaining cooldown)`.
 | --- | --- |
 | 5xx, network/connection, timeout classes | `retryable = true` regardless of the SDK's own flag |
 | OpenAI-family 404 | `retryable = true` (documented provider misbehavior) |
+| Anthropic 400 `invalid_request_error` with the verified credit-exhaustion discriminator | quarantine the failed platform key before generic shape classification; outward pool exhaustion stays generic |
 | 400/422 request-shape | fail fast to caller, do **not** rotate the key |
+| no status and no explicit timeout/network tag | `provider_stream_error`, `retryable = true`; Runtime owns the existing bounded turn retry |
 | context overflow (413, `context_length_exceeded`, message-pattern) | `code = context_overflow`, `retryable = false` (arms runtime reactive compaction) |
 | subscription/entitlement (`usage_not_included`, `insufficient_quota`, `invalid_prompt`) | `retryable = false`, human-actionable public message |
 | 429 on providers that overload it (openai/moonshotai/zai) | parse the body `code`/`type` to split transient rate-limit (`COOLING`) from terminal quota (`QUARANTINE`) |
@@ -113,7 +118,9 @@ retryable = true, retry-after = shortest remaining cooldown)`.
 `provider-error.error` carries only bounded fields (code, public message,
 retryable, fatal, status code, retry-after). Credentials, raw headers/bodies,
 stack traces, and signed URLs are stripped before the event leaves the process.
-The gateway itself never retries.
+Platform-key failover never repeats the failed key. A rejected session-supplied
+credential receives one attempt and credential-specific safe wording; it never
+enters the platform pool. The gateway does not own Runtime turn retries.
 
 ### Process lifecycle
 

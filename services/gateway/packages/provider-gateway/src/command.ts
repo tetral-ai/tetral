@@ -144,8 +144,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
           "event.kind": "platform_provider_key_quarantined",
           operation: "platform_key_pool",
           component: "gateway",
-          "platform_key.id": event.keyId,
           "provider.id": event.providerId,
+          "credential.origin": "platform",
+          ...(event.providerError.statusCode === undefined ? {} : { "provider.status_code": event.providerError.statusCode }),
           ...semanticErrorFields({
             errorClass: "provider_error",
             errorCode: event.providerError.code ?? "provider_error",
