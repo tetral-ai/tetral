@@ -117,6 +117,86 @@ func TestActorCreationBoundsMatchTheRuntimeContract(t *testing.T) {
 	}
 }
 
+func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_live_spawn_fences"
+		parentID  = "thr_live_spawn_fences_parent"
+		otherID   = "thr_live_spawn_fences_other"
+		bindingID = "bind_live_spawn_fences"
+		podUID    = "pod_live_spawn_fences"
+		requestID = "mreq_live_spawn_fences"
+		validID   = "evt_live_spawn_fences_valid"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, otherID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, validID, 1, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET visibility='public',session_visible=true,model_request_id=$2
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, requestID, validID); err != nil {
+		t.Fatalf("authorize valid live spawn source: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, requestID, validID, "call_live_spawn_fences", "spawn_agent")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_live_spawn_fences_wrong_name", 2, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"Read","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET visibility='public',session_visible=true,model_request_id=$2
+		WHERE workspace_id='default' AND session_id=$1 AND event_id='evt_live_spawn_fences_wrong_name'`, sessionID, requestID); err != nil {
+		t.Fatalf("authorize wrong-name source: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_live_spawn_fences_wrong_type", 3, "agent.mcp_tool_use",
+		`{"type":"agent.mcp_tool_use","name":"spawn_agent","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET visibility='public',session_visible=true,model_request_id=$2
+		WHERE workspace_id='default' AND session_id=$1 AND event_id='evt_live_spawn_fences_wrong_type'`, sessionID, requestID); err != nil {
+		t.Fatalf("authorize wrong-type source: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, otherID, "evt_live_spawn_fences_other_thread", 1, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET visibility='public',session_visible=true,model_request_id=$2
+		WHERE workspace_id='default' AND session_id=$1 AND event_id='evt_live_spawn_fences_other_thread'`, sessionID, requestID); err != nil {
+		t.Fatalf("authorize other-thread source: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	request := func(sourceID, taskName string, candidateScope *bridgev1.RuntimeScope) *bridgev1.CreateSubagentThreadRequest {
+		return &bridgev1.CreateSubagentThreadRequest{
+			Scope: candidateScope, SourceToolUseEventId: sourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all",
+		}
+	}
+	for name, candidate := range map[string]*bridgev1.CreateSubagentThreadRequest{
+		"wrong Tool name":            request("evt_live_spawn_fences_wrong_name", "worker", scope),
+		"wrong Tool type":            request("evt_live_spawn_fences_wrong_type", "worker", scope),
+		"conflicting arguments":      request(validID, "different-worker", scope),
+		"stale scope":                request(validID, "worker", bridgeAPIScope(sessionID, parentID, bindingID, 2, podUID)),
+		"source from another Thread": request("evt_live_spawn_fences_other_thread", "worker", scope),
+	} {
+		if response, err := store.CreateSubagentThread(context.Background(), candidate); err == nil || response != nil {
+			t.Fatalf("%s admission = %#v/%v; want rejection", name, response, err)
+		}
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime'
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, parentID); err != nil {
+		t.Fatalf("close parent before admission: %v", err)
+	}
+	if response, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); err == nil || response != nil {
+		t.Fatalf("closed parent admission = %#v/%v; want rejection", response, err)
+	}
+	var children, operations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='subagent' AND task_name='worker'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn')`,
+		sessionID).Scan(&children, &operations); err != nil {
+		t.Fatalf("read rejected spawn mutation census: %v", err)
+	}
+	if children != 0 || operations != 0 {
+		t.Fatalf("rejected spawn mutation census children/operations = %d/%d", children, operations)
+	}
+}
+
 func TestActorBoundaryDiagnosticsAreBoundedAndFailOpen(t *testing.T) {
 	scope := bridgeAPIScope("sesn_actor_diagnostic", "thr_actor_diagnostic", "bind_actor_diagnostic", 1, "pod_actor_diagnostic")
 	logActorBoundaryRejected(

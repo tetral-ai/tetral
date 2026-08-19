@@ -697,6 +697,13 @@ func settleRuntimePodLostLiveScopeTx(
 	if err != nil {
 		return err
 	}
+	rescheduleEventID, rescheduleActive, err := activeRuntimePodLostRescheduleTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if rescheduleActive {
+		return retireRuntimePodLostRescheduledBindingTx(ctx, tx, scope, binding, rescheduleEventID, now)
+	}
 	interruptedThenLost, err := runtimePodLostInterruptedThenLostTx(ctx, tx, workspaceID, sessionID, threadID)
 	if err != nil {
 		return err
@@ -810,6 +817,76 @@ func settleRuntimePodLostLiveScopeTx(
 		idleEventID,
 		formattedNow,
 		now.Add(defaultIdleCleanupDelay),
+	)
+	return err
+}
+
+func activeRuntimePodLostRescheduleTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+) (string, bool, error) {
+	var eventID, eventType string
+	var consumed bool
+	err := tx.QueryRow(ctx,
+		`SELECT lifecycle.event_id, lifecycle.type, EXISTS (
+		     SELECT 1 FROM session_events request_start
+		      WHERE request_start.workspace_id=lifecycle.workspace_id
+		        AND request_start.session_id=lifecycle.session_id
+		        AND request_start.session_thread_id=lifecycle.session_thread_id
+		        AND request_start.type='span.model_request_start'
+		        AND request_start.sequence > lifecycle.sequence
+		   )
+		   FROM session_events lifecycle
+		  WHERE lifecycle.workspace_id=$1 AND lifecycle.session_id=$2 AND lifecycle.session_thread_id=$3
+		    AND lifecycle.type IN (
+		      'session.status_running','session.thread_status_running',
+		      'session.status_rescheduled','session.thread_status_rescheduled',
+		      'session.status_idle','session.thread_status_idle',
+		      'session.status_terminated','session.thread_status_terminated'
+		    )
+		  ORDER BY sequence DESC
+		  LIMIT 1`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	).Scan(&eventID, &eventType, &consumed)
+	if dbconnect.IsNoRows(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return eventID, !consumed && (eventType == "session.status_rescheduled" || eventType == "session.thread_status_rescheduled"), nil
+}
+
+// A committed reschedule remains the Turn owner after pod loss. Repair may
+// finish its outstanding Tool effects, but the lost binding is retired without
+// projecting a competing idle closeout or resetting the accepted retry facts.
+func retireRuntimePodLostRescheduledBindingTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	binding runtimeBindingForDelivery,
+	rescheduleEventID string,
+	now time.Time,
+) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status='idle',
+		        status_event_id=$5,
+		        idle_since=$6,
+		        active_seconds_total=active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
+		        END,
+		        running_since=NULL,
+		        cleanup_after=$7,
+		        cleanup_enqueued_at=NULL,
+		        cleanup_claimed_at=NULL,
+		        cleanup_job_id=NULL,
+		        updated_at=$6
+		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
+		rescheduleEventID, now, now.Add(defaultIdleCleanupDelay),
 	)
 	return err
 }

@@ -140,7 +140,9 @@ terminal result (`spawn_agent` / `send_message` settle delivery-aware by their
 `delivery_id`, keyed on the durable inter-agent delivery state); a delivered-
 but-uncommitted input replays from the inbox; pending waits owned by the lost
 binding are cancelled; every included scope the loss left unsettled
-resolves to idle with its `session.error` — **except** an interrupted-then-
+resolves to idle with its `session.error` — **except** a scope whose committed
+Request End already owns provider reschedule, where repair retires only the
+lost residency row and preserves the accepted retry facts, and an interrupted-then-
 lost scope, which settles quietly as `end_turn` with no error because the
 user's own processed `user.interrupt` (the thread's highest-sequence committed
 input) is the durable proof the stop was requested; the retry budget resets;
@@ -281,6 +283,14 @@ and active lifecycle facts directly from durable rows.
   evidence, marks those children terminated, and terminates the Session in the
   same transaction. The response returns only the declaring Thread's
   database-assigned stamps.
+- **Child creation authority.** `CreateSubagentThread` validates the exact
+  public `spawn_agent` Tool Use, its model-request Assistant message, declared
+  arguments, live parent scope, mutation barrier, and source-event idempotency.
+  The Tool Use may belong to an open provider request: Bridge snapshots the
+  currently provider-valid durable prefix and stores it with the child and
+  operation receipt in one transaction. Exact replay returns that child without
+  rereading later parent Message growth; a new Tool Use identity still crosses
+  task-name uniqueness rather than aliasing the earlier receipt.
 - **Lifecycle.** At most one terminal end per `model_request_id` (pod close and
   repair close both check inside the transaction, serialized on the start-row
   lock; a divergent loser is rejected and cold-recovers the durable winner). `FinishIdle` and

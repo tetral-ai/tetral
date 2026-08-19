@@ -1528,22 +1528,6 @@ func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *brid
 	} else if err != nil {
 		return nil, err
 	}
-	var requestEnded bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events ended
-		WHERE ended.workspace_id=$1 AND ended.session_id=$2 AND ended.session_thread_id=$3
-		 AND ended.type='span.model_request_end' AND ended.model_request_id=$4
-		 AND NOT COALESCE((ended.payload_json::jsonb ->> 'is_error')::boolean, FALSE)
-		 AND NOT EXISTS (SELECT 1 FROM session_events rescheduled
-		   WHERE rescheduled.workspace_id=ended.workspace_id AND rescheduled.session_id=ended.session_id
-		    AND rescheduled.session_thread_id=ended.session_thread_id AND rescheduled.model_request_id=ended.model_request_id
-		    AND rescheduled.type IN ('session.status_rescheduled','session.thread_status_rescheduled')))`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), modelRequestID.String,
-	).Scan(&requestEnded); err != nil {
-		return nil, err
-	}
-	if !requestEnded {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source request is not durably sealed")
-	}
 	entries, kinds, err := loadDurablePrefixEntriesThroughTx(ctx, tx, request.GetScope(), boundarySequence)
 	if err != nil {
 		return nil, err

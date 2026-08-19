@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -57,6 +59,12 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
+		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,created_at,updated_at
+	) VALUES ('default',$1,$2,'msg_actor_production_user',1,'user',
+		'{"parts":[{"type":"text","text":"safe parent prefix text"}]}',now(),now())`, sessionID, parentID); err != nil {
+		t.Fatalf("seed stable parent prefix: %v", err)
+	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, spawnSourceID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"`+taskName+`","agent_type":"worker","fork_turns":"all"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -65,18 +73,6 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		t.Fatalf("authorize durable spawn source: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, spawnRequestID, spawnSourceID, "call_actor_production_spawn", "spawn_agent")
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json='{"parts":[{"type":"text","text":"safe parent prefix text"},{"type":"tool_call","modelToolCallId":"call_actor_production_spawn","toolName":"spawn_agent","canonicalInput":{"task_name":"durable-child","agent_type":"worker","fork_turns":"all"}}]}'
-		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
-		sessionID, parentID, spawnRequestID); err != nil {
-		t.Fatalf("add safe parent prefix sibling: %v", err)
-	}
-	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_actor_production_spawn_end", 2, "span.model_request_end",
-		`{"type":"span.model_request_end","model_request_id":"`+spawnRequestID+`","is_error":false}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET model_request_id=$2
-		WHERE workspace_id='default' AND session_id=$1 AND event_id='evt_actor_production_spawn_end'`, sessionID, spawnRequestID); err != nil {
-		t.Fatalf("seal durable spawn request: %v", err)
-	}
 
 	client := startActorProductionBridge(t, runtime)
 	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
@@ -88,10 +84,6 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		t.Fatalf("create subagent through generated gRPC = %#v/%v", spawned, err)
 	}
 	childID := spawned.GetCommitted().GetChildThreadId()
-	replayed, err := client.CreateSubagentThread(context.Background(), spawnRequest)
-	if err != nil || replayed.GetDuplicate().GetChildThreadId() != childID {
-		t.Fatalf("replay generated subagent creation = %#v/%v; want %s", replayed, err, childID)
-	}
 	var prefixParent, prefixBoundary, prefixEntries string
 	if err := admin.QueryRowContext(context.Background(), `SELECT parent_thread_id,parent_boundary_event_id,entries_json
 		FROM session_thread_context_prefixes WHERE workspace_id='default' AND session_id=$1 AND child_thread_id=$2`, sessionID, childID).
@@ -100,6 +92,57 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	}
 	if prefixParent != parentID || prefixBoundary != spawnSourceID || prefixEntries == "[]" {
 		t.Fatalf("subagent prefix parent/boundary/entries = %s/%s/%s", prefixParent, prefixBoundary, prefixEntries)
+	}
+	if strings.Contains(prefixEntries, "call_actor_production_spawn") {
+		t.Fatalf("live spawn draft leaked into child prefix: %s", prefixEntries)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
+		SET data_json = jsonb_set(data_json::jsonb, '{parts}',
+			(data_json::jsonb -> 'parts') || '[{"type":"text","text":"late parent growth"}]'::jsonb)::text,
+			updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		sessionID, parentID, spawnRequestID); err != nil {
+		t.Fatalf("grow parent Assistant after child creation: %v", err)
+	}
+	const repeatedSourceID = "evt_actor_production_spawn_repeated"
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, repeatedSourceID, 2, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"`+taskName+`","agent_type":"worker","fork_turns":"all"}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET visibility='public',session_visible=true,model_request_id=$2
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, spawnRequestID, repeatedSourceID); err != nil {
+		t.Fatalf("authorize repeated durable spawn source: %v", err)
+	}
+	if repeated, err := client.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
+		Scope: parentScope, SourceToolUseEventId: repeatedSourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all",
+	}); status.Code(err) != codes.AlreadyExists || repeated != nil {
+		t.Fatalf("new Tool identity with repeated task name = %#v/%v; want AlreadyExists", repeated, err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_actor_production_spawn_end", 3, "span.model_request_end",
+		`{"type":"span.model_request_end","model_request_id":"`+spawnRequestID+`","is_error":false}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET model_request_id=$2
+		WHERE workspace_id='default' AND session_id=$1 AND event_id='evt_actor_production_spawn_end'`, sessionID, spawnRequestID); err != nil {
+		t.Fatalf("seal durable spawn request after child creation: %v", err)
+	}
+	replayed, err := client.CreateSubagentThread(context.Background(), spawnRequest)
+	if err != nil || replayed.GetDuplicate().GetChildThreadId() != childID {
+		t.Fatalf("replay generated subagent creation = %#v/%v; want %s", replayed, err, childID)
+	}
+	var replayPrefixEntries string
+	var children, operations, createdEvents, prefixes, runtimeInputs, queuedJobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT entries_json FROM session_thread_context_prefixes WHERE workspace_id='default' AND session_id=$1 AND child_thread_id=$2),
+		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$3 AND role='subagent'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.thread_created' AND payload_json::jsonb->>'role'='subagent'),
+		(SELECT count(*) FROM session_thread_context_prefixes WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1)`,
+		sessionID, childID, parentID).Scan(&replayPrefixEntries, &children, &operations, &createdEvents, &prefixes, &runtimeInputs, &queuedJobs); err != nil {
+		t.Fatalf("read replayed child creation census: %v", err)
+	}
+	if replayPrefixEntries != prefixEntries || children != 1 || operations != 1 || createdEvents != 1 || prefixes != 1 || runtimeInputs != 0 || queuedJobs != 0 {
+		t.Fatalf("replayed child prefix/census = %s children:%d operations:%d events:%d prefixes:%d inbox:%d queue:%d",
+			replayPrefixEntries, children, operations, createdEvents, prefixes, runtimeInputs, queuedJobs)
 	}
 	childScope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
 	firstLoaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope})

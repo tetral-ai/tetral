@@ -1016,6 +1016,151 @@ describe("ThreadLoop", () => {
 			appended.filter((event) => event.type === "session.status_idle"),
 		).toHaveLength(1);
 	});
+	test("provider failure waits for live subagent creation result and retries its pair once", async () => {
+		const session = new ThreadRuntime("sesn_subagent_provider_failure");
+		const loader = new QueuedContextLoader(
+			[],
+			[
+				{
+					type: "context",
+					entries: [userMessage("user-spawn", 0, "spawn the worker")],
+				},
+			],
+		);
+		const requests: LLMRequest[] = [];
+		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+		const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
+		const childCreated = deferred<void>();
+		const releaseToolResult = deferred<void>();
+		const providerFailureEmitted = deferred<void>();
+		let childCreations = 0;
+		const providerFailure = runtimeFailureFromProviderError(
+			normalizeProviderError({
+				code: "provider_stream_error",
+				message: "provider failed after child creation",
+				retryable: true,
+				fatal: false,
+			}),
+		);
+		const baseWriter = writerFrom((envelope) => ({
+			ok: true,
+			eventId:
+				envelope.event.type === "agent.tool_use"
+					? "sevt_subagent_creation"
+					: `bridge-${envelope.writeId}`,
+			type: "committed",
+			eventSequence: 1,
+		}));
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			settleToolResult: async (envelope) => {
+				settlements.push(envelope);
+				return await baseWriter.settleToolResult(envelope);
+			},
+			writeRequestEnd: async (envelope) => {
+				requestEnds.push(envelope);
+				return await baseWriter.writeRequestEnd(envelope);
+			},
+		};
+		const layer = runtimeThreadLoopLayer(loader, {
+			writer,
+			llmService: {
+				stream: (request) => {
+					requests.push(request);
+					if (requests.length !== 1) {
+						return Stream.fromIterable([
+							{ type: "text-start" as const, id: "after-spawn" },
+							{
+								type: "text-delta" as const,
+								id: "after-spawn",
+								text_delta: "child confirmed",
+							},
+							{ type: "text-end" as const, id: "after-spawn" },
+							{ type: "finish" as const, finishReason: "stop" as const },
+						]);
+					}
+					return Stream.fromAsyncIterable(
+						(async function* () {
+							yield {
+								type: "tool-call" as const,
+								id: "call_spawn_live",
+								toolName: "spawn_agent",
+								input: {
+									task_name: "worker",
+									prompt: "do the work",
+									agent_type: "worker",
+									fork_turns: "all",
+								},
+								inputPreview: {
+									preview: '{"task_name":"worker","prompt":"do the work","agent_type":"worker","fork_turns":"all"}',
+									truncated: false,
+								},
+							};
+							await childCreated.promise;
+							providerFailureEmitted.resolve(undefined);
+							yield { type: "provider-error" as const, error: providerFailure };
+						})(),
+						(error): LLMServiceError => ({
+							type: "llm-service",
+							error: runtimeFailureFromProviderError(
+								normalizeProviderError({
+									code: "provider_stream_error",
+									message: String(error),
+									retryable: true,
+								}),
+							),
+						}),
+					);
+				},
+			},
+			providerCallRuntime: {
+				systemInstructions: "live subagent provider failure test",
+				toolCatalog: catalogForTest({
+					name: "spawn_agent",
+					description: "Spawn a worker",
+					inputSchema: { type: "object" },
+				}),
+			},
+			runTool: async () => {
+				childCreations += 1;
+				childCreated.resolve(undefined);
+				await releaseToolResult.promise;
+				return {
+					type: "completed",
+					output: {
+						text: "task_name: worker\nstatus: delivered",
+						truncated: false,
+					},
+				};
+			},
+		});
+		const run = Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(Effect.provide(layer)),
+		);
+		await providerFailureEmitted.promise;
+		await flushMicrotasks(30);
+		expect(childCreations).toBe(1);
+		expect(requests).toHaveLength(1);
+		expect(settlements).toHaveLength(0);
+		expect(requestEnds).toHaveLength(1);
+		expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
+
+		releaseToolResult.resolve(undefined);
+		expect(await run).toMatchObject({ type: "completed" });
+		expect(childCreations).toBe(1);
+		expect(requests).toHaveLength(2);
+		expect(settlements).toHaveLength(1);
+		expect(requestEnds).toHaveLength(2);
+		const retryContext = JSON.stringify(requests[1]?.context);
+		expect(retryContext).toContain("call_spawn_live");
+		expect(retryContext).toContain("status: delivered");
+		expect(retryContext.split("call_spawn_live")).toHaveLength(3);
+	});
 	test("same-request committed tool is repaired and rebased before provider reschedule", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const loader = new RecordingContextLoader([], {
