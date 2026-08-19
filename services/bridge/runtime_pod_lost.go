@@ -183,7 +183,7 @@ func retainRuntimePodLostToolPairsTx(
 		}
 		switch eventType {
 		case "agent.tool_use", "agent.mcp_tool_use":
-			call, err := runtimeToolCallPartFromDirectFacts(payloadJSON, projectionJSON)
+			call, err := runtimeToolCallPartFromProjection(projectionJSON)
 			if err != nil {
 				return err
 			}
@@ -252,33 +252,14 @@ func retainRuntimePodLostToolPairsTx(
 	return nil
 }
 
-func runtimeToolCallPartFromDirectFacts(payloadJSON string, projectionJSON string) (map[string]any, error) {
-	var payload runtimeToolUseEventPayload
-	var projection struct {
-		ModelToolCallID string `json:"model_tool_call_id"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.Name == "" || len(payload.Input) == 0 ||
-		json.Unmarshal([]byte(projectionJSON), &projection) != nil || projection.ModelToolCallID == "" {
-		return nil, status.Error(codes.FailedPrecondition, "durable Tool Use event is malformed")
-	}
-	var input any
-	if err := json.Unmarshal(payload.Input, &input); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, "durable Tool input event is malformed")
-	}
-	return map[string]any{
-		"type": "tool_call", "modelToolCallId": projection.ModelToolCallID,
-		"toolName": payload.Name, "canonicalInput": input,
-	}, nil
-}
-
 func runtimeToolCallPartFromProjection(projectionJSON string) (map[string]any, error) {
 	var projection runtimeToolProjectionPayload
 	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil ||
-		projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.Input) == 0 {
+		projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.ProviderInput) == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "durable Tool projection is malformed")
 	}
 	var input any
-	if err := json.Unmarshal(projection.Input, &input); err != nil {
+	if err := json.Unmarshal(projection.ProviderInput, &input); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "durable Tool input projection is malformed")
 	}
 	return map[string]any{

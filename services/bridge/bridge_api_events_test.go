@@ -431,7 +431,8 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	first, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_first_tool", ModelRequestId: "mreq_history_first",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"apply_patch","input":{},"evaluated_permission":"ask"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", `{}`),
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", `{}`),
+		CanonicalExecutionInputJson: `{}`,
 	})
 	if err != nil || first.GetCommitted() == nil {
 		t.Fatalf("first Tool Call = %#v/%v", first, err)
@@ -447,7 +448,8 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_second_tool", ModelRequestId: "mreq_history_second",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"apply_patch","input":{},"evaluated_permission":"ask"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", `{}`),
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", `{}`),
+		CanonicalExecutionInputJson: `{}`,
 	})
 	if status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("historical Tool Call reuse error = %v; want AlreadyExists", err)

@@ -46,10 +46,11 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_tool_failure_start", modelRequest, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_use", ModelRequestId: modelRequest,
-		EventType:             "agent.mcp_tool_use",
-		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
-		SessionVisible:        true,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelCall, "github_search", `{"query":"tetral"}`),
+		EventType:                   "agent.mcp_tool_use",
+		PayloadJson:                 `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
+		SessionVisible:              true,
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelCall, "github_search", `{"query":"tetral"}`),
+		CanonicalExecutionInputJson: `{"query":"tetral"}`,
 	})
 	if err != nil {
 		t.Fatalf("write MCP Tool Use: %v", err)
@@ -263,7 +264,8 @@ func TestPostgreSQLMCPUncertaintySettlesWithoutResultAlias(t *testing.T) {
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_uncertain_use", ModelRequestId: modelRequest,
 		EventType: "agent.mcp_tool_use", PayloadJson: `{"type":"agent.mcp_tool_use","name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_uncertain", "github_search", `{"query":"tetral"}`),
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_mcp_uncertain", "github_search", `{"query":"tetral"}`),
+		CanonicalExecutionInputJson: `{"query":"tetral"}`,
 	})
 	if err != nil {
 		t.Fatalf("write MCP Tool Use: %v", err)
@@ -602,12 +604,13 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	scope := bridgeAPIScope("sesn_bridge_mcp_media", "thr_bridge_mcp_media", "bind_bridge_mcp_media", 1, "pod_uid_mcp_media")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_media_start", "mreq_mcp_media", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:                 scope,
-		RuntimeWriteId:        "rwrite_mcp_media_tool_use",
-		ModelRequestId:        "mreq_mcp_media",
-		EventType:             "agent.mcp_tool_use",
-		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"get_file_contents","input":{"path":"plot.png"},"mcp_server_name":"github","evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_media", "get_file_contents", `{"path":"plot.png"}`),
+		Scope:                       scope,
+		RuntimeWriteId:              "rwrite_mcp_media_tool_use",
+		ModelRequestId:              "mreq_mcp_media",
+		EventType:                   "agent.mcp_tool_use",
+		PayloadJson:                 `{"type":"agent.mcp_tool_use","name":"get_file_contents","input":{"path":"plot.png"},"mcp_server_name":"github","evaluated_permission":"allow"}`,
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_mcp_media", "get_file_contents", `{"path":"plot.png"}`),
+		CanonicalExecutionInputJson: `{"path":"plot.png"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent MCP tool use: %v", err)
@@ -1394,10 +1397,11 @@ func writeDurableMCPToolUseForTest(t *testing.T, store *PostgreSQLBridgeAPIStore
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_durable_claim_start", modelRequestID, "agent_provider_request", 0)
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_durable_claim_use", ModelRequestId: modelRequestID,
-		EventType:             "agent.mcp_tool_use",
-		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"create_issue","mcp_server_name":"github","input":{"title":"Bug","body":"Details"},"evaluated_permission":"allow"}`,
-		SessionVisible:        true,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_durable_claim", "create_issue", `{"title":"Bug","body":"Details"}`),
+		EventType:                   "agent.mcp_tool_use",
+		PayloadJson:                 `{"type":"agent.mcp_tool_use","name":"create_issue","mcp_server_name":"github","input":{"title":"Bug","body":"Details"},"evaluated_permission":"allow"}`,
+		SessionVisible:              true,
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_mcp_durable_claim", "create_issue", `{"title":"Bug","body":"Details"}`),
+		CanonicalExecutionInputJson: `{"title":"Bug","body":"Details"}`,
 	})
 	if err != nil {
 		t.Fatalf("write durable MCP Tool use: %v", err)

@@ -443,6 +443,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		AssistantContextDelta: bridgeToolCallContextDeltaForTest(
 			"tool-call-generated", "dangerous_tool", `{"path":"README.md"}`,
 		),
+		CanonicalExecutionInputJson: `{"path":"README.md"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent generated tool use: %v", err)

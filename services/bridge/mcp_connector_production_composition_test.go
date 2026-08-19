@@ -51,8 +51,9 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	cleanupToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_cleanup_use", ModelRequestId: "mreq_mcp_durable_claim",
 		EventType: "agent.mcp_tool_use", SessionVisible: true,
-		PayloadJson:           `{"type":"agent.mcp_tool_use","name":"create_issue","mcp_server_name":"github","input":{"mode":"cleanup"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_mcp_production_cleanup", "create_issue", `{"mode":"cleanup"}`),
+		PayloadJson:                 `{"type":"agent.mcp_tool_use","name":"create_issue","mcp_server_name":"github","input":{"mode":"cleanup"},"evaluated_permission":"allow"}`,
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_mcp_production_cleanup", "create_issue", `{"mode":"cleanup"}`),
+		CanonicalExecutionInputJson: `{"mode":"cleanup"}`,
 	})
 	if err != nil || cleanupToolUse.GetCommitted() == nil || cleanupToolUse.GetCommitted().GetEventId() == "" {
 		t.Fatalf("write cleanup MCP Tool use = %#v/%v", cleanupToolUse, err)

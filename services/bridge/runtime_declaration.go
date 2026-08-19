@@ -124,13 +124,22 @@ func writeEventDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
+	var canonicalExecutionInput any
+	if request.GetCanonicalExecutionInputJson() != "" {
+		inputJSON, err := canonicalRuntimeDeclarationJSON(request.GetCanonicalExecutionInputJson())
+		if err != nil {
+			return "", status.Error(codes.InvalidArgument, "canonical execution input is invalid")
+		}
+		canonicalExecutionInput = json.RawMessage(inputJSON)
+	}
 	declaration := map[string]any{
-		"assistant_context_delta": assistantDelta,
-		"event_type":              request.GetEventType(),
-		"model_request_id":        nullableDeclarationString(request.GetModelRequestId()),
-		"operation_kind":          bridgeOpWriteEvent,
-		"runtime_write_id":        request.GetRuntimeWriteId(),
-		"session_thread_id":       request.GetScope().GetSessionThreadId(),
+		"assistant_context_delta":   assistantDelta,
+		"canonical_execution_input": canonicalExecutionInput,
+		"event_type":                request.GetEventType(),
+		"model_request_id":          nullableDeclarationString(request.GetModelRequestId()),
+		"operation_kind":            bridgeOpWriteEvent,
+		"runtime_write_id":          request.GetRuntimeWriteId(),
+		"session_thread_id":         request.GetScope().GetSessionThreadId(),
 	}
 	if request.GetEventType() == "span.model_request_start" {
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
@@ -996,9 +1005,10 @@ func decodeRuntimeToolErrorJSON(raw string) (map[string]any, error) {
 
 func runtimeToolProjectionFromDurableTool(tool durableToolExecution, result map[string]any) runtimeToolProjectionPayload {
 	projection := runtimeToolProjectionPayload{
-		ModelToolCallID: tool.ModelToolCallID,
-		ToolName:        tool.ToolName,
-		Input:           json.RawMessage(tool.InputJSON),
+		ModelToolCallID:         tool.ModelToolCallID,
+		ToolName:                tool.ToolName,
+		ProviderInput:           json.RawMessage(tool.ProviderInputJSON),
+		CanonicalExecutionInput: json.RawMessage(tool.InputJSON),
 	}
 	if result != nil {
 		projection.State, _ = result["type"].(string)
@@ -1098,7 +1108,7 @@ func commitInternalToolRepairContextTx(
 	}
 	delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{
 		{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
-			ModelToolCallId: modelToolCallID, ToolName: toolName, CanonicalInputJson: canonicalInputJSON,
+			ModelToolCallId: modelToolCallID, ToolName: toolName, ProviderInputJson: canonicalInputJSON,
 		}}},
 		{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{
 			ModelToolCallId: modelToolCallID,

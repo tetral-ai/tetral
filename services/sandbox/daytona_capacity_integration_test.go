@@ -313,12 +313,13 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_tool_use", ModelRequestId: modelRequestID,
-		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`,
+		EventType:                   "agent.tool_use",
+		PayloadJson:                 `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`,
+		CanonicalExecutionInputJson: inputJSON,
 		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
 			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
 				ToolCall: &bridgev1.RuntimeContextToolCall{
-					ModelToolCallId: modelToolCallID, ToolName: "exec_command", CanonicalInputJson: inputJSON,
+					ModelToolCallId: modelToolCallID, ToolName: "exec_command", ProviderInputJson: inputJSON,
 				},
 			}}},
 		},
@@ -447,12 +448,13 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 	)
 	written, err := h.bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_shared_tool_use", ModelRequestId: h.modelRequestID,
-		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"printf shared"},"evaluated_permission":"allow"}`,
+		EventType:                   "agent.tool_use",
+		PayloadJson:                 `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"printf shared"},"evaluated_permission":"allow"}`,
+		CanonicalExecutionInputJson: inputJSON,
 		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
 			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
 				ToolCall: &bridgev1.RuntimeContextToolCall{
-					ModelToolCallId: modelToolCallID, ToolName: "exec_command", CanonicalInputJson: inputJSON,
+					ModelToolCallId: modelToolCallID, ToolName: "exec_command", ProviderInputJson: inputJSON,
 				},
 			}}},
 		},

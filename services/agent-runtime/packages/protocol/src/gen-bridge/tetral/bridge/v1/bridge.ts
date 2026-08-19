@@ -326,7 +326,7 @@ export interface RuntimeContextReasoning {
 export interface RuntimeContextToolCall {
   modelToolCallId: string;
   toolName: string;
-  canonicalInputJson: string;
+  providerInputJson: string;
 }
 
 export interface RuntimeContextToolResult {
@@ -726,6 +726,7 @@ export interface WriteEventRequest {
   contextThroughMessageSequence?: number | undefined;
   requestKind: string;
   consumedFileAttachments: FileAttachmentPair[];
+  canonicalExecutionInputJson: string;
 }
 
 export interface ServerToolUseUsage {
@@ -1597,7 +1598,7 @@ export const RuntimeContextReasoning: MessageFns<RuntimeContextReasoning> = {
 };
 
 function createBaseRuntimeContextToolCall(): RuntimeContextToolCall {
-  return { modelToolCallId: "", toolName: "", canonicalInputJson: "" };
+  return { modelToolCallId: "", toolName: "", providerInputJson: "" };
 }
 
 export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
@@ -1608,8 +1609,8 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
     if (message.toolName !== "") {
       writer.uint32(18).string(message.toolName);
     }
-    if (message.canonicalInputJson !== "") {
-      writer.uint32(26).string(message.canonicalInputJson);
+    if (message.providerInputJson !== "") {
+      writer.uint32(34).string(message.providerInputJson);
     }
     return writer;
   },
@@ -1637,12 +1638,12 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
           message.toolName = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
+        case 4: {
+          if (tag !== 34) {
             break;
           }
 
-          message.canonicalInputJson = reader.string();
+          message.providerInputJson = reader.string();
           continue;
         }
       }
@@ -1666,10 +1667,10 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
         : isSet(object.tool_name)
         ? globalThis.String(object.tool_name)
         : "",
-      canonicalInputJson: isSet(object.canonicalInputJson)
-        ? globalThis.String(object.canonicalInputJson)
-        : isSet(object.canonical_input_json)
-        ? globalThis.String(object.canonical_input_json)
+      providerInputJson: isSet(object.providerInputJson)
+        ? globalThis.String(object.providerInputJson)
+        : isSet(object.provider_input_json)
+        ? globalThis.String(object.provider_input_json)
         : "",
     };
   },
@@ -1682,8 +1683,8 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
     if (message.toolName !== "") {
       obj.toolName = message.toolName;
     }
-    if (message.canonicalInputJson !== "") {
-      obj.canonicalInputJson = message.canonicalInputJson;
+    if (message.providerInputJson !== "") {
+      obj.providerInputJson = message.providerInputJson;
     }
     return obj;
   },
@@ -1695,7 +1696,7 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
     const message = createBaseRuntimeContextToolCall();
     message.modelToolCallId = object.modelToolCallId ?? "";
     message.toolName = object.toolName ?? "";
-    message.canonicalInputJson = object.canonicalInputJson ?? "";
+    message.providerInputJson = object.providerInputJson ?? "";
     return message;
   },
 };
@@ -8146,6 +8147,7 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     contextThroughMessageSequence: undefined,
     requestKind: "",
     consumedFileAttachments: [],
+    canonicalExecutionInputJson: "",
   };
 }
 
@@ -8180,6 +8182,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     for (const v of message.consumedFileAttachments) {
       FileAttachmentPair.encode(v!, writer.uint32(130).fork()).join();
+    }
+    if (message.canonicalExecutionInputJson !== "") {
+      writer.uint32(138).string(message.canonicalExecutionInputJson);
     }
     return writer;
   },
@@ -8271,6 +8276,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.consumedFileAttachments.push(FileAttachmentPair.decode(reader, reader.uint32()));
           continue;
         }
+        case 17: {
+          if (tag !== 138) {
+            break;
+          }
+
+          message.canonicalExecutionInputJson = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8328,6 +8341,11 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : globalThis.Array.isArray(object?.consumed_file_attachments)
         ? object.consumed_file_attachments.map((e: any) => FileAttachmentPair.fromJSON(e))
         : [],
+      canonicalExecutionInputJson: isSet(object.canonicalExecutionInputJson)
+        ? globalThis.String(object.canonicalExecutionInputJson)
+        : isSet(object.canonical_execution_input_json)
+        ? globalThis.String(object.canonical_execution_input_json)
+        : "",
     };
   },
 
@@ -8363,6 +8381,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.consumedFileAttachments?.length) {
       obj.consumedFileAttachments = message.consumedFileAttachments.map((e) => FileAttachmentPair.toJSON(e));
     }
+    if (message.canonicalExecutionInputJson !== "") {
+      obj.canonicalExecutionInputJson = message.canonicalExecutionInputJson;
+    }
     return obj;
   },
 
@@ -8387,6 +8408,7 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.requestKind = object.requestKind ?? "";
     message.consumedFileAttachments = object.consumedFileAttachments?.map((e) => FileAttachmentPair.fromPartial(e)) ||
       [];
+    message.canonicalExecutionInputJson = object.canonicalExecutionInputJson ?? "";
     return message;
   },
 };

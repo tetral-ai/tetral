@@ -1123,6 +1123,10 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 						fileId: attachment.fileId,
 					}),
 				),
+				canonicalExecutionInputJson:
+					envelope.canonicalExecutionInput === undefined
+						? ""
+						: JSON.stringify(envelope.canonicalExecutionInput),
 				assistantContextDelta:
 					envelope.assistantContextAppend === undefined
 						? undefined
@@ -1844,7 +1848,7 @@ function runtimeContextDeltaForBridge(
 				toolCall: {
 					modelToolCallId: part.modelToolCallId,
 					toolName: part.toolName,
-					canonicalInputJson: JSON.stringify(part.state.input.value),
+					providerInputJson: JSON.stringify(part.state.input.value),
 				},
 			};
 		}),
@@ -1875,7 +1879,7 @@ function runtimeSealedContextDeltaForBridge(context: {
 						toolCall: {
 							modelToolCallId: part.modelToolCallId,
 							toolName: part.toolName,
-							canonicalInputJson: JSON.stringify(part.canonicalInput),
+							providerInputJson: JSON.stringify(part.canonicalInput),
 						},
 					};
 				case "tool_result": {

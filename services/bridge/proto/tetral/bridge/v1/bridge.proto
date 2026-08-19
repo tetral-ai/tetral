@@ -99,7 +99,9 @@ message RuntimeContextReasoning {
 message RuntimeContextToolCall {
   string model_tool_call_id = 1;
   string tool_name = 2;
-  string canonical_input_json = 3;
+  reserved 3;
+  reserved "canonical_input_json";
+  string provider_input_json = 4;
 }
 message RuntimeContextToolResult {
   string model_tool_call_id = 1;
@@ -537,6 +539,7 @@ message WriteEventRequest {
   reserved 15;
   reserved "tool_settlement";
   repeated FileAttachmentPair consumed_file_attachments = 16;
+  string canonical_execution_input_json = 17;
 }
 
 message ServerToolUseUsage {

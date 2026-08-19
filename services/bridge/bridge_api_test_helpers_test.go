@@ -151,9 +151,9 @@ func bridgeTextContextDeltaForTest(text string) *bridgev1.RuntimeContextDelta {
 	return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: text}}}}}
 }
 
-func bridgeToolCallContextDeltaForTest(modelToolCallID, toolName, canonicalInputJSON string) *bridgev1.RuntimeContextDelta {
+func bridgeToolCallContextDeltaForTest(modelToolCallID, toolName, providerInputJSON string) *bridgev1.RuntimeContextDelta {
 	return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
-		ModelToolCallId: modelToolCallID, ToolName: toolName, CanonicalInputJson: canonicalInputJSON,
+		ModelToolCallId: modelToolCallID, ToolName: toolName, ProviderInputJson: providerInputJSON,
 	}}}}}
 }
 
@@ -417,7 +417,13 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity", 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf '<>&'","workdir":"/workspace"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_events
-		    SET model_request_id = 'mreq_tool_identity', projection_json = '{"model_tool_call_id":"call_tool_identity"}'
+		    SET model_request_id = 'mreq_tool_identity',
+		        projection_json = jsonb_build_object(
+		          'model_tool_call_id', 'call_tool_identity',
+		          'tool_name', payload_json::jsonb ->> 'name',
+		          'provider_input', payload_json::jsonb -> 'input',
+		          'canonical_execution_input', payload_json::jsonb -> 'input'
+		        )
 		  WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
@@ -778,13 +784,19 @@ func seedBridgeAPIDurableToolMessage(
 	if _, err := db.ExecContext(context.Background(),
 		`UPDATE session_events
 		    SET model_request_id = $4,
-		        projection_json = COALESCE(projection_json, '{}')::jsonb || $5::jsonb
+		        projection_json = COALESCE(projection_json, '{}')::jsonb || jsonb_build_object(
+		          'model_tool_call_id', $5::text,
+		          'tool_name', $6::text,
+		          'provider_input', payload_json::jsonb -> 'input',
+		          'canonical_execution_input', payload_json::jsonb -> 'input'
+		        )
 		  WHERE workspace_id = $1 AND session_id = $2 AND event_id = $3`,
 		workspaceID,
 		sessionID,
 		toolUseEventID,
 		modelRequestID,
-		fmt.Sprintf(`{"model_tool_call_id":%q,"tool_name":%q}`, toolCallID, toolName),
+		toolCallID,
+		toolName,
 	); err != nil {
 		t.Fatalf("seed durable Tool Use identity: %v", err)
 	}
@@ -1136,7 +1148,8 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_event_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
 		'internal', false, 'mreq_' || $4,
 		jsonb_build_object(
-			'model_tool_call_id','call_' || $4,'tool_name','exec_command','input','{}'::jsonb,'state','completed',
+			'model_tool_call_id','call_' || $4,'tool_name','exec_command',
+			'provider_input','{}'::jsonb,'canonical_execution_input','{}'::jsonb,'state','completed',
 			'output',jsonb_build_object('text','Background command accepted.','truncated',false)
 		),
 		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'

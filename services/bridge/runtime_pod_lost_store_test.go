@@ -1028,7 +1028,12 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_events
-		    SET projection_json = '{"model_tool_call_id":"tool-call-pod-loss-multiple-resolving","tool_name":"Write"}'
+		    SET projection_json = jsonb_build_object(
+		      'model_tool_call_id', 'tool-call-pod-loss-multiple-resolving',
+		      'tool_name', 'Write',
+		      'provider_input', payload_json::jsonb -> 'input',
+		      'canonical_execution_input', payload_json::jsonb -> 'input'
+		    )
 		  WHERE workspace_id='default' AND session_id=$1
 		    AND event_id='evt_pod_loss_multiple_tool_resolving'`,
 		sessionID,

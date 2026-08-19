@@ -3977,6 +3977,7 @@ function processProviderEventEffect(
 					source,
 					job.modelToolCallId,
 					publicToolEventForEntry(entry),
+					job.input,
 				)
 			) {
 				yield* Deferred.succeed(declarationBarrier, false);
@@ -6703,6 +6704,7 @@ async function appendEvent(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
+		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
 	},
 	modelRequestId?: string,
 	requestStart?: {
@@ -6734,6 +6736,7 @@ async function appendProcessorEvent(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
+		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
 	},
 	modelRequestId?: string,
 ): Promise<SessionEventWriterAppendResult> {
@@ -6761,6 +6764,7 @@ async function appendRetriedEvent(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
+		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
 	},
 	modelRequestId?: string,
 	requestStart?: {
@@ -6855,6 +6859,7 @@ async function appendEventWithRetry(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
+		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
 	},
 	modelRequestId?: string,
 	requestStart?: {
@@ -6915,6 +6920,7 @@ async function appendEventWithWriteId(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
+		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
 	},
 	modelRequestId?: string,
 	requestStart?: {

@@ -169,15 +169,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		toolProjection, err := runtimeToolProjectionFromContextDelta(
 			eventType,
 			request.GetAssistantContextDelta(),
+			request.GetCanonicalExecutionInputJson(),
 		)
 		if err != nil {
 			return err
-		}
-		if eventType == "agent.tool_use" || eventType == "agent.mcp_tool_use" {
-			eventPayloadJSON, err = authoritativeToolUseEventPayloadJSON(eventPayloadJSON, toolProjection)
-			if err != nil {
-				return err
-			}
 		}
 		visibility, sessionVisible := threadScope.publicProjection(eventType)
 		eventID := id.New("evt_")
@@ -247,8 +242,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			); err != nil {
 				return err
 			}
-			projectionJSON, err := marshalBridgeJSON(map[string]string{
-				"model_tool_call_id": toolProjection.ModelToolCallID,
+			projectionJSON, err := marshalBridgeJSON(map[string]any{
+				"canonical_execution_input": toolProjection.CanonicalExecutionInput,
+				"model_tool_call_id":        toolProjection.ModelToolCallID,
+				"provider_input":            toolProjection.ProviderInput,
+				"tool_name":                 toolProjection.ToolName,
 			})
 			if err != nil {
 				return err
@@ -1164,29 +1162,6 @@ type runtimeToolUseEventPayload struct {
 	EvaluatedPermission string          `json:"evaluated_permission"`
 }
 
-// The Assistant Tool Call is the one durable immutable invocation. Public
-// Event storage and executor bookkeeping derive name/input from that same fact
-// instead of trusting a second caller-authored copy in payload_json.
-func authoritativeToolUseEventPayloadJSON(
-	payloadJSON string,
-	projection runtimeToolProjectionPayload,
-) (string, error) {
-	var payload runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return "", status.Error(codes.InvalidArgument, "tool use event payload is invalid")
-	}
-	if projection.ToolName == "" || len(projection.Input) == 0 {
-		return "", status.Error(codes.InvalidArgument, "Tool Use context declaration is incomplete")
-	}
-	payload.Name = projection.ToolName
-	payload.Input = append(json.RawMessage(nil), projection.Input...)
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
-	return string(encoded), nil
-}
-
 type durableToolResultEventPayload struct {
 	ToolUseID      string `json:"tool_use_id"`
 	ToolUseEventID string `json:"tool_use_event_id"`
@@ -1221,11 +1196,12 @@ func durableToolResultUseEventID(eventType string, payload durableToolResultEven
 }
 
 type runtimeToolProjectionPayload struct {
-	ModelToolCallID string          `json:"model_tool_call_id"`
-	ToolName        string          `json:"tool_name"`
-	Input           json.RawMessage `json:"input"`
-	State           string          `json:"state"`
-	Output          *struct {
+	ModelToolCallID         string          `json:"model_tool_call_id"`
+	ToolName                string          `json:"tool_name"`
+	ProviderInput           json.RawMessage `json:"provider_input"`
+	CanonicalExecutionInput json.RawMessage `json:"canonical_execution_input"`
+	State                   string          `json:"state"`
+	Output                  *struct {
 		Text      string `json:"text"`
 		Truncated bool   `json:"truncated"`
 	} `json:"output"`
@@ -1239,14 +1215,22 @@ type runtimeToolProjectionPayload struct {
 func runtimeToolProjectionFromContextDelta(
 	eventType string,
 	delta *bridgev1.RuntimeContextDelta,
+	canonicalExecutionInputJSON string,
 ) (runtimeToolProjectionPayload, error) {
 	switch eventType {
 	case "agent.message":
+		if canonicalExecutionInputJSON != "" {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Assistant message cannot declare canonical execution input")
+		}
 		if delta == nil || len(delta.GetParts()) == 0 {
 			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Assistant message context delta is empty")
 		}
 		return runtimeToolProjectionPayload{}, nil
 	case "agent.tool_use", "agent.mcp_tool_use":
+		canonicalExecutionInput, err := canonicalRunToolJSON(canonicalExecutionInputJSON)
+		if err != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool Use canonical execution input is invalid")
+		}
 		if delta == nil || len(delta.GetParts()) == 0 {
 			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool Use context delta is empty")
 		}
@@ -1256,11 +1240,16 @@ func runtimeToolProjectionFromContextDelta(
 			if call == nil {
 				continue
 			}
-			if _, err := decodeRuntimeDeclarationValue(call.GetCanonicalInputJson()); err != nil {
-				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool Use canonical input is invalid")
+			if _, err := decodeRuntimeDeclarationValue(call.GetProviderInputJson()); err != nil {
+				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool Use provider input is invalid")
 			}
-			input := json.RawMessage(call.GetCanonicalInputJson())
-			projection := runtimeToolProjectionPayload{ModelToolCallID: call.GetModelToolCallId(), ToolName: call.GetToolName(), Input: input, State: "running"}
+			projection := runtimeToolProjectionPayload{
+				ModelToolCallID:         call.GetModelToolCallId(),
+				ToolName:                call.GetToolName(),
+				ProviderInput:           json.RawMessage(call.GetProviderInputJson()),
+				CanonicalExecutionInput: json.RawMessage(canonicalExecutionInput),
+				State:                   "running",
+			}
 			if selected != nil {
 				return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool Use context delta is ambiguous")
 			}
@@ -1271,7 +1260,7 @@ func runtimeToolProjectionFromContextDelta(
 		}
 		return *selected, nil
 	default:
-		if delta != nil {
+		if delta != nil || canonicalExecutionInputJSON != "" {
 			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "event type does not accept a Runtime declaration")
 		}
 		return runtimeToolProjectionPayload{}, nil
@@ -1294,19 +1283,21 @@ func applyToolEventBookkeepingTx(
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 			return status.Error(codes.FailedPrecondition, "tool use event payload is invalid")
 		}
-		if projection.ModelToolCallID == "" || projection.ToolName == "" {
+		if projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.CanonicalExecutionInput) == 0 {
 			return status.Error(codes.FailedPrecondition, "tool use declaration is missing its tool part")
+		}
+		if payload.Name != projection.ToolName {
+			return status.Error(codes.FailedPrecondition, "tool use declaration identity is inconsistent")
+		}
+		if _, err := runtimeToolEventInputJSON(payload.Input); err != nil {
+			return err
 		}
 		if eventType == "agent.mcp_tool_use" && payload.MCPServerName == "" {
 			return status.Error(codes.FailedPrecondition, "MCP tool use declaration server is invalid")
 		}
 		switch payload.EvaluatedPermission {
 		case "ask":
-			inputJSON, err := runtimeToolEventInputJSON(payload.Input)
-			if err != nil {
-				return err
-			}
-			return upsertPendingToolApprovalTx(ctx, tx, scope, eventID, projection, inputJSON, now)
+			return upsertPendingToolApprovalTx(ctx, tx, scope, eventID, projection, string(projection.CanonicalExecutionInput), now)
 		case "allow", "deny":
 			return nil
 		default:

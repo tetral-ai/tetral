@@ -1127,9 +1127,10 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("tool-call-cleanup-cold-approval", "Write", string(approvalInputJSON)),
+		EventType:                   "agent.tool_use",
+		PayloadJson:                 `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
+		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("tool-call-cleanup-cold-approval", "Write", string(approvalInputJSON)),
+		CanonicalExecutionInputJson: string(approvalInputJSON),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write cleanup approval Tool Use: response=%#v err=%v", toolUse, err)

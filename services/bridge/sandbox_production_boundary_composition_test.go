@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -33,6 +34,40 @@ import (
 )
 
 func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T) {
+	tests := []struct {
+		name           string
+		toolName       string
+		providerInput  any
+		executionInput any
+	}{
+		{
+			name:           "freeform apply_patch",
+			toolName:       "apply_patch",
+			providerInput:  "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n",
+			executionInput: map[string]any{"patch": "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n"},
+		},
+		{
+			name:           "ordinary object exec_command",
+			toolName:       "exec_command",
+			providerInput:  map[string]any{"cmd": "printf object"},
+			executionInput: map[string]any{"cmd": "printf object"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
+				t, test.toolName, test.providerInput, test.executionInput,
+			)
+		})
+	}
+}
+
+func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
+	t *testing.T,
+	toolName string,
+	providerInput any,
+	executionInput any,
+) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		workspaceID     = "default"
@@ -48,6 +83,7 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("sandbox-production-boundary-key")
 	bridge := &sandboxProductionBoundaryBridgeServer{store: store}
 	client, bridgeAddress := startSandboxProductionBoundaryBridgeClient(t, bridge, podUID)
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
@@ -72,18 +108,14 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 	if err != nil || start.GetCommitted() == nil {
 		t.Fatalf("WriteEvent request start = %#v/%v; want committed", start, err)
 	}
-	const inputJSON = `{"cmd":"printf production-boundary"}`
-	toolUse, err := client.WriteEvent(runtimeContext, &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_sandbox_production_tool", ModelRequestId: modelRequestID,
-		EventType: "agent.tool_use", SessionVisible: true,
-		PayloadJson:           `{"type":"agent.tool_use","name":"exec_command","input":` + inputJSON + `,"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, "exec_command", inputJSON),
-	})
-	if err != nil || toolUse.GetCommitted() == nil || toolUse.GetCommitted().GetEventId() == "" {
-		t.Fatalf("WriteEvent Tool use = %#v/%v; want committed durable target", toolUse, err)
+	providerInputJSON, err := json.Marshal(providerInput)
+	if err != nil {
+		t.Fatalf("marshal provider patch input: %v", err)
 	}
-	toolUseEventID := toolUse.GetCommitted().GetEventId()
-
+	executionInputJSON, err := json.Marshal(executionInput)
+	if err != nil {
+		t.Fatalf("marshal canonical patch execution input: %v", err)
+	}
 	bunPath, err := exec.LookPath("bun")
 	if err != nil {
 		t.Fatalf("Sandbox Runtime composition requires bun: %v", err)
@@ -96,8 +128,9 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 	fixtureInput, err := json.Marshal(map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "workspaceId": workspaceID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": 1, "targetPodUid": podUID, "toolUseEventId": toolUseEventID,
+		"bindingGeneration": 1, "targetPodUid": podUID,
 		"modelRequestId": modelRequestID, "modelToolCallId": modelToolCallID,
+		"toolName": toolName, "providerInput": json.RawMessage(providerInputJSON),
 	})
 	if err != nil {
 		t.Fatalf("encode Runtime Sandbox composition input: %v", err)
@@ -141,7 +174,11 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 	}
 
 	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
-	provider := &sandboxProductionBoundaryProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}}
+	provider := &sandboxProductionBoundaryProvider{
+		bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{},
+		expectedToolName:               toolName,
+		expectedInputJSON:              string(executionInputJSON),
+	}
 	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
 		"daytona": provider,
 	})
@@ -167,16 +204,21 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 		t.Fatalf("run Runtime Sandbox production composition: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
 	var runtimeResult struct {
-		Result struct {
+		ToolUseEventID          string `json:"toolUseEventId"`
+		CanonicalExecutionInput any    `json:"canonicalExecutionInput"`
+		Result                  struct {
 			Type string `json:"type"`
 		} `json:"result"`
 		Settlement struct {
 			Type string `json:"type"`
 		} `json:"settlement"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &runtimeResult); err != nil || runtimeResult.Result.Type != "completed" || runtimeResult.Settlement.Type != "duplicate" {
+	if err := json.Unmarshal(stdout.Bytes(), &runtimeResult); err != nil || runtimeResult.ToolUseEventID == "" ||
+		runtimeResult.Result.Type != "completed" || runtimeResult.Settlement.Type != "duplicate" ||
+		!reflect.DeepEqual(runtimeResult.CanonicalExecutionInput, executionInput) {
 		t.Fatalf("Runtime Sandbox result = %q/%v; want completed/duplicate", stdout.String(), err)
 	}
+	toolUseEventID := runtimeResult.ToolUseEventID
 
 	var executionState string
 	var retainedResult sql.NullString
@@ -197,11 +239,51 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 		queue.FormatSandboxExecutionPartitionKey(workspace.ID(workspaceID), sessionID, threadID, toolUseEventID)).Scan(&queueStatus); err != nil {
 		t.Fatalf("read Sandbox queue status: %v", err)
 	}
-	acceptDropped, settlementDropped := bridge.snapshot()
+	var payloadJSON string
+	var projectionJSON string
+	if err := admin.QueryRowContext(context.Background(), `SELECT payload_json, projection_json
+		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3`,
+		workspaceID, sessionID, toolUseEventID).Scan(&payloadJSON, &projectionJSON); err != nil {
+		t.Fatalf("read durable Tool declaration: %v", err)
+	}
+	if testJSONPathString(t, payloadJSON, "name") != toolName ||
+		!reflect.DeepEqual(testJSONPathValue(t, payloadJSON, "input"), executionInput) ||
+		testJSONPathString(t, projectionJSON, "tool_name") != toolName ||
+		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "provider_input"), providerInput) ||
+		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "canonical_execution_input"), executionInput) {
+		t.Fatalf("durable Tool declaration payload/projection = %s / %s", payloadJSON, projectionJSON)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("LoadContext after Sandbox composition: %v", err)
+	}
+	var contextPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &contextPayload); err != nil {
+		t.Fatalf("decode Sandbox composition context: %v", err)
+	}
+	providerInputFound := false
+	contextEntries := contextPayload.ContextEntries
+	if contextPayload.OpenRequestDraft != nil {
+		contextEntries = append(contextEntries, bridgeRuntimeContextEntry{Parts: contextPayload.OpenRequestDraft.Parts})
+	}
+	for _, entry := range contextEntries {
+		for _, rawPart := range entry.Parts {
+			var part map[string]any
+			if json.Unmarshal(rawPart, &part) == nil && part["type"] == "tool_call" &&
+				part["modelToolCallId"] == modelToolCallID && reflect.DeepEqual(part["canonicalInput"], providerInput) {
+				providerInputFound = true
+			}
+		}
+	}
+	writeDropped, acceptDropped, settlementDropped := bridge.snapshot()
 	if executionState != "consumed" || retainedResult.Valid || resultEvents != 1 || queueStatus != "acknowledged" ||
-		provider.calls.Load() != 1 || !acceptDropped || !settlementDropped {
-		t.Fatalf("production boundary = state %q retained %v events %d queue %q calls %d dropped %v/%v; want consumed/NULL/1/acknowledged/1/true/true",
-			executionState, retainedResult, resultEvents, queueStatus, provider.calls.Load(), acceptDropped, settlementDropped)
+		provider.prepareCalls.Load() != 1 || provider.prepareMismatches.Load() != 0 ||
+		provider.calls.Load() != 1 || provider.mismatches.Load() != 0 || !providerInputFound ||
+		!writeDropped || !acceptDropped || !settlementDropped {
+		t.Fatalf("production boundary = state %q retained %v events %d queue %q prepares %d/%d calls %d/%d provider_input %v dropped %v/%v/%v; want consumed/NULL/1/acknowledged/1/0/1/0/true/true/true/true",
+			executionState, retainedResult, resultEvents, queueStatus,
+			provider.prepareCalls.Load(), provider.prepareMismatches.Load(), provider.calls.Load(), provider.mismatches.Load(),
+			providerInputFound, writeDropped, acceptDropped, settlementDropped)
 	}
 }
 
@@ -210,12 +292,23 @@ type sandboxProductionBoundaryBridgeServer struct {
 	store *PostgreSQLBridgeAPIStore
 
 	mu                   sync.Mutex
+	writeACKDropped      bool
 	acceptACKDropped     bool
 	settlementACKDropped bool
 }
 
 func (s *sandboxProductionBoundaryBridgeServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
-	return s.store.WriteEvent(ctx, request)
+	response, err := s.store.WriteEvent(ctx, request)
+	if err != nil || (request.GetEventType() != "agent.tool_use" && request.GetEventType() != "agent.mcp_tool_use") {
+		return response, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.writeACKDropped {
+		s.writeACKDropped = true
+		return nil, status.Error(codes.Unavailable, "Tool declaration acknowledgement unavailable")
+	}
+	return response, nil
 }
 
 func (s *sandboxProductionBoundaryBridgeServer) AcceptSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error) {
@@ -250,10 +343,10 @@ func (s *sandboxProductionBoundaryBridgeServer) SettleToolResult(ctx context.Con
 	return response, nil
 }
 
-func (s *sandboxProductionBoundaryBridgeServer) snapshot() (bool, bool) {
+func (s *sandboxProductionBoundaryBridgeServer) snapshot() (bool, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.acceptACKDropped, s.settlementACKDropped
+	return s.writeACKDropped, s.acceptACKDropped, s.settlementACKDropped
 }
 
 func startSandboxProductionBoundaryBridgeClient(t *testing.T, server bridgev1.AgentRuntimeBridgeServiceServer, runtimePodUID string) (bridgev1.AgentRuntimeBridgeServiceClient, string) {
@@ -309,11 +402,27 @@ func (a sandboxCompositionAuthenticator) Authenticate(_ context.Context, token s
 
 type sandboxProductionBoundaryProvider struct {
 	*bridgeMemoryProjectionProvider
-	calls atomic.Int32
+	prepareCalls      atomic.Int32
+	prepareMismatches atomic.Int32
+	calls             atomic.Int32
+	mismatches        atomic.Int32
+	expectedToolName  string
+	expectedInputJSON string
 }
 
-func (p *sandboxProductionBoundaryProvider) ExecuteTool(context.Context, tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
+func (p *sandboxProductionBoundaryProvider) PrepareTool(_ context.Context, request tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult] {
+	p.prepareCalls.Add(1)
+	if request.Invocation.ToolName != p.expectedToolName || request.Invocation.InputJSON != p.expectedInputJSON {
+		p.prepareMismatches.Add(1)
+	}
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult]{}
+}
+
+func (p *sandboxProductionBoundaryProvider) ExecuteTool(_ context.Context, request tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
 	p.calls.Add(1)
+	if request.Invocation.ToolName != p.expectedToolName || request.Invocation.InputJSON != p.expectedInputJSON {
+		p.mismatches.Add(1)
+	}
 	return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{Value: sandboxdriver.ToolExecution{
 		ResultJSON: `{"status":"success","result":{"text":"production-boundary"}}`,
 	}}

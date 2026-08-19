@@ -757,10 +757,74 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					toolCall: {
 						modelToolCallId: "call_1",
 						toolName: "lookup",
-						canonicalInputJson: JSON.stringify({ city: "Paris" }),
+						providerInputJson: JSON.stringify({ city: "Paris" }),
 					},
 				},
 			],
+		});
+	});
+
+	test("declares provider and canonical execution Tool inputs separately", async () => {
+		const bridge = new TypedBridge();
+		bridge.writeEventResponse = {
+			committed: {
+				eventId: "evt_patch",
+				assignedMessageSequence: 4,
+				createdToolUseEventIds: ["tool_evt_patch"],
+			},
+		};
+		const writer = new BridgeAPIEventWriter(options(bridge));
+		const rawPatch =
+			"*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n";
+		await expect(
+			writer.append({
+				...eventScope("write_patch"),
+				modelRequestId: "mrq_patch",
+				event: {
+					type: "agent.tool_use",
+					name: "apply_patch",
+					input: { patch: rawPatch },
+					evaluated_permission: "allow",
+				},
+				assistantContextAppend: {
+					parts: [
+						{
+							type: "tool",
+							modelToolCallId: "call_patch",
+							toolName: "apply_patch",
+							state: {
+								status: "running",
+								input: {
+									value: rawPatch,
+									preview: rawPatch,
+									truncated: false,
+								},
+							},
+						},
+					],
+				},
+				canonicalExecutionInput: { patch: rawPatch },
+			}),
+		).resolves.toMatchObject({ ok: true, eventId: "evt_patch" });
+		expect(bridge.writeEventRequests[0]).toMatchObject({
+			payloadJson: JSON.stringify({
+				type: "agent.tool_use",
+				name: "apply_patch",
+				input: { patch: rawPatch },
+				evaluated_permission: "allow",
+			}),
+			canonicalExecutionInputJson: JSON.stringify({ patch: rawPatch }),
+			assistantContextDelta: {
+				parts: [
+					{
+						toolCall: {
+							modelToolCallId: "call_patch",
+							toolName: "apply_patch",
+							providerInputJson: JSON.stringify(rawPatch),
+						},
+					},
+				],
+			},
 		});
 	});
 
@@ -978,7 +1042,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					toolCall: {
 						modelToolCallId: "call_1",
 						toolName: "lookup",
-						canonicalInputJson: JSON.stringify({ q: "x" }),
+						providerInputJson: JSON.stringify({ q: "x" }),
 					},
 				},
 				{ toolResult: { modelToolCallId: "call_1", cancelled: {} } },

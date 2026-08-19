@@ -860,7 +860,7 @@ export const SessionEventSchema = z.discriminatedUnion("type", [
 	z.strictObject({
 		type: z.literal("agent.tool_use"),
 		name: RuntimeIdentifierSchema,
-		input: RuntimeJsonObjectSchema,
+	input: RuntimeJsonObjectSchema,
 		evaluated_permission: z.enum(["allow", "ask", "deny"]),
 	}),
 	z.strictObject({
@@ -984,6 +984,7 @@ export const SessionEventEnvelopeSchema = z
 			)
 			.max(32)
 			.optional(),
+		canonicalExecutionInput: RuntimeJsonValueSchema.optional(),
 	})
 	.superRefine((envelope, context) => {
 		const memberEvent =
@@ -1000,6 +1001,21 @@ export const SessionEventEnvelopeSchema = z
 			context.addIssue({
 				code: "custom",
 				message: "event forbids a Runtime declaration shape",
+			});
+		}
+		const toolUseEvent =
+			envelope.event.type === "agent.tool_use" ||
+			envelope.event.type === "agent.mcp_tool_use";
+		if (toolUseEvent && envelope.canonicalExecutionInput === undefined) {
+			context.addIssue({
+				code: "custom",
+				message: "Tool Use event requires canonical execution input",
+			});
+		}
+		if (!toolUseEvent && envelope.canonicalExecutionInput !== undefined) {
+			context.addIssue({
+				code: "custom",
+				message: "non-Tool event forbids canonical execution input",
 			});
 		}
 		if (memberEvent && envelope.modelRequestId === undefined) {

@@ -95,6 +95,7 @@ export interface FrozenAssistantPartAppend {
 	readonly source: RuntimeProcessorSource;
 	readonly append: RuntimeAssistantContextAppend;
 	readonly event: Promise<SessionEventWriterAppendEvent>;
+	readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
 	readonly toolCallId?: string | undefined;
 }
 
@@ -139,6 +140,7 @@ export interface ProviderStreamAccumulatorWriter {
 		_source: RuntimeProcessorSource,
 		declaration?: {
 			readonly assistantContextAppend: RuntimeAssistantContextAppend;
+			readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
 		},
 		modelRequestId?: string,
 	) => Promise<SessionEventWriterAppendResult>;
@@ -253,7 +255,15 @@ export class ProviderStreamAccumulator {
 				const result = await this.options.writer.appendEvent(
 					event,
 					frozen.source,
-					{ assistantContextAppend: frozen.append },
+					{
+						assistantContextAppend: frozen.append,
+						...(frozen.canonicalExecutionInput === undefined
+							? {}
+							: {
+									canonicalExecutionInput:
+										frozen.canonicalExecutionInput,
+								}),
+					},
 					this.options.modelRequestId,
 				);
 				if (!result.ok)
@@ -569,6 +579,7 @@ export class ProviderStreamAccumulator {
 		source: RuntimeProcessorSource,
 		toolCallId: string,
 		toolEvent: PublicToolEvent,
+		canonicalExecutionInput: RuntimeJsonValue,
 	): boolean {
 		if (this.reservedToolMembers.has(toolCallId)) return true;
 		const existing = this.toolParts.get(toolCallId);
@@ -586,6 +597,7 @@ export class ProviderStreamAccumulator {
 			source,
 			append,
 			event,
+			canonicalExecutionInput,
 			toolCallId,
 		});
 		this.reservedToolMembers.set(toolCallId, {
@@ -1137,6 +1149,17 @@ function toolUseSessionEvent(
 			});
 }
 
+function isRuntimeJsonObject(
+	value: RuntimeJsonValue,
+): value is { readonly [key: string]: RuntimeJsonValue } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.getPrototypeOf(value) === Object.prototype
+	);
+}
+
 function terminalToolPart(
 	part: ToolPartCreate,
 	settlement: RuntimeToolSettlement,
@@ -1178,16 +1201,6 @@ function isTerminalTool(part: ToolPartCreate): boolean {
 		part.state.status === "completed" ||
 		part.state.status === "error" ||
 		part.state.status === "cancelled"
-	);
-}
-function isRuntimeJsonObject(
-	value: RuntimeJsonValue,
-): value is { readonly [key: string]: RuntimeJsonValue } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		!Array.isArray(value) &&
-		Object.getPrototypeOf(value) === Object.prototype
 	);
 }
 function withinJsonStringBudget(value: string, maxBytes: number): boolean {

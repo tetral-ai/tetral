@@ -186,6 +186,7 @@ type durableToolExecution struct {
 	ModelToolCallID     string
 	ToolName            string
 	MCPServerName       string
+	ProviderInputJSON   string
 	InputJSON           string
 	NormalizedInputHash string
 	EvaluatedPermission string
@@ -217,7 +218,10 @@ func loadDurableToolExecutionTx(
 	}
 	var payload runtimeToolUseEventPayload
 	var projection struct {
-		ModelToolCallID string `json:"model_tool_call_id"`
+		ModelToolCallID         string          `json:"model_tool_call_id"`
+		ToolName                string          `json:"tool_name"`
+		ProviderInput           json.RawMessage `json:"provider_input"`
+		CanonicalExecutionInput json.RawMessage `json:"canonical_execution_input"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use payload is invalid")
@@ -225,15 +229,17 @@ func loadDurableToolExecutionTx(
 	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use projection is invalid")
 	}
-	inputJSON, inputHash, err := canonicalRunToolInput(string(defaultRawJSON(payload.Input, json.RawMessage(`{}`))))
-	if err != nil || !modelRequestID.Valid || modelRequestID.String == "" || projection.ModelToolCallID == "" || payload.Name == "" {
+	inputJSON, inputHash, err := canonicalRunToolInput(string(projection.CanonicalExecutionInput))
+	if err != nil || !modelRequestID.Valid || modelRequestID.String == "" || projection.ModelToolCallID == "" ||
+		projection.ToolName == "" || len(projection.ProviderInput) == 0 || payload.Name != projection.ToolName {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool execution facts are incomplete")
 	}
 	return durableToolExecution{
 		ModelRequestID:      modelRequestID.String,
 		ModelToolCallID:     projection.ModelToolCallID,
-		ToolName:            payload.Name,
+		ToolName:            projection.ToolName,
 		MCPServerName:       payload.MCPServerName,
+		ProviderInputJSON:   string(projection.ProviderInput),
 		InputJSON:           inputJSON,
 		NormalizedInputHash: inputHash,
 		EvaluatedPermission: payload.EvaluatedPermission,
@@ -253,13 +259,6 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 		return err
 	}
 	return nil
-}
-
-func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMessage {
-	if len(value) == 0 || string(value) == "null" {
-		return fallback
-	}
-	return value
 }
 
 func verifyApprovedToolExecutionHandoffTx(
@@ -699,10 +698,11 @@ func insertInternalToolRepairEventTx(
 		return "", 0, err
 	}
 	projection := runtimeToolProjectionFromDurableTool(durableToolExecution{
-		ModelRequestID:  request.GetModelRequestId(),
-		ModelToolCallID: request.GetModelToolCallId(),
-		ToolName:        request.GetToolName(),
-		InputJSON:       request.GetCanonicalInputJson(),
+		ModelRequestID:    request.GetModelRequestId(),
+		ModelToolCallID:   request.GetModelToolCallId(),
+		ToolName:          request.GetToolName(),
+		ProviderInputJSON: request.GetCanonicalInputJson(),
+		InputJSON:         request.GetCanonicalInputJson(),
 	}, map[string]any{"type": "error", "error": errorValue})
 	projectionJSON, err := marshalBridgeJSON(projection)
 	if err != nil {

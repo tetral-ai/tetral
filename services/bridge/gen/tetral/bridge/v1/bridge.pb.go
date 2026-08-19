@@ -594,12 +594,12 @@ func (x *RuntimeContextReasoning) GetProviderMetadataJson() string {
 }
 
 type RuntimeContextToolCall struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	ModelToolCallId    string                 `protobuf:"bytes,1,opt,name=model_tool_call_id,json=modelToolCallId,proto3" json:"model_tool_call_id,omitempty"`
-	ToolName           string                 `protobuf:"bytes,2,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
-	CanonicalInputJson string                 `protobuf:"bytes,3,opt,name=canonical_input_json,json=canonicalInputJson,proto3" json:"canonical_input_json,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	ModelToolCallId   string                 `protobuf:"bytes,1,opt,name=model_tool_call_id,json=modelToolCallId,proto3" json:"model_tool_call_id,omitempty"`
+	ToolName          string                 `protobuf:"bytes,2,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	ProviderInputJson string                 `protobuf:"bytes,4,opt,name=provider_input_json,json=providerInputJson,proto3" json:"provider_input_json,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RuntimeContextToolCall) Reset() {
@@ -646,9 +646,9 @@ func (x *RuntimeContextToolCall) GetToolName() string {
 	return ""
 }
 
-func (x *RuntimeContextToolCall) GetCanonicalInputJson() string {
+func (x *RuntimeContextToolCall) GetProviderInputJson() string {
 	if x != nil {
-		return x.CanonicalInputJson
+		return x.ProviderInputJson
 	}
 	return ""
 }
@@ -5228,6 +5228,7 @@ type WriteEventRequest struct {
 	ContextThroughMessageSequence *int64                 `protobuf:"varint,13,opt,name=context_through_message_sequence,json=contextThroughMessageSequence,proto3,oneof" json:"context_through_message_sequence,omitempty"`
 	RequestKind                   string                 `protobuf:"bytes,14,opt,name=request_kind,json=requestKind,proto3" json:"request_kind,omitempty"`
 	ConsumedFileAttachments       []*FileAttachmentPair  `protobuf:"bytes,16,rep,name=consumed_file_attachments,json=consumedFileAttachments,proto3" json:"consumed_file_attachments,omitempty"`
+	CanonicalExecutionInputJson   string                 `protobuf:"bytes,17,opt,name=canonical_execution_input_json,json=canonicalExecutionInputJson,proto3" json:"canonical_execution_input_json,omitempty"`
 	unknownFields                 protoimpl.UnknownFields
 	sizeCache                     protoimpl.SizeCache
 }
@@ -5330,6 +5331,13 @@ func (x *WriteEventRequest) GetConsumedFileAttachments() []*FileAttachmentPair {
 		return x.ConsumedFileAttachments
 	}
 	return nil
+}
+
+func (x *WriteEventRequest) GetCanonicalExecutionInputJson() string {
+	if x != nil {
+		return x.CanonicalExecutionInputJson
+	}
+	return ""
 }
 
 type ServerToolUseUsage struct {
@@ -11906,11 +11914,11 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x17RuntimeContextReasoning\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x129\n" +
 	"\x16provider_metadata_json\x18\x02 \x01(\tH\x00R\x14providerMetadataJson\x88\x01\x01B\x19\n" +
-	"\x17_provider_metadata_json\"\x94\x01\n" +
+	"\x17_provider_metadata_json\"\xae\x01\n" +
 	"\x16RuntimeContextToolCall\x12+\n" +
 	"\x12model_tool_call_id\x18\x01 \x01(\tR\x0fmodelToolCallId\x12\x1b\n" +
-	"\ttool_name\x18\x02 \x01(\tR\btoolName\x120\n" +
-	"\x14canonical_input_json\x18\x03 \x01(\tR\x12canonicalInputJson\"\xb3\x02\n" +
+	"\ttool_name\x18\x02 \x01(\tR\btoolName\x12.\n" +
+	"\x13provider_input_json\x18\x04 \x01(\tR\x11providerInputJsonJ\x04\b\x03\x10\x04R\x14canonical_input_json\"\xb3\x02\n" +
 	"\x18RuntimeContextToolResult\x12+\n" +
 	"\x12model_tool_call_id\x18\x01 \x01(\tR\x0fmodelToolCallId\x12M\n" +
 	"\tcompleted\x18\x02 \x01(\v2-.tetral.bridge.v1.RuntimeContextToolCompletedH\x00R\tcompleted\x12A\n" +
@@ -12189,7 +12197,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x1fReadFileAttachmentChunkResponse\x12\x14\n" +
 	"\x04data\x18\x01 \x01(\fH\x00R\x04data\x12G\n" +
 	"\brejected\x18\x02 \x01(\v2).tetral.bridge.v1.FileAttachmentRejectionH\x00R\brejectedB\t\n" +
-	"\aoutcome\"\xd8\x05\n" +
+	"\aoutcome\"\x9d\x06\n" +
 	"\x11WriteEventRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12(\n" +
 	"\x10runtime_write_id\x18\x02 \x01(\tR\x0eruntimeWriteId\x12(\n" +
@@ -12202,7 +12210,8 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	" \x01(\v2%.tetral.bridge.v1.RuntimeContextDeltaR\x15assistantContextDelta\x12L\n" +
 	" context_through_message_sequence\x18\r \x01(\x03H\x00R\x1dcontextThroughMessageSequence\x88\x01\x01\x12!\n" +
 	"\frequest_kind\x18\x0e \x01(\tR\vrequestKind\x12`\n" +
-	"\x19consumed_file_attachments\x18\x10 \x03(\v2$.tetral.bridge.v1.FileAttachmentPairR\x17consumedFileAttachmentsB#\n" +
+	"\x19consumed_file_attachments\x18\x10 \x03(\v2$.tetral.bridge.v1.FileAttachmentPairR\x17consumedFileAttachments\x12C\n" +
+	"\x1ecanonical_execution_input_json\x18\x11 \x01(\tR\x1bcanonicalExecutionInputJsonB#\n" +
 	"!_context_through_message_sequenceJ\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"J\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\x0f\x10\x10R\x0fserver_tool_useR\x1amcp_materialization_handleR\x15sandbox_result_digestR\x0ftool_settlement\"r\n" +
 	"\x12ServerToolUseUsage\x12.\n" +
