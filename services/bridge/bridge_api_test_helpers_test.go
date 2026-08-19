@@ -157,6 +157,18 @@ func bridgeToolCallContextDeltaForTest(modelToolCallID, toolName, providerInputJ
 	}}}}}
 }
 
+func bridgeSignedReasoningToolCallContextDeltaForTest(modelToolCallID, toolName, providerInputJSON string) *bridgev1.RuntimeContextDelta {
+	return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{
+		{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{
+			Text:                 "provider-declared reasoning",
+			ProviderMetadataJson: bridgeString(`{"anthropic":{"signature":"sig_provider_context"}}`),
+		}}},
+		{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
+			ModelToolCallId: modelToolCallID, ToolName: toolName, ProviderInputJson: providerInputJSON,
+		}}},
+	}}
+}
+
 type panicSlogHandler struct{}
 
 func (panicSlogHandler) Enabled(context.Context, slog.Level) bool  { return true }

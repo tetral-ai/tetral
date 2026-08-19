@@ -370,6 +370,116 @@ describe("multi-Tool captured provider wire composition", () => {
 			}
 		}
 	});
+
+	test("emits no invented Anthropic Assistant text for completed MCP, errored builtin, and reasoning-only history", async () => {
+		const mock = createMockAnthropicServer(
+			await readFile(AnthropicFixtureUrl, "utf8"),
+		);
+		const registry = new ProviderClientRegistry({ fetch: mock.fetch });
+		try {
+			await collectEvents(
+				registry.stream({
+					request: noInventionToolHistoryRequest(
+						anthropicGoldenRequest(),
+						JSON.stringify({ anthropic: { signature: "sig_no_invention" } }),
+					),
+					credential: sessionAnthropicCredential(),
+				}),
+			);
+
+			expect(mock.requests).toHaveLength(1);
+			const body = mock.requests[0]!.body;
+			const messages = body.messages as readonly {
+				readonly role: string;
+				readonly content: readonly Record<string, unknown>[];
+			}[];
+			const assistantTypes = messages
+				.filter((message) => message.role === "assistant")
+				.map((message) => message.content.map((part) => part.type));
+			expect(assistantTypes).toEqual([
+				["thinking", "tool_use"],
+				["thinking", "tool_use"],
+				["thinking"],
+			]);
+
+			const wire = capturedToolWire("anthropic", body);
+			expect(wire.calls.map((call) => [call.id, call.name, call.input])).toEqual([
+				["call_mcp_completed", "github_create_issue", { title: "fixed" }],
+				["call_builtin_error", "exec_command", { cmd: "false" }],
+			]);
+			expect(wire.results.map((result) => result.id)).toEqual([
+				"call_mcp_completed",
+				"call_builtin_error",
+			]);
+			expect(capturedToolSequence(wire)).toEqual([
+				["call", "call_mcp_completed"],
+				["result", "call_mcp_completed"],
+				["call", "call_builtin_error"],
+				["result", "call_builtin_error"],
+			]);
+			expect(wire.results[0]!.output).toBe(JSON.stringify({ text: "mcp-completed-canary" }));
+			expect(wire.results[1]!.output).toBe(JSON.stringify({ error: { message: "builtin-error-canary" } }));
+		} finally {
+			await mock.close();
+		}
+	});
+
+	test("keeps the same completed and errored Tool exchange identities on OpenAI wire families", async () => {
+		const scenarios: readonly {
+			readonly family: "openai" | "openai-compatible";
+			readonly request: ProviderRequest;
+			readonly credential: ResolvedProviderCredential;
+			readonly fixture: URL;
+		}[] = [
+			{
+				family: "openai",
+				request: noInventionToolHistoryRequest(openAIGoldenRequest()),
+				credential: sessionOpenAICredential(),
+				fixture: OpenAIFixtureUrl,
+			},
+			{
+				family: "openai-compatible",
+				request: noInventionToolHistoryRequest(zaiGoldenRequest()),
+				credential: sessionZaiCredential(),
+				fixture: ZaiFixtureUrl,
+			},
+		];
+
+		for (const scenario of scenarios) {
+			const mock = createMockAnthropicServer(
+				await readFile(scenario.fixture, "utf8"),
+			);
+			const registry = new ProviderClientRegistry({ fetch: mock.fetch });
+			try {
+				await collectEvents(
+					registry.stream({
+						request: scenario.request,
+						credential: scenario.credential,
+					}),
+				);
+				expect(mock.requests).toHaveLength(1);
+				const wire = capturedToolWire(scenario.family, mock.requests[0]!.body);
+				expect(wire.calls.map((call) => [call.id, call.name, call.input]), scenario.family).toEqual([
+					["call_mcp_completed", "github_create_issue", { title: "fixed" }],
+					["call_builtin_error", "exec_command", { cmd: "false" }],
+				]);
+				expect(wire.results.map((result) => result.id), scenario.family).toEqual([
+					"call_mcp_completed",
+					"call_builtin_error",
+				]);
+				expect(capturedToolSequence(wire), scenario.family).toEqual([
+					["call", "call_mcp_completed"],
+					["result", "call_mcp_completed"],
+					["call", "call_builtin_error"],
+					["result", "call_builtin_error"],
+				]);
+				expect(wire.results[0]!.output, scenario.family).toBe(JSON.stringify({ text: "mcp-completed-canary" }));
+				expect(wire.results[1]!.output, scenario.family).toBe(JSON.stringify({ error: { message: "builtin-error-canary" } }));
+			} finally {
+				await mock.close();
+			}
+		}
+	});
 });
 
 describe("expanded provider catalog golden wire paths", () => {
@@ -1841,6 +1951,102 @@ const MultiToolCalls = [
 	{ modelToolCallId: "call_gamma", name: "Gamma", input: { value: "gamma" } },
 ] as const;
 
+function noInventionToolHistoryRequest(
+	base: ProviderRequest,
+	signedReasoningMetadataJson?: string,
+): ProviderRequest {
+	const reasoning = (suffix: string) =>
+		signedReasoningMetadataJson === undefined
+			? []
+			: [{
+					reasoning: {
+						text: `declared reasoning ${suffix}`,
+						metadataJson: signedReasoningMetadataJson,
+					},
+				}];
+	return {
+		...base,
+		requestId: `${base.requestId}_no_invention`,
+		modelRequestId: `${base.modelRequestId}_no_invention`,
+		context: [
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+				content: [{ text: { text: "Continue from the settled Tool history." } }],
+			},
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+				content: [
+					...reasoning("mcp"),
+					{ toolCall: {
+						modelToolCallId: "call_mcp_completed",
+						name: "github_create_issue",
+						inputJson: JSON.stringify({ title: "fixed" }),
+					} },
+				],
+			},
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+				content: [{ toolResult: {
+					modelToolCallId: "call_mcp_completed",
+					completed: { outputJson: JSON.stringify({ text: "mcp-completed-canary" }) },
+					error: undefined,
+					cancelled: undefined,
+				} }],
+			},
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+				content: [
+					...reasoning("builtin"),
+					{ toolCall: {
+						modelToolCallId: "call_builtin_error",
+						name: "exec_command",
+						inputJson: JSON.stringify({ cmd: "false" }),
+					} },
+				],
+			},
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+				content: [{ toolResult: {
+					modelToolCallId: "call_builtin_error",
+					completed: undefined,
+					error: { errorJson: JSON.stringify({ error: { message: "builtin-error-canary" } }) },
+					cancelled: undefined,
+				} }],
+			},
+			...(signedReasoningMetadataJson === undefined
+				? []
+				: [{
+						role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+						content: reasoning("only"),
+					}]),
+			{
+				role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+				content: [{ text: { text: "Proceed." } }],
+			},
+		],
+		tools: [
+			{
+				name: "github_create_issue",
+				description: "Create an issue.",
+				function: {
+					inputSchemaJson: JSON.stringify({ type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false }),
+					outputSchemaJson: undefined,
+				},
+				freeform: undefined,
+			},
+			{
+				name: "exec_command",
+				description: "Execute a command.",
+				function: {
+					inputSchemaJson: JSON.stringify({ type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"], additionalProperties: false }),
+					outputSchemaJson: undefined,
+				},
+				freeform: undefined,
+			},
+		],
+	};
+}
+
 function multiToolHistoryRequest(
 	base: ProviderRequest,
 	settledCallIds: readonly string[],
@@ -2103,6 +2309,18 @@ interface CapturedToolResult {
 	readonly id: string;
 	readonly output: unknown;
 	readonly index: number;
+}
+
+function capturedToolSequence(wire: {
+	readonly calls: readonly CapturedToolCall[];
+	readonly results: readonly CapturedToolResult[];
+}): readonly (readonly ["call" | "result", string])[] {
+	return [
+		...wire.calls.map((call) => ({ type: "call" as const, id: call.id, index: call.index })),
+		...wire.results.map((result) => ({ type: "result" as const, id: result.id, index: result.index })),
+	]
+		.sort((left, right) => left.index - right.index)
+		.map((item) => [item.type, item.id] as const);
 }
 
 interface CapturedAnthropicRequest {

@@ -46,6 +46,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("mcp-production-context-signing-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	cleanupToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
@@ -59,6 +60,12 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("write cleanup MCP Tool use = %#v/%v", cleanupToolUse, err)
 	}
 	cleanupToolUseEventID := cleanupToolUse.GetCommitted().GetEventId()
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_end", ModelRequestId: "mreq_mcp_durable_claim",
+		FinishReason: "tool-calls", UsageJson: `{}`,
+	}); err != nil {
+		t.Fatalf("seal MCP production request: %v", err)
+	}
 
 	bridge := &mcpConnectorProductionBridgeServer{
 		store: store,
@@ -211,6 +218,65 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	if claimStatus != "stored" || claimID.Valid || claimExpiry.Valid || !bytes.Contains([]byte(storedResult), []byte("reacquired claimant")) {
 		t.Fatalf("reacquired MCP result = status %q result %q claim %+v expiry %+v", claimStatus, storedResult, claimID, claimExpiry)
 	}
+
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("cold-load MCP production settlement: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode MCP production cold context: %v", err)
+	}
+	var mainCalls, mainResults, cleanupCalls, cleanupResults int
+	for _, entry := range payload.ContextEntries {
+		for _, raw := range entry.Parts {
+			var part struct {
+				Type            string `json:"type"`
+				ModelToolCallID string `json:"modelToolCallId"`
+			}
+			if err := json.Unmarshal(raw, &part); err != nil {
+				t.Fatalf("decode MCP production context part: %v", err)
+			}
+			switch part.ModelToolCallID {
+			case "call_mcp_durable_claim":
+				if part.Type == "tool_call" {
+					mainCalls++
+				} else if part.Type == "tool_result" {
+					mainResults++
+				}
+			case "call_mcp_production_cleanup":
+				if part.Type == "tool_call" {
+					cleanupCalls++
+				} else if part.Type == "tool_result" {
+					cleanupResults++
+				}
+			}
+		}
+	}
+	if mainCalls != 1 || mainResults != 1 || cleanupCalls != 1 || cleanupResults != 0 {
+		t.Fatalf("MCP cold context calls/results main=%d/%d cleanup=%d/%d; want one settled pair and one unresolved call", mainCalls, mainResults, cleanupCalls, cleanupResults)
+	}
+	cleanupSettlement, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+		scope,
+		bridgeCompletedToolSettlementForTest(cleanupToolUseEventID, "reacquired claimant"),
+	))
+	if err != nil {
+		t.Fatalf("settle staged cleanup MCP result: %v", err)
+	}
+	bridgeRequireToolSettlementOutcomeForTest(t, cleanupSettlement, "committed")
+	finalLoaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("cold-load fully settled MCP production context: %v", err)
+	}
+	ready := runRuntimeColdContextComposition(t, finalLoaded.GetContextJson(), true)
+	if ready.ReducerAction.Action != "prepare_next_request" {
+		t.Fatalf("settled MCP Runtime action = %+v; want exactly one next Provider request authority", ready.ReducerAction)
+	}
+	assertNoInventedAssistantText(t, ready.ProviderComposition)
+	assertProviderCompositionToolOrder(t, ready.ProviderComposition, []string{
+		"call_mcp_durable_claim",
+		"call_mcp_production_cleanup",
+	})
 }
 
 type mcpConnectorProductionBridgeServer struct {
