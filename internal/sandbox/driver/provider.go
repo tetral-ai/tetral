@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +24,11 @@ import (
 const DaytonaProviderName = "daytona"
 
 var ErrSandboxOwnershipMismatch = stderrors.New("sandbox provider ownership mismatch")
-var daytonaDiskCapacityMessagePattern = regexp.MustCompile(`^Total disk limit exceeded\. Maximum allowed: ([1-9][0-9]*)(KiB|MiB|GiB|TiB)\.$`)
+var (
+	daytonaCapacityFamilyPattern    = regexp.MustCompile(`^Total (disk|CPU|memory) limit exceeded\. Maximum allowed: ([^.[:space:]]+)\.$`)
+	daytonaComputeCapacityPattern   = regexp.MustCompile(`^[1-9][0-9]*$`)
+	daytonaByteCapacityLimitPattern = regexp.MustCompile(`^[1-9][0-9]*(KiB|MiB|GiB|TiB)$`)
+)
 
 type DaytonaLifecycleProvider struct {
 	client         daytonaLifecycleClient
@@ -451,7 +454,7 @@ func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 	}
 	var validation *daytonaerrors.DaytonaValidationError
 	if stderrors.As(err, &validation) {
-		if stage == sandbox.StageCreateSandbox && daytonaCreateDiskCapacityExceeded(validation) {
+		if stage == sandbox.StageCreateSandbox && daytonaCreateCapacityExceeded(validation) {
 			return daytonaProviderError(stage, sandbox.ProviderErrorQuotaExceeded, true, http.StatusBadRequest, "sandbox provider capacity is unavailable", err)
 		}
 		return daytonaProviderError(stage, sandbox.ProviderErrorInvalidRequest, false, http.StatusBadRequest, "daytona rejected sandbox request", err)
@@ -480,23 +483,25 @@ func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 	return daytonaProviderError(stage, sandbox.ProviderErrorUnknown, true, 0, "daytona sandbox request failed", err)
 }
 
-// Daytona Create capacity is recognized from the first logical line of the
-// SDK's structured response. That line is the stable machine discriminator;
-// later lines are mutable provider guidance. The anchored grammar deliberately
-// rejects prefixes and wording drift, while Queue retry remains owned by the
+// Daytona Create capacity is one provider family with resource-specific limit
+// shapes. The first logical response line is the stable machine discriminator;
+// later lines are mutable provider guidance. Queue retry remains owned by the
 // activation lifecycle after this adapter emits a proved-not-started outcome.
-func daytonaCreateDiskCapacityExceeded(validation *daytonaerrors.DaytonaValidationError) bool {
+func daytonaCreateCapacityExceeded(validation *daytonaerrors.DaytonaValidationError) bool {
 	if validation == nil || validation.DaytonaError == nil {
 		return false
 	}
 	message := strings.TrimSpace(validation.Message)
 	firstLine, _, _ := strings.Cut(message, "\n")
-	match := daytonaDiskCapacityMessagePattern.FindStringSubmatch(strings.TrimSpace(firstLine))
+	match := daytonaCapacityFamilyPattern.FindStringSubmatch(strings.TrimSpace(firstLine))
 	if len(match) != 3 {
 		return false
 	}
-	limit, err := strconv.ParseUint(match[1], 10, 64)
-	return err == nil && limit > 0
+	resource, limit := match[1], match[2]
+	if resource == "CPU" {
+		return daytonaComputeCapacityPattern.MatchString(limit)
+	}
+	return daytonaByteCapacityLimitPattern.MatchString(limit)
 }
 
 func daytonaRequestWasRejected(err error) bool {

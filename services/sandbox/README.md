@@ -160,13 +160,14 @@ mechanics, and helper transport remain behind that adapter. Queue payloads,
 Bridge, Runtime, and binding rows use only Tetral identities and normalized
 outcomes.
 
-Create-time Daytona disk-capacity rejection is classified only from the SDK's
-structured validation message and only when the complete, trimmed message
-matches the driver's anchored capacity grammar. It remains a proved-not-started
-operation and therefore consumes the existing activation Queue budget; other
-validation responses and non-Create stages retain terminal `invalid_request`
-semantics. Provider completion logs record the normalized `quota_exceeded`
-category and fixed safe message, never the response text or capacity value.
+Create-time Daytona disk, CPU, and memory capacity rejections are one provider
+failure family. Classification uses only the first logical line of the SDK's
+structured validation message and requires the anchored family grammar plus
+the resource's exact limit shape. It remains a proved-not-started operation and
+therefore consumes the existing activation Queue budget; other validation
+responses and non-Create stages retain terminal `invalid_request` semantics.
+Provider completion logs record the normalized `quota_exceeded` category and
+fixed safe message, never the resource, response text, or capacity value.
 
 The Daytona adapter owns the R2/rclone/FUSE path and the Daytona Linux Helper.
 File resources are copied into a Session-scoped Blob prefix, mounted read-only,
