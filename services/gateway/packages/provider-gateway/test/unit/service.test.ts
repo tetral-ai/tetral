@@ -516,6 +516,141 @@ describe("ProviderGatewayServiceShell", () => {
     expect(JSON.stringify(logs)).not.toContain("Provider stream stalled before the next chunk.");
   });
 
+  test("transport heartbeats cannot keep a provider stream alive without semantic progress", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    let release!: () => void;
+    const request = validProviderRequest({
+      ...base,
+      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+      limits: { maxOutputTokens: 1024, timeoutMs: 1_000 },
+    });
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamTimeouts: {
+        firstByteTimeoutMs: 500,
+        interChunkTimeoutMs: 20,
+        semanticProgressTimeoutMs: 50,
+      },
+      providerStreamer: {
+        stream: async function* (input) {
+          yield textEvent(
+            ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+            "",
+          );
+          yield textEvent(
+            ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+            "visible",
+          );
+          for (let index = 0; index < 20; index += 1) {
+            input.onTransportActivity?.();
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          await new Promise<void>((resolve) => {
+            release = resolve;
+            input.abortSignal?.addEventListener("abort", release, { once: true });
+          });
+        },
+      },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(events.at(-1)?.providerError?.error).toMatchObject({
+      code: "provider_stream_error",
+      retryable: true,
+      fatal: false,
+    });
+    expect(events.filter((event) => event.providerError === undefined)).toHaveLength(2);
+  });
+
+  test("semantic watchdog starts before the first content-bearing event", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({
+      ...base,
+      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+      limits: { maxOutputTokens: 1024, timeoutMs: 1_000 },
+    });
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamTimeouts: {
+        firstByteTimeoutMs: 500,
+        interChunkTimeoutMs: 20,
+        semanticProgressTimeoutMs: 40,
+      },
+      providerStreamer: {
+        stream: async function* (input) {
+          for (let index = 0; index < 20; index += 1) {
+            input.onTransportActivity?.();
+            yield textEvent(
+              ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+              "",
+            );
+            yield textEvent(
+              ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+              "",
+            );
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        },
+      },
+    });
+
+    const startedAt = Date.now();
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(30);
+    expect(events.at(-1)?.providerError?.error).toMatchObject({
+      code: "provider_stream_error",
+      retryable: true,
+    });
+  });
+
+  test("text, reasoning, and Tool Call progress each reset the semantic watchdog", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({
+      ...base,
+      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+      limits: { maxOutputTokens: 1024, timeoutMs: 1_000 },
+    });
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamTimeouts: {
+        firstByteTimeoutMs: 500,
+        interChunkTimeoutMs: 500,
+        semanticProgressTimeoutMs: 50,
+      },
+      providerStreamer: {
+        stream: async function* () {
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "visible");
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          yield reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, "");
+          yield reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA, "thinking");
+          yield reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END, "");
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          yield toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "Read", "", "call_1");
+          yield toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "Read", "", "call_1");
+          yield toolCallEvent("call_1", "Read", "{}");
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          yield finishEvent();
+        },
+      },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    ]);
+  });
+
   test("abort mid-body errors the provider stream instead of hanging", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({
@@ -1493,7 +1628,11 @@ function createService(
     readonly credentialResolver?: ProviderCredentialResolver | undefined;
     readonly attachmentResolver?: ProviderAttachmentResolver | undefined;
     readonly providerStreamer?: ProviderRequestStreamer | undefined;
-    readonly providerStreamTimeouts?: { readonly firstByteTimeoutMs?: number | undefined; readonly interChunkTimeoutMs?: number | undefined } | undefined;
+    readonly providerStreamTimeouts?: {
+      readonly firstByteTimeoutMs?: number | undefined;
+      readonly interChunkTimeoutMs?: number | undefined;
+      readonly semanticProgressTimeoutMs?: number | undefined;
+    } | undefined;
     readonly logger?: GatewayLogger | undefined;
   } = {},
 ): ProviderGatewayServiceShell {

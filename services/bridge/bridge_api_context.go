@@ -343,14 +343,6 @@ func loadThreadContextJSONTx(
 			          ORDER BY ended.sequence DESC
 			          LIMIT 1
 			       ), '') AS request_error_kind
-			       , EXISTS (
-			         SELECT 1 FROM session_events rescheduled
-			          WHERE rescheduled.workspace_id = m.workspace_id
-			            AND rescheduled.session_id = m.session_id
-			            AND rescheduled.session_thread_id = m.session_thread_id
-			            AND rescheduled.model_request_id = m.model_request_id
-			            AND rescheduled.type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
-			       ) AS request_rescheduled
 			       , (
 			         (
 			           EXISTS (
@@ -412,7 +404,6 @@ func loadThreadContextJSONTx(
 		var modelRequestID sql.NullString
 		var contextState string
 		var requestErrorKind string
-		var requestRescheduled bool
 		var completeToolRepair bool
 		if err := rows.Scan(
 			&kind,
@@ -423,7 +414,6 @@ func loadThreadContextJSONTx(
 			&modelRequestID,
 			&contextState,
 			&requestErrorKind,
-			&requestRescheduled,
 			&completeToolRepair,
 		); err != nil {
 			return "", err
@@ -435,7 +425,7 @@ func loadThreadContextJSONTx(
 		if err != nil {
 			return "", err
 		}
-		if contextState == "pod_lost" && requestErrorKind == "runtime_pod_lost" && !requestRescheduled && completeToolRepair {
+		if contextState == "pod_lost" && requestErrorKind == "runtime_pod_lost" && completeToolRepair {
 			contextState = "sealed"
 		}
 		switch contextState {

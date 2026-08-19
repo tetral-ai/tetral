@@ -267,6 +267,11 @@ it preserves the stated invariants and passes the named suites.
   `providers/openai-oauth.ts` (authorization swap, subscription-URL rewrite,
   system text carried as the call's `instructions`).
 - **Lifecycle.** One SDK stream per turn; SDK client retries are disabled.
+- **Liveness.** First-event and inter-event watchdogs bound transport stalls.
+  Independently, a 60-second semantic-progress watchdog is measured from the
+  last non-empty text/reasoning delta or Tool Call/input delta. Metadata,
+  keepalive traffic, and start/end markers do not re-arm it; expiry uses the
+  existing retryable provider-stream timeout projection.
 - **Invariants.** Raw-wire access is confined to the enumerated file-and-purpose
   points — a raw-wire mutation elsewhere is a boundary violation. Provider
   fetches may target only catalog base URLs plus the OAuth issuer/subscription
@@ -323,7 +328,7 @@ it preserves the stated invariants and passes the named suites.
 | `credentials*.test.ts`, `openai-oauth-refresh.test.ts` | Fail-closed enumeration, positive resolution to the provider-native credential header, Go↔TS decryption round-trip, OAuth single-flight refresh and rotation CAS |
 | `platform-pool.test.ts`, `platform-key-cli.test.ts` | Body-level classification, cool/quarantine transitions, pre-first-byte failover and switch cap, cooldown clamp, weighted selection, cache-scope startup refusal, operator-CLI round-trip |
 | `leak-guards.test.ts` | No key/token sentinel appears in any captured log, event, or error payload |
-| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk timeouts, admission cap, and the Bun/grpc-js tripwire (high event count + trailers + clean status) |
+| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap, and the Bun/grpc-js tripwire (high event count + trailers + clean status) |
 | `http-server.test.ts` | Ops-route responses and readiness-first graceful shutdown |
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |

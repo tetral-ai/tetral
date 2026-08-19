@@ -36,10 +36,18 @@ type bridgeLoadContextRequestStart struct {
 }
 
 type bridgeLoadContextRequestEnd struct {
-	RequestStartEventID string  `json:"requestStartEventId"`
-	IsError             bool    `json:"isError"`
-	ErrorKind           *string `json:"errorKind,omitempty"`
-	Rescheduled         bool    `json:"rescheduled"`
+	RequestStartEventID      string                              `json:"requestStartEventId"`
+	IsError                  bool                                `json:"isError"`
+	ErrorKind                *string                             `json:"errorKind,omitempty"`
+	AssistantMessageSequence *int64                              `json:"assistantMessageSequence,omitempty"`
+	Reschedule               *bridgeLoadContextRequestReschedule `json:"reschedule,omitempty"`
+}
+
+type bridgeLoadContextRequestReschedule struct {
+	Attempt            int64  `json:"attempt"`
+	EffectiveDeadline  string `json:"effectiveDeadline"`
+	ProviderAttempts   int64  `json:"providerAttempts"`
+	CompactionAttempts int64  `json:"compactionAttempts"`
 }
 
 type bridgeLoadContextToolUse struct {
@@ -191,6 +199,15 @@ func loadThreadTurnFactsTx(
 		if err != nil {
 			return facts, err
 		}
+		if event.RequestEnd != nil && event.ModelRequestID != nil {
+			for _, message := range messages {
+				if message.Kind == "assistant" && message.ModelRequestID != nil && *message.ModelRequestID == *event.ModelRequestID {
+					sequence := message.MessageSequence
+					event.RequestEnd.AssistantMessageSequence = &sequence
+					break
+				}
+			}
+		}
 		facts.Events = append(facts.Events, event)
 	}
 	repairs, err := loadContextRepairFactsTx(ctx, tx, scope, eventFloor)
@@ -297,6 +314,35 @@ func loadContextTurnEventFloorTx(
 		}
 	}
 	eventFloor := durableTurnFloor
+	for _, message := range messages {
+		if message.Kind != "assistant" || message.ModelRequestID == nil {
+			continue
+		}
+		var requestFloor sql.NullInt64
+		err := tx.QueryRow(ctx,
+			`SELECT MIN(request_start.sequence)
+			   FROM session_events request_start
+			   JOIN session_events request_end
+			     ON request_end.workspace_id=request_start.workspace_id
+			    AND request_end.session_id=request_start.session_id
+			    AND request_end.session_thread_id=request_start.session_thread_id
+			    AND request_end.model_request_id=request_start.model_request_id
+			    AND request_end.type='span.model_request_end'
+			  WHERE request_start.workspace_id=$1
+			    AND request_start.session_id=$2
+			    AND request_start.session_thread_id=$3
+			    AND request_start.model_request_id=$4
+			    AND request_start.type='span.model_request_start'
+			    AND request_end.payload_json::jsonb ->> 'is_error' = 'true'`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *message.ModelRequestID,
+		).Scan(&requestFloor)
+		if err != nil {
+			return 0, err
+		}
+		if requestFloor.Valid && requestFloor.Int64 < eventFloor {
+			eventFloor = requestFloor.Int64
+		}
+	}
 	var unresolvedRequestFloor sql.NullInt64
 	err := tx.QueryRow(ctx,
 		`SELECT MIN(request_start.sequence)
@@ -384,7 +430,7 @@ func bridgeTurnEventFact(
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.RequestStartEventID == "" || payload.IsError == nil {
 			return event, status.Error(codes.FailedPrecondition, "request end projection is malformed")
 		}
-		rescheduled, err := loadContextRequestEndRescheduledTx(ctx, tx, scope, modelRequestID.String)
+		reschedule, err := loadContextRequestEndRescheduleTx(ctx, tx, scope, modelRequestID.String)
 		if err != nil {
 			return event, err
 		}
@@ -392,7 +438,7 @@ func bridgeTurnEventFact(
 			RequestStartEventID: payload.RequestStartEventID,
 			IsError:             *payload.IsError,
 			ErrorKind:           payload.ErrorKind,
-			Rescheduled:         rescheduled,
+			Reschedule:          reschedule,
 		}
 	case "agent.tool_use", "agent.mcp_tool_use":
 		if !modelRequestID.Valid {
@@ -462,23 +508,86 @@ func bridgeTurnEventTypeAllowed(eventType string) bool {
 	return false
 }
 
-func loadContextRequestEndRescheduledTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, modelRequestID string) (bool, error) {
-	var rescheduled bool
+func loadContextRequestEndRescheduleTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, modelRequestID string) (*bridgeLoadContextRequestReschedule, error) {
+	var rescheduleProjectionJSON string
 	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		   SELECT 1 FROM session_events
+		`SELECT projection_json
+		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND model_request_id = $4
 		    AND type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
-		)`,
+		  ORDER BY sequence DESC
+		  LIMIT 1`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&rescheduled)
-	if err != nil {
-		return false, err
+	).Scan(&rescheduleProjectionJSON)
+	if dbconnect.IsNoRows(err) {
+		return nil, nil
 	}
-	return rescheduled, nil
+	if err != nil {
+		return nil, err
+	}
+	var projection struct {
+		Attempt            int64  `json:"attempt"`
+		EffectiveDeadline  string `json:"effective_deadline"`
+		ProviderAttempts   int64  `json:"provider_attempts"`
+		CompactionAttempts int64  `json:"compaction_attempts"`
+	}
+	if json.Unmarshal([]byte(rescheduleProjectionJSON), &projection) != nil ||
+		projection.Attempt <= 0 || projection.EffectiveDeadline == "" ||
+		projection.ProviderAttempts < 0 || projection.CompactionAttempts < 0 {
+		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end projection is malformed")
+	}
+	var receiptJSON string
+	err = tx.QueryRow(ctx,
+		`SELECT receipt_json
+		   FROM session_bridge_operations
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND operation = 'write_request_end'
+		    AND source_kind = 'model_request'
+		    AND idempotency_key = $4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+	).Scan(&receiptJSON)
+	if dbconnect.IsNoRows(err) {
+		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end has no durable receipt")
+	}
+	if err != nil {
+		return nil, err
+	}
+	facts, err := unmarshalRequestEndReplay(receiptJSON)
+	if err != nil || facts.Disposition != "rescheduled" || facts.EffectiveDeadline == "" {
+		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end receipt is malformed")
+	}
+	var requestKind string
+	err = tx.QueryRow(ctx,
+		`SELECT projection_json::jsonb ->> 'request_kind'
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
+		    AND type = 'span.model_request_start'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+	).Scan(&requestKind)
+	if err != nil {
+		return nil, err
+	}
+	attempt := projection.ProviderAttempts
+	if requestKind == requestKindCompactionSummary {
+		attempt = projection.CompactionAttempts
+	}
+	if attempt != projection.Attempt || facts.EffectiveDeadline != projection.EffectiveDeadline {
+		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end facts conflict")
+	}
+	return &bridgeLoadContextRequestReschedule{
+		Attempt:            attempt,
+		EffectiveDeadline:  facts.EffectiveDeadline,
+		ProviderAttempts:   projection.ProviderAttempts,
+		CompactionAttempts: projection.CompactionAttempts,
+	}, nil
 }
 
 func bridgeTurnToolUseFact(payloadJSON string, projectionJSON string) (*bridgeLoadContextToolUse, error) {

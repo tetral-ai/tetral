@@ -304,14 +304,14 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		t.Fatalf("pod-loss release jobs = %d; want acknowledged predecessor plus one successor", releaseJobCount)
 	}
 
-	var requestEndPayload string
+	var requestEndEventID, requestEndPayload string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT payload_json
+		`SELECT event_id, payload_json
 		   FROM session_events
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_pod_loss'
 		    AND type = 'span.model_request_end'
-		    AND model_request_id = 'mrq_pod_loss'`).Scan(&requestEndPayload); err != nil {
+		    AND model_request_id = 'mrq_pod_loss'`).Scan(&requestEndEventID, &requestEndPayload); err != nil {
 		t.Fatalf("read pod-loss request end: %v", err)
 	}
 	if !strings.Contains(requestEndPayload, `"error_kind":"runtime_pod_lost"`) {
@@ -433,12 +433,33 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 	) SELECT workspace_id, session_id, session_thread_id, 'evt_pod_loss_rescheduled', max(sequence) + 1,
 		'session.status_rescheduled', '{"type":"session.status_rescheduled"}', 'internal', false,
-		'mrq_pod_loss', '{}', '2026-01-01T00:06:00Z', '2026-01-01T00:06:00Z'
+		'mrq_pod_loss', '{"attempt":1,"effective_deadline":"2026-01-01T00:06:01Z","provider_attempts":1,"compaction_attempts":0}', '2026-01-01T00:06:00Z', '2026-01-01T00:06:00Z'
 	  FROM session_events
 	 WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_pod_loss'
 	 GROUP BY workspace_id, session_id, session_thread_id
 	 HAVING session_thread_id = 'thr_bridge_pod_loss'`); err != nil {
 		t.Fatalf("reschedule repaired request: %v", err)
+	}
+	rescheduleReceipt, err := marshalRequestEndReplay(requestEndDurableFacts{
+		RequestEndEventID: requestEndEventID,
+		Disposition:       "rescheduled",
+		EffectiveDeadline: "2026-01-01T00:06:01Z",
+	})
+	if err != nil {
+		t.Fatalf("encode repaired request reschedule receipt: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_turn_retries (
+		workspace_id, session_id, session_thread_id, provider_attempts, compaction_attempts, updated_at
+	) VALUES ('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 1, 0, '2026-01-01T00:06:00Z')`); err != nil {
+		t.Fatalf("seed repaired request retry counter: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_bridge_operations (
+		workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
+		request_hash, ack_status, result_json, declaration_digest, receipt_json, created_at, updated_at
+	) VALUES ('default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'write_request_end',
+		'model_request', 'mrq_pod_loss', 'pod-loss-reschedule', 'committed', '{}',
+		'pod-loss-reschedule', $1, '2026-01-01T00:06:00Z', '2026-01-01T00:06:00Z')`, rescheduleReceipt); err != nil {
+		t.Fatalf("seed repaired request reschedule receipt: %v", err)
 	}
 	rescheduled, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(
 		"sesn_bridge_pod_loss", "thr_bridge_pod_loss", replacementBindingID, replacementGeneration, replacementPodUID,
@@ -450,12 +471,16 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if err := json.Unmarshal([]byte(rescheduled.GetContextJson()), &rescheduledPayload); err != nil {
 		t.Fatalf("decode rescheduled Pod-loss context: %v", err)
 	}
+	foundRescheduledRepair := false
 	for _, entry := range rescheduledPayload.ContextEntries {
 		for _, part := range entry.Parts {
 			if strings.Contains(string(part), `"modelToolCallId":"tool-call-pod-loss"`) {
-				t.Fatalf("rescheduled Pod-loss repair leaked into provider context: %#v", rescheduledPayload.ContextEntries)
+				foundRescheduledRepair = true
 			}
 		}
+	}
+	if !foundRescheduledRepair {
+		t.Fatalf("rescheduled Pod-loss direct context omitted its durable repair pair: %#v", rescheduledPayload.ContextEntries)
 	}
 	var boundPodUID string
 	if err := admin.QueryRowContext(context.Background(),

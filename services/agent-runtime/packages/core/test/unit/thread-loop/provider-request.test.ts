@@ -2461,7 +2461,6 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "event_end_unresolved_tool_call",
 						isError: false,
-						rescheduled: false,
 					},
 					toolMembers: [
 						{

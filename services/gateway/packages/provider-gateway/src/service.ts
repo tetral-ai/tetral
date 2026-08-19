@@ -35,11 +35,11 @@ import type { RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/b
 import type { GatewayLogger } from "./logger.js";
 import { lookupGatewayModel } from "./providers/catalog.js";
 import { controlProviderStream } from "./providers/stream-control.js";
+import type { ProviderStreamWatchdogKind } from "./providers/stream-control.js";
 import { classifyProviderFailure, PlatformKeyPoolConstants, ProviderKeyFailureError } from "./providers/pool.js";
 import type { ProviderFailureClassification } from "./providers/pool.js";
 import type { ProviderCredentialResolver, ResolvedProviderCredential } from "./providers/credentials.js";
 import type { ProviderErrorInput } from "@tetral/gateway-lowering/src/errors.js";
-import type { ProviderStreamTimeoutKind } from "@tetral/gateway-lowering/src/errors.js";
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import { ProviderGatewayMetricsRegistry } from "./metrics.js";
 
@@ -327,6 +327,11 @@ export class ProviderGatewayServiceShell {
         DefaultProviderChunkTimeoutMs,
         overallTimeoutMs,
       ),
+      semanticProgressTimeoutMs: providerTimeoutMs(
+        this.options.providerStreamTimeouts?.semanticProgressTimeoutMs,
+        DefaultProviderSemanticProgressTimeoutMs,
+        overallTimeoutMs,
+      ),
     };
   }
 
@@ -405,6 +410,7 @@ export class ProviderGatewayServiceShell {
       let emitted = false;
       let lastEventAt: number | undefined;
       let lastEventKind: string | undefined;
+      let lastTransportActivityAt = Date.now();
       const openFragments = new ProviderOpenFragmentTracker();
       try {
         const providerEvents = controlProviderStream(this.providerStreamer.stream({
@@ -412,6 +418,9 @@ export class ProviderGatewayServiceShell {
           abortSignal,
           credential: resolvedCredential,
           resolvedAttachments: attachmentResolution.attachments,
+          onTransportActivity: () => {
+            lastTransportActivityAt = Date.now();
+          },
         }), {
           abortSignal,
           abortOnTimeout: (kind) => abortOnTimeout({
@@ -423,6 +432,8 @@ export class ProviderGatewayServiceShell {
           }),
           ...this.providerStreamTimeouts(providerDeadlineRemainingMs(providerDeadline)),
           overallTimeoutMs: providerDeadlineRemainingMs(providerDeadline),
+          isSemanticProgress: isProviderSemanticProgress,
+          transportActivityAt: () => lastTransportActivityAt,
         });
         for await (const event of providerEvents) {
           const eventValidation = validateProviderStreamEvent(event);
@@ -585,7 +596,7 @@ function sessionCredentialUnavailableError(statusCode: number | undefined): Prov
 }
 
 interface ProviderTimeoutObservation {
-  readonly kind: ProviderStreamTimeoutKind;
+  readonly kind: ProviderStreamWatchdogKind;
   readonly interEventGapMs?: number | undefined;
   readonly lastEventKind?: string | undefined;
 }
@@ -599,7 +610,12 @@ function logGatewayProviderTimeout(
 ): void {
   const kind = timeout.kind === "first_byte_timeout"
     ? "first_event"
-    : timeout.kind === "inter_chunk_timeout" ? "inter_event" : "overall";
+    : timeout.kind === "inter_chunk_timeout"
+      ? "inter_event"
+      : timeout.kind === "semantic_progress_timeout"
+        ? "semantic_progress"
+        : "overall";
+  const semanticProgressExpired = timeout.kind === "semantic_progress_timeout";
   try {
     logger.error({
       event: "gateway_provider_timeout",
@@ -614,9 +630,15 @@ function logGatewayProviderTimeout(
       }),
       ...(timeout.lastEventKind === undefined ? {} : { "stream.last_event.kind": timeout.lastEventKind }),
       ...semanticErrorFields({
-        errorClass: "provider_timeout",
-        errorCode: "provider_timeout",
-        messageSafe: "provider stream watchdog expired",
+        errorClass: semanticProgressExpired
+          ? "provider_transport_failure"
+          : "provider_timeout",
+        errorCode: semanticProgressExpired
+          ? "provider_stream_error"
+          : "provider_timeout",
+        messageSafe: semanticProgressExpired
+          ? "provider stream made no semantic progress"
+          : "provider stream watchdog expired",
       }),
     });
   } catch {
@@ -916,17 +938,20 @@ export interface ProviderRequestStreamInput {
   readonly abortSignal?: AbortSignal | undefined;
   readonly credential?: ResolvedProviderCredential | undefined;
   readonly resolvedAttachments?: readonly ResolvedProviderRequestAttachment[] | undefined;
+  readonly onTransportActivity?: (() => void) | undefined;
 }
 
-/** Configures first-event and between-event liveness watchdog budgets. */
+/** Configures first-event, between-event, and semantic-progress watchdog budgets. */
 export interface ProviderStreamTimeoutOptions {
   readonly firstByteTimeoutMs?: number | undefined;
   readonly interChunkTimeoutMs?: number | undefined;
+  readonly semanticProgressTimeoutMs?: number | undefined;
 }
 
 interface ResolvedProviderStreamTimeoutOptions {
   readonly firstByteTimeoutMs: number;
   readonly interChunkTimeoutMs: number;
+  readonly semanticProgressTimeoutMs: number;
 }
 
 class CatalogGatedProviderStreamer implements ProviderRequestStreamer {
@@ -977,6 +1002,23 @@ class TurnAdmissionGate {
 // long generations, so a healthy long stream finishes under the watchdog rather
 // than being truncated by the overall deadline.
 const DefaultProviderChunkTimeoutMs = 30_000;
+const DefaultProviderSemanticProgressTimeoutMs = 60_000;
+
+function isProviderSemanticProgress(value: unknown): boolean {
+  const event = value as ProviderStreamEvent;
+  switch (event.type) {
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
+      return (event.text?.text.length ?? 0) > 0;
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
+      return (event.reasoning?.text.length ?? 0) > 0;
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
+      return (event.toolInput?.text.length ?? 0) > 0;
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
+      return true;
+    default:
+      return false;
+  }
+}
 
 function attachmentUnavailableProviderError(): ProviderErrorInput {
   return {

@@ -4901,7 +4901,6 @@ describe("ThreadLoop", () => {
 							requestEnd: {
 								eventId: "sevt_rehydrated_request_end",
 								isError: false,
-								rescheduled: false,
 							},
 						},
 					},
@@ -5384,9 +5383,9 @@ describe("ThreadLoop", () => {
 		expect(settled).toBe(false);
 		releaseAcceptance.resolve();
 		await expect(runPromise).resolves.toMatchObject({ type: "failed" });
-		expect(awaitCalls).toBe(0);
-		expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(1);
-		expect(settlements).toEqual([]);
+		expect(awaitCalls).toBe(1);
+		expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
+		expect(settlements).toHaveLength(1);
 	});
 	test("runtime shutdown aborts active ToolFiber route execution", async () => {
 		const session = new ThreadRuntime("sesn_1");
@@ -7321,83 +7320,139 @@ describe("ThreadLoop", () => {
 			}).success,
 		).toBe(false);
 	});
-	test("terminal provider failure discards a tool call without a durable public tool-use identity", async () => {
+	test("provider failure waits for the committed Tool owner before closing", async () => {
 		const session = new ThreadRuntime("sesn_1");
-		const loader = new RecordingContextLoader([], {
-			type: "context",
-			entries: [userMessage("user-1", 0, "hello")],
-		});
+		const loader = new QueuedContextLoader(
+			[],
+			[
+				{
+					type: "context",
+					entries: [userMessage("user-1", 0, "hello")],
+				},
+			],
+		);
 		const appended: SessionEvent[] = [];
+		const requests: LLMRequest[] = [];
+		const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
 		let runToolCalls = 0;
+		let providerCalls = 0;
 		const providerError = {
 			type: "provider",
 			code: "provider_stream_error",
 			message: "Stream failed before tool commitment.",
-			retryable: false,
-			fatal: true,
+			retryable: true,
+			fatal: false,
 			providerId: "fake",
 			modelId: "fake-chat",
 		} as const;
-		const result = await Effect.runPromise(
-			Effect.gen(function* () {
-				const threadLoop = yield* ThreadLoop.Service;
-				return yield* threadLoop.run(session, testRunCustody());
-			}).pipe(
-				Effect.provide(
-					runtimeThreadLoopLayer(loader, {
-						writer: writerFrom((envelope) => {
-							appended.push(envelope.event);
-							return {
-								ok: true,
-								eventId: `bridge-${envelope.writeId}`,
-								type: "committed",
-								eventSequence: 1,
-							};
-						}),
-						events: [
-							{
-								type: "tool-call",
-								id: "tool-uncommitted",
-								toolName: "search",
-								input: { q: "x" },
-								inputPreview: { preview: '{"q":"x"}', truncated: false },
-							},
-							{ type: "provider-error", error: providerError },
-						],
-						providerCallRuntime: {
-							systemInstructions: "terminal failure tool discard test",
-							toolCatalog: catalogForTest({
-								name: "search",
-								description: "Search test tool",
-								inputSchema: { type: "object" },
-								permissionPolicy: "always_ask",
-							}),
-						},
-						runTool: () => {
-							runToolCalls += 1;
-							return {
-								type: "completed",
-								output: { text: "must not run", truncated: false },
-							};
-						},
-					}),
-				),
+		const layer = runtimeThreadLoopLayer(loader, {
+			writer: writerFrom(
+				(envelope) => {
+					appended.push(envelope.event);
+					return {
+						ok: true,
+						eventId: `bridge-${envelope.writeId}`,
+						type: "committed",
+						eventSequence: 1,
+					};
+				},
+				undefined,
+				[],
+				undefined,
+				async (envelope) => {
+					settlements.push(envelope);
+					return { ok: true, result: { type: "committed" } };
+				},
 			),
-		);
-		expect(result).toMatchObject({ type: "failed", error: providerError });
-		expect(runToolCalls).toBe(0);
+			llmService: {
+				stream: (request) => {
+					requests.push(request);
+					providerCalls += 1;
+					return Stream.fromIterable<LLMEvent>(
+						providerCalls === 1
+							? [
+									{
+										type: "tool-call",
+										id: "tool-uncommitted",
+										toolName: "search",
+										input: { q: "x" },
+										inputPreview: {
+											preview: '{"q":"x"}',
+											truncated: false,
+										},
+									},
+									{ type: "provider-error", error: providerError },
+								]
+							: [
+									{ type: "text-start", id: "retry-text" },
+									{
+										type: "text-delta",
+										id: "retry-text",
+										text_delta: "done",
+									},
+									{ type: "text-end", id: "retry-text" },
+									{ type: "finish", finishReason: "stop" },
+								],
+					);
+				},
+			},
+			providerCallRuntime: {
+				systemInstructions: "terminal failure tool discard test",
+				toolCatalog: catalogForTest({
+					name: "search",
+					description: "Search test tool",
+					inputSchema: { type: "object" },
+					permissionPolicy: "always_ask",
+				}),
+			},
+			runTool: () => {
+				runToolCalls += 1;
+				return {
+					type: "completed",
+					output: { text: "must not run", truncated: false },
+				};
+			},
+		});
+		const run = async () =>
+			await Effect.runPromise(
+				Effect.gen(function* () {
+					const threadLoop = yield* ThreadLoop.Service;
+					return yield* threadLoop.run(session, testRunCustody());
+				}).pipe(Effect.provide(layer)),
+			);
+		expect(await run()).toMatchObject({ type: "interrupted" });
+		expect(session.state.pendingApprovalToolJobs()).toHaveLength(1);
+		expect(await run()).toMatchObject({ type: "interrupted" });
+		expect(providerCalls).toBe(1);
+		const pendingToolUseEventId = session.state.pendingApprovalToolJobs()[0]?.toolUseEventId;
+		expect(pendingToolUseEventId).toBeDefined();
 		expect(
-			appended.some(
+			session.state.resolveToolConfirmation({
+				workspaceId: session.identity.workspaceId,
+				sessionId: session.identity.sessionId,
+				sessionThreadId: session.identity.sessionThreadId,
+				bindingId: session.identity.bindingId,
+				bindingGeneration: session.identity.bindingGeneration,
+				targetPodUid: session.identity.targetPodUid,
+				runtimeInputId: "rin_provider_failure_confirm",
+				toolUseEventId: pendingToolUseEventId!,
+				decision: "allow",
+			}),
+		).toBe("applied");
+		expect(await run()).toMatchObject({ type: "completed" });
+		expect(providerCalls).toBe(2);
+		expect(runToolCalls).toBe(1);
+		expect(
+			appended.filter(
 				(event) =>
 					event.type === "agent.tool_use" ||
 					event.type === "agent.mcp_tool_use",
 			),
-		).toBe(false);
-		expect(
-			session.state.contextManager
-				.entries()
-				.some((message) => message.contextKind === "assistant"),
-		).toBe(false);
+		).toHaveLength(1);
+		expect(settlements).toHaveLength(1);
+		const retryContext = JSON.stringify(requests[1]?.context);
+		expect(retryContext).toContain("tool-uncommitted");
+		expect(retryContext).toContain("must not run");
 	});
 	test("terminal provider failure retains an atomically committed internal tool repair", async () => {
 		const session = new ThreadRuntime("sesn_1");

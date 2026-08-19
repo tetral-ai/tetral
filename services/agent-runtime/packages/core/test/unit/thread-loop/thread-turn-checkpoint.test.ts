@@ -5,6 +5,8 @@ import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
 	parseThreadTurnCheckpoint,
+	projectFailedRequestProviderContext,
+	projectFailedRequestsProviderContext,
 } from "../../../src/thread-loop/thread-turn-checkpoint.js";
 
 function entry(
@@ -120,7 +122,6 @@ describe("cold Thread-turn reconstruction", () => {
 					requestEnd: {
 						requestStartEventId: "evt_start",
 						isError: false,
-						rescheduled: false,
 					},
 				},
 			],
@@ -150,7 +151,7 @@ describe("cold Thread-turn reconstruction", () => {
 				requestStartEventId: "evt_start",
 				requestKind: "agent_provider_request",
 				contextThroughMessageSequence: 1,
-				requestEnd: { eventId: "evt_end", isError: false, rescheduled: false },
+				requestEnd: { eventId: "evt_end", isError: false },
 				toolMembers: [
 					{
 						memberKind: "public_tool_use",
@@ -180,6 +181,152 @@ describe("cold Thread-turn reconstruction", () => {
 				{ toolUseEventId: "evt_tool", disposition: "requires_user_action" },
 			],
 		});
+	});
+
+	test("failed Request projection drops partial text and retains exact Tool ownership", () => {
+		const checkpoint = parseThreadTurnCheckpoint({
+			executionRunId: "evt_run",
+			pendingInputContextSequences: [],
+			request: {
+				modelRequestId: "req_failed",
+				requestStartEventId: "evt_start",
+				requestKind: "agent_provider_request",
+				contextThroughMessageSequence: 1,
+				requestEnd: {
+					eventId: "evt_end",
+					isError: true,
+					errorKind: "provider_stream_error",
+					assistantMessageSequence: 2,
+					reschedule: {
+						attempt: 1,
+						effectiveDeadline: "2026-08-15T00:00:00.000Z",
+						providerAttempts: 1,
+						compactionAttempts: 0,
+					},
+				},
+				toolMembers: [
+					{
+						memberKind: "public_tool_use",
+						modelToolCallId: "call_done",
+						toolUseEventId: "evt_tool_done",
+						toolName: "Read",
+						terminalResult: { outcome: "success" },
+					},
+					{
+						memberKind: "public_tool_use",
+						modelToolCallId: "call_pending",
+						toolUseEventId: "evt_tool_pending",
+						toolName: "Write",
+					},
+				],
+			},
+		});
+		const projected = projectFailedRequestProviderContext({
+			contextEntries: [
+				entry(1, "user", "go"),
+				{
+					messageSequence: 2,
+					contextKind: "assistant",
+					parts: [
+						{ type: "text", text: "failed partial" },
+						{ type: "reasoning", text: "signed thought", providerMetadata: { anthropic: { signature: "sig" } } },
+						{ type: "tool_call", modelToolCallId: "call_done", toolName: "Read", canonicalInput: {} },
+						{ type: "tool_call", modelToolCallId: "call_pending", toolName: "Write", canonicalInput: {} },
+						{ type: "tool_result", modelToolCallId: "call_done", result: { type: "completed", output: { text: "ok" } } },
+						{ type: "reasoning", text: "failed trailing thought", providerMetadata: { anthropic: { signature: "trailing" } } },
+						{ type: "text", text: "failed trailing text" },
+					],
+				},
+			],
+			checkpoint,
+		});
+
+		expect(projected.contextEntries).toEqual([entry(1, "user", "go")]);
+		expect(projected.openRequestDraft).toMatchObject({
+			modelRequestId: "req_failed",
+			messageSequence: 2,
+		});
+		expect(projected.openRequestDraft?.parts.map((part) => part.type)).toEqual([
+			"reasoning",
+			"tool_call",
+			"tool_call",
+			"tool_result",
+		]);
+		expect(JSON.stringify(projected)).not.toContain("failed partial");
+		expect(JSON.stringify(projected)).not.toContain("failed trailing thought");
+		expect(JSON.stringify(projected)).not.toContain("failed trailing text");
+	});
+
+	test("cold eligibility removes older failed partials after a later request closes", () => {
+		const facts: ThreadTurnLoadFacts = {
+			events: [
+				{ eventId: "run", eventSequence: 1, type: "session.status_running" },
+				{
+					eventId: "failed-start", eventSequence: 2,
+					type: "span.model_request_start", modelRequestId: "failed",
+					requestStart: { requestKind: "agent_provider_request", contextThroughMessageSequence: 1 },
+				},
+				{
+					eventId: "failed-end", eventSequence: 3,
+					type: "span.model_request_end", modelRequestId: "failed",
+					requestEnd: { requestStartEventId: "failed-start", isError: true, assistantMessageSequence: 2 },
+				},
+				{
+					eventId: "success-start", eventSequence: 4,
+					type: "span.model_request_start", modelRequestId: "success",
+					requestStart: { requestKind: "agent_provider_request", contextThroughMessageSequence: 2 },
+				},
+				{
+					eventId: "success-end", eventSequence: 5,
+					type: "span.model_request_end", modelRequestId: "success",
+					requestEnd: { requestStartEventId: "success-start", isError: false, assistantMessageSequence: 3 },
+				},
+				{
+					eventId: "idle", eventSequence: 6, type: "session.status_idle",
+					idle: { stopReason: "end_turn" },
+				},
+			],
+			internalRepairs: [],
+		};
+		const projected = projectFailedRequestsProviderContext({
+			contextEntries: [
+				entry(1, "user", "go"),
+				entry(2, "assistant", "failed partial must remain audit-only"),
+				entry(3, "assistant", "successful answer"),
+			],
+			openRequestDraft: {
+				modelRequestId: "current-open",
+				messageSequence: 4,
+				parts: [{ type: "text", text: "current retry draft" }],
+			},
+			facts,
+		});
+
+			expect(projected.contextEntries).toEqual([
+			entry(1, "user", "go"),
+			entry(3, "assistant", "successful answer"),
+		]);
+		expect(projected.openRequestDraft?.modelRequestId).toBe("current-open");
+
+		const alreadyExcluded = projectFailedRequestsProviderContext({
+			contextEntries: [
+				entry(1, "user", "go"),
+				entry(3, "assistant", "successful answer"),
+			],
+			openRequestDraft: {
+				modelRequestId: "current-open",
+				messageSequence: 4,
+				parts: [{ type: "text", text: "current retry draft" }],
+			},
+			facts,
+		});
+		expect(alreadyExcluded.contextEntries).toEqual([
+			entry(1, "user", "go"),
+			entry(3, "assistant", "successful answer"),
+		]);
+		expect(alreadyExcluded.openRequestDraft?.modelRequestId).toBe(
+			"current-open",
+		);
 	});
 
 	test("malformed direct facts fail closed", () => {

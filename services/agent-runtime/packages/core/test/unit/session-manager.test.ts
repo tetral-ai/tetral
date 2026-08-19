@@ -1896,7 +1896,6 @@ describe("SessionManager", () => {
 							requestEnd: {
 								eventId: "sevt_idle_interrupt_end",
 								isError: false,
-								rescheduled: false,
 							},
 							toolMembers: [
 								{
@@ -3293,7 +3292,6 @@ describe("SessionManager", () => {
 							requestEnd: {
 								eventId: "sevt_request_end_1",
 								isError: false,
-								rescheduled: false,
 							},
 							toolMembers: [
 								{

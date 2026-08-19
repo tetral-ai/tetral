@@ -4044,7 +4044,6 @@ function resumeTurnFactsForPendingTool(input: {
 				requestEnd: {
 					requestStartEventId: `start_${input.modelRequestId}`,
 					isError: false,
-					rescheduled: false,
 				},
 			},
 		],

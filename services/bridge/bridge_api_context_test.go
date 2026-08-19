@@ -168,3 +168,65 @@ func TestLoadContextBoundsTurnFactsButRetainsLivePriorToolRequest(t *testing.T) 
 		}
 	}
 }
+
+func TestLoadContextRetainsFailedAssistantRequestBeforeNewerRunningBoundary(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_failed_request_floor"
+		threadID  = "sthr_failed_request_floor"
+		bindingID = "bind_failed_request_floor"
+		podUID    = "pod_failed_request_floor"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
+		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,model_request_id,created_at,updated_at
+	) VALUES ('default',$1,$2,'msg_failed_partial',1,'assistant',
+		'{"parts":[{"type":"text","text":"failed partial"}]}',
+		'mreq_failed_floor','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, sessionID, threadID); err != nil {
+		t.Fatalf("seed failed Assistant message: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,model_request_id,projection_json,created_at,updated_at
+	) VALUES
+		('default',$1,$2,'evt_before_failed_floor',1,'session.error','{}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+		('default',$1,$2,'evt_failed_floor_running',2,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+		('default',$1,$2,'evt_failed_floor_start',3,'span.model_request_start','{}','mreq_failed_floor','{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+		('default',$1,$2,'evt_failed_floor_end',4,'span.model_request_end','{"model_request_start_id":"evt_failed_floor_start","is_error":true,"error_kind":"gateway_stream_error"}','mreq_failed_floor','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+		('default',$1,$2,'evt_failed_floor_idle',5,'session.status_idle','{"stop_reason":{"type":"error"}}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+		('default',$1,$2,'evt_newer_running',6,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		sessionID, threadID); err != nil {
+		t.Fatalf("seed failed request turn facts: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("mark Session active: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("mark Thread active: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("failed-request-floor-signing-key")
+	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
+	if err != nil {
+		t.Fatalf("LoadContext failed request floor: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode failed request floor: %v", err)
+	}
+	ids := make([]string, 0, len(payload.TurnFacts.Events))
+	for _, event := range payload.TurnFacts.Events {
+		ids = append(ids, event.EventID)
+	}
+	if len(ids) == 0 || ids[0] != "evt_failed_floor_start" {
+		t.Fatalf("failed request turn fact IDs = %v; want failed Request Start first", ids)
+	}
+	for _, id := range ids {
+		if id == "evt_before_failed_floor" || id == "evt_failed_floor_running" {
+			t.Fatalf("failed request turn facts retained bounded event %q: %v", id, ids)
+		}
+	}
+	if !containsString(strings.Join(ids, ","), "evt_failed_floor_end") || !containsString(strings.Join(ids, ","), "evt_newer_running") {
+		t.Fatalf("failed request turn facts = %v; want failed end and newer running boundary", ids)
+	}
+}

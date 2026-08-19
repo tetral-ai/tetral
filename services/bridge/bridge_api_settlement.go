@@ -655,15 +655,23 @@ func (s *PostgreSQLBridgeAPIStore) applyRequestEndRescheduleTx(
 	if err := incrementTurnRetryCounterTx(ctx, tx, request.GetScope(), requestKind, now); err != nil {
 		return nil, err
 	}
-	if err := appendRequestRescheduledStatusTx(ctx, tx, request, threadScope, now); err != nil {
+	effectiveDeadline := effectiveRequestEndRescheduleDeadline(now, reschedule)
+	accepted := &requestEndDispositionResult{
+		Status:             "accepted",
+		Attempt:            reschedule.Attempt,
+		EffectiveDeadline:  effectiveDeadline.UTC().Format(time.RFC3339Nano),
+		ProviderAttempts:   providerAttempts,
+		CompactionAttempts: compactionAttempts,
+	}
+	if requestKind == requestKindCompactionSummary {
+		accepted.CompactionAttempts++
+	} else {
+		accepted.ProviderAttempts++
+	}
+	if err := appendRequestRescheduledStatusTx(ctx, tx, request, threadScope, accepted, now); err != nil {
 		return nil, err
 	}
-	effectiveDeadline := effectiveRequestEndRescheduleDeadline(now, reschedule)
-	return &requestEndDispositionResult{
-		Status:            "accepted",
-		Attempt:           reschedule.Attempt,
-		EffectiveDeadline: effectiveDeadline.UTC().Format(time.RFC3339Nano),
-	}, nil
+	return accepted, nil
 }
 
 func lockTurnRetryCountersTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) (int64, int64, error) {
@@ -756,6 +764,7 @@ func appendRequestRescheduledStatusTx(
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
 	threadScope threadMutationScope,
+	accepted *requestEndDispositionResult,
 	now time.Time,
 ) error {
 	eventType := "session.status_rescheduled"
@@ -768,6 +777,15 @@ func appendRequestRescheduledStatusTx(
 			return err
 		}
 	}
+	projectionJSON, err := json.Marshal(map[string]any{
+		"attempt":             accepted.Attempt,
+		"effective_deadline":  accepted.EffectiveDeadline,
+		"provider_attempts":   accepted.ProviderAttempts,
+		"compaction_attempts": accepted.CompactionAttempts,
+	})
+	if err != nil {
+		return err
+	}
 	visibility, sessionVisible := threadScope.publicProjection(eventType)
 	eventID := id.New("evt_")
 	sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
@@ -778,7 +796,7 @@ func appendRequestRescheduledStatusTx(
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $7, $12, $12, $12)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
 		request.GetScope().GetWorkspaceId(),
 		request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(),
@@ -790,6 +808,7 @@ func appendRequestRescheduledStatusTx(
 		sessionVisible,
 		request.GetRuntimeWriteId(),
 		request.GetModelRequestId(),
+		string(projectionJSON),
 		now,
 	); err != nil {
 		return err
@@ -1257,10 +1276,12 @@ func settleRuntimeTerminationTx(
 }
 
 type requestEndDispositionResult struct {
-	Status            string `json:"status"`
-	DenialReason      string `json:"denial_reason,omitempty"`
-	Attempt           int32  `json:"attempt,omitempty"`
-	EffectiveDeadline string `json:"effective_deadline,omitempty"`
+	Status             string `json:"status"`
+	DenialReason       string `json:"denial_reason,omitempty"`
+	Attempt            int32  `json:"attempt,omitempty"`
+	EffectiveDeadline  string `json:"effective_deadline,omitempty"`
+	ProviderAttempts   int64  `json:"provider_attempts,omitempty"`
+	CompactionAttempts int64  `json:"compaction_attempts,omitempty"`
 }
 
 type createChildThreadResult struct {

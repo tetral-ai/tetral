@@ -343,7 +343,6 @@ describe("Thread-turn reducer", () => {
 						eventId: "event_end_closed",
 						isError: true,
 						errorKind: "provider_stream_error",
-						rescheduled: false,
 					},
 					toolMembers: [],
 				},
@@ -694,7 +693,6 @@ describe("Thread-turn reducer", () => {
 				eventId: "event_end",
 				modelRequestId: "request_1",
 				isError: false,
-				rescheduled: false,
 			},
 			noRoutes,
 		);
@@ -857,7 +855,6 @@ describe("Thread-turn reducer", () => {
 					requestEnd: {
 						eventId: "event_end_interrupted_idle",
 						isError: false,
-						rescheduled: false,
 					},
 					toolMembers: [
 						{
@@ -950,7 +947,6 @@ describe("Thread-turn reducer", () => {
 				eventId: "event_end",
 				modelRequestId: "request_1",
 				isError: false,
-				rescheduled: false,
 			},
 			noRoutes,
 		);
@@ -1172,7 +1168,6 @@ describe("Thread-turn reducer", () => {
 				modelRequestId: "request_1",
 				isError: true,
 				errorKind: "provider_stream_error",
-				rescheduled: false,
 			},
 			noRoutes,
 		);
@@ -1234,7 +1229,6 @@ describe("Thread-turn reducer", () => {
 				deriveThreadTurnDecision(noPendingAttachments,
 					sealedCheckpoint([], requestKind, {
 						isError: true,
-						rescheduled: false,
 						errorKind: "provider_stream_error",
 					}),
 					noRoutes,
@@ -1251,7 +1245,12 @@ describe("Thread-turn reducer", () => {
 			deriveThreadTurnDecision(noPendingAttachments,
 				sealedCheckpoint([], "agent_provider_request", {
 					isError: true,
-					rescheduled: true,
+					reschedule: {
+						attempt: 1,
+						effectiveDeadline: "2026-08-15T00:00:00.000Z",
+						providerAttempts: 1,
+						compactionAttempts: 0,
+					},
 					errorKind: "provider_unavailable",
 				}),
 				noRoutes,
@@ -1444,7 +1443,6 @@ function sealRequestWithTools(tools: readonly (readonly [string, string])[]) {
 			eventId: "event_end",
 			modelRequestId: "request_1",
 			isError: false,
-			rescheduled: false,
 		},
 		noRoutes,
 	);
@@ -1457,11 +1455,15 @@ function sealedCheckpoint(
 	>["requestKind"] = "agent_provider_request",
 	requestEnd: {
 		readonly isError: boolean;
-		readonly rescheduled: boolean;
+		readonly reschedule?: {
+			readonly attempt: number;
+			readonly effectiveDeadline: string;
+			readonly providerAttempts: number;
+			readonly compactionAttempts: number;
+		};
 		readonly errorKind?: string;
 	} = {
 		isError: false,
-		rescheduled: false,
 	},
 ): ThreadTurnCheckpoint {
 	return {

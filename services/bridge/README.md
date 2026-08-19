@@ -267,7 +267,10 @@ and active lifecycle facts directly from durable rows.
   census in the nested input transaction. The response carries only the
   operation-specific interrupt Tool outcomes needed by the caller.
   The reschedule leg increments `session_turn_retries` and writes rescheduled
-  status only when the ceiling admits. `FinishIdle` adopts a Sandbox-staged
+  status only when the ceiling admits. Private `LoadContext` direct facts pair
+  that accepted attempt with the effective deadline from the request-end receipt
+  and identify the request's Assistant message sequence; Runtime consumes those
+  identities before constructing provider-visible entries. `FinishIdle` adopts a Sandbox-staged
   output-capture generation into `session_output_captures` and the file tables,
   then writes `session.status_idle` in the same transaction.
   `CommitRuntimeTermination` accepts only the live loop's current-thread
@@ -324,12 +327,13 @@ and active lifecycle facts directly from durable rows.
   return the operation-specific result; a changed declaration conflicts.
 - **Failure behavior.** An error or rescheduled request end carries no new
   Assistant append. Every member already acknowledged by its owning
-  `WriteEvent` remains durable and provider-visible; request-local fragments
-  still buffered in pod memory are discarded and regenerated on retry. A
-  committed Tool Use forces its preceding ordered prefix through the same
-  durable append boundary, but Tool membership is not a separate survival
-  rule. Pod loss remains stricter: an abandoned open draft is excluded unless
-  reconciliation completes the exact Tool Call/Result repair pair.
+  `WriteEvent` remains durable audit history. Bridge returns that direct Message
+  plus Request/Tool facts; Runtime alone decides provider eligibility, excluding
+  failed text while retaining exact terminal Tool Call/Result pairs and holding
+  nonterminal Tool ownership privately. Request-local fragments still buffered
+  in pod memory are discarded. Pod loss remains stricter: an abandoned open
+  draft is excluded unless reconciliation completes the exact Tool Call/Result
+  repair pair.
 - **File attachment boundary.** A provider Request Start privately declares
   the exact file-backed `(source Event, file)` ride. Bridge writes those
   consumption rows atomically with the Start Event only when exactly one

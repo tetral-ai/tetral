@@ -127,7 +127,6 @@ function turnFactsForPendingTool(input: {
 				requestEnd: {
 					requestStartEventId: `start_${input.modelRequestId}`,
 					isError: false,
-					rescheduled: false,
 				},
 			},
 		],
@@ -2000,7 +1999,6 @@ describe("Runtime core host production assembly", () => {
 									requestEnd: {
 										requestStartEventId: "sevt_settled_idle_start",
 										isError: false,
-										rescheduled: false,
 									},
 								},
 								{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -108,6 +109,100 @@ func TestAcceptedRescheduleResultDoesNotEchoAttempt(t *testing.T) {
 	replayed, err := unmarshalRequestEndReplay(encoded)
 	if err != nil || replayed.EffectiveDeadline != facts.EffectiveDeadline || replayed.Disposition != "rescheduled" {
 		t.Fatalf("replayed facts = %#v err=%v", replayed, err)
+	}
+}
+
+func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_reschedule_context_facts"
+		threadID  = "sthr_reschedule_context_facts"
+		bindingID = "bind_reschedule_context_facts"
+		podUID    = "pod_reschedule_context_facts"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("reschedule-context-test-signing-key")
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	store.Clock = func() time.Time { return now }
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_compaction_start", "mreq_reschedule_compaction", requestKindCompactionSummary, 0)
+	compactionEnd, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_reschedule_compaction_end", ModelRequestId: "mreq_reschedule_compaction",
+		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		Reschedule: &bridgev1.RequestEndReschedule{
+			Attempt: 1, Deadline: now.Add(30 * time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
+		},
+	})
+	if err != nil || compactionEnd.GetCommitted().GetRescheduled() == nil {
+		t.Fatalf("write prior compaction reschedule: response=%#v err=%v", compactionEnd, err)
+	}
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_start", "mreq_reschedule", requestKindAgentProviderRequest, 0)
+	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_reschedule_member", ModelRequestId: "mreq_reschedule",
+		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"partial"}]}`,
+		AssistantContextDelta: bridgeTextContextDeltaForTest("partial"),
+	})
+	if err != nil || message.GetCommitted() == nil {
+		t.Fatalf("seed rescheduled Assistant context: response=%#v err=%v", message, err)
+	}
+	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_reschedule_end", ModelRequestId: "mreq_reschedule",
+		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		Reschedule: &bridgev1.RequestEndReschedule{
+			Attempt:   1,
+			Deadline:  now.Add(time.Minute).Format(time.RFC3339Nano),
+			BackoffMs: 1_000,
+		},
+	})
+	if err != nil || ended.GetCommitted().GetRescheduled() == nil {
+		t.Fatalf("write rescheduled request end: response=%#v err=%v", ended, err)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("load rescheduled request context: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode rescheduled request context: %v", err)
+	}
+	var requestEnd *bridgeLoadContextRequestEnd
+	for _, event := range payload.TurnFacts.Events {
+		if event.ModelRequestID != nil && *event.ModelRequestID == "mreq_reschedule" && event.RequestEnd != nil {
+			requestEnd = event.RequestEnd
+			break
+		}
+	}
+	if requestEnd == nil || requestEnd.Reschedule == nil || requestEnd.Reschedule.Attempt != 1 ||
+		requestEnd.Reschedule.ProviderAttempts != 1 || requestEnd.Reschedule.CompactionAttempts != 1 ||
+		requestEnd.Reschedule.EffectiveDeadline != ended.GetCommitted().GetRescheduled().GetEffectiveDeadline() ||
+		requestEnd.AssistantMessageSequence == nil || *requestEnd.AssistantMessageSequence != message.GetCommitted().GetAssignedMessageSequence() {
+		t.Fatalf("rescheduled Request End direct facts = %#v", requestEnd)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_turn_retries
+		SET provider_attempts=0, compaction_attempts=0
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("reset mutable retry counters: %v", err)
+	}
+	reloaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("reload rescheduled request after counter reset: %v", err)
+	}
+	var reloadedPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(reloaded.GetContextJson()), &reloadedPayload); err != nil {
+		t.Fatalf("decode reloaded reschedule context: %v", err)
+	}
+	requestEnd = nil
+	for _, event := range reloadedPayload.TurnFacts.Events {
+		if event.ModelRequestID != nil && *event.ModelRequestID == "mreq_reschedule" && event.RequestEnd != nil {
+			requestEnd = event.RequestEnd
+			break
+		}
+	}
+	if requestEnd == nil || requestEnd.Reschedule == nil || requestEnd.Reschedule.Attempt != 1 ||
+		requestEnd.Reschedule.ProviderAttempts != 1 || requestEnd.Reschedule.CompactionAttempts != 1 {
+		t.Fatalf("immutable rescheduled Request End facts after counter reset = %#v", requestEnd)
 	}
 }
 

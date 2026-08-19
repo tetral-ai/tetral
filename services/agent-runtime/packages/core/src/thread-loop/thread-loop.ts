@@ -220,6 +220,7 @@ import type {
 	ThreadTurnAction,
 	ThreadTurnReduction,
 } from "./thread-turn-reducer.js";
+import { projectFailedRequestProviderContext } from "./thread-turn-checkpoint.js";
 import type {
 	RuntimeApprovalReviewer,
 	RuntimeRecoveredToolJobState,
@@ -238,7 +239,6 @@ import {
 	defaultRuntimeToolRunner,
 	deniedToolCallFailure,
 	effectiveToolPermissionPolicy,
-	findPendingApprovalSettlementDescriptor,
 	installLoadedPendingToolUses,
 	installLoadedSandboxExecutions,
 	invalidToolCallFailure,
@@ -915,6 +915,13 @@ function runThreadLoopEffect(
 	custody: ThreadLoopRunCustody,
 ): Effect.Effect<ThreadLoopRunResult, unknown> {
 	let pendingProviderRequestReschedule = false;
+	let recoveredRescheduleDeadline: string | undefined;
+	let recoveredRescheduleKind:
+		| "agent_provider_request"
+		| "compaction_summary"
+		| "approval_reviewer"
+		| undefined;
+	let recoveredFailureWithoutReschedule = false;
 	const run: Effect.Effect<ThreadLoopRunResult, unknown> = Effect.gen(
 		function* () {
 			let pendingInput: PendingInputResult = { type: "empty" };
@@ -954,9 +961,34 @@ function runThreadLoopEffect(
 				);
 			}
 			if (recoveredAction.action === "apply_request_retry_or_reschedule") {
-				return yield* nonAbandonablePromise(() =>
-					consumeRecoveredRequestRetryOrRescheduleAction(session, options),
+				const recoveredRequest =
+					session.state.threadTurnReduction().checkpoint.request;
+				const reschedule = recoveredRequest?.requestEnd?.reschedule;
+				const hasIncompleteTool = recoveredRequest?.toolMembers.some(
+					(member) =>
+						member.memberKind === "public_tool_use" &&
+						member.terminalResult === undefined,
 				);
+				if (
+					recoveredRequest === undefined ||
+					(reschedule === undefined && !hasIncompleteTool)
+				) {
+					return yield* nonAbandonablePromise(() =>
+						consumeRecoveredRequestRetryOrRescheduleAction(session, options),
+					);
+				}
+				if (reschedule === undefined) {
+					recoveredFailureWithoutReschedule = true;
+					pendingProviderRequestReschedule = true;
+				} else {
+					turnRetryCounters.providerAttempts =
+						reschedule.providerAttempts;
+					turnRetryCounters.compactionAttempts =
+						reschedule.compactionAttempts;
+					pendingProviderRequestReschedule = true;
+					recoveredRescheduleDeadline = reschedule.effectiveDeadline;
+					recoveredRescheduleKind = recoveredRequest.requestKind;
+				}
 			}
 			if (recoveredAction.action === "await_request_end") {
 				return failRecoveredOpenRequest(session);
@@ -1290,6 +1322,12 @@ function runThreadLoopEffect(
 					return { type: "interrupted" };
 				}
 				if (pendingApprovalResume.type === "waiting_external") {
+					if (pendingProviderRequestReschedule) {
+						// The failed Request already owns retry/reschedule reduction.
+						// Keep the exact approval route active without authoring a
+						// requires-action Idle transition for a sealed error Request.
+						return { type: "interrupted" };
+					}
 					if (custody.activeTurnId(session) === undefined) {
 						return completedHotStateRunResult(session);
 					}
@@ -1311,6 +1349,37 @@ function runThreadLoopEffect(
 				if (pendingApprovalResume.type === "resumed") {
 					statusRunningAlreadyAppended = true;
 					pendingInput = { type: "empty" };
+				}
+				if (
+					pendingProviderRequestReschedule &&
+					recoveredRescheduleDeadline !== undefined
+				) {
+					const projectionFailure = applyFailedRequestProviderProjection(session);
+					if (projectionFailure !== undefined) {
+						return { type: "failed", error: projectionFailure };
+					}
+					const waited = yield* waitForProviderRequestRescheduleEffect(
+						session,
+						options,
+						recoveredRescheduleDeadline,
+					);
+					if (waited.type !== "deadline") {
+						pendingProviderRequestReschedule = false;
+						if (waited.type === "user_interrupt") {
+							session.state.markUserInterruptCloseoutEligible();
+						}
+						return { type: "interrupted" };
+					}
+					recoveredRescheduleDeadline = undefined;
+				}
+				if (recoveredFailureWithoutReschedule) {
+					const projectionFailure = applyFailedRequestProviderProjection(session);
+					if (projectionFailure !== undefined) {
+						return { type: "failed", error: projectionFailure };
+					}
+					return yield* nonAbandonablePromise(() =>
+						consumeRecoveredRequestRetryOrRescheduleAction(session, options),
+					);
 				}
 				if (
 					(pendingInput.type !== "context" ||
@@ -1458,16 +1527,44 @@ function runThreadLoopEffect(
 					highestMessageSequence(committedContext),
 				);
 				const compactionResult =
-						yield* coordinateCompactionBeforeProviderRequestEffect(
-							session,
-							options,
-							custody,
-						committedContext,
-						turnRetryCounters,
-						(pending) => {
-							pendingProviderRequestReschedule = pending;
-						},
-					);
+					recoveredRescheduleKind === "compaction_summary"
+						? options.compaction === undefined
+							? {
+									type: "failed" as const,
+									result: {
+										type: "failed" as const,
+										error: normalizeRuntimeFailure({
+											type: "runtime",
+											code: "runtime_invalid_sequence",
+											retryable: false,
+											fatal: true,
+											reason: "runtime_contract_validation",
+											sessionId: session.sessionId,
+										}),
+									},
+								}
+							: yield* runCompactionSummaryEffect(
+									session,
+									options,
+									custody,
+									committedContext,
+									options.compaction,
+									turnRetryCounters,
+									(pending) => {
+										pendingProviderRequestReschedule = pending;
+									},
+								)
+						: yield* coordinateCompactionBeforeProviderRequestEffect(
+								session,
+								options,
+								custody,
+								committedContext,
+								turnRetryCounters,
+								(pending) => {
+									pendingProviderRequestReschedule = pending;
+								},
+							);
+				recoveredRescheduleKind = undefined;
 				if (compactionResult.type === "failed") {
 					return compactionResult.result;
 				}
@@ -1742,7 +1839,14 @@ function runThreadLoopEffect(
 					}
 					return settleUserInterruptAtRunExitEffect(session, options, custody);
 				}
+				const hasUnsettledToolOwner =
+					session.state.threadTurnReduction().checkpoint.request?.toolMembers.some(
+						(member) =>
+							member.memberKind === "public_tool_use" &&
+							member.terminalResult === undefined,
+					) ?? false;
 				return pendingProviderRequestReschedule &&
+					!hasUnsettledToolOwner &&
 					!session.state.runtimeShutdownRequested()
 					? nonAbandonablePromise(() =>
 							appendIdleEvent(options, session, custody, { type: "end_turn" }),
@@ -2953,7 +3057,13 @@ async function closeCompactionFailure(
 		usage,
 		[],
 		"compaction_summary",
-		plan.type === "proposed" ? plan.reschedule : undefined,
+		plan.type === "proposed"
+			? {
+					...plan.reschedule,
+					providerAttempts: counters.providerAttempts,
+					compactionAttempts: plan.reschedule.attempt,
+				}
+			: undefined,
 	);
 	if (!end.ok) {
 		return {
@@ -3835,12 +3945,7 @@ function processProviderEventEffect(
 					),
 				);
 			}
-			const sealApplication = applyRequestEndSeal(
-				processor,
-				undefined,
-				requestEndOutcome(spanEndAppend),
-			);
-			if (sealApplication.type === "stale_custody") {
+			if (spanEndAppend.type === "stale") {
 				yield* interruptAndJoinToolFibersEffect(state);
 				return yield* Effect.fail(
 					new ProviderTurnShortCircuit(
@@ -3848,10 +3953,11 @@ function processProviderEventEffect(
 					),
 				);
 			}
-			if (sealApplication.type === "failed") {
+			const projectionFailure = applyFailedRequestProviderProjection(session);
+			if (projectionFailure !== undefined) {
 				return yield* Effect.fail(
 					new ProviderTurnShortCircuit(
-						providerTurnFailed(sealApplication.error, "event_write_failed"),
+						providerTurnFailed(projectionFailure, "event_write_failed"),
 					),
 				);
 			}
@@ -4074,17 +4180,28 @@ function resumeRecoveredToolJobsEffect(
 		}
 
 		for (const pending of pendingJobs) {
-			const currentAssistant = session.state.contextManager.entry(
+			const sealedAssistant = session.state.contextManager.entry(
 				pending.assistantMessageSequence,
 			);
+			const openAssistant =
+				session.state.contextManager.openRequestDraft()?.messageSequence ===
+				pending.assistantMessageSequence
+					? session.state.contextManager.openRequestDraft()
+					: undefined;
+			const currentAssistant = sealedAssistant ?? openAssistant;
 			if (
 				currentAssistant === undefined ||
 				currentAssistant.messageSequence !== pending.assistantMessageSequence ||
-				findPendingApprovalSettlementDescriptor(
-					[currentAssistant],
-					pending.job.modelToolCallId,
-					pending.toolUseEventId,
-				) === undefined
+				!currentAssistant.parts.some(
+					(part) =>
+						part.type === "tool_call" &&
+						part.modelToolCallId === pending.job.modelToolCallId,
+				) ||
+				currentAssistant.parts.some(
+					(part) =>
+						part.type === "tool_result" &&
+						part.modelToolCallId === pending.job.modelToolCallId,
+				)
 			) {
 				return pendingApprovalResumeFailed(
 					pendingApprovalResumeFailure(
@@ -5312,6 +5429,19 @@ function closeProviderFailureEffect(
 			state.executionPolicy,
 		);
 		processor.discardUncommittedMembers();
+		yield* Effect.promise(() => processor.awaitAssistantMembersDrained());
+		const declarationOutcomes = yield* Effect.forEach(
+			state.allToolDeclarationBarriers,
+			(barrier) => Deferred.await(barrier),
+			{ concurrency: "unbounded" },
+		);
+		for (let index = 0; index < declarationOutcomes.length; index += 1) {
+			if (declarationOutcomes[index] === true) continue;
+			const fiber = state.toolFibers[index];
+			if (fiber !== undefined) {
+				yield* Fiber.interrupt(fiber);
+			}
+		}
 		const requestEnd = yield* Effect.promise(() =>
 			appendModelRequestEndEvent(
 				options,
@@ -5324,32 +5454,29 @@ function closeProviderFailureEffect(
 				usage,
 				state.carriedAttachments,
 				requestEndKindFromRequest(request),
-				plan.type === "proposed" ? plan.reschedule : undefined,
+				plan.type === "proposed"
+					? {
+							...plan.reschedule,
+							providerAttempts: plan.reschedule.attempt,
+							compactionAttempts: counters.compactionAttempts,
+						}
+					: undefined,
 				undefined,
 			),
 		);
 		if (!requestEnd.ok) {
 			return providerTurnFailed(requestEnd.error, "event_write_failed");
 		}
-		const sealApplication = applyRequestEndSeal(
-			processor,
-			undefined,
-			requestEndOutcome(requestEnd),
-		);
-		if (sealApplication.type === "stale_custody") {
+		if (requestEnd.type === "stale") {
 			yield* interruptAndJoinToolFibersEffect(state);
 			return requestEndCommitted(
 				providerTurnInterrupted(),
 				"discard_hot_state",
 			);
 		}
-		if (sealApplication.type === "failed") {
-			return providerTurnFailed(sealApplication.error, "event_write_failed");
-		}
 		const toolSettlement = yield* settleProviderErrorToolsEffect(
 			session,
 			processor,
-			source,
 			state,
 		);
 		if (toolSettlement !== undefined) {
@@ -5363,10 +5490,7 @@ function closeProviderFailureEffect(
 			);
 		}
 		if (plan.type === "proposed") {
-			if (
-				requestEnd.type !== "stale" &&
-				requestEnd.outcome.type === "rescheduled"
-			) {
+			if (requestEnd.outcome.type === "rescheduled") {
 				counters.providerAttempts = plan.reschedule.attempt;
 				recordProviderReschedule(
 					options,
@@ -5475,32 +5599,85 @@ function recordProviderReschedule(
 function settleProviderErrorToolsEffect(
 	session: ThreadRuntime,
 	processor: ProviderStreamAccumulator,
-	source: RuntimeProcessorSource,
 	state: ProviderTurnStreamState,
-): Effect.Effect<ProviderTurnResult | undefined, never> {
+): Effect.Effect<ProviderTurnResult | undefined, unknown> {
 	return Effect.gen(function* () {
-		yield* interruptAndJoinToolFibersEffect(state);
-		yield* Effect.promise(() => state.durableOperations.awaitIdle());
-		const repaired = yield* Effect.promise(() =>
-			processor.cancelOpenTools(
-				source,
-				providerRescheduleInterruptFailure(session.sessionId, source),
-				pendingSandboxExecutionToolUseEventIds(session),
-			),
+		yield* Effect.promise(() => processor.awaitAssistantMembersDrained());
+		const declarationOutcomes = yield* Effect.forEach(
+			state.allToolDeclarationBarriers,
+			(barrier) => Deferred.await(barrier),
+			{ concurrency: "unbounded" },
 		);
-		if (repaired.type === "failed") {
-			return providerTurnFailed(
-				repaired.error,
-				repaired.error.type === "message-store"
-					? "persistence_failed"
-					: "event_write_failed",
-			);
+		for (let index = 0; index < state.toolFibers.length; index += 1) {
+			const fiber = state.toolFibers[index];
+			if (fiber === undefined) continue;
+			if (declarationOutcomes[index] !== true) {
+				yield* Fiber.interrupt(fiber);
+				continue;
+			}
+			const result = yield* Fiber.join(fiber);
+			if (result.type === "failed" || result.type === "interrupted") {
+				return result;
+			}
 		}
-		if (repaired.type === "stale_custody") {
-			return providerTurnInterruptedWithDiscard();
+		yield* Effect.promise(() => state.durableOperations.awaitIdle());
+		const projection = applyFailedRequestProviderProjection(session);
+		if (projection !== undefined) {
+			return providerTurnFailed(projection, "event_write_failed");
+		}
+		const blockingEventIds = [
+			...new Set([
+				...state.waitingToolUseEventIds,
+				...(session.state.threadTurnReduction().checkpoint.request?.toolMembers.flatMap(
+					(member) =>
+						member.memberKind === "public_tool_use" &&
+						member.terminalResult === undefined
+							? [member.toolUseEventId]
+							: [],
+				) ?? []),
+			]),
+		];
+		if (blockingEventIds.length > 0) {
+			// An error Request End intentionally keeps the reducer's existing
+			// retry/reschedule action. Yield the run without authoring an Idle
+			// transition; the exact pending Tool route wakes the next run and
+			// remains the sole settlement owner.
+			return providerTurnInterrupted();
 		}
 		return undefined;
 	});
+}
+
+function applyFailedRequestProviderProjection(
+	session: ThreadRuntime,
+): RuntimeFailure | undefined {
+	try {
+		const projected = projectFailedRequestProviderContext({
+			contextEntries: session.state.contextManager.entries(),
+			...(session.state.contextManager.openRequestDraft() === undefined
+				? {}
+				: {
+						openRequestDraft:
+							session.state.contextManager.openRequestDraft(),
+					}),
+			checkpoint: session.state.threadTurnReduction().checkpoint,
+		});
+		session.state.contextManager.replaceEntries(projected.contextEntries);
+		session.state.contextManager.installOpenRequestDraft(
+			projected.openRequestDraft,
+		);
+		return undefined;
+	} catch (error) {
+		return normalizeRuntimeFailure({
+			type: "runtime",
+			code: "runtime_invalid_sequence",
+			rawError: error,
+			retryable: false,
+			fatal: true,
+			reason: "runtime_contract_validation",
+			sessionId: session.sessionId,
+		});
+	}
 }
 
 type ProviderRequestReschedulePlan =
@@ -5705,6 +5882,8 @@ function settleRuntimeShutdownEffect(
 					}),
 				);
 			}
+			const assistantMessageSequence =
+				processor.openRequestDraft()?.messageSequence;
 			const spanEndAppend = yield* Effect.promise(() =>
 				appendModelRequestEndEvent(
 					options,
@@ -5809,10 +5988,15 @@ function settleRuntimeShutdownEffect(
 				modelRequestId,
 				true,
 				"runtime_interrupted",
-				false,
+				assistantMessageSequence,
+				undefined,
 			);
 			if (requestSealFailure !== undefined) {
 				return yield* failRequestCloseout(requestSealFailure);
+			}
+			const projectionFailure = applyFailedRequestProviderProjection(session);
+			if (projectionFailure !== undefined) {
+				return yield* failRequestCloseout(projectionFailure);
 			}
 			if (
 				!session.state.recordJoinedUserInterruptResult(
@@ -5918,19 +6102,15 @@ function settleCooperativeCancellationEffect(
 		if (!requestEnd.ok) {
 			return yield* failRequestCloseout(requestEnd.error);
 		}
-		const sealApplication = applyRequestEndSeal(
-			processor,
-			undefined,
-			requestEndOutcome(requestEnd),
-		);
-		if (sealApplication.type === "stale_custody") {
+		if (requestEnd.type === "stale") {
 			return requestEndCommitted(
 				providerTurnInterrupted(),
 				"discard_hot_state",
 			);
 		}
-		if (sealApplication.type === "failed") {
-			return yield* failRequestCloseout(sealApplication.error);
+		const projectionFailure = applyFailedRequestProviderProjection(session);
+		if (projectionFailure !== undefined) {
+			return yield* failRequestCloseout(projectionFailure);
 		}
 		commitProcessorProjectionWithoutStableReasoning(session, processor);
 		return requestEndCommitted(providerTurnInterrupted(), "retained");
@@ -6298,17 +6478,13 @@ async function closeStartedRequestAfterProcessorFailure(
 	if (!requestEnd.ok) {
 		return providerTurnFailed(requestEnd.error, "event_write_failed");
 	}
-	const sealApplication = applyRequestEndSeal(
-		processor,
-		undefined,
-		requestEndOutcome(requestEnd),
-	);
-	if (sealApplication.type === "stale_custody") {
+	if (requestEnd.type === "stale") {
 		return requestEndCommitted(providerTurnInterrupted(), "discard_hot_state");
 	}
-	if (sealApplication.type === "failed") {
+	const projectionFailure = applyFailedRequestProviderProjection(session);
+	if (projectionFailure !== undefined) {
 		return requestEndCommitted(
-			providerTurnFailed(sealApplication.error, "event_write_failed"),
+			providerTurnFailed(projectionFailure, "event_write_failed"),
 		);
 	}
 	commitProcessorProjectionWithoutStableReasoning(session, processor);
@@ -6418,7 +6594,10 @@ async function appendModelRequestEndEvent(
 		| "agent_provider_request"
 		| "compaction_summary"
 		| "approval_reviewer",
-	reschedule?: NonNullable<SessionEventWriterRequestEndEnvelope["reschedule"]>,
+	reschedule?: NonNullable<SessionEventWriterRequestEndEnvelope["reschedule"]> & {
+		readonly providerAttempts: number;
+		readonly compactionAttempts: number;
+	},
 	trailingContextAppend?: RuntimeAssistantContextAppend,
 	compaction?: {
 		readonly context: { readonly parts: readonly RuntimeContextPart[] };
@@ -6506,7 +6685,15 @@ async function appendModelRequestEndEvent(
 		...(consumedAttachmentRefs.length > 0
 			? { consumedAttachmentRefs: [...consumedAttachmentRefs] }
 			: {}),
-		...(reschedule !== undefined ? { reschedule } : {}),
+		...(reschedule !== undefined
+			? {
+					reschedule: {
+						attempt: reschedule.attempt,
+						backoffMs: reschedule.backoffMs,
+						deadline: reschedule.deadline,
+					},
+				}
+			: {}),
 		...(trailingContextAppend === undefined ? {} : { trailingContextAppend }),
 		...(compaction === undefined
 			? {}
@@ -6533,13 +6720,25 @@ async function appendModelRequestEndEvent(
 		return { ok: false, error: runtimeFailureFromEventWriter(result.error) };
 	}
 	if (result.type !== "stale" && interrupt === undefined) {
+		const assistantMessageSequence =
+			session.state.contextManager.openRequestDraft()?.messageSequence;
+		const acceptedReschedule =
+			result.outcome.type === "rescheduled" && reschedule !== undefined
+				? {
+						attempt: reschedule.attempt,
+						effectiveDeadline: result.outcome.effectiveDeadline,
+						providerAttempts: reschedule.providerAttempts,
+						compactionAttempts: reschedule.compactionAttempts,
+					}
+				: undefined;
 		const requestSealFailure = reconcileRequestEndTurn(
 			session,
 			result.requestEndEventId,
 			modelRequestId,
 			isError,
 			errorKind,
-			result.outcome.type === "rescheduled",
+			assistantMessageSequence,
+			acceptedReschedule,
 		);
 		if (requestSealFailure !== undefined) {
 			return { ok: false, error: requestSealFailure };
@@ -6592,7 +6791,15 @@ function reconcileRequestEndTurn(
 	modelRequestId: string,
 	isError: boolean,
 	errorKind: RuntimeRequestErrorKind | undefined,
-	rescheduled: boolean,
+	assistantMessageSequence: number | undefined,
+	reschedule:
+		| {
+				readonly attempt: number;
+				readonly effectiveDeadline: string;
+				readonly providerAttempts: number;
+				readonly compactionAttempts: number;
+		  }
+		| undefined,
 ): RuntimeFailure | undefined {
 	try {
 		const requestEndReduction = session.state.applyThreadTurnFact({
@@ -6601,7 +6808,10 @@ function reconcileRequestEndTurn(
 			modelRequestId,
 			isError,
 			...(errorKind !== undefined ? { errorKind } : {}),
-			rescheduled,
+			...(assistantMessageSequence !== undefined
+				? { assistantMessageSequence }
+				: {}),
+			...(reschedule !== undefined ? { reschedule } : {}),
 		});
 		if (
 			interpretThreadTurnAction(requestEndReduction.action).action.action !==

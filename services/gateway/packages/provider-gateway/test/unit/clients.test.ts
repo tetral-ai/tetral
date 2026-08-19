@@ -736,6 +736,40 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(interChunkTimeout).toMatchObject({ timeout: true, kind: "inter_chunk" });
   });
 
+  test("provider custom fetch reports every raw response-body chunk as transport activity", async () => {
+    const providerSettings: AnthropicProviderSettings[] = [];
+    const registry = new ProviderClientRegistry({
+      fetch: Object.assign(async () =>
+        new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(": ping\n\n"));
+            controller.enqueue(new TextEncoder().encode("data: {}\n\n"));
+            controller.close();
+          },
+        })), { preconnect: () => {} }) satisfies FetchFunction,
+      anthropicProviderFactory: (settings) => {
+        providerSettings.push(settings);
+        return () => ({});
+      },
+      streamText: () => streamTextResult([finishPart()]),
+    });
+    let transportActivity = 0;
+    await collectEvents(registry.stream({
+      request: anthropicRequest({ attachments: [] }),
+      credential: sessionAnthropicCredential(),
+      onTransportActivity: () => {
+        transportActivity += 1;
+      },
+    }));
+
+    const response = await providerSettings[0]?.fetch?.(
+      "https://api.anthropic.com/v1/messages",
+    );
+    await response?.text();
+
+    expect(transportActivity).toBe(2);
+  });
+
   test("fails closed for non-catalog models and missing credentials before streamText", async () => {
     let streamTextCalls = 0;
     const registry = new ProviderClientRegistry({

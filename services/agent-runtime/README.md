@@ -215,13 +215,17 @@ Invariants a replacement must preserve:
 - The stable `tool-call` is the execution boundary; `tool-input` fragments start
   nothing.
 - The next request cannot start until the stream is terminal, the request end is
-  ACKed, its terminal assistant projection is installed in hot context, and the
-  per-turn tool-fiber set has settled. A rescheduled request carries only parts
-  already proven durable; successful closeout adds the request's complete stable
-  reasoning set in the same settlement.
-- The pod is the only retry driver: a retryable failure parks in-run until the
-  Bridge-effective deadline and re-issues the request rebuilt from committed
-  context, or settles as retries-exhausted.
+  ACKed, and every committed Tool Use has reached its existing settlement owner.
+  A failed attempt's text remains durable audit history but is excluded from all
+  later provider requests. Runtime retains only exact terminal Tool Call/Result
+  pairs and their ordered reasoning; a nonterminal Tool Call stays in the private
+  open draft until that same Tool route settles, without executor replay or a
+  fabricated result.
+- The pod is the only retry driver. The accepted Request End reschedule receipt
+  carries the attempt and Bridge-effective deadline through hot or cold recovery;
+  Runtime waits only the remaining deadline and re-issues exactly one request
+  rebuilt from eligible committed context. The durable attempt seeds the next
+  proposal, so pod loss cannot reset the budget.
 - The reviewer model and provider credentials are platform-owned; Gateway injects
   credentials but never chooses or replaces the model.
 - Media attachments obey `MaxProviderRequestAttachments` = 32

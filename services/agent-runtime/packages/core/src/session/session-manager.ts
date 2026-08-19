@@ -239,6 +239,7 @@ export type ThreadSnapshotResult =
 			readonly observed: boolean;
 			readonly status?: RuntimeThreadStatusState | undefined;
 			readonly hasPendingApprovalToolJobs?: boolean | undefined;
+			readonly hasUnsettledToolOwner?: boolean | undefined;
 			readonly entries: readonly RuntimeContextEntry[];
 	  }
 	| {
@@ -3132,6 +3133,12 @@ export function layer(
 						status: threadEntry.status,
 						hasPendingApprovalToolJobs:
 							threadEntry.runtimeThread.state.hasPendingApprovalToolJobs(),
+						hasUnsettledToolOwner:
+							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request?.toolMembers.some(
+								(member) =>
+									member.memberKind === "public_tool_use" &&
+									member.terminalResult === undefined,
+							) ?? false,
 						entries: threadEntry.runtimeThread.state.contextManager.entries(),
 					};
 				});

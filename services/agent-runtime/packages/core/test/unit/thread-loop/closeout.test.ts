@@ -2022,7 +2022,6 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "sevt_partial_requires_action_end",
 						isError: false,
-						rescheduled: false,
 					},
 					toolMembers: [
 						{
@@ -2952,11 +2951,6 @@ describe("ThreadLoop", () => {
 				contextKind: "user",
 				parts: [{ type: "text", text: "hello" }],
 			},
-			{
-				messageSequence: 2,
-				contextKind: "assistant",
-				parts: [{ type: "text", text: "partial stream answer" }],
-			},
 		]);
 	});
 	test("processor settlement failure seals durable assistant content before terminal closeout", async () => {
@@ -3113,7 +3107,7 @@ describe("ThreadLoop", () => {
 		).toBe(false);
 		expect(order).toEqual([]);
 	});
-	test("terminal provider failure preserves completed text with a durable message ACK", async () => {
+	test("terminal provider failure keeps completed text as audit but excludes it from provider context", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const loader = new RecordingContextLoader([], {
 			type: "context",
@@ -3165,10 +3159,13 @@ describe("ThreadLoop", () => {
 				content: [{ type: "text", text: "durably completed" }],
 			},
 		]);
-		expect(session.state.contextManager.entries().at(-1)).toMatchObject({
-			contextKind: "assistant",
-			parts: [{ type: "text", text: "durably completed" }],
-		});
+		expect(session.state.contextManager.entries()).toEqual([
+			{
+				messageSequence: 1,
+				contextKind: "user",
+				parts: [{ type: "text", text: "hello" }],
+			},
+		]);
 	});
 	test("runtime layer does not publish active draft when provider-error terminal append fails", async () => {
 		const order: string[] = [];

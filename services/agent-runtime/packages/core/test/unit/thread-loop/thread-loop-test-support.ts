@@ -320,7 +320,6 @@ function installRecoveredToolTurn(
 				requestEnd: {
 					eventId: `${modelRequestId}_end`,
 					isError: false,
-					rescheduled: false,
 				},
 			},
 		},

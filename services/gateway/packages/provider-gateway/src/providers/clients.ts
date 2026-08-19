@@ -254,6 +254,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
         abortSignal: input.abortSignal,
         overallTimeoutMs: input.request.limits?.timeoutMs,
         timeouts: this.providerFetchTimeouts,
+        onTransportActivity: input.onTransportActivity,
       }),
     };
     const provider = this.anthropicProviderFactory(providerSettings);
@@ -450,6 +451,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
         abortSignal: input.abortSignal,
         overallTimeoutMs: input.request.limits?.timeoutMs,
         timeouts: this.providerFetchTimeouts,
+        onTransportActivity: input.onTransportActivity,
       }),
     };
     const provider = this.openAICompatibleProviderFactory(providerSettings);
@@ -553,6 +555,7 @@ function officialOpenAIProviderFetch(
     abortSignal: input.abortSignal,
     overallTimeoutMs: input.request.limits?.timeoutMs,
     timeouts,
+    onTransportActivity: input.onTransportActivity,
   }));
 }
 
@@ -565,6 +568,7 @@ function providerFetch(options: {
   readonly abortSignal?: AbortSignal | undefined;
   readonly overallTimeoutMs?: number | undefined;
   readonly timeouts: ProviderFetchTimeoutOptions;
+  readonly onTransportActivity?: (() => void) | undefined;
 }): FetchFunction {
   const allowedRoots = allowedProviderURLRoots(options.allowedBaseURLs);
   const targetFetch = options.fetchImpl ?? fetch;
@@ -581,7 +585,11 @@ function providerFetch(options: {
       for (let redirectCount = 0; redirectCount <= MaxProviderRedirects; redirectCount += 1) {
         const response = await targetFetch(new Request(request.clone(), { signal: timers.signal, redirect: "manual" }));
         if (!providerRedirectStatus(response.status)) {
-          return wrapProviderResponseBody(response, timers);
+          return wrapProviderResponseBody(
+            response,
+            timers,
+            options.onTransportActivity,
+          );
         }
         const location = response.headers.get("location");
         if (location === null || location.length === 0) {
@@ -807,6 +815,7 @@ function providerFetchTimers(input: {
 function wrapProviderResponseBody(
   response: Response,
   timers: ReturnType<typeof providerFetchTimers>,
+  onTransportActivity: (() => void) | undefined,
 ): Response {
   if (response.body === null) {
     timers.clearAll();
@@ -832,6 +841,7 @@ function wrapProviderResponseBody(
           return;
         }
         timers.armChunk();
+        onTransportActivity?.();
         controller.enqueue(chunk.value);
       } catch (error) {
         timers.clearAll();

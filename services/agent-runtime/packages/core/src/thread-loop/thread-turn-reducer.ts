@@ -135,7 +135,13 @@ export type ThreadTurnFact =
 			readonly modelRequestId: string;
 			readonly isError: boolean;
 			readonly errorKind?: string;
-			readonly rescheduled: boolean;
+			readonly assistantMessageSequence?: number;
+			readonly reschedule?: {
+				readonly attempt: number;
+				readonly effectiveDeadline: string;
+				readonly providerAttempts: number;
+				readonly compactionAttempts: number;
+			};
 	  }
 	| {
 			readonly fact: "finish_idle_committed";
@@ -230,7 +236,7 @@ export function deriveThreadTurnDecision(
 		};
 	}
 
-	if (request.requestEnd.isError || request.requestEnd.rescheduled) {
+	if (request.requestEnd.isError || request.requestEnd.reschedule !== undefined) {
 		return {
 			state: {
 				state: "request_sealed",
@@ -716,7 +722,12 @@ export function reduceThreadTurn(
 					...(fact.errorKind !== undefined
 						? { errorKind: fact.errorKind }
 						: {}),
-					rescheduled: fact.rescheduled,
+					...(fact.assistantMessageSequence !== undefined
+						? { assistantMessageSequence: fact.assistantMessageSequence }
+						: {}),
+					...(fact.reschedule !== undefined
+						? { reschedule: fact.reschedule }
+						: {}),
 				},
 			});
 			return {

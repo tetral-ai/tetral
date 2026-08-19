@@ -98,7 +98,6 @@ describe("Thread-turn semantic characterization", () => {
 		const reviewerFailure = sealedRequest([], "approval_reviewer", {
 			isError: true,
 			errorKind: "provider_stream_error",
-			rescheduled: false,
 		});
 		const reviewerCancelled = {
 			...reviewerDecision,
@@ -400,11 +399,15 @@ function sealedRequest(
 	>["requestKind"] = "agent_provider_request",
 	end: {
 		readonly isError: boolean;
-		readonly rescheduled: boolean;
+		readonly reschedule?: {
+			readonly attempt: number;
+			readonly effectiveDeadline: string;
+			readonly providerAttempts: number;
+			readonly compactionAttempts: number;
+		};
 		readonly errorKind?: string;
 	} = {
 		isError: false,
-		rescheduled: false,
 	},
 ): ThreadTurnCheckpoint {
 	return {

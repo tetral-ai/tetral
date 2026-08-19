@@ -1,6 +1,12 @@
 import { z } from "zod/v4";
-import type { RuntimeContextEntry } from "../contracts/runtime.js";
-import { RuntimeContextEntrySchema } from "../contracts/runtime.js";
+import type {
+	RuntimeContextEntry,
+	RuntimeOpenRequestDraft,
+} from "../contracts/runtime.js";
+import {
+	RuntimeContextEntrySchema,
+	RuntimeOpenRequestDraftSchema,
+} from "../contracts/runtime.js";
 
 const DurableIdentitySchema = z.string().min(1);
 
@@ -43,7 +49,20 @@ const RequestSchema = z
 				eventId: DurableIdentitySchema,
 				isError: z.boolean(),
 				errorKind: DurableIdentitySchema.optional(),
-				rescheduled: z.boolean(),
+				assistantMessageSequence: z
+					.number()
+					.int()
+					.positive()
+					.max(Number.MAX_SAFE_INTEGER)
+					.optional(),
+				reschedule: z
+					.strictObject({
+						attempt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+						effectiveDeadline: z.string().datetime({ offset: true }),
+						providerAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+						compactionAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+					})
+					.optional(),
 			})
 			.optional(),
 		toolMembers: z.array(
@@ -177,7 +196,13 @@ export interface ThreadTurnCheckpoint {
 			readonly eventId: string;
 			readonly isError: boolean;
 			readonly errorKind?: string;
-			readonly rescheduled: boolean;
+			readonly assistantMessageSequence?: number;
+			readonly reschedule?: {
+				readonly attempt: number;
+				readonly effectiveDeadline: string;
+				readonly providerAttempts: number;
+				readonly compactionAttempts: number;
+			};
 		};
 		readonly toolMembers: readonly (
 			| {
@@ -246,7 +271,12 @@ export function parseThreadTurnCheckpoint(
 										...(parsed.request.requestEnd.errorKind !== undefined
 											? { errorKind: parsed.request.requestEnd.errorKind }
 											: {}),
-										rescheduled: parsed.request.requestEnd.rescheduled,
+										...(parsed.request.requestEnd.assistantMessageSequence !== undefined
+											? { assistantMessageSequence: parsed.request.requestEnd.assistantMessageSequence }
+											: {}),
+										...(parsed.request.requestEnd.reschedule !== undefined
+											? { reschedule: parsed.request.requestEnd.reschedule }
+											: {}),
 									},
 								}
 							: {}),
@@ -308,7 +338,15 @@ const RequestEndFactSchema = z.strictObject({
 	requestStartEventId: IdentitySchema,
 	isError: z.boolean(),
 	errorKind: IdentitySchema.optional(),
-	rescheduled: z.boolean(),
+	assistantMessageSequence: MessageSequenceSchema.optional(),
+	reschedule: z
+		.strictObject({
+			attempt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+			effectiveDeadline: z.string().datetime({ offset: true }),
+			providerAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+			compactionAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+		})
+		.optional(),
 });
 
 const ToolUseFactSchema = z.strictObject({
@@ -666,6 +704,219 @@ export function extractThreadTurnCheckpoint(input: {
 	});
 }
 
+/**
+ * Converts the durable Assistant projection of one failed Request into the
+ * Runtime-owned provider view. Text from the failed attempt is never replayed;
+ * exact terminal Tool Call/Result pairs and their signed reasoning remain
+ * provider-visible, while a nonterminal Tool Call stays in the private open
+ * draft until its existing settlement route completes.
+ */
+export function projectFailedRequestProviderContext(input: {
+	readonly contextEntries: readonly RuntimeContextEntry[];
+	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly checkpoint: ThreadTurnCheckpoint;
+}): {
+	readonly contextEntries: readonly RuntimeContextEntry[];
+	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+} {
+	const checkpoint = parseThreadTurnCheckpoint(input.checkpoint);
+	const request = checkpoint.request;
+	if (
+		request?.requestEnd === undefined ||
+		(!request.requestEnd.isError && request.requestEnd.reschedule === undefined)
+	) {
+		return {
+			contextEntries: input.contextEntries,
+			...(input.openRequestDraft === undefined
+				? {}
+				: { openRequestDraft: input.openRequestDraft }),
+		};
+	}
+	const sequence =
+		request.requestEnd.assistantMessageSequence ??
+		(input.openRequestDraft?.modelRequestId === request.modelRequestId
+			? input.openRequestDraft.messageSequence
+			: undefined);
+	if (sequence === undefined) {
+		return {
+			contextEntries: input.contextEntries,
+			...(input.openRequestDraft === undefined
+				? {}
+				: { openRequestDraft: input.openRequestDraft }),
+		};
+	}
+	const sealed = input.contextEntries.find(
+		(entry) =>
+			entry.contextKind === "assistant" && entry.messageSequence === sequence,
+	);
+	const open =
+		input.openRequestDraft?.messageSequence === sequence
+			? RuntimeOpenRequestDraftSchema.parse(input.openRequestDraft)
+			: undefined;
+	const unrelatedOpenRequestDraft =
+		open === undefined ? input.openRequestDraft : undefined;
+	if (sealed === undefined && open === undefined) {
+		if (request.toolMembers.length !== 0) {
+			throw new Error(
+				"failed Request Tool projection has no resident Assistant owner",
+			);
+		}
+		return {
+			contextEntries: input.contextEntries,
+			...(input.openRequestDraft === undefined
+				? {}
+				: { openRequestDraft: input.openRequestDraft }),
+		};
+	}
+	if (sealed !== undefined && open !== undefined) {
+		throw new Error(
+			"failed Request Assistant projection must have exactly one resident owner",
+		);
+	}
+	if (open !== undefined && open.modelRequestId !== request.modelRequestId) {
+		throw new Error("failed Request draft identity does not match its checkpoint");
+	}
+	const memberIds = new Set(
+		request.toolMembers.map((member) => member.modelToolCallId),
+	);
+	const terminalIds = new Set(
+		request.toolMembers.flatMap((member) =>
+			member.memberKind === "internal_tool_repair" ||
+			member.terminalResult !== undefined
+				? [member.modelToolCallId]
+				: [],
+		),
+	);
+	const incomplete = request.toolMembers.some(
+		(member) =>
+			member.memberKind === "public_tool_use" &&
+			member.terminalResult === undefined,
+	);
+	const sourceParts = sealed?.parts ?? open!.parts;
+	const retainedReasoningIndexes = new Set<number>();
+	for (let index = 0; index < sourceParts.length; index += 1) {
+		const part = sourceParts[index];
+		if (
+			part?.type !== "tool_call" ||
+			!memberIds.has(part.modelToolCallId)
+		) {
+			continue;
+		}
+		for (let ownerIndex = index - 1; ownerIndex >= 0; ownerIndex -= 1) {
+			const owner = sourceParts[ownerIndex];
+			if (owner?.type === "text" || owner?.type === "tool_result") {
+				break;
+			}
+			if (owner?.type === "reasoning") {
+				retainedReasoningIndexes.add(ownerIndex);
+			}
+		}
+	}
+	const retainedParts = sourceParts.filter((part, index) => {
+		switch (part.type) {
+		case "reasoning":
+			return retainedReasoningIndexes.has(index);
+			case "tool_call":
+				return memberIds.has(part.modelToolCallId);
+			case "tool_result":
+				return terminalIds.has(part.modelToolCallId);
+			case "text":
+				return false;
+		}
+	});
+	const contextEntries = input.contextEntries.filter(
+		(entry) => entry.messageSequence !== sequence,
+	);
+	if (incomplete) {
+		if (unrelatedOpenRequestDraft !== undefined) {
+			throw new Error("failed Request cannot replace an unrelated open draft");
+		}
+		return {
+			contextEntries,
+			openRequestDraft: RuntimeOpenRequestDraftSchema.parse({
+				modelRequestId: request.modelRequestId,
+				messageSequence: sequence,
+				parts: retainedParts,
+			}),
+		};
+	}
+	if (retainedParts.length === 0) {
+		return {
+			contextEntries,
+			...(unrelatedOpenRequestDraft === undefined
+				? {}
+				: { openRequestDraft: unrelatedOpenRequestDraft }),
+		};
+	}
+	return {
+		contextEntries: [
+			...contextEntries,
+			RuntimeContextEntrySchema.parse({
+				messageSequence: sequence,
+				contextKind: "assistant",
+				parts: retainedParts,
+			}),
+		].sort((left, right) => left.messageSequence - right.messageSequence),
+		...(unrelatedOpenRequestDraft === undefined
+			? {}
+			: { openRequestDraft: unrelatedOpenRequestDraft }),
+	};
+}
+
+/** Applies failed-request eligibility to every durable Request represented by LoadContext facts. */
+export function projectFailedRequestsProviderContext(input: {
+	readonly contextEntries: readonly RuntimeContextEntry[];
+	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly facts: ThreadTurnLoadFacts;
+}): {
+	readonly contextEntries: readonly RuntimeContextEntry[];
+	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+} {
+	const facts = ThreadTurnLoadFactsSchema.parse(input.facts);
+	const starts = new Map(
+		facts.events
+			.filter((event) => event.type === "span.model_request_start")
+			.map((event) => [event.modelRequestId!, event] as const),
+	);
+	let projected: {
+		readonly contextEntries: readonly RuntimeContextEntry[];
+		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+	} = {
+		contextEntries: input.contextEntries,
+		...(input.openRequestDraft === undefined
+			? {}
+			: { openRequestDraft: input.openRequestDraft }),
+	};
+	for (const end of facts.events) {
+		if (
+			end.type !== "span.model_request_end" ||
+			(!end.requestEnd!.isError && end.requestEnd!.reschedule === undefined)
+		) {
+			continue;
+		}
+		const start = starts.get(end.modelRequestId!);
+		if (start === undefined) {
+			throw new Error("failed Request End has no matching Request Start");
+		}
+		projected = projectFailedRequestProviderContext({
+			contextEntries: projected.contextEntries,
+			...(projected.openRequestDraft === undefined
+				? {}
+				: { openRequestDraft: projected.openRequestDraft }),
+			checkpoint: {
+				pendingInputContextSequences: [],
+				request: extractNewestRequest(
+					start,
+					end,
+					facts.events,
+					facts.internalRepairs,
+				),
+			},
+		});
+	}
+	return projected;
+}
+
 export function extractColdThreadToolRouteView(input: {
 	readonly checkpoint: ThreadTurnCheckpoint;
 	readonly pendingToolUses: readonly ColdPendingToolUse[];
@@ -1017,7 +1268,12 @@ function extractNewestRequest(
 						...(end.requestEnd.errorKind !== undefined
 							? { errorKind: end.requestEnd.errorKind }
 							: {}),
-						rescheduled: end.requestEnd.rescheduled,
+						...(end.requestEnd.assistantMessageSequence !== undefined
+							? { assistantMessageSequence: end.requestEnd.assistantMessageSequence }
+							: {}),
+						...(end.requestEnd.reschedule !== undefined
+							? { reschedule: end.requestEnd.reschedule }
+							: {}),
 					},
 				}
 			: {}),
