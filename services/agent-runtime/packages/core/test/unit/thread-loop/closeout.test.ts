@@ -103,8 +103,14 @@ describe("ThreadLoop", () => {
 					new Error(defectCanary),
 					testRunCustody(),
 				);
-				expect(yield* closeout).toEqual({ type: "landed" });
-				expect(yield* closeout).toEqual({ type: "landed" });
+				expect(yield* closeout).toEqual({
+					type: "landed",
+					disposition: "continuation",
+				});
+				expect(yield* closeout).toEqual({
+					type: "landed",
+					disposition: "continuation",
+				});
 			}).pipe(
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
@@ -196,7 +202,7 @@ describe("ThreadLoop", () => {
 			),
 		);
 
-		expect(result).toEqual({ type: "landed" });
+		expect(result).toEqual({ type: "landed", disposition: "terminal" });
 		expect(appended).toEqual([]);
 		expect(terminations).toHaveLength(1);
 		expect(terminations[0]).toMatchObject({
@@ -291,8 +297,14 @@ describe("ThreadLoop", () => {
 			type: "committed",
 		});
 		await flushMicrotasks(10);
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
 		expect(errorCalls).toBe(1);
 		expect(idleCalls).toBe(1);
 	});
@@ -393,7 +405,10 @@ describe("ThreadLoop", () => {
 			type: "committed",
 		});
 		await flushMicrotasks(10);
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
 		expect(errorCalls).toBe(1);
 		expect(idleCalls).toBe(1);
 	});
@@ -458,7 +473,10 @@ describe("ThreadLoop", () => {
 			type: "retry",
 			error: { code: "unavailable" },
 		});
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
 		expect(appendWriteIds).toHaveLength(
 			SessionEventWriterRetryPolicy.attempts + 1,
 		);

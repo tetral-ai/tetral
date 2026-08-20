@@ -81,6 +81,36 @@ func TestBridgeAPIServerReturnsClosedStaleResultsForSupersededCloseouts(t *testi
 func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "termination_replay_binding")
 	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	const committedInputID = "rin_termination_replay_binding"
+	seedBridgeAPIEvent(t, fixture.admin, "default", fixture.sessionID, fixture.threadID,
+		"evt_termination_replay_input", 1, "user.message", `{"content":[{"type":"text","text":"settled"}]}`)
+	seedBridgeAPIRuntimeInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID,
+		committedInputID, "messages", `["evt_termination_replay_input"]`, "accepted",
+		fixture.bindingID, fixture.podUID, 1, 1)
+	commitInputsRequest := &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: committedInputID}
+	if committed, err := fixture.server.CommitInputs(context.Background(), commitInputsRequest); err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("CommitInputs before termination = %#v/%v; want committed", committed, err)
+	}
+	oldRunningRequest := closeoutWriteEventRequest(scope, "rwrite_termination_replay_old_running")
+	oldRunning, err := fixture.store.WriteEvent(context.Background(), oldRunningRequest)
+	if err != nil || oldRunning.GetCommitted() == nil {
+		t.Fatalf("open old durable Runtime turn = %#v/%v", oldRunning, err)
+	}
+	modelRequestID := "mreq_termination_replay_binding"
+	seedBridgeAPIRequestStart(t, fixture.store, scope, "rwrite_termination_replay_request_start", modelRequestID, requestKindAgentProviderRequest, 1)
+	requestEndRequest := &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_termination_replay_request_end", ModelRequestId: modelRequestID,
+		FinishReason: "stop", UsageJson: `{}`,
+	}
+	if ended, err := fixture.server.WriteRequestEnd(context.Background(), requestEndRequest); err != nil || ended.GetCommitted() == nil {
+		t.Fatalf("WriteRequestEnd before termination = %#v/%v; want committed", ended, err)
+	}
+	finishIdleRequest := &bridgev1.FinishIdleRequest{
+		Scope: scope, DurableTurnId: oldRunning.GetCommitted().GetEventId(), StopReasonJson: `{"type":"end_turn"}`,
+	}
+	if idle, err := finishIdleWithStagedCaptureForTest(t, fixture.admin, fixture.store, finishIdleRequest); err != nil || idle.GetCommitted() == nil {
+		t.Fatalf("FinishIdle before termination = %#v/%v; want committed", idle, err)
+	}
 	running, err := fixture.store.WriteEvent(context.Background(), closeoutWriteEventRequest(scope, "rwrite_termination_replay_binding"))
 	if err != nil || running.GetCommitted() == nil {
 		t.Fatalf("open durable Runtime turn = %#v/%v", running, err)
@@ -104,6 +134,41 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	committed, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
 	if err != nil || committed.GetCommitted() == nil {
 		t.Fatalf("CommitRuntimeTermination = %#v/%v; want committed", committed, err)
+	}
+	var eventsBefore, operationsBefore, capturesBefore, queueBefore int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM sandbox_output_capture_operations WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND partition_key LIKE '%' || $1 || '%')`, fixture.sessionID,
+	).Scan(&eventsBefore, &operationsBefore, &capturesBefore, &queueBefore); err != nil {
+		t.Fatalf("read post-terminal mutation baseline: %v", err)
+	}
+	if replayed, err := fixture.server.CommitInputs(context.Background(), commitInputsRequest); err != nil || replayed.GetStale() == nil {
+		t.Fatalf("post-terminal CommitInputs = %#v/%v; want stale", replayed, err)
+	}
+	if replayed, err := fixture.server.WriteEvent(context.Background(), oldRunningRequest); err != nil || replayed.GetStale() == nil {
+		t.Fatalf("post-terminal WriteEvent = %#v/%v; want stale", replayed, err)
+	}
+	if replayed, err := fixture.server.WriteRequestEnd(context.Background(), requestEndRequest); err != nil || replayed.GetStale() == nil {
+		t.Fatalf("post-terminal WriteRequestEnd = %#v/%v; want stale", replayed, err)
+	}
+	if replayed, err := fixture.server.FinishIdle(context.Background(), finishIdleRequest); err != nil || replayed.GetStale() == nil {
+		t.Fatalf("post-terminal FinishIdle = %#v/%v; want stale", replayed, err)
+	}
+	var eventsAfter, operationsAfter, capturesAfter, queueAfter int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM sandbox_output_capture_operations WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND partition_key LIKE '%' || $1 || '%')`, fixture.sessionID,
+	).Scan(&eventsAfter, &operationsAfter, &capturesAfter, &queueAfter); err != nil {
+		t.Fatalf("read post-terminal mutation result: %v", err)
+	}
+	if eventsAfter != eventsBefore || operationsAfter != operationsBefore || capturesAfter != capturesBefore || queueAfter != queueBefore {
+		t.Fatalf("ordinary post-terminal replay mutated events/operations/captures/queue = %d/%d/%d/%d -> %d/%d/%d/%d",
+			eventsBefore, operationsBefore, capturesBefore, queueBefore,
+			eventsAfter, operationsAfter, capturesAfter, queueAfter)
 	}
 	var runtimeStatus, statusEventID string
 	var runningSince, idleSince, cleanupAfter, cleanupEnqueuedAt, cleanupClaimedAt sql.NullTime

@@ -314,7 +314,8 @@ async function buildManager(): Promise<{
 		ThreadLoop.Service,
 		ThreadLoop.Service.of({
 			run: () => Effect.succeed({ type: "completed", modelMessageCount: 0 }),
-			closeFailedRun: () => Effect.succeed({ type: "landed" }),
+			closeFailedRun: () =>
+				Effect.succeed({ type: "landed", disposition: "continuation" }),
 			seedRuntimeModel: () => undefined,
 			installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 			installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),

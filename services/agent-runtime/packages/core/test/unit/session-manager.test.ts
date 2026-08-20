@@ -10,6 +10,7 @@ import type {
 	RuntimeMetricsSink,
 } from "../../src/runtime/metrics.js";
 import * as SessionManager from "../../src/session/session-manager.js";
+import type { FailedRunCloseoutResult } from "../../src/thread-loop/closeout.js";
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
 import type {
@@ -306,7 +307,8 @@ function threadLoopService(
 	overrides: Pick<ThreadLoop.Interface, "run"> & Partial<ThreadLoop.Interface>,
 ): ThreadLoop.Interface {
 	return ThreadLoop.Service.of({
-		closeFailedRun: () => Effect.succeed({ type: "landed" }),
+		closeFailedRun: () =>
+			Effect.succeed({ type: "landed", disposition: "terminal" }),
 		seedRuntimeModel: () => {},
 		installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 		installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),
@@ -5144,7 +5146,7 @@ describe("SessionManager", () => {
 		});
 	});
 
-	test("value-level failed exit releases queued completion mail for cold redelivery", async () => {
+	test("value-level continuation hands queued completion mail to the next hot owner", async () => {
 		const threadLoop = makeControlledThreadLoop();
 		const sessionID = "sesn_failed_agent_mail_redelivery";
 		const threadID = "thrd_failed_agent_mail_redelivery_main";
@@ -5201,36 +5203,13 @@ describe("SessionManager", () => {
 				if (failure.type !== "failed") {
 					throw new Error("expected failed run fixture");
 				}
-				threadLoop.runs[0]?.release({ type: "failed", error: failure.error });
-				await waitForCondition(async () => {
-					const snapshot = await Effect.runPromise(
-						manager.inspectThread(
-							threadControl(
-								sessionID,
-								"rin_inspect_failed_agent_mail_release",
-								threadID,
-							),
-						),
-					);
-					return snapshot.ok && !snapshot.observed;
-				}, "failed agent-mail recipient release");
-
-				expect(
-					await Effect.runPromise(
-						manager.preloadThread({
-							...threadControl(
-								sessionID,
-								"rin_reload_failed_agent_mail_redelivery",
-								threadID,
-							),
-							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
-							thread,
-							pendingAgentMail: [mail],
-						}),
-					),
-				).toMatchObject({ ok: true, applied: true });
+				threadLoop.runs[0]?.release({
+					type: "failed",
+					error: failure.error,
+					closeoutDisposition: "continuation",
+				});
 				await waitForRuns(threadLoop, 2);
+				expect(threadLoop.runs[1]?.session).toBe(threadLoop.runs[0]?.session);
 				expect(
 					threadLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId,
 				).toBe(mail.runtimeInputId);
@@ -5248,7 +5227,10 @@ describe("SessionManager", () => {
 			closeFailedRun: () =>
 				Effect.sync(() => {
 					duplicateCloseoutCalls += 1;
-					return { type: "landed" as const };
+					return {
+						type: "landed" as const,
+						disposition: "continuation" as const,
+					};
 				}),
 		});
 		const sessionID = "sesn_failed_turn_follow_up";
@@ -5276,7 +5258,11 @@ describe("SessionManager", () => {
 				if (failure.type !== "failed") {
 					throw new Error("expected failed run fixture");
 				}
-				threadLoop.runs[0]?.release({ type: "failed", error: failure.error });
+				threadLoop.runs[0]?.release({
+					type: "failed",
+					error: failure.error,
+					closeoutDisposition: "continuation",
+				});
 				await waitForRuns(threadLoop, 2);
 				expect(threadLoop.runs[1]?.session).toBe(threadLoop.runs[0]?.session);
 				expect(
@@ -5286,6 +5272,117 @@ describe("SessionManager", () => {
 				threadLoop.runs[1]?.release();
 			},
 		);
+	});
+
+	test("durable failed-closeout disposition owns every accepted follower family", async () => {
+		for (const disposition of ["continuation", "terminal"] as const) {
+			for (const inputKind of [
+				"messages",
+				"inter_agent_message",
+				"task_notification",
+				"rejection",
+			] as const) {
+				let closeoutStartedResolve: () => void = () => {};
+				let closeoutReleaseResolve: () => void = () => {};
+				const closeoutStarted = new Promise<void>((resolve) => {
+					closeoutStartedResolve = resolve;
+				});
+				const closeoutRelease = new Promise<void>((resolve) => {
+					closeoutReleaseResolve = resolve;
+				});
+				const threadLoop = makeControlledCrashThreadLoop("die", {
+					closeFailedRun: () =>
+						Effect.promise(async () => {
+							closeoutStartedResolve();
+							await closeoutRelease;
+							return {
+								type: "landed",
+								disposition,
+							} as unknown as FailedRunCloseoutResult;
+						}),
+				});
+				const sessionId = `sesn_closeout_${disposition}_${inputKind}`;
+				const threadId = `thrd_closeout_${disposition}_${inputKind}`;
+
+				await withSessionManager(
+					sessionManagerLayer(threadLoop),
+					async (manager) => {
+						expect(
+							await Effect.runPromise(
+								manager.acceptInput(
+									acceptedInput(sessionId, `rin_initial_${inputKind}`, threadId),
+								),
+							),
+						).toMatchObject({ ok: true, started: true });
+						await waitForCrashRuns(threadLoop, 1);
+						threadLoop.runs[0]?.session.state.acknowledgeAcceptedInput(
+							`rin_initial_${inputKind}`,
+						);
+						threadLoop.runs[0]?.releaseCrash();
+						await closeoutStarted;
+
+						const runtimeInputId = `rin_follower_${disposition}_${inputKind}`;
+						if (inputKind === "task_notification") {
+							expect(
+								await Effect.runPromise(
+									manager.commitTaskNotification(sessionId, {
+										...threadControl(sessionId, runtimeInputId, threadId),
+										inputOrder: 2,
+										taskId: `task_${disposition}`,
+										sourceToolUseEventId: `sevt_${disposition}`,
+										status: "completed",
+										notificationJson: '{"status":"completed"}',
+									}),
+								),
+							).toMatchObject({ ok: true, applied: true });
+						} else {
+							let follower: RuntimeAcceptedInputState;
+							if (inputKind === "messages") {
+								follower = acceptedInput(sessionId, runtimeInputId, threadId);
+							} else if (inputKind === "inter_agent_message") {
+								follower = agentMailInput(
+									sessionId,
+									runtimeInputId,
+									threadId,
+									`thrd_source_${disposition}`,
+									{ role: "main", visibility: "public", status: "running" },
+								);
+							} else {
+								const { contentJson: _contentJson, ...scope } = acceptedInput(
+									sessionId,
+									runtimeInputId,
+									threadId,
+								);
+								follower = {
+									...scope,
+									kind: "rejection",
+									reasonCode: "runtime_command_rejected",
+								};
+							}
+							expect(
+								await Effect.runPromise(manager.acceptInput(follower)),
+							).toMatchObject({ ok: true, started: false });
+						}
+
+						closeoutReleaseResolve();
+						if (disposition === "continuation") {
+							await waitForCrashRuns(threadLoop, 2);
+							expect(
+								threadLoop.runs[1]?.session.state.peekAcceptedInput(),
+							).toMatchObject({ kind: inputKind, runtimeInputId });
+						} else {
+							await waitForCondition(async () => {
+								const snapshot = await Effect.runPromise(
+									manager.inspectThread(threadControl(sessionId, "rin_inspect", threadId)),
+								);
+								return snapshot.ok && !snapshot.observed;
+							}, "terminal failed-closeout release");
+							expect(threadLoop.runs).toHaveLength(1);
+						}
+					},
+				);
+			}
+		}
 	});
 
 	test("discard-requested interruption removes hot state before the next command", async () => {
@@ -5609,7 +5706,10 @@ describe("SessionManager", () => {
 				Effect.promise(async () => {
 					closeoutStartedResolve();
 					await closeoutRelease;
-					return { type: "landed" as const };
+					return {
+						type: "landed" as const,
+						disposition: "terminal" as const,
+					};
 				}),
 		});
 		const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
@@ -5694,7 +5794,10 @@ describe("SessionManager", () => {
 									code: "unavailable",
 								}),
 							}
-						: { type: "landed" as const };
+						: {
+								type: "landed" as const,
+								disposition: "terminal" as const,
+							};
 				}),
 		});
 		const layer = sessionManagerLayer(threadLoop, {
@@ -5740,7 +5843,10 @@ describe("SessionManager", () => {
 				Effect.sync(() => {
 					attempts += 1;
 					return ledgerAvailable
-						? { type: "landed" as const }
+						? {
+								type: "landed" as const,
+								disposition: "terminal" as const,
+							}
 						: {
 								type: "retry" as const,
 								error: normalizeSessionEventWriterError({
@@ -6093,7 +6199,10 @@ describe("SessionManager", () => {
 				Effect.promise(async () => {
 					closeoutStartedResolve();
 					await closeoutRelease;
-					return { type: "landed" as const };
+					return {
+						type: "landed" as const,
+						disposition: "terminal" as const,
+					};
 				}),
 		});
 

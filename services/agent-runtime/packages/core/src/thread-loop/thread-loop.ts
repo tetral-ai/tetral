@@ -339,6 +339,7 @@ export type ThreadLoopRunResult =
 			readonly type: "failed";
 			readonly error: ProviderError | RuntimeFailure;
 			readonly failureEventId?: string;
+			readonly closeoutDisposition?: "continuation" | "terminal";
 			readonly releaseSession?: {
 				readonly reason: ThreadLoopSessionReleaseReason;
 			};

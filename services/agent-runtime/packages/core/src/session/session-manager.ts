@@ -1090,7 +1090,13 @@ export function layer(
 				sessionEntry: SessionEntry,
 				threadEntry: ThreadEntry,
 				exit: Exit.Exit<ThreadLoop.ThreadLoopRunResult, unknown>,
-			): Effect.Effect<"disposed" | "unrepairable" | "shutdown"> => {
+			): Effect.Effect<
+				| "continuation"
+				| "terminal"
+				| "superseded"
+				| "unrepairable"
+				| "shutdown"
+			> => {
 				const closeoutId = beginFailedRunCloseout();
 				const custody: ThreadLoop.ThreadLoopRunCustody = {
 					activeTurnId: (session) =>
@@ -1110,8 +1116,11 @@ export function layer(
 					let backoffMs = CloseoutRetryInitialBackoffMs;
 					for (;;) {
 						const result = yield* attempt;
-						if (result.type === "landed" || result.type === "superseded") {
-							return "disposed" as const;
+						if (result.type === "landed") {
+							return result.disposition;
+						}
+						if (result.type === "superseded") {
+							return "superseded" as const;
 						}
 						if (result.type === "unrepairable") {
 							const current = activeCloseouts.get(closeoutId);
@@ -1145,6 +1154,24 @@ export function layer(
 					),
 				);
 			};
+
+			const startAcceptedFollowerAfterFailedCloseout = (
+				sessionEntry: SessionEntry,
+				threadEntry: ThreadEntry,
+			): Effect.Effect<boolean> =>
+				Effect.gen(function* () {
+					if (
+						threadEntry.runtimeThread.state.acceptedInputCount() === 0 ||
+						sessionEntry.threads.get(threadEntry.sessionThreadId) !== threadEntry
+					) {
+						return false;
+					}
+					threadEntry.runSlot = undefined;
+					threadEntry.status = "idle";
+					recordHotStateMetrics();
+					yield* startThreadRun(sessionEntry, threadEntry).pipe(Effect.asVoid);
+					return true;
+				});
 
 			const finishThreadRun = (
 				sessionEntry: SessionEntry,
@@ -1181,6 +1208,16 @@ export function layer(
 							yield* completeRunSlot(runSlot, exit);
 							return;
 						}
+						if (
+							closeout === "continuation" &&
+							(yield* startAcceptedFollowerAfterFailedCloseout(
+								sessionEntry,
+								threadEntry,
+							))
+						) {
+							yield* completeRunSlot(runSlot, exit);
+							return;
+						}
 						yield* releaseThreadEntry(sessionEntry, threadEntry);
 						yield* completeRunSlot(runSlot, exit);
 						return;
@@ -1201,10 +1238,10 @@ export function layer(
 							threadEntry.runtimeThread.state.acceptedInputCount() === 0 &&
 							exit.value.releaseSession === undefined;
 						const closeout = alreadyIdle
-							? ("disposed" as const)
+							? ("continuation" as const)
 							: yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit);
 						if (
-							closeout === "disposed" &&
+							closeout === "continuation" &&
 							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
 								.executionRunId === undefined
 						) {
@@ -1237,40 +1274,37 @@ export function layer(
 					const valueLevelFailed =
 						Exit.isSuccess(exit) && exit.value.type === "failed";
 					if (valueLevelFailed) {
+						let closeout:
+							| "continuation"
+							| "terminal"
+							| "superseded"
+							| "unrepairable"
+							| "shutdown"
+							| undefined = exit.value.closeoutDisposition;
 						if (
+							closeout === undefined &&
 							threadEntry.runtimeThread.state.acceptedInputCount() > 0 &&
 							exit.value.releaseSession?.reason !== "terminated"
 						) {
-							const alreadyIdle =
-								threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
-									.executionRunId === undefined;
-							const closeout = alreadyIdle
-								? ("disposed" as const)
-								: yield* settleFailedRunCloseout(
-										sessionEntry,
-										threadEntry,
-										exit,
-									);
+							closeout = yield* settleFailedRunCloseout(
+								sessionEntry,
+								threadEntry,
+								exit,
+							);
 							if (closeout === "unrepairable") {
 								yield* completeRunSlot(runSlot, exit);
 								return;
 							}
-							if (
-								threadEntry.runtimeThread.state
-									.acceptedInputSnapshot()
-									.some((input) => input.kind === "messages") &&
-								sessionEntry.threads.get(threadEntry.sessionThreadId) ===
-									threadEntry
-							) {
-								threadEntry.runSlot = undefined;
-								threadEntry.status = "idle";
-								recordHotStateMetrics();
-								yield* startThreadRun(sessionEntry, threadEntry).pipe(
-									Effect.asVoid,
-								);
-								yield* completeRunSlot(runSlot, exit);
-								return;
-							}
+						}
+						if (
+							closeout === "continuation" &&
+							(yield* startAcceptedFollowerAfterFailedCloseout(
+								sessionEntry,
+								threadEntry,
+							))
+						) {
+							yield* completeRunSlot(runSlot, exit);
+							return;
 						}
 						yield* releaseThreadEntry(sessionEntry, threadEntry);
 						yield* completeRunSlot(runSlot, exit);

@@ -59,6 +59,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		var err error
 		inputKind, err = commitInputKindTx(ctx, tx, request)
 		if err != nil {
@@ -104,9 +107,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		} else if request.GetInterruptLeaseRef() != nil {
 			return status.Error(codes.InvalidArgument, "interrupt lease authority is not valid for ordinary input")
 		} else if err := requireSessionInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
-		if err := verifyRuntimeScopeTx(mutationCtx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		threadScope, err := lockThreadMutationTx(mutationCtx, tx, request.GetScope())

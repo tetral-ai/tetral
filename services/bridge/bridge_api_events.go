@@ -103,6 +103,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		evidence.Kind = "transaction"
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
@@ -125,9 +128,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			}
 			duplicate = true
 			return nil
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
 		}
 		if requestStart != nil {
 			if err := requireSessionInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
