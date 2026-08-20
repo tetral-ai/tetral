@@ -339,19 +339,23 @@ specialized sub-agent loop and no reviewer-only model-call path. The parent
 thread sees tool use/result; child work stays child-thread-local.
 
 - Interface: the `subagent` route operations dispatch in `tool-runner.ts`; child
-  threads are created through Bridge `CreateSubagentThread`; Bridge derives and stores the thread context prefix;
+  threads are created through Bridge `CreateSubagentThread`; Runtime declares
+  the normalized child metadata and bounded initial prompt once, while Bridge
+  derives and stores the thread context prefix and initial custody atomically;
   `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
-- Lifecycle: `spawn_agent` prepares a durable child row and immutable context
-  prefix directly from its live durable Tool Use, before the parent Provider
-  Request End and before the first child message; `send_message` resolves the child by `task_name`, delivering
-  every instruction through the stored envelope and durable Runtime input rail;
+- Lifecycle: `spawn_agent` commits the durable child row, immutable context
+  prefix, opening sent/received Events, target Inbox/Queue custody, and one
+  replay receipt directly from its live durable Tool Use, before the parent
+  Provider Request End. Later `send_message` calls resolve the child by
+  `task_name` and deliver through their own stored envelope and durable Runtime input rail;
   `wait_agent`, `interrupt_agent`, `close_agent`, `resume_agent`, and
   `list_agents` operate over durable `session_threads`.
 
 Invariants a replacement must preserve:
 
-- Child durable thread and context prefix exist before the initial message; a crash
-  after a duplicate `CreateSubagentThread` result reuses the same Bridge-owned child and prefix.
+- Child thread, prefix, opening Events, Inbox/Queue custody, and receipt exist
+  together or not at all. A crash after `CreateSubagentThread` commits reuses
+  that complete Bridge-owned lineage without a second opening delivery.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → committed input
   result. Pod-loss reconciliation hands an accepted input back to the existing

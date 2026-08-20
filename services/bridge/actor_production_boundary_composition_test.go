@@ -52,6 +52,59 @@ func (s *lostACKSubagentBridge) calls() int {
 	return s.createCalls
 }
 
+type subagentProductionCompositionResult struct {
+	ResultType          string            `json:"resultType"`
+	ProviderInvocations int               `json:"providerInvocations"`
+	ProviderContexts    []json.RawMessage `json:"providerContexts"`
+}
+
+func runSubagentProductionComposition(
+	t *testing.T,
+	bridgeServer bridgev1.AgentRuntimeBridgeServiceServer,
+	sessionID, threadID, bindingID string,
+	bindingGeneration int64,
+	podUID, taskName, prompt string,
+) subagentProductionCompositionResult {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for subagent ToolRunner composition: %v", err)
+	}
+	server := grpc.NewServer()
+	bridgev1.RegisterAgentRuntimeBridgeServiceServer(server, bridgeServer)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+	input, err := json.Marshal(map[string]any{
+		"bridgeAddress": listener.Addr().String(), "workspaceId": "default",
+		"sessionId": sessionID, "sessionThreadId": threadID,
+		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID,
+		"taskName": taskName, "prompt": prompt,
+	})
+	if err != nil {
+		t.Fatalf("encode subagent ToolRunner composition: %v", err)
+	}
+	inputPath := t.TempDir() + "/subagent-production.json"
+	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
+		t.Fatalf("write subagent ToolRunner composition: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/subagent-production-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run subagent ToolRunner composition: %v: %s", err, output)
+	}
+	var result subagentProductionCompositionResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode subagent ToolRunner composition: %v: %s", err, output)
+	}
+	return result
+}
+
 func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -72,61 +125,13 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for subagent ToolRunner composition: %v", err)
-	}
-	server := grpc.NewServer()
-	bridgev1.RegisterAgentRuntimeBridgeServiceServer(server, wrapped)
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() {
-		server.Stop()
-		_ = listener.Close()
-	})
-
-	input, err := json.Marshal(map[string]any{
-		"bridgeAddress":   listener.Addr().String(),
-		"workspaceId":     "default",
-		"sessionId":       sessionID,
-		"sessionThreadId": threadID,
-		"bindingId":       bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
-		"taskName": taskName, "prompt": "complete the delegated task",
-	})
-	if err != nil {
-		t.Fatalf("encode subagent ToolRunner composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/subagent-production.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write subagent ToolRunner composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/subagent-production-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		var events, children, inbox int
-		_ = admin.QueryRowContext(context.Background(), `SELECT
-			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),
-			(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2),
-			(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1)`, sessionID, threadID).
-			Scan(&events, &children, &inbox)
-		t.Fatalf("run subagent ToolRunner composition: %v: %s; calls/events/children/inbox=%d/%d/%d/%d", err, output, wrapped.calls(), events, children, inbox)
-	}
-	var result struct {
-		ResultType          string            `json:"resultType"`
-		ProviderInvocations int               `json:"providerInvocations"`
-		ProviderContexts    []json.RawMessage `json:"providerContexts"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode subagent ToolRunner composition: %v: %s", err, output)
-	}
-	if result.ResultType != "observed" || result.ProviderInvocations != 2 || wrapped.calls() != 2 {
+	result := runSubagentProductionComposition(t, wrapped, sessionID, threadID, bindingID, 1, podUID, taskName, "complete the delegated task")
+	if result.ResultType != "observed" || result.ProviderInvocations != 3 || wrapped.calls() != 2 {
 		t.Fatalf("subagent ToolRunner result = %+v create calls=%d", result, wrapped.calls())
 	}
 
-	var childID, prefixEntries, publicInput string
-	var children, createOperations, toolUses, toolResults, deliveries int
+	var childID, prefixEntries, publicInput, receiptJSON, inboxID string
+	var children, createOperations, toolUses, toolResults, deliveries, openingSent, openingReceived, queuedJobs, reschedules int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT id FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'),
 		(SELECT entries_json FROM session_thread_context_prefixes WHERE workspace_id='default' AND session_id=$1 AND child_thread_id=(SELECT id FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent')),
@@ -135,12 +140,23 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_use' AND payload_json::jsonb->>'name'='spawn_agent'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'),
-		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail')`, sessionID, threadID).
-		Scan(&childID, &prefixEntries, &publicInput, &children, &createOperations, &toolUses, &toolResults, &deliveries); err != nil {
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_received'),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1 AND payload_json::jsonb->>'input_kind'='agent_mail'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_rescheduled'),
+		(SELECT result_json FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn'),
+		(SELECT runtime_input_id FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail')`, sessionID, threadID).
+		Scan(&childID, &prefixEntries, &publicInput, &children, &createOperations, &toolUses, &toolResults, &deliveries,
+			&openingSent, &openingReceived, &queuedJobs, &reschedules, &receiptJSON, &inboxID); err != nil {
 		t.Fatalf("read subagent ToolRunner durable census: %v", err)
 	}
-	if childID == "" || children != 1 || createOperations != 1 || toolUses != 1 || toolResults != 1 || deliveries != 1 {
-		t.Fatalf("subagent durable census child=%s children/ops/uses/results/deliveries=%d/%d/%d/%d/%d", childID, children, createOperations, toolUses, toolResults, deliveries)
+	if childID == "" || children != 1 || createOperations != 1 || toolUses != 1 || toolResults != 1 || deliveries != 1 || openingSent != 1 || openingReceived != 1 || queuedJobs != 1 || reschedules != 1 {
+		t.Fatalf("subagent durable census child=%s children/ops/uses/results/deliveries/sent/received/queue=%d/%d/%d/%d/%d/%d/%d/%d",
+			childID, children, createOperations, toolUses, toolResults, deliveries, openingSent, openingReceived, queuedJobs)
+	}
+	if !strings.Contains(receiptJSON, childID) || !strings.Contains(receiptJSON, inboxID) || !strings.Contains(receiptJSON, "initial_event_id") {
+		t.Fatalf("atomic subagent receipt/input identity = %s/%s", receiptJSON, inboxID)
 	}
 	if !strings.Contains(prefixEntries, "start a worker") || strings.Contains(prefixEntries, "call_subagent_production") {
 		t.Fatalf("subagent immutable prefix = %s", prefixEntries)
@@ -208,7 +224,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	client := startActorProductionBridge(t, runtime)
 	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	spawnRequest := &bridgev1.CreateSubagentThreadRequest{
-		Scope: parentScope, SourceToolUseEventId: spawnSourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all",
+		Scope: parentScope, SourceToolUseEventId: spawnSourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all", InitialPrompt: "inspect the target-owned durable envelope",
 	}
 	spawned, err := client.CreateSubagentThread(context.Background(), spawnRequest)
 	if err != nil || spawned.GetCommitted().GetChildThreadId() == "" {
@@ -237,7 +253,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	}
 	const repeatedSourceID = "evt_actor_production_spawn_repeated"
 	const repeatedRequestID = "mreq_actor_production_spawn_repeated"
-	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, repeatedSourceID, 2, "agent.tool_use",
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, repeatedSourceID, 3, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"`+taskName+`","agent_type":"worker","fork_turns":"all"},"evaluated_permission":"ask"}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
 		SET visibility='public',session_visible=true,model_request_id=$2
@@ -247,11 +263,11 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, repeatedRequestID, repeatedSourceID, "call_actor_production_spawn_repeated", "spawn_agent")
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, repeatedSourceID)
 	if repeated, err := client.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: parentScope, SourceToolUseEventId: repeatedSourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all",
+		Scope: parentScope, SourceToolUseEventId: repeatedSourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all", InitialPrompt: "inspect the target-owned durable envelope",
 	}); status.Code(err) != codes.AlreadyExists || repeated != nil {
 		t.Fatalf("new Tool identity with repeated task name = %#v/%v; want AlreadyExists", repeated, err)
 	}
-	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_actor_production_spawn_end", 3, "span.model_request_end",
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_actor_production_spawn_end", 4, "span.model_request_end",
 		`{"type":"span.model_request_end","model_request_id":"`+spawnRequestID+`","is_error":false}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET model_request_id=$2
 		WHERE workspace_id='default' AND session_id=$1 AND event_id='evt_actor_production_spawn_end'`, sessionID, spawnRequestID); err != nil {
@@ -274,7 +290,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		sessionID, childID, parentID).Scan(&replayPrefixEntries, &children, &operations, &createdEvents, &prefixes, &runtimeInputs, &queuedJobs); err != nil {
 		t.Fatalf("read replayed child creation census: %v", err)
 	}
-	if replayPrefixEntries != prefixEntries || children != 1 || operations != 1 || createdEvents != 1 || prefixes != 1 || runtimeInputs != 0 || queuedJobs != 0 {
+	if replayPrefixEntries != prefixEntries || children != 1 || operations != 1 || createdEvents != 1 || prefixes != 1 || runtimeInputs != 1 || queuedJobs != 1 {
 		t.Fatalf("replayed child prefix/census = %s children:%d operations:%d events:%d prefixes:%d inbox:%d queue:%d",
 			replayPrefixEntries, children, operations, createdEvents, prefixes, runtimeInputs, queuedJobs)
 	}
@@ -348,6 +364,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		SET status='leased',leased_by='actor-production',lease_token=$2,leased_at=clock_timestamp(),
 		    leased_until=clock_timestamp()+interval '1 minute',updated_at=clock_timestamp()
 		WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'
+		  AND payload_json::jsonb->>'input_kind'='interrupt_control'
 		  AND dedupe_key=$1
 		RETURNING id,partition_key,dedupe_key`,
 		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptInputID), interruptQueueJob.LeaseToken,

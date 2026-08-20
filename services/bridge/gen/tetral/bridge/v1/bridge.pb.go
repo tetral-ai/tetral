@@ -6971,6 +6971,7 @@ type CreateSubagentThreadRequest struct {
 	TaskName             string                 `protobuf:"bytes,3,opt,name=task_name,json=taskName,proto3" json:"task_name,omitempty"`
 	AgentType            string                 `protobuf:"bytes,4,opt,name=agent_type,json=agentType,proto3" json:"agent_type,omitempty"`
 	ForkTurns            string                 `protobuf:"bytes,5,opt,name=fork_turns,json=forkTurns,proto3" json:"fork_turns,omitempty"`
+	InitialPrompt        string                 `protobuf:"bytes,6,opt,name=initial_prompt,json=initialPrompt,proto3" json:"initial_prompt,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -7036,6 +7037,13 @@ func (x *CreateSubagentThreadRequest) GetAgentType() string {
 func (x *CreateSubagentThreadRequest) GetForkTurns() string {
 	if x != nil {
 		return x.ForkTurns
+	}
+	return ""
+}
+
+func (x *CreateSubagentThreadRequest) GetInitialPrompt() string {
+	if x != nil {
+		return x.InitialPrompt
 	}
 	return ""
 }
@@ -12319,7 +12327,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\ridle_event_id\x18\x01 \x01(\tR\vidleEventId\"9\n" +
 	"\x13FinishIdleDuplicate\x12\"\n" +
 	"\ridle_event_id\x18\x01 \x01(\tR\vidleEventId\"\x11\n" +
-	"\x0fFinishIdleStale\"\xe6\x01\n" +
+	"\x0fFinishIdleStale\"\x8d\x02\n" +
 	"\x1bCreateSubagentThreadRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x126\n" +
 	"\x18source_tool_use_event_id\x18\x02 \x01(\tR\x14sourceToolUseEventId\x12\x1b\n" +
@@ -12327,7 +12335,8 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\n" +
 	"agent_type\x18\x04 \x01(\tR\tagentType\x12\x1d\n" +
 	"\n" +
-	"fork_turns\x18\x05 \x01(\tR\tforkTurns\"\xcb\x01\n" +
+	"fork_turns\x18\x05 \x01(\tR\tforkTurns\x12%\n" +
+	"\x0einitial_prompt\x18\x06 \x01(\tR\rinitialPrompt\"\xcb\x01\n" +
 	"\x1cCreateSubagentThreadResponse\x12O\n" +
 	"\tcommitted\x18\x01 \x01(\v2/.tetral.bridge.v1.CreateSubagentThreadCommittedH\x00R\tcommitted\x12O\n" +
 	"\tduplicate\x18\x02 \x01(\v2/.tetral.bridge.v1.CreateSubagentThreadDuplicateH\x00R\tduplicateB\t\n" +

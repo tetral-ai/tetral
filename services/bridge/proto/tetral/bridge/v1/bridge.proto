@@ -698,6 +698,7 @@ message CreateSubagentThreadRequest {
   string task_name = 3;
   string agent_type = 4;
   string fork_turns = 5;
+  string initial_prompt = 6;
 }
 
 message CreateSubagentThreadResponse {

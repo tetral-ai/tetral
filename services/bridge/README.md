@@ -283,12 +283,15 @@ and active lifecycle facts directly from durable rows.
   evidence, marks those children terminated, and terminates the Session in the
   same transaction. The response returns only the declaring Thread's
   database-assigned stamps.
-- **Child creation authority.** `CreateSubagentThread` validates the exact
-  public `spawn_agent` Tool Use, its model-request Assistant message, declared
-  arguments, live parent scope, mutation barrier, and source-event idempotency.
-  The Tool Use may belong to an open provider request: Bridge snapshots the
-  currently provider-valid durable prefix and stores it with the child and
-  operation receipt in one transaction. Exact replay returns that child without
+- **Child creation authority.** Runtime interprets `spawn_agent` and declares
+  normalized child metadata plus the bounded initial prompt once.
+  `CreateSubagentThread` verifies the exact public executable Tool route, live
+  parent scope, mutation barrier, bounds, and source-event idempotency without
+  parsing Tool business arguments. The Tool Use may belong to an open provider
+  request: Bridge snapshots its durable Assistant boundary and commits the
+  child, immutable prefix, opening sent/received Events, target Inbox/Queue
+  custody, and operation receipt in one transaction. Exact replay returns that
+  committed lineage without requiring the route to remain executable or
   rereading later parent Message growth; a new Tool Use identity still crosses
   task-name uniqueness rather than aliasing the earlier receipt.
 - **Lifecycle.** At most one terminal end per `model_request_id` (pod close and

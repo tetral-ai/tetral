@@ -174,13 +174,12 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	request := func(sourceID, taskName string, candidateScope *bridgev1.RuntimeScope) *bridgev1.CreateSubagentThreadRequest {
 		return &bridgev1.CreateSubagentThreadRequest{
-			Scope: candidateScope, SourceToolUseEventId: sourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all",
+			Scope: candidateScope, SourceToolUseEventId: sourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all", InitialPrompt: "perform the delegated task",
 		}
 	}
 	for name, candidate := range map[string]*bridgev1.CreateSubagentThreadRequest{
 		"wrong Tool name":            request("evt_live_spawn_fences_wrong_name", "worker", scope),
 		"wrong Tool type":            request("evt_live_spawn_fences_wrong_type", "worker", scope),
-		"conflicting arguments":      request(validID, "different-worker", scope),
 		"stale scope":                request(validID, "worker", bridgeAPIScope(sessionID, parentID, bindingID, 2, podUID)),
 		"source from another Thread": request("evt_live_spawn_fences_other_thread", "worker", scope),
 	} {
@@ -201,7 +200,16 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 		t.Fatalf("denied spawn authorization = %#v/%v; want FailedPrecondition", response, err)
 	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses
-		SET decision='allow',updated_at=clock_timestamp()
+		SET status='cancelled',decision=NULL,updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, parentID, validID); err != nil {
+		t.Fatalf("cancel spawn authorization: %v", err)
+	}
+	if response, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("cancelled spawn authorization = %#v/%v; want FailedPrecondition", response, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses
+		SET status='resolving',decision='allow',updated_at=clock_timestamp()
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
 		sessionID, parentID, validID); err != nil {
 		t.Fatalf("allow spawn authorization: %v", err)
@@ -212,8 +220,9 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, validID); err != nil {
 		t.Fatalf("mutate provider-visible spawn declaration: %v", err)
 	}
-	if response, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); status.Code(err) != codes.AlreadyExists || response != nil {
-		t.Fatalf("conflicting provider/public spawn declaration = %#v/%v; want AlreadyExists", response, err)
+	created, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope))
+	if err != nil || created.GetCommitted().GetChildThreadId() == "" {
+		t.Fatalf("Runtime-owned spawn declaration = %#v/%v; want committed", created, err)
 	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
 		SET projection_json=jsonb_set(projection_json::jsonb,'{provider_input}',
@@ -225,18 +234,20 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, parentID); err != nil {
 		t.Fatalf("close parent before admission: %v", err)
 	}
-	if response, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); err == nil || response != nil {
-		t.Fatalf("closed parent admission = %#v/%v; want rejection", response, err)
+	if replayed, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); err != nil || replayed.GetDuplicate().GetChildThreadId() != created.GetCommitted().GetChildThreadId() {
+		t.Fatalf("closed-parent exact creation replay = %#v/%v; want duplicate", replayed, err)
 	}
-	var children, operations int
+	var children, operations, initialInputs, queueJobs int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='subagent' AND task_name='worker'),
-		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn')`,
-		sessionID).Scan(&children, &operations); err != nil {
-		t.Fatalf("read rejected spawn mutation census: %v", err)
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail'),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1)`,
+		sessionID).Scan(&children, &operations, &initialInputs, &queueJobs); err != nil {
+		t.Fatalf("read spawn mutation census: %v", err)
 	}
-	if children != 0 || operations != 0 {
-		t.Fatalf("rejected spawn mutation census children/operations = %d/%d", children, operations)
+	if children != 1 || operations != 1 || initialInputs != 1 || queueJobs != 1 {
+		t.Fatalf("spawn mutation census children/operations/inputs/queue = %d/%d/%d/%d", children, operations, initialInputs, queueJobs)
 	}
 }
 
@@ -278,7 +289,7 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 				}
 			}
 			created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-				Scope: scope, SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), TaskName: "worker", AgentType: "worker", ForkTurns: "all",
+				Scope: scope, SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), TaskName: "worker", AgentType: "worker", ForkTurns: "all", InitialPrompt: "perform the delegated task",
 			})
 			if err != nil || created.GetCommitted().GetChildThreadId() == "" {
 				t.Fatalf("create child from %s = %#v/%v", name, created, err)
@@ -592,7 +603,7 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		t.Fatalf("interrupted-source mail error = %v; want interrupt barrier stale", err)
 	}
 	if _, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", ForkTurns: "all",
+		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", ForkTurns: "all", InitialPrompt: "must be stale",
 	}); !isSessionInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child error = %v; want interrupt barrier stale", err)
 	}

@@ -898,6 +898,7 @@ export class RuntimePodToolRunner {
 				taskName,
 				agentType,
 				forkTurns,
+				initialPrompt: prompt,
 			};
 			const createResponse = await this.replayActorTransport(
 				request.abortSignal,
@@ -920,8 +921,9 @@ export class RuntimePodToolRunner {
 			if (childThreadId === undefined || childThreadId.length === 0) {
 				throw new BridgeToolResultContractError("CreateSubagentThread");
 			}
+			durablyDeliveredThreadId = childThreadId;
 			throwIfToolRouteAborted(request.abortSignal);
-			const preloaded = await preloadChildThread(
+			await preloadChildThread(
 				host,
 				request,
 				parentScope,
@@ -935,39 +937,9 @@ export class RuntimePodToolRunner {
 					status: "idle",
 				},
 			);
-			if (!preloaded.ok && preloaded.reason !== "thread_busy") {
-				return toolFailure(
-					request,
-					`Sub-agent context preload failed: ${preloaded.reason}.`,
-					preloaded.reason === "local_session_capacity_exceeded",
-				);
-			}
-			const delivery = deliveryIdentity(
-				request.toolUseEventId,
-				childThreadId,
-				0,
-			);
-			const deliveryRequest: DeliverInterAgentMailRequest = {
-				scope: parentScope,
-				deliveryId: delivery.deliveryId,
-				targetThreadId: childThreadId,
-				sourceToolUseEventId: request.toolUseEventId,
-				content: prompt,
-			};
-			const delivered = await this.replayActorTransport(
-				request.abortSignal,
-				async () =>
-					await deliverInterAgentMail(
-						this.bridgeClient,
-						deliveryRequest,
-						metadata,
-						request.abortSignal,
-					),
-			);
-			if (!exactlyOneDefined(delivered.committed, delivered.duplicate)) {
-				throw new BridgeToolResultContractError("DeliverInterAgentMail");
-			}
-			durablyDeliveredThreadId = childThreadId;
+			// Creation already committed the opening input. Preload is a hot-path
+			// optimization; Queue custody remains the durable delivery owner when
+			// this pod cannot host the child immediately.
 			return completedText(
 				`task_name: ${taskName}\nsession_thread_id: ${childThreadId}\nstatus: delivered`,
 			);

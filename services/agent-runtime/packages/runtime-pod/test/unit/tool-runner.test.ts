@@ -2219,7 +2219,7 @@ describe("RuntimePodToolRunner", () => {
 		});
 	});
 
-	test("spawns a sub-agent by creating the child and handing its stored instruction to durable delivery", async () => {
+	test("spawns a sub-agent by atomically declaring the child and its opening input", async () => {
 		const bridge = new RecordingBridgeClient();
 		const subAgentHost = new RecordingSubAgentHost();
 		const runner = makeRunner({ bridge, subAgentHost });
@@ -2240,16 +2240,10 @@ describe("RuntimePodToolRunner", () => {
 				agentType: "research",
 				sourceToolUseEventId: "sevt_tool_1",
 				forkTurns: "none",
+				initialPrompt: "work on this",
 			}),
 		]);
-		expect(bridge.deliverInterAgentMailRequests).toEqual([
-			expect.objectContaining({
-				deliveryId: expect.any(String),
-				targetThreadId: "thr_child_1",
-				sourceToolUseEventId: "sevt_tool_1",
-				content: "work on this",
-			}),
-		]);
+		expect(bridge.deliverInterAgentMailRequests).toEqual([]);
 		expect(subAgentHost.actions).toEqual(["preload"]);
 		expect(subAgentHost.preloaded).toEqual([
 			expect.objectContaining({
@@ -2461,7 +2455,7 @@ describe("RuntimePodToolRunner", () => {
 		).toMatchObject({ type: "error" });
 	});
 
-	test("durable sub-agent delivery returns delivered without enqueueing child input", async () => {
+	test("atomic sub-agent creation returns delivered without enqueueing child input in process", async () => {
 		const bridge = new RecordingBridgeClient();
 		const subAgentHost = new RecordingSubAgentHost();
 		const runner = makeRunner({ bridge, subAgentHost });
@@ -2481,16 +2475,16 @@ describe("RuntimePodToolRunner", () => {
 				text: expect.stringContaining("status: delivered"),
 			}),
 		});
-		expect(bridge.deliverInterAgentMailRequests).toHaveLength(1);
+		expect(bridge.createSubagentThreadRequests[0]?.initialPrompt).toBe(
+			"work on this",
+		);
+		expect(bridge.deliverInterAgentMailRequests).toHaveLength(0);
 		expect(subAgentHost.enqueued).toEqual([]);
 	});
 
-	test("replays ambiguous child creation and mail delivery with identical durable identities", async () => {
+	test("replays ambiguous atomic child creation with an identical declaration", async () => {
 		const bridge = new RecordingBridgeClient();
 		bridge.createSubagentThreadErrors.push(grpcError(GrpcStatus.UNAVAILABLE));
-		bridge.deliverInterAgentMailErrors.push(
-			grpcError(GrpcStatus.DEADLINE_EXCEEDED),
-		);
 		const runner = makeRunner({
 			bridge,
 			subAgentHost: new RecordingSubAgentHost(),
@@ -2509,10 +2503,7 @@ describe("RuntimePodToolRunner", () => {
 		expect(bridge.createSubagentThreadRequests[1]).toEqual(
 			bridge.createSubagentThreadRequests[0],
 		);
-		expect(bridge.deliverInterAgentMailRequests).toHaveLength(2);
-		expect(bridge.deliverInterAgentMailRequests[1]).toEqual(
-			bridge.deliverInterAgentMailRequests[0],
-		);
+		expect(bridge.deliverInterAgentMailRequests).toHaveLength(0);
 	});
 
 	test("replays ambiguous child interrupt admission and await with identical operation identities", async () => {

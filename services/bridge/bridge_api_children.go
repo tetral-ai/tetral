@@ -35,8 +35,8 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "create_subagent_thread", request.GetSourceToolUseEventId(), phase, resultErr)
 	}()
-	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorTaskName(request.GetTaskName()) {
-		return nil, status.Error(codes.InvalidArgument, "sub-agent source Tool, task name, and scope are required")
+	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorTaskName(request.GetTaskName()) || !validActorInitialPrompt(request.GetInitialPrompt()) {
+		return nil, status.Error(codes.InvalidArgument, "sub-agent source Tool, task name, initial prompt, and scope are required")
 	}
 	switch request.GetAgentType() {
 	case "general", "research", "worker":
@@ -46,7 +46,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 	if !validForkTurns(request.GetForkTurns()) {
 		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent fork_turns")
 	}
-	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetForkTurns())
+	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetForkTurns(), request.GetInitialPrompt())
 	now := s.now()
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.create_subagent_thread", func(tx *dbconnect.Tx) error {
@@ -76,7 +76,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := requireOpenChildParentTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
 		}
-		prefix, err := selectSubagentPrefixTx(ctx, tx, request)
+		prefix, err := selectSubagentPrefixTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), request.GetForkTurns())
 		if err != nil {
 			return err
 		}
@@ -88,6 +88,19 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err != nil {
 			return err
 		}
+		envelope, err := appendDeclaredSubagentInitialEnvelopeTx(
+			ctx, tx, request.GetScope(), childThreadID, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetInitialPrompt(), now,
+		)
+		if err != nil {
+			return err
+		}
+		initialEventID, err := appendDeclaredSubagentInitialReceivedEventTx(ctx, tx, scopeForThread(request.GetScope(), childThreadID), envelope, now)
+		if err != nil {
+			return err
+		}
+		result.InitialDeliveryID = envelope.DeliveryID
+		result.InitialRuntimeInputID = completionRuntimeInputID(envelope.DeliveryID)
+		result.InitialEventID = initialEventID
 		if err := persistCreatedChildOperationTx(ctx, tx, request.GetScope(), childCreateSourceSubagent, request.GetSourceToolUseEventId(), requestHash, result, now); err != nil {
 			return err
 		}
@@ -1492,49 +1505,37 @@ func requireOpenChildParentTx(ctx context.Context, tx *dbconnect.Tx, scope *brid
 	return nil
 }
 
-func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CreateSubagentThreadRequest) (*threadContextPrefixEnvelope, error) {
-	tool, err := loadDurableToolExecutionTx(
-		ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "agent.tool_use", true,
-	)
-	if err != nil {
+// selectSubagentPrefixTx snapshots the parent history at the exact source
+// event's Assistant boundary. Runtime owns spawn argument interpretation and
+// declares the normalized fork instruction; Bridge does not decode or compare
+// provider-visible Tool input.
+func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceToolUseEventID, forkTurns string) (*threadContextPrefixEnvelope, error) {
+	var modelRequestID string
+	if err := tx.QueryRow(ctx, `SELECT model_request_id
+		FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4
+		 AND type='agent.tool_use' AND visibility='public' AND model_request_id IS NOT NULL
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceToolUseEventID).Scan(&modelRequestID); dbconnect.IsNoRows(err) {
+		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool boundary is missing")
+	} else if err != nil {
 		return nil, err
-	}
-	if tool.ToolName != "spawn_agent" {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool Use is invalid")
-	}
-	providerInputJSON, err := canonicalRunToolJSON(tool.ProviderInputJSON)
-	if err != nil || providerInputJSON != tool.PublicInputJSON {
-		return nil, status.Error(codes.AlreadyExists, "sub-agent public Tool declaration conflicts with provider context")
-	}
-	var input struct {
-		TaskName  string `json:"task_name"`
-		AgentType string `json:"agent_type"`
-		ForkTurns string `json:"fork_turns"`
-	}
-	if err := json.Unmarshal([]byte(providerInputJSON), &input); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool input is malformed")
-	}
-	input.AgentType = defaultString(input.AgentType, "general")
-	input.ForkTurns = defaultString(input.ForkTurns, "all")
-	if input.TaskName != request.GetTaskName() || input.AgentType != request.GetAgentType() || input.ForkTurns != request.GetForkTurns() {
-		return nil, status.Error(codes.AlreadyExists, "sub-agent declaration conflicts with its durable Tool Use")
 	}
 	var boundarySequence int64
 	if err := tx.QueryRow(ctx, `SELECT sequence FROM session_messages
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), tool.ModelRequestID,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
 	).Scan(&boundarySequence); dbconnect.IsNoRows(err) {
 		return nil, status.Error(codes.FailedPrecondition, "sub-agent source request has no durable Assistant context")
 	} else if err != nil {
 		return nil, err
 	}
-	entries, kinds, err := loadDurablePrefixEntriesThroughTx(ctx, tx, request.GetScope(), boundarySequence-1)
+	entries, kinds, err := loadDurablePrefixEntriesThroughTx(ctx, tx, scope, boundarySequence-1)
 	if err != nil {
 		return nil, err
 	}
-	entries = selectForkEntries(entries, kinds, request.GetForkTurns())
+	entries = selectForkEntries(entries, kinds, forkTurns)
 	return &threadContextPrefixEnvelope{
-		SourceParentThreadID: request.GetScope().GetSessionThreadId(), ParentBoundaryEventID: request.GetSourceToolUseEventId(), Entries: entries,
+		SourceParentThreadID: scope.GetSessionThreadId(), ParentBoundaryEventID: sourceToolUseEventID, Entries: entries,
 	}, nil
 }
 
@@ -1746,6 +1747,10 @@ func validForkTurns(value string) bool {
 
 func validActorTaskName(value string) bool {
 	return value == strings.TrimSpace(value) && value != "" && utf8.ValidString(value) && len([]byte(value)) <= actorTaskNameMaxBytes
+}
+
+func validActorInitialPrompt(value string) bool {
+	return value == strings.TrimSpace(value) && value != "" && utf8.ValidString(value) && len([]byte(value)) <= AgentMailContentMaxBytes
 }
 
 func validActorIdentity(value string) bool {

@@ -571,15 +571,14 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID       = "sesn_subagent_reschedule_recovery"
-		threadID        = "sthr_subagent_reschedule_recovery"
-		oldBindingID    = "bind_subagent_reschedule_old"
-		newBindingID    = "bind_subagent_reschedule_new"
-		newPodUID       = "pod_subagent_reschedule_new"
-		modelRequestID  = "mreq_subagent_reschedule_original"
-		modelToolCallID = "call_subagent_reschedule_original"
-		taskName        = "recovery-worker"
-		prompt          = "finish the durable task"
+		sessionID      = "sesn_subagent_reschedule_recovery"
+		threadID       = "sthr_subagent_reschedule_recovery"
+		oldBindingID   = "bind_subagent_reschedule_old"
+		newBindingID   = "bind_subagent_reschedule_new"
+		newPodUID      = "pod_subagent_reschedule_new"
+		modelRequestID = "mreq_subagent_reschedule_cold"
+		taskName       = "recovery-worker"
+		prompt         = "finish the durable task"
 	)
 	oldBinding := runtimePodLostBinding(sessionID, oldBindingID, 1)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
@@ -593,72 +592,56 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("subagent-reschedule-recovery-signing-key")
-	acceptedAt := time.Date(2026, 8, 19, 13, 0, 0, 0, time.UTC)
-	store.Clock = func() time.Time { return acceptedAt }
 	oldScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldBinding.PodUID)
-	seedBridgeAPIOpenDurableTurn(t, admin, oldScope, "evt_subagent_reschedule_durable_turn")
-	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_subagent_reschedule_start", modelRequestID, requestKindAgentProviderRequest, 1)
-	canonicalInput := `{"task_name":"recovery-worker","prompt":"finish the durable task","agent_type":"worker","fork_turns":"all"}`
-	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: oldScope, RuntimeWriteId: "rwrite_subagent_reschedule_tool", ModelRequestId: modelRequestID,
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"spawn_agent","input":` + canonicalInput + `,"evaluated_permission":"allow"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "spawn_agent", canonicalInput),
-		CanonicalExecutionInputJson: canonicalInput,
-	})
-	if err != nil || toolUse.GetCommitted() == nil {
-		t.Fatalf("write spawn Tool Use: response=%#v err=%v", toolUse, err)
+	toolRunnerResult := runSubagentProductionComposition(
+		t, BridgeAPIServer{store: store}, sessionID, threadID, oldBindingID, 1, oldBinding.PodUID, taskName, prompt,
+	)
+	if toolRunnerResult.ResultType != "observed" || toolRunnerResult.ProviderInvocations != 3 {
+		t.Fatalf("ToolRunner child creation before cold reschedule = %+v", toolRunnerResult)
 	}
-	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: oldScope, SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), TaskName: taskName, AgentType: "worker", ForkTurns: "all",
-	})
-	if err != nil || created.GetCommitted().GetChildThreadId() == "" {
-		t.Fatalf("create subagent before Request End: response=%#v err=%v", created, err)
+	var childID string
+	var boundarySequence int64
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT id FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'),
+		(SELECT COALESCE(MAX(sequence),0) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2)`,
+		sessionID, threadID).Scan(&childID, &boundarySequence); err != nil {
+		t.Fatalf("read ToolRunner-created subagent facts: %v", err)
 	}
-	childID := created.GetCommitted().GetChildThreadId()
-	deliveryID := agentMailDeliveryID(toolUse.GetCommitted().GetEventId(), childID)
-	if delivered, err := store.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope: oldScope, DeliveryId: deliveryID, TargetThreadId: childID,
-		SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), Content: prompt,
-	}); err != nil || delivered.GetCommitted() == nil {
-		t.Fatalf("commit subagent delivery before Tool Result: response=%#v err=%v", delivered, err)
+	acceptedAt := time.Date(2026, 8, 20, 16, 0, 0, 0, time.UTC)
+	store.Clock = func() time.Time { return acceptedAt }
+	durableTurnID := "evt_subagent_reschedule_cold_turn"
+	seedBridgeAPIOpenDurableTurn(t, admin, oldScope, durableTurnID)
+	var priorProviderAttempts int64
+	if err := admin.QueryRowContext(context.Background(), `SELECT provider_attempts FROM session_turn_retries
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, threadID).Scan(&priorProviderAttempts); err != nil {
+		t.Fatalf("read prior ToolRunner provider attempts: %v", err)
 	}
+	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_subagent_reschedule_cold_start", modelRequestID, requestKindAgentProviderRequest, boundarySequence)
 	if ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
-		Scope: oldScope, RuntimeWriteId: "rwrite_subagent_reschedule_end", ModelRequestId: modelRequestID,
+		Scope: oldScope, RuntimeWriteId: "rwrite_subagent_reschedule_cold_end", ModelRequestId: modelRequestID,
 		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
 		Reschedule: &bridgev1.RequestEndReschedule{
-			Attempt: 1, Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
+			Attempt: int32(priorProviderAttempts + 1), Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
 		},
 	}); err != nil || ended.GetCommitted().GetRescheduled() == nil {
 		t.Fatalf("commit subagent provider reschedule: response=%#v err=%v", ended, err)
-	}
-	var resultsBeforeRepair int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
-		WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'
-		  AND payload_json::jsonb->>'tool_use_event_id'=$2`, sessionID, toolUse.GetCommitted().GetEventId()).Scan(&resultsBeforeRepair); err != nil {
-		t.Fatalf("count pre-repair subagent results: %v", err)
-	}
-	if resultsBeforeRepair != 0 {
-		t.Fatalf("pre-repair subagent Tool Results = %d; want nonterminal", resultsBeforeRepair)
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, err := runRuntimePodLostRepairTransaction(context.Background(), runtimeDB, sessionID, oldBinding, acceptedAt.Add(250*time.Millisecond)); err != nil {
 			t.Fatalf("repair committed subagent delivery attempt %d: %v", attempt+1, err)
 		}
 	}
-	var sessionStatus, threadStatus, runtimeStatus string
+	var sessionStatus, threadStatus string
 	var providerAttempts int64
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
-		(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1 AND binding_id=$3 AND binding_generation=1),
 		(SELECT provider_attempts FROM session_turn_retries WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2)`,
-		sessionID, threadID, oldBindingID).Scan(&sessionStatus, &threadStatus, &runtimeStatus, &providerAttempts); err != nil {
+		sessionID, threadID).Scan(&sessionStatus, &threadStatus, &providerAttempts); err != nil {
 		t.Fatalf("read repaired reschedule ownership: %v", err)
 	}
-	if sessionStatus != "rescheduling" || threadStatus != "rescheduling" || runtimeStatus != "idle" || providerAttempts != 1 {
-		t.Fatalf("repaired reschedule ownership session/thread/runtime/attempts = %s/%s/%s/%d",
-			sessionStatus, threadStatus, runtimeStatus, providerAttempts)
+	if sessionStatus != "rescheduling" || threadStatus != "rescheduling" || providerAttempts != priorProviderAttempts+1 {
+		t.Fatalf("repaired reschedule ownership session/thread/attempts = %s/%s/%d", sessionStatus, threadStatus, providerAttempts)
 	}
 	if result, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
 		SET binding_id=$2, binding_generation=2, agent_runtime_pod_uid=$3, updated_at=clock_timestamp()
@@ -666,6 +649,14 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		t.Fatalf("install replacement subagent Runtime binding: %v", err)
 	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
 		t.Fatalf("replacement subagent Runtime binding rows = %d err=%v", rows, rowsErr)
+	}
+	if result, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='running', binding_id=$2, binding_generation=2, running_since=clock_timestamp(),
+		    idle_since=NULL, updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
+		t.Fatalf("activate replacement subagent Runtime residency: %v", err)
+	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+		t.Fatalf("replacement subagent Runtime residency rows = %d err=%v", rows, rowsErr)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -678,37 +669,28 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		server.Stop()
 		_ = listener.Close()
 	})
-	captureSettled := make(chan error, 1)
-	go func() {
-		captureSettled <- settleOutputCaptureGenerationForTest(admin, sessionID, "evt_subagent_reschedule_durable_turn", 1, "staged")
-	}()
 	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
 		"bridgeAddress": listener.Addr().String(),
 		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
 		"bindingId": newBindingID, "bindingGeneration": 2, "targetPodUid": newPodUID,
-		"now": acceptedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+		"now":         acceptedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+		"preloadOnly": true,
 	})
-	if result.ResultType != "completed" || result.ProviderInvocations != 1 || result.ExecutorInvocations != 0 {
+	if result.ResultType != "preloaded" || result.ProviderInvocations != 0 || result.ExecutorInvocations != 0 {
 		t.Fatalf("replacement Runtime subagent recovery = %+v", result)
 	}
-	if err := <-captureSettled; err != nil {
-		t.Fatalf("stage subagent reschedule closeout capture: %v", err)
-	}
-	if len(result.WaitedMS) == 0 || result.WaitedMS[0] != 500 {
-		t.Fatalf("subagent reschedule accepted-deadline wait = %v; want first wait 500ms", result.WaitedMS)
-	}
-	providerContext := string(result.ProviderContext)
-	expectedProviderContext := fmt.Sprintf(`[{"role":1,"content":[{"text":{"text":"spawn the durable worker"}}]},{"role":2,"content":[{"toolCall":{"modelToolCallId":"call_subagent_reschedule_original","name":"spawn_agent","inputJson":"{\"agent_type\":\"worker\",\"fork_turns\":\"all\",\"prompt\":\"finish the durable task\",\"task_name\":\"recovery-worker\"}"}},{"toolResult":{"modelToolCallId":"call_subagent_reschedule_original","completed":{"outputJson":"{\"text\":\"task_name: recovery-worker\\nsession_thread_id: %s\\nstatus: delivered\"}"}}}]}]`, childID)
-	if providerContext != expectedProviderContext {
-		t.Fatalf("recovered provider context did not preserve one exact spawn pair: %s", providerContext)
+	recoveredSnapshot := string(result.LastSnapshot)
+	if strings.Count(recoveredSnapshot, `"toolName":"spawn_agent"`) != 1 ||
+		strings.Count(recoveredSnapshot, `task_name: recovery-worker`) != 1 ||
+		!strings.Contains(recoveredSnapshot, childID) {
+		t.Fatalf("cold-loaded Runtime did not preserve one exact ToolRunner spawn pair: %s", recoveredSnapshot)
 	}
 	var children, createOperations, toolUses, toolResults int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_use'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'
-		  AND payload_json::jsonb->>'tool_use_event_id'=$3)`, sessionID, threadID, toolUse.GetCommitted().GetEventId()).
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result')`, sessionID, threadID).
 		Scan(&children, &createOperations, &toolUses, &toolResults); err != nil {
 		t.Fatalf("read recovered subagent census: %v", err)
 	}

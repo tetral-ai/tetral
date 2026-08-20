@@ -872,6 +872,7 @@ export interface CreateSubagentThreadRequest {
   taskName: string;
   agentType: string;
   forkTurns: string;
+  initialPrompt: string;
 }
 
 export interface CreateSubagentThreadResponse {
@@ -10736,7 +10737,7 @@ export const FinishIdleStale: MessageFns<FinishIdleStale> = {
 };
 
 function createBaseCreateSubagentThreadRequest(): CreateSubagentThreadRequest {
-  return { scope: undefined, sourceToolUseEventId: "", taskName: "", agentType: "", forkTurns: "" };
+  return { scope: undefined, sourceToolUseEventId: "", taskName: "", agentType: "", forkTurns: "", initialPrompt: "" };
 }
 
 export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest> = {
@@ -10755,6 +10756,9 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     }
     if (message.forkTurns !== "") {
       writer.uint32(42).string(message.forkTurns);
+    }
+    if (message.initialPrompt !== "") {
+      writer.uint32(50).string(message.initialPrompt);
     }
     return writer;
   },
@@ -10806,6 +10810,14 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
           message.forkTurns = reader.string();
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.initialPrompt = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -10838,6 +10850,11 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
         : isSet(object.fork_turns)
         ? globalThis.String(object.fork_turns)
         : "",
+      initialPrompt: isSet(object.initialPrompt)
+        ? globalThis.String(object.initialPrompt)
+        : isSet(object.initial_prompt)
+        ? globalThis.String(object.initial_prompt)
+        : "",
     };
   },
 
@@ -10858,6 +10875,9 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     if (message.forkTurns !== "") {
       obj.forkTurns = message.forkTurns;
     }
+    if (message.initialPrompt !== "") {
+      obj.initialPrompt = message.initialPrompt;
+    }
     return obj;
   },
 
@@ -10873,6 +10893,7 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     message.taskName = object.taskName ?? "";
     message.agentType = object.agentType ?? "";
     message.forkTurns = object.forkTurns ?? "";
+    message.initialPrompt = object.initialPrompt ?? "";
     return message;
   },
 };

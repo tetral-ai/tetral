@@ -50,7 +50,7 @@ const tracedWriter = {
 		const result = await writer.writeRequestEnd(...args);
 		if (result.ok && result.type !== "stale") {
 			requestEndCount += 1;
-			if (requestEndCount === 2) resolveSecondRequestEnd();
+			if (requestEndCount === 3) resolveSecondRequestEnd();
 		}
 		return result;
 	},
@@ -81,6 +81,7 @@ const session = new ThreadRuntime({
 let providerInvocations = 0;
 const providerRequests: LLMRequest[] = [];
 let nextId = 0;
+let elapsedMs = 0;
 const llmService = {
 	stream: (request: LLMRequest) => {
 		providerInvocations += 1;
@@ -104,6 +105,18 @@ const llmService = {
 				},
 				{ type: "finish" as const, finishReason: "tool-calls" as const },
 			]);
+		}
+		if (providerInvocations === 2) {
+			return Stream.fail({
+				type: "llm-service" as const,
+				error: {
+					type: "runtime" as const,
+					code: "gateway_stream_error" as const,
+					message: "Gateway stream failed after atomic child creation.",
+					retryable: true,
+					fatal: false,
+				},
+			});
 		}
 		return Stream.fromIterable([
 			{ type: "text-start" as const, id: "subagent-complete" },
@@ -155,22 +168,15 @@ const runFiber = Effect.runFork(
 					}),
 					runTool: runner.runTool.bind(runner),
 					runtime: {
-						now: () => "2026-08-20T00:00:00.000Z",
-						monotonicMs: () => 0,
+						now: () =>
+							new Date(Date.parse("2026-08-20T00:00:00.000Z") + elapsedMs).toISOString(),
+						monotonicMs: () => elapsedMs,
 						createId: (prefix) => `${prefix}_subagent_production_${++nextId}`,
-						sleep: async (durationMs, signal) =>
-							await new Promise<boolean>((resolve) => {
-								const timer = setTimeout(() => resolve(true), durationMs);
-								const abort = () => {
-									clearTimeout(timer);
-									resolve(false);
-								};
-								if (signal.aborted) {
-									abort();
-									return;
-								}
-								signal.addEventListener("abort", abort, { once: true });
-							}),
+						sleep: async (durationMs, signal) => {
+							if (signal.aborted) return false;
+							elapsedMs += durationMs;
+							return true;
+						},
 					},
 				},
 			),
