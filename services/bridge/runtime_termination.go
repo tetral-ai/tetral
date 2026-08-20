@@ -649,7 +649,7 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 	// replay. The terminal sessions.status value gates future input; a null
 	// cleanup_after prevents the ordinary idle TTL owner from claiming a
 	// terminal Session that no longer has hot Runtime work.
-	_, err = tx.Exec(ctx,
+	runtimeStatusResult, err := tx.Exec(ctx,
 		`UPDATE session_runtime_status
 		    SET status = 'idle',
 		        status_event_id = $3,
@@ -668,6 +668,9 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 		scope.GetWorkspaceId(), scope.GetSessionId(), statusStamp.EventID, now)
 	if err != nil {
 		return runtimeTerminationEventFact{}, err
+	}
+	if !rowsAffected(runtimeStatusResult) {
+		return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "runtime residency closeout is stale")
 	}
 	return statusStamp, nil
 }

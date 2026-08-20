@@ -100,6 +100,25 @@ func TestRuntimeContextDeltaEnforcesExactJSONByteBounds(t *testing.T) {
 	}
 }
 
+func TestRuntimeToolProjectionEnforcesCanonicalExecutionInputBound(t *testing.T) {
+	delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{
+		Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
+			ModelToolCallId: "call", ToolName: "apply_patch", ProviderInputJson: `"patch"`,
+		}},
+	}}}
+	exact := `{"patch":"` + strings.Repeat("x", runtimeToolInputJSONMaxBytes-len(`{"patch":""}`)) + `"}`
+	if len(exact) != runtimeToolInputJSONMaxBytes {
+		t.Fatalf("exact canonical execution input bytes = %d", len(exact))
+	}
+	if _, err := runtimeToolProjectionFromContextDelta("agent.tool_use", delta, exact); err != nil {
+		t.Fatalf("exact canonical execution input rejected: %v", err)
+	}
+	over := `{"patch":"` + strings.Repeat("x", runtimeToolInputJSONMaxBytes-len(`{"patch":""}`)+1) + `"}`
+	if _, err := runtimeToolProjectionFromContextDelta("agent.tool_use", delta, over); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("oversized canonical execution input error = %v; want InvalidArgument", err)
+	}
+}
+
 func TestRuntimeContextTextAndIdentifiersMatchGatewayByteBounds(t *testing.T) {
 	for _, test := range []struct {
 		name  string

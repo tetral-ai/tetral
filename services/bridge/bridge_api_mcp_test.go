@@ -1109,6 +1109,9 @@ func TestPostgreSQLBridgeAPIStoreMCPClaimEnforcesDurablePermissionHandoff(t *tes
 				t.Fatalf("stamp MCP permission model request: %v", err)
 			}
 			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "github_search")
+			if testCase.evaluatedPermission == "allow" {
+				seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+			}
 			if testCase.approvalStatus != "" {
 				var approvalDecision any
 				if testCase.approvalDecision != "" {

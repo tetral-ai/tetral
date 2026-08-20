@@ -196,6 +196,13 @@ export function deriveThreadTurnDecision(
 		};
 	}
 	if (checkpoint.terminalCloseout !== undefined) {
+		const acceptedInput = commitAcceptedInputDecision(
+			checkpoint,
+			acceptedInputIds,
+		);
+		if (acceptedInput !== undefined) {
+			return acceptedInput;
+		}
 		return { state: { state: "idle" }, action: { action: "await_input" } };
 	}
 

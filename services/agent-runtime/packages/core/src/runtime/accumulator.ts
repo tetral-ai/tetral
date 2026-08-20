@@ -1131,8 +1131,6 @@ function toolUseSessionEvent(
 	permission: "allow" | "ask" | "deny",
 	toolEvent: PublicToolEvent,
 ): SessionEventWriterAppendEvent {
-	if (!isRuntimeJsonObject(input))
-		throw new Error("public Tool input must be an object");
 	return toolEvent.kind === "mcp"
 		? SessionEventWriterAppendEventSchema.parse({
 				type: "agent.mcp_tool_use",
@@ -1147,17 +1145,6 @@ function toolUseSessionEvent(
 				input,
 				evaluated_permission: permission,
 			});
-}
-
-function isRuntimeJsonObject(
-	value: RuntimeJsonValue,
-): value is { readonly [key: string]: RuntimeJsonValue } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		!Array.isArray(value) &&
-		Object.getPrototypeOf(value) === Object.prototype
-	);
 }
 
 function terminalToolPart(

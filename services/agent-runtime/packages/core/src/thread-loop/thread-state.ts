@@ -1030,6 +1030,10 @@ export class ThreadState {
 		this.#threadProcessor?.finishRunBoundary();
 	}
 
+	blockAcceptedInputUntilRunExit(): void {
+		this.#threadProcessor?.blockAcceptedInputUntilRunExit();
+	}
+
 	userInterruptRequested(): boolean {
 		return this.#userInterrupt !== undefined;
 	}

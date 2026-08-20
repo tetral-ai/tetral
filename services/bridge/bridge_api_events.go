@@ -1231,6 +1231,9 @@ func runtimeToolProjectionFromContextDelta(
 		if err != nil {
 			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool Use canonical execution input is invalid")
 		}
+		if len(canonicalExecutionInput) > runtimeToolInputJSONMaxBytes {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool Use canonical execution input exceeds its storage bound")
+		}
 		if delta == nil || len(delta.GetParts()) == 0 {
 			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool Use context delta is empty")
 		}
@@ -1296,10 +1299,17 @@ func applyToolEventBookkeepingTx(
 			return status.Error(codes.FailedPrecondition, "MCP tool use declaration server is invalid")
 		}
 		switch payload.EvaluatedPermission {
-		case "ask":
-			return upsertPendingToolApprovalTx(ctx, tx, scope, eventID, projection, string(projection.CanonicalExecutionInput), now)
-		case "allow", "deny":
-			return nil
+		case "ask", "allow", "deny":
+			return upsertPendingToolRouteTx(
+				ctx,
+				tx,
+				scope,
+				eventID,
+				projection,
+				string(projection.CanonicalExecutionInput),
+				payload.EvaluatedPermission,
+				now,
+			)
 		default:
 			return status.Error(codes.FailedPrecondition, "tool use permission is invalid")
 		}
@@ -1548,12 +1558,27 @@ func runtimeToolEventInputJSON(raw json.RawMessage) (string, error) {
 	return string(encoded), nil
 }
 
-func upsertPendingToolApprovalTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string, projection runtimeToolProjectionPayload, inputJSON string, now time.Time) error {
+func upsertPendingToolRouteTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	eventID string,
+	projection runtimeToolProjectionPayload,
+	inputJSON string,
+	evaluatedPermission string,
+	now time.Time,
+) error {
+	statusValue := "pending"
+	var decision any
+	if evaluatedPermission != "ask" {
+		statusValue = "resolving"
+		decision = evaluatedPermission
+	}
 	_, err := tx.Exec(ctx,
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, input_json, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $8)
+			tool_name, input_json, status, decision, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
 		ON CONFLICT (workspace_id, session_id, session_thread_id, tool_use_event_id)
 		DO UPDATE SET
 			model_tool_call_id = EXCLUDED.model_tool_call_id,
@@ -1568,6 +1593,8 @@ func upsertPendingToolApprovalTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		projection.ModelToolCallID,
 		projection.ToolName,
 		inputJSON,
+		statusValue,
+		decision,
 		now,
 	)
 	return err

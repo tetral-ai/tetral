@@ -737,7 +737,14 @@ func assertRuntimeHotColdToolComposition(
 
 type runtimeProviderComposition struct {
 	CarrierMessages []struct {
+		Role    int `json:"role"`
 		Content []struct {
+			Text *struct {
+				Text string `json:"text"`
+			} `json:"text"`
+			Reasoning *struct {
+				Text string `json:"text"`
+			} `json:"reasoning"`
 			ToolCall *struct {
 				ModelToolCallID string `json:"modelToolCallId"`
 				Name            string `json:"name"`
@@ -936,10 +943,37 @@ func assertProviderCompositionToolOrder(t *testing.T, composition runtimeProvide
 
 func assertNoInventedAssistantText(t *testing.T, composition runtimeProviderComposition) {
 	t.Helper()
+	declaredText := make(map[string]int)
+	for _, message := range composition.CarrierMessages {
+		if message.Role != 2 {
+			continue
+		}
+		for _, part := range message.Content {
+			if part.Text != nil {
+				declaredText[part.Text.Text]++
+			}
+			if part.Reasoning != nil {
+				declaredText[part.Reasoning.Text]++
+			}
+		}
+	}
 	for _, strategy := range composition.Strategies {
+		actual := make([]string, 0)
+		remaining := make(map[string]int, len(declaredText))
+		for text, count := range declaredText {
+			remaining[text] = count
+		}
 		for _, message := range strategy.LoweredMessages {
-			if message.Role != "assistant" || len(message.Content) == 0 || message.Content[0] != '[' {
+			if message.Role != "assistant" || len(message.Content) == 0 || string(message.Content) == "null" {
 				continue
+			}
+			var text string
+			if err := json.Unmarshal(message.Content, &text); err == nil {
+				actual = append(actual, text)
+				continue
+			}
+			if message.Content[0] != '[' {
+				t.Fatalf("decode %s Assistant content: %s", strategy.ProviderFamily, message.Content)
 			}
 			var parts []struct {
 				Type string `json:"type"`
@@ -949,10 +983,16 @@ func assertNoInventedAssistantText(t *testing.T, composition runtimeProviderComp
 				t.Fatalf("decode %s Assistant content: %v", strategy.ProviderFamily, err)
 			}
 			for _, part := range parts {
-				if part.Type == "text" && part.Text == " " {
-					t.Fatalf("%s lowering invented Assistant whitespace: %s", strategy.ProviderFamily, message.Content)
+				if part.Type == "text" {
+					actual = append(actual, part.Text)
 				}
 			}
+		}
+		for _, text := range actual {
+			if remaining[text] == 0 {
+				t.Fatalf("%s lowered Assistant text %q was not declared by Runtime; carrier text/reasoning = %v", strategy.ProviderFamily, text, declaredText)
+			}
+			remaining[text]--
 		}
 	}
 }

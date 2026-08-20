@@ -1241,12 +1241,33 @@ export function layer(
 							threadEntry.runtimeThread.state.acceptedInputCount() > 0 &&
 							exit.value.releaseSession?.reason !== "terminated"
 						) {
-							const closeout = yield* settleFailedRunCloseout(
-								sessionEntry,
-								threadEntry,
-								exit,
-							);
+							const alreadyIdle =
+								threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
+									.executionRunId === undefined;
+							const closeout = alreadyIdle
+								? ("disposed" as const)
+								: yield* settleFailedRunCloseout(
+										sessionEntry,
+										threadEntry,
+										exit,
+									);
 							if (closeout === "unrepairable") {
+								yield* completeRunSlot(runSlot, exit);
+								return;
+							}
+							if (
+								threadEntry.runtimeThread.state
+									.acceptedInputSnapshot()
+									.some((input) => input.kind === "messages") &&
+								sessionEntry.threads.get(threadEntry.sessionThreadId) ===
+									threadEntry
+							) {
+								threadEntry.runSlot = undefined;
+								threadEntry.status = "idle";
+								recordHotStateMetrics();
+								yield* startThreadRun(sessionEntry, threadEntry).pipe(
+									Effect.asVoid,
+								);
 								yield* completeRunSlot(runSlot, exit);
 								return;
 							}

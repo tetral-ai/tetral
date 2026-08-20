@@ -132,7 +132,7 @@ if (
 const committed = await processor.commitPublicToolUse(
 	source,
 	job.modelToolCallId,
-	job.input,
+	input.providerInput,
 	"allow",
 );
 if (!committed.ok)

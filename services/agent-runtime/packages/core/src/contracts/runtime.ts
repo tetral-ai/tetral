@@ -860,7 +860,7 @@ export const SessionEventSchema = z.discriminatedUnion("type", [
 	z.strictObject({
 		type: z.literal("agent.tool_use"),
 		name: RuntimeIdentifierSchema,
-	input: RuntimeJsonObjectSchema,
+		input: RuntimeJsonValueSchema,
 		evaluated_permission: z.enum(["allow", "ask", "deny"]),
 	}),
 	z.strictObject({

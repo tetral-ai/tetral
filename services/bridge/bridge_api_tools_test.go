@@ -104,6 +104,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequest, toolUseID, modelCallID, "exec_command")
+	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseID)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_messages SET source_event_id = $5
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
@@ -264,7 +265,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_patch_split_tool", ModelRequestId: modelRequestID,
 		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"apply_patch","input":` + string(executionInputJSON) + `,"evaluated_permission":"ask"}`,
+		PayloadJson:                 `{"type":"agent.tool_use","name":"apply_patch","input":` + string(providerInputJSON) + `,"evaluated_permission":"allow"}`,
 		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", string(providerInputJSON)),
 		CanonicalExecutionInputJson: string(executionInputJSON),
 	})
@@ -277,7 +278,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		t.Fatalf("load authoritative Tool Use event: %v", err)
 	}
 	if testJSONPathString(t, durableEventPayload, "name") != "apply_patch" ||
-		!reflect.DeepEqual(testJSONPathValue(t, durableEventPayload, "input"), map[string]any{"patch": rawPatch}) ||
+		!reflect.DeepEqual(testJSONPathValue(t, durableEventPayload, "input"), rawPatch) ||
 		strings.Contains(durableEventPayload, "runtime_only") {
 		t.Fatalf("authoritative Tool Use payload = %s", durableEventPayload)
 	}
@@ -318,26 +319,18 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		t.Fatal("LoadContext omitted apply_patch Tool Call context")
 	}
 
-	beforeApproval := load("rin_bridge_patch_split_before_approval")
-	assertRuntimeScalar(beforeApproval)
-	if len(beforeApproval.PendingToolUses) != 1 ||
-		beforeApproval.PendingToolUses[0].ToolUseEventID != toolUseEventID ||
-		beforeApproval.PendingToolUses[0].ModelRequestID != modelRequestID ||
-		beforeApproval.PendingToolUses[0].ModelToolCallID != modelToolCallID ||
-		beforeApproval.PendingToolUses[0].ToolName != "apply_patch" ||
-		string(beforeApproval.PendingToolUses[0].Input) != string(executionInputJSON) {
-		t.Fatalf("pending apply_patch approval = %#v; want object execution identity", beforeApproval.PendingToolUses)
-	}
-
-	setBridgeAPIPendingApprovalStatus(t, admin, "default", sessionID, threadID, toolUseEventID, "resolving")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_bridge_patch_split_allow", 3, "user.tool_confirmation",
-		`{"type":"user.tool_confirmation","tool_use_id":"`+toolUseEventID+`","result":"allow"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_patch_split_allow", "tool_confirmation",
-		`["evt_bridge_patch_split_allow"]`, "accepted", bindingID, podUID, 3, 3)
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_bridge_patch_split_allow",
-	}); err != nil {
-		t.Fatalf("CommitInputs allow approval: %v", err)
+	beforeAcceptance := load("rin_bridge_patch_split_before_acceptance")
+	assertRuntimeScalar(beforeAcceptance)
+	if len(beforeAcceptance.PendingToolUses) != 1 ||
+		beforeAcceptance.PendingToolUses[0].ToolUseEventID != toolUseEventID ||
+		beforeAcceptance.PendingToolUses[0].ModelRequestID != modelRequestID ||
+		beforeAcceptance.PendingToolUses[0].ModelToolCallID != modelToolCallID ||
+		beforeAcceptance.PendingToolUses[0].ToolName != "apply_patch" ||
+		string(beforeAcceptance.PendingToolUses[0].Input) != string(executionInputJSON) ||
+		beforeAcceptance.PendingToolUses[0].Status != "resolving" ||
+		beforeAcceptance.PendingToolUses[0].Decision == nil ||
+		*beforeAcceptance.PendingToolUses[0].Decision != "allow" {
+		t.Fatalf("admitted apply_patch route = %#v; want durable allow execution identity", beforeAcceptance.PendingToolUses)
 	}
 
 	canonicalInput, _, err := canonicalRunToolInput(string(executionInputJSON))
@@ -391,6 +384,7 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 		t.Fatalf("stamp Tool Use model request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
+	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
@@ -631,6 +625,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 				t.Fatalf("stamp permission model request: %v", err)
 			}
 			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "exec_command")
+			if testCase.evaluatedPermission == "allow" {
+				seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+			}
 			if testCase.approvalStatus != "" {
 				approvalInput := testCase.approvalInput
 				if approvalInput == "" {

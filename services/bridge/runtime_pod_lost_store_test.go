@@ -783,14 +783,15 @@ func TestRuntimePodLossUsesDurablePrivateRequestKind(t *testing.T) {
 
 func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 	for _, testCase := range []struct {
-		name             string
-		approvalStatus   string
-		withRequestEnd   bool
-		wantEndIsError   bool
-		raceConfirmation bool
+		name               string
+		approvalStatus     string
+		withRequestEnd     bool
+		wantEndIsError     bool
+		wantRoutePreserved bool
+		raceConfirmation   bool
 	}{
 		{name: "existing successful Request End", approvalStatus: "pending", withRequestEnd: true},
-		{name: "missing Request End", approvalStatus: "resolving", wantEndIsError: true},
+		{name: "admitted Tool with missing Request End", approvalStatus: "resolving", wantEndIsError: true, wantRoutePreserved: true},
 		{name: "confirmation race", approvalStatus: "resolving", withRequestEnd: true, raceConfirmation: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -915,7 +916,11 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 			).Scan(&resultCount, &resultEventID, &resultPayload); err != nil {
 				t.Fatalf("read approval pod-loss result: %v", err)
 			}
-			if resultCount != 1 || !strings.Contains(resultPayload, `"is_error":true`) {
+			if testCase.wantRoutePreserved {
+				if resultCount != 0 {
+					t.Fatalf("admitted Tool pod-loss result count = %d; want durable route preserved", resultCount)
+				}
+			} else if resultCount != 1 || !strings.Contains(resultPayload, `"is_error":true`) {
 				t.Fatalf("approval pod-loss result = %d/%s; want one terminal error", resultCount, resultPayload)
 			}
 			var pendingStatus string
@@ -929,10 +934,16 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 				t.Fatalf("read repaired approval row: %v", err)
 			}
 			wantPendingStatus := "cancelled"
-			if testCase.raceConfirmation && !strings.Contains(resultPayload, `"reason":"runtime_pod_lost"`) {
+			if testCase.wantRoutePreserved {
+				wantPendingStatus = "resolving"
+			} else if testCase.raceConfirmation && !strings.Contains(resultPayload, `"reason":"runtime_pod_lost"`) {
 				wantPendingStatus = "resolved"
 			}
-			if pendingStatus != wantPendingStatus || !pendingResultEventID.Valid || pendingResultEventID.String != resultEventID {
+			if testCase.wantRoutePreserved {
+				if pendingStatus != wantPendingStatus || pendingResultEventID.Valid {
+					t.Fatalf("admitted Tool route = %q/%v; want resolving without terminal result", pendingStatus, pendingResultEventID)
+				}
+			} else if pendingStatus != wantPendingStatus || !pendingResultEventID.Valid || pendingResultEventID.String != resultEventID {
 				t.Fatalf("approval row = %q/%v; want %s linked to %s", pendingStatus, pendingResultEventID, wantPendingStatus, resultEventID)
 			}
 			var requestEndCount int
@@ -975,14 +986,18 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 			if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 				t.Fatalf("decode approval pod-loss context: %v", err)
 			}
-			if len(payload.PendingToolUses) != 0 {
-				t.Fatalf("approval pod-loss pending context = %+v; want no live approval route", payload.PendingToolUses)
+			wantPendingToolUses := 0
+			if testCase.wantRoutePreserved {
+				wantPendingToolUses = 1
+			}
+			if len(payload.PendingToolUses) != wantPendingToolUses {
+				t.Fatalf("approval pod-loss pending context = %+v; want %d live route(s)", payload.PendingToolUses, wantPendingToolUses)
 			}
 		})
 	}
 }
 
-func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
+func TestRuntimePodLossSettlesPendingApprovalsAndPreservesAdmittedTool(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID             = "sesn_pod_loss_multiple_approvals"
@@ -1069,18 +1084,19 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		eventID    string
 		toolCallID string
 		status     string
+		decision   any
 		path       string
 	}{
 		{eventID: "evt_pod_loss_multiple_tool_pending", toolCallID: "tool-call-pod-loss-multiple-pending", status: "pending", path: "src/a.ts"},
-		{eventID: "evt_pod_loss_multiple_tool_resolving", toolCallID: "tool-call-pod-loss-multiple-resolving", status: "resolving", path: "src/b.ts"},
+		{eventID: "evt_pod_loss_multiple_tool_resolving", toolCallID: "tool-call-pod-loss-multiple-resolving", status: "resolving", decision: "allow", path: "src/b.ts"},
 	} {
 		if _, err := admin.ExecContext(context.Background(),
 			`INSERT INTO session_pending_tool_uses (
 				workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-				tool_name, input_json, status, created_at, updated_at
-			) VALUES ('default', $1, $2, $3, $4, 'Write', $5, $6, now(), now())`,
+				tool_name, input_json, status, decision, created_at, updated_at
+			) VALUES ('default', $1, $2, $3, $4, 'Write', $5, $6, $7, now(), now())`,
 			sessionID, threadID, tool.eventID, tool.toolCallID,
-			`{"file_path":"`+tool.path+`"}`, tool.status,
+			`{"file_path":"`+tool.path+`"}`, tool.status, tool.decision,
 		); err != nil {
 			t.Fatalf("seed %s approval: %v", tool.status, err)
 		}
@@ -1165,8 +1181,8 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	).Scan(&terminalResults); err != nil {
 		t.Fatalf("count multiple approval pod-loss results: %v", err)
 	}
-	if terminalResults != 2 {
-		t.Fatalf("multiple approval pod-loss results = %d; want exactly 2", terminalResults)
+	if terminalResults != 1 {
+		t.Fatalf("pending approval pod-loss results = %d; want exactly 1", terminalResults)
 	}
 	var cancelledAndLinked int
 	if err := admin.QueryRowContext(context.Background(),
@@ -1178,8 +1194,23 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	).Scan(&cancelledAndLinked); err != nil {
 		t.Fatalf("count cancelled multiple approvals: %v", err)
 	}
-	if cancelledAndLinked != 2 {
-		t.Fatalf("cancelled and linked approvals = %d; want exactly 2", cancelledAndLinked)
+	if cancelledAndLinked != 1 {
+		t.Fatalf("cancelled and linked approvals = %d; want exactly 1", cancelledAndLinked)
+	}
+	var admittedStatus string
+	var admittedDecision sql.NullString
+	var admittedResultEventID sql.NullString
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status, decision, result_event_id
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+		    AND tool_use_event_id = 'evt_pod_loss_multiple_tool_resolving'`,
+		sessionID, threadID,
+	).Scan(&admittedStatus, &admittedDecision, &admittedResultEventID); err != nil {
+		t.Fatalf("read admitted Tool route: %v", err)
+	}
+	if admittedStatus != "resolving" || !admittedDecision.Valid || admittedDecision.String != "allow" || admittedResultEventID.Valid {
+		t.Fatalf("admitted Tool route = %q/%v/%v; want resolving allow without terminal result", admittedStatus, admittedDecision, admittedResultEventID)
 	}
 	var siblingApprovalStatus string
 	var siblingResultCount int

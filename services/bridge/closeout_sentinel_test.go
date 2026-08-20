@@ -143,6 +143,18 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	if inboxStatus != "cancelled" || queueStatus != "cancelled" {
 		t.Fatalf("queued termination custody = Inbox %q Queue %q; want cancelled/cancelled", inboxStatus, queueStatus)
 	}
+	if _, err := fixture.store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("LoadContext after termination error = %v; want FailedPrecondition", err)
+	}
+	if _, err := fixture.store.RefreshRuntimeBindingToken(context.Background(), &bridgev1.RefreshRuntimeBindingTokenRequest{Scope: scope}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("RefreshRuntimeBindingToken after termination error = %v; want FailedPrecondition", err)
+	}
+	duplicate, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
+	if err != nil || duplicate.GetDuplicate() == nil ||
+		duplicate.GetDuplicate().GetFailureEventId() != committed.GetCommitted().GetFailureEventId() ||
+		duplicate.GetDuplicate().GetCloseoutEventId() != committed.GetCommitted().GetCloseoutEventId() {
+		t.Fatalf("same-binding termination replay = %#v/%v; want exact duplicate", duplicate, err)
+	}
 	cleanupStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(fixture.runtime), 9090)
 	cleanupPlan, err := cleanupStore.PrepareRuntimeCommand(context.Background(), RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID: "qjob_" + cleanupJobID, LeaseToken: "lease_" + cleanupJobID,
@@ -167,7 +179,7 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	}
 }
 
-func TestPostgreSQLRuntimeTerminationAllowsAbsentResidencyRow(t *testing.T) {
+func TestPostgreSQLRuntimeTerminationRejectsAbsentResidencyRowAtomically(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "termination_absent_residency")
 	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
 	running, err := fixture.store.WriteEvent(context.Background(), closeoutWriteEventRequest(scope, "rwrite_termination_absent_residency"))
@@ -183,14 +195,25 @@ func TestPostgreSQLRuntimeTerminationAllowsAbsentResidencyRow(t *testing.T) {
 		Scope: scope, RuntimeWriteId: running.GetCommitted().GetEventId(),
 		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
 	})
-	if err != nil || committed.GetCommitted() == nil {
-		t.Fatalf("CommitRuntimeTermination without residency row = %#v/%v; want committed", committed, err)
+	if committed != nil || status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("CommitRuntimeTermination without residency row = %#v/%v; want FailedPrecondition", committed, err)
 	}
-	var rows int
+	var rows, terminalEvents, operations int
+	var sessionStatus string
 	if err := fixture.admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
-	).Scan(&rows); err != nil || rows != 0 {
-		t.Fatalf("Runtime status rows after absent-row termination = %d/%v; want zero", rows, err)
+		`SELECT
+		   (SELECT count(*) FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		   (SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		   (SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		      AND type IN ('session.error','session.status_terminated')),
+		   (SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1
+		      AND operation='commit_runtime_termination')`, fixture.sessionID,
+	).Scan(&rows, &sessionStatus, &terminalEvents, &operations); err != nil {
+		t.Fatalf("read absent-row termination rollback: %v", err)
+	}
+	if rows != 0 || sessionStatus == "terminated" || terminalEvents != 0 || operations != 0 {
+		t.Fatalf("absent-row termination rollback = rows %d status %q events %d operations %d; want no terminal mutation",
+			rows, sessionStatus, terminalEvents, operations)
 	}
 }
 

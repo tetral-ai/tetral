@@ -5242,6 +5242,52 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("a user input accepted during failed-run closeout starts the next hot run", async () => {
+		let duplicateCloseoutCalls = 0;
+		const threadLoop = makeControlledThreadLoop({
+			closeFailedRun: () =>
+				Effect.sync(() => {
+					duplicateCloseoutCalls += 1;
+					return { type: "landed" as const };
+				}),
+		});
+		const sessionID = "sesn_failed_turn_follow_up";
+		const threadID = "thrd_failed_turn_follow_up";
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionID, "rin_failed_turn_initial", threadID),
+						),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForRuns(threadLoop, 1);
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionID, "rin_failed_turn_follow_up", threadID),
+						),
+					),
+				).toMatchObject({ ok: true, started: false });
+
+				const failure = fatalRunResult("crashed");
+				if (failure.type !== "failed") {
+					throw new Error("expected failed run fixture");
+				}
+				threadLoop.runs[0]?.release({ type: "failed", error: failure.error });
+				await waitForRuns(threadLoop, 2);
+				expect(threadLoop.runs[1]?.session).toBe(threadLoop.runs[0]?.session);
+				expect(
+					threadLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId,
+				).toBe("rin_failed_turn_follow_up");
+				expect(duplicateCloseoutCalls).toBe(0);
+				threadLoop.runs[1]?.release();
+			},
+		);
+	});
+
 	test("discard-requested interruption removes hot state before the next command", async () => {
 		const threadLoop = makeControlledThreadLoop();
 		const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });

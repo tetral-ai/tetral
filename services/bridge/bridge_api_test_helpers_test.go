@@ -439,6 +439,7 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 		  WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
@@ -811,6 +812,33 @@ func seedBridgeAPIDurableToolMessage(
 		toolName,
 	); err != nil {
 		t.Fatalf("seed durable Tool Use identity: %v", err)
+	}
+}
+
+func seedBridgeAPIAllowedToolRoute(
+	t *testing.T,
+	db *sql.DB,
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	toolUseEventID string,
+) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO session_pending_tool_uses (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+			tool_name, input_json, status, decision, created_at, updated_at
+		)
+		SELECT e.workspace_id, e.session_id, e.session_thread_id, e.event_id,
+		       e.projection_json::jsonb ->> 'model_tool_call_id',
+		       e.projection_json::jsonb ->> 'tool_name',
+		       (e.projection_json::jsonb -> 'canonical_execution_input')::text,
+		       'resolving', 'allow', clock_timestamp(), clock_timestamp()
+		  FROM session_events e
+		 WHERE e.workspace_id=$1 AND e.session_id=$2 AND e.session_thread_id=$3 AND e.event_id=$4`,
+		workspaceID, sessionID, threadID, toolUseEventID,
+	); err != nil {
+		t.Fatalf("seed allowed Tool route: %v", err)
 	}
 }
 

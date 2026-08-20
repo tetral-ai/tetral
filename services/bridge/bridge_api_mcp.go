@@ -102,7 +102,13 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		if tool.MCPServerName == "" {
 			return status.Error(codes.FailedPrecondition, "durable tool is not an MCP operation")
 		}
-		if err := verifyApprovedToolExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
+			return err
+		} else if ok {
+			response, err = claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
+			return err
+		}
+		if err := verifyDurableToolAuthorizationTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
 			return err
 		}
 		response, err = claimMCPToolResultTx(ctx, tx, request, tool, now)

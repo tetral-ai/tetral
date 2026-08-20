@@ -1262,6 +1262,15 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 			      OR COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
 			    ))
 			    AND NOT EXISTS (
+			      SELECT 1
+			        FROM session_pending_tool_uses route
+			       WHERE route.workspace_id = e.workspace_id
+			         AND route.session_id = e.session_id
+			         AND route.session_thread_id = e.session_thread_id
+			         AND route.tool_use_event_id = e.event_id
+			         AND route.status = 'resolving'
+			    )
+			    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events result
 			         WHERE result.workspace_id = e.workspace_id

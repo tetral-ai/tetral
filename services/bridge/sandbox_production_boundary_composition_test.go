@@ -247,7 +247,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 		t.Fatalf("read durable Tool declaration: %v", err)
 	}
 	if testJSONPathString(t, payloadJSON, "name") != toolName ||
-		!reflect.DeepEqual(testJSONPathValue(t, payloadJSON, "input"), executionInput) ||
+		!reflect.DeepEqual(testJSONPathValue(t, payloadJSON, "input"), providerInput) ||
 		testJSONPathString(t, projectionJSON, "tool_name") != toolName ||
 		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "provider_input"), providerInput) ||
 		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "canonical_execution_input"), executionInput) {

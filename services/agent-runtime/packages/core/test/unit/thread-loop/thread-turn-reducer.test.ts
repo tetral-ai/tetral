@@ -183,7 +183,7 @@ describe("Thread-turn reducer", () => {
 					},
 				},
 				routes: noRoutes,
-				expectedAction: "await_input",
+				expectedAction: "commit_accepted_input",
 			},
 			{
 				name: "sealed safe boundary",

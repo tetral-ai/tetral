@@ -2975,6 +2975,32 @@ describe("ThreadLoop", () => {
 			expect(JSON.stringify(appended)).not.toContain('"type":"retrying"');
 			expect(JSON.stringify(appended)).not.toMatch(/credit|balance|billing|platform key|raw credential/i);
 			expect(session.state.contextManager.entries().some((entry) => entry.contextKind === "assistant")).toBe(false);
+
+			expect(
+				session.state.enqueueAcceptedInput(
+					acceptedInput(`rin_after_${testCase.error.code}`, session.sessionId),
+				),
+			).toBe("applied");
+			let nextProviderCalls = 0;
+			const nextResult = await Effect.runPromise(
+				Effect.gen(function* () {
+					const threadLoop = yield* ThreadLoop.Service;
+					return yield* threadLoop.run(session, testRunCustody());
+				}).pipe(
+					Effect.provide(
+						runtimeThreadLoopLayer(loader, {
+							store,
+							writer,
+							onStream: () => {
+								nextProviderCalls += 1;
+							},
+						}),
+					),
+				),
+			);
+			expect(nextResult).toMatchObject({ type: "completed" });
+			expect(nextProviderCalls).toBe(1);
+			expect(session.state.peekAcceptedInput()).toBeUndefined();
 		});
 	}
 

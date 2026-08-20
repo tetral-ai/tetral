@@ -1151,15 +1151,14 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		// A termination ACK belongs to the binding that closed the Runtime turn.
-		// Replays must revalidate that binding before consulting idempotency state so
-		// a replaced Pod cannot recover the predecessor's hot closeout facts.
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitRuntimeTermination, request.GetRuntimeWriteId()); err != nil {
 			return err
 		} else if ok {
+			// The terminal receipt is the only declaration that may replay after the
+			// Session closes. It remains fenced to the binding that authored it.
+			if err := verifyRuntimeBindingTx(ctx, tx, request.GetScope()); err != nil {
+				return err
+			}
 			if existing.RequestHash != requestHash {
 				return status.Error(codes.AlreadyExists, "runtime termination idempotency conflict")
 			}
@@ -1168,6 +1167,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			}
 			duplicate = true
 			return nil
+		}
+		if err := verifyRuntimeSessionNonTerminalTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := verifyRuntimeBindingTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {

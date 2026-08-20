@@ -523,6 +523,33 @@ func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 	if err := lockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
 		return err
 	}
+	if err := verifyRuntimeSessionNonTerminalTx(ctx, tx, scope); err != nil {
+		return err
+	}
+	return verifyRuntimeBindingTx(ctx, tx, scope)
+}
+
+func verifyRuntimeSessionNonTerminalTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	var sessionStatus string
+	if err := tx.QueryRow(ctx,
+		`SELECT status
+		   FROM sessions
+		  WHERE workspace_id = $1
+		    AND id = $2`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+	).Scan(&sessionStatus); dbconnect.IsNoRows(err) {
+		return scopeSupersededError(status.Error(codes.NotFound, "session not found"))
+	} else if err != nil {
+		return err
+	}
+	if sessionStatus == "terminated" {
+		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is terminal"))
+	}
+	return nil
+}
+
+func verifyRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
 	row := tx.QueryRow(ctx,
 		`SELECT agent_runtime_pod_uid
 		   FROM session_runtime_bindings

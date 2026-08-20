@@ -114,6 +114,12 @@ export async function closeFailedThreadRun(
 		session.state.threadTurnReduction().checkpoint.request?.requestKind ===
 		"approval_reviewer";
 	if (reviewerRequest || !isRuntimeTerminationFailure(failure)) {
+		if (!reviewerRequest) {
+			// A failed provider Turn closes before any concurrently admitted input
+			// may open its successor. The accepted fact remains hot and durable, but
+			// only the next run may commit it after this closeout returns.
+			session.state.blockAcceptedInputUntilRunExit();
+		}
 		// An internal reviewer request must leave its reusable trunk durably idle;
 		// its separately acknowledged outcome owns whether the parent falls back
 		// to user approval. Even a fatal request-local failure therefore closes

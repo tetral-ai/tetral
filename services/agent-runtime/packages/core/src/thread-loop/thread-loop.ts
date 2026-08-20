@@ -641,6 +641,7 @@ interface ProviderTurnStreamState {
 	providerRequestScope: Scope.Scope;
 	toolScheduler: ToolScheduler;
 	toolEntries: Record<string, ToolEntry | undefined>;
+	toolProviderInputs: Record<string, RuntimeJsonValue | undefined>;
 	toolDeclarationBarriers: Record<
 		string,
 		Deferred.Deferred<boolean> | undefined
@@ -3414,6 +3415,10 @@ function coordinateProviderTurnEffect(
 			providerRequestScope,
 			toolScheduler: new ToolScheduler(),
 			toolEntries: Object.create(null) as Record<string, ToolEntry | undefined>,
+			toolProviderInputs: Object.create(null) as Record<
+				string,
+				RuntimeJsonValue | undefined
+			>,
 			toolDeclarationBarriers: Object.create(null) as Record<
 				string,
 				Deferred.Deferred<boolean> | undefined
@@ -4058,6 +4063,7 @@ function processProviderEventEffect(
 				return;
 			}
 			state.toolDeclarationBarriers[registered.jobId] = declarationBarrier;
+			state.toolProviderInputs[registered.jobId] = event.input;
 			const job = state.toolScheduler
 				.jobs()
 				.find((candidate) => candidate.id === registered.jobId);
@@ -4823,9 +4829,27 @@ function coordinateRuntimeToolJobEffect(
 		}
 		const toolCatalog = state.executionPolicy.toolCatalog;
 		const entry = state.toolEntries[job.id];
+		const providerInput = state.toolProviderInputs[job.id];
 		if (entry === undefined || toolCatalog === undefined) {
 			state.toolScheduler.finishJob(job.id);
 			return providerTurnCompleted();
+		}
+		if (providerInput === undefined) {
+			state.toolScheduler.finishJob(job.id);
+			return yield* Effect.promise(() =>
+				handleProcessorFailure(
+					session,
+					options,
+					normalizeRuntimeFailure({
+						type: "runtime",
+						code: "runtime_invalid_sequence",
+						retryable: false,
+						fatal: true,
+						reason: "runtime_contract_validation",
+						sessionId: session.sessionId,
+					}),
+				),
+			);
 		}
 
 		let gateDecision = evaluateToolGate({
@@ -4980,7 +5004,7 @@ function coordinateRuntimeToolJobEffect(
 					.commitPublicToolUse(
 						source,
 						job.modelToolCallId,
-						job.input,
+						providerInput,
 						gateDecision.evaluatedPermission,
 						publicToolEventForEntry(entry),
 					)

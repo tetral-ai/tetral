@@ -76,7 +76,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyApprovedToolExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+		if err := verifyDurableToolAuthorizationTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
 			return err
 		}
 		now := s.now()
@@ -186,6 +186,7 @@ type durableToolExecution struct {
 	ModelToolCallID     string
 	ToolName            string
 	MCPServerName       string
+	PublicInputJSON     string
 	ProviderInputJSON   string
 	InputJSON           string
 	NormalizedInputHash string
@@ -230,8 +231,9 @@ func loadDurableToolExecutionTx(
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use projection is invalid")
 	}
 	inputJSON, inputHash, err := canonicalRunToolInput(string(projection.CanonicalExecutionInput))
+	publicInputJSON, publicInputErr := runtimeToolEventInputJSON(payload.Input)
 	if err != nil || !modelRequestID.Valid || modelRequestID.String == "" || projection.ModelToolCallID == "" ||
-		projection.ToolName == "" || len(projection.ProviderInput) == 0 || payload.Name != projection.ToolName {
+		projection.ToolName == "" || len(projection.ProviderInput) == 0 || payload.Name != projection.ToolName || publicInputErr != nil {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool execution facts are incomplete")
 	}
 	return durableToolExecution{
@@ -239,6 +241,7 @@ func loadDurableToolExecutionTx(
 		ModelToolCallID:     projection.ModelToolCallID,
 		ToolName:            projection.ToolName,
 		MCPServerName:       payload.MCPServerName,
+		PublicInputJSON:     publicInputJSON,
 		ProviderInputJSON:   string(projection.ProviderInput),
 		InputJSON:           inputJSON,
 		NormalizedInputHash: inputHash,
@@ -261,7 +264,7 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	return nil
 }
 
-func verifyApprovedToolExecutionHandoffTx(
+func verifyDurableToolAuthorizationTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
@@ -279,14 +282,7 @@ func verifyApprovedToolExecutionHandoffTx(
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
 	).Scan(&modelToolCallID, &toolName, &inputJSON, &statusValue, &decision)
 	if dbconnect.IsNoRows(err) {
-		switch tool.EvaluatedPermission {
-		case "allow":
-			return nil
-		case "ask", "deny":
-			return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
-		default:
-			return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
-		}
+		return status.Error(codes.FailedPrecondition, "durable tool authorization is missing")
 	}
 	if err != nil {
 		return err
@@ -298,16 +294,19 @@ func verifyApprovedToolExecutionHandoffTx(
 	}
 	switch tool.EvaluatedPermission {
 	case "allow":
+		if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
+			return status.Error(codes.FailedPrecondition, "durable tool authorization is not executable")
+		}
 		return nil
 	case "deny":
-		return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
+		return status.Error(codes.FailedPrecondition, "durable tool authorization is not executable")
 	case "ask":
 		if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
-			return status.Error(codes.FailedPrecondition, "sandbox tool approval is not executable")
+			return status.Error(codes.FailedPrecondition, "durable tool authorization is not executable")
 		}
 		return nil
 	default:
-		return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
+		return status.Error(codes.FailedPrecondition, "durable tool authorization is invalid")
 	}
 }
 

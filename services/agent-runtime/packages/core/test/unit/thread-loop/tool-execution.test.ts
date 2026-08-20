@@ -316,7 +316,7 @@ describe("ThreadLoop", () => {
 		if (toolUseEnvelope?.event.type !== "agent.tool_use")
 			throw new Error("expected apply_patch Tool Use event");
 		expect(toolUseEnvelope.event.name).toBe("apply_patch");
-		expect(toolUseEnvelope.event.input).toEqual({ patch });
+		expect(toolUseEnvelope.event.input).toBe(patch);
 		expect(toolUseEnvelope.canonicalExecutionInput).toEqual({ patch });
 		expect(executionInput).toEqual({ patch });
 		expect(executionInput).not.toEqual({ patch: { patch } });

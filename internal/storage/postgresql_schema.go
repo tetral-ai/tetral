@@ -455,8 +455,10 @@ const (
 		)
 	)`
 
-	// session_pending_tool_uses tracks public tool calls whose result waits on
-	// approval via user.tool_confirmation.
+	// session_pending_tool_uses is the durable route for every public Tool Call
+	// until its terminal Tool Result commits. It closes the crash gap between
+	// the Tool Use declaration and executor admission; approval is one route
+	// state, not the table's ownership boundary.
 	// The row is a cold-resume and stale-reply routing record, NOT a context
 	// message: LoadContext installs unresolved rows as thread-local ToolJob
 	// state, and a rehydrated decision is applied, never re-evaluated under
@@ -464,13 +466,11 @@ const (
 	//
 	//   status      meaning                             entered on                                 legal next
 	//   pending     approval opened, undecided          agent.tool_use(ask) projection             resolving, cancelled
-	//                                                   (upsertPendingToolApproval)
-	//   resolving   user decision recorded, awaiting    user.tool_confirmation processing          resolved, cancelled
-	//               the terminal tool result            (Bridge CommitInputs /
-	//                                                   recordPendingToolConfirmationDecision)
+	//   resolving   execution authorized or denied,     agent.tool_use(allow/deny) projection or   resolved, cancelled
+	//               awaiting the terminal Tool Result   user.tool_confirmation processing
 	//   resolved    terminal agent.tool_result          markPendingToolResultResolved              (terminal)
 	//               committed (sets result_event_id)
-	//   cancelled   owner turn failed/interrupted       interrupt / pod-loss cancel                (terminal)
+	//   cancelled   route closed without Tool Result    interrupt or request closeout              (terminal)
 	//
 	// UPDATE-WITH: services/bridge pending-tool projection, input-commit,
 	// terminal settlement, and LoadContext paths.
