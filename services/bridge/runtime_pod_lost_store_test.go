@@ -25,6 +25,20 @@ import (
 
 // This file owns PostgreSQL delivery-store pod-loss repair tests.
 
+type settlingRecoveryCommandClient struct {
+	*RuntimePodCommandClient
+	beforeRecover func(*agentruntimev1.RecoverThreadRequest) error
+}
+
+func (c *settlingRecoveryCommandClient) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	if c.beforeRecover != nil {
+		if err := c.beforeRecover(request); err != nil {
+			return nil, err
+		}
+	}
+	return c.RuntimePodCommandClient.RecoverThread(ctx, target, request)
+}
+
 func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -765,18 +779,37 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			if err := json.Unmarshal([]byte(recoveryPayloadJSON), &recoveryPayload); err != nil {
 				t.Fatalf("decode recovery Queue payload: %v", err)
 			}
-			if recoveryJobCount != 1 || len(recoveryPayload) != 4 || string(recoveryPayload["source_event_id"]) != `"`+toolUseEventID+`"` || string(recoveryPayload["recovery_kind"]) != `"tool_route"` {
+			if recoveryJobCount != 1 || len(recoveryPayload) != 3 || string(recoveryPayload["source_event_id"]) != `"`+toolUseEventID+`"` {
 				t.Fatalf("recovery Queue job = %d/%s; want one exact Tool root and no envelope echoes", recoveryJobCount, recoveryPayloadJSON)
 			}
+			bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, apiStore)
+			t.Cleanup(stopBridge)
 			replacement := enginekubernetes.BindingCandidate{
 				Namespace: "tetral-agent-runtime", PodName: "runtime-recovery-" + suffix,
-				PodUID: "pod-recovery-" + suffix, PodIP: "10.61.0.10",
+				PodUID: "pod-recovery-" + suffix, PodIP: "127.0.0.1",
 			}
-			deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+			runtimeProcess := startProviderRecoveryRuntime(t, bridgeAddress, sessionID, threadID, replacement.PodUID, time.Date(2026, 1, 1, 0, 5, 1, 0, time.UTC))
+			deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runtimeProcess.port)
 			deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
 			}}
-			sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+			settle := func(scope *bridgev1.RuntimeScope) {
+				t.Helper()
+				response, settleErr := apiStore.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+					scope,
+					bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel"),
+				))
+				if settleErr != nil || response.GetCommitted() == nil {
+					t.Fatalf("settle Tool route under replacement custody = %#v/%v; want committed", response, settleErr)
+				}
+			}
+			sender := &settlingRecoveryCommandClient{RuntimePodCommandClient: NewRuntimePodCommandClient(providerRecoveryTokenSource{})}
+			if testCase.settleBeforeWake {
+				sender.beforeRecover = func(request *agentruntimev1.RecoverThreadRequest) error {
+					settle(bridgeAPIScope(sessionID, threadID, request.GetBindingId(), request.GetBindingGeneration(), request.GetTargetPodUid()))
+					return nil
+				}
+			}
 			runner := &JobRunner{
 				Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 				Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
@@ -786,30 +819,15 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			if err != nil || !active {
 				t.Fatalf("deliver Runtime recovery job = active:%t err:%v; want one accepted delivery", active, err)
 			}
-			if len(sender.requests) != 1 {
-				t.Fatalf("Runtime recovery requests = %d; want one", len(sender.requests))
-			}
-			recoveryRequest, ok := sender.requests[0].(*agentruntimev1.RecoverThreadRequest)
-			if !ok || recoveryRequest.GetSourceEventId() != toolUseEventID || recoveryRequest.GetTargetPodUid() != replacement.PodUID {
-				t.Fatalf("Runtime recovery command = %#v; want exact Tool root and resolver-owned replacement", sender.requests[0])
+			preloaded := runtimeProcess.recoveryResult(t)
+			if preloaded.Command.SourceEventID != toolUseEventID || preloaded.Command.TargetPodUID != replacement.PodUID {
+				t.Fatalf("Runtime recovery command = %#v; want exact Tool root and resolver-owned replacement", preloaded.Command)
 			}
 			loadScope := bridgeAPIScope(
-				sessionID, threadID, recoveryRequest.GetBindingId(),
-				recoveryRequest.GetBindingGeneration(), recoveryRequest.GetTargetPodUid(),
+				sessionID, threadID, preloaded.Command.BindingID,
+				preloaded.Command.BindingGeneration, preloaded.Command.TargetPodUID,
 			)
-			settle := func() {
-				t.Helper()
-				response, settleErr := apiStore.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
-					loadScope,
-					bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel"),
-				))
-				if settleErr != nil || response.GetCommitted() == nil {
-					t.Fatalf("settle Tool route under replacement custody = %#v/%v; want committed", response, settleErr)
-				}
-			}
-			if testCase.settleBeforeWake {
-				settle()
-			}
+			runtimeProcess.close(t)
 
 			var resultCount int
 			var resultEventID string
@@ -879,7 +897,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				if !assistantOwner {
 					t.Fatalf("cold recovery context = %#v; want Assistant owner for the nonterminal Tool route", payload.ContextEntries)
 				}
-				settle()
+				settle(loadScope)
 				reloaded, reloadErr := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: loadScope})
 				if reloadErr != nil {
 					t.Fatalf("LoadContext after post-wake settlement: %v", reloadErr)

@@ -53,7 +53,7 @@ interface ThreadBindingScope {
 /** Validates one durable lost-custody recovery trigger. */
 export function validateRecoverThreadRequest(input: RecoverThreadRequest): ValidationResult {
   const scope = validateThreadBindingScope(input);
-  if (!scope.ok || !validId(input.sourceEventId) || (input.recoveryKind !== 1 && input.recoveryKind !== 2)) {
+  if (!scope.ok || !validId(input.sourceEventId)) {
     return invalidRequest();
   }
   return { ok: true };

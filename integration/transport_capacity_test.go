@@ -240,6 +240,9 @@ func (s *settlingTransportSender) AcceptInput(
 		ModelRequestId: modelRequestID,
 		FinishReason:   "stop",
 		UsageJson:      `{"input_tokens":1,"output_tokens":1}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed",
+		},
 	}); err != nil {
 		return nil, err
 	}

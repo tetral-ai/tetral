@@ -18,7 +18,6 @@ import {
 	InterruptOrigin,
 	ResolveToolConfirmationFailure,
 	ToolConfirmationDecision,
-	RuntimeRecoveryKind,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type { RuntimePodLogRecord } from "../../src/logger.js";
 import type {
@@ -195,13 +194,12 @@ describe("RuntimeControlService method-specific ingress", () => {
 			bindingGeneration: 4,
 			targetPodUid: "uid-a",
 			sourceEventId: "evt_tool_recovery",
-			recoveryKind: RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_TOOL_ROUTE,
 		};
 		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ accepted: {} });
 		expect(fixture.host.recoveries).toEqual([{
 			workspaceId: "default", sessionId: "sesn_recovery", sessionThreadId: "thr_recovery",
 			bindingId: "bind_recovery", bindingGeneration: 4, targetPodUid: "uid-a",
-			sourceEventId: "evt_tool_recovery", recoveryKind: "tool_route",
+			sourceEventId: "evt_tool_recovery",
 		}]);
 		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ duplicate: {} });
 	});

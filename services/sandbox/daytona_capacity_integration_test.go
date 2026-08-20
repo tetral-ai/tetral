@@ -328,24 +328,18 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_tool_use", ModelRequestId: modelRequestID,
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`,
-		CanonicalExecutionInputJson: inputJSON,
-		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
-			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
-				ToolCall: &bridgev1.RuntimeContextToolCall{
-					ModelToolCallId: modelToolCallID, ToolName: "exec_command", ProviderInputJson: inputJSON,
-				},
-			}}},
+		ToolDeclaration: &bridgev1.RuntimeToolDeclaration{
+			EventKind: bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_TOOL, ModelToolCallId: modelToolCallID,
+			ToolName: "exec_command", PublicExecutionInputJson: inputJSON, EvaluatedPermission: "allow", RouteCapability: "sandbox_execute",
 		},
 	})
 	if err != nil {
 		t.Fatalf("commit capacity-chain Tool Use: %v", err)
 	}
-	if toolUse.GetCommitted() == nil || len(toolUse.GetCommitted().GetCreatedToolUseEventIds()) != 1 {
+	if toolUse.GetCommitted() == nil || toolUse.GetCommitted().GetEventId() == "" {
 		t.Fatalf("capacity-chain Tool Use result = %#v; want one committed Tool identity", toolUse)
 	}
-	toolUseEventID := toolUse.GetCommitted().GetCreatedToolUseEventIds()[0]
+	toolUseEventID := toolUse.GetCommitted().GetEventId()
 	inputHash := sandboxCapacitySHA256(inputJSON)
 	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
 		SET tool_use_event_id=$1, normalized_input_hash=$2, tool_name='exec_command', input_json=$3,
@@ -463,24 +457,18 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 	)
 	written, err := h.bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_shared_tool_use", ModelRequestId: h.modelRequestID,
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"printf shared"},"evaluated_permission":"allow"}`,
-		CanonicalExecutionInputJson: inputJSON,
-		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
-			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
-				ToolCall: &bridgev1.RuntimeContextToolCall{
-					ModelToolCallId: modelToolCallID, ToolName: "exec_command", ProviderInputJson: inputJSON,
-				},
-			}}},
+		ToolDeclaration: &bridgev1.RuntimeToolDeclaration{
+			EventKind: bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_TOOL, ModelToolCallId: modelToolCallID,
+			ToolName: "exec_command", PublicExecutionInputJson: inputJSON, EvaluatedPermission: "allow", RouteCapability: "sandbox_execute",
 		},
 	})
 	if err != nil {
 		t.Fatalf("commit shared capacity Tool Use: %v", err)
 	}
-	if written.GetCommitted() == nil || len(written.GetCommitted().GetCreatedToolUseEventIds()) != 1 {
+	if written.GetCommitted() == nil || written.GetCommitted().GetEventId() == "" {
 		t.Fatalf("shared capacity Tool Use result = %#v; want one committed Tool identity", written)
 	}
-	toolUseEventID := written.GetCommitted().GetCreatedToolUseEventIds()[0]
+	toolUseEventID := written.GetCommitted().GetEventId()
 	inputHash := sandboxCapacitySHA256(inputJSON)
 	if _, err := h.admin.Exec(`UPDATE session_runtime_tool_results
 		SET tool_use_event_id=$1, normalized_input_hash=$2, tool_name='exec_command', input_json=$3,

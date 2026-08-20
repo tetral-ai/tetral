@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
@@ -21,6 +21,9 @@ import {
 	BridgeAPIEventWriter,
 } from "../../src/bridge-client.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
+import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
+import type { RuntimeCleanupController } from "../../src/runtime-service.js";
+import { RuntimeControlService } from "../../src/runtime-service.js";
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) {
@@ -31,20 +34,24 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly workspaceId: string;
 	readonly sessionId: string;
 	readonly sessionThreadId: string;
-	readonly bindingId: string;
-	readonly bindingGeneration: number;
+	readonly bindingId?: string;
+	readonly bindingGeneration?: number;
 	readonly targetPodUid: string;
 	readonly now: string;
 	readonly preloadOnly?: boolean;
 	readonly terminationWriteId?: string;
 	readonly terminationReplayCount?: number;
+	readonly serveRecovery?: boolean;
+	readonly readyPath?: string;
+	readonly recoveryResultPath?: string;
+	readonly closePath?: string;
 };
 const command = {
 	workspaceId: input.workspaceId,
 	sessionId: input.sessionId,
 	sessionThreadId: input.sessionThreadId,
-	bindingId: input.bindingId,
-	bindingGeneration: input.bindingGeneration,
+	bindingId: input.bindingId ?? "",
+	bindingGeneration: input.bindingGeneration ?? 0,
 	targetPodUid: input.targetPodUid,
 };
 const bridgeOptions = {
@@ -112,6 +119,68 @@ const hosts = await buildRuntimeCoreHosts({
 		},
 	},
 });
+if (input.serveRecovery === true) {
+	if (input.readyPath === undefined || input.recoveryResultPath === undefined || input.closePath === undefined) {
+		throw new Error("serving recovery composition paths are required");
+	}
+	const cleanupController = {
+		startCleanup: async () => {
+			throw new Error("unexpected cleanup command");
+		},
+	} satisfies RuntimeCleanupController;
+	const service = new RuntimeControlService({
+		ownPod: {
+			namespace: "tetral-agent-runtime",
+			name: "runtime-provider-reschedule-recovery",
+			uid: input.targetPodUid,
+			ip: "127.0.0.1",
+		},
+		allowedBridge: { namespace: "tetral-system", name: "bridge" },
+		authenticator: {
+			authenticate: async () => ({
+				ok: true as const,
+				serviceAccount: { namespace: "tetral-system", name: "bridge" },
+			}),
+		},
+		runHost: {
+			...hosts.commandRunHost,
+			handleRecoverThread: async (recoveryCommand) => {
+				const result = await hosts.commandRunHost.handleRecoverThread!(recoveryCommand);
+				const snapshot = await hosts.subAgentRunHost.inspectThread(recoveryCommand);
+				await writeFile(input.recoveryResultPath!, JSON.stringify({
+					resultType: "preloaded",
+					providerInvocations,
+					executorInvocations,
+					preloadResult: result,
+					lastSnapshot: snapshot,
+					command: recoveryCommand,
+				}), { mode: 0o600 });
+				return result;
+			},
+		},
+		cleanupController,
+		logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+		ready: () => true,
+	});
+	const server = createRuntimeGrpcServer(service);
+	const port = await server.bind("127.0.0.1:0");
+	await writeFile(input.readyPath, JSON.stringify({ port }), { mode: 0o600 });
+	try {
+		for (;;) {
+			try {
+				await access(input.closePath);
+				break;
+			} catch {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+		}
+	} finally {
+		await hosts.shutdownActiveRuns();
+		await server.shutdown();
+		await hosts.close();
+	}
+	process.exit(0);
+}
 let resultType = "failed";
 let preloadResult: unknown;
 let lastSnapshot: unknown;

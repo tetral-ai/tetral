@@ -294,6 +294,46 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 	}
 }
 
+func TestPostgreSQLCreateSubagentThreadAcceptsMechanicallyValidRuntimeAgentType(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_spawn_declared_agent_type"
+		threadID  = "thr_spawn_declared_agent_type"
+		bindingID = "bind_spawn_declared_agent_type"
+		podUID    = "pod_spawn_declared_agent_type"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_declared_type_start", "mreq_spawn_declared_type", requestKindAgentProviderRequest, 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_spawn_declared_type_tool", ModelRequestId: "mreq_spawn_declared_type",
+		ToolDeclaration: bridgeToolDeclarationForTest(
+			"call_spawn_declared_type", "spawn_agent",
+			`{"task_name":"planner","agent_type":"worker","fork_turns":"none"}`, "allow", "child_create",
+		),
+	})
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("write declared spawn Tool Use = %#v/%v", toolUse, err)
+	}
+	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
+		Scope: scope, SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), TaskName: "planner",
+		AgentType: "planner-v2", InitialPrompt: "perform the delegated task",
+	})
+	if err != nil || created.GetCommitted().GetChildThreadId() == "" {
+		t.Fatalf("create child from Runtime declaration = %#v/%v", created, err)
+	}
+	var storedAgentType string
+	if err := admin.QueryRowContext(context.Background(), `SELECT agent_type FROM session_threads
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, created.GetCommitted().GetChildThreadId()).Scan(&storedAgentType); err != nil {
+		t.Fatalf("read declared child agent type: %v", err)
+	}
+	if storedAgentType != "planner-v2" {
+		t.Fatalf("stored child agent type = %q; want exact Runtime declaration", storedAgentType)
+	}
+}
+
 func TestActorBoundaryDiagnosticsAreBoundedAndFailOpen(t *testing.T) {
 	scope := bridgeAPIScope("sesn_actor_diagnostic", "thr_actor_diagnostic", "bind_actor_diagnostic", 1, "pod_actor_diagnostic")
 	logActorBoundaryRejected(

@@ -458,9 +458,6 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		if err != nil {
 			return err
 		}
-		if tool.ToolName != "memory" || tool.MCPServerName != "" {
-			return status.Error(codes.FailedPrecondition, "durable tool is not a memory operation")
-		}
 		var memoryInput memoryToolInput
 		if err := json.Unmarshal([]byte(tool.InputJSON), &memoryInput); err != nil || memoryInput.Action == "" {
 			return status.Error(codes.FailedPrecondition, "durable memory input is invalid")

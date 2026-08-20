@@ -23,13 +23,8 @@ message RecoverThreadRequest {
   int64 binding_generation = 5;
   string target_pod_uid = 6;
   string source_event_id = 7;
-  RuntimeRecoveryKind recovery_kind = 8;
-}
-
-enum RuntimeRecoveryKind {
-  RUNTIME_RECOVERY_KIND_UNSPECIFIED = 0;
-  RUNTIME_RECOVERY_KIND_TOOL_ROUTE = 1;
-  RUNTIME_RECOVERY_KIND_RESCHEDULE = 2;
+  reserved 8;
+  reserved "recovery_kind";
 }
 
 message RecoverThreadResponse {

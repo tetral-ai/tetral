@@ -193,7 +193,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	if err := validateProviderContextRetention(request, requestKind); err != nil {
+	if err := validateProviderContextRetention(request); err != nil {
 		return nil, err
 	}
 	finishReason := defaultString(request.GetFinishReason(), "unknown")
@@ -1391,32 +1391,13 @@ func modelRequestEndPayloadJSON(request *bridgev1.WriteRequestEndRequest, reques
 	return marshalBridgeJSON(payload)
 }
 
-func validateProviderContextRetention(request *bridgev1.WriteRequestEndRequest, requestKind string) error {
+func validateProviderContextRetention(request *bridgev1.WriteRequestEndRequest) error {
 	selection := request.GetProviderContextRetention()
 	if selection == nil {
 		return status.Error(codes.InvalidArgument, "provider-context retention declaration is required")
 	}
 	switch selection.GetDisposition() {
-	case "completed":
-		if request.GetIsError() || request.GetReschedule() != nil || requestKind == requestKindCompactionSummary {
-			return status.Error(codes.InvalidArgument, "completed retention disposition does not match request closeout")
-		}
-	case "interrupted":
-		if !request.GetIsError() || request.GetErrorKind() != "runtime_interrupted" || request.GetReschedule() != nil {
-			return status.Error(codes.InvalidArgument, "interrupted retention disposition does not match request closeout")
-		}
-	case "rescheduled":
-		if request.GetReschedule() == nil {
-			return status.Error(codes.InvalidArgument, "rescheduled retention disposition does not match request closeout")
-		}
-	case "failed":
-		if !request.GetIsError() || request.GetReschedule() != nil || request.GetErrorKind() == "runtime_interrupted" {
-			return status.Error(codes.InvalidArgument, "failed retention disposition does not match request closeout")
-		}
-	case "compacted":
-		if requestKind != requestKindCompactionSummary || request.GetIsError() || request.GetReschedule() != nil {
-			return status.Error(codes.InvalidArgument, "compacted retention disposition does not match request closeout")
-		}
+	case "completed", "interrupted", "rescheduled", "failed", "compacted":
 	default:
 		return status.Error(codes.InvalidArgument, "provider-context retention disposition is invalid")
 	}

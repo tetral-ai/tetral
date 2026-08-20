@@ -21,45 +21,6 @@ import {
 
 export const protobufPackage = "tetral.agent_runtime.v1";
 
-export enum RuntimeRecoveryKind {
-  RUNTIME_RECOVERY_KIND_UNSPECIFIED = 0,
-  RUNTIME_RECOVERY_KIND_TOOL_ROUTE = 1,
-  RUNTIME_RECOVERY_KIND_RESCHEDULE = 2,
-  UNRECOGNIZED = -1,
-}
-
-export function runtimeRecoveryKindFromJSON(object: any): RuntimeRecoveryKind {
-  switch (object) {
-    case 0:
-    case "RUNTIME_RECOVERY_KIND_UNSPECIFIED":
-      return RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_UNSPECIFIED;
-    case 1:
-    case "RUNTIME_RECOVERY_KIND_TOOL_ROUTE":
-      return RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_TOOL_ROUTE;
-    case 2:
-    case "RUNTIME_RECOVERY_KIND_RESCHEDULE":
-      return RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_RESCHEDULE;
-    case -1:
-    case "UNRECOGNIZED":
-    default:
-      return RuntimeRecoveryKind.UNRECOGNIZED;
-  }
-}
-
-export function runtimeRecoveryKindToJSON(object: RuntimeRecoveryKind): string {
-  switch (object) {
-    case RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_UNSPECIFIED:
-      return "RUNTIME_RECOVERY_KIND_UNSPECIFIED";
-    case RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_TOOL_ROUTE:
-      return "RUNTIME_RECOVERY_KIND_TOOL_ROUTE";
-    case RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_RESCHEDULE:
-      return "RUNTIME_RECOVERY_KIND_RESCHEDULE";
-    case RuntimeRecoveryKind.UNRECOGNIZED:
-    default:
-      return "UNRECOGNIZED";
-  }
-}
-
 export enum RecoverThreadFailure {
   RECOVER_THREAD_FAILURE_UNSPECIFIED = 0,
   RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH = 1,
@@ -728,7 +689,6 @@ export interface RecoverThreadRequest {
   bindingGeneration: number;
   targetPodUid: string;
   sourceEventId: string;
-  recoveryKind: RuntimeRecoveryKind;
 }
 
 export interface RecoverThreadResponse {
@@ -988,7 +948,6 @@ function createBaseRecoverThreadRequest(): RecoverThreadRequest {
     bindingGeneration: 0,
     targetPodUid: "",
     sourceEventId: "",
-    recoveryKind: 0,
   };
 }
 
@@ -1014,9 +973,6 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
     }
     if (message.sourceEventId !== "") {
       writer.uint32(58).string(message.sourceEventId);
-    }
-    if (message.recoveryKind !== 0) {
-      writer.uint32(64).int32(message.recoveryKind);
     }
     return writer;
   },
@@ -1084,14 +1040,6 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
           message.sourceEventId = reader.string();
           continue;
         }
-        case 8: {
-          if (tag !== 64) {
-            break;
-          }
-
-          message.recoveryKind = reader.int32() as any;
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1138,11 +1086,6 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
         : isSet(object.source_event_id)
         ? globalThis.String(object.source_event_id)
         : "",
-      recoveryKind: isSet(object.recoveryKind)
-        ? runtimeRecoveryKindFromJSON(object.recoveryKind)
-        : isSet(object.recovery_kind)
-        ? runtimeRecoveryKindFromJSON(object.recovery_kind)
-        : 0,
     };
   },
 
@@ -1169,9 +1112,6 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
     if (message.sourceEventId !== "") {
       obj.sourceEventId = message.sourceEventId;
     }
-    if (message.recoveryKind !== 0) {
-      obj.recoveryKind = runtimeRecoveryKindToJSON(message.recoveryKind);
-    }
     return obj;
   },
 
@@ -1187,7 +1127,6 @@ export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.targetPodUid = object.targetPodUid ?? "";
     message.sourceEventId = object.sourceEventId ?? "";
-    message.recoveryKind = object.recoveryKind ?? 0;
     return message;
   },
 };

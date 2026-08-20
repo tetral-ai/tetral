@@ -53,6 +53,18 @@ func TestFailedRequestWithoutRetentionDeclarationKeepsAssistantAuditOnly(t *test
 	}
 }
 
+func TestProviderContextRetentionValidationAcceptsMechanicallyValidRuntimeDeclaration(t *testing.T) {
+	request := &bridgev1.WriteRequestEndRequest{
+		IsError: false,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "interrupted",
+		},
+	}
+	if err := validateProviderContextRetention(request); err != nil {
+		t.Fatalf("mechanically valid Runtime retention declaration: %v", err)
+	}
+}
+
 func TestWriteRequestEndReturnsOnlyDirectDurableFacts(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

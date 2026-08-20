@@ -892,7 +892,7 @@ func retireRuntimePodLostOwnedToolBindingTx(
 	); err != nil {
 		return err
 	}
-	return enqueueRuntimeRecoveryTx(ctx, tx, scope, toolUseEventID, "tool_route", now)
+	return enqueueRuntimeRecoveryTx(ctx, tx, scope, toolUseEventID, now)
 }
 
 func activeRuntimePodLostRescheduleTx(
@@ -964,12 +964,12 @@ func retireRuntimePodLostRescheduledBindingTx(
 	); err != nil {
 		return err
 	}
-	return enqueueRuntimeRecoveryTx(ctx, tx, scope, rescheduleEventID, "reschedule", now)
+	return enqueueRuntimeRecoveryTx(ctx, tx, scope, rescheduleEventID, now)
 }
 
-func enqueueRuntimeRecoveryTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceEventID string, recoveryKind string, now time.Time) error {
+func enqueueRuntimeRecoveryTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceEventID string, now time.Time) error {
 	request, err := queue.NewRuntimeRecoveryEnqueueRequest(
-		workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), scope.GetSessionThreadId(), sourceEventID, recoveryKind, now,
+		workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), scope.GetSessionThreadId(), sourceEventID, now,
 	)
 	if err != nil {
 		return err

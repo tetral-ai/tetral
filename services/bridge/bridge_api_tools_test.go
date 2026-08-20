@@ -1105,6 +1105,27 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *test
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreRunMemoryUsesDeclaredRouteWithoutToolNameAllowlist(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_declared_route", "bind_bridge_memory_declared_route", 1, "pod_uid_memory_declared_route")
+	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_declared_route", "memstore_bridge_memory_declared_route")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route", "bind_bridge_memory_declared_route", 1, "pod_uid_memory_declared_route")
+	request := durableMemoryRequestForTest(t, admin, scope, "evt_tool_memory_declared_route",
+		`{"action":"create","path":"notes/declared.md","content":"declared"}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET projection_json=jsonb_set(projection_json::jsonb, '{tool_name}', '"runtime_memory_v2"'::jsonb)::text
+		WHERE workspace_id='default' AND event_id=$1`, request.GetToolUseEventId()); err != nil {
+		t.Fatalf("replace diagnostic Tool name while retaining declared route: %v", err)
+	}
+	response, err := store.RunMemory(context.Background(), request)
+	if err != nil || response.GetCommitted() == nil {
+		t.Fatalf("RunMemory declared route = %#v/%v", response, err)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreRunMemoryWaitsForDurableSandboxProjection(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

@@ -160,7 +160,6 @@ export interface RuntimeCleanupCommand extends RuntimeSessionScope {
 
 export interface RuntimeRecoveryCommand extends RuntimeThreadScope {
 	readonly sourceEventId: string;
-	readonly recoveryKind: "tool_route" | "reschedule";
 }
 
 export interface RuntimeSessionRunHost {
@@ -481,7 +480,6 @@ export class RuntimeControlService {
 				const result = await handler.call(this.options.runHost, {
 					...scope,
 					sourceEventId: request.sourceEventId,
-					recoveryKind: request.recoveryKind === 1 ? "tool_route" : "reschedule",
 				});
 				if (!result.ok) {
 					if (result.reason === "context_load_failed") {

@@ -116,7 +116,6 @@ type RuntimeJob struct {
 	SequenceTo            int64
 	InputKind             string
 	RejectionReasonCode   string
-	RecoveryKind          string
 	RecoverySourceEventID string
 	PayloadJSON           string
 	AttemptCount          int32
@@ -712,22 +711,20 @@ func decodeRuntimeRecoveryJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		SessionID       string `json:"session_id"`
 		SessionThreadID string `json:"session_thread_id"`
 		SourceEventID   string `json:"source_event_id"`
-		RecoveryKind    string `json:"recovery_kind"`
 	}
 	if err := json.Unmarshal([]byte(queueJob.GetPayloadJson()), &payload); err != nil {
 		return RuntimeJob{}, err
 	}
 	if queueJob.GetWorkspaceId() == "" || queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" ||
-		payload.SessionID == "" || payload.SessionThreadID == "" || payload.SourceEventID == "" ||
-		(payload.RecoveryKind != "tool_route" && payload.RecoveryKind != "reschedule") {
+		payload.SessionID == "" || payload.SessionThreadID == "" || payload.SourceEventID == "" {
 		return RuntimeJob{}, errors.New("runtime recovery payload has missing identity fields")
 	}
 	return RuntimeJob{
 		JobID: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(), Kind: queue.KindRuntimeRecovery,
 		PartitionKey: queueJob.GetPartitionKey(), DedupeKey: queueJob.GetDedupeKey(),
 		WorkspaceID: queueJob.GetWorkspaceId(), SessionID: payload.SessionID, SessionThreadID: payload.SessionThreadID,
-		RecoveryKind: payload.RecoveryKind, RecoverySourceEventID: payload.SourceEventID,
-		PayloadJSON: queueJob.GetPayloadJson(), AttemptCount: queueJob.GetAttemptCount(), MaxAttempts: queueJob.GetMaxAttempts(),
+		RecoverySourceEventID: payload.SourceEventID,
+		PayloadJSON:           queueJob.GetPayloadJson(), AttemptCount: queueJob.GetAttemptCount(), MaxAttempts: queueJob.GetMaxAttempts(),
 	}, nil
 }
 

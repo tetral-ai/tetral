@@ -35,6 +35,63 @@ import (
 
 // This file owns PostgreSQL runtime delivery-store behavior tests.
 
+func TestPrepareRuntimeRecoveryRequiresExactLiveQueueLeaseBeforeMutation(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_recovery_lease_fence"
+		threadID  = "thr_recovery_lease_fence"
+		sourceID  = "evt_recovery_lease_fence"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	enqueue, err := queue.NewRuntimeRecoveryEnqueueRequest(workspace.DefaultID, sessionID, threadID, sourceID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("build recovery Queue job: %v", err)
+	}
+	if _, err := queueStore.Enqueue(context.Background(), enqueue); err != nil {
+		t.Fatalf("enqueue recovery Queue job: %v", err)
+	}
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeRecovery}, LeaseOwner: "recovery-lease-fence",
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease recovery Queue job = %#v/%v", leased, err)
+	}
+	job := RuntimeJob{
+		JobID: leased[0].ID, LeaseToken: leased[0].LeaseToken, Kind: leased[0].Kind,
+		PartitionKey: leased[0].PartitionKey, DedupeKey: leased[0].DedupeKey,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RecoverySourceEventID: sourceID, PayloadJSON: string(leased[0].PayloadJSON),
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, job.JobID); err != nil {
+		t.Fatalf("expire recovery Queue lease: %v", err)
+	}
+	store := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-lease-fence", PodUID: "pod-recovery-lease-fence", PodIP: "127.0.0.1",
+		}})
+	}}
+	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
+	if err != nil || !plan.DeliveryAuthorityLost || plan.hasCommand() {
+		t.Fatalf("expired recovery preparation = %#v/%v; want authority-loss no-op", plan, err)
+	}
+	var bindingCount int
+	var runtimeStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		COALESCE((SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1), 'absent')`, sessionID).Scan(&bindingCount, &runtimeStatus); err != nil {
+		t.Fatalf("read recovery mutation census: %v", err)
+	}
+	if bindingCount != 0 || runtimeStatus != "absent" {
+		t.Fatalf("expired recovery mutated binding/status = %d/%s; want 0/absent", bindingCount, runtimeStatus)
+	}
+}
+
 type recordingMCPConnectorServer struct {
 	providergatewayv1.UnimplementedMcpConnectorServiceServer
 

@@ -635,13 +635,12 @@ func FormatRuntimeRecoveryDedupeKey(workspaceID workspace.ID, sessionID string, 
 	return formatQueueDedupeKey(KindRuntimeRecovery, workspaceID, sessionID, sourceEventID)
 }
 
-func NewRuntimeRecoveryEnqueueRequest(workspaceID workspace.ID, sessionID string, sessionThreadID string, sourceEventID string, recoveryKind string, now time.Time) (EnqueueRequest, error) {
+func NewRuntimeRecoveryEnqueueRequest(workspaceID workspace.ID, sessionID string, sessionThreadID string, sourceEventID string, now time.Time) (EnqueueRequest, error) {
 	payload, err := json.Marshal(struct {
 		SessionID       string `json:"session_id"`
 		SessionThreadID string `json:"session_thread_id"`
 		SourceEventID   string `json:"source_event_id"`
-		RecoveryKind    string `json:"recovery_kind"`
-	}{sessionID, sessionThreadID, sourceEventID, recoveryKind})
+	}{sessionID, sessionThreadID, sourceEventID})
 	if err != nil {
 		return EnqueueRequest{}, err
 	}
@@ -838,7 +837,7 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 	}
 	switch request.Kind {
 	case KindRuntimeRecovery:
-		if err := validatePayloadKeys(rawPayload, "session_id", "session_thread_id", "source_event_id", "recovery_kind"); err != nil {
+		if err := validatePayloadKeys(rawPayload, "session_id", "session_thread_id", "source_event_id"); err != nil {
 			return err
 		}
 		sessionID, sourceEventID, err := requiredPayloadTokens(payload, "session_id", "source_event_id")
@@ -847,9 +846,6 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 		}
 		if _, err := requiredPayloadToken(payload, "session_thread_id"); err != nil {
 			return err
-		}
-		if payload["recovery_kind"] != "tool_route" && payload["recovery_kind"] != "reschedule" {
-			return &ValidationError{Message: "runtime_recovery recovery_kind is invalid"}
 		}
 		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeRecoveryDedupeKey(request.WorkspaceID, sessionID, sourceEventID))
 	case KindRuntimeInput:

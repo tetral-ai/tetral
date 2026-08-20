@@ -400,6 +400,108 @@ type providerRescheduleRecoveryComposition struct {
 	PreloadResult       json.RawMessage `json:"preloadResult"`
 	LastSnapshot        json.RawMessage `json:"lastSnapshot"`
 	TerminationResults  json.RawMessage `json:"terminationResults"`
+	Command             struct {
+		WorkspaceID       string `json:"workspaceId"`
+		SessionID         string `json:"sessionId"`
+		SessionThreadID   string `json:"sessionThreadId"`
+		BindingID         string `json:"bindingId"`
+		BindingGeneration int64  `json:"bindingGeneration"`
+		TargetPodUID      string `json:"targetPodUid"`
+		SourceEventID     string `json:"sourceEventId"`
+	} `json:"command"`
+}
+
+type providerRecoveryProcess struct {
+	command    *exec.Cmd
+	output     bytes.Buffer
+	port       int
+	resultPath string
+	closePath  string
+}
+
+type providerRecoveryTokenSource struct{}
+
+func (providerRecoveryTokenSource) Token(context.Context) (string, error) {
+	return "provider-recovery-composition-token", nil
+}
+
+func startProviderRecoveryRuntime(t *testing.T, bridgeAddress, sessionID, threadID, podUID string, now time.Time) *providerRecoveryProcess {
+	t.Helper()
+	tempDir := t.TempDir()
+	readyPath := filepath.Join(tempDir, "ready.json")
+	process := &providerRecoveryProcess{
+		resultPath: filepath.Join(tempDir, "result.json"),
+		closePath:  filepath.Join(tempDir, "close"),
+	}
+	inputPath := filepath.Join(tempDir, "input.json")
+	encoded, err := json.Marshal(map[string]any{
+		"serveRecovery": true, "bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
+		"sessionId": sessionID, "sessionThreadId": threadID, "targetPodUid": podUID,
+		"now": now.Format(time.RFC3339Nano), "readyPath": readyPath,
+		"recoveryResultPath": process.resultPath, "closePath": process.closePath,
+	})
+	if err != nil {
+		t.Fatalf("encode serving recovery composition: %v", err)
+	}
+	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
+		t.Fatalf("write serving recovery composition: %v", err)
+	}
+	process.command = exec.Command("bun", "packages/runtime-pod/test/fixtures/provider-reschedule-recovery-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	process.command.Dir = "../agent-runtime"
+	process.command.Stdout = &process.output
+	process.command.Stderr = &process.output
+	if err := process.command.Start(); err != nil {
+		t.Fatalf("start serving recovery composition: %v", err)
+	}
+	t.Cleanup(func() {
+		if process.command.ProcessState == nil {
+			_ = process.command.Process.Kill()
+			_ = process.command.Wait()
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, readErr := os.ReadFile(readyPath)
+		if readErr == nil {
+			var ready struct {
+				Port int `json:"port"`
+			}
+			if json.Unmarshal(raw, &ready) == nil && ready.Port > 0 {
+				process.port = ready.Port
+				return process
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("serving recovery composition did not become ready: %s", process.output.String())
+	return nil
+}
+
+func (p *providerRecoveryProcess) recoveryResult(t *testing.T) providerRescheduleRecoveryComposition {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(p.resultPath)
+		if err == nil {
+			var result providerRescheduleRecoveryComposition
+			if json.Unmarshal(raw, &result) == nil {
+				return result
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("serving recovery composition did not accept command: %s", p.output.String())
+	return providerRescheduleRecoveryComposition{}
+}
+
+func (p *providerRecoveryProcess) close(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(p.closePath, nil, 0o600); err != nil {
+		t.Fatalf("signal serving recovery composition close: %v", err)
+	}
+	if err := p.command.Wait(); err != nil {
+		t.Fatalf("close serving recovery composition: %v: %s", err, p.output.String())
+	}
 }
 
 func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t *testing.T) {
@@ -474,7 +576,7 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 		t.Fatalf("deliver recovered-binding wake = active:%t requests:%d err:%v", active, len(sender.requests), err)
 	}
 	recoveryRequest, ok := sender.requests[0].(*agentruntimev1.RecoverThreadRequest)
-	if !ok || recoveryRequest.GetRecoveryKind() != agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_RESCHEDULE || recoveryRequest.GetTargetPodUid() != newPodUID {
+	if !ok || recoveryRequest.GetTargetPodUid() != newPodUID {
 		t.Fatalf("recovered-binding wake = %#v; want resolver-owned reschedule recovery", sender.requests[0])
 	}
 	newBindingID := recoveryRequest.GetBindingId()
@@ -643,31 +745,6 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		  AND type='session.status_rescheduled' ORDER BY sequence DESC LIMIT 1`, sessionID, threadID).Scan(&rescheduleEventID); err != nil {
 		t.Fatalf("read durable reschedule root: %v", err)
 	}
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
-	replacement := enginekubernetes.BindingCandidate{
-		Namespace: "tetral-agent-runtime", PodName: "runtime-provider-reschedule-new",
-		PodUID: newPodUID, PodIP: "10.62.0.10",
-	}
-	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
-		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
-	}}
-	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
-		Config:    JobRunnerConfig{LeaseOwner: "provider-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
-	}
-	active, err := runner.RunOnceWithActivity(context.Background())
-	if err != nil || !active || len(sender.requests) != 1 {
-		t.Fatalf("deliver provider reschedule recovery = active:%t requests:%d err:%v", active, len(sender.requests), err)
-	}
-	recoveryRequest, ok := sender.requests[0].(*agentruntimev1.RecoverThreadRequest)
-	if !ok || recoveryRequest.GetRecoveryKind() != agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_RESCHEDULE ||
-		recoveryRequest.GetSourceEventId() != rescheduleEventID || recoveryRequest.GetTargetPodUid() != newPodUID {
-		t.Fatalf("provider reschedule recovery request = %#v; want exact durable reschedule root", sender.requests[0])
-	}
-	newBindingID := recoveryRequest.GetBindingId()
-	newBindingGeneration := recoveryRequest.GetBindingGeneration()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for provider reschedule recovery: %v", err)
@@ -679,13 +756,31 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		server.Stop()
 		_ = listener.Close()
 	})
-	preloaded := runProviderRescheduleRecoveryComposition(t, map[string]any{
-		"bridgeAddress": listener.Addr().String(),
-		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
-		"now":         acceptedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano),
-		"preloadOnly": true,
-	})
+	runtimeProcess := startProviderRecoveryRuntime(
+		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(250*time.Millisecond),
+	)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	replacement := enginekubernetes.BindingCandidate{
+		Namespace: "tetral-agent-runtime", PodName: "runtime-provider-reschedule-new",
+		PodUID: newPodUID, PodIP: "127.0.0.1",
+	}
+	deliveryStore.RuntimeGRPCPort = runtimeProcess.port
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(providerRecoveryTokenSource{})},
+		Config:    JobRunnerConfig{LeaseOwner: "provider-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	active, err := runner.RunOnceWithActivity(context.Background())
+	if err != nil || !active {
+		t.Fatalf("deliver provider reschedule recovery = active:%t err:%v", active, err)
+	}
+	preloaded := runtimeProcess.recoveryResult(t)
+	if preloaded.Command.SourceEventID != rescheduleEventID || preloaded.Command.TargetPodUID != newPodUID {
+		t.Fatalf("provider reschedule recovery command = %#v; want exact durable reschedule root", preloaded.Command)
+	}
 	if preloaded.ResultType != "preloaded" || preloaded.ProviderInvocations != 0 || preloaded.ExecutorInvocations != 0 ||
 		!strings.Contains(string(preloaded.PreloadResult), `"ok":true`) ||
 		!strings.Contains(string(preloaded.LastSnapshot), `"observed":true`) ||
@@ -694,6 +789,9 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		strings.Contains(string(preloaded.LastSnapshot), "call_uncommitted_fragment") {
 		t.Fatalf("replacement Runtime nonterminal preload = %+v snapshot=%s", preloaded, preloaded.LastSnapshot)
 	}
+	runtimeProcess.close(t)
+	newBindingID := preloaded.Command.BindingID
+	newBindingGeneration := preloaded.Command.BindingGeneration
 	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
 	settleSandboxExecutionForHotReceiptProof(t, runtimeDB, admin, newScope, toolUse.GetCommitted().GetEventId(),
 		`{"status":"success","result":{"content":"original result"}}`)

@@ -34,13 +34,9 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "create_subagent_thread", request.GetSourceToolUseEventId(), phase, resultErr)
 	}()
-	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorTaskName(request.GetTaskName()) || !validActorInitialPrompt(request.GetInitialPrompt()) {
+	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorTaskName(request.GetTaskName()) ||
+		!validActorIdentity(request.GetAgentType()) || !validActorInitialPrompt(request.GetInitialPrompt()) {
 		return nil, status.Error(codes.InvalidArgument, "sub-agent source Tool, task name, initial prompt, and scope are required")
-	}
-	switch request.GetAgentType() {
-	case "general", "research", "worker":
-	default:
-		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent agent_type")
 	}
 	if !validParentMessageSequences(request.GetParentMessageSequences()) {
 		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent parent Message references")

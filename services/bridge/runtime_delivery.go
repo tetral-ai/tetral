@@ -2536,8 +2536,21 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
-	if job.RecoverySourceEventID == "" || (job.RecoveryKind != "tool_route" && job.RecoveryKind != "reschedule") {
+	if job.RecoverySourceEventID == "" || job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" {
 		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery identity is incomplete", retryable: false}
+	}
+	if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+		WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
+		PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+	})
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if !live {
+		return RuntimeCommandPlan{DeliveryAuthorityLost: true}, nil
 	}
 	var sourceThreadID, sourceType string
 	if err := tx.QueryRow(ctx,
@@ -2550,8 +2563,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx con
 		return RuntimeCommandPlan{}, err
 	}
 	if sourceThreadID != job.SessionThreadID ||
-		(job.RecoveryKind == "tool_route" && sourceType != "agent.tool_use" && sourceType != "agent.mcp_tool_use") ||
-		(job.RecoveryKind == "reschedule" && sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled") {
+		(sourceType != "agent.tool_use" && sourceType != "agent.mcp_tool_use" &&
+			sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled") {
 		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery source is invalid", retryable: false}
 	}
 	binding, err := s.resolveRuntimeTarget(ctx, tx, job)
@@ -2572,17 +2585,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx con
 	if !rowsAffected(result) {
 		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_binding_unavailable", message: "runtime residency is unavailable", retryable: true}
 	}
-	recoveryKind := agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_TOOL_ROUTE
-	if job.RecoveryKind == "reschedule" {
-		recoveryKind = agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_RESCHEDULE
-	}
 	return RuntimeCommandPlan{
 		Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP, Port: port},
 		AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID},
 		RecoverThread: &agentruntimev1.RecoverThreadRequest{
 			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
 			BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
-			SourceEventId: job.RecoverySourceEventID, RecoveryKind: recoveryKind,
+			SourceEventId: job.RecoverySourceEventID,
 		},
 	}, nil
 }
