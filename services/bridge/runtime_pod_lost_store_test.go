@@ -772,9 +772,11 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 
 			apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-pod-loss-approval-key!!")
+			loadScope := bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID)
 			if testCase.raceConfirmation {
+				deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 				confirmationRequest := bridgeToolSettlementRequestForTest(
-					bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
+					loadScope,
 					bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel"),
 				)
 				start := make(chan struct{})
@@ -782,8 +784,8 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				confirmationResult := make(chan error, 1)
 				go func() {
 					<-start
-					_, err := runRuntimePodLostRepairTransaction(
-						context.Background(), runtime, sessionID, binding,
+					err := deliveryStore.repairLostRuntimeBinding(
+						context.Background(), "default", sessionID, binding,
 						time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
 					)
 					repairResult <- err
@@ -800,6 +802,15 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				if err := <-confirmationResult; err != nil && status.Code(err) != codes.FailedPrecondition && status.Code(err) != codes.AlreadyExists {
 					t.Fatalf("confirmation race result: %v", err)
 				}
+				replacementBindingID := bindingID + "_replacement"
+				replacementPodUID := binding.PodUID + "_replacement"
+				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, replacementBindingID, 2, replacementPodUID)
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+					SET binding_id=$2,binding_generation=2,updated_at=now()
+					WHERE workspace_id='default' AND session_id=$1`, sessionID, replacementBindingID); err != nil {
+					t.Fatalf("install replacement Runtime status provenance: %v", err)
+				}
+				loadScope = bridgeAPIScope(sessionID, threadID, replacementBindingID, 2, replacementPodUID)
 			} else if _, err := runRuntimePodLostRepairTransaction(
 				context.Background(), runtime, sessionID, binding,
 				time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
@@ -872,9 +883,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 					failureCount, retriesExhaustedCount, resultCount, resultCount)
 			}
 
-			loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-				Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
-			})
+			loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: loadScope})
 			if err != nil {
 				t.Fatalf("LoadContext after approval pod loss: %v", err)
 			}
