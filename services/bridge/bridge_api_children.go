@@ -1309,51 +1309,6 @@ func readChildLifecycleOperationResultSetTx(
 	return results, len(results) > 0, nil
 }
 
-func readChildLifecycleOperationResultsTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	callerScope *bridgev1.RuntimeScope,
-	targetIDs []string,
-	command childLifecycleCommand,
-	operationKind string,
-) ([]*bridgev1.ChildLifecycleResult, bool, error) {
-	results := make([]*bridgev1.ChildLifecycleResult, 0, len(targetIDs))
-	existingCount := 0
-	for _, targetID := range targetIDs {
-		targetScope := scopeForThread(callerScope, targetID)
-		existing, ok, err := readBridgeDeclarationOperationTx(
-			ctx,
-			tx,
-			targetScope,
-			operationKind,
-			command.operationSourceKind,
-			command.operationID,
-		)
-		if err != nil {
-			return nil, false, err
-		}
-		if !ok {
-			continue
-		}
-		existingCount++
-		if existing.DeclarationDigest != command.declarationDigest || existing.ReceiptJSON == "" {
-			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle idempotency conflict")
-		}
-		result, err := unmarshalChildLifecycleStoredResult(existing.ReceiptJSON, targetID, command.action)
-		if err != nil {
-			return nil, false, err
-		}
-		results = append(results, result)
-	}
-	if existingCount == 0 {
-		return nil, false, nil
-	}
-	if existingCount != len(targetIDs) {
-		return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle stored result set is incomplete")
-	}
-	return results, true, nil
-}
-
 func unmarshalChildLifecycleStoredResult(raw, targetID, action string) (*bridgev1.ChildLifecycleResult, error) {
 	var stored childLifecycleStoredResult
 	if err := json.Unmarshal([]byte(raw), &stored); err != nil || stored.ChildThreadID != targetID {
