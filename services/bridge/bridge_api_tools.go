@@ -76,7 +76,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool.ToolName); err != nil {
+		if err := lockExecutableSandboxToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		}
 		now := s.now()
@@ -264,10 +264,6 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	return nil
 }
 
-// lockExecutableToolRouteTx is the mechanical first-effect admission gate for
-// a Runtime-selected Tool route. Runtime owns the Tool name, arguments, policy,
-// and executor choice; Bridge locks only the exact durable route and verifies
-// that it is still executable and has no terminal Result.
 // lockExecutableToolRouteTx is the mechanical first-effect gate shared by
 // Bridge-owned executors. It locks the exact durable route and may compare its
 // declared capability name, but it never interprets Tool arguments or policy.
@@ -323,6 +319,22 @@ func lockExecutableToolRouteTx(
 		}
 	}
 	return nil
+}
+
+// lockExecutableSandboxToolRouteTx binds Sandbox admission to the closed set
+// of capabilities that the Sandbox executor implements. Runtime still selects
+// the route and interprets every argument; Bridge only prevents another Tool
+// family (or the separately routed stdin helper) from borrowing this endpoint.
+func lockExecutableSandboxToolRouteTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+) error {
+	return lockExecutableToolRouteTx(
+		ctx, tx, scope, toolUseEventID,
+		"Bash", "exec_command", "Read", "Write", "Edit", "Grep", "Glob", "view_image", "apply_patch",
+	)
 }
 
 // lockSettleableToolRouteTx separates terminal Result authority from executor

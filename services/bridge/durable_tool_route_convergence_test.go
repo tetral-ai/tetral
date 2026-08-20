@@ -222,6 +222,41 @@ func TestPostgreSQLActorEffectsRejectExecutableCapabilitySubstitution(t *testing
 	}
 }
 
+func TestPostgreSQLSandboxEffectRejectsExecutableCapabilitySubstitution(t *testing.T) {
+	for _, toolName := range []string{"web", "memory", "spawn_agent", "write_stdin"} {
+		t.Run(toolName, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(toolName, "_", "")
+			sessionID := "sesn_sandbox_capability_" + suffix
+			threadID := "thr_sandbox_capability_" + suffix
+			bindingID := "bind_sandbox_capability_" + suffix
+			podUID := "pod_sandbox_capability_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_sandbox_capability_"+suffix, "call_sandbox_capability_"+suffix, toolName, `{}`)
+
+			response, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+				Scope: scope, ToolUseEventId: toolUseID,
+			})
+			if status.Code(err) != codes.FailedPrecondition || response != nil {
+				t.Fatalf("Sandbox capability substitution response=%#v err=%v; want FailedPrecondition", response, err)
+			}
+			var executions, jobs int
+			if err := admin.QueryRowContext(context.Background(), `SELECT
+				(SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id=$1),
+				(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND partition_key LIKE '%' || $1 || '%')`, sessionID,
+			).Scan(&executions, &jobs); err != nil {
+				t.Fatalf("read rejected Sandbox effect census: %v", err)
+			}
+			if executions != 0 || jobs != 0 {
+				t.Fatalf("rejected Sandbox capability effects executions/jobs = %d/%d; want zero", executions, jobs)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLToolSettlementClosesExactRouteAtomically(t *testing.T) {
 	for _, decision := range []string{"allow", "deny"} {
 		t.Run(decision, func(t *testing.T) {
