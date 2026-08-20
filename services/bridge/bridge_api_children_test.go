@@ -351,14 +351,17 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"close_agent","input":{"task_name":"task_`+childID+`"}}`)
+		`{"type":"agent.tool_use","name":"close_agent","input":{"task_name":"provider-owned-different"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public' WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make control source public: %v", err)
 	}
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
-	request := &bridgev1.AdmitChildInterruptRequest{Scope: scope, SourceToolUseEventId: sourceID}
+	request := &bridgev1.AdmitChildInterruptRequest{
+		Scope: scope, SourceToolUseEventId: sourceID, TargetChildThreadId: childID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+	}
 	first, err := store.AdmitChildInterrupt(context.Background(), request)
 	if err != nil {
 		t.Fatalf("first AdmitChildInterrupt: %v", err)
@@ -373,6 +376,11 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	}
 	if replay.GetDuplicate().GetControlOperationId() != operationID {
 		t.Fatalf("replayed control operation id = %q; want %q", replay.GetDuplicate().GetControlOperationId(), operationID)
+	}
+	conflict := *request
+	conflict.Action = bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT
+	if response, err := store.AdmitChildInterrupt(context.Background(), &conflict); status.Code(err) != codes.AlreadyExists || response != nil {
+		t.Fatalf("conflicting child-control declaration = %#v/%v; want AlreadyExists", response, err)
 	}
 	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: sourceID}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("AwaitChildInterrupt accepted source Tool identity: %v", err)
@@ -625,7 +633,107 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 	}
 }
 
-func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *testing.T) {
+func TestPostgreSQLDeclaredChildControlOwnsExactTargetActionAndExpansion(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID       = "sesn_declared_child_control"
+		parentID        = "thr_declared_control_parent"
+		interruptRootID = "thr_declared_interrupt_root"
+		interruptLeafID = "thr_declared_interrupt_leaf"
+		closeRootID     = "thr_declared_close_root"
+		closeLeafID     = "thr_declared_close_leaf"
+		resumeTargetID  = "thr_declared_resume_target"
+		reviewerID      = "thr_declared_control_reviewer"
+		bindingID       = "bind_declared_child_control"
+		podUID          = "pod_declared_child_control"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, interruptRootID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, interruptRootID, interruptLeafID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, closeRootID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, closeRootID, closeLeafID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, resumeTargetID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+
+	seedSource := func(sourceID, toolName string, sequence int64) string {
+		t.Helper()
+		seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, sequence, "agent.tool_use",
+			`{"type":"agent.tool_use","name":"`+toolName+`","input":{"task_name":"provider-owned-different"}}`)
+		if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true
+			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
+			t.Fatalf("publish declared child-control source: %v", err)
+		}
+		seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+		return sourceID
+	}
+	interruptSource := seedSource("evt_declared_interrupt", "interrupt_agent", 1)
+	closeSource := seedSource("evt_declared_close", "close_agent", 2)
+	capabilitySource := seedSource("evt_declared_capability", "close_agent", 3)
+	wrongParentSource := seedSource("evt_declared_wrong_parent", "interrupt_agent", 4)
+	wrongRoleSource := seedSource("evt_declared_wrong_role", "interrupt_agent", 5)
+	interrupt, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+		Scope: scope, SourceToolUseEventId: interruptSource, TargetChildThreadId: interruptRootID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT,
+	})
+	if err != nil || interrupt.GetCommitted().GetControlOperationId() == "" {
+		t.Fatalf("Runtime-declared exact interrupt = %#v/%v", interrupt, err)
+	}
+
+	closed, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+		Scope: scope, SourceToolUseEventId: closeSource, TargetChildThreadId: closeRootID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+	})
+	if err != nil || closed.GetCommitted().GetControlOperationId() == "" {
+		t.Fatalf("Runtime-declared close subtree = %#v/%v", closed, err)
+	}
+
+	if response, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+		Scope: scope, SourceToolUseEventId: capabilitySource, TargetChildThreadId: interruptRootID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT,
+	}); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("child-control capability substitution = %#v/%v; want FailedPrecondition", response, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime',closed_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, resumeTargetID); err != nil {
+		t.Fatalf("close capability-substitution resume target: %v", err)
+	}
+	if response, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
+		Scope: scope, SourceToolUseEventId: capabilitySource, TargetChildThreadId: resumeTargetID,
+	}); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("child-resume capability substitution = %#v/%v; want FailedPrecondition", response, err)
+	}
+
+	if response, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+		Scope: scope, SourceToolUseEventId: wrongParentSource, TargetChildThreadId: interruptLeafID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT,
+	}); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("non-direct child-control target = %#v/%v; want FailedPrecondition", response, err)
+	}
+
+	if response, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+		Scope: scope, SourceToolUseEventId: wrongRoleSource, TargetChildThreadId: reviewerID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT,
+	}); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("non-public-subagent control target = %#v/%v; want FailedPrecondition", response, err)
+	}
+
+	var interruptTargets, closeTargets, rejectedTargets int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_interrupt_requested' AND payload_json::jsonb->>'source_tool_use_event_id'=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_interrupt_requested' AND payload_json::jsonb->>'source_tool_use_event_id'=$3),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_interrupt_requested' AND payload_json::jsonb->>'source_tool_use_event_id' IN ($4,$5,$6))`,
+		sessionID, interruptSource, closeSource, capabilitySource, wrongParentSource, wrongRoleSource).Scan(&interruptTargets, &closeTargets, &rejectedTargets); err != nil {
+		t.Fatalf("read declared child-control target census: %v", err)
+	}
+	if interruptTargets != 1 || closeTargets != 2 || rejectedTargets != 0 {
+		t.Fatalf("declared interrupt/close/rejected target census = %d/%d/%d; want 1/2/0", interruptTargets, closeTargets, rejectedTargets)
+	}
+}
+
+func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_durable_resume_target"
@@ -639,7 +747,7 @@ func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *te
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"task_`+childID+`"}}`)
+		`{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"provider-owned-different"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public'
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make resume Tool source public: %v", err)
@@ -651,7 +759,7 @@ func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *te
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.MarkChildThreadActiveRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: sourceID,
+		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: sourceID, TargetChildThreadId: childID,
 	}
 	response, err := store.MarkChildThreadActive(context.Background(), request)
 	if err != nil || response.GetCommitted().GetDisposition() != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED {
@@ -692,7 +800,7 @@ func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *te
 			WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID, test.status); err != nil {
 			t.Fatalf("set resume target %s: %v", test.status, err)
 		}
-		terminalRequest := &bridgev1.MarkChildThreadActiveRequest{Scope: request.GetScope(), SourceToolUseEventId: sourceID}
+		terminalRequest := &bridgev1.MarkChildThreadActiveRequest{Scope: request.GetScope(), SourceToolUseEventId: sourceID, TargetChildThreadId: childID}
 		terminalResponse, err := store.MarkChildThreadActive(context.Background(), terminalRequest)
 		if err != nil || terminalResponse.GetCommitted().GetDisposition() != test.disposition {
 			t.Fatalf("MarkChildThreadActive %s target = %#v/%v; want committed %s", test.status, terminalResponse, err, test.disposition)
@@ -720,7 +828,7 @@ func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *te
 		t.Fatalf("make terminal resume source public: %v", err)
 	}
 	terminalRequest := &bridgev1.MarkChildThreadActiveRequest{
-		Scope: request.GetScope(), SourceToolUseEventId: terminalSourceID,
+		Scope: request.GetScope(), SourceToolUseEventId: terminalSourceID, TargetChildThreadId: childID,
 	}
 	if _, err := store.MarkChildThreadActive(context.Background(), terminalRequest); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("terminal resume Tool source err = %v; want FailedPrecondition", err)

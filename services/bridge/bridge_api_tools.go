@@ -76,7 +76,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool.ToolName); err != nil {
 			return err
 		}
 		now := s.now()
@@ -268,18 +268,23 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 // a Runtime-selected Tool route. Runtime owns the Tool name, arguments, policy,
 // and executor choice; Bridge locks only the exact durable route and verifies
 // that it is still executable and has no terminal Result.
+// lockExecutableToolRouteTx is the mechanical first-effect gate shared by
+// Bridge-owned executors. It locks the exact durable route and may compare its
+// declared capability name, but it never interprets Tool arguments or policy.
 func lockExecutableToolRouteTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	toolUseEventID string,
+	expectedToolNames ...string,
 ) error {
 	var statusValue string
 	var decision sql.NullString
 	var resultEventID sql.NullString
+	var toolName string
 	var terminalResultExists bool
 	err := tx.QueryRow(ctx,
-		`SELECT route.status, route.decision, route.result_event_id,
+		`SELECT route.status, route.decision, route.result_event_id, route.tool_name,
 		        EXISTS (
 		          SELECT 1 FROM session_events result
 		           WHERE result.workspace_id=route.workspace_id
@@ -297,7 +302,7 @@ func lockExecutableToolRouteTx(
 		    AND tool_use_event_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-	).Scan(&statusValue, &decision, &resultEventID, &terminalResultExists)
+	).Scan(&statusValue, &decision, &resultEventID, &toolName, &terminalResultExists)
 	if dbconnect.IsNoRows(err) {
 		return status.Error(codes.FailedPrecondition, "durable Tool route is missing")
 	}
@@ -307,6 +312,15 @@ func lockExecutableToolRouteTx(
 	if statusValue != "resolving" || !decision.Valid || decision.String != "allow" ||
 		resultEventID.Valid || terminalResultExists {
 		return status.Error(codes.FailedPrecondition, "durable Tool route is not executable")
+	}
+	if len(expectedToolNames) > 0 {
+		matched := false
+		for _, expected := range expectedToolNames {
+			matched = matched || toolName == expected
+		}
+		if !matched {
+			return status.Error(codes.FailedPrecondition, "durable Tool route capability does not match the effect endpoint")
+		}
 	}
 	return nil
 }
@@ -450,7 +464,7 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 			response = duplicateMemoryRunResponse(existing.ResultJSON)
 			return nil
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "memory"); err != nil {
 			return err
 		}
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {

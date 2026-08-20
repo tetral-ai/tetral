@@ -124,7 +124,10 @@ func TestPostgreSQLActorEffectsUseExecutableRouteGate(t *testing.T) {
 					t.Fatalf("denied mail = %#v/%v", response, err)
 				}
 			case "close_agent":
-				response, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{Scope: scope, SourceToolUseEventId: toolUseID})
+				response, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+					Scope: scope, SourceToolUseEventId: toolUseID, TargetChildThreadId: childID,
+					Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+				})
 				if status.Code(err) != codes.FailedPrecondition || response != nil {
 					t.Fatalf("denied child interrupt = %#v/%v", response, err)
 				}
@@ -132,7 +135,7 @@ func TestPostgreSQLActorEffectsUseExecutableRouteGate(t *testing.T) {
 				if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime',closed_at=clock_timestamp() WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID); err != nil {
 					t.Fatalf("close resume target: %v", err)
 				}
-				response, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{Scope: scope, SourceToolUseEventId: toolUseID})
+				response, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{Scope: scope, SourceToolUseEventId: toolUseID, TargetChildThreadId: childID})
 				if status.Code(err) != codes.FailedPrecondition || response != nil {
 					t.Fatalf("denied child resume = %#v/%v", response, err)
 				}
@@ -146,6 +149,74 @@ func TestPostgreSQLActorEffectsUseExecutableRouteGate(t *testing.T) {
 			}
 			if actorEvents != 0 || operations != 0 {
 				t.Fatalf("denied %s effects = events:%d operations:%d; want zero", toolName, actorEvents, operations)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLActorEffectsRejectExecutableCapabilitySubstitution(t *testing.T) {
+	for _, endpoint := range []string{"spawn_agent", "send_message", "close_agent", "resume_agent"} {
+		t.Run(endpoint, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(endpoint, "_", "")
+			sessionID := "sesn_actor_capability_" + suffix
+			parentID := "thr_actor_capability_parent_" + suffix
+			childID := "thr_actor_capability_child_" + suffix
+			bindingID := "bind_actor_capability_" + suffix
+			podUID := "pod_actor_capability_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+			seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_actor_capability_"+suffix, "call_actor_capability_"+suffix, "list_agents", `{}`)
+			var responseNonNil bool
+			var err error
+			switch endpoint {
+			case "spawn_agent":
+				var createResponse *bridgev1.CreateSubagentThreadResponse
+				createResponse, err = store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
+					Scope: scope, SourceToolUseEventId: toolUseID, TaskName: "capability-worker", AgentType: "worker", ForkTurns: "all", InitialPrompt: "do not create",
+				})
+				responseNonNil = createResponse != nil
+			case "send_message":
+				var mailResponse *bridgev1.DeliverInterAgentMailResponse
+				mailResponse, err = store.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+					Scope: scope, DeliveryId: agentMailDeliveryID(toolUseID, childID), TargetThreadId: childID,
+					SourceToolUseEventId: toolUseID, Content: "do not deliver",
+				})
+				responseNonNil = mailResponse != nil
+			case "close_agent":
+				var interruptResponse *bridgev1.AdmitChildInterruptResponse
+				interruptResponse, err = store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+					Scope: scope, SourceToolUseEventId: toolUseID, TargetChildThreadId: childID,
+					Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+				})
+				responseNonNil = interruptResponse != nil
+			case "resume_agent":
+				if _, updateErr := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime',closed_at=clock_timestamp()
+					WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID); updateErr != nil {
+					t.Fatalf("close capability target: %v", updateErr)
+				}
+				var resumeResponse *bridgev1.MarkChildThreadActiveResponse
+				resumeResponse, err = store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
+					Scope: scope, SourceToolUseEventId: toolUseID, TargetChildThreadId: childID,
+				})
+				responseNonNil = resumeResponse != nil
+			}
+			if status.Code(err) != codes.FailedPrecondition || responseNonNil {
+				t.Fatalf("%s capability substitution response=%t err=%v; want FailedPrecondition", endpoint, responseNonNil, err)
+			}
+			var children, actorEvents, operations int
+			if err := admin.QueryRowContext(context.Background(), `SELECT
+				(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='subagent'),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('agent.thread_message_sent','agent.thread_interrupt_requested')),
+				(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation IN ('create_child_thread','deliver_inter_agent_mail','mark_child_thread_active'))`,
+				sessionID).Scan(&children, &actorEvents, &operations); err != nil {
+				t.Fatalf("read capability substitution census: %v", err)
+			}
+			if children != 1 || actorEvents != 0 || operations != 0 {
+				t.Fatalf("%s capability substitution effects children/events/operations = %d/%d/%d", endpoint, children, actorEvents, operations)
 			}
 		})
 	}

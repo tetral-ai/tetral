@@ -69,7 +69,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "spawn_agent"); err != nil {
 			return err
 		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
@@ -464,7 +464,7 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 				targetThread:      request.GetTargetThreadId(),
 			})
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "send_message"); err != nil {
 			return err
 		}
 		envelope, err := appendSubagentMailEnvelopeTx(
@@ -578,7 +578,7 @@ func (s *PostgreSQLBridgeAPIStore) CloseChildControl(ctx context.Context, reques
 	var childThreadID string
 	phase = "derive_authority"
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.derive_child_close", func(tx *dbconnect.Tx) error {
-		command, err := deriveChildControlCommandByOperationTx(ctx, tx, request.GetScope(), request.GetControlOperationId())
+		command, err := loadCommittedChildControlCommandTx(ctx, tx, request.GetScope(), request.GetControlOperationId())
 		if err != nil {
 			return err
 		}
@@ -869,8 +869,8 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "mark_child_thread_active", request.GetSourceToolUseEventId(), phase, resultErr)
 	}()
-	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "child resume scope and source Tool identity are required")
+	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorIdentity(request.GetTargetChildThreadId()) {
+		return nil, status.Error(codes.InvalidArgument, "child resume scope, source Tool identity, and target are required")
 	}
 	now := s.now()
 	var (
@@ -890,11 +890,11 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		var err error
-		childThreadID, err = deriveChildResumeTargetTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId())
-		if err != nil {
+		childThreadID = request.GetTargetChildThreadId()
+		if err := validateDeclaredPublicSubagentTargetTx(ctx, tx, request.GetScope(), childThreadID); err != nil {
 			return err
 		}
+		var err error
 		command, err = parseChildLifecycleCommand(
 			request.GetScope(), childThreadID, now, "tool_use", request.GetSourceToolUseEventId(),
 			bridgeOpMarkChildThreadActive, "resume",
@@ -917,7 +917,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			duplicate = true
 			return nil
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "resume_agent"); err != nil {
 			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, childScope)
@@ -1129,45 +1129,6 @@ func parseChildLifecycleCommand(
 	}, nil
 }
 
-func deriveChildResumeTargetTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	sourceToolUseEventID string,
-) (string, error) {
-	var payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT payload_json
-		FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		AND event_id=$4 AND type='agent.tool_use' AND visibility='public'
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceToolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool Use is missing")
-	} else if err != nil {
-		return "", err
-	}
-	var tool runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &tool); err != nil || tool.Name != "resume_agent" {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool Use is invalid")
-	}
-	var input struct {
-		TaskName string `json:"task_name"`
-	}
-	if err := json.Unmarshal(tool.Input, &input); err != nil || strings.TrimSpace(input.TaskName) == "" {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool input is invalid")
-	}
-	var childThreadID string
-	if err := tx.QueryRow(ctx, `SELECT id
-		FROM session_threads
-		WHERE workspace_id=$1 AND session_id=$2 AND parent_thread_id=$3
-		AND role='subagent' AND visibility='public' AND task_name=$4
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), strings.TrimSpace(input.TaskName)).Scan(&childThreadID); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.NotFound, "child resume target is missing")
-	} else if err != nil {
-		return "", err
-	}
-	return childThreadID, nil
-}
-
 func validateChildLifecycleSourceTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -1231,7 +1192,7 @@ func validateChildLifecycleSourceTx(
 		return status.Error(codes.FailedPrecondition, "child lifecycle tool source does not own the durable child")
 	}
 	if command.action == "close" {
-		control, err := deriveChildControlCommandByOperationTx(ctx, tx, scope, command.sourceCommandID)
+		control, err := loadCommittedChildControlCommandTx(ctx, tx, scope, command.sourceCommandID)
 		if err != nil {
 			return err
 		}
@@ -1239,13 +1200,6 @@ func validateChildLifecycleSourceTx(
 			return status.Error(codes.FailedPrecondition, "child lifecycle control operation does not own the durable child")
 		}
 		return nil
-	}
-	derivedChildThreadID, err := deriveChildResumeTargetTx(ctx, tx, scope, command.sourceCommandID)
-	if err != nil {
-		return err
-	}
-	if derivedChildThreadID != childThreadID {
-		return status.Error(codes.FailedPrecondition, "child resume source does not own the durable child")
 	}
 	return nil
 }

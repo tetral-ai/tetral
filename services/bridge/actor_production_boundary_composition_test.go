@@ -310,7 +310,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	}
 
 	seedActorSourceEvent(t, admin, sessionID, parentID, mailSourceID, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"`+taskName+`","message":"`+mailContent+`"}}`)
+		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"provider-owned-different","message":"provider-owned-different"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, mailSourceID); err != nil {
 		t.Fatalf("authorize durable mail source: %v", err)
@@ -334,14 +334,18 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 
 	closeSourceID := "evt_actor_production_close"
 	seedActorSourceEvent(t, admin, sessionID, parentID, closeSourceID, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"close_agent","model_tool_call_id":"call_actor_production_close","input":{"task_name":"`+taskName+`"}}`)
+		`{"type":"agent.tool_use","name":"close_agent","model_tool_call_id":"call_actor_production_close","input":{"task_name":"provider-owned-different"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true,model_request_id='mreq_actor_production_close',projection_json='{"model_tool_call_id":"call_actor_production_close"}'
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, closeSourceID); err != nil {
 		t.Fatalf("authorize durable close source: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_actor_production_close", closeSourceID, "call_actor_production_close", "close_agent")
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, closeSourceID)
-	admitted, err := client.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{Scope: parentScope, SourceToolUseEventId: closeSourceID})
+	closeAdmissionRequest := &bridgev1.AdmitChildInterruptRequest{
+		Scope: parentScope, SourceToolUseEventId: closeSourceID, TargetChildThreadId: childID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+	}
+	admitted, err := client.AdmitChildInterrupt(context.Background(), closeAdmissionRequest)
 	if err != nil || admitted.GetCommitted().GetControlOperationId() == "" {
 		t.Fatalf("admit durable child close control = %#v/%v", admitted, err)
 	}
@@ -418,16 +422,24 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	if err != nil || settledClose.GetCommitted() == nil {
 		t.Fatalf("settle child close source through dedicated Tool result = %#v/%v", settledClose, err)
 	}
+	childAdmissionReplay, err := client.AdmitChildInterrupt(context.Background(), closeAdmissionRequest)
+	if err != nil || childAdmissionReplay.GetDuplicate().GetControlOperationId() != controlID {
+		t.Fatalf("lost-ACK child admission replay after route settlement = %#v/%v", childAdmissionReplay, err)
+	}
 
 	resumeSourceID := "evt_actor_production_resume"
 	seedActorSourceEvent(t, admin, sessionID, parentID, resumeSourceID, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"`+taskName+`"}}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true
+		`{"type":"agent.tool_use","name":"resume_agent","model_tool_call_id":"call_actor_production_resume","input":{"task_name":"provider-owned-different"}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true,model_request_id='mreq_actor_production_resume',projection_json='{"model_tool_call_id":"call_actor_production_resume"}'
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, resumeSourceID); err != nil {
 		t.Fatalf("authorize durable resume source: %v", err)
 	}
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_actor_production_resume", resumeSourceID, "call_actor_production_resume", "resume_agent")
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, resumeSourceID)
-	resumed, err := client.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{Scope: parentScope, SourceToolUseEventId: resumeSourceID})
+	resumeRequest := &bridgev1.MarkChildThreadActiveRequest{
+		Scope: parentScope, SourceToolUseEventId: resumeSourceID, TargetChildThreadId: childID,
+	}
+	resumed, err := client.MarkChildThreadActive(context.Background(), resumeRequest)
 	if err != nil || resumed.GetCommitted() == nil {
 		t.Fatalf("resume child through generated gRPC = %#v/%v", resumed, err)
 	}
@@ -438,6 +450,16 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	}
 	if finalStatus != "idle" {
 		t.Fatalf("resumed child status = %s; want idle", finalStatus)
+	}
+	settledResume, err := client.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{
+		Scope: parentScope, Settlement: bridgeCompletedToolSettlementForTest(resumeSourceID, "child resumed"),
+	})
+	if err != nil || settledResume.GetCommitted() == nil {
+		t.Fatalf("settle child resume source through dedicated Tool result = %#v/%v", settledResume, err)
+	}
+	resumeReplay, err := client.MarkChildThreadActive(context.Background(), resumeRequest)
+	if err != nil || resumeReplay.GetDuplicate().GetDisposition() != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED {
+		t.Fatalf("lost-ACK child resume replay after route settlement = %#v/%v", resumeReplay, err)
 	}
 }
 

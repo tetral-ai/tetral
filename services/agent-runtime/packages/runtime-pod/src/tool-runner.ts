@@ -78,6 +78,7 @@ import type {
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	AgentRuntimeBridgeServiceClient,
+	ChildControlAction,
 	ChildInterruptOutcome,
 	ChildLifecycleDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -1228,6 +1229,8 @@ export class RuntimePodToolRunner {
 						const control = await this.admitAndAwaitChildInterrupt(
 							request,
 							parentScope,
+							child.sessionThreadId,
+							ChildControlAction.CHILD_CONTROL_ACTION_INTERRUPT,
 							metadata,
 						);
 						if (!control.ok) {
@@ -1289,6 +1292,8 @@ export class RuntimePodToolRunner {
 						const control = await this.admitAndAwaitChildInterrupt(
 							request,
 							parentScope,
+							child.sessionThreadId,
+							ChildControlAction.CHILD_CONTROL_ACTION_CLOSE,
 							metadata,
 						);
 						if (!control.ok) {
@@ -1383,6 +1388,8 @@ export class RuntimePodToolRunner {
 	private async admitAndAwaitChildInterrupt(
 		request: RuntimeToolExecutionRequest,
 		parentScope: RuntimeScope,
+		targetChildThreadId: string,
+		action: ChildControlAction,
 		metadata: Metadata,
 	): Promise<
 		| {
@@ -1403,6 +1410,8 @@ export class RuntimePodToolRunner {
 			const admissionRequest: AdmitChildInterruptRequest = {
 				scope: parentScope,
 				sourceToolUseEventId: request.toolUseEventId,
+				targetChildThreadId,
+				action,
 			};
 			admitted = await this.replayActorTransport(
 				request.abortSignal,
@@ -1560,6 +1569,7 @@ export class RuntimePodToolRunner {
 							const resumeRequest: MarkChildThreadActiveRequest = {
 								scope: parentScope,
 								sourceToolUseEventId: request.toolUseEventId,
+								targetChildThreadId: child.sessionThreadId,
 							};
 							response = await this.replayActorTransport(
 								request.abortSignal,

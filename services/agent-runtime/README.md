@@ -349,7 +349,9 @@ thread sees tool use/result; child work stays child-thread-local.
   Provider Request End. Later `send_message` calls resolve the child by
   `task_name` and deliver through their own stored envelope and durable Runtime input rail;
   `wait_agent`, `interrupt_agent`, `close_agent`, `resume_agent`, and
-  `list_agents` operate over durable `session_threads`.
+  `list_agents` operate over durable `session_threads`. Runtime resolves
+  `task_name` before child control and declares the exact child ID plus fixed
+  interrupt/close action; Bridge never reinterprets those Tool arguments.
 
 Invariants a replacement must preserve:
 

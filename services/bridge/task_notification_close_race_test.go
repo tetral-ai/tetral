@@ -76,7 +76,8 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	apiStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	admitRequest := &bridgev1.AdmitChildInterruptRequest{
-		Scope: parentScope, SourceToolUseEventId: closeSource,
+		Scope: parentScope, SourceToolUseEventId: closeSource, TargetChildThreadId: childID,
+		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }

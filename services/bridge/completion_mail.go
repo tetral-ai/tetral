@@ -49,11 +49,10 @@ func agentMailDeliveryID(sourceToolUseEventID string, targetThreadID string) str
 	return "delivery_" + hex.EncodeToString(digest[:])[:32]
 }
 
-// appendSubagentMailEnvelopeTx owns the sender-side half of direct agent mail.
-// The durable Tool Use is the command authority: the caller supplies only its
-// exact identity, target, deterministic delivery identity, and bounded text.
-// Bridge validates those facts and authors the Runtime message and public sent
-// event before Inbox/Queue custody is born in the same transaction.
+// appendSubagentMailEnvelopeTx owns the sender-side half of later direct agent
+// mail. Runtime supplies the already interpreted target and bounded text;
+// Bridge validates only the deterministic identity and exact parent-child
+// ownership before birthing Event and Inbox/Queue custody atomically.
 func appendSubagentMailEnvelopeTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -70,34 +69,8 @@ func appendSubagentMailEnvelopeTx(
 	if deliveryID != agentMailDeliveryID(sourceToolUseEventID, targetThreadID) {
 		return storedAgentMailEnvelope{}, status.Error(codes.InvalidArgument, "agent mail delivery identity is invalid")
 	}
-	var payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT payload_json
-		FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		AND event_id=$4 AND type='agent.tool_use' AND visibility='public'
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceToolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool Use is missing")
-	} else if err != nil {
-		return storedAgentMailEnvelope{}, err
-	}
-	var tool runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &tool); err != nil {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool Use is malformed")
-	}
-	var input struct {
-		TaskName string `json:"task_name"`
-		Message  string `json:"message"`
-	}
-	if err := json.Unmarshal(tool.Input, &input); err != nil {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool input is malformed")
-	}
-	input.TaskName = strings.TrimSpace(input.TaskName)
-	if tool.Name != "send_message" {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool name is invalid")
-	}
-	durableContent := strings.TrimSpace(input.Message)
-	if !validActorTaskName(input.TaskName) || durableContent == "" || durableContent != content {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail request conflicts with its durable Tool Use")
+	if content != strings.TrimSpace(content) {
+		return storedAgentMailEnvelope{}, status.Error(codes.InvalidArgument, "agent mail content is not normalized")
 	}
 	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, sourceToolUseEventID); err != nil {
 		return storedAgentMailEnvelope{}, err
@@ -108,10 +81,10 @@ func appendSubagentMailEnvelopeTx(
 	if err := tx.QueryRow(ctx, `SELECT task_name
 		FROM session_threads
 		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND parent_thread_id=$4
-		AND role='subagent' AND visibility='public' AND task_name=$5
+		AND role='subagent' AND visibility='public'
 		AND status NOT IN ('closed_for_runtime','failed','terminated')
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, scope.GetSessionThreadId(), input.TaskName).Scan(&targetTaskName); dbconnect.IsNoRows(err) {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail target does not match the durable Tool Use")
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, scope.GetSessionThreadId()).Scan(&targetTaskName); dbconnect.IsNoRows(err) {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail target is not a receivable public sub-agent owned by the parent")
 	} else if err != nil {
 		return storedAgentMailEnvelope{}, err
 	}

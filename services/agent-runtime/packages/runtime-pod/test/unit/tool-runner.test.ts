@@ -55,6 +55,7 @@ import type {
 	SendCommandInputResponse,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
+	ChildControlAction,
 	ChildInterruptOutcome,
 	ChildLifecycleDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -2521,6 +2522,12 @@ describe("RuntimePodToolRunner", () => {
 
 		expect(result).toMatchObject({ type: "completed" });
 		expect(bridge.admitChildInterruptRequests).toHaveLength(2);
+		expect(bridge.admitChildInterruptRequests[0]).toEqual(
+			expect.objectContaining({
+				targetChildThreadId: "thr_child_1",
+				action: ChildControlAction.CHILD_CONTROL_ACTION_INTERRUPT,
+			}),
+		);
 		expect(bridge.admitChildInterruptRequests[1]).toEqual(
 			bridge.admitChildInterruptRequests[0],
 		);
@@ -2540,6 +2547,12 @@ describe("RuntimePodToolRunner", () => {
 			toolRequest("close_agent", { task_name: "worker" }, "sevt_close"),
 		);
 		expect(close).toMatchObject({ type: "completed" });
+		expect(closeBridge.admitChildInterruptRequests[0]).toEqual(
+			expect.objectContaining({
+				targetChildThreadId: "thr_child_1",
+				action: ChildControlAction.CHILD_CONTROL_ACTION_CLOSE,
+			}),
+		);
 		expect(closeBridge.closeChildControlRequests).toHaveLength(2);
 		expect(closeBridge.closeChildControlRequests[1]).toEqual(
 			closeBridge.closeChildControlRequests[0],
@@ -2558,6 +2571,9 @@ describe("RuntimePodToolRunner", () => {
 		);
 		expect(resume).toMatchObject({ type: "completed" });
 		expect(resumeBridge.markChildThreadActiveRequests).toHaveLength(2);
+		expect(resumeBridge.markChildThreadActiveRequests[0]).toEqual(
+			expect.objectContaining({ targetChildThreadId: "thr_child_1" }),
+		);
 		expect(resumeBridge.markChildThreadActiveRequests[1]).toEqual(
 			resumeBridge.markChildThreadActiveRequests[0],
 		);
@@ -3726,7 +3742,10 @@ describe("RuntimePodToolRunner", () => {
 
 		expect(result.type).toBe("completed");
 		expect(bridge.markChildThreadActiveRequests).toEqual([
-			expect.objectContaining({ sourceToolUseEventId: "sevt_tool_1" }),
+			expect.objectContaining({
+				sourceToolUseEventId: "sevt_tool_1",
+				targetChildThreadId: "thr_child_1",
+			}),
 		]);
 		expect(subAgentHost.preloaded).toEqual([
 			expect.objectContaining({

@@ -1039,6 +1039,8 @@ export interface ChildInterruptTarget {
 export interface AdmitChildInterruptRequest {
   scope: RuntimeScope | undefined;
   sourceToolUseEventId: string;
+  targetChildThreadId: string;
+  action: ChildControlAction;
 }
 
 export interface AdmitChildInterruptResponse {
@@ -1124,6 +1126,7 @@ export interface ChildLifecycleResult {
 export interface MarkChildThreadActiveRequest {
   scope: RuntimeScope | undefined;
   sourceToolUseEventId: string;
+  targetChildThreadId: string;
 }
 
 export interface MarkChildThreadActiveResponse {
@@ -13557,7 +13560,7 @@ export const ChildInterruptTarget: MessageFns<ChildInterruptTarget> = {
 };
 
 function createBaseAdmitChildInterruptRequest(): AdmitChildInterruptRequest {
-  return { scope: undefined, sourceToolUseEventId: "" };
+  return { scope: undefined, sourceToolUseEventId: "", targetChildThreadId: "", action: 0 };
 }
 
 export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> = {
@@ -13567,6 +13570,12 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
     }
     if (message.sourceToolUseEventId !== "") {
       writer.uint32(18).string(message.sourceToolUseEventId);
+    }
+    if (message.targetChildThreadId !== "") {
+      writer.uint32(26).string(message.targetChildThreadId);
+    }
+    if (message.action !== 0) {
+      writer.uint32(32).int32(message.action);
     }
     return writer;
   },
@@ -13594,6 +13603,22 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
           message.sourceToolUseEventId = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.targetChildThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.action = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13611,6 +13636,12 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
         : isSet(object.source_tool_use_event_id)
         ? globalThis.String(object.source_tool_use_event_id)
         : "",
+      targetChildThreadId: isSet(object.targetChildThreadId)
+        ? globalThis.String(object.targetChildThreadId)
+        : isSet(object.target_child_thread_id)
+        ? globalThis.String(object.target_child_thread_id)
+        : "",
+      action: isSet(object.action) ? childControlActionFromJSON(object.action) : 0,
     };
   },
 
@@ -13621,6 +13652,12 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
     }
     if (message.sourceToolUseEventId !== "") {
       obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.targetChildThreadId !== "") {
+      obj.targetChildThreadId = message.targetChildThreadId;
+    }
+    if (message.action !== 0) {
+      obj.action = childControlActionToJSON(message.action);
     }
     return obj;
   },
@@ -13634,6 +13671,8 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
+    message.targetChildThreadId = object.targetChildThreadId ?? "";
+    message.action = object.action ?? 0;
     return message;
   },
 };
@@ -14909,7 +14948,7 @@ export const ChildLifecycleResult: MessageFns<ChildLifecycleResult> = {
 };
 
 function createBaseMarkChildThreadActiveRequest(): MarkChildThreadActiveRequest {
-  return { scope: undefined, sourceToolUseEventId: "" };
+  return { scope: undefined, sourceToolUseEventId: "", targetChildThreadId: "" };
 }
 
 export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveRequest> = {
@@ -14919,6 +14958,9 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     }
     if (message.sourceToolUseEventId !== "") {
       writer.uint32(18).string(message.sourceToolUseEventId);
+    }
+    if (message.targetChildThreadId !== "") {
+      writer.uint32(26).string(message.targetChildThreadId);
     }
     return writer;
   },
@@ -14946,6 +14988,14 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
           message.sourceToolUseEventId = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.targetChildThreadId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14963,6 +15013,11 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
         : isSet(object.source_tool_use_event_id)
         ? globalThis.String(object.source_tool_use_event_id)
         : "",
+      targetChildThreadId: isSet(object.targetChildThreadId)
+        ? globalThis.String(object.targetChildThreadId)
+        : isSet(object.target_child_thread_id)
+        ? globalThis.String(object.target_child_thread_id)
+        : "",
     };
   },
 
@@ -14973,6 +15028,9 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     }
     if (message.sourceToolUseEventId !== "") {
       obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.targetChildThreadId !== "") {
+      obj.targetChildThreadId = message.targetChildThreadId;
     }
     return obj;
   },
@@ -14986,6 +15044,7 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
+    message.targetChildThreadId = object.targetChildThreadId ?? "";
     return message;
   },
 };

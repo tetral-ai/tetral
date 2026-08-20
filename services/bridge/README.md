@@ -294,6 +294,13 @@ and active lifecycle facts directly from durable rows.
   committed lineage without requiring the route to remain executable or
   rereading later parent Message growth; a new Tool Use identity still crosses
   task-name uniqueness rather than aliasing the earlier receipt.
+- **Child-control authority.** Runtime resolves `task_name` and declares the
+  exact direct public subagent plus interrupt/close action (or resume target).
+  Bridge checks the route capability and parent-child ownership mechanically;
+  interrupt targets only the declared child, close freezes that child and its
+  descendants, and resume targets exactly that child. Committed operation
+  replay validates the stored declaration digest without requiring an
+  executable route or decoding the source Tool input again.
 - **Lifecycle.** At most one terminal end per `model_request_id` (pod close and
   repair close both check inside the transaction, serialized on the start-row
   lock; a divergent loser is rejected and cold-recovers the durable winner). `FinishIdle` and
