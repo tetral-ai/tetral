@@ -13,16 +13,8 @@ const RunToolCanonicalJSONMaxDepth = 256;
 // order change.
 /** Produces the compact canonical representation of one JSON document. */
 export function canonicalRunToolJSON(raw: string): string {
-  return canonicalRunToolJSONWithoutObjectFields(raw, undefined);
-}
-
-/** Canonicalizes JSON while removing matching object members at every depth. */
-export function canonicalRunToolJSONWithoutObjectFields(
-  raw: string,
-  excludedObjectFields: ReadonlySet<string> | undefined,
-): string {
   JSON.parse(raw);
-  const parser = new CanonicalJSONParser(raw, excludedObjectFields);
+  const parser = new CanonicalJSONParser(raw);
   const canonical = parser.parseValue(0);
   parser.skipWhitespace();
   if (!parser.atEnd()) {
@@ -34,10 +26,7 @@ export function canonicalRunToolJSONWithoutObjectFields(
 class CanonicalJSONParser {
   private offset = 0;
 
-  constructor(
-    private readonly raw: string,
-    private readonly excludedObjectFields: ReadonlySet<string> | undefined,
-  ) {}
+  constructor(private readonly raw: string) {}
 
   parseValue(depth: number): string {
     if (depth > RunToolCanonicalJSONMaxDepth) {
@@ -68,22 +57,13 @@ class CanonicalJSONParser {
       this.skipWhitespace();
       if (!this.consume(":")) throw new Error("missing JSON object colon");
       const value = this.parseValue(depth);
-      if (!this.objectFieldExcluded(key)) {
-        members.push({ key, value, keyBytes: new TextEncoder().encode(key) });
-      }
+      members.push({ key, value, keyBytes: new TextEncoder().encode(key) });
       this.skipWhitespace();
       if (this.consume("}")) break;
       if (!this.consume(",")) throw new Error("missing JSON object comma");
     }
     members.sort((left, right) => compareBytes(left.keyBytes, right.keyBytes));
     return `{${members.map(({ key, value }) => `${key}:${value}`).join(",")}}`;
-  }
-
-  private objectFieldExcluded(rawKey: string): boolean {
-    if (this.excludedObjectFields === undefined || this.excludedObjectFields.size === 0) return false;
-    const key = JSON.parse(rawKey) as unknown;
-    if (typeof key !== "string") throw new Error("invalid JSON object key");
-    return this.excludedObjectFields.has(key);
   }
 
   private parseArray(depth: number): string {

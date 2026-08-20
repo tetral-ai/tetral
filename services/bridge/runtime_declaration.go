@@ -119,27 +119,17 @@ func writeEventDeclarationDigest(
 	payloadJSON string,
 	consumedFileJSON string,
 ) (string, error) {
-	payloadJSON = stripInternalProviderFields(payloadJSON)
 	assistantDelta, err := canonicalRuntimeContextDelta(request.GetAssistantContextDelta())
 	if err != nil {
 		return "", err
 	}
-	var canonicalExecutionInput any
-	if request.GetCanonicalExecutionInputJson() != "" {
-		inputJSON, err := canonicalRuntimeDeclarationJSON(request.GetCanonicalExecutionInputJson())
-		if err != nil {
-			return "", status.Error(codes.InvalidArgument, "canonical execution input is invalid")
-		}
-		canonicalExecutionInput = json.RawMessage(inputJSON)
-	}
 	declaration := map[string]any{
-		"assistant_context_delta":   assistantDelta,
-		"canonical_execution_input": canonicalExecutionInput,
-		"event_type":                request.GetEventType(),
-		"model_request_id":          nullableDeclarationString(request.GetModelRequestId()),
-		"operation_kind":            bridgeOpWriteEvent,
-		"runtime_write_id":          request.GetRuntimeWriteId(),
-		"session_thread_id":         request.GetScope().GetSessionThreadId(),
+		"assistant_context_delta": assistantDelta,
+		"event_type":              request.GetEventType(),
+		"model_request_id":        nullableDeclarationString(request.GetModelRequestId()),
+		"operation_kind":          bridgeOpWriteEvent,
+		"runtime_write_id":        request.GetRuntimeWriteId(),
+		"session_thread_id":       request.GetScope().GetSessionThreadId(),
 	}
 	if request.GetEventType() == "span.model_request_start" {
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
@@ -147,6 +137,36 @@ func writeEventDeclarationDigest(
 		declaration["consumed_file_attachments"] = json.RawMessage(consumedFileJSON)
 	}
 	raw, err := marshalRuntimeDeclarationObjectWithRawField(declaration, "payload", payloadJSON)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := canonicalRunToolJSON(string(raw))
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(canonical), nil
+}
+
+func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, declaration runtimeToolProjectionPayload) (string, error) {
+	contextDelta, err := canonicalRuntimeContextDelta(runtimeToolContextDelta(declaration))
+	if err != nil {
+		return "", err
+	}
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+		"assistant_context_delta": contextDelta,
+		"evaluated_permission":    declaration.EvaluatedPermission,
+		"event_type":              declaration.EventType,
+		"mcp_server_name":         nullableDeclarationString(declaration.MCPServerName),
+		"model_request_id":        request.GetModelRequestId(),
+		"model_tool_call_id":      declaration.ModelToolCallID,
+		"operation_kind":          bridgeOpWriteEvent,
+		"provider_input":          declaration.ProviderInput,
+		"public_execution_input":  declaration.CanonicalExecutionInput,
+		"route_capability":        declaration.RouteCapability,
+		"runtime_write_id":        request.GetRuntimeWriteId(),
+		"session_thread_id":       request.GetScope().GetSessionThreadId(),
+		"tool_name":               declaration.ToolName,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -479,9 +499,8 @@ type durableContextWrite struct {
 }
 
 type writeEventDurableFacts struct {
-	EventID                string   `json:"eventId"`
-	MessageSequence        *int64   `json:"messageSequence,omitempty"`
-	CreatedToolUseEventIDs []string `json:"createdToolUseEventIds"`
+	EventID         string `json:"eventId"`
+	MessageSequence *int64 `json:"messageSequence,omitempty"`
 }
 
 func commitWriteEventContextTx(
@@ -494,14 +513,13 @@ func commitWriteEventContextTx(
 	delta *bridgev1.RuntimeContextDelta,
 	now time.Time,
 ) (writeEventDurableFacts, error) {
-	facts := writeEventDurableFacts{EventID: eventID, CreatedToolUseEventIDs: []string{}}
+	facts := writeEventDurableFacts{EventID: eventID}
 	if delta != nil {
 		write, err := appendRuntimeAssistantContextTx(ctx, tx, scope, eventType, eventID, modelRequestID, delta, now)
 		if err != nil {
 			return writeEventDurableFacts{}, err
 		}
 		facts.MessageSequence = &write.MessageSequence
-		facts.CreatedToolUseEventIDs = write.CreatedToolUseEventIDs
 	}
 	return facts, nil
 }

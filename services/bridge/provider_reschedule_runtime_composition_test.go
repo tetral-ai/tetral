@@ -534,10 +534,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	}
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: oldScope, RuntimeWriteId: "rwrite_provider_reschedule_tool", ModelRequestId: modelRequestID,
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"Read","input":{"path":"original.txt"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "Read", `{"path":"original.txt"}`),
-		CanonicalExecutionInputJson: `{"path":"original.txt"}`,
+		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "Read", `{"path":"original.txt"}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write original Tool Use: response=%#v err=%v", toolUse, err)

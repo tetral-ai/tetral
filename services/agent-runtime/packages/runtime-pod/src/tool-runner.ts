@@ -572,10 +572,9 @@ export class RuntimePodToolRunner {
 					{
 						scope,
 						taskId,
-						operationId,
-						maxOutputTokens,
-						inputJson: stableJsonStringify(request.input),
-						toolUseEventId: request.toolUseEventId,
+							operationId,
+							maxOutputTokens,
+							toolUseEventId: request.toolUseEventId,
 					},
 					metadata,
 					request.abortSignal,

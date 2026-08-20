@@ -435,13 +435,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_generated_tool_use",
 		ModelRequestId: "mreq_bridge_generated_tool_use",
-		EventType:      "agent.tool_use",
-		PayloadJson:    `{"type":"agent.tool_use","name":"dangerous_tool","input":{"path":"README.md"},"evaluated_permission":"ask"}`,
-		SessionVisible: true,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(
-			"tool-call-generated", "dangerous_tool", `{"path":"README.md"}`,
+		ToolDeclaration: bridgeToolDeclarationForTest(
+			"tool-call-generated", "dangerous_tool", `{"path":"README.md"}`, "ask", "sandbox_execute",
 		),
-		CanonicalExecutionInputJson: `{"path":"README.md"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent generated tool use: %v", err)

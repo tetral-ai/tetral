@@ -7,10 +7,15 @@ import { ContextManager } from "@tetral/agent-runtime-core/src/session/context-m
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import type { RuntimeToolRegistrationState } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import {
+	distinctProviderInputForEntry,
+	publicInputForRegisteredTool,
+	publicToolEventForEntry,
 	registerRuntimeToolCall,
+	routeCapabilityForEntry,
 	runtimeToolSettlement,
 } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
+import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { ToolScheduler } from "@tetral/agent-runtime-core/src/tools/tool-scheduler.js";
 import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
@@ -101,8 +106,9 @@ if (!processed.ok)
 	throw new Error("Runtime rejected the production provider Tool event");
 
 const toolScheduler = new ToolScheduler();
+const toolCatalog = createToolCatalog({ family: "gpt" });
 const registrationState: RuntimeToolRegistrationState = {
-	executionPolicy: { toolCatalog: createToolCatalog({ family: "gpt" }) },
+	executionPolicy: { toolCatalog },
 	toolScheduler,
 	toolEntries: {},
 	nextToolModelOrder: 0,
@@ -120,20 +126,28 @@ const job = toolScheduler
 const entry = registrationState.toolEntries[registered.jobId];
 if (job === undefined || entry === undefined)
 	throw new Error("Runtime catalog omitted the registered production Tool job");
+const gateDecision = evaluateToolGate({
+	catalog: toolCatalog,
+	toolName: job.name,
+	approvalMode: "full_access",
+});
+if (gateDecision.type !== "run")
+	throw new Error("Runtime gate did not authorize the production Tool job");
 if (
 	!processor.reservePublicToolUse(
 		source,
 		job.modelToolCallId,
-		{ kind: "tool" },
-		job.input,
+		publicToolEventForEntry(entry),
+		distinctProviderInputForEntry(entry, input.providerInput),
+		routeCapabilityForEntry(entry),
 	)
 )
 	throw new Error("Runtime could not reserve the production Tool declaration");
 const committed = await processor.commitPublicToolUse(
 	source,
 	job.modelToolCallId,
-	input.providerInput,
-	"allow",
+	publicInputForRegisteredTool(job.input),
+	gateDecision.evaluatedPermission,
 );
 if (!committed.ok)
 	throw new Error("Runtime could not durably commit the production Tool declaration");

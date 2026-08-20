@@ -51,6 +51,7 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_stdin_replay")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_stdin_replay","chars":"hello\n"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, toolUseEventID, "call_bridge_stdin_replay", "write_stdin", `{"session_id":"task_bridge_stdin_replay","chars":"hello\n"}`, "background_command")
 	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, "evt_source_stdin_replay")
 
@@ -59,7 +60,7 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_stdin_replay")
 	request := &bridgev1.SendCommandInputRequest{
 		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID,
-		OperationId: "cmdop_bridge_stdin_replay", InputJson: `{"chars":"hello\n","session_id":"task_bridge_stdin_replay"}`,
+		OperationId: "cmdop_bridge_stdin_replay",
 	}
 
 	type callResult struct {
@@ -127,6 +128,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_consumed")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_poll_consumed","chars":""},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, toolUseEventID, "call_bridge_poll_consumed", "write_stdin", `{"session_id":"task_bridge_poll_consumed","chars":""}`, "background_command")
 	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", terminalJSON)
@@ -179,6 +181,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_wait_consumed")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_poll_wait_consumed","chars":""},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, toolUseEventID, "call_bridge_poll_wait_consumed", "write_stdin", `{"session_id":"task_bridge_poll_wait_consumed","chars":""}`, "background_command")
 	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -389,12 +392,16 @@ func TestPostgreSQLBridgeAPIStoreBackgroundCommandsRejectUnrelatedSameThreadAuth
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_command_authority")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_poll", 1, "agent.tool_use",
 		`{"name":"write_stdin","input":{"session_id":"task_command_expected","chars":""},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, "evt_command_poll", "call_command_poll", "write_stdin", `{"session_id":"task_command_expected","chars":""}`, "background_command")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_send", 2, "agent.tool_use",
 		`{"name":"write_stdin","input":{"session_id":"task_command_expected","chars":"hello"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, "evt_command_send", "call_command_send", "write_stdin", `{"session_id":"task_command_expected","chars":"hello"}`, "background_command")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_exec", 3, "agent.tool_use",
 		`{"name":"exec_command","input":{"cmd":"sleep 60"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, "evt_command_exec", "call_command_exec", "exec_command", `{"cmd":"sleep 60"}`, "sandbox_execute")
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_command_other_exec", 4, "agent.tool_use",
 		`{"name":"exec_command","input":{"cmd":"sleep 30"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, "evt_command_other_exec", "call_command_other_exec", "exec_command", `{"cmd":"sleep 30"}`, "sandbox_execute")
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_expected", "evt_command_exec")
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_other", "evt_command_other_exec")
 
@@ -404,12 +411,6 @@ func TestPostgreSQLBridgeAPIStoreBackgroundCommandsRejectUnrelatedSameThreadAuth
 		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_poll", OperationId: "cmdop_wrong_task",
 	}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("read with unrelated task error = %v; want FailedPrecondition", err)
-	}
-	if _, err := store.SendCommandInput(context.Background(), &bridgev1.SendCommandInputRequest{
-		Scope: scope, TaskId: "task_command_expected", ToolUseEventId: "evt_command_send", OperationId: "cmdop_wrong_input",
-		InputJson: `{"session_id":"task_command_expected","chars":"different"}`,
-	}); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("send with divergent durable input error = %v; want FailedPrecondition", err)
 	}
 	if _, err := store.CancelCommand(context.Background(), &bridgev1.CancelCommandRequest{
 		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_exec", OperationId: "cmdop_wrong_cancel",

@@ -848,6 +848,24 @@ const ModelUsageSchema = z.strictObject({
 	speed: z.null(),
 });
 
+export const RuntimeToolRouteCapabilitySchema = z.enum([
+	"sandbox_execute",
+	"background_command",
+	"web_execute",
+	"mcp_execute",
+	"memory_execute",
+	"child_create",
+	"child_message",
+	"child_wait",
+	"child_interrupt",
+	"child_close",
+	"child_resume",
+	"child_list",
+]);
+export type RuntimeToolRouteCapability = z.infer<
+	typeof RuntimeToolRouteCapabilitySchema
+>;
+
 /** Closed durable session event payloads emitted by Runtime Core. */
 export const SessionEventSchema = z.discriminatedUnion("type", [
 	z.strictObject({
@@ -860,7 +878,7 @@ export const SessionEventSchema = z.discriminatedUnion("type", [
 	z.strictObject({
 		type: z.literal("agent.tool_use"),
 		name: RuntimeIdentifierSchema,
-		input: RuntimeJsonValueSchema,
+		input: RuntimeJsonObjectSchema,
 		evaluated_permission: z.enum(["allow", "ask", "deny"]),
 	}),
 	z.strictObject({
@@ -984,7 +1002,8 @@ export const SessionEventEnvelopeSchema = z
 			)
 			.max(32)
 			.optional(),
-		canonicalExecutionInput: RuntimeJsonValueSchema.optional(),
+		distinctProviderInput: RuntimeJsonValueSchema.optional(),
+		toolRouteCapability: RuntimeToolRouteCapabilitySchema.optional(),
 	})
 	.superRefine((envelope, context) => {
 		const memberEvent =
@@ -1006,16 +1025,22 @@ export const SessionEventEnvelopeSchema = z
 		const toolUseEvent =
 			envelope.event.type === "agent.tool_use" ||
 			envelope.event.type === "agent.mcp_tool_use";
-		if (toolUseEvent && envelope.canonicalExecutionInput === undefined) {
+		if (toolUseEvent && envelope.toolRouteCapability === undefined) {
 			context.addIssue({
 				code: "custom",
-				message: "Tool Use event requires canonical execution input",
+				message: "Tool Use event requires a route capability",
 			});
 		}
-		if (!toolUseEvent && envelope.canonicalExecutionInput !== undefined) {
+		if (!toolUseEvent && envelope.distinctProviderInput !== undefined) {
 			context.addIssue({
 				code: "custom",
-				message: "non-Tool event forbids canonical execution input",
+				message: "non-Tool event forbids distinct Provider input",
+			});
+		}
+		if (!toolUseEvent && envelope.toolRouteCapability !== undefined) {
+			context.addIssue({
+				code: "custom",
+				message: "non-Tool event forbids a route capability",
 			});
 		}
 		if (memberEvent && envelope.modelRequestId === undefined) {

@@ -590,16 +590,16 @@ func loadContextRequestEndRescheduleTx(ctx context.Context, tx *dbconnect.Tx, sc
 	}, nil
 }
 
-func bridgeTurnToolUseFact(payloadJSON string, projectionJSON string) (*bridgeLoadContextToolUse, error) {
-	var payload runtimeToolUseEventPayload
+func bridgeTurnToolUseFact(_ string, projectionJSON string) (*bridgeLoadContextToolUse, error) {
 	var projection struct {
 		ModelToolCallID string `json:"model_tool_call_id"`
+		ToolName        string `json:"tool_name"`
 	}
-	if json.Unmarshal([]byte(payloadJSON), &payload) != nil || json.Unmarshal([]byte(projectionJSON), &projection) != nil ||
-		payload.Name == "" || projection.ModelToolCallID == "" {
+	if json.Unmarshal([]byte(projectionJSON), &projection) != nil ||
+		projection.ToolName == "" || projection.ModelToolCallID == "" {
 		return nil, status.Error(codes.FailedPrecondition, "tool use direct facts are malformed")
 	}
-	return &bridgeLoadContextToolUse{ModelToolCallID: projection.ModelToolCallID, ToolName: payload.Name}, nil
+	return &bridgeLoadContextToolUse{ModelToolCallID: projection.ModelToolCallID, ToolName: projection.ToolName}, nil
 }
 
 func bridgeTurnToolResultFact(

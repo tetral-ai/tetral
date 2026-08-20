@@ -1602,6 +1602,7 @@ export function layer(
 						try {
 							const pendingTools = [
 								...threadEntry.runtimeThread.state.pendingApprovalToolJobs(),
+								...threadEntry.runtimeThread.state.resolvedToolRouteJobs(),
 								...threadEntry.runtimeThread.state.pendingSandboxExecutionJobs(),
 							];
 							threadEntry.runtimeThread.state.contextManager.appendInterruptToolResults(
@@ -1634,6 +1635,9 @@ export function layer(
 									metrics.addPendingApprovals(-1);
 								}
 								threadEntry.runtimeThread.state.clearThreadToolRoute(
+									cancellation.toolUseEventId,
+								);
+								threadEntry.runtimeThread.state.removeResolvedToolRouteJob(
 									cancellation.toolUseEventId,
 								);
 							}

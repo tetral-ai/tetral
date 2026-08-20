@@ -1302,8 +1302,6 @@ describe("RuntimePodToolRunner", () => {
 				operationId: stableTestId("req", "command-followup:sevt_tool_send"),
 				taskId: "task_1",
 				maxOutputTokens: 123,
-				inputJson:
-					'{"chars":"hello","max_output_tokens":123,"session_id":"task_1"}',
 				toolUseEventId: "sevt_tool_send",
 			}),
 		]);

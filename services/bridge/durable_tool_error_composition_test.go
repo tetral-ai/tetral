@@ -233,10 +233,9 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 
 	toolUse, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_error_use", ModelRequestId: "mreq_durable_error",
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/missing.txt"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta:       bridgeSignedReasoningToolCallContextDeltaForTest("call_durable_error", "Read", `{"file_path":"/missing.txt"}`),
-		CanonicalExecutionInputJson: `{"file_path":"/missing.txt"}`,
+		ToolDeclaration: bridgeSignedReasoningToolDeclarationForTest(
+			"call_durable_error", "Read", `{"file_path":"/missing.txt"}`, "allow",
+		),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write Tool Use: response=%#v err=%v", toolUse, err)
@@ -408,10 +407,7 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_truncation_use", ModelRequestId: modelRequestID,
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "Read", `{}`),
-		CanonicalExecutionInputJson: `{}`,
+		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write truncated Tool Use: response=%#v err=%v", toolUse, err)
@@ -521,10 +517,7 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_cancel_start", modelRequestID, requestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_cancel_use", ModelRequestId: modelRequestID,
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_durable_cancel", "Read", `{}`),
-		CanonicalExecutionInputJson: `{}`,
+		ToolDeclaration: bridgeToolDeclarationForTest("call_durable_cancel", "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write cancelled Tool Use: response=%#v err=%v", toolUse, err)
@@ -625,10 +618,9 @@ func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_direct_tool_start", modelRequestID, requestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_direct_tool_use", ModelRequestId: modelRequestID,
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/owned.txt"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_direct_tool_authority", "Read", `{"file_path":"/owned.txt"}`),
-		CanonicalExecutionInputJson: `{"file_path":"/owned.txt"}`,
+		ToolDeclaration: bridgeToolDeclarationForTest(
+			"call_direct_tool_authority", "Read", `{"file_path":"/owned.txt"}`, "allow", "sandbox_execute",
+		),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write direct Tool authority: %#v/%v", toolUse, err)
@@ -1059,10 +1051,7 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) 
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reject_error_start", "mreq_reject_error", requestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reject_error_use", ModelRequestId: "mreq_reject_error",
-		EventType:                   "agent.tool_use",
-		PayloadJson:                 `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_reject_error", "Read", `{}`),
-		CanonicalExecutionInputJson: `{}`,
+		ToolDeclaration: bridgeToolDeclarationForTest("call_reject_error", "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write Tool Use: response=%#v err=%v", toolUse, err)
@@ -1121,10 +1110,7 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 		t.Helper()
 		response, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: "mreq_multi",
-			EventType:                   "agent.tool_use",
-			PayloadJson:                 `{"type":"agent.tool_use","name":"` + toolName + `","input":{},"evaluated_permission":"allow"}`,
-			AssistantContextDelta:       bridgeToolCallContextDeltaForTest(callID, toolName, `{}`),
-			CanonicalExecutionInputJson: `{}`,
+			ToolDeclaration: bridgeToolDeclarationForTest(callID, toolName, `{}`, "allow", "sandbox_execute"),
 		})
 		if err != nil || response.GetCommitted() == nil {
 			t.Fatalf("write %s: response=%#v err=%v", callID, response, err)

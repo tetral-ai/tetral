@@ -88,7 +88,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, requ
 			targets, duplicate = stored, true
 			return nil
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), childControlToolName(command.action)); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), childControlRouteCapability(command.action)); err != nil {
 			return err
 		}
 		command.controlOperationID = id.New("ctrl_")
@@ -750,11 +750,11 @@ func childControlActionFromName(value string) (bridgev1.ChildControlAction, erro
 	}
 }
 
-func childControlToolName(action bridgev1.ChildControlAction) string {
+func childControlRouteCapability(action bridgev1.ChildControlAction) string {
 	if action == bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE {
-		return "close_agent"
+		return "child_close"
 	}
-	return "interrupt_agent"
+	return "child_interrupt"
 }
 
 func childInterruptDisposition(value string) bridgev1.ChildInterruptDisposition {

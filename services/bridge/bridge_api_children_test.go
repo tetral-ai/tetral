@@ -274,9 +274,7 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 			inputJSON := `{"task_name":"worker","agent_type":"worker","fork_turns":"all"}`
 			toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_spawn_prefix_tool_" + name, ModelRequestId: modelRequestID,
-				EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"spawn_agent","input":` + inputJSON + `,"evaluated_permission":"allow"}`,
-				AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_spawn_prefix_"+name, "spawn_agent", inputJSON),
-				CanonicalExecutionInputJson: inputJSON,
+				ToolDeclaration: bridgeToolDeclarationForTest("call_spawn_prefix_"+name, "spawn_agent", inputJSON, "allow", "child_create"),
 			})
 			if err != nil || toolUse.GetCommitted() == nil {
 				t.Fatalf("write source spawn Tool Use = %#v/%v", toolUse, err)

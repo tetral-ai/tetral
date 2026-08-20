@@ -69,7 +69,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "spawn_agent"); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_create"); err != nil {
 			return err
 		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
@@ -464,7 +464,7 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 				targetThread:      request.GetTargetThreadId(),
 			})
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "send_message"); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_message"); err != nil {
 			return err
 		}
 		envelope, err := appendSubagentMailEnvelopeTx(
@@ -917,7 +917,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			duplicate = true
 			return nil
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "resume_agent"); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_resume"); err != nil {
 			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, childScope)

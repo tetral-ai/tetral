@@ -238,15 +238,19 @@ import {
 	defaultRuntimeSandboxExecutionWaiter,
 	defaultRuntimeToolRunner,
 	deniedToolCallFailure,
+	distinctProviderInputForEntry,
 	effectiveToolPermissionPolicy,
 	installLoadedPendingToolUses,
 	installLoadedSandboxExecutions,
 	invalidToolCallFailure,
 	isPendingSandboxExecution,
+	isResolvedToolRoute,
 	pendingApprovalResumeFailure,
 	pendingSandboxExecutionToolUseEventIds,
+	publicInputForRegisteredTool,
 	publicToolEventForEntry,
 	registerRuntimeToolCall,
+	routeCapabilityForEntry,
 	runRuntimeToolEffect,
 	runtimeToolSettlement,
 } from "./tool-execution.js";
@@ -4090,7 +4094,8 @@ function processProviderEventEffect(
 					source,
 					job.modelToolCallId,
 					publicToolEventForEntry(entry),
-					job.input,
+					distinctProviderInputForEntry(entry, event.input),
+					routeCapabilityForEntry(entry),
 				)
 			) {
 				yield* Deferred.succeed(declarationBarrier, false);
@@ -4138,6 +4143,19 @@ type PendingApprovalToolSettlementResult =
 	| { readonly type: "settled" }
 	| Extract<ProviderTurnResult, { readonly type: "interrupted" | "failed" }>;
 
+function removeRecoveredToolRouteJob(
+	session: ThreadRuntime,
+	options: ThreadLoopRuntimeOptions,
+	pending: RuntimeRecoveredToolJobState,
+): void {
+	if (isResolvedToolRoute(pending)) {
+		session.state.removeResolvedToolRouteJob(pending.toolUseEventId);
+		return;
+	}
+	session.state.removePendingApprovalToolJob(pending.toolUseEventId);
+	runtimeMetrics(options).addPendingApprovals(-1);
+}
+
 function resumeRecoveredToolJobsEffect(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
@@ -4180,6 +4198,7 @@ function resumeRecoveredToolJobsEffect(
 	const run = Effect.gen(function* () {
 		const pendingJobs: readonly RuntimeRecoveredToolJobState[] = [
 			...session.state.pendingApprovalToolJobs(),
+			...session.state.resolvedToolRouteJobs(),
 			...session.state.pendingSandboxExecutionJobs(),
 		];
 		if (pendingJobs.length === 0) {
@@ -4228,11 +4247,13 @@ function resumeRecoveredToolJobsEffect(
 		const unresolved = pendingJobs.filter(
 			(pending) =>
 				!isPendingSandboxExecution(pending) &&
+				!isResolvedToolRoute(pending) &&
 				session.state.toolConfirmation(pending.toolUseEventId) === undefined,
 		);
 		const actionableJobs = pendingJobs.filter(
 			(pending) =>
 				isPendingSandboxExecution(pending) ||
+				isResolvedToolRoute(pending) ||
 				session.state.toolConfirmation(pending.toolUseEventId) !== undefined,
 		);
 		if (actionableJobs.length === 0) {
@@ -4271,9 +4292,9 @@ function resumeRecoveredToolJobsEffect(
 				allowedJobs.push(pending);
 				continue;
 			}
-			const confirmation = session.state.toolConfirmation(
-				pending.toolUseEventId,
-			);
+			const confirmation = isResolvedToolRoute(pending)
+				? pending
+				: session.state.toolConfirmation(pending.toolUseEventId);
 			if (confirmation === undefined) {
 				continue;
 			}
@@ -4310,8 +4331,7 @@ function resumeRecoveredToolJobsEffect(
 				if (denied.type === "stale_custody") {
 					return providerTurnInterruptedWithDiscard();
 				}
-				session.state.removePendingApprovalToolJob(pending.toolUseEventId);
-				runtimeMetrics(options).addPendingApprovals(-1);
+				removeRecoveredToolRouteJob(session, options, pending);
 				continue;
 			}
 			allowedJobs.push(pending);
@@ -4338,7 +4358,9 @@ function resumeRecoveredToolJobsEffect(
 				toolUseEventId: pending.toolUseEventId,
 				gateState: "runnable" as const,
 				decision: "allow" as const,
-				approvalSource: "user" as const,
+				...(isResolvedToolRoute(pending)
+					? {}
+					: { approvalSource: "user" as const }),
 			};
 			scheduler.addJob(job);
 			statesByJobId[job.id] = { ...pending, job };
@@ -4564,13 +4586,12 @@ function resumeRecoveredToolJobEffect(
 									...pending.job,
 									gateState: "runnable",
 									decision: "allow",
-									approvalSource: "user",
+									...(isResolvedToolRoute(pending)
+										? {}
+										: { approvalSource: "user" as const }),
 								},
 							});
-							session.state.removePendingApprovalToolJob(
-								pending.toolUseEventId,
-							);
-							runtimeMetrics(options).addPendingApprovals(-1);
+							removeRecoveredToolRouteJob(session, options, pending);
 						}
 						return accepted;
 					}),
@@ -4626,8 +4647,7 @@ function resumeRecoveredToolJobEffect(
 						pending.toolUseEventId,
 					);
 				} else {
-					session.state.removePendingApprovalToolJob(pending.toolUseEventId);
-					runtimeMetrics(options).addPendingApprovals(-1);
+					removeRecoveredToolRouteJob(session, options, pending);
 				}
 				return { type: "settled" as const };
 			});
@@ -5005,7 +5025,7 @@ function coordinateRuntimeToolJobEffect(
 					.commitPublicToolUse(
 						source,
 						job.modelToolCallId,
-						providerInput,
+						publicInputForRegisteredTool(job.input),
 						gateDecision.evaluatedPermission,
 						publicToolEventForEntry(entry),
 					)
@@ -6283,6 +6303,7 @@ function settleUserInterruptFenceEffect(
 			try {
 				const pendingTools = [
 					...session.state.pendingApprovalToolJobs(),
+					...session.state.resolvedToolRouteJobs(),
 					...session.state.pendingSandboxExecutionJobs(),
 				];
 				const hotToolUseEventIds =
@@ -6357,6 +6378,7 @@ function releaseInterruptedPendingTools(
 			session.state.removePendingApprovalToolJob(toolUseEventId);
 			runtimeMetrics(options).addPendingApprovals(-1);
 		}
+		session.state.removeResolvedToolRouteJob(toolUseEventId);
 		session.state.removePendingSandboxExecutionJob(toolUseEventId);
 		session.state.clearThreadToolRoute(toolUseEventId);
 	}
@@ -6939,7 +6961,8 @@ async function appendEvent(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
-		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
+		readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+		readonly toolRouteCapability?: SessionEventEnvelope["toolRouteCapability"];
 	},
 	modelRequestId?: string,
 	requestStart?: {
@@ -6971,7 +6994,8 @@ async function appendProcessorEvent(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
-		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
+		readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+		readonly toolRouteCapability?: SessionEventEnvelope["toolRouteCapability"];
 	},
 	modelRequestId?: string,
 ): Promise<SessionEventWriterAppendResult> {
@@ -6999,7 +7023,8 @@ async function appendRetriedEvent(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
-		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
+		readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+		readonly toolRouteCapability?: SessionEventEnvelope["toolRouteCapability"];
 	},
 	modelRequestId?: string,
 	requestStart?: {
@@ -7094,7 +7119,8 @@ async function appendEventWithRetry(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
-		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
+		readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+		readonly toolRouteCapability?: SessionEventEnvelope["toolRouteCapability"];
 	},
 	modelRequestId?: string,
 	requestStart?: {
@@ -7155,7 +7181,8 @@ async function appendEventWithWriteId(
 	event: SessionEventWriterAppendEvent,
 	declaration?: {
 		readonly assistantContextAppend: RuntimeAssistantContextAppend;
-		readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
+		readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+		readonly toolRouteCapability?: SessionEventEnvelope["toolRouteCapability"];
 	},
 	modelRequestId?: string,
 	requestStart?: {
@@ -7318,6 +7345,7 @@ function acknowledgeJoinedInterruptRequestEnd(
 	try {
 		const pendingTools = [
 			...session.state.pendingApprovalToolJobs(),
+			...session.state.resolvedToolRouteJobs(),
 			...session.state.pendingSandboxExecutionJobs(),
 		];
 		session.state.contextManager.appendInterruptToolResults(

@@ -99,6 +99,7 @@ import type {
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	AgentRuntimeBridgeServiceClient,
+	RuntimeToolEventKind,
 	WriteEventRequest as WriteEventRequestMessage,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
@@ -1107,30 +1108,79 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 			envelope.event.type === "approval_review.failure";
 		try {
 			const event = sessionEventForDurableWrite(envelope.event);
+			const toolEvent =
+				event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use";
+			const toolDeclarationParts = toolEvent
+				? (envelope.assistantContextAppend?.parts ?? [])
+				: [];
+			const declaredToolParts = toolDeclarationParts.filter(
+				(part) => part.type === "tool",
+			);
+			const declaredToolPart = declaredToolParts[0];
+			if (
+				toolEvent &&
+				(declaredToolParts.length !== 1 ||
+					declaredToolPart?.type !== "tool" ||
+					toolDeclarationParts.some(
+						(part) => part.type !== "reasoning" && part.type !== "tool",
+					))
+			) {
+				return eventWriterOperationSchemaFailure(
+					envelope.sessionId,
+					envelope.writeId,
+				);
+			}
 			const request: WriteEventRequest = {
 				scope: bridgeScope(envelope),
 				runtimeWriteId: envelope.writeId,
-				modelRequestId:
-					envelope.modelRequestId ?? modelRequestIdForEvent(event),
-				eventType: event.type,
-				payloadJson: JSON.stringify(event),
-				sessionVisible: false,
-				contextThroughMessageSequence: envelope.contextThroughMessageSequence,
-				requestKind: envelope.requestKind ?? "",
-				consumedFileAttachments: (envelope.consumedFileAttachments ?? []).map(
-					(attachment) => ({
-						sourceEventId: attachment.sourceEventId,
-						fileId: attachment.fileId,
-					}),
-				),
-				canonicalExecutionInputJson:
-					envelope.canonicalExecutionInput === undefined
-						? ""
-						: JSON.stringify(envelope.canonicalExecutionInput),
+				modelRequestId: envelope.modelRequestId ?? modelRequestIdForEvent(event),
+				eventType: toolEvent ? "" : event.type,
+				payloadJson: toolEvent ? "" : JSON.stringify(event),
+				contextThroughMessageSequence: toolEvent
+					? undefined
+					: envelope.contextThroughMessageSequence,
+				requestKind: toolEvent ? "" : (envelope.requestKind ?? ""),
+				consumedFileAttachments: toolEvent
+					? []
+					: (envelope.consumedFileAttachments ?? []).map((attachment) => ({
+							sourceEventId: attachment.sourceEventId,
+							fileId: attachment.fileId,
+						})),
 				assistantContextDelta:
-					envelope.assistantContextAppend === undefined
+					toolEvent || envelope.assistantContextAppend === undefined
 						? undefined
 						: runtimeContextDeltaForBridge(envelope.assistantContextAppend),
+				toolDeclaration:
+					!toolEvent || declaredToolPart?.type !== "tool"
+						? undefined
+						: {
+								eventKind:
+									event.type === "agent.mcp_tool_use"
+										? RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_MCP
+										: RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_TOOL,
+								modelToolCallId: declaredToolPart.modelToolCallId,
+								toolName: event.name,
+								publicExecutionInputJson: JSON.stringify(event.input),
+								distinctProviderInputJson:
+									envelope.distinctProviderInput === undefined
+										? undefined
+										: JSON.stringify(envelope.distinctProviderInput),
+								evaluatedPermission: event.evaluated_permission,
+								routeCapability: envelope.toolRouteCapability ?? "",
+								mcpServerName:
+									event.type === "agent.mcp_tool_use"
+										? event.mcp_server_name
+										: undefined,
+								leadingReasoning: toolDeclarationParts
+									.filter((part) => part.type === "reasoning")
+									.map((part) => ({
+										text: part.text,
+										providerMetadataJson:
+											part.providerMetadata === undefined
+												? undefined
+												: JSON.stringify(part.providerMetadata),
+									})),
+							},
 			};
 			if (
 				WriteEventRequestMessage.encode(request).finish().byteLength >
@@ -1169,18 +1219,11 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				result === undefined ||
 				result.eventId.length === 0 ||
 				(envelope.assistantContextAppend === undefined &&
-					(result.assignedMessageSequence !== undefined ||
-						result.createdToolUseEventIds.length !== 0)) ||
+					result.assignedMessageSequence !== undefined) ||
 				(envelope.assistantContextAppend !== undefined &&
 					(result.assignedMessageSequence === undefined ||
 						!Number.isSafeInteger(result.assignedMessageSequence) ||
-						result.assignedMessageSequence <= 0 ||
-						result.createdToolUseEventIds.length !== expectedToolUseEventIds ||
-						result.createdToolUseEventIds.some(
-							(eventId) => eventId.length === 0,
-						) ||
-						new Set(result.createdToolUseEventIds).size !==
-							result.createdToolUseEventIds.length))
+						result.assignedMessageSequence <= 0))
 			) {
 				return eventWriterOperationSchemaFailure(
 					envelope.sessionId,
@@ -1196,7 +1239,8 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 					: {
 							assistant: {
 								messageSequence: result.assignedMessageSequence,
-								createdToolUseEventIds: result.createdToolUseEventIds,
+								createdToolUseEventIds:
+									expectedToolUseEventIds === 0 ? [] : [result.eventId],
 							},
 						}),
 			};

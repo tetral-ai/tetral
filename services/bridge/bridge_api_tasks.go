@@ -444,7 +444,7 @@ func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, reques
 		return nil, status.Error(codes.InvalidArgument, "invalid read command result request")
 	}
 	maxOutputTokens := positiveInt32(request.GetMaxOutputTokens())
-	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "poll", "", maxOutputTokens)
+	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "poll", maxOutputTokens)
 	if err != nil {
 		if isScopeSupersededError(err) {
 			return &bridgev1.ReadCommandResultResponse{Outcome: &bridgev1.ReadCommandResultResponse_Stale{Stale: &bridgev1.CommandReadStale{}}}, nil
@@ -458,17 +458,8 @@ func (s *PostgreSQLBridgeAPIStore) SendCommandInput(ctx context.Context, request
 	if request.GetOperationId() == "" || request.GetTaskId() == "" || request.GetMaxOutputTokens() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "invalid send command input request")
 	}
-	if strings.TrimSpace(request.GetInputJson()) == "" {
-		return nil, status.Error(codes.InvalidArgument, "empty command input must use read command result")
-	}
-	if request.GetInputJson() != "" && !json.Valid([]byte(request.GetInputJson())) {
-		return nil, status.Error(codes.InvalidArgument, "command input must be JSON")
-	}
-	if commandInputCharsEmpty(request.GetInputJson()) {
-		return nil, status.Error(codes.InvalidArgument, "empty command chars must use read command result")
-	}
 	maxOutputTokens := positiveInt32(request.GetMaxOutputTokens())
-	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "stdin", request.GetInputJson(), maxOutputTokens)
+	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "stdin", maxOutputTokens)
 	if err != nil {
 		if isScopeSupersededError(err) {
 			return &bridgev1.SendCommandInputResponse{Outcome: &bridgev1.SendCommandInputResponse_Stale{Stale: &bridgev1.CommandInputStale{}}}, nil
@@ -505,7 +496,6 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	taskID string,
 	toolUseEventID string,
 	kind string,
-	inputJSON string,
 	maxOutputTokens int,
 ) (commandOperationResult, error) {
 	if kind != "poll" && kind != "stdin" {
@@ -527,21 +517,15 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		authority, err := loadBackgroundCommandAuthorityTx(ctx, tx, scope, toolUseEventID)
+		tool, err := loadDurableToolExecutionTx(ctx, tx, scope, toolUseEventID, "agent.tool_use", true)
 		if err != nil {
 			return err
 		}
-		if authority.Kind != kind || authority.TaskID != taskID || authority.MaxOutputTokens != maxOutputTokens {
-			return status.Error(codes.FailedPrecondition, "background command does not match its durable Tool declaration")
+		if tool.RouteCapability != "background_command" {
+			return status.Error(codes.FailedPrecondition, "durable Tool route capability does not match the command endpoint")
 		}
-		if kind == "stdin" {
-			callerInput, _, err := canonicalBackgroundCommandInput(inputJSON)
-			if err != nil || callerInput != authority.InputJSON {
-				return status.Error(codes.FailedPrecondition, "background command input does not match its durable Tool declaration")
-			}
-		}
-		canonicalInput := authority.InputJSON
-		inputHash := authority.InputHash
+		canonicalInput := tool.InputJSON
+		inputHash := tool.NormalizedInputHash
 		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID, "")
 		if err != nil {
 			return err
@@ -579,7 +563,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		if !dbconnect.IsNoRows(err) {
 			return err
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID, "write_stdin"); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID, "background_command"); err != nil {
 			return err
 		}
 		var writeSequence int64
@@ -659,9 +643,6 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		if err := verifyBackgroundCancelAuthorityTx(ctx, tx, scope, toolUseEventID); err != nil {
-			return err
-		}
 		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID, toolUseEventID)
 		if err != nil {
 			return err
@@ -694,9 +675,6 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 			return nil
 		}
 		if !dbconnect.IsNoRows(err) {
-			return err
-		}
-		if err := lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID, "exec_command"); err != nil {
 			return err
 		}
 		state := "pending"
@@ -768,71 +746,6 @@ func allocateBackgroundTaskWriteSequenceTx(ctx context.Context, tx *dbconnect.Tx
 		return 0, err
 	}
 	return writeSequence, nil
-}
-
-type backgroundCommandAuthority struct {
-	Kind            string
-	TaskID          string
-	InputJSON       string
-	InputHash       string
-	MaxOutputTokens int
-}
-
-func loadBackgroundCommandAuthorityTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (backgroundCommandAuthority, error) {
-	var payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT payload_json FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		  AND event_id=$4 AND type='agent.tool_use' FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
-		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command Tool is missing")
-	} else if err != nil {
-		return backgroundCommandAuthority{}, err
-	}
-	var event runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &event); err != nil || event.Name != "write_stdin" || event.MCPServerName != "" {
-		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command Tool is invalid")
-	}
-	canonicalInput, inputHash, err := canonicalRunToolInput(string(event.Input))
-	if err != nil {
-		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command input is invalid")
-	}
-	var input struct {
-		SessionID       string  `json:"session_id"`
-		Chars           *string `json:"chars"`
-		MaxOutputTokens *int32  `json:"max_output_tokens"`
-	}
-	if err := json.Unmarshal([]byte(canonicalInput), &input); err != nil || input.SessionID == "" || (input.MaxOutputTokens != nil && *input.MaxOutputTokens < 0) {
-		return backgroundCommandAuthority{}, status.Error(codes.FailedPrecondition, "durable background command input is invalid")
-	}
-	kind := "poll"
-	if input.Chars != nil && *input.Chars != "" {
-		kind = "stdin"
-	}
-	maxOutputTokens := 0
-	if input.MaxOutputTokens != nil {
-		maxOutputTokens = int(*input.MaxOutputTokens)
-	}
-	return backgroundCommandAuthority{
-		Kind: kind, TaskID: input.SessionID, InputJSON: canonicalInput,
-		InputHash: inputHash, MaxOutputTokens: maxOutputTokens,
-	}, nil
-}
-
-func verifyBackgroundCancelAuthorityTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) error {
-	var payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT payload_json FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		  AND event_id=$4 AND type='agent.tool_use' FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
-		return status.Error(codes.FailedPrecondition, "durable background cancellation Tool is missing")
-	} else if err != nil {
-		return err
-	}
-	var event runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &event); err != nil || event.Name != "exec_command" || event.MCPServerName != "" {
-		return status.Error(codes.FailedPrecondition, "durable background cancellation Tool is invalid")
-	}
-	return nil
 }
 
 func enqueueBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, taskID string, requestID string, now time.Time) error {
@@ -930,16 +843,6 @@ func nullablePositiveInt64(value int64) any {
 	return value
 }
 
-func commandInputCharsEmpty(inputJSON string) bool {
-	var payload struct {
-		Chars *string `json:"chars"`
-	}
-	if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil {
-		return false
-	}
-	return payload.Chars != nil && *payload.Chars == ""
-}
-
 type commandOperationResult struct {
 	ResultJSON string
 	WriteSeq   int64
@@ -978,7 +881,7 @@ func terminalStatusFromResultJSON(resultJSON string) (string, error) {
 }
 
 func runtimeNotificationJSON(taskID string, sourceToolUseEventID string, terminalStatus string, resultJSON string) (string, error) {
-	canonicalResultJSON, err := canonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, stripInternalProviderFields(resultJSON))
+	canonicalResultJSON, err := canonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
 	if err != nil {
 		canonicalResultJSON = `{"status":"failed","error_code":"invalid_result_json"}`
 	}

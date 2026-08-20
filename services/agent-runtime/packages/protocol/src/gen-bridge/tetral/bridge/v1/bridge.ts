@@ -303,6 +303,45 @@ export function fileAttachmentRejectionReasonToJSON(object: FileAttachmentReject
   }
 }
 
+export enum RuntimeToolEventKind {
+  RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED = 0,
+  RUNTIME_TOOL_EVENT_KIND_TOOL = 1,
+  RUNTIME_TOOL_EVENT_KIND_MCP = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function runtimeToolEventKindFromJSON(object: any): RuntimeToolEventKind {
+  switch (object) {
+    case 0:
+    case "RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED":
+      return RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED;
+    case 1:
+    case "RUNTIME_TOOL_EVENT_KIND_TOOL":
+      return RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_TOOL;
+    case 2:
+    case "RUNTIME_TOOL_EVENT_KIND_MCP":
+      return RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_MCP;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RuntimeToolEventKind.UNRECOGNIZED;
+  }
+}
+
+export function runtimeToolEventKindToJSON(object: RuntimeToolEventKind): string {
+  switch (object) {
+    case RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED:
+      return "RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED";
+    case RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_TOOL:
+      return "RUNTIME_TOOL_EVENT_KIND_TOOL";
+    case RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_MCP:
+      return "RUNTIME_TOOL_EVENT_KIND_MCP";
+    case RuntimeToolEventKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface RuntimeContextDelta {
   parts: RuntimeContextPart[];
 }
@@ -721,12 +760,23 @@ export interface WriteEventRequest {
   modelRequestId: string;
   eventType: string;
   payloadJson: string;
-  sessionVisible: boolean;
   assistantContextDelta: RuntimeContextDelta | undefined;
   contextThroughMessageSequence?: number | undefined;
   requestKind: string;
   consumedFileAttachments: FileAttachmentPair[];
-  canonicalExecutionInputJson: string;
+  toolDeclaration: RuntimeToolDeclaration | undefined;
+}
+
+export interface RuntimeToolDeclaration {
+  eventKind: RuntimeToolEventKind;
+  modelToolCallId: string;
+  toolName: string;
+  publicExecutionInputJson: string;
+  distinctProviderInputJson?: string | undefined;
+  evaluatedPermission: string;
+  routeCapability: string;
+  mcpServerName?: string | undefined;
+  leadingReasoning: RuntimeContextReasoning[];
 }
 
 export interface ServerToolUseUsage {
@@ -743,13 +793,11 @@ export interface WriteEventResponse {
 export interface WriteEventCommitted {
   eventId: string;
   assignedMessageSequence?: number | undefined;
-  createdToolUseEventIds: string[];
 }
 
 export interface WriteEventDuplicate {
   eventId: string;
   assignedMessageSequence?: number | undefined;
-  createdToolUseEventIds: string[];
 }
 
 export interface WriteEventStale {
@@ -1208,7 +1256,6 @@ export interface SendCommandInputRequest {
   scope: RuntimeScope | undefined;
   taskId: string;
   maxOutputTokens: number;
-  inputJson: string;
   toolUseEventId: string;
   operationId: string;
 }
@@ -8146,12 +8193,11 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     modelRequestId: "",
     eventType: "",
     payloadJson: "",
-    sessionVisible: false,
     assistantContextDelta: undefined,
     contextThroughMessageSequence: undefined,
     requestKind: "",
     consumedFileAttachments: [],
-    canonicalExecutionInputJson: "",
+    toolDeclaration: undefined,
   };
 }
 
@@ -8172,9 +8218,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.payloadJson !== "") {
       writer.uint32(42).string(message.payloadJson);
     }
-    if (message.sessionVisible !== false) {
-      writer.uint32(56).bool(message.sessionVisible);
-    }
     if (message.assistantContextDelta !== undefined) {
       RuntimeContextDelta.encode(message.assistantContextDelta, writer.uint32(82).fork()).join();
     }
@@ -8187,8 +8230,8 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     for (const v of message.consumedFileAttachments) {
       FileAttachmentPair.encode(v!, writer.uint32(130).fork()).join();
     }
-    if (message.canonicalExecutionInputJson !== "") {
-      writer.uint32(138).string(message.canonicalExecutionInputJson);
+    if (message.toolDeclaration !== undefined) {
+      RuntimeToolDeclaration.encode(message.toolDeclaration, writer.uint32(146).fork()).join();
     }
     return writer;
   },
@@ -8240,14 +8283,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.payloadJson = reader.string();
           continue;
         }
-        case 7: {
-          if (tag !== 56) {
-            break;
-          }
-
-          message.sessionVisible = reader.bool();
-          continue;
-        }
         case 10: {
           if (tag !== 82) {
             break;
@@ -8280,12 +8315,12 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.consumedFileAttachments.push(FileAttachmentPair.decode(reader, reader.uint32()));
           continue;
         }
-        case 17: {
-          if (tag !== 138) {
+        case 18: {
+          if (tag !== 146) {
             break;
           }
 
-          message.canonicalExecutionInputJson = reader.string();
+          message.toolDeclaration = RuntimeToolDeclaration.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -8320,11 +8355,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.payload_json)
         ? globalThis.String(object.payload_json)
         : "",
-      sessionVisible: isSet(object.sessionVisible)
-        ? globalThis.Boolean(object.sessionVisible)
-        : isSet(object.session_visible)
-        ? globalThis.Boolean(object.session_visible)
-        : false,
       assistantContextDelta: isSet(object.assistantContextDelta)
         ? RuntimeContextDelta.fromJSON(object.assistantContextDelta)
         : isSet(object.assistant_context_delta)
@@ -8345,11 +8375,11 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : globalThis.Array.isArray(object?.consumed_file_attachments)
         ? object.consumed_file_attachments.map((e: any) => FileAttachmentPair.fromJSON(e))
         : [],
-      canonicalExecutionInputJson: isSet(object.canonicalExecutionInputJson)
-        ? globalThis.String(object.canonicalExecutionInputJson)
-        : isSet(object.canonical_execution_input_json)
-        ? globalThis.String(object.canonical_execution_input_json)
-        : "",
+      toolDeclaration: isSet(object.toolDeclaration)
+        ? RuntimeToolDeclaration.fromJSON(object.toolDeclaration)
+        : isSet(object.tool_declaration)
+        ? RuntimeToolDeclaration.fromJSON(object.tool_declaration)
+        : undefined,
     };
   },
 
@@ -8370,9 +8400,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.payloadJson !== "") {
       obj.payloadJson = message.payloadJson;
     }
-    if (message.sessionVisible !== false) {
-      obj.sessionVisible = message.sessionVisible;
-    }
     if (message.assistantContextDelta !== undefined) {
       obj.assistantContextDelta = RuntimeContextDelta.toJSON(message.assistantContextDelta);
     }
@@ -8385,8 +8412,8 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.consumedFileAttachments?.length) {
       obj.consumedFileAttachments = message.consumedFileAttachments.map((e) => FileAttachmentPair.toJSON(e));
     }
-    if (message.canonicalExecutionInputJson !== "") {
-      obj.canonicalExecutionInputJson = message.canonicalExecutionInputJson;
+    if (message.toolDeclaration !== undefined) {
+      obj.toolDeclaration = RuntimeToolDeclaration.toJSON(message.toolDeclaration);
     }
     return obj;
   },
@@ -8403,7 +8430,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.modelRequestId = object.modelRequestId ?? "";
     message.eventType = object.eventType ?? "";
     message.payloadJson = object.payloadJson ?? "";
-    message.sessionVisible = object.sessionVisible ?? false;
     message.assistantContextDelta =
       (object.assistantContextDelta !== undefined && object.assistantContextDelta !== null)
         ? RuntimeContextDelta.fromPartial(object.assistantContextDelta)
@@ -8412,7 +8438,243 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.requestKind = object.requestKind ?? "";
     message.consumedFileAttachments = object.consumedFileAttachments?.map((e) => FileAttachmentPair.fromPartial(e)) ||
       [];
-    message.canonicalExecutionInputJson = object.canonicalExecutionInputJson ?? "";
+    message.toolDeclaration = (object.toolDeclaration !== undefined && object.toolDeclaration !== null)
+      ? RuntimeToolDeclaration.fromPartial(object.toolDeclaration)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeToolDeclaration(): RuntimeToolDeclaration {
+  return {
+    eventKind: 0,
+    modelToolCallId: "",
+    toolName: "",
+    publicExecutionInputJson: "",
+    distinctProviderInputJson: undefined,
+    evaluatedPermission: "",
+    routeCapability: "",
+    mcpServerName: undefined,
+    leadingReasoning: [],
+  };
+}
+
+export const RuntimeToolDeclaration: MessageFns<RuntimeToolDeclaration> = {
+  encode(message: RuntimeToolDeclaration, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.eventKind !== 0) {
+      writer.uint32(8).int32(message.eventKind);
+    }
+    if (message.modelToolCallId !== "") {
+      writer.uint32(18).string(message.modelToolCallId);
+    }
+    if (message.toolName !== "") {
+      writer.uint32(26).string(message.toolName);
+    }
+    if (message.publicExecutionInputJson !== "") {
+      writer.uint32(34).string(message.publicExecutionInputJson);
+    }
+    if (message.distinctProviderInputJson !== undefined) {
+      writer.uint32(42).string(message.distinctProviderInputJson);
+    }
+    if (message.evaluatedPermission !== "") {
+      writer.uint32(50).string(message.evaluatedPermission);
+    }
+    if (message.routeCapability !== "") {
+      writer.uint32(58).string(message.routeCapability);
+    }
+    if (message.mcpServerName !== undefined) {
+      writer.uint32(66).string(message.mcpServerName);
+    }
+    for (const v of message.leadingReasoning) {
+      RuntimeContextReasoning.encode(v!, writer.uint32(74).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeToolDeclaration {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeToolDeclaration();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.eventKind = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.modelToolCallId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.toolName = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.publicExecutionInputJson = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.distinctProviderInputJson = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.evaluatedPermission = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.routeCapability = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.mcpServerName = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.leadingReasoning.push(RuntimeContextReasoning.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeToolDeclaration {
+    return {
+      eventKind: isSet(object.eventKind)
+        ? runtimeToolEventKindFromJSON(object.eventKind)
+        : isSet(object.event_kind)
+        ? runtimeToolEventKindFromJSON(object.event_kind)
+        : 0,
+      modelToolCallId: isSet(object.modelToolCallId)
+        ? globalThis.String(object.modelToolCallId)
+        : isSet(object.model_tool_call_id)
+        ? globalThis.String(object.model_tool_call_id)
+        : "",
+      toolName: isSet(object.toolName)
+        ? globalThis.String(object.toolName)
+        : isSet(object.tool_name)
+        ? globalThis.String(object.tool_name)
+        : "",
+      publicExecutionInputJson: isSet(object.publicExecutionInputJson)
+        ? globalThis.String(object.publicExecutionInputJson)
+        : isSet(object.public_execution_input_json)
+        ? globalThis.String(object.public_execution_input_json)
+        : "",
+      distinctProviderInputJson: isSet(object.distinctProviderInputJson)
+        ? globalThis.String(object.distinctProviderInputJson)
+        : isSet(object.distinct_provider_input_json)
+        ? globalThis.String(object.distinct_provider_input_json)
+        : undefined,
+      evaluatedPermission: isSet(object.evaluatedPermission)
+        ? globalThis.String(object.evaluatedPermission)
+        : isSet(object.evaluated_permission)
+        ? globalThis.String(object.evaluated_permission)
+        : "",
+      routeCapability: isSet(object.routeCapability)
+        ? globalThis.String(object.routeCapability)
+        : isSet(object.route_capability)
+        ? globalThis.String(object.route_capability)
+        : "",
+      mcpServerName: isSet(object.mcpServerName)
+        ? globalThis.String(object.mcpServerName)
+        : isSet(object.mcp_server_name)
+        ? globalThis.String(object.mcp_server_name)
+        : undefined,
+      leadingReasoning: globalThis.Array.isArray(object?.leadingReasoning)
+        ? object.leadingReasoning.map((e: any) => RuntimeContextReasoning.fromJSON(e))
+        : globalThis.Array.isArray(object?.leading_reasoning)
+        ? object.leading_reasoning.map((e: any) => RuntimeContextReasoning.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: RuntimeToolDeclaration): unknown {
+    const obj: any = {};
+    if (message.eventKind !== 0) {
+      obj.eventKind = runtimeToolEventKindToJSON(message.eventKind);
+    }
+    if (message.modelToolCallId !== "") {
+      obj.modelToolCallId = message.modelToolCallId;
+    }
+    if (message.toolName !== "") {
+      obj.toolName = message.toolName;
+    }
+    if (message.publicExecutionInputJson !== "") {
+      obj.publicExecutionInputJson = message.publicExecutionInputJson;
+    }
+    if (message.distinctProviderInputJson !== undefined) {
+      obj.distinctProviderInputJson = message.distinctProviderInputJson;
+    }
+    if (message.evaluatedPermission !== "") {
+      obj.evaluatedPermission = message.evaluatedPermission;
+    }
+    if (message.routeCapability !== "") {
+      obj.routeCapability = message.routeCapability;
+    }
+    if (message.mcpServerName !== undefined) {
+      obj.mcpServerName = message.mcpServerName;
+    }
+    if (message.leadingReasoning?.length) {
+      obj.leadingReasoning = message.leadingReasoning.map((e) => RuntimeContextReasoning.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeToolDeclaration>, I>>(base?: I): RuntimeToolDeclaration {
+    return RuntimeToolDeclaration.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeToolDeclaration>, I>>(object: I): RuntimeToolDeclaration {
+    const message = createBaseRuntimeToolDeclaration();
+    message.eventKind = object.eventKind ?? 0;
+    message.modelToolCallId = object.modelToolCallId ?? "";
+    message.toolName = object.toolName ?? "";
+    message.publicExecutionInputJson = object.publicExecutionInputJson ?? "";
+    message.distinctProviderInputJson = object.distinctProviderInputJson ?? undefined;
+    message.evaluatedPermission = object.evaluatedPermission ?? "";
+    message.routeCapability = object.routeCapability ?? "";
+    message.mcpServerName = object.mcpServerName ?? undefined;
+    message.leadingReasoning = object.leadingReasoning?.map((e) => RuntimeContextReasoning.fromPartial(e)) || [];
     return message;
   },
 };
@@ -8600,7 +8862,7 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
 };
 
 function createBaseWriteEventCommitted(): WriteEventCommitted {
-  return { eventId: "", assignedMessageSequence: undefined, createdToolUseEventIds: [] };
+  return { eventId: "", assignedMessageSequence: undefined };
 }
 
 export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
@@ -8610,9 +8872,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
     }
     if (message.assignedMessageSequence !== undefined) {
       writer.uint32(24).int64(message.assignedMessageSequence);
-    }
-    for (const v of message.createdToolUseEventIds) {
-      writer.uint32(34).string(v!);
     }
     return writer;
   },
@@ -8640,14 +8899,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
           message.assignedMessageSequence = longToNumber(reader.int64());
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.createdToolUseEventIds.push(reader.string());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8669,11 +8920,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
         : isSet(object.assigned_message_sequence)
         ? globalThis.Number(object.assigned_message_sequence)
         : undefined,
-      createdToolUseEventIds: globalThis.Array.isArray(object?.createdToolUseEventIds)
-        ? object.createdToolUseEventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.created_tool_use_event_ids)
-        ? object.created_tool_use_event_ids.map((e: any) => globalThis.String(e))
-        : [],
     };
   },
 
@@ -8685,9 +8931,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
     if (message.assignedMessageSequence !== undefined) {
       obj.assignedMessageSequence = Math.round(message.assignedMessageSequence);
     }
-    if (message.createdToolUseEventIds?.length) {
-      obj.createdToolUseEventIds = message.createdToolUseEventIds;
-    }
     return obj;
   },
 
@@ -8698,13 +8941,12 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
     const message = createBaseWriteEventCommitted();
     message.eventId = object.eventId ?? "";
     message.assignedMessageSequence = object.assignedMessageSequence ?? undefined;
-    message.createdToolUseEventIds = object.createdToolUseEventIds?.map((e) => e) || [];
     return message;
   },
 };
 
 function createBaseWriteEventDuplicate(): WriteEventDuplicate {
-  return { eventId: "", assignedMessageSequence: undefined, createdToolUseEventIds: [] };
+  return { eventId: "", assignedMessageSequence: undefined };
 }
 
 export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
@@ -8714,9 +8956,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
     }
     if (message.assignedMessageSequence !== undefined) {
       writer.uint32(24).int64(message.assignedMessageSequence);
-    }
-    for (const v of message.createdToolUseEventIds) {
-      writer.uint32(34).string(v!);
     }
     return writer;
   },
@@ -8744,14 +8983,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
           message.assignedMessageSequence = longToNumber(reader.int64());
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.createdToolUseEventIds.push(reader.string());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8773,11 +9004,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
         : isSet(object.assigned_message_sequence)
         ? globalThis.Number(object.assigned_message_sequence)
         : undefined,
-      createdToolUseEventIds: globalThis.Array.isArray(object?.createdToolUseEventIds)
-        ? object.createdToolUseEventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.created_tool_use_event_ids)
-        ? object.created_tool_use_event_ids.map((e: any) => globalThis.String(e))
-        : [],
     };
   },
 
@@ -8789,9 +9015,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
     if (message.assignedMessageSequence !== undefined) {
       obj.assignedMessageSequence = Math.round(message.assignedMessageSequence);
     }
-    if (message.createdToolUseEventIds?.length) {
-      obj.createdToolUseEventIds = message.createdToolUseEventIds;
-    }
     return obj;
   },
 
@@ -8802,7 +9025,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
     const message = createBaseWriteEventDuplicate();
     message.eventId = object.eventId ?? "";
     message.assignedMessageSequence = object.assignedMessageSequence ?? undefined;
-    message.createdToolUseEventIds = object.createdToolUseEventIds?.map((e) => e) || [];
     return message;
   },
 };
@@ -16246,7 +16468,7 @@ export const CommandReadStale: MessageFns<CommandReadStale> = {
 };
 
 function createBaseSendCommandInputRequest(): SendCommandInputRequest {
-  return { scope: undefined, taskId: "", maxOutputTokens: 0, inputJson: "", toolUseEventId: "", operationId: "" };
+  return { scope: undefined, taskId: "", maxOutputTokens: 0, toolUseEventId: "", operationId: "" };
 }
 
 export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
@@ -16259,9 +16481,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
     }
     if (message.maxOutputTokens !== 0) {
       writer.uint32(24).int32(message.maxOutputTokens);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(34).string(message.inputJson);
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(42).string(message.toolUseEventId);
@@ -16303,14 +16522,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
           message.maxOutputTokens = reader.int32();
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.inputJson = reader.string();
-          continue;
-        }
         case 5: {
           if (tag !== 42) {
             break;
@@ -16349,11 +16560,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
         : isSet(object.max_output_tokens)
         ? globalThis.Number(object.max_output_tokens)
         : 0,
-      inputJson: isSet(object.inputJson)
-        ? globalThis.String(object.inputJson)
-        : isSet(object.input_json)
-        ? globalThis.String(object.input_json)
-        : "",
       toolUseEventId: isSet(object.toolUseEventId)
         ? globalThis.String(object.toolUseEventId)
         : isSet(object.tool_use_event_id)
@@ -16378,9 +16584,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
     if (message.maxOutputTokens !== 0) {
       obj.maxOutputTokens = Math.round(message.maxOutputTokens);
     }
-    if (message.inputJson !== "") {
-      obj.inputJson = message.inputJson;
-    }
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
     }
@@ -16400,7 +16603,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
       : undefined;
     message.taskId = object.taskId ?? "";
     message.maxOutputTokens = object.maxOutputTokens ?? 0;
-    message.inputJson = object.inputJson ?? "";
     message.toolUseEventId = object.toolUseEventId ?? "";
     message.operationId = object.operationId ?? "";
     return message;

@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T) {
@@ -51,6 +52,18 @@ func TestPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(t *testing.T
 			toolName:       "exec_command",
 			providerInput:  map[string]any{"cmd": "printf object"},
 			executionInput: map[string]any{"cmd": "printf object"},
+		},
+		{
+			name:     "nested provider metadata remains ordinary input",
+			toolName: "exec_command",
+			providerInput: map[string]any{
+				"cmd": "printf nested",
+				"env": map[string]any{"provider_metadata": "kept"},
+			},
+			executionInput: map[string]any{
+				"cmd": "printf nested",
+				"env": map[string]any{"provider_metadata": "kept"},
+			},
 		},
 	}
 	for _, test := range tests {
@@ -247,7 +260,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 		t.Fatalf("read durable Tool declaration: %v", err)
 	}
 	if testJSONPathString(t, payloadJSON, "name") != toolName ||
-		!reflect.DeepEqual(testJSONPathValue(t, payloadJSON, "input"), providerInput) ||
+		!reflect.DeepEqual(testJSONPathValue(t, payloadJSON, "input"), executionInput) ||
 		testJSONPathString(t, projectionJSON, "tool_name") != toolName ||
 		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "provider_input"), providerInput) ||
 		!reflect.DeepEqual(testJSONPathValue(t, projectionJSON, "canonical_execution_input"), executionInput) {
@@ -276,6 +289,18 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 		}
 	}
 	writeDropped, acceptDropped, settlementDropped := bridge.snapshot()
+	declarations, receipts := bridge.toolDeclarationTrace()
+	if len(declarations) != 2 || len(receipts) != 2 || !proto.Equal(declarations[0], declarations[1]) ||
+		declarations[0].GetToolDeclaration() == nil || declarations[0].GetEventType() != "" ||
+		declarations[0].GetPayloadJson() != "" || declarations[0].GetAssistantContextDelta() != nil ||
+		receipts[0].GetCommitted() == nil || receipts[1].GetDuplicate() == nil ||
+		receipts[0].GetCommitted().GetEventId() != receipts[1].GetDuplicate().GetEventId() ||
+		receipts[0].GetCommitted().AssignedMessageSequence == nil || receipts[1].GetDuplicate().AssignedMessageSequence == nil {
+		t.Fatalf("Tool declaration trace = requests %#v receipts %#v; want exact replay and minimal durable receipt", declarations, receipts)
+	}
+	if (toolName == "apply_patch") != (declarations[0].GetToolDeclaration().DistinctProviderInputJson != nil) {
+		t.Fatalf("distinct Provider input presence for %q = %v", toolName, declarations[0].GetToolDeclaration().DistinctProviderInputJson != nil)
+	}
 	if executionState != "consumed" || retainedResult.Valid || resultEvents != 1 || queueStatus != "acknowledged" ||
 		provider.prepareCalls.Load() != 1 || provider.prepareMismatches.Load() != 0 ||
 		provider.calls.Load() != 1 || provider.mismatches.Load() != 0 || !providerInputFound ||
@@ -295,15 +320,19 @@ type sandboxProductionBoundaryBridgeServer struct {
 	writeACKDropped      bool
 	acceptACKDropped     bool
 	settlementACKDropped bool
+	toolDeclarations     []*bridgev1.WriteEventRequest
+	toolReceipts         []*bridgev1.WriteEventResponse
 }
 
 func (s *sandboxProductionBoundaryBridgeServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
 	response, err := s.store.WriteEvent(ctx, request)
-	if err != nil || (request.GetEventType() != "agent.tool_use" && request.GetEventType() != "agent.mcp_tool_use") {
+	if err != nil || request.GetToolDeclaration() == nil {
 		return response, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.toolDeclarations = append(s.toolDeclarations, proto.Clone(request).(*bridgev1.WriteEventRequest))
+	s.toolReceipts = append(s.toolReceipts, proto.Clone(response).(*bridgev1.WriteEventResponse))
 	if !s.writeACKDropped {
 		s.writeACKDropped = true
 		return nil, status.Error(codes.Unavailable, "Tool declaration acknowledgement unavailable")
@@ -347,6 +376,12 @@ func (s *sandboxProductionBoundaryBridgeServer) snapshot() (bool, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.writeACKDropped, s.acceptACKDropped, s.settlementACKDropped
+}
+
+func (s *sandboxProductionBoundaryBridgeServer) toolDeclarationTrace() ([]*bridgev1.WriteEventRequest, []*bridgev1.WriteEventResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*bridgev1.WriteEventRequest(nil), s.toolDeclarations...), append([]*bridgev1.WriteEventResponse(nil), s.toolReceipts...)
 }
 
 func startSandboxProductionBoundaryBridgeClient(t *testing.T, server bridgev1.AgentRuntimeBridgeServiceServer, runtimePodUID string) (bridgev1.AgentRuntimeBridgeServiceClient, string) {

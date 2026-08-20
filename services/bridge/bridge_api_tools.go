@@ -186,11 +186,11 @@ type durableToolExecution struct {
 	ModelToolCallID     string
 	ToolName            string
 	MCPServerName       string
-	PublicInputJSON     string
 	ProviderInputJSON   string
 	InputJSON           string
 	NormalizedInputHash string
 	EvaluatedPermission string
+	RouteCapability     string
 }
 
 func loadDurableToolExecutionTx(
@@ -201,51 +201,53 @@ func loadDurableToolExecutionTx(
 	eventType string,
 	lock bool,
 ) (durableToolExecution, error) {
-	query := `SELECT payload_json, projection_json, model_request_id
+	query := `SELECT projection_json, model_request_id
 		  FROM session_events
 		 WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		   AND event_id = $4 AND type = $5`
 	if lock {
 		query += ` FOR UPDATE`
 	}
-	var payloadJSON, projectionJSON string
+	var projectionJSON string
 	var modelRequestID sql.NullString
 	if err := tx.QueryRow(ctx, query,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID, eventType,
-	).Scan(&payloadJSON, &projectionJSON, &modelRequestID); dbconnect.IsNoRows(err) {
+	).Scan(&projectionJSON, &modelRequestID); dbconnect.IsNoRows(err) {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use is missing")
 	} else if err != nil {
 		return durableToolExecution{}, err
 	}
-	var payload runtimeToolUseEventPayload
 	var projection struct {
 		ModelToolCallID         string          `json:"model_tool_call_id"`
 		ToolName                string          `json:"tool_name"`
 		ProviderInput           json.RawMessage `json:"provider_input"`
 		CanonicalExecutionInput json.RawMessage `json:"canonical_execution_input"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use payload is invalid")
+		RouteCapability         string          `json:"route_capability"`
+		EvaluatedPermission     string          `json:"evaluated_permission"`
+		EventType               string          `json:"event_type"`
+		MCPServerName           string          `json:"mcp_server_name"`
 	}
 	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use projection is invalid")
 	}
 	inputJSON, inputHash, err := canonicalRunToolInput(string(projection.CanonicalExecutionInput))
-	publicInputJSON, publicInputErr := runtimeToolEventInputJSON(payload.Input)
 	if err != nil || !modelRequestID.Valid || modelRequestID.String == "" || projection.ModelToolCallID == "" ||
-		projection.ToolName == "" || len(projection.ProviderInput) == 0 || payload.Name != projection.ToolName || publicInputErr != nil {
+		projection.ToolName == "" || len(projection.ProviderInput) == 0 ||
+		!runtimeToolRouteCapabilityAllowed(projection.RouteCapability) ||
+		projection.EventType != eventType ||
+		(projection.EvaluatedPermission != "allow" && projection.EvaluatedPermission != "ask" && projection.EvaluatedPermission != "deny") {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool execution facts are incomplete")
 	}
 	return durableToolExecution{
 		ModelRequestID:      modelRequestID.String,
 		ModelToolCallID:     projection.ModelToolCallID,
 		ToolName:            projection.ToolName,
-		MCPServerName:       payload.MCPServerName,
-		PublicInputJSON:     publicInputJSON,
+		MCPServerName:       projection.MCPServerName,
 		ProviderInputJSON:   string(projection.ProviderInput),
 		InputJSON:           inputJSON,
 		NormalizedInputHash: inputHash,
-		EvaluatedPermission: payload.EvaluatedPermission,
+		EvaluatedPermission: projection.EvaluatedPermission,
+		RouteCapability:     projection.RouteCapability,
 	}, nil
 }
 
@@ -265,22 +267,24 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 }
 
 // lockExecutableToolRouteTx is the mechanical first-effect gate shared by
-// Bridge-owned executors. It locks the exact durable route and may compare its
-// declared capability name, but it never interprets Tool arguments or policy.
+// Bridge-owned executors. It locks the exact durable route and its Runtime-
+// declared endpoint capability without interpreting Tool identity, arguments,
+// or policy.
 func lockExecutableToolRouteTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	toolUseEventID string,
-	expectedToolNames ...string,
+	expectedCapabilities ...string,
 ) error {
 	var statusValue string
 	var decision sql.NullString
 	var resultEventID sql.NullString
-	var toolName string
+	var routeCapability string
 	var terminalResultExists bool
 	err := tx.QueryRow(ctx,
-		`SELECT route.status, route.decision, route.result_event_id, route.tool_name,
+		`SELECT route.status, route.decision, route.result_event_id,
+		        source.projection_json::jsonb ->> 'route_capability',
 		        EXISTS (
 		          SELECT 1 FROM session_events result
 		           WHERE result.workspace_id=route.workspace_id
@@ -294,11 +298,14 @@ func lockExecutableToolRouteTx(
 		                 ) = route.tool_use_event_id
 		        )
 		   FROM session_pending_tool_uses route
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND tool_use_event_id = $4
+		   JOIN session_events source
+		     ON source.workspace_id=route.workspace_id AND source.session_id=route.session_id
+		    AND source.session_thread_id=route.session_thread_id AND source.event_id=route.tool_use_event_id
+		  WHERE route.workspace_id = $1 AND route.session_id = $2 AND route.session_thread_id = $3
+		    AND route.tool_use_event_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-	).Scan(&statusValue, &decision, &resultEventID, &toolName, &terminalResultExists)
+	).Scan(&statusValue, &decision, &resultEventID, &routeCapability, &terminalResultExists)
 	if dbconnect.IsNoRows(err) {
 		return status.Error(codes.FailedPrecondition, "durable Tool route is missing")
 	}
@@ -309,10 +316,10 @@ func lockExecutableToolRouteTx(
 		resultEventID.Valid || terminalResultExists {
 		return status.Error(codes.FailedPrecondition, "durable Tool route is not executable")
 	}
-	if len(expectedToolNames) > 0 {
+	if len(expectedCapabilities) > 0 {
 		matched := false
-		for _, expected := range expectedToolNames {
-			matched = matched || toolName == expected
+		for _, expected := range expectedCapabilities {
+			matched = matched || routeCapability == expected
 		}
 		if !matched {
 			return status.Error(codes.FailedPrecondition, "durable Tool route capability does not match the effect endpoint")
@@ -321,20 +328,15 @@ func lockExecutableToolRouteTx(
 	return nil
 }
 
-// lockExecutableSandboxToolRouteTx binds Sandbox admission to the closed set
-// of capabilities that the Sandbox executor implements. Runtime still selects
-// the route and interprets every argument; Bridge only prevents another Tool
-// family (or the separately routed stdin helper) from borrowing this endpoint.
+// lockExecutableSandboxToolRouteTx binds Sandbox admission to the capability
+// declared by Runtime for this exact Tool route.
 func lockExecutableSandboxToolRouteTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	toolUseEventID string,
 ) error {
-	return lockExecutableToolRouteTx(
-		ctx, tx, scope, toolUseEventID,
-		"Bash", "exec_command", "Read", "Write", "Edit", "Grep", "Glob", "view_image", "apply_patch",
-	)
+	return lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID, "sandbox_execute")
 }
 
 // lockSettleableToolRouteTx separates terminal Result authority from executor
@@ -476,7 +478,7 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 			response = duplicateMemoryRunResponse(existing.ResultJSON)
 			return nil
 		}
-		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "memory"); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "memory_execute"); err != nil {
 			return err
 		}
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {

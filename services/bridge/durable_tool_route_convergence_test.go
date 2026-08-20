@@ -291,7 +291,7 @@ func TestPostgreSQLToolSettlementClosesExactRouteAtomically(t *testing.T) {
 			var resultCount int
 			var routeStatus string
 			if err := admin.QueryRowContext(context.Background(), `SELECT
-				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$2),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$2),
 				(SELECT status FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2)`,
 				sessionID, toolUseID).Scan(&resultCount, &routeStatus); err != nil {
 				t.Fatalf("read rolled-back settlement: %v", err)
@@ -338,11 +338,15 @@ func TestPostgreSQLToolSettlementClosesExactRouteAtomically(t *testing.T) {
 				t.Fatalf("competing settlement outcomes = committed:%d duplicate:%d", committed, duplicate)
 			}
 			var resultEventID sql.NullString
-			if err := admin.QueryRowContext(context.Background(), `SELECT status,result_event_id FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseID).Scan(&routeStatus, &resultEventID); err != nil {
+			var resultEventType, resultToolUseID sql.NullString
+			if err := admin.QueryRowContext(context.Background(), `SELECT route.status,route.result_event_id,result.type,result.payload_json::jsonb->>'tool_use_id'
+				FROM session_pending_tool_uses route
+				LEFT JOIN session_events result ON result.workspace_id=route.workspace_id AND result.session_id=route.session_id AND result.event_id=route.result_event_id
+				WHERE route.workspace_id='default' AND route.session_id=$1 AND route.tool_use_event_id=$2`, sessionID, toolUseID).Scan(&routeStatus, &resultEventID, &resultEventType, &resultToolUseID); err != nil {
 				t.Fatalf("read committed settlement route: %v", err)
 			}
-			if routeStatus != "resolved" || !resultEventID.Valid {
-				t.Fatalf("committed settlement route = %s/%v; want resolved linked result", routeStatus, resultEventID)
+			if routeStatus != "resolved" || !resultEventID.Valid || resultEventType.String != "agent.tool_result" || resultToolUseID.String != toolUseID {
+				t.Fatalf("committed settlement route = %s/%v/%v/%v; want exact linked terminal result", routeStatus, resultEventID, resultEventType, resultToolUseID)
 			}
 		})
 	}
@@ -380,7 +384,7 @@ func TestPostgreSQLToolSettlementRejectsNonsettleableRoutesWithoutResult(t *test
 				t.Fatalf("%s settlement = %#v/%v; want FailedPrecondition", routeState, response, err)
 			}
 			var results int
-			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$2`, sessionID, toolUseID).Scan(&results); err != nil {
+			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$2`, sessionID, toolUseID).Scan(&results); err != nil {
 				t.Fatalf("count rejected settlement results: %v", err)
 			}
 			if results != 0 {

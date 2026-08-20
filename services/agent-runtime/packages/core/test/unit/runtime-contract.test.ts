@@ -308,7 +308,7 @@ describe("runtime boundary contracts", () => {
 			sessionThreadId: "thr_1",
 			writeId: "rwrite_1",
 			modelRequestId: "mreq_anchor_1",
-			canonicalExecutionInput: {},
+			toolRouteCapability: "sandbox_execute" as const,
 			assistantContextAppend: {
 				parts: [
 					{
@@ -387,7 +387,7 @@ describe("runtime boundary contracts", () => {
 					evaluated_permission: "allow",
 				},
 				modelRequestId: "mreq_without_anchor",
-				canonicalExecutionInput: {},
+				toolRouteCapability: "sandbox_execute",
 			}).success,
 		).toBe(true);
 

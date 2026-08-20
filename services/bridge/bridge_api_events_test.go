@@ -142,7 +142,7 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteEvent message: %v", err)
 	}
-	if message.GetCommitted() == nil || message.GetCommitted().AssignedMessageSequence == nil || message.GetCommitted().GetAssignedMessageSequence() != 1 || len(message.GetCommitted().GetCreatedToolUseEventIds()) != 0 {
+	if message.GetCommitted() == nil || message.GetCommitted().AssignedMessageSequence == nil || message.GetCommitted().GetAssignedMessageSequence() != 1 {
 		t.Fatalf("message result = %#v", message)
 	}
 	var stored string
@@ -430,9 +430,7 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_first_start", "mreq_history_first", requestKindAgentProviderRequest, 0)
 	first, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_first_tool", ModelRequestId: "mreq_history_first",
-		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"apply_patch","input":{},"evaluated_permission":"ask"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", `{}`),
-		CanonicalExecutionInputJson: `{}`,
+		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "apply_patch", `{}`, "ask", "sandbox_execute"),
 	})
 	if err != nil || first.GetCommitted() == nil {
 		t.Fatalf("first Tool Call = %#v/%v", first, err)
@@ -447,9 +445,7 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 
 	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_second_tool", ModelRequestId: "mreq_history_second",
-		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"apply_patch","input":{},"evaluated_permission":"ask"}`,
-		AssistantContextDelta:       bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", `{}`),
-		CanonicalExecutionInputJson: `{}`,
+		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "apply_patch", `{}`, "ask", "sandbox_execute"),
 	})
 	if status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("historical Tool Call reuse error = %v; want AlreadyExists", err)

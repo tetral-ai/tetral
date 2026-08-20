@@ -742,7 +742,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			ok: true,
 			type: "committed",
 			eventId: "evt_1",
-			assistant: { messageSequence: 4, createdToolUseEventIds: ["tool_evt_1"] },
+			assistant: { messageSequence: 4, createdToolUseEventIds: ["evt_1"] },
 		});
 		expect(bridge.writeEventRequests[0]?.assistantContextDelta).toEqual({
 			parts: [
@@ -803,27 +803,22 @@ describe("Bridge operation-specific Runtime adapters", () => {
 						},
 					],
 				},
-				canonicalExecutionInput: { patch: rawPatch },
+				distinctProviderInput: rawPatch,
+				toolRouteCapability: "sandbox_execute",
 			}),
 		).resolves.toMatchObject({ ok: true, eventId: "evt_patch" });
 		expect(bridge.writeEventRequests[0]).toMatchObject({
-			payloadJson: JSON.stringify({
-				type: "agent.tool_use",
-				name: "apply_patch",
-				input: { patch: rawPatch },
-				evaluated_permission: "allow",
-			}),
-			canonicalExecutionInputJson: JSON.stringify({ patch: rawPatch }),
-			assistantContextDelta: {
-				parts: [
-					{
-						toolCall: {
-							modelToolCallId: "call_patch",
-							toolName: "apply_patch",
-							providerInputJson: JSON.stringify(rawPatch),
-						},
-					},
-				],
+			eventType: "",
+			payloadJson: "",
+			assistantContextDelta: undefined,
+			toolDeclaration: {
+				modelToolCallId: "call_patch",
+				toolName: "apply_patch",
+				publicExecutionInputJson: JSON.stringify({ patch: rawPatch }),
+				distinctProviderInputJson: JSON.stringify(rawPatch),
+				evaluatedPermission: "allow",
+				routeCapability: "sandbox_execute",
+				leadingReasoning: [],
 			},
 		});
 	});

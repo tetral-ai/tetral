@@ -20,6 +20,7 @@ import type {
 	RuntimeProcessorSource,
 	RuntimeToolSettlement,
 	RuntimeToolSettlementDeclaration,
+	RuntimeToolRouteCapability,
 	SessionEvent,
 	SessionEventWriterAppendEvent,
 	SessionEventWriterAppendResult,
@@ -95,7 +96,8 @@ export interface FrozenAssistantPartAppend {
 	readonly source: RuntimeProcessorSource;
 	readonly append: RuntimeAssistantContextAppend;
 	readonly event: Promise<SessionEventWriterAppendEvent>;
-	readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
+	readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+	readonly toolRouteCapability?: RuntimeToolRouteCapability | undefined;
 	readonly toolCallId?: string | undefined;
 }
 
@@ -140,7 +142,8 @@ export interface ProviderStreamAccumulatorWriter {
 		_source: RuntimeProcessorSource,
 		declaration?: {
 			readonly assistantContextAppend: RuntimeAssistantContextAppend;
-			readonly canonicalExecutionInput?: RuntimeJsonValue | undefined;
+			readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+			readonly toolRouteCapability?: RuntimeToolRouteCapability | undefined;
 		},
 		modelRequestId?: string,
 	) => Promise<SessionEventWriterAppendResult>;
@@ -257,12 +260,14 @@ export class ProviderStreamAccumulator {
 					frozen.source,
 					{
 						assistantContextAppend: frozen.append,
-						...(frozen.canonicalExecutionInput === undefined
+						...(frozen.distinctProviderInput === undefined
 							? {}
 							: {
-									canonicalExecutionInput:
-										frozen.canonicalExecutionInput,
+									distinctProviderInput: frozen.distinctProviderInput,
 								}),
+						...(frozen.toolRouteCapability === undefined
+							? {}
+							: { toolRouteCapability: frozen.toolRouteCapability }),
 					},
 					this.options.modelRequestId,
 				);
@@ -579,7 +584,8 @@ export class ProviderStreamAccumulator {
 		source: RuntimeProcessorSource,
 		toolCallId: string,
 		toolEvent: PublicToolEvent,
-		canonicalExecutionInput: RuntimeJsonValue,
+		distinctProviderInput: RuntimeJsonValue | undefined,
+		toolRouteCapability: RuntimeToolRouteCapability,
 	): boolean {
 		if (this.reservedToolMembers.has(toolCallId)) return true;
 		const existing = this.toolParts.get(toolCallId);
@@ -597,7 +603,8 @@ export class ProviderStreamAccumulator {
 			source,
 			append,
 			event,
-			canonicalExecutionInput,
+			...(distinctProviderInput === undefined ? {} : { distinctProviderInput }),
+			toolRouteCapability,
 			toolCallId,
 		});
 		this.reservedToolMembers.set(toolCallId, {
