@@ -596,6 +596,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -617,9 +620,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			}
 			duplicate = true
 			return nil
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -676,7 +676,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			now,
 		)
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isConversationMutationStaleError(err) {
 			return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Stale{Stale: &bridgev1.CommitInternalToolRepairStale{}}}, nil
 		}
 		return nil, err

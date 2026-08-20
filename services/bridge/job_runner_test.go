@@ -49,7 +49,7 @@ func TestJobRunnerAcksRuntimeInputOnlyAfterRuntimeAccepts(t *testing.T) {
 	if deliverer.jobs[0].InputKind != "messages" {
 		t.Fatalf("input kind = %q; want messages", deliverer.jobs[0].InputKind)
 	}
-	if !reflect.DeepEqual(queueClient.leaseKinds, []string{"runtime_input", "runtime_config_update", "cleanup_session", "session_delete_cleanup"}) {
+	if !reflect.DeepEqual(queueClient.leaseKinds, []string{"runtime_input", "runtime_recovery", "runtime_config_update", "cleanup_session", "session_delete_cleanup"}) {
 		t.Fatalf("lease kinds = %v; want Bridge runtime-facing kinds", queueClient.leaseKinds)
 	}
 }

@@ -181,6 +181,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	if _, err := apiStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_consumed_end", ModelRequestId: "mreq_attachment_consumed",
 		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}); err != nil {
 		t.Fatalf("settle attachment-consuming request: %v", err)
 	}

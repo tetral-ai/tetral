@@ -127,6 +127,12 @@ function turnFactsForPendingTool(input: {
 				requestEnd: {
 					requestStartEventId: `start_${input.modelRequestId}`,
 					isError: false,
+					providerContextRetention: {
+						disposition: "completed",
+						assistantMessageSequence: 2,
+						toolUseEventIds: [input.toolUseEventId],
+						repairEventIds: [],
+					},
 				},
 			},
 		],
@@ -1367,6 +1373,7 @@ describe("Runtime core host production assembly", () => {
 				toolName: "github_search",
 				canonicalInput: pendingInput,
 			}),
+			textContextEntry(3, "user", "Approval allowed"),
 		];
 		const replacementScope = {
 			...commandScope("sesn_cold_confirm"),
@@ -1999,6 +2006,7 @@ describe("Runtime core host production assembly", () => {
 									requestEnd: {
 										requestStartEventId: "sevt_settled_idle_start",
 										isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 									},
 								},
 								{

@@ -321,62 +321,8 @@ func loadThreadContextJSONTx(
 			              AND ended.model_request_id = m.model_request_id
 			              AND ended.type = 'span.model_request_end'
 			         ) THEN 'open'
-			         WHEN EXISTS (
-			           SELECT 1 FROM session_events ended
-			            WHERE ended.workspace_id = m.workspace_id
-			              AND ended.session_id = m.session_id
-			              AND ended.session_thread_id = m.session_thread_id
-			              AND ended.model_request_id = m.model_request_id
-			              AND ended.type = 'span.model_request_end'
-			              AND ended.payload_json::jsonb ->> 'error_kind' = 'runtime_pod_lost'
-			         ) THEN 'pod_lost'
 			         ELSE 'sealed'
 			       END AS context_state
-			       , COALESCE((
-			         SELECT ended.payload_json::jsonb ->> 'error_kind'
-			           FROM session_events ended
-			          WHERE ended.workspace_id = m.workspace_id
-			            AND ended.session_id = m.session_id
-			            AND ended.session_thread_id = m.session_thread_id
-			            AND ended.model_request_id = m.model_request_id
-			            AND ended.type = 'span.model_request_end'
-			          ORDER BY ended.sequence DESC
-			          LIMIT 1
-			       ), '') AS request_error_kind
-			       , (
-			         (
-			           EXISTS (
-			             SELECT 1 FROM session_events tool_use
-			              WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
-			                AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
-			                AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
-			           )
-			           OR EXISTS (
-			             SELECT 1 FROM session_events repair
-			              WHERE repair.workspace_id=m.workspace_id AND repair.session_id=m.session_id
-			                AND repair.session_thread_id=m.session_thread_id AND repair.model_request_id=m.model_request_id
-			                AND repair.type='agent.tool_result'
-			                AND repair.payload_json::jsonb ->> 'repair_kind'='invalid_tool'
-			           )
-			         )
-			         AND NOT EXISTS (
-			           SELECT 1 FROM session_events tool_use
-			            WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
-			              AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
-			              AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
-			              AND NOT EXISTS (
-			                SELECT 1 FROM session_events tool_result
-			                 WHERE tool_result.workspace_id=tool_use.workspace_id AND tool_result.session_id=tool_use.session_id
-			                   AND tool_result.session_thread_id=tool_use.session_thread_id
-			                   AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
-			                   AND COALESCE(
-			                         tool_result.payload_json::jsonb ->> 'tool_use_event_id',
-			                         tool_result.payload_json::jsonb ->> 'tool_use_id',
-			                         tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
-			                       )=tool_use.event_id
-			              )
-			         )
-			       ) AS complete_tool_repair
 		  FROM session_messages m
 		  CROSS JOIN latest_compaction c
 		 WHERE m.workspace_id = $1
@@ -403,8 +349,6 @@ func loadThreadContextJSONTx(
 		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
 		var contextState string
-		var requestErrorKind string
-		var completeToolRepair bool
 		if err := rows.Scan(
 			&kind,
 			&messageID,
@@ -413,8 +357,6 @@ func loadThreadContextJSONTx(
 			&sourceEventID,
 			&modelRequestID,
 			&contextState,
-			&requestErrorKind,
-			&completeToolRepair,
 		); err != nil {
 			return "", err
 		}
@@ -424,9 +366,6 @@ func loadThreadContextJSONTx(
 		parts, err := decodeStoredRuntimeContextParts(raw)
 		if err != nil {
 			return "", err
-		}
-		if contextState == "pod_lost" && requestErrorKind == "runtime_pod_lost" && completeToolRepair {
-			contextState = "sealed"
 		}
 		switch contextState {
 		case "sealed":
@@ -444,9 +383,6 @@ func loadThreadContextJSONTx(
 				MessageSequence: sequence,
 				Parts:           parts,
 			}
-		case "pod_lost":
-			// A Pod-loss draft has no hot owner. Only the complete Tool repair
-			// promoted above is safe provider-visible history.
 		default:
 			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
 		}

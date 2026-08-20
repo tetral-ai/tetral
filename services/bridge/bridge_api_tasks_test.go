@@ -614,6 +614,24 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 		strings.Contains(notificationDataJSON, `"origin"`) {
 		t.Fatalf("runtime notification data = %s; want narrow provider-visible parts without task output paths or provider metadata", notificationDataJSON)
 	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id='sesn_bridge_task_notify'`); err != nil {
+		t.Fatalf("supersede task-notification Runtime scope: %v", err)
+	}
+	staleReplay, err := (BridgeAPIServer{store: store}).CommitTaskNotificationResult(context.Background(), request)
+	if err != nil || staleReplay.GetStale() == nil {
+		t.Fatalf("stale-scope task-notification replay = %#v/%v; want typed stale", staleReplay, err)
+	}
+	var replayOperations, replayMessages int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_bridge_task_notify' AND operation=$1),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id='sesn_bridge_task_notify' AND kind='runtime_notification')`,
+		bridgeOpCommitTaskNotificationResult).Scan(&replayOperations, &replayMessages); err != nil {
+		t.Fatalf("read stale-scope task-notification effects: %v", err)
+	}
+	if replayOperations != 1 || replayMessages != 1 {
+		t.Fatalf("stale-scope task-notification effects = operations:%d messages:%d; want 1/1", replayOperations, replayMessages)
+	}
 }
 
 func TestPostgreSQLBridgeAPIStoreTaskNotificationStaleSettlementHasStableEvidence(t *testing.T) {

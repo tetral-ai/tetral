@@ -494,6 +494,11 @@ describe("runtime boundary contracts", () => {
 			modelRequestId: "mreq_1",
 			isError: false,
 			finishReason: "stop" as const,
+			providerContextRetention: {
+				disposition: "completed" as const,
+				toolUseEventIds: [],
+				repairEventIds: [],
+			},
 		};
 		const trailingContextAppend = {
 			parts: [
@@ -538,6 +543,11 @@ describe("runtime boundary contracts", () => {
 			modelRequestId: "mreq_attachments",
 			isError: false,
 			finishReason: "stop" as const,
+			providerContextRetention: {
+				disposition: "completed" as const,
+				toolUseEventIds: [],
+				repairEventIds: [],
+			},
 		};
 		const fileAttachments = Array.from({ length: 32 }, (_, index) => ({
 			sourceEventId: `sevt_file_${index}`,

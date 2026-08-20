@@ -42,7 +42,7 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
 	 'public', true, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 	('default', $1, $2, 'evt_cleanup_narrow_end', 3, 'span.model_request_end',
-	 '{"type":"span.model_request_end","model_request_start_id":"evt_cleanup_narrow_start","is_error":false}',
+	 '{"type":"span.model_request_end","model_request_start_id":"evt_cleanup_narrow_start","is_error":false,"provider_context_retention":{"disposition":"completed","tool_use_event_ids":["evt_cleanup_narrow_tool_use"],"repair_event_ids":[]}}',
 	 'internal', false, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		sessionID, threadID, modelRequestID, toolUseEventID,
 	); err != nil {
@@ -1138,6 +1138,9 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	if _, err := bridgeStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_end", ModelRequestId: modelRequestID,
 		FinishReason: "tool_calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", ToolUseEventIds: []string{toolUseEventID},
+		},
 	}); err != nil {
 		t.Fatalf("seal cleanup approval request: %v", err)
 	}

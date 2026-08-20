@@ -1405,6 +1405,7 @@ function requestEndEnvelope(): SessionEventWriterRequestEndEnvelope {
 		...eventScope("end_write_1"),
 		modelRequestId: "mrq_1",
 		isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 		finishReason: "stop",
 	};
 }

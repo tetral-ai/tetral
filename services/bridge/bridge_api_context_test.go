@@ -133,7 +133,7 @@ func TestLoadContextBoundsTurnFactsButRetainsLivePriorToolRequest(t *testing.T) 
 		('default',$1,$2,'evt_prior_running',2,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_live_prior_start',3,'span.model_request_start','{}','mreq_live_prior','{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_live_prior_tool',4,'agent.tool_use','{"type":"agent.tool_use","name":"Read","input":{"path":"README.md"}}','mreq_live_prior','{"model_tool_call_id":"call_live_prior","tool_name":"Read"}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_live_prior_end',5,'span.model_request_end','{"model_request_start_id":"evt_live_prior_start","is_error":false}','mreq_live_prior','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+		('default',$1,$2,'evt_live_prior_end',5,'span.model_request_end','{"model_request_start_id":"evt_live_prior_start","is_error":false,"provider_context_retention":{"disposition":"completed","tool_use_event_ids":["evt_live_prior_tool"],"repair_event_ids":[]}}','mreq_live_prior','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_prior_idle',6,'session.status_idle','{"stop_reason":{"type":"requires_action"}}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_current_running',7,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
 		sessionID, threadID); err != nil {
@@ -192,7 +192,7 @@ func TestLoadContextRetainsFailedAssistantRequestBeforeNewerRunningBoundary(t *t
 		('default',$1,$2,'evt_before_failed_floor',1,'session.error','{}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_failed_floor_running',2,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_failed_floor_start',3,'span.model_request_start','{}','mreq_failed_floor','{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_failed_floor_end',4,'span.model_request_end','{"model_request_start_id":"evt_failed_floor_start","is_error":true,"error_kind":"gateway_stream_error"}','mreq_failed_floor','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+		('default',$1,$2,'evt_failed_floor_end',4,'span.model_request_end','{"model_request_start_id":"evt_failed_floor_start","is_error":true,"error_kind":"gateway_stream_error","provider_context_retention":{"disposition":"failed","tool_use_event_ids":[],"repair_event_ids":[]}}','mreq_failed_floor','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_failed_floor_idle',5,'session.status_idle','{"stop_reason":{"type":"error"}}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
 		('default',$1,$2,'evt_newer_running',6,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
 		sessionID, threadID); err != nil {

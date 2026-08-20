@@ -54,6 +54,9 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_end", ModelRequestId: modelRequest,
 		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("write request end: %v", err)
 	}
@@ -1371,6 +1374,23 @@ func TestPostgreSQLBridgeAPIStoreMCPRelinquishReleasesOnlyExactClaimAndReplays(t
 	}
 	if activeClaim != secondClaim.GetClaimId() {
 		t.Fatalf("active MCP claim = %q; want %q", activeClaim, secondClaim.GetClaimId())
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+		t.Fatalf("supersede MCP relinquish Runtime scope: %v", err)
+	}
+	staleReplay, err := store.RelinquishMcpToolResult(context.Background(), relinquish)
+	if err != nil || staleReplay.GetStale() == nil {
+		t.Fatalf("stale-scope MCP relinquish replay = %#v/%v; want typed stale", staleReplay, err)
+	}
+	var relinquishOperations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations
+		WHERE workspace_id='default' AND session_id=$1 AND operation=$2`,
+		sessionID, bridgeOpRelinquishMcpToolResult).Scan(&relinquishOperations); err != nil {
+		t.Fatalf("count stale-scope MCP relinquish operations: %v", err)
+	}
+	if relinquishOperations != 1 {
+		t.Fatalf("stale-scope MCP relinquish operations = %d; want 1", relinquishOperations)
 	}
 }
 

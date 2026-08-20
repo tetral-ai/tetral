@@ -1236,6 +1236,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(1);
 		expect(requestEnds[0]).toMatchObject({
 			isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "gateway_protocol_error",
 		});
 		expect(requestEnds[0]?.reschedule).toBeUndefined();
@@ -1315,6 +1316,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(2);
 		expect(requestEnds[0]).toMatchObject({
 			isError: true,
+			providerContextRetention: { disposition: "rescheduled", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "gateway_stream_error",
 			reschedule: { attempt: 1, backoffMs: 1_000 },
 		});
@@ -1409,6 +1411,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(2);
 		expect(requestEnds[0]).toMatchObject({
 			isError: true,
+			providerContextRetention: { disposition: "rescheduled", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "provider_error",
 			reschedule: { attempt: 1, backoffMs: 1_000 },
 		});
@@ -2199,6 +2202,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(1);
 		expect(requestEnds[0]).toMatchObject({
 			isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "provider_error",
 		});
 		expect(requestEnds[0]?.trailingContextAppend).toBeUndefined();
@@ -2461,6 +2465,7 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "event_end_unresolved_tool_call",
 						isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 					},
 					toolMembers: [
 						{

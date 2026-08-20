@@ -1312,6 +1312,17 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				scope: bridgeScope(envelope),
 				runtimeWriteId: envelope.writeId,
 				modelRequestId: envelope.modelRequestId,
+				providerContextRetention: {
+					disposition: envelope.providerContextRetention.disposition,
+					assistantMessageSequence:
+						envelope.providerContextRetention.assistantMessageSequence,
+					toolUseEventIds: [
+						...envelope.providerContextRetention.toolUseEventIds,
+					],
+					repairEventIds: [
+						...envelope.providerContextRetention.repairEventIds,
+					],
+				},
 				finishReason: envelope.finishReason,
 				isError: envelope.isError,
 				errorKind: envelope.errorKind ?? "",

@@ -704,12 +704,12 @@ func settleRuntimePodLostLiveScopeTx(
 	if rescheduleActive {
 		return retireRuntimePodLostRescheduledBindingTx(ctx, tx, scope, binding, rescheduleEventID, now)
 	}
-	ownedToolRoute, err := runtimePodLostNonterminalToolOwnerTx(ctx, tx, scope)
+	toolUseEventID, ownedToolRoute, err := runtimePodLostNonterminalToolOwnerTx(ctx, tx, scope)
 	if err != nil {
 		return err
 	}
 	if ownedToolRoute {
-		return retireRuntimePodLostOwnedToolBindingTx(ctx, tx, scope, binding, now)
+		return retireRuntimePodLostOwnedToolBindingTx(ctx, tx, scope, binding, toolUseEventID, now)
 	}
 	interruptedThenLost, err := runtimePodLostInterruptedThenLostTx(ctx, tx, workspaceID, sessionID, threadID)
 	if err != nil {
@@ -828,12 +828,14 @@ func settleRuntimePodLostLiveScopeTx(
 	return err
 }
 
-func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (bool, error) {
-	var exists bool
+func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (string, bool, error) {
+	var toolUseEventID string
 	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		   SELECT 1
+		`SELECT route.tool_use_event_id
 		     FROM session_pending_tool_uses route
+		     JOIN session_events tool_use
+		       ON tool_use.workspace_id=route.workspace_id AND tool_use.session_id=route.session_id
+		      AND tool_use.session_thread_id=route.session_thread_id AND tool_use.event_id=route.tool_use_event_id
 		    WHERE route.workspace_id=$1 AND route.session_id=$2 AND route.session_thread_id=$3
 		      AND route.status IN ('pending','resolving')
 		      AND NOT EXISTS (
@@ -848,10 +850,15 @@ func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx,
 		                 result.payload_json::jsonb ->> 'mcp_tool_use_id'
 		               )=route.tool_use_event_id
 		      )
-		)`,
+		    ORDER BY tool_use.sequence, route.tool_use_event_id
+		    LIMIT 1
+		    FOR UPDATE OF route`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-	).Scan(&exists)
-	return exists, err
+	).Scan(&toolUseEventID)
+	if dbconnect.IsNoRows(err) {
+		return "", false, nil
+	}
+	return toolUseEventID, err == nil, err
 }
 
 // A lost binding does not own a Runtime-selected nonterminal Tool route. Retire
@@ -862,9 +869,10 @@ func retireRuntimePodLostOwnedToolBindingTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	binding runtimeBindingForDelivery,
+	toolUseEventID string,
 	now time.Time,
 ) error {
-	_, err := tx.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`UPDATE session_runtime_status
 		    SET status='idle',
 		        idle_since=$5,
@@ -881,8 +889,10 @@ func retireRuntimePodLostOwnedToolBindingTx(
 		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
 		now, now.Add(defaultIdleCleanupDelay),
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	return enqueueRuntimeRecoveryTx(ctx, tx, scope, toolUseEventID, "tool_route", now)
 }
 
 func activeRuntimePodLostRescheduleTx(
@@ -933,7 +943,7 @@ func retireRuntimePodLostRescheduledBindingTx(
 	rescheduleEventID string,
 	now time.Time,
 ) error {
-	_, err := tx.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`UPDATE session_runtime_status
 		    SET status='idle',
 		        status_event_id=$5,
@@ -951,7 +961,20 @@ func retireRuntimePodLostRescheduledBindingTx(
 		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
 		rescheduleEventID, now, now.Add(defaultIdleCleanupDelay),
+	); err != nil {
+		return err
+	}
+	return enqueueRuntimeRecoveryTx(ctx, tx, scope, rescheduleEventID, "reschedule", now)
+}
+
+func enqueueRuntimeRecoveryTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceEventID string, recoveryKind string, now time.Time) error {
+	request, err := queue.NewRuntimeRecoveryEnqueueRequest(
+		workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), scope.GetSessionThreadId(), sourceEventID, recoveryKind, now,
 	)
+	if err != nil {
+		return err
+	}
+	_, err = queue.EnqueueTx(ctx, tx, request)
 	return err
 }
 
@@ -1421,6 +1444,9 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 		ErrorKind:      errorKind,
 		FinishReason:   "error",
 		UsageJson:      "{}",
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "failed",
+		},
 	}
 	payloadJSON, err := modelRequestEndPayloadJSON(request, start.EventID, start.RequestKind, "error", bridgeUsage{})
 	if err != nil {

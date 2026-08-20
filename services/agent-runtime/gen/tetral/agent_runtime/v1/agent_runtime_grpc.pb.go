@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	AgentRuntimePodService_RecoverThread_FullMethodName           = "/tetral.agent_runtime.v1.AgentRuntimePodService/RecoverThread"
 	AgentRuntimePodService_AcceptInput_FullMethodName             = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput"
 	AgentRuntimePodService_AcceptAgentMail_FullMethodName         = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail"
 	AgentRuntimePodService_AcceptTaskNotification_FullMethodName  = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptTaskNotification"
@@ -32,6 +33,7 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AgentRuntimePodServiceClient interface {
+	RecoverThread(ctx context.Context, in *RecoverThreadRequest, opts ...grpc.CallOption) (*RecoverThreadResponse, error)
 	AcceptInput(ctx context.Context, in *AcceptInputRequest, opts ...grpc.CallOption) (*AcceptInputResponse, error)
 	AcceptAgentMail(ctx context.Context, in *AcceptAgentMailRequest, opts ...grpc.CallOption) (*AcceptAgentMailResponse, error)
 	AcceptTaskNotification(ctx context.Context, in *AcceptTaskNotificationRequest, opts ...grpc.CallOption) (*AcceptTaskNotificationResponse, error)
@@ -47,6 +49,16 @@ type agentRuntimePodServiceClient struct {
 
 func NewAgentRuntimePodServiceClient(cc grpc.ClientConnInterface) AgentRuntimePodServiceClient {
 	return &agentRuntimePodServiceClient{cc}
+}
+
+func (c *agentRuntimePodServiceClient) RecoverThread(ctx context.Context, in *RecoverThreadRequest, opts ...grpc.CallOption) (*RecoverThreadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecoverThreadResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimePodService_RecoverThread_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *agentRuntimePodServiceClient) AcceptInput(ctx context.Context, in *AcceptInputRequest, opts ...grpc.CallOption) (*AcceptInputResponse, error) {
@@ -123,6 +135,7 @@ func (c *agentRuntimePodServiceClient) CleanupSession(ctx context.Context, in *C
 // All implementations must embed UnimplementedAgentRuntimePodServiceServer
 // for forward compatibility.
 type AgentRuntimePodServiceServer interface {
+	RecoverThread(context.Context, *RecoverThreadRequest) (*RecoverThreadResponse, error)
 	AcceptInput(context.Context, *AcceptInputRequest) (*AcceptInputResponse, error)
 	AcceptAgentMail(context.Context, *AcceptAgentMailRequest) (*AcceptAgentMailResponse, error)
 	AcceptTaskNotification(context.Context, *AcceptTaskNotificationRequest) (*AcceptTaskNotificationResponse, error)
@@ -140,6 +153,9 @@ type AgentRuntimePodServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAgentRuntimePodServiceServer struct{}
 
+func (UnimplementedAgentRuntimePodServiceServer) RecoverThread(context.Context, *RecoverThreadRequest) (*RecoverThreadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RecoverThread not implemented")
+}
 func (UnimplementedAgentRuntimePodServiceServer) AcceptInput(context.Context, *AcceptInputRequest) (*AcceptInputResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptInput not implemented")
 }
@@ -181,6 +197,24 @@ func RegisterAgentRuntimePodServiceServer(s grpc.ServiceRegistrar, srv AgentRunt
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&AgentRuntimePodService_ServiceDesc, srv)
+}
+
+func _AgentRuntimePodService_RecoverThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecoverThreadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimePodServiceServer).RecoverThread(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimePodService_RecoverThread_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimePodServiceServer).RecoverThread(ctx, req.(*RecoverThreadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimePodService_AcceptInput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -316,6 +350,10 @@ var AgentRuntimePodService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "tetral.agent_runtime.v1.AgentRuntimePodService",
 	HandlerType: (*AgentRuntimePodServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RecoverThread",
+			Handler:    _AgentRuntimePodService_RecoverThread_Handler,
+		},
 		{
 			MethodName: "AcceptInput",
 			Handler:    _AgentRuntimePodService_AcceptInput_Handler,

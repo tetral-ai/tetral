@@ -135,7 +135,13 @@ export type ThreadTurnFact =
 			readonly modelRequestId: string;
 			readonly isError: boolean;
 			readonly errorKind?: string;
-			readonly assistantMessageSequence?: number;
+			readonly providerContextRetention: NonNullable<
+				ThreadTurnCheckpoint["request"]
+			>["requestEnd"] extends infer T
+				? T extends { readonly providerContextRetention: infer R }
+					? R
+					: never
+				: never;
 			readonly reschedule?: {
 				readonly attempt: number;
 				readonly effectiveDeadline: string;
@@ -196,12 +202,14 @@ export function deriveThreadTurnDecision(
 		};
 	}
 	if (checkpoint.terminalCloseout !== undefined) {
-		const acceptedInput = commitAcceptedInputDecision(
-			checkpoint,
-			acceptedInputIds,
-		);
-		if (acceptedInput !== undefined) {
-			return acceptedInput;
+		if (checkpoint.terminalCloseout.disposition === "retries_exhausted") {
+			const acceptedInput = commitAcceptedInputDecision(
+				checkpoint,
+				acceptedInputIds,
+			);
+			if (acceptedInput !== undefined) {
+				return acceptedInput;
+			}
 		}
 		return { state: { state: "idle" }, action: { action: "await_input" } };
 	}
@@ -729,9 +737,7 @@ export function reduceThreadTurn(
 					...(fact.errorKind !== undefined
 						? { errorKind: fact.errorKind }
 						: {}),
-					...(fact.assistantMessageSequence !== undefined
-						? { assistantMessageSequence: fact.assistantMessageSequence }
-						: {}),
+					providerContextRetention: fact.providerContextRetention,
 					...(fact.reschedule !== undefined
 						? { reschedule: fact.reschedule }
 						: {}),

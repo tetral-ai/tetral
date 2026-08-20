@@ -183,6 +183,19 @@ describe("Thread-turn reducer", () => {
 					},
 				},
 				routes: noRoutes,
+				expectedAction: "await_input",
+			},
+			{
+				name: "retry-exhausted closeout retains continuation custody",
+				checkpoint: {
+					...sealedCheckpoint([]),
+					terminalCloseout: {
+						failureEventId: "event_failure",
+						closeoutEventId: "event_closeout",
+						disposition: "retries_exhausted",
+					},
+				},
+				routes: noRoutes,
 				expectedAction: "commit_accepted_input",
 			},
 			{
@@ -342,6 +355,7 @@ describe("Thread-turn reducer", () => {
 					requestEnd: {
 						eventId: "event_end_closed",
 						isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 						errorKind: "provider_stream_error",
 					},
 					toolMembers: [],
@@ -693,6 +707,7 @@ describe("Thread-turn reducer", () => {
 				eventId: "event_end",
 				modelRequestId: "request_1",
 				isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 			},
 			noRoutes,
 		);
@@ -855,6 +870,7 @@ describe("Thread-turn reducer", () => {
 					requestEnd: {
 						eventId: "event_end_interrupted_idle",
 						isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 					},
 					toolMembers: [
 						{
@@ -947,6 +963,7 @@ describe("Thread-turn reducer", () => {
 				eventId: "event_end",
 				modelRequestId: "request_1",
 				isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 			},
 			noRoutes,
 		);
@@ -1167,6 +1184,7 @@ describe("Thread-turn reducer", () => {
 				eventId: "event_end",
 				modelRequestId: "request_1",
 				isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				errorKind: "provider_stream_error",
 			},
 			noRoutes,
@@ -1229,6 +1247,7 @@ describe("Thread-turn reducer", () => {
 				deriveThreadTurnDecision(noPendingAttachments,
 					sealedCheckpoint([], requestKind, {
 						isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 						errorKind: "provider_stream_error",
 					}),
 					noRoutes,
@@ -1245,6 +1264,7 @@ describe("Thread-turn reducer", () => {
 			deriveThreadTurnDecision(noPendingAttachments,
 				sealedCheckpoint([], "agent_provider_request", {
 					isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 					reschedule: {
 						attempt: 1,
 						effectiveDeadline: "2026-08-15T00:00:00.000Z",
@@ -1443,6 +1463,7 @@ function sealRequestWithTools(tools: readonly (readonly [string, string])[]) {
 			eventId: "event_end",
 			modelRequestId: "request_1",
 			isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 		},
 		noRoutes,
 	);
@@ -1455,6 +1476,9 @@ function sealedCheckpoint(
 	>["requestKind"] = "agent_provider_request",
 	requestEnd: {
 		readonly isError: boolean;
+		readonly providerContextRetention: NonNullable<
+			NonNullable<ThreadTurnCheckpoint["request"]>["requestEnd"]
+		>["providerContextRetention"];
 		readonly reschedule?: {
 			readonly attempt: number;
 			readonly effectiveDeadline: string;
@@ -1464,6 +1488,7 @@ function sealedCheckpoint(
 		readonly errorKind?: string;
 	} = {
 		isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 	},
 ): ThreadTurnCheckpoint {
 	return {

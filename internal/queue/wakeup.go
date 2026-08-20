@@ -26,7 +26,7 @@ const (
 // lease it. Notification payloads carry only this class, never work content.
 func ConsumerClassForKind(kind string) (string, bool) {
 	switch kind {
-	case KindRuntimeInput, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup:
+	case KindRuntimeInput, KindRuntimeRecovery, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup:
 		return ConsumerClassBridge, true
 	case KindEnvironmentBuild, KindEnvironmentReadyFanout,
 		KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize,

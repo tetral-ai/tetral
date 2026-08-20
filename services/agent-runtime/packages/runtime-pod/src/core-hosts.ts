@@ -379,6 +379,21 @@ export async function buildRuntimeCoreHosts(
 	};
 	return {
 		commandRunHost: {
+			handleRecoverThread: async (command) => {
+				const result = await Effect.runPromise(
+					host.handleEnsureThreadInstalled(command, { startPendingWork: true }),
+				);
+				return result.ok
+					? { ok: true, sessionId: result.sessionId, applied: result.applied }
+					: {
+							ok: false,
+							sessionId: result.sessionId,
+							reason: result.reason === "local_session_capacity_exceeded"
+								? "local_session_capacity_exceeded"
+								: "context_load_failed",
+							...(result.retryable === undefined ? {} : { retryable: result.retryable }),
+						};
+			},
 			handleAcceptInput: async (command) => {
 				const acceptedInput = runtimeAcceptedInputFromCommand(command);
 				try {

@@ -30,6 +30,24 @@ const InternalToolRepairMemberSchema = z.strictObject({
 	outcome: z.literal("error"),
 });
 
+const ProviderContextRetentionSchema = z.strictObject({
+	disposition: z.enum([
+		"completed",
+		"interrupted",
+		"rescheduled",
+		"failed",
+		"compacted",
+	]),
+	assistantMessageSequence: z
+		.number()
+		.int()
+		.positive()
+		.max(Number.MAX_SAFE_INTEGER)
+		.optional(),
+	toolUseEventIds: z.array(DurableIdentitySchema).max(128),
+	repairEventIds: z.array(DurableIdentitySchema).max(128),
+});
+
 const RequestSchema = z
 	.strictObject({
 		modelRequestId: DurableIdentitySchema,
@@ -49,12 +67,7 @@ const RequestSchema = z
 				eventId: DurableIdentitySchema,
 				isError: z.boolean(),
 				errorKind: DurableIdentitySchema.optional(),
-				assistantMessageSequence: z
-					.number()
-					.int()
-					.positive()
-					.max(Number.MAX_SAFE_INTEGER)
-					.optional(),
+				providerContextRetention: ProviderContextRetentionSchema,
 				reschedule: z
 					.strictObject({
 						attempt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -196,7 +209,9 @@ export interface ThreadTurnCheckpoint {
 			readonly eventId: string;
 			readonly isError: boolean;
 			readonly errorKind?: string;
-			readonly assistantMessageSequence?: number;
+			readonly providerContextRetention: z.infer<
+				typeof ProviderContextRetentionSchema
+			>;
 			readonly reschedule?: {
 				readonly attempt: number;
 				readonly effectiveDeadline: string;
@@ -271,9 +286,8 @@ export function parseThreadTurnCheckpoint(
 										...(parsed.request.requestEnd.errorKind !== undefined
 											? { errorKind: parsed.request.requestEnd.errorKind }
 											: {}),
-										...(parsed.request.requestEnd.assistantMessageSequence !== undefined
-											? { assistantMessageSequence: parsed.request.requestEnd.assistantMessageSequence }
-											: {}),
+										providerContextRetention:
+											parsed.request.requestEnd.providerContextRetention,
 										...(parsed.request.requestEnd.reschedule !== undefined
 											? { reschedule: parsed.request.requestEnd.reschedule }
 											: {}),
@@ -338,7 +352,7 @@ const RequestEndFactSchema = z.strictObject({
 	requestStartEventId: IdentitySchema,
 	isError: z.boolean(),
 	errorKind: IdentitySchema.optional(),
-	assistantMessageSequence: MessageSequenceSchema.optional(),
+	providerContextRetention: ProviderContextRetentionSchema,
 	reschedule: z
 		.strictObject({
 			attempt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -723,7 +737,8 @@ export function projectFailedRequestProviderContext(input: {
 	const request = checkpoint.request;
 	if (
 		request?.requestEnd === undefined ||
-		(!request.requestEnd.isError && request.requestEnd.reschedule === undefined)
+		request.requestEnd.providerContextRetention.disposition === "completed" ||
+		request.requestEnd.providerContextRetention.disposition === "compacted"
 	) {
 		return {
 			contextEntries: input.contextEntries,
@@ -733,7 +748,7 @@ export function projectFailedRequestProviderContext(input: {
 		};
 	}
 	const sequence =
-		request.requestEnd.assistantMessageSequence ??
+		request.requestEnd.providerContextRetention.assistantMessageSequence ??
 		(input.openRequestDraft?.modelRequestId === request.modelRequestId
 			? input.openRequestDraft.messageSequence
 			: undefined);
@@ -776,18 +791,29 @@ export function projectFailedRequestProviderContext(input: {
 	if (open !== undefined && open.modelRequestId !== request.modelRequestId) {
 		throw new Error("failed Request draft identity does not match its checkpoint");
 	}
+	const retainedToolUseIds = new Set(
+		request.requestEnd.providerContextRetention.toolUseEventIds,
+	);
+	const retainedRepairIds = new Set(
+		request.requestEnd.providerContextRetention.repairEventIds,
+	);
+	const retainedMembers = request.toolMembers.filter((member) =>
+		member.memberKind === "public_tool_use"
+			? retainedToolUseIds.has(member.toolUseEventId)
+			: retainedRepairIds.has(member.repairEventId),
+	);
 	const memberIds = new Set(
-		request.toolMembers.map((member) => member.modelToolCallId),
+		retainedMembers.map((member) => member.modelToolCallId),
 	);
 	const terminalIds = new Set(
-		request.toolMembers.flatMap((member) =>
+		retainedMembers.flatMap((member) =>
 			member.memberKind === "internal_tool_repair" ||
 			member.terminalResult !== undefined
 				? [member.modelToolCallId]
 				: [],
 		),
 	);
-	const incomplete = request.toolMembers.some(
+	const incomplete = retainedMembers.some(
 		(member) =>
 			member.memberKind === "public_tool_use" &&
 			member.terminalResult === undefined,
@@ -890,7 +916,8 @@ export function projectFailedRequestsProviderContext(input: {
 	for (const end of facts.events) {
 		if (
 			end.type !== "span.model_request_end" ||
-			(!end.requestEnd!.isError && end.requestEnd!.reschedule === undefined)
+			end.requestEnd!.providerContextRetention.disposition === "completed" ||
+			end.requestEnd!.providerContextRetention.disposition === "compacted"
 		) {
 			continue;
 		}
@@ -1177,6 +1204,12 @@ function extractNewestRequest(
 	internalRepairs: ThreadTurnLoadFacts["internalRepairs"],
 ): NonNullable<ThreadTurnCheckpoint["request"]> {
 	const modelRequestId = start.modelRequestId!;
+	const retainedToolUseEventIds = new Set(
+		end?.requestEnd?.providerContextRetention.toolUseEventIds ?? [],
+	);
+	const retainedRepairEventIds = new Set(
+		end?.requestEnd?.providerContextRetention.repairEventIds ?? [],
+	);
 	const terminalByToolUse = new Map<
 		string,
 		{ readonly outcome: "success" | "error" | "cancelled" | "unknown" }
@@ -1222,6 +1255,9 @@ function extractNewestRequest(
 			event.type === "agent.tool_use" ||
 			event.type === "agent.mcp_tool_use"
 		) {
+			if (end !== undefined && !retainedToolUseEventIds.has(event.eventId)) {
+				continue;
+			}
 			const toolUse = event.toolUse!;
 			if (modelToolCallIds.has(toolUse.modelToolCallId)) {
 				throw new Error("modelToolCallId is duplicated within the request");
@@ -1240,6 +1276,9 @@ function extractNewestRequest(
 			event.toolResult !== undefined &&
 			"repairKey" in event.toolResult
 		) {
+			if (end !== undefined && !retainedRepairEventIds.has(event.eventId)) {
+				continue;
+			}
 			const repair = repairsByKey.get(event.toolResult.repairKey)!;
 			if (modelToolCallIds.has(repair.modelToolCallId)) {
 				throw new Error("modelToolCallId is duplicated within the request");
@@ -1268,9 +1307,8 @@ function extractNewestRequest(
 						...(end.requestEnd.errorKind !== undefined
 							? { errorKind: end.requestEnd.errorKind }
 							: {}),
-						...(end.requestEnd.assistantMessageSequence !== undefined
-							? { assistantMessageSequence: end.requestEnd.assistantMessageSequence }
-							: {}),
+						providerContextRetention:
+							end.requestEnd.providerContextRetention,
 						...(end.requestEnd.reschedule !== undefined
 							? { reschedule: end.requestEnd.reschedule }
 							: {}),

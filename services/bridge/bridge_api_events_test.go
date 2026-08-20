@@ -299,6 +299,7 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_end", ModelRequestId: first.ModelRequestId,
 		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}); err != nil {
 		t.Fatalf("close first attachment Request: %v", err)
 	}
@@ -438,6 +439,7 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_first_end", ModelRequestId: "mreq_history_first",
 		FinishReason: "tool_calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}); err != nil {
 		t.Fatalf("seal first request: %v", err)
 	}

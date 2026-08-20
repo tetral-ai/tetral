@@ -142,6 +142,9 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		existingOperation, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -159,9 +162,6 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 			}
 			response = duplicateMCPRelinquishResponse()
 			return nil
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
 		}
 		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
 		if err != nil {

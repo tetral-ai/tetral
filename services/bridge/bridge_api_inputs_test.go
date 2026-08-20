@@ -78,7 +78,8 @@ func TestPostgreSQLWriteRequestEndAtomicallyCommitsActiveRunInterrupt(t *testing
 	})
 	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_atomic_active_end", ModelRequestId: modelRequestID,
-		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+		FinishReason: "cancelled", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"}, IsError: true, ErrorKind: "runtime_interrupted",
 		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease)},
 	})
 	if err != nil || ended.GetCommitted() == nil {

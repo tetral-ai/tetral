@@ -65,6 +65,7 @@ func TestBridgeAPIServerReturnsClosedStaleResultsForSupersededCloseouts(t *testi
 	ended, err := fixture.server.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_end_" + fixture.sessionID, ModelRequestId: modelRequestID,
 		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	})
 	if err != nil || ended.GetStale() == nil {
 		t.Fatalf("WriteRequestEnd stale result = %#v err=%v", ended, err)
@@ -78,7 +79,7 @@ func TestBridgeAPIServerReturnsClosedStaleResultsForSupersededCloseouts(t *testi
 	}
 }
 
-func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.T) {
+func TestPostgreSQLRuntimeTerminationReceiptOwnsReplayAfterUnbinding(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "termination_replay_binding")
 	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
 	const committedInputID = "rin_termination_replay_binding"
@@ -101,6 +102,7 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	requestEndRequest := &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_termination_replay_request_end", ModelRequestId: modelRequestID,
 		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}
 	if ended, err := fixture.server.WriteRequestEnd(context.Background(), requestEndRequest); err != nil || ended.GetCommitted() == nil {
 		t.Fatalf("WriteRequestEnd before termination = %#v/%v; want committed", ended, err)
@@ -171,25 +173,28 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 			eventsAfter, operationsAfter, capturesAfter, queueAfter)
 	}
 	var runtimeStatus, statusEventID string
+	var liveBindings int
 	var runningSince, idleSince, cleanupAfter, cleanupEnqueuedAt, cleanupClaimedAt sql.NullTime
 	var bindingID, storedCleanupJobID sql.NullString
 	var bindingGeneration sql.NullInt64
 	if err := fixture.admin.QueryRowContext(context.Background(),
 		`SELECT status, status_event_id, running_since, idle_since, cleanup_after,
 		        cleanup_job_id, cleanup_enqueued_at, cleanup_claimed_at,
-		        binding_id, binding_generation
+		        binding_id, binding_generation,
+		        (SELECT count(*) FROM session_runtime_bindings
+		          WHERE workspace_id='default' AND session_id=$1)
 		   FROM session_runtime_status
 		  WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
 	).Scan(&runtimeStatus, &statusEventID, &runningSince, &idleSince, &cleanupAfter,
 		&storedCleanupJobID, &cleanupEnqueuedAt, &cleanupClaimedAt,
-		&bindingID, &bindingGeneration); err != nil {
+		&bindingID, &bindingGeneration, &liveBindings); err != nil {
 		t.Fatalf("read Runtime status after termination: %v", err)
 	}
 	if runtimeStatus != "idle" || statusEventID != committed.GetCommitted().GetCloseoutEventId() ||
 		runningSince.Valid || !idleSince.Valid || cleanupAfter.Valid || storedCleanupJobID.Valid ||
-		cleanupEnqueuedAt.Valid || cleanupClaimedAt.Valid || !bindingID.Valid ||
-		bindingID.String != fixture.bindingID || !bindingGeneration.Valid || bindingGeneration.Int64 != 1 {
-		t.Fatalf("Runtime status after termination = %q event=%q running=%+v idle=%+v cleanup=%+v/%+v/%+v/%+v binding=%+v/%+v; want closed non-resident row with exact replay binding", runtimeStatus, statusEventID, runningSince, idleSince, cleanupAfter, storedCleanupJobID, cleanupEnqueuedAt, cleanupClaimedAt, bindingID, bindingGeneration)
+		cleanupEnqueuedAt.Valid || cleanupClaimedAt.Valid || bindingID.Valid ||
+		bindingGeneration.Valid || liveBindings != 0 {
+		t.Fatalf("Runtime status after termination = %q event=%q running=%+v idle=%+v cleanup=%+v/%+v/%+v/%+v binding=%+v/%+v live=%d; want receipt-owned unbound terminal residency", runtimeStatus, statusEventID, runningSince, idleSince, cleanupAfter, storedCleanupJobID, cleanupEnqueuedAt, cleanupClaimedAt, bindingID, bindingGeneration, liveBindings)
 	}
 	inputID := completionRuntimeInputID(deliveryID)
 	var inboxStatus, queueStatus string
@@ -229,18 +234,6 @@ func TestPostgreSQLRuntimeTerminationReplayRevalidatesCurrentBinding(t *testing.
 	})
 	if err != nil || !cleanupPlan.StaleAccepted || cleanupPlan.CleanupSession != nil {
 		t.Fatalf("retired cleanup custody plan = %#v/%v; want stale without Runtime command", cleanupPlan, err)
-	}
-	if _, err := fixture.admin.ExecContext(context.Background(),
-		`UPDATE session_runtime_bindings
-		    SET binding_id='bind_termination_replacement', binding_generation=2,
-		        agent_runtime_pod_uid='pod_termination_replacement'
-		  WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID,
-	); err != nil {
-		t.Fatalf("replace Runtime binding: %v", err)
-	}
-	replay, err := fixture.server.CommitRuntimeTermination(context.Background(), request)
-	if err != nil || replay.GetStale() == nil {
-		t.Fatalf("old-Pod termination replay = %#v/%v; want stale", replay, err)
 	}
 }
 

@@ -643,18 +643,16 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 	if threadScope.role != "main" {
 		return statusStamp, nil
 	}
-	// Session termination closes live residency in the same transaction while
-	// retaining the binding identity needed to validate an idempotent closeout
-	// replay. The terminal sessions.status value gates future input; a null
-	// cleanup_after prevents the ordinary idle TTL owner from claiming a
-	// terminal Session that no longer has hot Runtime work.
+	// Terminal receipt replay is independent of residency. Close the live
+	// binding and running markers in this transaction so cleanup/GC observes an
+	// unbound terminal Session and late Runtime declarations cannot re-arm it.
 	runtimeStatusResult, err := tx.Exec(ctx,
 		`UPDATE session_runtime_status
 		    SET status = 'idle',
 		        status_event_id = $3,
 		        idle_since = $4,
-		        binding_id = $5,
-		        binding_generation = $6,
+		        binding_id = NULL,
+		        binding_generation = NULL,
 		        active_seconds_total = active_seconds_total + CASE
 		          WHEN running_since IS NULL THEN 0
 		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($4 - running_since)))
@@ -666,13 +664,18 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 		        cleanup_job_id = NULL,
 		        updated_at = $4
 		  WHERE workspace_id = $1 AND session_id = $2`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), statusStamp.EventID, now,
-		scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration())
+		scope.GetWorkspaceId(), scope.GetSessionId(), statusStamp.EventID, now)
 	if err != nil {
 		return runtimeTerminationEventFact{}, err
 	}
 	if !rowsAffected(runtimeStatusResult) {
 		return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "runtime residency closeout is stale")
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM session_runtime_bindings
+		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration()); err != nil {
+		return runtimeTerminationEventFact{}, err
 	}
 	return statusStamp, nil
 }

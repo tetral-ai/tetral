@@ -35,7 +35,8 @@ func TestFailedRequestPreservesAcknowledgedAssistantContext(t *testing.T) {
 	}
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_failed_context_end", ModelRequestId: "mreq_failed_context",
-		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "provider_error",
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "failed"}, IsError: true, ErrorKind: "provider_error",
 	}); err != nil {
 		t.Fatalf("write failed request end: %v", err)
 	}
@@ -79,6 +80,7 @@ func TestWriteRequestEndReturnsOnlyDirectDurableFacts(t *testing.T) {
 	request := &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_end", ModelRequestId: "mreq_end",
 		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}
 	first, err := store.WriteRequestEnd(context.Background(), request)
 	if err != nil {
@@ -130,7 +132,8 @@ func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_compaction_start", "mreq_reschedule_compaction", requestKindCompactionSummary, 0)
 	compactionEnd, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reschedule_compaction_end", ModelRequestId: "mreq_reschedule_compaction",
-		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "rescheduled"}, IsError: true, ErrorKind: "gateway_stream_error",
 		Reschedule: &bridgev1.RequestEndReschedule{
 			Attempt: 1, Deadline: now.Add(30 * time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
 		},
@@ -149,7 +152,10 @@ func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
 	}
 	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reschedule_end", ModelRequestId: "mreq_reschedule",
-		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "rescheduled", AssistantMessageSequence: message.GetCommitted().AssignedMessageSequence,
+		}, IsError: true, ErrorKind: "gateway_stream_error",
 		Reschedule: &bridgev1.RequestEndReschedule{
 			Attempt:   1,
 			Deadline:  now.Add(time.Minute).Format(time.RFC3339Nano),
@@ -177,7 +183,8 @@ func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
 	if requestEnd == nil || requestEnd.Reschedule == nil || requestEnd.Reschedule.Attempt != 1 ||
 		requestEnd.Reschedule.ProviderAttempts != 1 || requestEnd.Reschedule.CompactionAttempts != 1 ||
 		requestEnd.Reschedule.EffectiveDeadline != ended.GetCommitted().GetRescheduled().GetEffectiveDeadline() ||
-		requestEnd.AssistantMessageSequence == nil || *requestEnd.AssistantMessageSequence != message.GetCommitted().GetAssignedMessageSequence() {
+		requestEnd.ProviderContextRetention.AssistantMessageSequence == nil ||
+		*requestEnd.ProviderContextRetention.AssistantMessageSequence != message.GetCommitted().GetAssignedMessageSequence() {
 		t.Fatalf("rescheduled Request End direct facts = %#v", requestEnd)
 	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_turn_retries

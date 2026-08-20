@@ -348,7 +348,10 @@ export interface Interface {
 	) => Effect.Effect<ThreadLifecycleResult>;
 	readonly ensureThreadInstalled: (
 		command: RuntimeThreadAddressState,
-		options?: { readonly requirePendingApprovalToolJobs?: boolean | undefined },
+		options?: {
+			readonly requirePendingApprovalToolJobs?: boolean | undefined;
+			readonly startPendingWork?: boolean | undefined;
+		},
 	) => Effect.Effect<ThreadLifecycleResult>;
 	readonly interruptReviewerExecution: (
 		command: RuntimeThreadAddressState,
@@ -517,6 +520,7 @@ interface ThreadInstallation {
 	readonly result: Deferred.Deferred<ThreadLifecycleResult>;
 	readonly cleanup: Deferred.Deferred<void>;
 	fiber: Fiber.Fiber<void, never> | undefined;
+	startPendingWork: boolean;
 }
 
 interface SessionEntry {
@@ -1366,9 +1370,14 @@ export function layer(
 						| "thread_busy",
 					retryable?: boolean,
 				) => CommandResult,
+				startPendingWork = false,
 			): Effect.Effect<CommandResult> =>
 				Effect.gen(function* () {
-					const prepared = yield* prepareThreadInstallation(command, metadata);
+					const prepared = yield* prepareThreadInstallation(
+						command,
+						metadata,
+						startPendingWork,
+					);
 					if (prepared.threadResult === undefined) {
 						return unavailable(
 							prepared.failedResult.reason,
@@ -2060,10 +2069,11 @@ export function layer(
 									reason:
 										reason === "local_session_capacity_exceeded"
 											? "local_session_capacity_exceeded"
-											: reason === "context_load_failed"
-												? "context_load_failed"
-												: "control_busy",
+										: reason === "context_load_failed"
+											? "context_load_failed"
+											: "control_busy",
 								}) as RuntimeControlResult,
+							true,
 						);
 					if (
 						result.ok &&
@@ -2526,6 +2536,7 @@ export function layer(
 			const prepareThreadInstallation = (
 				command: RuntimeThreadAddressState,
 				metadata: RuntimeAcceptedThreadMetadataState = {},
+				startPendingWork = false,
 			) =>
 				Effect.gen(function* () {
 					const failedResult = {
@@ -2588,6 +2599,7 @@ export function layer(
 						} as const;
 					}
 					if (threadResult.threadEntry.installation !== undefined) {
+						threadResult.threadEntry.installation.startPendingWork ||= startPendingWork;
 						return {
 							threadResult,
 							failedResult,
@@ -2608,6 +2620,7 @@ export function layer(
 						result: resultDeferred,
 						cleanup: cleanupDeferred,
 						fiber: undefined,
+						startPendingWork,
 					};
 					threadResult.threadEntry.installation = installation;
 					const install = Effect.uninterruptibleMask((restore) =>
@@ -2630,7 +2643,7 @@ export function layer(
 									return yield* preloadThread(
 										context,
 										initializeSharedState,
-										false,
+										installation.startPendingWork,
 									);
 								}),
 							).pipe(Effect.exit);
@@ -2717,10 +2730,15 @@ export function layer(
 				command: RuntimeThreadAddressState,
 				installOptions: {
 					readonly requirePendingApprovalToolJobs?: boolean | undefined;
+					readonly startPendingWork?: boolean | undefined;
 				} = {},
 			): Effect.Effect<ThreadLifecycleResult> =>
 				Effect.gen(function* () {
-					const prepared = yield* prepareThreadInstallation(command);
+					const prepared = yield* prepareThreadInstallation(
+						command,
+						{},
+						installOptions.startPendingWork === true,
+					);
 					if (prepared.threadResult === undefined) {
 						return prepared.failedResult;
 					}

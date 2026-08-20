@@ -854,6 +854,29 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if _, err := store.CommitInternalToolRepair(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CommitInternalToolRepair err = %v; want AlreadyExists", err)
 	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_bridge_operations SET receipt_json='{}'
+		WHERE workspace_id='default' AND session_id='sesn_bridge_repair' AND operation=$1`,
+		bridgeOpCommitInternalToolRepair); err != nil {
+		t.Fatalf("corrupt superseded internal repair memo: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id='sesn_bridge_repair'`); err != nil {
+		t.Fatalf("supersede internal repair Runtime scope: %v", err)
+	}
+	staleReplay, err := store.CommitInternalToolRepair(context.Background(), request)
+	if err != nil || staleReplay.GetStale() == nil {
+		t.Fatalf("stale-scope internal repair replay = %#v/%v; want typed stale", staleReplay, err)
+	}
+	var repairOperations, repairEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_bridge_repair' AND operation=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_bridge_repair' AND runtime_write_id=$2)`,
+		bridgeOpCommitInternalToolRepair, repairKey).Scan(&repairOperations, &repairEvents); err != nil {
+		t.Fatalf("read stale-scope internal repair effects: %v", err)
+	}
+	if repairOperations != 1 || repairEvents != 1 {
+		t.Fatalf("stale-scope internal repair effects = operations:%d events:%d; want 1/1", repairOperations, repairEvents)
+	}
 }
 func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -964,6 +987,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_repair_after_end_close", ModelRequestId: modelRequestID,
 		FinishReason: "tool_calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}); err != nil {
 		t.Fatalf("write request end: %v", err)
 	}
@@ -983,7 +1007,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_repair_stale", "bind_bridge_repair_stale", 1, "pod_uid_repair_stale")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	_, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
+	response, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
 		Scope:              bridgeAPIScope("sesn_bridge_repair_stale", "thr_bridge_repair_stale", "bind_bridge_repair_stale", 2, "pod_uid_repair_stale"),
 		ModelRequestId:     "mreq_repair_stale",
 		ModelToolCallId:    "call_repair_stale",
@@ -992,8 +1016,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 		CanonicalInputJson: `{}`,
 		Error:              &bridgev1.RuntimeToolError{ErrorJson: `{"type":"provider_tool_protocol_error","message":"invalid tool","retryable":false}`},
 	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("stale CommitInternalToolRepair err = %v; want FailedPrecondition", err)
+	if err != nil || response.GetStale() == nil {
+		t.Fatalf("stale CommitInternalToolRepair = %#v/%v; want typed stale", response, err)
 	}
 	var messageCount int
 	if err := admin.QueryRowContext(context.Background(),

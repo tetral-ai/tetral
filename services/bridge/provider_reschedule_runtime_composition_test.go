@@ -18,10 +18,14 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *testing.T) {
@@ -385,13 +389,12 @@ type providerRescheduleRecoveryComposition struct {
 	TerminationResults  json.RawMessage `json:"terminationResults"`
 }
 
-func TestPostgreSQLReplacementRuntimeTerminationStampsRecoveredBindingProvenance(t *testing.T) {
+func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID      = "sesn_recovered_binding_termination"
 		threadID       = "sthr_recovered_binding_termination"
 		oldBindingID   = "bind_recovered_binding_old"
-		newBindingID   = "bind_recovered_binding_new"
 		newPodUID      = "pod_recovered_binding_new"
 		durableTurnID  = "evt_recovered_binding_active_turn"
 		modelRequestID = "mreq_recovered_binding_reschedule"
@@ -409,7 +412,8 @@ func TestPostgreSQLReplacementRuntimeTerminationStampsRecoveredBindingProvenance
 	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_recovered_binding_start", modelRequestID, requestKindAgentProviderRequest, 0)
 	if ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: oldScope, RuntimeWriteId: "rwrite_recovered_binding_end", ModelRequestId: modelRequestID,
-		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "rescheduled"}, IsError: true, ErrorKind: "gateway_stream_error",
 		Reschedule: &bridgev1.RequestEndReschedule{
 			Attempt: 1, Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
 		},
@@ -438,7 +442,30 @@ func TestPostgreSQLReplacementRuntimeTerminationStampsRecoveredBindingProvenance
 	if sessionStatus != "rescheduling" || runtimeStatus != "idle" || lostBindingID.Valid || lostBindingGeneration.Valid || remainingBindings != 0 {
 		t.Fatalf("pod-loss cleanup session/runtime/provenance/bindings = %s/%s/%+v/%+v/%d", sessionStatus, runtimeStatus, lostBindingID, lostBindingGeneration, remainingBindings)
 	}
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	replacement := enginekubernetes.BindingCandidate{
+		Namespace: "tetral-agent-runtime", PodName: "runtime-recovered-binding-new",
+		PodUID: newPodUID, PodIP: "10.63.0.10",
+	}
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
+	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:    JobRunnerConfig{LeaseOwner: "recovered-binding-termination", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	active, err := runner.RunOnceWithActivity(context.Background())
+	if err != nil || !active || len(sender.requests) != 1 {
+		t.Fatalf("deliver recovered-binding wake = active:%t requests:%d err:%v", active, len(sender.requests), err)
+	}
+	recoveryRequest, ok := sender.requests[0].(*agentruntimev1.RecoverThreadRequest)
+	if !ok || recoveryRequest.GetRecoveryKind() != agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_RESCHEDULE || recoveryRequest.GetTargetPodUid() != newPodUID {
+		t.Fatalf("recovered-binding wake = %#v; want resolver-owned reschedule recovery", sender.requests[0])
+	}
+	newBindingID := recoveryRequest.GetBindingId()
+	newBindingGeneration := recoveryRequest.GetBindingGeneration()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for recovered-binding Runtime: %v", err)
@@ -458,7 +485,7 @@ func TestPostgreSQLReplacementRuntimeTerminationStampsRecoveredBindingProvenance
 	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
 		"bridgeAddress": listener.Addr().String(),
 		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": 2, "targetPodUid": newPodUID,
+		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
 		"now":         acceptedAt.Add(200 * time.Millisecond).Format(time.RFC3339Nano),
 		"preloadOnly": true, "terminationWriteId": durableTurnID, "terminationReplayCount": 2,
 	})
@@ -469,28 +496,30 @@ func TestPostgreSQLReplacementRuntimeTerminationStampsRecoveredBindingProvenance
 	if strings.Count(terminationResults, `"type":"committed"`) != 1 || strings.Count(terminationResults, `"type":"duplicate"`) != 1 {
 		t.Fatalf("replacement Runtime termination/replay = %s; want committed then exact duplicate", terminationResults)
 	}
-	var storedStatus, storedBindingID string
-	var storedBindingGeneration int64
-	var runningEventsAfter, terminationOperations int
+	var storedStatus string
+	var storedBindingID sql.NullString
+	var storedBindingGeneration sql.NullInt64
+	var runningEventsAfter, terminationOperations, liveBindings int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
 		(SELECT binding_id FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
 		(SELECT binding_generation FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_running'),
-		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='commit_runtime_termination')`, sessionID,
-	).Scan(&storedStatus, &storedBindingID, &storedBindingGeneration, &runningEventsAfter, &terminationOperations); err != nil {
-		t.Fatalf("read recovered terminal binding provenance: %v", err)
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='commit_runtime_termination'),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`, sessionID,
+	).Scan(&storedStatus, &storedBindingID, &storedBindingGeneration, &runningEventsAfter, &terminationOperations, &liveBindings); err != nil {
+		t.Fatalf("read recovered terminal residency: %v", err)
 	}
-	if storedStatus != "idle" || storedBindingID != newBindingID || storedBindingGeneration != 2 || runningEventsAfter != runningEventsBefore || terminationOperations != 1 {
-		t.Fatalf("terminal residency status/binding/generation/running Events/operations = %s/%s/%d/%d/%d; want idle/%s/2/%d/1", storedStatus, storedBindingID, storedBindingGeneration, runningEventsAfter, terminationOperations, newBindingID, runningEventsBefore)
+	if storedStatus != "idle" || storedBindingID.Valid || storedBindingGeneration.Valid || runningEventsAfter != runningEventsBefore || terminationOperations != 1 || liveBindings != 0 {
+		t.Fatalf("terminal residency status/binding/generation/running Events/operations/live bindings = %s/%v/%v/%d/%d/%d; want idle/null/null/%d/1/0", storedStatus, storedBindingID, storedBindingGeneration, runningEventsAfter, terminationOperations, liveBindings, runningEventsBefore)
 	}
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	if replay, replayErr := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: oldScope, RuntimeWriteId: durableTurnID, FailureJson: failureJSON,
-	}); replayErr != nil || replay.GetStale() == nil {
-		t.Fatalf("old-binding termination replay = %#v/%v; want stale", replay, replayErr)
+	}); replayErr != nil || replay.GetDuplicate() == nil {
+		t.Fatalf("exact termination receipt replay after unbinding = %#v/%v; want duplicate", replay, replayErr)
 	}
-	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, 2, newPodUID)
+	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
 	if ordinary, ordinaryErr := (BridgeAPIServer{store: store}).WriteEvent(context.Background(), closeoutWriteEventRequest(newScope, "rwrite_recovered_binding_post_terminal")); ordinaryErr != nil || ordinary.GetStale() == nil {
 		t.Fatalf("ordinary replacement declaration after termination = %#v/%v; want stale", ordinary, ordinaryErr)
 	}
@@ -503,7 +532,6 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		threadID        = "sthr_provider_reschedule_recovery"
 		oldBindingID    = "bind_provider_reschedule_old"
 		oldPodUID       = "pod_provider_reschedule_old"
-		newBindingID    = "bind_provider_reschedule_new"
 		newPodUID       = "pod_provider_reschedule_new"
 		modelRequestID  = "mreq_provider_reschedule_original"
 		modelToolCallID = "call_provider_reschedule_original"
@@ -546,7 +574,11 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	}
 	endRequest := &bridgev1.WriteRequestEndRequest{
 		Scope: oldScope, RuntimeWriteId: "rwrite_provider_reschedule_end", ModelRequestId: modelRequestID,
-		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "rescheduled", AssistantMessageSequence: toolUse.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		}, IsError: true, ErrorKind: "gateway_stream_error",
 		Reschedule: &bridgev1.RequestEndReschedule{
 			Attempt: 1, Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
 		},
@@ -592,15 +624,37 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		t.Fatalf("pod-loss reschedule route/result/bindings = %s/%v/%d/%d; want resolving allow/0/0",
 			routeStatus, routeDecision, terminalToolResults, oldBindings)
 	}
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
-	if result, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
-		SET status='running', binding_id=$2, binding_generation=2, running_since=clock_timestamp(),
-		    idle_since=NULL, updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
-		t.Fatalf("activate replacement Runtime residency: %v", err)
-	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
-		t.Fatalf("replacement Runtime residency rows = %d err=%v", rows, rowsErr)
+	var rescheduleEventID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='session.status_rescheduled' ORDER BY sequence DESC LIMIT 1`, sessionID, threadID).Scan(&rescheduleEventID); err != nil {
+		t.Fatalf("read durable reschedule root: %v", err)
 	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	replacement := enginekubernetes.BindingCandidate{
+		Namespace: "tetral-agent-runtime", PodName: "runtime-provider-reschedule-new",
+		PodUID: newPodUID, PodIP: "10.62.0.10",
+	}
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
+	}}
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:    JobRunnerConfig{LeaseOwner: "provider-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	active, err := runner.RunOnceWithActivity(context.Background())
+	if err != nil || !active || len(sender.requests) != 1 {
+		t.Fatalf("deliver provider reschedule recovery = active:%t requests:%d err:%v", active, len(sender.requests), err)
+	}
+	recoveryRequest, ok := sender.requests[0].(*agentruntimev1.RecoverThreadRequest)
+	if !ok || recoveryRequest.GetRecoveryKind() != agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_RESCHEDULE ||
+		recoveryRequest.GetSourceEventId() != rescheduleEventID || recoveryRequest.GetTargetPodUid() != newPodUID {
+		t.Fatalf("provider reschedule recovery request = %#v; want exact durable reschedule root", sender.requests[0])
+	}
+	newBindingID := recoveryRequest.GetBindingId()
+	newBindingGeneration := recoveryRequest.GetBindingGeneration()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for provider reschedule recovery: %v", err)
@@ -615,7 +669,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	preloaded := runProviderRescheduleRecoveryComposition(t, map[string]any{
 		"bridgeAddress": listener.Addr().String(),
 		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": 2, "targetPodUid": newPodUID,
+		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
 		"now":         acceptedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano),
 		"preloadOnly": true,
 	})
@@ -627,7 +681,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		strings.Contains(string(preloaded.LastSnapshot), "call_uncommitted_fragment") {
 		t.Fatalf("replacement Runtime nonterminal preload = %+v snapshot=%s", preloaded, preloaded.LastSnapshot)
 	}
-	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, 2, newPodUID)
+	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
 	settleSandboxExecutionForHotReceiptProof(t, runtimeDB, admin, newScope, toolUse.GetCommitted().GetEventId(),
 		`{"status":"success","result":{"content":"original result"}}`)
 	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
@@ -645,7 +699,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
 		"bridgeAddress": listener.Addr().String(),
 		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": 2, "targetPodUid": newPodUID,
+		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
 		"now": acceptedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
 	})
 	if result.ResultType != "completed" || result.ProviderInvocations != 1 || result.ExecutorInvocations != 0 {
@@ -728,7 +782,8 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_subagent_reschedule_cold_start", modelRequestID, requestKindAgentProviderRequest, boundarySequence)
 	if ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: oldScope, RuntimeWriteId: "rwrite_subagent_reschedule_cold_end", ModelRequestId: modelRequestID,
-		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "rescheduled"}, IsError: true, ErrorKind: "gateway_stream_error",
 		Reschedule: &bridgev1.RequestEndReschedule{
 			Attempt: int32(priorProviderAttempts + 1), Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
 		},
@@ -830,7 +885,8 @@ func TestPostgreSQLPodLossAfterRetryStartSettlesConsumedReschedule(t *testing.T)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_consumed_reschedule_original_start", originalID, requestKindAgentProviderRequest, 0)
 	if ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_consumed_reschedule_original_end", ModelRequestId: originalID,
-		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "rescheduled"}, IsError: true, ErrorKind: "gateway_stream_error",
 		Reschedule: &bridgev1.RequestEndReschedule{
 			Attempt: 1, Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
 		},

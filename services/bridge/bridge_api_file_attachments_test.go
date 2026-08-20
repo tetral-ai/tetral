@@ -331,6 +331,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesCommittedUnconsumedFileAttach
 	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_file_pending_end", ModelRequestId: "mreq_file_pending",
 		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	})
 	if err != nil {
 		t.Fatalf("seed request end: %v", err)

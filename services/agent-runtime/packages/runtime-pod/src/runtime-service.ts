@@ -26,6 +26,7 @@ import {
 	validateCleanupSessionRequest,
 	validateInterruptRequest,
 	validateResolveToolConfirmationRequest,
+	validateRecoverThreadRequest,
 } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
 	AcceptAgentMailRequest,
@@ -43,6 +44,8 @@ import type {
 	InterruptLeaseRef,
 	ResolveToolConfirmationRequest,
 	ResolveToolConfirmationResponse,
+	RecoverThreadRequest,
+	RecoverThreadResponse,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import {
 	AcceptAgentMailFailure,
@@ -55,6 +58,7 @@ import {
 	InterruptFailure,
 	InterruptOrigin,
 	ResolveToolConfirmationFailure,
+	RecoverThreadFailure,
 	ToolConfirmationDecision,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { semanticErrorFields } from "@tetral/ts-observability";
@@ -154,7 +158,18 @@ export interface RuntimeCleanupCommand extends RuntimeSessionScope {
 	readonly cleanupOperationId: string;
 }
 
+export interface RuntimeRecoveryCommand extends RuntimeThreadScope {
+	readonly sourceEventId: string;
+	readonly recoveryKind: "tool_route" | "reschedule";
+}
+
 export interface RuntimeSessionRunHost {
+	readonly handleRecoverThread?: (
+		command: RuntimeRecoveryCommand,
+	) => Promise<
+		| { readonly ok: true; readonly sessionId: string; readonly applied: boolean }
+		| { readonly ok: false; readonly sessionId: string; readonly reason: "context_load_failed" | "local_session_capacity_exceeded"; readonly retryable?: boolean }
+	>;
 	readonly handleAcceptInput: (
 		command: RuntimeAcceptInputCommand,
 	) => Promise<
@@ -362,6 +377,7 @@ export interface RuntimeControlServiceOptions {
 }
 
 const Methods = {
+	recoverThread: "/tetral.agent_runtime.v1.AgentRuntimePodService/RecoverThread",
 	acceptInput: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput",
 	acceptAgentMail:
 		"/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail",
@@ -439,6 +455,44 @@ export class RuntimeControlService {
 
 	beginShutdown(): void {
 		this.acceptingCommands = false;
+	}
+
+	async recoverThread(request: RecoverThreadRequest, metadata: Metadata): Promise<RecoverThreadResponse> {
+		const scope = threadScope(request);
+		return await this.executeMethod({
+			request,
+			metadata,
+			method: Methods.recoverThread,
+			operation: "RecoverThread",
+			operationId: request.sourceEventId,
+			dedupeKey: `recovery:${request.sessionThreadId}:${request.sourceEventId}`,
+			identity: () => stableIdentity(request),
+			validate: validateRecoverThreadRequest,
+			selectedPodRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH, true),
+			bindingRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_BINDING_MISMATCH, true),
+			identityRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT, false),
+			duplicate: (response) => response.rejected === undefined ? { duplicate: {} } : response,
+			rejected: (response) => response.rejected !== undefined,
+			apply: async () => {
+				const handler = this.options.runHost.handleRecoverThread;
+				if (handler === undefined) {
+					return recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED, true);
+				}
+				const result = await handler.call(this.options.runHost, {
+					...scope,
+					sourceEventId: request.sourceEventId,
+					recoveryKind: request.recoveryKind === 1 ? "tool_route" : "reschedule",
+				});
+				if (!result.ok) {
+					if (result.reason === "context_load_failed") {
+						return recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED, result.retryable ?? false);
+					}
+					throw new GrpcStatusError(status.RESOURCE_EXHAUSTED, "local runtime capacity exceeded");
+				}
+				return result.applied ? { accepted: {} } : { duplicate: {} };
+			},
+			acceptedBinding: true,
+		});
 	}
 
 	async acceptInput(
@@ -1356,6 +1410,10 @@ function inputScope(input: RuntimeInputScope): RuntimeInputScope {
 	};
 }
 
+function threadScope(input: RuntimeThreadScope): RuntimeThreadScope {
+	return { ...sessionScope(input), sessionThreadId: input.sessionThreadId };
+}
+
 function acceptInputCommand(
 	request: AcceptInputRequest,
 	scope: RuntimeInputScope,
@@ -1511,6 +1569,10 @@ function acceptInputRejected(
 	reason: AcceptInputFailure,
 	retryable: boolean,
 ): AcceptInputResponse {
+	return { rejected: { reason, retryable } };
+}
+
+function recoverThreadRejected(reason: RecoverThreadFailure, retryable: boolean): RecoverThreadResponse {
 	return { rejected: { reason, retryable } };
 }
 

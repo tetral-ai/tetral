@@ -34,6 +34,7 @@ export interface RuntimeGrpcServer {
 export function createRuntimeGrpcServer(service: RuntimeControlService): RuntimeGrpcServer {
   const server = new Server(grpcServerOptions());
   server.addService(AgentRuntimePodServiceService, {
+		recoverThread: commandHandler((request, metadata) => service.recoverThread(request, metadata)),
     acceptInput: commandHandler((request, metadata) => service.acceptInput(request, metadata)),
     acceptAgentMail: commandHandler((request, metadata) => service.acceptAgentMail(request, metadata)),
     acceptTaskNotification: commandHandler((request, metadata) => service.acceptTaskNotification(request, metadata)),

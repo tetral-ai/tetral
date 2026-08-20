@@ -635,6 +635,14 @@ message WriteRequestEndRequest {
   string compaction_event_payload_json = 17;
   RequestEndInterruptSettlement interrupt_settlement = 18;
   RuntimeContextDelta compaction_context = 19;
+  ProviderContextRetention provider_context_retention = 20;
+}
+
+message ProviderContextRetention {
+  string disposition = 1;
+  optional int64 assistant_message_sequence = 2;
+  repeated string tool_use_event_ids = 3;
+  repeated string repair_event_ids = 4;
 }
 
 message RequestEndInterruptSettlement {

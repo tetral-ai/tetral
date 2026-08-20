@@ -39,8 +39,15 @@ type bridgeLoadContextRequestEnd struct {
 	RequestStartEventID      string                              `json:"requestStartEventId"`
 	IsError                  bool                                `json:"isError"`
 	ErrorKind                *string                             `json:"errorKind,omitempty"`
-	AssistantMessageSequence *int64                              `json:"assistantMessageSequence,omitempty"`
+	ProviderContextRetention bridgeLoadContextProviderRetention  `json:"providerContextRetention"`
 	Reschedule               *bridgeLoadContextRequestReschedule `json:"reschedule,omitempty"`
+}
+
+type bridgeLoadContextProviderRetention struct {
+	Disposition              string   `json:"disposition"`
+	AssistantMessageSequence *int64   `json:"assistantMessageSequence,omitempty"`
+	ToolUseEventIDs          []string `json:"toolUseEventIds"`
+	RepairEventIDs           []string `json:"repairEventIds"`
 }
 
 type bridgeLoadContextRequestReschedule struct {
@@ -198,15 +205,6 @@ func loadThreadTurnFactsTx(
 		)
 		if err != nil {
 			return facts, err
-		}
-		if event.RequestEnd != nil && event.ModelRequestID != nil {
-			for _, message := range messages {
-				if message.Kind == "assistant" && message.ModelRequestID != nil && *message.ModelRequestID == *event.ModelRequestID {
-					sequence := message.MessageSequence
-					event.RequestEnd.AssistantMessageSequence = &sequence
-					break
-				}
-			}
 		}
 		facts.Events = append(facts.Events, event)
 	}
@@ -423,22 +421,40 @@ func bridgeTurnEventFact(
 			return event, status.Error(codes.FailedPrecondition, "request end fact has no model request identity")
 		}
 		var payload struct {
-			RequestStartEventID string  `json:"model_request_start_id"`
-			IsError             *bool   `json:"is_error"`
-			ErrorKind           *string `json:"error_kind"`
+			RequestStartEventID      string  `json:"model_request_start_id"`
+			IsError                  *bool   `json:"is_error"`
+			ErrorKind                *string `json:"error_kind"`
+			ProviderContextRetention struct {
+				Disposition              string   `json:"disposition"`
+				AssistantMessageSequence *int64   `json:"assistant_message_sequence"`
+				ToolUseEventIDs          []string `json:"tool_use_event_ids"`
+				RepairEventIDs           []string `json:"repair_event_ids"`
+			} `json:"provider_context_retention"`
 		}
-		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.RequestStartEventID == "" || payload.IsError == nil {
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.RequestStartEventID == "" || payload.IsError == nil || payload.ProviderContextRetention.Disposition == "" {
 			return event, status.Error(codes.FailedPrecondition, "request end projection is malformed")
 		}
 		reschedule, err := loadContextRequestEndRescheduleTx(ctx, tx, scope, modelRequestID.String)
 		if err != nil {
 			return event, err
 		}
+		if payload.ProviderContextRetention.ToolUseEventIDs == nil {
+			payload.ProviderContextRetention.ToolUseEventIDs = make([]string, 0)
+		}
+		if payload.ProviderContextRetention.RepairEventIDs == nil {
+			payload.ProviderContextRetention.RepairEventIDs = make([]string, 0)
+		}
 		event.RequestEnd = &bridgeLoadContextRequestEnd{
 			RequestStartEventID: payload.RequestStartEventID,
 			IsError:             *payload.IsError,
 			ErrorKind:           payload.ErrorKind,
-			Reschedule:          reschedule,
+			ProviderContextRetention: bridgeLoadContextProviderRetention{
+				Disposition:              payload.ProviderContextRetention.Disposition,
+				AssistantMessageSequence: payload.ProviderContextRetention.AssistantMessageSequence,
+				ToolUseEventIDs:          payload.ProviderContextRetention.ToolUseEventIDs,
+				RepairEventIDs:           payload.ProviderContextRetention.RepairEventIDs,
+			},
+			Reschedule: reschedule,
 		}
 	case "agent.tool_use", "agent.mcp_tool_use":
 		if !modelRequestID.Valid {

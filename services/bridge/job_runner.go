@@ -116,6 +116,8 @@ type RuntimeJob struct {
 	SequenceTo            int64
 	InputKind             string
 	RejectionReasonCode   string
+	RecoveryKind          string
+	RecoverySourceEventID string
 	PayloadJSON           string
 	AttemptCount          int32
 	MaxAttempts           int32
@@ -217,7 +219,7 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 	}
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId:     workspaceID,
-		Kinds:           []string{queue.KindRuntimeInput, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession, queue.KindSessionDeleteCleanup},
+		Kinds:           []string{queue.KindRuntimeInput, queue.KindRuntimeRecovery, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession, queue.KindSessionDeleteCleanup},
 		LeaseOwner:      cfg.LeaseOwner,
 		MaxJobs:         int32(cfg.MaxJobs),
 		LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
@@ -690,6 +692,8 @@ func DecodeRuntimeJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		return RuntimeJob{}, errors.New("queue job is required")
 	}
 	switch queueJob.GetKind() {
+	case queue.KindRuntimeRecovery:
+		return decodeRuntimeRecoveryJob(queueJob)
 	case queue.KindRuntimeInput:
 		return decodeRuntimeInputJob(queueJob)
 	case queue.KindRuntimeConfigUpdate:
@@ -701,6 +705,30 @@ func DecodeRuntimeJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 	default:
 		return RuntimeJob{}, fmt.Errorf("queue job kind %q is not a Bridge runtime-facing job", queueJob.GetKind())
 	}
+}
+
+func decodeRuntimeRecoveryJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
+	var payload struct {
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		SourceEventID   string `json:"source_event_id"`
+		RecoveryKind    string `json:"recovery_kind"`
+	}
+	if err := json.Unmarshal([]byte(queueJob.GetPayloadJson()), &payload); err != nil {
+		return RuntimeJob{}, err
+	}
+	if queueJob.GetWorkspaceId() == "" || queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" ||
+		payload.SessionID == "" || payload.SessionThreadID == "" || payload.SourceEventID == "" ||
+		(payload.RecoveryKind != "tool_route" && payload.RecoveryKind != "reschedule") {
+		return RuntimeJob{}, errors.New("runtime recovery payload has missing identity fields")
+	}
+	return RuntimeJob{
+		JobID: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(), Kind: queue.KindRuntimeRecovery,
+		PartitionKey: queueJob.GetPartitionKey(), DedupeKey: queueJob.GetDedupeKey(),
+		WorkspaceID: queueJob.GetWorkspaceId(), SessionID: payload.SessionID, SessionThreadID: payload.SessionThreadID,
+		RecoveryKind: payload.RecoveryKind, RecoverySourceEventID: payload.SourceEventID,
+		PayloadJSON: queueJob.GetPayloadJson(), AttemptCount: queueJob.GetAttemptCount(), MaxAttempts: queueJob.GetMaxAttempts(),
+	}, nil
 }
 
 func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {

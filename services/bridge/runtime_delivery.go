@@ -98,6 +98,10 @@ type RuntimeCommandSender interface {
 	CleanupSession(context.Context, RuntimePodTarget, *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error)
 }
 
+type RuntimeRecoveryCommandSender interface {
+	RecoverThread(context.Context, RuntimePodTarget, *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error)
+}
+
 const (
 	initialMCPManifestListTimeout = 180 * time.Second
 	// The production closeout proof measures command admission, Tool Fiber
@@ -124,6 +128,7 @@ type RuntimeCommandPlan struct {
 	ToolConfirmation      *agentruntimev1.ResolveToolConfirmationRequest
 	RuntimeConfig         *agentruntimev1.ApplyRuntimeConfigRequest
 	CleanupSession        *agentruntimev1.CleanupSessionRequest
+	RecoverThread         *agentruntimev1.RecoverThreadRequest
 	TaskNotification      *RuntimeTaskNotificationPlan
 }
 
@@ -137,7 +142,7 @@ func (p RuntimeCommandPlan) hasCommand() bool {
 	count := 0
 	for _, present := range []bool{
 		p.AcceptInput != nil, p.AcceptAgentMail != nil, p.AcceptTask != nil,
-		p.Interrupt != nil, p.ToolConfirmation != nil, p.RuntimeConfig != nil, p.CleanupSession != nil,
+		p.Interrupt != nil, p.ToolConfirmation != nil, p.RuntimeConfig != nil, p.CleanupSession != nil, p.RecoverThread != nil,
 	} {
 		if present {
 			count++
@@ -148,6 +153,13 @@ func (p RuntimeCommandPlan) hasCommand() bool {
 
 func (p RuntimeCommandPlan) send(ctx context.Context, sender RuntimeCommandSender) (RuntimeDeliveryResult, error) {
 	switch {
+	case p.RecoverThread != nil:
+		recoverySender, ok := sender.(RuntimeRecoveryCommandSender)
+		if !ok {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime recovery sender is unavailable"}, nil
+		}
+		response, err := recoverySender.RecoverThread(ctx, p.Target, p.RecoverThread)
+		return runtimeResultFromRecoverThread(response), err
 	case p.AcceptInput != nil:
 		response, err := sender.AcceptInput(ctx, p.Target, p.AcceptInput)
 		return runtimeResultFromAcceptInput(response), err
@@ -174,6 +186,22 @@ func (p RuntimeCommandPlan) send(ctx context.Context, sender RuntimeCommandSende
 	default:
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, ErrorKind: "runtime_command_plan_invalid", ErrorMessage: "runtime command request is missing"}, nil
 	}
+}
+
+func runtimeResultFromRecoverThread(response *agentruntimev1.RecoverThreadResponse) RuntimeDeliveryResult {
+	if response == nil {
+		return invalidRuntimeResponse()
+	}
+	if response.GetAccepted() != nil {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
+	}
+	if response.GetDuplicate() != nil {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
+	}
+	if rejected := response.GetRejected(); rejected != nil {
+		return rejectedRuntimeResponse(runtimeFailureKind(rejected.GetReason().String()), rejected.GetRetryable())
+	}
+	return invalidRuntimeResponse()
 }
 
 func invalidRuntimeResponse() RuntimeDeliveryResult {
@@ -628,7 +656,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 	if s == nil || s.Client == nil {
 		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
-	if job.WorkspaceID == "" || job.SessionID == "" || job.RuntimeInputID == "" {
+	if job.WorkspaceID == "" || job.SessionID == "" || (job.Kind != queue.KindRuntimeRecovery && job.RuntimeInputID == "") {
 		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime job identity is incomplete", retryable: false}
 	}
 	port := s.RuntimeGRPCPort
@@ -659,6 +687,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 		}
 		if deleted {
 			plan = RuntimeCommandPlan{StaleAccepted: true}
+			return nil
+		}
+		if job.Kind == queue.KindRuntimeRecovery {
+			recoveryPlan, err := s.prepareRuntimeRecoveryCommandTx(ctx, tx, job, port, now)
+			if err != nil {
+				return err
+			}
+			plan = recoveryPlan
 			return nil
 		}
 		if job.Kind == queue.KindRuntimeInput {
@@ -2499,6 +2535,58 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 	return plan, nil
 }
 
+func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
+	if job.RecoverySourceEventID == "" || (job.RecoveryKind != "tool_route" && job.RecoveryKind != "reschedule") {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery identity is incomplete", retryable: false}
+	}
+	var sourceThreadID, sourceType string
+	if err := tx.QueryRow(ctx,
+		`SELECT session_thread_id, type FROM session_events
+		  WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3 FOR UPDATE`,
+		job.WorkspaceID, job.SessionID, job.RecoverySourceEventID,
+	).Scan(&sourceThreadID, &sourceType); dbconnect.IsNoRows(err) {
+		return RuntimeCommandPlan{StaleAccepted: true}, nil
+	} else if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if sourceThreadID != job.SessionThreadID ||
+		(job.RecoveryKind == "tool_route" && sourceType != "agent.tool_use" && sourceType != "agent.mcp_tool_use") ||
+		(job.RecoveryKind == "reschedule" && sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled") {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery source is invalid", retryable: false}
+	}
+	binding, err := s.resolveRuntimeTarget(ctx, tx, job)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status='running', binding_id=$3, binding_generation=$4,
+		        running_since=COALESCE(running_since,$5), idle_since=NULL,
+		        cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL, cleanup_job_id=NULL, updated_at=$5
+		  WHERE workspace_id=$1 AND session_id=$2`,
+		job.WorkspaceID, job.SessionID, binding.BindingID, binding.BindingGeneration, now,
+	)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if !rowsAffected(result) {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_binding_unavailable", message: "runtime residency is unavailable", retryable: true}
+	}
+	recoveryKind := agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_TOOL_ROUTE
+	if job.RecoveryKind == "reschedule" {
+		recoveryKind = agentruntimev1.RuntimeRecoveryKind_RUNTIME_RECOVERY_KIND_RESCHEDULE
+	}
+	return RuntimeCommandPlan{
+		Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP, Port: port},
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID},
+		RecoverThread: &agentruntimev1.RecoverThreadRequest{
+			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
+			BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
+			SourceEventId: job.RecoverySourceEventID, RecoveryKind: recoveryKind,
+		},
+	}, nil
+}
+
 func runtimeGenerationFromInputID(runtimeInputID string) (int64, error) {
 	value := runtimeInputID[strings.LastIndex(runtimeInputID, ":")+1:]
 	generation, err := strconv.ParseInt(value, 10, 64)
@@ -3564,6 +3652,11 @@ func runtimePodCall[Request proto.Message, Response any](ctx context.Context, c 
 func (c *RuntimePodCommandClient) AcceptInput(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error) {
 	return runtimePodCall(ctx, c, target, request, func(client agentruntimev1.AgentRuntimePodServiceClient, ctx context.Context, request *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error) {
 		return client.AcceptInput(ctx, request)
+	})
+}
+func (c *RuntimePodCommandClient) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	return runtimePodCall(ctx, c, target, request, func(client agentruntimev1.AgentRuntimePodServiceClient, ctx context.Context, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+		return client.RecoverThread(ctx, request)
 	})
 }
 func (c *RuntimePodCommandClient) AcceptAgentMail(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {

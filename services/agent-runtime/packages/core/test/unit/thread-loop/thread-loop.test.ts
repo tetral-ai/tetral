@@ -831,6 +831,7 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "event_end_cold_tool_continuation",
 						isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 					},
 					toolMembers: [
 						{
@@ -1006,6 +1007,7 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "sevt_cold_reschedule_end",
 						isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 						errorKind: "provider_error",
 						reschedule: {
 							attempt: 1,

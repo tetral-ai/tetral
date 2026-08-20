@@ -193,6 +193,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
+	if err := validateProviderContextRetention(request, requestKind); err != nil {
+		return nil, err
+	}
 	finishReason := defaultString(request.GetFinishReason(), "unknown")
 	usage, err := parseBridgeUsage(usageJSON)
 	if err != nil {
@@ -290,6 +293,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			return err
 		} else if exists {
 			return status.Error(codes.AlreadyExists, "model request is already closed")
+		}
+		if err := verifyProviderContextRetentionReferencesTx(ctx, tx, request); err != nil {
+			return err
 		}
 		threadScope, err := lockThreadMutationTx(mutationCtx, tx, request.GetScope())
 		if err != nil {
@@ -503,6 +509,52 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Duplicate{Duplicate: requestEndDuplicateResult(facts)}}, nil
 	}
 	return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Committed{Committed: requestEndCommittedResult(facts)}}, nil
+}
+
+func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.WriteRequestEndRequest) error {
+	selection := request.GetProviderContextRetention()
+	if sequence := selection.AssistantMessageSequence; sequence != nil {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM session_messages
+			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			   AND model_request_id=$4 AND kind='assistant' AND sequence=$5
+		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), sequence).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return status.Error(codes.FailedPrecondition, "retained Assistant owner does not belong to the request")
+		}
+	}
+	for _, eventID := range selection.GetToolUseEventIds() {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM session_events
+			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			   AND model_request_id=$4 AND event_id=$5
+			   AND type IN ('agent.tool_use','agent.mcp_tool_use')
+		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), eventID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return status.Error(codes.FailedPrecondition, "retained Tool Use does not belong to the request")
+		}
+	}
+	for _, eventID := range selection.GetRepairEventIds() {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM session_events
+			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			   AND model_request_id=$4 AND event_id=$5 AND type='agent.tool_result'
+			   AND payload_json::jsonb ->> 'repair_kind'='invalid_tool'
+		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), eventID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return status.Error(codes.FailedPrecondition, "retained Tool repair does not belong to the request")
+		}
+	}
+	return nil
 }
 
 func requestEndCommittedResult(facts requestEndDurableFacts) *bridgev1.WriteRequestEndCommitted {
@@ -1154,11 +1206,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitRuntimeTermination, request.GetRuntimeWriteId()); err != nil {
 			return err
 		} else if ok {
-			// The terminal receipt is the only declaration that may replay after the
-			// Session closes. It remains fenced to the binding that authored it.
-			if err := verifyRuntimeBindingTx(ctx, tx, request.GetScope()); err != nil {
-				return err
-			}
+			// The exact terminal receipt owns replay after residency is unbound.
 			if existing.RequestHash != requestHash {
 				return status.Error(codes.AlreadyExists, "runtime termination idempotency conflict")
 			}
@@ -1336,11 +1384,62 @@ func modelRequestEndPayloadJSON(request *bridgev1.WriteRequestEndRequest, reques
 			"speed":                       nil,
 		},
 		"request_usage": json.RawMessage(defaultString(request.GetUsageJson(), "{}")),
+		"provider_context_retention": map[string]any{
+			"disposition":                request.GetProviderContextRetention().GetDisposition(),
+			"assistant_message_sequence": request.GetProviderContextRetention().AssistantMessageSequence,
+			"tool_use_event_ids":         request.GetProviderContextRetention().GetToolUseEventIds(),
+			"repair_event_ids":           request.GetProviderContextRetention().GetRepairEventIds(),
+		},
 	}
 	if request.GetErrorKind() != "" {
 		payload["error_kind"] = request.GetErrorKind()
 	}
 	return marshalBridgeJSON(payload)
+}
+
+func validateProviderContextRetention(request *bridgev1.WriteRequestEndRequest, requestKind string) error {
+	selection := request.GetProviderContextRetention()
+	if selection == nil {
+		return status.Error(codes.InvalidArgument, "provider-context retention declaration is required")
+	}
+	switch selection.GetDisposition() {
+	case "completed":
+		if request.GetIsError() || request.GetReschedule() != nil || requestKind == requestKindCompactionSummary {
+			return status.Error(codes.InvalidArgument, "completed retention disposition does not match request closeout")
+		}
+	case "interrupted":
+		if !request.GetIsError() || request.GetErrorKind() != "runtime_interrupted" || request.GetReschedule() != nil {
+			return status.Error(codes.InvalidArgument, "interrupted retention disposition does not match request closeout")
+		}
+	case "rescheduled":
+		if request.GetReschedule() == nil {
+			return status.Error(codes.InvalidArgument, "rescheduled retention disposition does not match request closeout")
+		}
+	case "failed":
+		if !request.GetIsError() || request.GetReschedule() != nil || request.GetErrorKind() == "runtime_interrupted" {
+			return status.Error(codes.InvalidArgument, "failed retention disposition does not match request closeout")
+		}
+	case "compacted":
+		if requestKind != requestKindCompactionSummary || request.GetIsError() || request.GetReschedule() != nil {
+			return status.Error(codes.InvalidArgument, "compacted retention disposition does not match request closeout")
+		}
+	default:
+		return status.Error(codes.InvalidArgument, "provider-context retention disposition is invalid")
+	}
+	if len(selection.GetToolUseEventIds()) > 128 || len(selection.GetRepairEventIds()) > 128 {
+		return status.Error(codes.InvalidArgument, "provider-context retention declaration exceeds its bound")
+	}
+	seen := make(map[string]struct{}, len(selection.GetToolUseEventIds())+len(selection.GetRepairEventIds()))
+	for _, identity := range append(append([]string{}, selection.GetToolUseEventIds()...), selection.GetRepairEventIds()...) {
+		if identity == "" {
+			return status.Error(codes.InvalidArgument, "provider-context retention identity is invalid")
+		}
+		if _, exists := seen[identity]; exists {
+			return status.Error(codes.InvalidArgument, "provider-context retention identities must be unique")
+		}
+		seen[identity] = struct{}{}
+	}
+	return nil
 }
 
 func normalizeRequestKind(value string) (string, error) {

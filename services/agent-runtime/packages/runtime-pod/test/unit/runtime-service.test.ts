@@ -8,6 +8,7 @@ import type {
 	CleanupSessionRequest,
 	InterruptRequest,
 	ResolveToolConfirmationRequest,
+	RecoverThreadRequest,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import {
 	AcceptInputFailure,
@@ -17,6 +18,7 @@ import {
 	InterruptOrigin,
 	ResolveToolConfirmationFailure,
 	ToolConfirmationDecision,
+	RuntimeRecoveryKind,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type { RuntimePodLogRecord } from "../../src/logger.js";
 import type {
@@ -24,6 +26,7 @@ import type {
 	RuntimeCleanupController,
 	RuntimeControlInputCommitter,
 	RuntimeSessionRunHost,
+	RuntimeRecoveryCommand,
 } from "../../src/runtime-service.js";
 import {
 	GrpcStatusError,
@@ -180,6 +183,27 @@ describe("RuntimeControlService method-specific ingress", () => {
 				"/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput",
 			"operation.id": "rin_1",
 		});
+	});
+
+	test("preloads one exact durable recovery root without echoing it", async () => {
+		const fixture = makeFixture();
+		const request: RecoverThreadRequest = {
+			workspaceId: "default",
+			sessionId: "sesn_recovery",
+			sessionThreadId: "thr_recovery",
+			bindingId: "bind_recovery",
+			bindingGeneration: 4,
+			targetPodUid: "uid-a",
+			sourceEventId: "evt_tool_recovery",
+			recoveryKind: RuntimeRecoveryKind.RUNTIME_RECOVERY_KIND_TOOL_ROUTE,
+		};
+		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ accepted: {} });
+		expect(fixture.host.recoveries).toEqual([{
+			workspaceId: "default", sessionId: "sesn_recovery", sessionThreadId: "thr_recovery",
+			bindingId: "bind_recovery", bindingGeneration: 4, targetPodUid: "uid-a",
+			sourceEventId: "evt_tool_recovery", recoveryKind: "tool_route",
+		}]);
+		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ duplicate: {} });
 	});
 
 	test("accepts a bounded rejection without rejected content", async () => {
@@ -703,6 +727,7 @@ class FixedAuthenticator implements RuntimeAuthenticator {
 }
 
 class RecordingRunHost implements RuntimeSessionRunHost {
+	readonly recoveries: RuntimeRecoveryCommand[] = [];
 	readonly inputs: Array<
 		Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]
 	> = [];
@@ -727,6 +752,17 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 	}> = [];
 	acceptInputGate: Promise<void> | undefined;
 	configNoResidency = false;
+
+	async handleRecoverThread(command: RuntimeRecoveryCommand) {
+		if (this.recoveries.some((recovery) =>
+			recovery.sessionThreadId === command.sessionThreadId &&
+			recovery.sourceEventId === command.sourceEventId
+		)) {
+			return { ok: true as const, sessionId: command.sessionId, applied: false };
+		}
+		this.recoveries.push(command);
+		return { ok: true as const, sessionId: command.sessionId, applied: true };
+	}
 
 	async handleAcceptInput(
 		command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0],

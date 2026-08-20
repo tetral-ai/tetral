@@ -1107,6 +1107,37 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z
 		targetPodUid: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
 		modelRequestId: SanitizedIdentifierSchema,
+		providerContextRetention: z
+			.strictObject({
+				disposition: z.enum([
+					"completed",
+					"interrupted",
+					"rescheduled",
+					"failed",
+					"compacted",
+				]),
+				assistantMessageSequence: z
+					.number()
+					.int()
+					.positive()
+					.max(Number.MAX_SAFE_INTEGER)
+					.optional(),
+				toolUseEventIds: z.array(SanitizedIdentifierSchema).max(128),
+				repairEventIds: z.array(SanitizedIdentifierSchema).max(128),
+			})
+			.superRefine((selection, context) => {
+				if (
+					new Set(selection.toolUseEventIds).size !==
+						selection.toolUseEventIds.length ||
+					new Set(selection.repairEventIds).size !==
+						selection.repairEventIds.length
+				) {
+					context.addIssue({
+						code: "custom",
+						message: "provider-context retention identities must be unique",
+					});
+				}
+			}) ,
 		isError: z.boolean(),
 		errorKind: RuntimeRequestErrorKindSchema.optional(),
 		finishReason: RuntimeFinishReasonSchema,

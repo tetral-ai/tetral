@@ -839,6 +839,14 @@ export interface WriteRequestEndRequest {
   compactionEventPayloadJson: string;
   interruptSettlement: RequestEndInterruptSettlement | undefined;
   compactionContext: RuntimeContextDelta | undefined;
+  providerContextRetention: ProviderContextRetention | undefined;
+}
+
+export interface ProviderContextRetention {
+  disposition: string;
+  assistantMessageSequence?: number | undefined;
+  toolUseEventIds: string[];
+  repairEventIds: string[];
 }
 
 export interface RequestEndInterruptSettlement {
@@ -9396,6 +9404,7 @@ function createBaseWriteRequestEndRequest(): WriteRequestEndRequest {
     compactionEventPayloadJson: "",
     interruptSettlement: undefined,
     compactionContext: undefined,
+    providerContextRetention: undefined,
   };
 }
 
@@ -9445,6 +9454,9 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     }
     if (message.compactionContext !== undefined) {
       RuntimeContextDelta.encode(message.compactionContext, writer.uint32(154).fork()).join();
+    }
+    if (message.providerContextRetention !== undefined) {
+      ProviderContextRetention.encode(message.providerContextRetention, writer.uint32(162).fork()).join();
     }
     return writer;
   },
@@ -9576,6 +9588,14 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
           message.compactionContext = RuntimeContextDelta.decode(reader, reader.uint32());
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.providerContextRetention = ProviderContextRetention.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9654,6 +9674,11 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
         : isSet(object.compaction_context)
         ? RuntimeContextDelta.fromJSON(object.compaction_context)
         : undefined,
+      providerContextRetention: isSet(object.providerContextRetention)
+        ? ProviderContextRetention.fromJSON(object.providerContextRetention)
+        : isSet(object.provider_context_retention)
+        ? ProviderContextRetention.fromJSON(object.provider_context_retention)
+        : undefined,
     };
   },
 
@@ -9704,6 +9729,9 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     if (message.compactionContext !== undefined) {
       obj.compactionContext = RuntimeContextDelta.toJSON(message.compactionContext);
     }
+    if (message.providerContextRetention !== undefined) {
+      obj.providerContextRetention = ProviderContextRetention.toJSON(message.providerContextRetention);
+    }
     return obj;
   },
 
@@ -9739,6 +9767,130 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     message.compactionContext = (object.compactionContext !== undefined && object.compactionContext !== null)
       ? RuntimeContextDelta.fromPartial(object.compactionContext)
       : undefined;
+    message.providerContextRetention =
+      (object.providerContextRetention !== undefined && object.providerContextRetention !== null)
+        ? ProviderContextRetention.fromPartial(object.providerContextRetention)
+        : undefined;
+    return message;
+  },
+};
+
+function createBaseProviderContextRetention(): ProviderContextRetention {
+  return { disposition: "", assistantMessageSequence: undefined, toolUseEventIds: [], repairEventIds: [] };
+}
+
+export const ProviderContextRetention: MessageFns<ProviderContextRetention> = {
+  encode(message: ProviderContextRetention, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.disposition !== "") {
+      writer.uint32(10).string(message.disposition);
+    }
+    if (message.assistantMessageSequence !== undefined) {
+      writer.uint32(16).int64(message.assistantMessageSequence);
+    }
+    for (const v of message.toolUseEventIds) {
+      writer.uint32(26).string(v!);
+    }
+    for (const v of message.repairEventIds) {
+      writer.uint32(34).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderContextRetention {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderContextRetention();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.disposition = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.assistantMessageSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.toolUseEventIds.push(reader.string());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.repairEventIds.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProviderContextRetention {
+    return {
+      disposition: isSet(object.disposition) ? globalThis.String(object.disposition) : "",
+      assistantMessageSequence: isSet(object.assistantMessageSequence)
+        ? globalThis.Number(object.assistantMessageSequence)
+        : isSet(object.assistant_message_sequence)
+        ? globalThis.Number(object.assistant_message_sequence)
+        : undefined,
+      toolUseEventIds: globalThis.Array.isArray(object?.toolUseEventIds)
+        ? object.toolUseEventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.tool_use_event_ids)
+        ? object.tool_use_event_ids.map((e: any) => globalThis.String(e))
+        : [],
+      repairEventIds: globalThis.Array.isArray(object?.repairEventIds)
+        ? object.repairEventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.repair_event_ids)
+        ? object.repair_event_ids.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: ProviderContextRetention): unknown {
+    const obj: any = {};
+    if (message.disposition !== "") {
+      obj.disposition = message.disposition;
+    }
+    if (message.assistantMessageSequence !== undefined) {
+      obj.assistantMessageSequence = Math.round(message.assistantMessageSequence);
+    }
+    if (message.toolUseEventIds?.length) {
+      obj.toolUseEventIds = message.toolUseEventIds;
+    }
+    if (message.repairEventIds?.length) {
+      obj.repairEventIds = message.repairEventIds;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderContextRetention>, I>>(base?: I): ProviderContextRetention {
+    return ProviderContextRetention.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderContextRetention>, I>>(object: I): ProviderContextRetention {
+    const message = createBaseProviderContextRetention();
+    message.disposition = object.disposition ?? "";
+    message.assistantMessageSequence = object.assistantMessageSequence ?? undefined;
+    message.toolUseEventIds = object.toolUseEventIds?.map((e) => e) || [];
+    message.repairEventIds = object.repairEventIds?.map((e) => e) || [];
     return message;
   },
 };

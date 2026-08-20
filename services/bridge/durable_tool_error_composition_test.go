@@ -243,6 +243,9 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if _, err := client.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_error_end", ModelRequestId: "mreq_durable_error",
 		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("write Request End: %v", err)
 	}
@@ -415,6 +418,9 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_truncation_end", ModelRequestId: modelRequestID,
 		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("write truncated Tool Request End: %v", err)
 	}
@@ -525,6 +531,9 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_cancel_end", ModelRequestId: modelRequestID,
 		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("seal cancelled Tool request: %v", err)
 	}
@@ -1124,6 +1133,13 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 	}
 	if _, err := client.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_multi_end", ModelRequestId: "mreq_multi", FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed",
+			ToolUseEventIds: []string{
+				callA.GetCommitted().GetEventId(),
+				callB.GetCommitted().GetEventId(),
+			},
+		},
 	}); err != nil {
 		t.Fatalf("seal multi-Tool Request: %v", err)
 	}

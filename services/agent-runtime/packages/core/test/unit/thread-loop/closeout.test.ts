@@ -1118,6 +1118,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(1);
 		expect(requestEnds[0]).toMatchObject({
 			isError: true,
+			providerContextRetention: { disposition: "interrupted", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "runtime_interrupted",
 			finishReason: "cancelled",
 		});
@@ -1308,6 +1309,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+				providerContextRetention: { disposition: "interrupted", toolUseEventIds: [], repairEventIds: [] },
 				errorKind: "runtime_interrupted",
 				finishReason: "cancelled",
 			}),
@@ -1504,6 +1506,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+				providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				errorKind: "runtime_interrupted",
 				finishReason: "cancelled",
 			}),
@@ -2040,6 +2043,7 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "sevt_partial_requires_action_end",
 						isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 					},
 					toolMembers: [
 						{
@@ -2780,6 +2784,7 @@ describe("ThreadLoop", () => {
 			expect.objectContaining({
 				modelRequestId: expect.any(String),
 				isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				errorKind: "provider_error",
 				finishReason: "error",
 			}),
@@ -2960,6 +2965,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				finishReason: "error",
 			}),
 		]);
@@ -3038,6 +3044,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				finishReason: "error",
 			}),
 		]);

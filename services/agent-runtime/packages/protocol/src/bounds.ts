@@ -16,6 +16,7 @@ import type {
   CleanupSessionRequest,
   InterruptRequest,
   ResolveToolConfirmationRequest,
+  RecoverThreadRequest,
 } from "./gen/tetral/agent_runtime/v1/agent_runtime.js";
 
 /** Maximum UTF-8 bytes accepted for one Runtime command identifier. */
@@ -47,6 +48,15 @@ interface ThreadBindingScope {
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly targetPodUid: string;
+}
+
+/** Validates one durable lost-custody recovery trigger. */
+export function validateRecoverThreadRequest(input: RecoverThreadRequest): ValidationResult {
+  const scope = validateThreadBindingScope(input);
+  if (!scope.ok || !validId(input.sourceEventId) || (input.recoveryKind !== 1 && input.recoveryKind !== 2)) {
+    return invalidRequest();
+  }
+  return { ok: true };
 }
 
 interface SessionBindingScope {

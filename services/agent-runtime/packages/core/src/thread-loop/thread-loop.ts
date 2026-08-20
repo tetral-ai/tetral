@@ -5927,8 +5927,6 @@ function settleRuntimeShutdownEffect(
 					}),
 				);
 			}
-			const assistantMessageSequence =
-				processor.openRequestDraft()?.messageSequence;
 			const spanEndAppend = yield* Effect.promise(() =>
 				appendModelRequestEndEvent(
 					options,
@@ -6033,7 +6031,7 @@ function settleRuntimeShutdownEffect(
 				modelRequestId,
 				true,
 				"runtime_interrupted",
-				assistantMessageSequence,
+				providerContextRetentionForRequest(session, "interrupted"),
 				undefined,
 			);
 			if (requestSealFailure !== undefined) {
@@ -6716,6 +6714,18 @@ async function appendModelRequestEndEvent(
 			? []
 			: [attachment.transient.attachmentRef],
 	);
+	const providerContextRetention = providerContextRetentionForRequest(
+		session,
+			compaction !== undefined
+				? ("compacted" as const)
+				: interrupt !== undefined
+					? ("interrupted" as const)
+					: reschedule !== undefined
+						? ("rescheduled" as const)
+						: isError
+							? ("failed" as const)
+							: ("completed" as const),
+	);
 	const envelope: SessionEventWriterRequestEndEnvelope = {
 		workspaceId: session.identity.workspaceId,
 		sessionId: session.sessionId,
@@ -6725,6 +6735,7 @@ async function appendModelRequestEndEvent(
 		targetPodUid: session.identity.targetPodUid,
 		writeId,
 		modelRequestId,
+		providerContextRetention,
 		isError,
 		...(errorKind !== undefined ? { errorKind } : {}),
 		finishReason,
@@ -6767,8 +6778,6 @@ async function appendModelRequestEndEvent(
 		return { ok: false, error: runtimeFailureFromEventWriter(result.error) };
 	}
 	if (result.type !== "stale" && interrupt === undefined) {
-		const assistantMessageSequence =
-			session.state.contextManager.openRequestDraft()?.messageSequence;
 		const acceptedReschedule =
 			result.outcome.type === "rescheduled" && reschedule !== undefined
 				? {
@@ -6784,7 +6793,7 @@ async function appendModelRequestEndEvent(
 			modelRequestId,
 			isError,
 			errorKind,
-			assistantMessageSequence,
+			providerContextRetention,
 			acceptedReschedule,
 		);
 		if (requestSealFailure !== undefined) {
@@ -6838,7 +6847,7 @@ function reconcileRequestEndTurn(
 	modelRequestId: string,
 	isError: boolean,
 	errorKind: RuntimeRequestErrorKind | undefined,
-	assistantMessageSequence: number | undefined,
+	providerContextRetention: SessionEventWriterRequestEndEnvelope["providerContextRetention"],
 	reschedule:
 		| {
 				readonly attempt: number;
@@ -6855,9 +6864,7 @@ function reconcileRequestEndTurn(
 			modelRequestId,
 			isError,
 			...(errorKind !== undefined ? { errorKind } : {}),
-			...(assistantMessageSequence !== undefined
-				? { assistantMessageSequence }
-				: {}),
+			providerContextRetention,
 			...(reschedule !== undefined ? { reschedule } : {}),
 		});
 		if (
@@ -6879,6 +6886,36 @@ function reconcileRequestEndTurn(
 			sessionId: session.sessionId,
 		});
 	}
+}
+
+function providerContextRetentionForRequest(
+	session: ThreadRuntime,
+	disposition: SessionEventWriterRequestEndEnvelope["providerContextRetention"]["disposition"],
+): SessionEventWriterRequestEndEnvelope["providerContextRetention"] {
+	const request = session.state.threadTurnReduction().checkpoint.request;
+	if (request === undefined) {
+		throw new Error("provider-context retention requires an active request");
+	}
+	const draft = session.state.contextManager.openRequestDraft();
+	const toolUseEventIds = request.toolMembers.flatMap((member) =>
+		member.memberKind === "public_tool_use" ? [member.toolUseEventId] : [],
+	);
+	const repairEventIds = request.toolMembers.flatMap((member) =>
+		member.memberKind === "internal_tool_repair" ? [member.repairEventId] : [],
+	);
+	const retainsAssistantOwner =
+		disposition === "completed" ||
+		disposition === "compacted" ||
+		toolUseEventIds.length !== 0 ||
+		repairEventIds.length !== 0;
+	return {
+		disposition,
+		...(retainsAssistantOwner && draft?.modelRequestId === request.modelRequestId
+			? { assistantMessageSequence: draft.messageSequence }
+			: {}),
+		toolUseEventIds,
+		repairEventIds,
+	};
 }
 
 async function writeRequestEndWithRetry(

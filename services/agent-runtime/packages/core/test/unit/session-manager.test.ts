@@ -1898,6 +1898,7 @@ describe("SessionManager", () => {
 							requestEnd: {
 								eventId: "sevt_idle_interrupt_end",
 								isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 							},
 							toolMembers: [
 								{
@@ -3294,6 +3295,7 @@ describe("SessionManager", () => {
 							requestEnd: {
 								eventId: "sevt_request_end_1",
 								isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 							},
 							toolMembers: [
 								{

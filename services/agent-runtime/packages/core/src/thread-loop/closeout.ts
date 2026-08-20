@@ -365,6 +365,13 @@ export async function closeFailedRunDurably(
 		if (session.state.acceptedInputCount() > 0) {
 			const durableTurnId = closeout.durableTurnId;
 			if (durableTurnId === undefined) {
+				const checkpoint = session.state.threadTurnReduction().checkpoint;
+				if (checkpoint.terminalCloseout !== undefined) {
+					return { type: "landed", disposition: "terminal" };
+				}
+				if (checkpoint.idleCloseout !== undefined) {
+					return { type: "landed", disposition: "continuation" };
+				}
 				return {
 					type: "unrepairable",
 					error: normalizeSessionEventWriterError({

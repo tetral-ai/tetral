@@ -225,6 +225,15 @@ func writeRequestEndDeclarationDigest(
 			"runtime_input_id": value.GetRuntimeInputId(),
 		}
 	}
+	var providerContextRetention any
+	if value := request.GetProviderContextRetention(); value != nil {
+		providerContextRetention = map[string]any{
+			"disposition":                value.GetDisposition(),
+			"assistant_message_sequence": value.AssistantMessageSequence,
+			"tool_use_event_ids":         value.GetToolUseEventIds(),
+			"repair_event_ids":           value.GetRepairEventIds(),
+		}
+	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"compacted_through_message_sequence": compactedThrough,
 		"compaction_context":                 compactionContext,
@@ -237,6 +246,7 @@ func writeRequestEndDeclarationDigest(
 		"model_request_id":                   request.GetModelRequestId(),
 		"operation_kind":                     bridgeOpWriteRequestEnd,
 		"prefix_consumption":                 prefixConsumption,
+		"provider_context_retention":         providerContextRetention,
 		"request_kind":                       requestKind,
 		"reschedule":                         reschedule,
 		"session_thread_id":                  request.GetScope().GetSessionThreadId(),

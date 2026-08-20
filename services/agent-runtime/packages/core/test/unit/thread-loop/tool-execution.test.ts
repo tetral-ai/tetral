@@ -2111,6 +2111,7 @@ describe("ThreadLoop", () => {
 		expect(requestEndEnvelopes).toHaveLength(2);
 		expect(requestEndEnvelopes[0]).toMatchObject({
 			isError: true,
+			providerContextRetention: { disposition: "rescheduled", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "provider_error",
 			finishReason: "error",
 			reschedule: { attempt: 1 },
@@ -3917,6 +3918,12 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(1);
 		expect(requestEnds[0]).toMatchObject({
 			isError: false,
+			providerContextRetention: {
+				disposition: "completed",
+				assistantMessageSequence: 2,
+				toolUseEventIds: ["sevt_post_success_cooperative_failure"],
+				repairEventIds: [],
+			},
 			consumedAttachmentRefs: ["att_post_success_cooperative_failure"],
 		});
 	});
@@ -4011,6 +4018,12 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(1);
 		expect(requestEnds[0]).toMatchObject({
 			isError: false,
+			providerContextRetention: {
+				disposition: "completed",
+				assistantMessageSequence: 2,
+				toolUseEventIds: ["sevt_post_success_interrupt_failure"],
+				repairEventIds: [],
+			},
 			consumedAttachmentRefs: ["att_post_success_interrupt_failure"],
 		});
 		expect(session.state.pendingAttachments()).toEqual([]);
@@ -5047,6 +5060,7 @@ describe("ThreadLoop", () => {
 							requestEnd: {
 								eventId: "sevt_rehydrated_request_end",
 								isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 							},
 						},
 					},

@@ -122,6 +122,7 @@ describe("cold Thread-turn reconstruction", () => {
 					requestEnd: {
 						requestStartEventId: "evt_start",
 						isError: false,
+						providerContextRetention: { disposition: "completed", toolUseEventIds: ["evt_tool"], repairEventIds: [] },
 					},
 				},
 			],
@@ -151,7 +152,11 @@ describe("cold Thread-turn reconstruction", () => {
 				requestStartEventId: "evt_start",
 				requestKind: "agent_provider_request",
 				contextThroughMessageSequence: 1,
-				requestEnd: { eventId: "evt_end", isError: false },
+				requestEnd: {
+					eventId: "evt_end",
+					isError: false,
+					providerContextRetention: { disposition: "completed", toolUseEventIds: ["evt_tool"], repairEventIds: [] },
+				},
 				toolMembers: [
 					{
 						memberKind: "public_tool_use",
@@ -195,8 +200,13 @@ describe("cold Thread-turn reconstruction", () => {
 				requestEnd: {
 					eventId: "evt_end",
 					isError: true,
+					providerContextRetention: {
+						disposition: "rescheduled",
+						assistantMessageSequence: 2,
+						toolUseEventIds: ["evt_tool_done", "evt_tool_pending"],
+						repairEventIds: [],
+					},
 					errorKind: "provider_stream_error",
-					assistantMessageSequence: 2,
 					reschedule: {
 						attempt: 1,
 						effectiveDeadline: "2026-08-15T00:00:00.000Z",
@@ -269,7 +279,11 @@ describe("cold Thread-turn reconstruction", () => {
 				{
 					eventId: "failed-end", eventSequence: 3,
 					type: "span.model_request_end", modelRequestId: "failed",
-					requestEnd: { requestStartEventId: "failed-start", isError: true, assistantMessageSequence: 2 },
+					requestEnd: {
+						requestStartEventId: "failed-start",
+						isError: true,
+						providerContextRetention: { disposition: "failed", assistantMessageSequence: 2, toolUseEventIds: [], repairEventIds: [] },
+					},
 				},
 				{
 					eventId: "success-start", eventSequence: 4,
@@ -279,7 +293,11 @@ describe("cold Thread-turn reconstruction", () => {
 				{
 					eventId: "success-end", eventSequence: 5,
 					type: "span.model_request_end", modelRequestId: "success",
-					requestEnd: { requestStartEventId: "success-start", isError: false, assistantMessageSequence: 3 },
+					requestEnd: {
+						requestStartEventId: "success-start",
+						isError: false,
+						providerContextRetention: { disposition: "completed", assistantMessageSequence: 3, toolUseEventIds: [], repairEventIds: [] },
+					},
 				},
 				{
 					eventId: "idle", eventSequence: 6, type: "session.status_idle",
