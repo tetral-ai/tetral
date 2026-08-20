@@ -132,13 +132,23 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, otherID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, validID, 1, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"}}`)
+		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"},"evaluated_permission":"ask"}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
 		SET visibility='public',session_visible=true,model_request_id=$2
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, requestID, validID); err != nil {
 		t.Fatalf("authorize valid live spawn source: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, requestID, validID, "call_live_spawn_fences", "spawn_agent")
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_pending_tool_uses (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+			tool_name, input_json, status, created_at, updated_at
+		) VALUES ('default',$1,$2,$3,'call_live_spawn_fences','spawn_agent',
+			'{"task_name":"worker","agent_type":"worker","fork_turns":"all"}','pending',now(),now())`,
+		sessionID, parentID, validID,
+	); err != nil {
+		t.Fatalf("seed pending spawn authorization: %v", err)
+	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "evt_live_spawn_fences_wrong_name", 2, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"Read","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -178,6 +188,39 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 			t.Fatalf("%s admission = %#v/%v; want rejection", name, response, err)
 		}
 	}
+	if response, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("pending spawn authorization = %#v/%v; want FailedPrecondition", response, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses
+		SET status='resolving',decision='deny',updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, parentID, validID); err != nil {
+		t.Fatalf("deny spawn authorization: %v", err)
+	}
+	if response, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("denied spawn authorization = %#v/%v; want FailedPrecondition", response, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses
+		SET decision='allow',updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, parentID, validID); err != nil {
+		t.Fatalf("allow spawn authorization: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET projection_json=jsonb_set(projection_json::jsonb,'{provider_input}',
+			'{"task_name":"other","agent_type":"worker","fork_turns":"all"}'::jsonb)::text
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, validID); err != nil {
+		t.Fatalf("mutate provider-visible spawn declaration: %v", err)
+	}
+	if response, err := store.CreateSubagentThread(context.Background(), request(validID, "worker", scope)); status.Code(err) != codes.AlreadyExists || response != nil {
+		t.Fatalf("conflicting provider/public spawn declaration = %#v/%v; want AlreadyExists", response, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET projection_json=jsonb_set(projection_json::jsonb,'{provider_input}',
+			(payload_json::jsonb -> 'input'))::text
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, validID); err != nil {
+		t.Fatalf("restore provider-visible spawn declaration: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime'
 		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, parentID); err != nil {
 		t.Fatalf("close parent before admission: %v", err)
@@ -194,6 +237,66 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 	}
 	if children != 0 || operations != 0 {
 		t.Fatalf("rejected spawn mutation census children/operations = %d/%d", children, operations)
+	}
+}
+
+func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd(t *testing.T) {
+	for _, requestEnded := range []bool{false, true} {
+		name := "open_request"
+		if requestEnded {
+			name = "ended_request"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID := "sesn_spawn_prefix_" + name
+			threadID := "thr_spawn_prefix_" + name
+			bindingID := "bind_spawn_prefix_" + name
+			podUID := "pod_spawn_prefix_" + name
+			modelRequestID := "mreq_spawn_prefix_" + name
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_spawn_prefix_"+name, "evt_spawn_prefix_user_"+name, 1)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_prefix_start_"+name, modelRequestID, requestKindAgentProviderRequest, 1)
+			inputJSON := `{"task_name":"worker","agent_type":"worker","fork_turns":"all"}`
+			toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+				Scope: scope, RuntimeWriteId: "rwrite_spawn_prefix_tool_" + name, ModelRequestId: modelRequestID,
+				EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"spawn_agent","input":` + inputJSON + `,"evaluated_permission":"allow"}`,
+				AssistantContextDelta:       bridgeToolCallContextDeltaForTest("call_spawn_prefix_"+name, "spawn_agent", inputJSON),
+				CanonicalExecutionInputJson: inputJSON,
+			})
+			if err != nil || toolUse.GetCommitted() == nil {
+				t.Fatalf("write source spawn Tool Use = %#v/%v", toolUse, err)
+			}
+			if requestEnded {
+				if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+					Scope: scope, RuntimeWriteId: "rwrite_spawn_prefix_end_" + name, ModelRequestId: modelRequestID,
+					FinishReason: "tool_calls", UsageJson: `{}`,
+				}); err != nil {
+					t.Fatalf("end source spawn request: %v", err)
+				}
+			}
+			created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
+				Scope: scope, SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), TaskName: "worker", AgentType: "worker", ForkTurns: "all",
+			})
+			if err != nil || created.GetCommitted().GetChildThreadId() == "" {
+				t.Fatalf("create child from %s = %#v/%v", name, created, err)
+			}
+			var entriesJSON string
+			if err := admin.QueryRowContext(context.Background(), `SELECT entries_json
+				FROM session_thread_context_prefixes WHERE workspace_id='default' AND session_id=$1 AND child_thread_id=$2`,
+				sessionID, created.GetCommitted().GetChildThreadId()).Scan(&entriesJSON); err != nil {
+				t.Fatalf("read child prefix: %v", err)
+			}
+			var entries []bridgeRuntimeContextEntry
+			if err := json.Unmarshal([]byte(entriesJSON), &entries); err != nil {
+				t.Fatalf("decode child prefix: %v", err)
+			}
+			if len(entries) != 1 || entries[0].MessageSequence != 1 || strings.Contains(entriesJSON, "spawn_agent") || strings.Contains(entriesJSON, "call_spawn_prefix_") {
+				t.Fatalf("%s child prefix = %s; want prior user context without source Assistant", name, entriesJSON)
+			}
+		})
 	}
 }
 

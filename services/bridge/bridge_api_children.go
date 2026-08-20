@@ -1489,29 +1489,28 @@ func requireOpenChildParentTx(ctx context.Context, tx *dbconnect.Tx, scope *brid
 }
 
 func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CreateSubagentThreadRequest) (*threadContextPrefixEnvelope, error) {
-	var payloadJSON string
-	var modelRequestID sql.NullString
-	err := tx.QueryRow(ctx, `SELECT payload_json, model_request_id
-		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		 AND event_id=$4 AND type='agent.tool_use' AND visibility='public' FOR SHARE`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetSourceToolUseEventId(),
-	).Scan(&payloadJSON, &modelRequestID)
-	if dbconnect.IsNoRows(err) {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool Use is invalid")
-	}
+	tool, err := loadDurableToolExecutionTx(
+		ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "agent.tool_use", true,
+	)
 	if err != nil {
 		return nil, err
 	}
-	var tool runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &tool); err != nil || tool.Name != "spawn_agent" || !modelRequestID.Valid || modelRequestID.String == "" {
+	if tool.ToolName != "spawn_agent" {
 		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool Use is invalid")
+	}
+	providerInputJSON, err := canonicalRunToolJSON(tool.ProviderInputJSON)
+	if err != nil || providerInputJSON != tool.PublicInputJSON {
+		return nil, status.Error(codes.AlreadyExists, "sub-agent public Tool declaration conflicts with provider context")
+	}
+	if err := verifyDurableToolAuthorizationTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), tool); err != nil {
+		return nil, err
 	}
 	var input struct {
 		TaskName  string `json:"task_name"`
 		AgentType string `json:"agent_type"`
 		ForkTurns string `json:"fork_turns"`
 	}
-	if err := json.Unmarshal(tool.Input, &input); err != nil {
+	if err := json.Unmarshal([]byte(providerInputJSON), &input); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool input is malformed")
 	}
 	input.AgentType = defaultString(input.AgentType, "general")
@@ -1522,13 +1521,13 @@ func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *brid
 	var boundarySequence int64
 	if err := tx.QueryRow(ctx, `SELECT sequence FROM session_messages
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), modelRequestID.String,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), tool.ModelRequestID,
 	).Scan(&boundarySequence); dbconnect.IsNoRows(err) {
 		return nil, status.Error(codes.FailedPrecondition, "sub-agent source request has no durable Assistant context")
 	} else if err != nil {
 		return nil, err
 	}
-	entries, kinds, err := loadDurablePrefixEntriesThroughTx(ctx, tx, request.GetScope(), boundarySequence)
+	entries, kinds, err := loadDurablePrefixEntriesThroughTx(ctx, tx, request.GetScope(), boundarySequence-1)
 	if err != nil {
 		return nil, err
 	}
