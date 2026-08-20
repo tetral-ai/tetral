@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -45,9 +46,9 @@ func TestPostgreSQLAtomicSubagentCreationCommitsAndReplaysWholeInitialLineage(t 
 	}
 	assertAtomicSubagentLineage(t, admin, sessionID, parentID, childID, toolUseID, prompt, 1)
 
-	conflict := *request
+	conflict := proto.Clone(request).(*bridgev1.CreateSubagentThreadRequest)
 	conflict.InitialPrompt = "different opening input"
-	if response, err := store.CreateSubagentThread(context.Background(), &conflict); status.Code(err) != codes.AlreadyExists || response != nil {
+	if response, err := store.CreateSubagentThread(context.Background(), conflict); status.Code(err) != codes.AlreadyExists || response != nil {
 		t.Fatalf("conflicting atomic replay = %#v/%v; want AlreadyExists", response, err)
 	}
 }

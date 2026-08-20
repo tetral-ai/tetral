@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -377,9 +378,9 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	if replay.GetDuplicate().GetControlOperationId() != operationID {
 		t.Fatalf("replayed control operation id = %q; want %q", replay.GetDuplicate().GetControlOperationId(), operationID)
 	}
-	conflict := *request
+	conflict := proto.Clone(request).(*bridgev1.AdmitChildInterruptRequest)
 	conflict.Action = bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT
-	if response, err := store.AdmitChildInterrupt(context.Background(), &conflict); status.Code(err) != codes.AlreadyExists || response != nil {
+	if response, err := store.AdmitChildInterrupt(context.Background(), conflict); status.Code(err) != codes.AlreadyExists || response != nil {
 		t.Fatalf("conflicting child-control declaration = %#v/%v; want AlreadyExists", response, err)
 	}
 	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: sourceID}); status.Code(err) != codes.FailedPrecondition {
