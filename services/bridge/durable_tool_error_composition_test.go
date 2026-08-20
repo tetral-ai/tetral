@@ -859,7 +859,10 @@ func assertProviderCompositionToolOrder(t *testing.T, composition runtimeProvide
 					}
 					isError = true
 				case item.ToolResult.Cancelled != nil:
-					output = "[tool execution cancelled]"
+					output = map[string]any{
+						"type": "text",
+						"text": "[tool execution cancelled]",
+					}
 					isError = true
 				default:
 					t.Fatalf("carrier Tool Result %s has no terminal outcome", item.ToolResult.ModelToolCallID)

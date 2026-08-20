@@ -239,15 +239,17 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 			}
 			switch part.ModelToolCallID {
 			case "call_mcp_durable_claim":
-				if part.Type == "tool_call" {
+				switch part.Type {
+				case "tool_call":
 					mainCalls++
-				} else if part.Type == "tool_result" {
+				case "tool_result":
 					mainResults++
 				}
 			case "call_mcp_production_cleanup":
-				if part.Type == "tool_call" {
+				switch part.Type {
+				case "tool_call":
 					cleanupCalls++
-				} else if part.Type == "tool_result" {
+				case "tool_result":
 					cleanupResults++
 				}
 			}
