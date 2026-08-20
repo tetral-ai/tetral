@@ -1264,11 +1264,18 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 			    AND NOT EXISTS (
 			      SELECT 1
 			        FROM session_pending_tool_uses route
+			        JOIN session_events rescheduled
+			          ON rescheduled.workspace_id = e.workspace_id
+			         AND rescheduled.session_id = e.session_id
+			         AND rescheduled.session_thread_id = e.session_thread_id
+			         AND rescheduled.model_request_id = e.model_request_id
+			         AND rescheduled.type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
 			       WHERE route.workspace_id = e.workspace_id
 			         AND route.session_id = e.session_id
 			         AND route.session_thread_id = e.session_thread_id
 			         AND route.tool_use_event_id = e.event_id
 			         AND route.status = 'resolving'
+			         AND route.decision = 'allow'
 			    )
 			    AND NOT EXISTS (
 		        SELECT 1

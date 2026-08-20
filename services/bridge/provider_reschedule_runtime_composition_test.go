@@ -404,6 +404,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		t.Fatalf("seed provider reschedule user context: %v", err)
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("provider-reschedule-recovery-signing-key")
 	acceptedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
@@ -456,12 +457,40 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		t.Fatalf("seed uncommitted sibling Tool fragment: %v", err)
 	}
 
-	if result, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
-		SET binding_id=$2, binding_generation=2, agent_runtime_pod_uid=$3, updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID, newPodUID); err != nil {
-		t.Fatalf("install replacement Runtime binding: %v", err)
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
+	if err := deliveryStore.repairLostRuntimeBinding(context.Background(), "default", sessionID, runtimeBindingForDelivery{
+		BindingID: oldBindingID, BindingGeneration: 1,
+	}, acceptedAt.Add(100*time.Millisecond)); err != nil {
+		t.Fatalf("repair lost Runtime after committed reschedule: %v", err)
+	}
+	var routeStatus string
+	var routeDecision sql.NullString
+	var terminalToolResults, oldBindings int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_pending_tool_uses
+		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3),
+		(SELECT decision FROM session_pending_tool_uses
+		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3),
+		(SELECT count(*) FROM session_events
+		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		    AND type='agent.tool_result' AND payload_json::jsonb ->> 'tool_use_event_id'=$3),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`,
+		sessionID, threadID, toolUse.GetCommitted().GetEventId(),
+	).Scan(&routeStatus, &routeDecision, &terminalToolResults, &oldBindings); err != nil {
+		t.Fatalf("read production pod-loss reschedule ownership: %v", err)
+	}
+	if routeStatus != "resolving" || !routeDecision.Valid || routeDecision.String != "allow" || terminalToolResults != 0 || oldBindings != 0 {
+		t.Fatalf("pod-loss reschedule route/result/bindings = %s/%v/%d/%d; want resolving allow/0/0",
+			routeStatus, routeDecision, terminalToolResults, oldBindings)
+	}
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
+	if result, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='running', binding_id=$2, binding_generation=2, running_since=clock_timestamp(),
+		    idle_since=NULL, updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
+		t.Fatalf("activate replacement Runtime residency: %v", err)
 	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
-		t.Fatalf("replacement Runtime binding rows = %d err=%v", rows, rowsErr)
+		t.Fatalf("replacement Runtime residency rows = %d err=%v", rows, rowsErr)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
