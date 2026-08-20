@@ -653,6 +653,8 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 		    SET status = 'idle',
 		        status_event_id = $3,
 		        idle_since = $4,
+		        binding_id = $5,
+		        binding_generation = $6,
 		        active_seconds_total = active_seconds_total + CASE
 		          WHEN running_since IS NULL THEN 0
 		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($4 - running_since)))
@@ -664,7 +666,8 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 		        cleanup_job_id = NULL,
 		        updated_at = $4
 		  WHERE workspace_id = $1 AND session_id = $2`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), statusStamp.EventID, now)
+		scope.GetWorkspaceId(), scope.GetSessionId(), statusStamp.EventID, now,
+		scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration())
 	if err != nil {
 		return runtimeTerminationEventFact{}, err
 	}

@@ -36,6 +36,8 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly targetPodUid: string;
 	readonly now: string;
 	readonly preloadOnly?: boolean;
+	readonly terminationWriteId?: string;
+	readonly terminationReplayCount?: number;
 };
 const command = {
 	workspaceId: input.workspaceId,
@@ -114,6 +116,7 @@ let resultType = "failed";
 let preloadResult: unknown;
 let lastSnapshot: unknown;
 let productionEntries: readonly unknown[] = [];
+const terminationResults: unknown[] = [];
 try {
 	const preload = await hosts.subAgentRunHost.preloadThread(command);
 	preloadResult = preload;
@@ -124,6 +127,25 @@ try {
 	await hosts.shutdownActiveRuns();
 	await hosts.close();
 }
+if (input.terminationWriteId !== undefined) {
+	for (let attempt = 0; attempt < (input.terminationReplayCount ?? 1); attempt += 1) {
+		terminationResults.push(
+			await writer.commitRuntimeTermination({
+				...command,
+				writeId: input.terminationWriteId,
+				failure: {
+					type: "runtime",
+					code: "runtime_invalid_sequence",
+					message: "Runtime operation failed.",
+					retryable: false,
+					fatal: true,
+					retryStatus: { type: "terminal" },
+					reason: "runtime_contract_validation",
+				},
+			}),
+		);
+	}
+}
 if (input.preloadOnly === true) {
 	process.stdout.write(JSON.stringify({
 		resultType: "preloaded",
@@ -133,6 +155,7 @@ if (input.preloadOnly === true) {
 		providerContext: [],
 		preloadResult,
 		lastSnapshot,
+		terminationResults,
 	}));
 	process.exit(0);
 }
@@ -203,5 +226,6 @@ process.stdout.write(
 		providerContext: providerRequests[0]?.context,
 		preloadResult,
 		lastSnapshot,
+		terminationResults,
 	}),
 );

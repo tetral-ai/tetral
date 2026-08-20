@@ -382,6 +382,118 @@ type providerRescheduleRecoveryComposition struct {
 	ProviderContext     json.RawMessage `json:"providerContext"`
 	PreloadResult       json.RawMessage `json:"preloadResult"`
 	LastSnapshot        json.RawMessage `json:"lastSnapshot"`
+	TerminationResults  json.RawMessage `json:"terminationResults"`
+}
+
+func TestPostgreSQLReplacementRuntimeTerminationStampsRecoveredBindingProvenance(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_recovered_binding_termination"
+		threadID       = "sthr_recovered_binding_termination"
+		oldBindingID   = "bind_recovered_binding_old"
+		newBindingID   = "bind_recovered_binding_new"
+		newPodUID      = "pod_recovered_binding_new"
+		durableTurnID  = "evt_recovered_binding_active_turn"
+		modelRequestID = "mreq_recovered_binding_reschedule"
+	)
+	oldBinding := runtimePodLostBinding(sessionID, oldBindingID, 1)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldBinding.PodUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("recovered-binding-termination-signing-key")
+	acceptedAt := time.Date(2026, 8, 20, 18, 0, 0, 0, time.UTC)
+	store.Clock = func() time.Time { return acceptedAt }
+	oldScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldBinding.PodUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, oldScope, durableTurnID)
+	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_recovered_binding_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	if ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: oldScope, RuntimeWriteId: "rwrite_recovered_binding_end", ModelRequestId: modelRequestID,
+		FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+		Reschedule: &bridgev1.RequestEndReschedule{
+			Attempt: 1, Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
+		},
+	}); err != nil || ended.GetCommitted().GetRescheduled() == nil {
+		t.Fatalf("commit recoverable provider reschedule: response=%#v err=%v", ended, err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
+	if err := deliveryStore.repairLostRuntimeBinding(context.Background(), "default", sessionID, runtimeBindingForDelivery{
+		BindingID: oldBindingID, BindingGeneration: 1,
+	}, acceptedAt.Add(100*time.Millisecond)); err != nil {
+		t.Fatalf("finalize lost Runtime binding: %v", err)
+	}
+	var sessionStatus, runtimeStatus string
+	var lostBindingID sql.NullString
+	var lostBindingGeneration sql.NullInt64
+	var remainingBindings int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT binding_id FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT binding_generation FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`, sessionID,
+	).Scan(&sessionStatus, &runtimeStatus, &lostBindingID, &lostBindingGeneration, &remainingBindings); err != nil {
+		t.Fatalf("read pod-loss provenance cleanup: %v", err)
+	}
+	if sessionStatus != "rescheduling" || runtimeStatus != "idle" || lostBindingID.Valid || lostBindingGeneration.Valid || remainingBindings != 0 {
+		t.Fatalf("pod-loss cleanup session/runtime/provenance/bindings = %s/%s/%+v/%+v/%d", sessionStatus, runtimeStatus, lostBindingID, lostBindingGeneration, remainingBindings)
+	}
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for recovered-binding Runtime: %v", err)
+	}
+	server := grpc.NewServer()
+	RegisterBridgeAPI(server, store)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+	var runningEventsBefore int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND type='session.status_running'`, sessionID).Scan(&runningEventsBefore); err != nil {
+		t.Fatalf("count running Events before replacement preload: %v", err)
+	}
+	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
+		"bridgeAddress": listener.Addr().String(),
+		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
+		"bindingId": newBindingID, "bindingGeneration": 2, "targetPodUid": newPodUID,
+		"now":         acceptedAt.Add(200 * time.Millisecond).Format(time.RFC3339Nano),
+		"preloadOnly": true, "terminationWriteId": durableTurnID, "terminationReplayCount": 2,
+	})
+	if result.ResultType != "preloaded" || result.ProviderInvocations != 0 || result.ExecutorInvocations != 0 {
+		t.Fatalf("replacement Runtime cold preload = %+v", result)
+	}
+	terminationResults := string(result.TerminationResults)
+	if strings.Count(terminationResults, `"type":"committed"`) != 1 || strings.Count(terminationResults, `"type":"duplicate"`) != 1 {
+		t.Fatalf("replacement Runtime termination/replay = %s; want committed then exact duplicate", terminationResults)
+	}
+	var storedStatus, storedBindingID string
+	var storedBindingGeneration int64
+	var runningEventsAfter, terminationOperations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT binding_id FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT binding_generation FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_running'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='commit_runtime_termination')`, sessionID,
+	).Scan(&storedStatus, &storedBindingID, &storedBindingGeneration, &runningEventsAfter, &terminationOperations); err != nil {
+		t.Fatalf("read recovered terminal binding provenance: %v", err)
+	}
+	if storedStatus != "idle" || storedBindingID != newBindingID || storedBindingGeneration != 2 || runningEventsAfter != runningEventsBefore || terminationOperations != 1 {
+		t.Fatalf("terminal residency status/binding/generation/running Events/operations = %s/%s/%d/%d/%d; want idle/%s/2/%d/1", storedStatus, storedBindingID, storedBindingGeneration, runningEventsAfter, terminationOperations, newBindingID, runningEventsBefore)
+	}
+	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
+	if replay, replayErr := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
+		Scope: oldScope, RuntimeWriteId: durableTurnID, FailureJson: failureJSON,
+	}); replayErr != nil || replay.GetStale() == nil {
+		t.Fatalf("old-binding termination replay = %#v/%v; want stale", replay, replayErr)
+	}
+	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, 2, newPodUID)
+	if ordinary, ordinaryErr := (BridgeAPIServer{store: store}).WriteEvent(context.Background(), closeoutWriteEventRequest(newScope, "rwrite_recovered_binding_post_terminal")); ordinaryErr != nil || ordinary.GetStale() == nil {
+		t.Fatalf("ordinary replacement declaration after termination = %#v/%v; want stale", ordinary, ordinaryErr)
+	}
 }
 
 func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution(t *testing.T) {
