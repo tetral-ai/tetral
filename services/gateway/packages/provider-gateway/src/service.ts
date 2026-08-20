@@ -371,9 +371,10 @@ export class ProviderGatewayServiceShell {
       attachments: attachmentResolution.attachments.map(({ data: _data, ...attachment }) => attachment),
     };
     // Per-turn provider loop. The `emitted` latch is set by the first event from
-    // the provider client and splits platform-key failover from Runtime-owned
-    // recovery. Attachment-rejections are emitted before this loop and do not
-    // close the failover window:
+    // the provider client and splits HTTP credential rejection from Runtime-owned
+    // stream recovery. Statusless transport and watchdog failures never mutate or
+    // switch credentials. Attachment-rejections are emitted before this loop and
+    // do not close the failover window:
     //
     //   | phase                     | credential | on provider fault                        | re-enters loop? |
     //   | ------------------------- | ---------- | ---------------------------------------- | --------------- |
@@ -469,6 +470,11 @@ export class ProviderGatewayServiceShell {
                 );
               })()
             : undefined;
+        if (error instanceof ProviderStreamTimeoutError || providerKeyFailure?.origin === "transport_failure") {
+          recordFailureOrigin("transport_failure");
+          yield providerErrorEvent(classifyProviderStreamError(error));
+          return;
+        }
         if (providerKeyFailure === undefined) {
           if (error instanceof ProviderIncompleteStreamError) {
             logProviderStreamIncomplete(this.options.logger, request, error);
@@ -477,11 +483,22 @@ export class ProviderGatewayServiceShell {
           yield providerErrorEvent(classifyProviderStreamError(error));
           return;
         }
+        if (resolvedCredential?.source === "session") {
+          recordFailureOrigin(providerKeyFailure.origin);
+          yield providerErrorEvent(
+            providerKeyFailure.classification.action === "quarantine" ||
+            providerKeyFailure.classification.providerError.statusCode === 401 ||
+            providerKeyFailure.classification.providerError.statusCode === 403
+              ? sessionCredentialUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
+          return;
+        }
         if (resolvedCredential?.source !== "platform" || emitted) {
           recordFailureOrigin(providerKeyFailure.origin);
           yield providerErrorEvent(
-            resolvedCredential?.source === "session" && providerKeyFailure.classification.action === "quarantine"
-              ? sessionCredentialUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+            providerKeyFailure.classification.action === "quarantine"
+              ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
               : providerKeyFailure.classification.providerError,
           );
           return;
@@ -526,12 +543,12 @@ export class ProviderGatewayServiceShell {
     if (resolved.ok) {
       return resolved;
     }
-    if (lastPlatformProviderError !== undefined && resolved.error.code === "platform_keys_exhausted") {
+    if (resolved.error.code === "platform_keys_exhausted") {
       return {
         ok: false,
-        error: lastPlatformFailureAction === "quarantine"
-          ? platformCredentialPoolUnavailableError(lastPlatformProviderError.statusCode)
-          : lastPlatformProviderError,
+        error: lastPlatformProviderError !== undefined && lastPlatformFailureAction !== "quarantine"
+          ? lastPlatformProviderError
+          : platformCredentialPoolUnavailableError(lastPlatformProviderError?.statusCode ?? resolved.error.statusCode),
       };
     }
     return resolved;

@@ -107,6 +107,161 @@ var bridgeLoadContextTurnEventTypes = []string{
 	"session.thread_status_terminated",
 }
 
+// Retained historical turn facts are selected only through Runtime-declared
+// Request End identities. The current durable attempt and pending Tool route
+// identities are the only additional roots. This query deliberately has no
+// per-Message lookup and never derives retention from is_error or event age.
+const loadContextTurnEventsSQL = `WITH current_turn AS MATERIALIZED (
+		SELECT sequence
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type IN ('session.status_running', 'session.thread_status_running')
+		   AND $5 <> ''
+		   AND event_id = $5
+		 ORDER BY sequence DESC
+		 LIMIT 1
+	),
+	open_request AS MATERIALIZED (
+		SELECT request_start.sequence, request_start.model_request_id
+		  FROM session_events request_start
+		 WHERE request_start.workspace_id = $1
+		   AND request_start.session_id = $2
+		   AND request_start.session_thread_id = $3
+		   AND request_start.type = 'span.model_request_start'
+		   AND request_start.sequence >= $4
+		   AND request_start.model_request_id IS NOT NULL
+		   AND NOT EXISTS (
+		     SELECT 1 FROM session_events request_end
+		      WHERE request_end.workspace_id = request_start.workspace_id
+		        AND request_end.session_id = request_start.session_id
+		        AND request_end.session_thread_id = request_start.session_thread_id
+		        AND request_end.model_request_id = request_start.model_request_id
+		        AND request_end.type = 'span.model_request_end'
+		   )
+		 ORDER BY request_start.sequence DESC
+		 LIMIT 1
+	),
+	pending_requests AS MATERIALIZED (
+		SELECT jsonb_array_elements_text($6::jsonb) AS model_request_id
+	),
+	pending_tools AS MATERIALIZED (
+		SELECT jsonb_array_elements_text($7::jsonb) AS event_id
+	),
+	pending_interrupts AS MATERIALIZED (
+		SELECT jsonb_array_elements_text(inbox.event_ids_json::jsonb) AS event_id
+		  FROM session_runtime_inbox inbox
+		 WHERE inbox.workspace_id = $1
+		   AND inbox.session_id = $2
+		   AND inbox.session_thread_id = $3
+		   AND inbox.input_kind = 'interrupt_control'
+		   AND inbox.status IN ('queued', 'delivering', 'accepted')
+	),
+	retained_ends AS MATERIALIZED (
+		SELECT event_id, model_request_id, payload_json::jsonb AS payload
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type = 'span.model_request_end'
+		   AND sequence >= $4
+		   AND model_request_id IS NOT NULL
+		   AND (
+		     payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}' IS NOT NULL
+		     OR CASE
+		          WHEN jsonb_typeof(payload_json::jsonb #> '{provider_context_retention,tool_use_event_ids}') = 'array'
+		          THEN jsonb_array_length(payload_json::jsonb #> '{provider_context_retention,tool_use_event_ids}') > 0
+		          ELSE false
+		        END
+		     OR CASE
+		          WHEN jsonb_typeof(payload_json::jsonb #> '{provider_context_retention,repair_event_ids}') = 'array'
+		          THEN jsonb_array_length(payload_json::jsonb #> '{provider_context_retention,repair_event_ids}') > 0
+		          ELSE false
+		        END
+		     OR (
+		       payload_json::jsonb #>> '{provider_context_retention,disposition}' = 'rescheduled'
+		       AND EXISTS (
+		         SELECT 1 FROM session_turn_retries retries
+		          WHERE retries.workspace_id = session_events.workspace_id
+		            AND retries.session_id = session_events.session_id
+		            AND retries.session_thread_id = session_events.session_thread_id
+		            AND (retries.provider_attempts > 0 OR retries.compaction_attempts > 0)
+		       )
+		     )
+		     OR model_request_id IN (SELECT model_request_id FROM pending_requests)
+		   )
+	),
+	retained_requests AS MATERIALIZED (
+		SELECT model_request_id FROM retained_ends
+		UNION
+		SELECT model_request_id FROM pending_requests
+		UNION
+		SELECT model_request_id FROM open_request
+	),
+	retained_tools AS MATERIALIZED (
+		SELECT jsonb_array_elements_text(CASE
+		         WHEN jsonb_typeof(payload #> '{provider_context_retention,tool_use_event_ids}') = 'array'
+		         THEN payload #> '{provider_context_retention,tool_use_event_ids}'
+		         ELSE '[]'::jsonb
+		       END) AS event_id
+		  FROM retained_ends
+		UNION
+		SELECT event_id FROM pending_tools
+	),
+	retained_repairs AS MATERIALIZED (
+		SELECT jsonb_array_elements_text(CASE
+		         WHEN jsonb_typeof(payload #> '{provider_context_retention,repair_event_ids}') = 'array'
+		         THEN payload #> '{provider_context_retention,repair_event_ids}'
+		         ELSE '[]'::jsonb
+		       END) AS event_id
+		  FROM retained_ends
+	)
+	SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+	  FROM session_events event
+	 WHERE workspace_id = $1
+	   AND session_id = $2
+	   AND session_thread_id = $3
+	   AND type IN (
+	     'session.status_running',
+	     'session.thread_status_running',
+	     'span.model_request_start',
+	     'span.model_request_end',
+	     'agent.tool_use',
+	     'agent.mcp_tool_use',
+	     'agent.tool_result',
+	     'agent.mcp_tool_result',
+	     'user.interrupt',
+	     'agent.thread_interrupt_requested',
+	     'session.error',
+	     'session.status_rescheduled',
+	     'session.thread_status_rescheduled',
+	     'session.status_idle',
+	     'session.thread_status_idle',
+	     'session.status_terminated',
+	     'session.thread_status_terminated'
+	   )
+	   AND (
+	     sequence >= COALESCE(
+	       (SELECT sequence FROM current_turn),
+	       (SELECT sequence FROM open_request),
+	       9223372036854775807
+	     )
+	     OR ($5 <> '' AND event_id = $5)
+	     OR event_id IN (SELECT event_id FROM retained_ends)
+	     OR (type = 'span.model_request_start' AND model_request_id IN (SELECT model_request_id FROM retained_requests))
+	     OR (type IN ('session.status_rescheduled', 'session.thread_status_rescheduled') AND model_request_id IN (SELECT model_request_id FROM retained_requests))
+	     OR (type IN ('agent.tool_use', 'agent.mcp_tool_use') AND event_id IN (SELECT event_id FROM retained_tools))
+	     OR (type IN ('agent.tool_result', 'agent.mcp_tool_result') AND COALESCE(
+	          payload_json::jsonb ->> 'tool_use_event_id',
+	          payload_json::jsonb ->> 'tool_use_id',
+	          payload_json::jsonb ->> 'mcp_tool_use_id'
+	        ) IN (SELECT event_id FROM retained_tools))
+	     OR (type = 'agent.tool_result' AND event_id IN (SELECT event_id FROM retained_repairs))
+	     OR (type IN ('user.interrupt', 'agent.thread_interrupt_requested') AND event_id IN (SELECT event_id FROM pending_interrupts))
+	   )
+	 ORDER BY sequence ASC`
+
 // loadThreadTurnFactsTx projects only facts with independent durable identity.
 // Runtime relates public Tools through their Tool Use references and internal
 // repairs through their own stable event identity; Message mutation history is
@@ -117,12 +272,14 @@ func loadThreadTurnFactsTx(
 	scope *bridgev1.RuntimeScope,
 	messages []bridgeLoadContextMessageDescriptor,
 	durableTurnID *string,
+	pendingModelRequestIDs []string,
+	pendingToolUseEventIDs []string,
 ) (bridgeLoadContextTurnFacts, error) {
 	facts := bridgeLoadContextTurnFacts{
 		Events:          make([]bridgeLoadContextTurnEvent, 0),
 		InternalRepairs: make([]bridgeLoadContextRepairFact, 0),
 	}
-	eventFloor, err := loadContextTurnEventFloorTx(ctx, tx, scope, messages, durableTurnID)
+	compactionFloor, err := loadContextCompactionEventFloorTx(ctx, tx, scope, messages)
 	if err != nil {
 		return facts, err
 	}
@@ -130,38 +287,17 @@ func loadThreadTurnFactsTx(
 	if durableTurnID != nil {
 		durableTurnEventID = *durableTurnID
 	}
+	pendingModelRequestIDsJSON, _ := json.Marshal(pendingModelRequestIDs)
+	pendingToolUseEventIDsJSON, _ := json.Marshal(pendingToolUseEventIDs)
 	rows, err := tx.Query(ctx,
-		`SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND (sequence >= $4 OR event_id = $5)
-		    AND type IN (
-		      'session.status_running',
-		      'session.thread_status_running',
-		      'span.model_request_start',
-		      'span.model_request_end',
-		      'agent.tool_use',
-		      'agent.mcp_tool_use',
-		      'agent.tool_result',
-		      'agent.mcp_tool_result',
-		      'user.interrupt',
-		      'agent.thread_interrupt_requested',
-		      'session.error',
-		      'session.status_rescheduled',
-		      'session.thread_status_rescheduled',
-		      'session.status_idle',
-		      'session.thread_status_idle',
-		      'session.status_terminated',
-		      'session.thread_status_terminated'
-		    )
-		  ORDER BY sequence ASC`,
+		loadContextTurnEventsSQL,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		eventFloor,
+		compactionFloor,
 		durableTurnEventID,
+		string(pendingModelRequestIDsJSON),
+		string(pendingToolUseEventIDsJSON),
 	)
 	if err != nil {
 		return facts, err
@@ -189,6 +325,7 @@ func loadThreadTurnFactsTx(
 	if err := rows.Close(); err != nil {
 		return facts, err
 	}
+	seenRepairKeys := make(map[string]struct{})
 	for _, raw := range rawEvents {
 		if raw.eventType == childInterruptRequestedEventType {
 			include, err := includeChildInterruptTurnFact(raw.payloadJSON)
@@ -207,12 +344,24 @@ func loadThreadTurnFactsTx(
 			return facts, err
 		}
 		facts.Events = append(facts.Events, event)
+		if event.ToolResult != nil && event.ToolResult.RepairKey != "" {
+			repair, err := bridgeRepairFactFromTurnEvent(
+				raw.eventID,
+				raw.eventSequence,
+				raw.modelRequestID,
+				raw.payloadJSON,
+				raw.runtimeWriteID,
+			)
+			if err != nil {
+				return facts, err
+			}
+			if _, duplicate := seenRepairKeys[repair.RepairKey]; duplicate {
+				return facts, status.Error(codes.FailedPrecondition, "internal repair direct reference is ambiguous")
+			}
+			seenRepairKeys[repair.RepairKey] = struct{}{}
+			facts.InternalRepairs = append(facts.InternalRepairs, repair)
+		}
 	}
-	repairs, err := loadContextRepairFactsTx(ctx, tx, scope, eventFloor)
-	if err != nil {
-		return facts, err
-	}
-	facts.InternalRepairs = repairs
 	return facts, nil
 }
 
@@ -236,12 +385,11 @@ func includeChildInterruptTurnFact(payloadJSON string) (bool, error) {
 	}
 }
 
-func loadContextTurnEventFloorTx(
+func loadContextCompactionEventFloorTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	messages []bridgeLoadContextMessageDescriptor,
-	durableTurnID *string,
 ) (int64, error) {
 	var compactionFloor int64
 	for _, message := range messages {
@@ -277,107 +425,41 @@ func loadContextTurnEventFloorTx(
 		compactionFloor = sequence
 		break
 	}
-	var durableTurnFloor int64
-	if durableTurnID != nil {
-		err := tx.QueryRow(ctx,
-			`SELECT sequence
-			   FROM session_events
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4
-			    AND type IN ('session.status_running', 'session.thread_status_running')`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *durableTurnID,
-		).Scan(&durableTurnFloor)
-		if dbconnect.IsNoRows(err) {
-			return 0, status.Error(codes.FailedPrecondition, "durable turn has no running event")
-		}
-		if err != nil {
-			return 0, err
-		}
-	} else {
-		err := tx.QueryRow(ctx,
-			`SELECT sequence
-			   FROM session_events
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND type IN ('session.status_running', 'session.thread_status_running')
-			  ORDER BY sequence DESC
-			  LIMIT 1`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		).Scan(&durableTurnFloor)
-		if err != nil && !dbconnect.IsNoRows(err) {
-			return 0, err
-		}
+	return compactionFloor, nil
+}
+
+func bridgeRepairFactFromTurnEvent(
+	eventID string,
+	eventSequence int64,
+	modelRequestID sql.NullString,
+	payloadJSON string,
+	runtimeWriteID sql.NullString,
+) (bridgeLoadContextRepairFact, error) {
+	if eventID == "" || eventSequence <= 0 || !modelRequestID.Valid || modelRequestID.String == "" ||
+		!runtimeWriteID.Valid || runtimeWriteID.String == "" {
+		return bridgeLoadContextRepairFact{}, status.Error(codes.FailedPrecondition, "internal repair direct reference is malformed")
 	}
-	eventFloor := durableTurnFloor
-	for _, message := range messages {
-		if message.Kind != "assistant" || message.ModelRequestID == nil {
-			continue
-		}
-		var requestFloor sql.NullInt64
-		err := tx.QueryRow(ctx,
-			`SELECT MIN(request_start.sequence)
-			   FROM session_events request_start
-			   JOIN session_events request_end
-			     ON request_end.workspace_id=request_start.workspace_id
-			    AND request_end.session_id=request_start.session_id
-			    AND request_end.session_thread_id=request_start.session_thread_id
-			    AND request_end.model_request_id=request_start.model_request_id
-			    AND request_end.type='span.model_request_end'
-			  WHERE request_start.workspace_id=$1
-			    AND request_start.session_id=$2
-			    AND request_start.session_thread_id=$3
-			    AND request_start.model_request_id=$4
-			    AND request_start.type='span.model_request_start'
-			    AND request_end.payload_json::jsonb ->> 'is_error' = 'true'`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *message.ModelRequestID,
-		).Scan(&requestFloor)
-		if err != nil {
-			return 0, err
-		}
-		if requestFloor.Valid && requestFloor.Int64 < eventFloor {
-			eventFloor = requestFloor.Int64
-		}
+	payload, err := decodeRuntimeDeclarationObject(payloadJSON)
+	if err != nil || requireRuntimeObjectFields(
+		payload,
+		[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
+		[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
+	) != nil || payload["type"] != "agent.tool_result" || payload["repair_kind"] != "invalid_tool" {
+		return bridgeLoadContextRepairFact{}, status.Error(codes.FailedPrecondition, "internal repair direct event is malformed")
 	}
-	var unresolvedRequestFloor sql.NullInt64
-	err := tx.QueryRow(ctx,
-		`SELECT MIN(request_start.sequence)
-		   FROM session_events tool_use
-		   JOIN session_events request_start
-		     ON request_start.workspace_id=tool_use.workspace_id
-		    AND request_start.session_id=tool_use.session_id
-		    AND request_start.session_thread_id=tool_use.session_thread_id
-		    AND request_start.model_request_id=tool_use.model_request_id
-		    AND request_start.type='span.model_request_start'
-		  WHERE tool_use.workspace_id=$1 AND tool_use.session_id=$2 AND tool_use.session_thread_id=$3
-		    AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
-		    AND request_start.sequence >= $4
-		    AND NOT EXISTS (
-		      SELECT 1 FROM session_events tool_result
-		       WHERE tool_result.workspace_id=tool_use.workspace_id
-		         AND tool_result.session_id=tool_use.session_id
-		         AND tool_result.session_thread_id=tool_use.session_thread_id
-		         AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
-		         AND COALESCE(
-		               tool_result.payload_json::jsonb ->> 'tool_use_event_id',
-		               tool_result.payload_json::jsonb ->> 'tool_use_id',
-		               tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
-		             )=tool_use.event_id
-		    )`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), compactionFloor,
-	).Scan(&unresolvedRequestFloor)
-	if err != nil {
-		return 0, err
+	modelToolCallID, _ := payload["model_tool_call_id"].(string)
+	toolName, _ := payload["tool_name"].(string)
+	if modelToolCallID == "" || toolName == "" {
+		return bridgeLoadContextRepairFact{}, status.Error(codes.FailedPrecondition, "internal repair direct event is incomplete")
 	}
-	if unresolvedRequestFloor.Valid && unresolvedRequestFloor.Int64 < eventFloor {
-		eventFloor = unresolvedRequestFloor.Int64
-	}
-	if eventFloor < compactionFloor {
-		eventFloor = compactionFloor
-	}
-	return eventFloor, nil
+	return bridgeLoadContextRepairFact{
+		RepairKey:       runtimeWriteID.String,
+		RepairEventID:   eventID,
+		EventSequence:   eventSequence,
+		ModelRequestID:  modelRequestID.String,
+		ModelToolCallID: modelToolCallID,
+		ToolName:        toolName,
+	}, nil
 }
 
 func bridgeTurnEventFact(
@@ -678,74 +760,4 @@ func bridgeTurnToolResultFact(
 		return nil, "", status.Error(codes.FailedPrecondition, "tool result direct facts are malformed")
 	}
 	return &bridgeLoadContextToolResult{ModelToolCallID: toolUse.ModelToolCallID, ToolName: toolUse.ToolName, Outcome: projection.State}, modelRequestID, nil
-}
-
-func loadContextRepairFactsTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	eventFloor int64,
-) ([]bridgeLoadContextRepairFact, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT runtime_write_id, payload_json, event_id, sequence, model_request_id
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND type = 'agent.tool_result'
-		    AND payload_json::jsonb ->> 'repair_kind' = 'invalid_tool'
-		    AND sequence >= $4
-		  ORDER BY sequence ASC`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventFloor,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	facts := make([]bridgeLoadContextRepairFact, 0)
-	seen := make(map[string]struct{})
-	for rows.Next() {
-		var fact bridgeLoadContextRepairFact
-		var payloadJSON string
-		var modelRequestID sql.NullString
-		if err := rows.Scan(
-			&fact.RepairKey,
-			&payloadJSON,
-			&fact.RepairEventID,
-			&fact.EventSequence,
-			&modelRequestID,
-		); err != nil {
-			return nil, err
-		}
-		if fact.RepairKey == "" || fact.RepairEventID == "" ||
-			fact.EventSequence <= 0 || !modelRequestID.Valid || modelRequestID.String == "" {
-			return nil, status.Error(codes.FailedPrecondition, "internal repair direct reference is malformed")
-		}
-		if _, duplicate := seen[fact.RepairKey]; duplicate {
-			return nil, status.Error(codes.FailedPrecondition, "internal repair direct reference is ambiguous")
-		}
-		seen[fact.RepairKey] = struct{}{}
-		fact.ModelRequestID = modelRequestID.String
-		payload, err := decodeRuntimeDeclarationObject(payloadJSON)
-		if err != nil || requireRuntimeObjectFields(
-			payload,
-			[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
-			[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
-		) != nil || payload["type"] != "agent.tool_result" || payload["repair_kind"] != "invalid_tool" {
-			return nil, status.Error(codes.FailedPrecondition, "internal repair direct event is malformed")
-		}
-		fact.ModelToolCallID, _ = payload["model_tool_call_id"].(string)
-		fact.ToolName, _ = payload["tool_name"].(string)
-		if fact.ModelToolCallID == "" || fact.ToolName == "" {
-			return nil, status.Error(codes.FailedPrecondition, "internal repair direct event is incomplete")
-		}
-		facts = append(facts, fact)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return facts, nil
 }

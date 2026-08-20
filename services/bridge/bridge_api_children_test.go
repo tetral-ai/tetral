@@ -284,7 +284,8 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 					Scope: scope, RuntimeWriteId: "rwrite_spawn_prefix_end_" + name, ModelRequestId: modelRequestID,
 					FinishReason: "tool_calls", UsageJson: `{}`,
 					ProviderContextRetention: &bridgev1.ProviderContextRetention{
-						Disposition: "completed", ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+						Disposition: "completed", AssistantMessageSequence: toolUse.GetCommitted().AssignedMessageSequence,
+						ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
 					},
 				}); err != nil {
 					t.Fatalf("end source spawn request: %v", err)

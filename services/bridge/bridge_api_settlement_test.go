@@ -11,7 +11,7 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-func TestFailedRequestPreservesAcknowledgedAssistantContext(t *testing.T) {
+func TestFailedRequestWithoutRetentionDeclarationKeepsAssistantAuditOnly(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_failed_acknowledged_context"
@@ -48,11 +48,8 @@ func TestFailedRequestPreservesAcknowledgedAssistantContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode failed request context: %v", err)
 	}
-	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 1 ||
-		payload.ContextEntries[0].MessageSequence != member.GetCommitted().GetAssignedMessageSequence() ||
-		len(payload.ContextEntries[0].Parts) != 1 ||
-		!containsString(string(payload.ContextEntries[0].Parts[0]), "acknowledged before failure") {
-		t.Fatalf("failed request cold context = %#v", payload)
+	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 0 {
+		t.Fatalf("audit-only failed Assistant entered cold provider context = %#v", payload)
 	}
 }
 

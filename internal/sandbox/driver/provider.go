@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,9 +26,8 @@ const DaytonaProviderName = "daytona"
 
 var ErrSandboxOwnershipMismatch = stderrors.New("sandbox provider ownership mismatch")
 var (
-	daytonaCapacityFamilyPattern    = regexp.MustCompile(`^Total (disk|CPU|memory) limit exceeded\. Maximum allowed: ([^.[:space:]]+)\.$`)
-	daytonaComputeCapacityPattern   = regexp.MustCompile(`^[1-9][0-9]*$`)
-	daytonaByteCapacityLimitPattern = regexp.MustCompile(`^[1-9][0-9]*(KiB|MiB|GiB|TiB)$`)
+	daytonaCapacityFamilyPattern = regexp.MustCompile(`^Total (disk|CPU|memory) limit exceeded\. Maximum allowed: ([^.[:space:]]+)\.$`)
+	daytonaCapacityLimitPattern  = regexp.MustCompile(`^([1-9][0-9]*)(KiB|MiB|GiB|TiB)?$`)
 )
 
 type DaytonaLifecycleProvider struct {
@@ -498,10 +498,14 @@ func daytonaCreateCapacityExceeded(validation *daytonaerrors.DaytonaValidationEr
 		return false
 	}
 	resource, limit := match[1], match[2]
-	if resource == "CPU" {
-		return daytonaComputeCapacityPattern.MatchString(limit)
+	limitMatch := daytonaCapacityLimitPattern.FindStringSubmatch(limit)
+	if len(limitMatch) != 3 {
+		return false
 	}
-	return daytonaByteCapacityLimitPattern.MatchString(limit)
+	if _, err := strconv.ParseUint(limitMatch[1], 10, 64); err != nil {
+		return false
+	}
+	return resource != "CPU" || limitMatch[2] == ""
 }
 
 func daytonaRequestWasRejected(err error) bool {

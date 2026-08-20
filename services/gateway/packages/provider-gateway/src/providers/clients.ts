@@ -974,7 +974,9 @@ function toAIAssistantPart(part: LoweredAssistantContentPart): ModelMessageForRo
       return {
         type: "reasoning",
         text: part.text,
-        providerOptions: mergePartProviderOptions(part.providerMetadata, part.providerOptions) as ProviderOptions,
+        providerOptions: reasoningProviderOptionsForSDK(
+          mergePartProviderOptions(part.providerMetadata, part.providerOptions),
+        ) as ProviderOptions,
       };
     case "tool-call":
       return {
@@ -985,6 +987,30 @@ function toAIAssistantPart(part: LoweredAssistantContentPart): ModelMessageForRo
         ...(part.providerOptions !== undefined ? { providerOptions: part.providerOptions as ProviderOptions } : {}),
       };
   }
+}
+
+// ProviderContext carries provider-native durable metadata. The OpenAI AI SDK
+// exposes the same Responses value under its typed camel-case adapter field;
+// translate only that spelling at the adapter boundary after lowering has
+// already removed stateless item identities.
+function reasoningProviderOptionsForSDK(
+  providerOptions: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const openAI = providerOptions.openai;
+  if (typeof openAI !== "object" || openAI === null || Array.isArray(openAI)) {
+    return providerOptions;
+  }
+  const { encrypted_content: encryptedContent, ...rest } = openAI as Readonly<Record<string, unknown>>;
+  if (typeof encryptedContent !== "string") {
+    return providerOptions;
+  }
+  return {
+    ...providerOptions,
+    openai: {
+      ...rest,
+      reasoningEncryptedContent: encryptedContent,
+    },
+  };
 }
 
 function toAIToolResultPart(part: LoweredToolResultPart): ModelMessageForRole<"tool">["content"][number] {

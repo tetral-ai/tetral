@@ -25,6 +25,11 @@
         "content": "Keep visible output minimal and call tools exactly as requested."
       },
       {
+        "type": "reasoning",
+        "encrypted_content": "enc_prior_reasoning",
+        "summary": []
+      },
+      {
         "role": "user",
         "content": [
           {
@@ -65,6 +70,8 @@
     "model_id": "openai/gpt-5.5",
     "provider": "openai",
     "source": "real-provider",
-    "source_fixture": "fixtures/openai-gpt-5.5-responses-live-2026-07-06.sse"
+    "source_fixture": "fixtures/openai-gpt-5.5-responses-live-2026-07-06.sse",
+    "request_evidence": "current-adapter-capture",
+    "replayed_reasoning_provider_acceptance": "not-claimed"
   }
 }

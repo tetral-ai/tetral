@@ -22,8 +22,10 @@ To increase concurrency limits, upgrade your organization's Tier by visiting htt
 		{name: "disk response", message: diskResponse},
 		{name: "disk CRLF response", message: strings.ReplaceAll(diskResponse, "\n", "\r\n")},
 		{name: "changed advisory", message: "Total disk limit exceeded. Maximum allowed: 30GiB.\nProvider guidance changed."},
+		{name: "disk unitless", message: "Total disk limit exceeded. Maximum allowed: 30.\nProvider guidance changed."},
 		{name: "CPU response", message: "Total CPU limit exceeded. Maximum allowed: 10.\nProvider guidance changed."},
 		{name: "memory response", message: "Total memory limit exceeded. Maximum allowed: 16GiB.\nProvider guidance changed."},
+		{name: "memory unitless", message: "Total memory limit exceeded. Maximum allowed: 16.\nProvider guidance changed."},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			mapped := mapDaytonaError(sandbox.StageCreateSandbox, daytonaerrors.NewDaytonaValidationError(test.message, nil))
@@ -61,7 +63,8 @@ To increase concurrency limits, upgrade your organization's Tier by visiting htt
 		{name: "same-line suffix", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 30GiB. trailing detail"},
 		{name: "unknown resource", stage: sandbox.StageCreateSandbox, message: "Total GPU limit exceeded. Maximum allowed: 1."},
 		{name: "CPU byte unit", stage: sandbox.StageCreateSandbox, message: "Total CPU limit exceeded. Maximum allowed: 10GiB."},
-		{name: "memory without byte unit", stage: sandbox.StageCreateSandbox, message: "Total memory limit exceeded. Maximum allowed: 16."},
+		{name: "numeric overflow", stage: sandbox.StageCreateSandbox, message: "Total memory limit exceeded. Maximum allowed: 18446744073709551616."},
+		{name: "numeric overflow with unit", stage: sandbox.StageCreateSandbox, message: "Total disk limit exceeded. Maximum allowed: 18446744073709551616GiB."},
 		{name: "non create", stage: sandbox.StageStatus, message: liveResponse},
 	}
 	for _, test := range tests {

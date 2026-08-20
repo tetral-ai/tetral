@@ -128,13 +128,14 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 		name              string
 		scenario          string
 		wantProviderCalls int
+		wantTurns         int
 		wantRequestEnds   int
 		wantReschedules   int
 		wantErrorEnds     int
 	}{
-		{name: "platform billing", scenario: "platform_billing", wantProviderCalls: 2, wantRequestEnds: 2, wantErrorEnds: 1},
-		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2},
-		{name: "invalid BYOK", scenario: "invalid_byok", wantProviderCalls: 2, wantRequestEnds: 2, wantErrorEnds: 1},
+		{name: "platform billing", scenario: "platform_billing", wantProviderCalls: 2, wantTurns: 3, wantRequestEnds: 3, wantErrorEnds: 2},
+		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2},
+		{name: "invalid BYOK", scenario: "invalid_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -164,13 +165,19 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				}
 				firstCapturePending <- firstWriteID
 				<-releaseFirstCapture
-				if err := settleOutputCaptureGenerationForTest(admin, sessionID, firstWriteID, generation, "staged"); err != nil {
-					capturesSettled <- err
-					return
-				}
-				secondWriteID, secondGeneration, err := waitForPendingOutputCapture(admin, sessionID, firstWriteID)
-				if err == nil {
-					err = settleOutputCaptureGenerationForTest(admin, sessionID, secondWriteID, secondGeneration, "staged")
+				writeID := firstWriteID
+				captureGeneration := generation
+				for turn := 0; turn < testCase.wantTurns; turn++ {
+					if turn > 0 {
+						writeID, captureGeneration, err = waitForPendingOutputCapture(admin, sessionID, writeID)
+						if err != nil {
+							break
+						}
+					}
+					err = settleOutputCaptureGenerationForTest(admin, sessionID, writeID, captureGeneration, "staged")
+					if err != nil {
+						break
+					}
 				}
 				capturesSettled <- err
 			}()
@@ -197,14 +204,20 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
 			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
 			close(releaseFirstCapture)
+			if testCase.wantTurns == 3 {
+				waitForProviderTimeoutFacts(t, admin, sessionID, 2, "idle", process)
+				appendMessage("idem_provider_failure_third_"+suffix, "continue after platform capacity is restored")
+				deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+			}
 			waitForProviderTimeoutFacts(t, admin, sessionID, testCase.wantRequestEnds, "idle", process)
 			result := process.close(t)
 			if captureErr := <-capturesSettled; captureErr != nil {
 				t.Fatalf("settle %s output captures: %v", testCase.scenario, captureErr)
 			}
-			if result.ProviderInvocations != testCase.wantProviderCalls || result.FinishIdleInvocations != 2 || result.FinishIdleResult != "committed" || result.SensitiveLogLeak {
-				t.Fatalf("%s provider/FinishIdle/log result = %d/%d/%s/%v; want %d/2/committed/false",
-					testCase.scenario, result.ProviderInvocations, result.FinishIdleInvocations, result.FinishIdleResult, result.SensitiveLogLeak, testCase.wantProviderCalls)
+			if result.ProviderInvocations != testCase.wantProviderCalls || result.FinishIdleInvocations != testCase.wantTurns || result.FinishIdleResult != "committed" || result.SensitiveLogLeak {
+				t.Fatalf("%s provider/FinishIdle/log result = %d/%d/%s/%v; want %d/%d/committed/false",
+					testCase.scenario, result.ProviderInvocations, result.FinishIdleInvocations, result.FinishIdleResult, result.SensitiveLogLeak,
+					testCase.wantProviderCalls, testCase.wantTurns)
 			}
 
 			var starts, ends, reschedules, errorEnds, users, assistants int
@@ -221,10 +234,10 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				t.Fatalf("read %s durable provider failure facts: %v", testCase.scenario, err)
 			}
 			if starts != testCase.wantRequestEnds || ends != testCase.wantRequestEnds || reschedules != testCase.wantReschedules ||
-				errorEnds != testCase.wantErrorEnds || users != 2 || assistants != 1 {
-				t.Fatalf("%s starts/ends/reschedules/errors/users/assistants = %d/%d/%d/%d/%d/%d; want %d/%d/%d/%d/2/1",
+				errorEnds != testCase.wantErrorEnds || users != testCase.wantTurns || assistants != 1 {
+				t.Fatalf("%s starts/ends/reschedules/errors/users/assistants = %d/%d/%d/%d/%d/%d; want %d/%d/%d/%d/%d/1",
 					testCase.scenario, starts, ends, reschedules, errorEnds, users, assistants,
-					testCase.wantRequestEnds, testCase.wantRequestEnds, testCase.wantReschedules, testCase.wantErrorEnds)
+					testCase.wantRequestEnds, testCase.wantRequestEnds, testCase.wantReschedules, testCase.wantErrorEnds, testCase.wantTurns)
 			}
 			if strings.Contains(durablePayloads, "private-billing-canary") || strings.Contains(durablePayloads, "statusless-private-canary") || strings.Contains(durablePayloads, "private-byok-canary") {
 				t.Fatalf("%s durable facts leaked provider-private detail", testCase.scenario)

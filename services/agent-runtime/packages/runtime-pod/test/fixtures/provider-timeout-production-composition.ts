@@ -121,11 +121,11 @@ const writer = {
 		await writeRuntimeState();
 		const result = await bridgeWriter.finishIdle(envelope);
 		finishIdleResult = result.ok ? result.type : result.error.code;
-		if (result.ok && finishIdleInvocations === 1) {
-			if (scenario === "platform_billing") {
+		if (result.ok) {
+			if (scenario === "platform_billing" && finishIdleInvocations === 2) {
 				platformPool.replaceKeys([badPlatformKey, healthyPlatformKey]);
 			}
-			if (scenario === "invalid_byok") {
+			if (scenario === "invalid_byok" && finishIdleInvocations === 1) {
 				sessionCredentialHealthy = true;
 			}
 		}
@@ -246,7 +246,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 						statusCode: 401,
 						data: {
 							error: {
-								type: "authentication_error",
+								type: "unknown_private_auth_code",
 								message: "invalid credential private-byok-canary",
 							},
 						},
@@ -264,14 +264,6 @@ const semanticTimeoutStreamer = {
 		if (providerInvocations <= 2) {
 			for (let index = 0; index < 40; index += 1) {
 				request.onTransportActivity?.();
-				yield {
-					type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-					text: { id: `empty_${index}`, text: "", metadataJson: "{}" },
-				};
-				yield {
-					type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-					text: { id: `empty_${index}`, text: "", metadataJson: "{}" },
-				};
 				await new Promise((resolve) => setTimeout(resolve, 5));
 			}
 			return;

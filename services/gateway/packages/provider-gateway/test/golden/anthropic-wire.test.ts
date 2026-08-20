@@ -424,6 +424,50 @@ describe("multi-Tool captured provider wire composition", () => {
 		}
 	});
 
+	test("serializes empty signed Anthropic reasoning at the adapter request boundary", async () => {
+		const mock = createMockAnthropicServer(
+			await readFile(AnthropicFixtureUrl, "utf8"),
+		);
+		const registry = new ProviderClientRegistry({ fetch: mock.fetch });
+		try {
+			const base = anthropicGoldenRequest();
+			await collectEvents(
+				registry.stream({
+					request: {
+						...base,
+						requestId: "req_empty_signed_reasoning",
+						modelRequestId: "mreq_empty_signed_reasoning",
+						context: [
+							{
+								role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
+								content: [{ reasoning: {
+									text: "",
+									metadataJson: JSON.stringify({ anthropic: { signature: "sig_empty_reasoning" } }),
+								} }],
+							},
+							{
+								role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_USER,
+								content: [{ text: { text: "Continue." } }],
+							},
+						],
+					},
+					credential: sessionAnthropicCredential(),
+				}),
+			);
+
+			const messages = mock.requests[0]!.body.messages as readonly {
+				readonly role: string;
+				readonly content: readonly Record<string, unknown>[];
+			}[];
+			expect(messages[0]).toMatchObject({
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "", signature: "sig_empty_reasoning" }],
+			});
+		} finally {
+			await mock.close();
+		}
+	});
+
 	test("keeps the same completed and errored Tool exchange identities on OpenAI wire families", async () => {
 		const scenarios: readonly {
 			readonly family: "openai" | "openai-compatible";
@@ -433,13 +477,16 @@ describe("multi-Tool captured provider wire composition", () => {
 		}[] = [
 			{
 				family: "openai",
-				request: noInventionToolHistoryRequest(openAIGoldenRequest()),
+				request: noInventionToolHistoryRequest(
+					openAIGoldenRequest(),
+					JSON.stringify({ openai: { encrypted_content: "enc_no_invention", itemId: "rs_removed" } }),
+				),
 				credential: sessionOpenAICredential(),
 				fixture: OpenAIFixtureUrl,
 			},
 			{
 				family: "openai-compatible",
-				request: noInventionToolHistoryRequest(zaiGoldenRequest()),
+				request: noInventionToolHistoryRequest(zaiGoldenRequest(), "{}"),
 				credential: sessionZaiCredential(),
 				fixture: ZaiFixtureUrl,
 			},
@@ -475,6 +522,27 @@ describe("multi-Tool captured provider wire composition", () => {
 				]);
 				expect(wire.results[0]!.output, scenario.family).toBe(JSON.stringify({ text: "mcp-completed-canary" }));
 				expect(wire.results[1]!.output, scenario.family).toBe(JSON.stringify({ error: { message: "builtin-error-canary" } }));
+				if (scenario.family === "openai") {
+					const reasoningItems = (mock.requests[0]!.body.input as readonly Record<string, unknown>[])
+						.filter((item) => item.type === "reasoning");
+					expect(reasoningItems).toHaveLength(3);
+					expect(reasoningItems.map((item) => item.encrypted_content)).toEqual([
+						"enc_no_invention",
+						"enc_no_invention",
+						"enc_no_invention",
+					]);
+					expect(JSON.stringify(reasoningItems)).not.toContain("rs_removed");
+				} else {
+					const assistantReasoning = (mock.requests[0]!.body.messages as readonly Record<string, unknown>[])
+						.filter((message) => message.role === "assistant")
+						.map((message) => message.reasoning_content)
+						.filter((value) => typeof value === "string" && value.length > 0);
+					expect(assistantReasoning).toEqual([
+						"declared reasoning mcp",
+						"declared reasoning builtin",
+						"declared reasoning only",
+					]);
+				}
 			} finally {
 				await mock.close();
 			}
@@ -759,6 +827,11 @@ describe("OpenAI Responses golden wire path", () => {
 						"Keep visible output minimal and call tools exactly as requested.",
 				},
 				{
+					type: "reasoning",
+					encrypted_content: "enc_prior_reasoning",
+					summary: [],
+				},
+				{
 					role: "user",
 					content: [
 						{
@@ -845,6 +918,11 @@ describe("OpenAI Responses golden wire path", () => {
 			});
 			expect(JSON.stringify(captured.body.input)).not.toContain('"id"');
 			expect(captured.body.input).toEqual([
+				{
+					type: "reasoning",
+					encrypted_content: "enc_prior_reasoning",
+					summary: [],
+				},
 				{
 					role: "user",
 					content: [

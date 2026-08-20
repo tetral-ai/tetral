@@ -15,7 +15,7 @@ import { BridgeAPIAttachmentResolver } from "../../src/attachments.js";
 import { ProviderCredentialResolver } from "../../src/providers/credentials.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { encryptAES256GCM } from "../../src/providers/crypto.js";
-import { ProviderKeyFailureError } from "../../src/providers/pool.js";
+import { classifyProviderFailure, ProviderKeyFailureError } from "../../src/providers/pool.js";
 import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
@@ -562,14 +562,17 @@ describe("ProviderGatewayServiceShell", () => {
     expect(events.filter((event) => event.providerError === undefined)).toHaveLength(2);
   });
 
-  test("semantic watchdog starts before the first content-bearing event", async () => {
+  test("semantic watchdog before the first normalized event stays on the stream-timeout path", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({
       ...base,
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
       limits: { maxOutputTokens: 1024, timeoutMs: 1_000 },
     });
+    const pool = new RecordingPlatformCredentialPool(["pfk_semantic_timeout", "pfk_unused"]);
+    let attempts = 0;
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      credentialResolver: platformCredentialResolver(pool),
       providerStreamTimeouts: {
         firstByteTimeoutMs: 500,
         interChunkTimeoutMs: 20,
@@ -577,17 +580,13 @@ describe("ProviderGatewayServiceShell", () => {
       },
       providerStreamer: {
         stream: async function* (input) {
+          attempts += 1;
           for (let index = 0; index < 20; index += 1) {
             input.onTransportActivity?.();
-            yield textEvent(
-              ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-              "",
-            );
-            yield textEvent(
-              ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-              "",
-            );
             await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          if (false) {
+            yield finishEvent();
           }
         },
       },
@@ -601,6 +600,8 @@ describe("ProviderGatewayServiceShell", () => {
       code: "provider_stream_error",
       retryable: true,
     });
+    expect(attempts).toBe(1);
+    expect(pool.recordedFailures).toEqual([]);
   });
 
   test("text, reasoning, and Tool Call progress each reset the semantic watchdog", async () => {
@@ -788,7 +789,7 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
   });
 
-  test("T-POOL-9 switches platform keys for direct pre-byte provider stream throws", async () => {
+  test("direct pre-byte statusless transport does not switch or mutate platform keys", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({
       ...base,
@@ -810,13 +811,8 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(attempts).toEqual(["pfk_1", "pfk_2", "pfk_3"]);
-    expect(pool.recordedFailures.map((failure) => failure.keyId)).toEqual(["pfk_1", "pfk_2", "pfk_3"]);
-    expect(pool.recordedFailures.map((failure) => failure.classification.providerError.code)).toEqual([
-      "provider_stream_error",
-      "provider_stream_error",
-      "provider_stream_error",
-    ]);
+    expect(attempts).toEqual(["pfk_1"]);
+    expect(pool.recordedFailures).toEqual([]);
     expect(events).toHaveLength(1);
     expect(events[0]?.providerError?.error).toMatchObject({
       code: "provider_stream_error",
@@ -863,6 +859,7 @@ describe("ProviderGatewayServiceShell", () => {
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
     expect(attempts).toBe(1);
+    expect(pool.recordedFailures).toEqual([]);
     expect(events).toHaveLength(1);
     expect(events[0]?.providerError?.error).toMatchObject({
       code: "provider_stream_error",
@@ -908,6 +905,42 @@ describe("ProviderGatewayServiceShell", () => {
       code: "provider_stream_error",
       retryable: true,
     });
+  });
+
+  test("midstream platform credential rejection is sanitized without pool mutation", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    const pool = new RecordingPlatformCredentialPool(["pfk_midstream", "pfk_unused"]);
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      credentialResolver: platformCredentialResolver(pool),
+      providerStreamer: {
+        stream: async function* () {
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          throw new ProviderKeyFailureError({
+            action: "quarantine",
+            providerError: {
+              code: "provider_key_unavailable",
+              message: "private-midstream-key-canary",
+              retryable: false,
+              fatal: true,
+              statusCode: 401,
+            },
+          });
+        },
+      },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(pool.recordedFailures).toEqual([]);
+    expect(events.at(-1)?.providerError?.error).toMatchObject({
+      code: "provider_unavailable",
+      message: "Provider is unavailable.",
+      retryable: false,
+      fatal: false,
+      statusCode: 401,
+    });
+    expect(JSON.stringify(events)).not.toMatch(/private-midstream-key-canary|platform|pool|credential|billing/i);
   });
 
   test("discards open provider fragments before post-first-byte provider errors", async () => {
@@ -1188,6 +1221,17 @@ describe("ProviderGatewayServiceShell", () => {
     })]);
     expect(JSON.stringify(logs)).not.toMatch(/pfk_billing|private-billing-canary|credit balance|sk-pfk/i);
 
+    const stillExhausted = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toEqual(["pfk_billing"]);
+    expect(stillExhausted).toHaveLength(1);
+    expect(stillExhausted[0]?.providerError?.error).toMatchObject({
+      code: "provider_unavailable",
+      message: "Provider is unavailable.",
+      retryable: false,
+      fatal: false,
+    });
+    expect(JSON.stringify(stillExhausted)).not.toMatch(/anthropic|platform|key|balance|billing|credit|private-billing-canary/i);
+
     keyIDs.push("pfk_restored");
     const recovered = await collectEvents(service.streamProviderRequest(request, metadata()));
     expect(attempts).toEqual(["pfk_billing", "pfk_restored"]);
@@ -1310,6 +1354,60 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 401,
     });
     expect(JSON.stringify(events)).not.toMatch(/raw credential rejection canary|platform|pool/i);
+
+    const recovered = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toBe(2);
+    expect(recovered.map((event) => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
+  });
+
+  test("session OpenAI 401 with an unknown body code is a resumable typed credential rejection", async () => {
+    const base = validProviderRequest({ model: { providerId: "openai", modelId: "gpt-5.5", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    let attempts = 0;
+    const resolver = {
+      resolve: async () => ({
+        ok: true as const,
+        credential: {
+          source: "session" as const,
+          authType: "provider_api_key" as const,
+          providerId: "openai" as const,
+          supplyMode: "openai-api-key" as const,
+          vaultId: "vlt_openai",
+          credentialId: "cred_openai",
+          accessMode: "api_key" as const,
+          apiKey: "sk-session-openai",
+        },
+      }),
+      recordPlatformFailure: () => {
+        throw new Error("session credentials must not mutate the platform pool");
+      },
+    } as unknown as ProviderCredentialResolver;
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      credentialResolver: resolver,
+      providerStreamer: {
+        stream: async function* () {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new ProviderKeyFailureError(classifyProviderFailure("openai", {
+              statusCode: 401,
+              body: { error: { code: "unrecognized-private-code", message: "private-byok-body-canary" } },
+            }));
+          }
+          yield finishEvent();
+        },
+      },
+    });
+
+    const failed = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.providerError?.error).toMatchObject({
+      code: "provider_key_unavailable",
+      message: "The supplied provider credential is not usable.",
+      retryable: false,
+      fatal: true,
+      statusCode: 401,
+    });
+    expect(JSON.stringify(failed)).not.toMatch(/unrecognized-private-code|private-byok-body-canary|platform|pool/i);
 
     const recovered = await collectEvents(service.streamProviderRequest(request, metadata()));
     expect(attempts).toBe(2);

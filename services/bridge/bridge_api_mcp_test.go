@@ -55,7 +55,8 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_end", ModelRequestId: modelRequest,
 		FinishReason: "tool-calls", UsageJson: `{}`,
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition: "completed", ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+			Disposition: "completed", AssistantMessageSequence: toolUse.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
 		},
 	}); err != nil {
 		t.Fatalf("write request end: %v", err)

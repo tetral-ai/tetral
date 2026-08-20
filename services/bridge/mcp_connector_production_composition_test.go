@@ -63,8 +63,9 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_end", ModelRequestId: "mreq_mcp_durable_claim",
 		FinishReason: "tool-calls", UsageJson: `{}`,
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition:     "completed",
-			ToolUseEventIds: []string{toolUseEventID, cleanupToolUseEventID},
+			Disposition:              "completed",
+			AssistantMessageSequence: cleanupToolUse.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds:          []string{toolUseEventID, cleanupToolUseEventID},
 		},
 	}); err != nil {
 		t.Fatalf("seal MCP production request: %v", err)

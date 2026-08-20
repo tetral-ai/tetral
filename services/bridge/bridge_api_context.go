@@ -276,6 +276,11 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
+	pendingModelRequestIDs, pendingToolUseEventIDs := loadContextPendingToolIdentities(
+		pendingToolUses,
+		pendingSandboxExecutions,
+	)
+	pendingModelRequestIDsJSON, _ := json.Marshal(pendingModelRequestIDs)
 	pendingAttachments, err := loadThreadPendingAttachmentsTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
@@ -304,6 +309,8 @@ func loadThreadContextJSONTx(
 			   AND session_id = $2
 			   AND session_thread_id = $3
 			   AND kind = 'compaction'
+		), pending_requests AS (
+			SELECT jsonb_array_elements_text($4::jsonb) AS model_request_id
 		)
 			SELECT m.kind,
 			       m.message_id,
@@ -329,10 +336,40 @@ func loadThreadContextJSONTx(
 		   AND m.session_id = $2
 		   AND m.session_thread_id = $3
 		   AND (c.boundary_sequence IS NULL OR m.sequence >= c.boundary_sequence)
+		   AND (
+		     m.kind <> 'assistant'
+		     OR (
+		       m.model_request_id IS NOT NULL
+		       AND (
+		         NOT EXISTS (
+		           SELECT 1 FROM session_events ended
+		            WHERE ended.workspace_id = m.workspace_id
+		              AND ended.session_id = m.session_id
+		              AND ended.session_thread_id = m.session_thread_id
+		              AND ended.model_request_id = m.model_request_id
+		              AND ended.type = 'span.model_request_end'
+		         )
+		         OR EXISTS (
+		           SELECT 1 FROM session_events ended
+		            WHERE ended.workspace_id = m.workspace_id
+		              AND ended.session_id = m.session_id
+		              AND ended.session_thread_id = m.session_thread_id
+		              AND ended.model_request_id = m.model_request_id
+		              AND ended.type = 'span.model_request_end'
+		              AND ended.payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}' = m.sequence::text
+		         )
+		         OR EXISTS (
+		           SELECT 1 FROM pending_requests pending
+		            WHERE pending.model_request_id = m.model_request_id
+		         )
+		       )
+		     )
+		   )
 		 ORDER BY m.sequence ASC`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
+		string(pendingModelRequestIDsJSON),
 	)
 	if err != nil {
 		return "", err
@@ -405,7 +442,15 @@ func loadThreadContextJSONTx(
 	if err := rows.Close(); err != nil {
 		return "", err
 	}
-	turnFacts, err := loadThreadTurnFactsTx(ctx, tx, scope, messageDescriptors, durableTurnID)
+	turnFacts, err := loadThreadTurnFactsTx(
+		ctx,
+		tx,
+		scope,
+		messageDescriptors,
+		durableTurnID,
+		pendingModelRequestIDs,
+		pendingToolUseEventIDs,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -422,6 +467,33 @@ func loadThreadContextJSONTx(
 		PendingAttachments:       pendingAttachments,
 		PendingAgentMail:         pendingAgentMail,
 	})
+}
+
+func loadContextPendingToolIdentities(
+	pendingToolUses []bridgeLoadContextPendingTool,
+	pendingSandboxExecutions []bridgeLoadContextSandboxExecution,
+) ([]string, []string) {
+	modelRequestIDs := make([]string, 0, len(pendingToolUses)+len(pendingSandboxExecutions))
+	toolUseEventIDs := make([]string, 0, len(pendingToolUses)+len(pendingSandboxExecutions))
+	seenRequests := make(map[string]struct{})
+	seenTools := make(map[string]struct{})
+	appendIdentity := func(modelRequestID, toolUseEventID string) {
+		if _, exists := seenRequests[modelRequestID]; !exists {
+			seenRequests[modelRequestID] = struct{}{}
+			modelRequestIDs = append(modelRequestIDs, modelRequestID)
+		}
+		if _, exists := seenTools[toolUseEventID]; !exists {
+			seenTools[toolUseEventID] = struct{}{}
+			toolUseEventIDs = append(toolUseEventIDs, toolUseEventID)
+		}
+	}
+	for _, pending := range pendingToolUses {
+		appendIdentity(pending.ModelRequestID, pending.ToolUseEventID)
+	}
+	for _, execution := range pendingSandboxExecutions {
+		appendIdentity(execution.ModelRequestID, execution.ToolUseEventID)
+	}
+	return modelRequestIDs, toolUseEventIDs
 }
 
 func loadThreadContextPrefixTx(
