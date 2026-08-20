@@ -282,7 +282,7 @@ func TestPostgreSQLToolSettlementClosesExactRouteAtomically(t *testing.T) {
 			request := bridgeToolSettlementRequestForTest(scope, settlement)
 			if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_exact_route_settlement() RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql;
 				CREATE TRIGGER fail_exact_route_settlement BEFORE UPDATE ON session_pending_tool_uses
-				FOR EACH ROW WHEN (OLD.tool_use_event_id = '`+toolUseID+`') EXECUTE FUNCTION fail_exact_route_settlement()`); err != nil {
+				FOR EACH ROW EXECUTE FUNCTION fail_exact_route_settlement()`); err != nil {
 				t.Fatalf("install settlement rollback trigger: %v", err)
 			}
 			if response, err := store.SettleToolResult(context.Background(), request); err == nil || response != nil {
@@ -411,7 +411,7 @@ func TestPostgreSQLRuntimeTerminationClosesMainAndSiblingToolRoutesAtomically(t 
 	}
 	if _, err := fixture.admin.ExecContext(context.Background(), `CREATE FUNCTION fail_terminal_sibling_route_close() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected terminal route failure'; END; $$ LANGUAGE plpgsql;
 		CREATE TRIGGER fail_terminal_sibling_route_close BEFORE UPDATE ON session_pending_tool_uses
-		FOR EACH ROW WHEN (OLD.tool_use_event_id = '`+childToolID+`') EXECUTE FUNCTION fail_terminal_sibling_route_close()`); err != nil {
+		FOR EACH ROW WHEN (OLD.session_thread_id = 'thr_termination_tool_routes_child') EXECUTE FUNCTION fail_terminal_sibling_route_close()`); err != nil {
 		t.Fatalf("install terminal route rollback trigger: %v", err)
 	}
 	if response, err := fixture.server.CommitRuntimeTermination(context.Background(), request); err == nil || response != nil {
