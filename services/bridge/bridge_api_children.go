@@ -69,6 +69,9 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
+			return err
+		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
 		if err := requireOpenChildParentTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
@@ -447,6 +450,9 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 				sourceThread:      request.GetScope().GetSessionThreadId(),
 				targetThread:      request.GetTargetThreadId(),
 			})
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
+			return err
 		}
 		envelope, err := appendSubagentMailEnvelopeTx(
 			ctx,
@@ -868,6 +874,9 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		var err error
 		childThreadID, err = deriveChildResumeTargetTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId())
 		if err != nil {
@@ -895,7 +904,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			duplicate = true
 			return nil
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
 			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, childScope)
@@ -1132,11 +1141,6 @@ func deriveChildResumeTargetTx(
 	}
 	if err := json.Unmarshal(tool.Input, &input); err != nil || strings.TrimSpace(input.TaskName) == "" {
 		return "", status.Error(codes.FailedPrecondition, "child resume source Tool input is invalid")
-	}
-	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, sourceToolUseEventID); err != nil {
-		return "", err
-	} else if terminal {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool Use is terminal")
 	}
 	var childThreadID string
 	if err := tx.QueryRow(ctx, `SELECT id
@@ -1501,9 +1505,6 @@ func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *brid
 	providerInputJSON, err := canonicalRunToolJSON(tool.ProviderInputJSON)
 	if err != nil || providerInputJSON != tool.PublicInputJSON {
 		return nil, status.Error(codes.AlreadyExists, "sub-agent public Tool declaration conflicts with provider context")
-	}
-	if err := verifyDurableToolAuthorizationTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), tool); err != nil {
-		return nil, err
 	}
 	var input struct {
 		TaskName  string `json:"task_name"`

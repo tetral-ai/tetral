@@ -299,6 +299,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, mailSourceID); err != nil {
 		t.Fatalf("authorize durable mail source: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, mailSourceID)
 	deliveryID := agentMailDeliveryID(mailSourceID, childID)
 	delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: parentScope, DeliveryId: deliveryID, TargetThreadId: childID, SourceToolUseEventId: mailSourceID, Content: mailContent,
@@ -323,6 +324,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		t.Fatalf("authorize durable close source: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_actor_production_close", closeSourceID, "call_actor_production_close", "close_agent")
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, closeSourceID)
 	admitted, err := client.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{Scope: parentScope, SourceToolUseEventId: closeSourceID})
 	if err != nil || admitted.GetCommitted().GetControlOperationId() == "" {
 		t.Fatalf("admit durable child close control = %#v/%v", admitted, err)
@@ -407,6 +409,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, resumeSourceID); err != nil {
 		t.Fatalf("authorize durable resume source: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, resumeSourceID)
 	resumed, err := client.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{Scope: parentScope, SourceToolUseEventId: resumeSourceID})
 	if err != nil || resumed.GetCommitted() == nil {
 		t.Fatalf("resume child through generated gRPC = %#v/%v", resumed, err)

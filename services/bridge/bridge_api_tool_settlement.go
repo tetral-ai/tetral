@@ -93,6 +93,9 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			outcome = "stale"
 			return nil
 		}
+		if err := lockSettleableToolRouteTx(ctx, tx, request.GetScope(), toolUseEventID); err != nil {
+			return err
+		}
 		resultEventType := "agent.tool_result"
 		if toolEventType == "agent.mcp_tool_use" {
 			resultEventType = "agent.mcp_tool_result"

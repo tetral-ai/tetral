@@ -108,7 +108,7 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 			response, err = claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
 			return err
 		}
-		if err := verifyDurableToolAuthorizationTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		}
 		response, err = claimMCPToolResultTx(ctx, tx, request, tool, now)

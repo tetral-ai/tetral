@@ -402,13 +402,12 @@ func closeRuntimeTerminatedSessionSiblingsTx(
 		}
 	}
 
-	toolUses, err := runtimeTerminalOrphanToolUsesTx(
+	toolUses, err := selectRuntimeTerminationOrphanToolUsesTx(
 		ctx,
 		tx,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		threadIDs,
-		true,
 	)
 	if err != nil {
 		return err

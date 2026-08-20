@@ -76,7 +76,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyDurableToolAuthorizationTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		}
 		now := s.now()
@@ -264,50 +264,84 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	return nil
 }
 
-func verifyDurableToolAuthorizationTx(
+// lockExecutableToolRouteTx is the mechanical first-effect admission gate for
+// a Runtime-selected Tool route. Runtime owns the Tool name, arguments, policy,
+// and executor choice; Bridge locks only the exact durable route and verifies
+// that it is still executable and has no terminal Result.
+func lockExecutableToolRouteTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	toolUseEventID string,
-	tool durableToolExecution,
 ) error {
-	var modelToolCallID, toolName, inputJSON, statusValue string
+	var statusValue string
 	var decision sql.NullString
+	var resultEventID sql.NullString
+	var terminalResultExists bool
 	err := tx.QueryRow(ctx,
-		`SELECT model_tool_call_id, tool_name, input_json, status, decision
-		   FROM session_pending_tool_uses
+		`SELECT route.status, route.decision, route.result_event_id,
+		        EXISTS (
+		          SELECT 1 FROM session_events result
+		           WHERE result.workspace_id=route.workspace_id
+		             AND result.session_id=route.session_id
+		             AND result.session_thread_id=route.session_thread_id
+		             AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		             AND COALESCE(
+		                   result.payload_json::jsonb ->> 'tool_use_event_id',
+		                   result.payload_json::jsonb ->> 'tool_use_id',
+		                   result.payload_json::jsonb ->> 'mcp_tool_use_id'
+		                 ) = route.tool_use_event_id
+		        )
+		   FROM session_pending_tool_uses route
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		    AND tool_use_event_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-	).Scan(&modelToolCallID, &toolName, &inputJSON, &statusValue, &decision)
+	).Scan(&statusValue, &decision, &resultEventID, &terminalResultExists)
 	if dbconnect.IsNoRows(err) {
-		return status.Error(codes.FailedPrecondition, "durable tool authorization is missing")
+		return status.Error(codes.FailedPrecondition, "durable Tool route is missing")
 	}
 	if err != nil {
 		return err
 	}
-	canonicalApprovalInput, _, err := canonicalRunToolInput(inputJSON)
-	if err != nil || modelToolCallID != tool.ModelToolCallID || toolName != tool.ToolName ||
-		canonicalApprovalInput != tool.InputJSON {
-		return status.Error(codes.AlreadyExists, "approved tool identity conflicts with execution")
+	if statusValue != "resolving" || !decision.Valid || decision.String != "allow" ||
+		resultEventID.Valid || terminalResultExists {
+		return status.Error(codes.FailedPrecondition, "durable Tool route is not executable")
 	}
-	switch tool.EvaluatedPermission {
-	case "allow":
-		if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
-			return status.Error(codes.FailedPrecondition, "durable tool authorization is not executable")
-		}
-		return nil
-	case "deny":
-		return status.Error(codes.FailedPrecondition, "durable tool authorization is not executable")
-	case "ask":
-		if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
-			return status.Error(codes.FailedPrecondition, "durable tool authorization is not executable")
-		}
-		return nil
-	default:
-		return status.Error(codes.FailedPrecondition, "durable tool authorization is invalid")
+	return nil
+}
+
+// lockSettleableToolRouteTx separates terminal Result authority from executor
+// admission. Both an allowed execution and a policy-owned denial may settle,
+// but a pending, cancelled, resolved, missing, or conflicting route may not.
+func lockSettleableToolRouteTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+) error {
+	var statusValue string
+	var decision sql.NullString
+	var resultEventID sql.NullString
+	err := tx.QueryRow(ctx,
+		`SELECT status, decision, result_event_id
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		    AND tool_use_event_id=$4
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+	).Scan(&statusValue, &decision, &resultEventID)
+	if dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "durable Tool settlement route is missing")
 	}
+	if err != nil {
+		return err
+	}
+	if statusValue != "resolving" || !decision.Valid ||
+		(decision.String != "allow" && decision.String != "deny") || resultEventID.Valid {
+		return status.Error(codes.FailedPrecondition, "durable Tool route is not settleable")
+	}
+	return nil
 }
 
 func sandboxExecutionIdentityMatches(existing runtimeToolResult, tool durableToolExecution) bool {
@@ -415,6 +449,9 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 			}
 			response = duplicateMemoryRunResponse(existing.ResultJSON)
 			return nil
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
+			return err
 		}
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err

@@ -81,13 +81,11 @@ func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, requ
 			if err := validateStoredChildInterruptRequestTx(ctx, tx, command.scope, command.sourceToolUseEventID, command.rootChildThreadID, command.action, command.includeDescendants); err != nil {
 				return err
 			}
-			if terminal, err := childControlSourceTerminalTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
-				return err
-			} else if terminal {
-				return status.Error(codes.FailedPrecondition, "child_control_source_terminal")
-			}
 			targets, duplicate = stored, true
 			return nil
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
+			return err
 		}
 		command.controlOperationID = id.New("ctrl_")
 		targetIDs, err := childInterruptTargetIDsTx(ctx, tx, command)
@@ -338,11 +336,6 @@ func deriveChildControlCommandTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		return childControlCommand{}, status.Error(codes.NotFound, "child thread not found")
 	} else if err != nil {
 		return childControlCommand{}, err
-	}
-	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, sourceID); err != nil {
-		return childControlCommand{}, err
-	} else if terminal {
-		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child_control_source_terminal")
 	}
 	return command, nil
 }

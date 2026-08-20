@@ -357,7 +357,7 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 		}
 		return
 	}
-	if receiptOutcome.err != nil || receiptOutcome.commit.GetBarrierStale() == nil || !terminationOutcome.finalized.QueueLeaseSettled || inboxStatus != "cancelled" || sessionStatus != "terminated" || bindings != 0 {
+	if receiptOutcome.err != nil || receiptOutcome.commit.GetStale() == nil || !terminationOutcome.finalized.QueueLeaseSettled || inboxStatus != "cancelled" || sessionStatus != "terminated" || bindings != 0 {
 		t.Fatalf("termination-first winner = commit %#v/%v final %+v Inbox %s Session %s bindings %d",
 			receiptOutcome.commit, receiptOutcome.err, terminationOutcome.finalized, inboxStatus, sessionStatus, bindings)
 	}

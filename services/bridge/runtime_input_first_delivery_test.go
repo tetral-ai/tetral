@@ -491,6 +491,7 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, resumeSourceID); err != nil {
 		t.Fatalf("authorize terminal-media resume source: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentThreadID, resumeSourceID)
 	assertClosedThreadResumeWithoutPhantomAttachment(t, runtime, map[string]any{
 		"workspaceId": "default", "sessionId": sessionID, "parentThreadId": parentThreadID,
 		"childThreadId": threadID, "childTaskName": childTaskName, "bindingId": bindingID,

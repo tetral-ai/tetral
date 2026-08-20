@@ -189,8 +189,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		`"operation.id":"rin_bridge_commit"`,
 		`"thread.id":"thr_bridge_commit"`,
 		`"runtime.binding.current":true`,
-		`"runtime.binding.current":false`,
-		`"binding.id":"bind_bridge_commit_replacement"`,
 	} {
 		if !strings.Contains(logText, fragment) {
 			t.Fatalf("declaration logs missing %s: %s", fragment, logText)
@@ -512,6 +510,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	)
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", sourceToolUseEventID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_thr_bridge_inter_agent_child","message":"hello child"}}`)
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", sourceToolUseEventID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("inter-agent-context-test-key-32b")
 	parentScope := bridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")

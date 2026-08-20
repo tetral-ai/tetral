@@ -49,9 +49,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	var typedResult *commitInputsTypedResult
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
 		mutationCtx := ctx
-		// Serialize replay lookup before validating the current binding. A replacement
-		// binding may recover an ACK lost by its predecessor, while concurrent writers
-		// for the same session must still observe one committed operation.
+		// Session authority precedes ordinary replay. Exact input receipts may replay
+		// only while the declaring binding remains current and nonterminal.
 		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
@@ -143,6 +142,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	}); err != nil {
 		if isSessionInterruptBarrierStaleError(err) {
 			return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_BarrierStale{BarrierStale: &bridgev1.CommitInputsBarrierStale{}}}, nil
+		}
+		if isScopeSupersededError(err) && status.Code(err) == codes.FailedPrecondition {
+			return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Stale{Stale: &bridgev1.CommitInputsStale{}}}, nil
 		}
 		return nil, err
 	}

@@ -704,6 +704,13 @@ func settleRuntimePodLostLiveScopeTx(
 	if rescheduleActive {
 		return retireRuntimePodLostRescheduledBindingTx(ctx, tx, scope, binding, rescheduleEventID, now)
 	}
+	ownedToolRoute, err := runtimePodLostNonterminalToolOwnerTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if ownedToolRoute {
+		return retireRuntimePodLostOwnedToolBindingTx(ctx, tx, scope, binding, now)
+	}
 	interruptedThenLost, err := runtimePodLostInterruptedThenLostTx(ctx, tx, workspaceID, sessionID, threadID)
 	if err != nil {
 		return err
@@ -817,6 +824,63 @@ func settleRuntimePodLostLiveScopeTx(
 		idleEventID,
 		formattedNow,
 		now.Add(defaultIdleCleanupDelay),
+	)
+	return err
+}
+
+func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1
+		     FROM session_pending_tool_uses route
+		    WHERE route.workspace_id=$1 AND route.session_id=$2 AND route.session_thread_id=$3
+		      AND route.status IN ('pending','resolving')
+		      AND NOT EXISTS (
+		        SELECT 1 FROM session_events result
+		         WHERE result.workspace_id=route.workspace_id
+		           AND result.session_id=route.session_id
+		           AND result.session_thread_id=route.session_thread_id
+		           AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		           AND COALESCE(
+		                 result.payload_json::jsonb ->> 'tool_use_event_id',
+		                 result.payload_json::jsonb ->> 'tool_use_id',
+		                 result.payload_json::jsonb ->> 'mcp_tool_use_id'
+		               )=route.tool_use_event_id
+		      )
+		)`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	).Scan(&exists)
+	return exists, err
+}
+
+// A lost binding does not own a Runtime-selected nonterminal Tool route. Retire
+// only the process custody; the existing Thread lifecycle remains recoverable
+// so a replacement Runtime can wait on the same durable owner.
+func retireRuntimePodLostOwnedToolBindingTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status='idle',
+		        idle_since=$5,
+		        active_seconds_total=active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($5 - running_since)))
+		        END,
+		        running_since=NULL,
+		        cleanup_after=$6,
+		        cleanup_enqueued_at=NULL,
+		        cleanup_claimed_at=NULL,
+		        cleanup_job_id=NULL,
+		        updated_at=$5
+		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
+		now, now.Add(defaultIdleCleanupDelay),
 	)
 	return err
 }
@@ -1233,10 +1297,23 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 }
 
 func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOrphanToolUse, error) {
-	return runtimeTerminalOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs, false)
+	return runtimeOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs, runtimeOrphanToolSelection{
+		preserveNonterminalRoutes: true,
+	})
 }
 
-func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string, includeSubAgentDeliveries bool) ([]runtimeOrphanToolUse, error) {
+type runtimeOrphanToolSelection struct {
+	includeSubAgentDeliveries bool
+	preserveNonterminalRoutes bool
+}
+
+func selectRuntimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOrphanToolUse, error) {
+	return runtimeOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs, runtimeOrphanToolSelection{
+		includeSubAgentDeliveries: true,
+	})
+}
+
+func runtimeOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string, selection runtimeOrphanToolSelection) ([]runtimeOrphanToolUse, error) {
 	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
 	if err != nil {
 		return nil, err
@@ -1261,22 +1338,15 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 			      e.type <> 'agent.tool_use'
 			      OR COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
 			    ))
-			    AND NOT EXISTS (
+			    AND (NOT $5 OR NOT EXISTS (
 			      SELECT 1
 			        FROM session_pending_tool_uses route
-			        JOIN session_events rescheduled
-			          ON rescheduled.workspace_id = e.workspace_id
-			         AND rescheduled.session_id = e.session_id
-			         AND rescheduled.session_thread_id = e.session_thread_id
-			         AND rescheduled.model_request_id = e.model_request_id
-			         AND rescheduled.type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
 			       WHERE route.workspace_id = e.workspace_id
 			         AND route.session_id = e.session_id
 			         AND route.session_thread_id = e.session_thread_id
 			         AND route.tool_use_event_id = e.event_id
-			         AND route.status = 'resolving'
-			         AND route.decision = 'allow'
-			    )
+			         AND route.status IN ('pending','resolving')
+			    ))
 			    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events result
@@ -1298,7 +1368,8 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 		workspaceID,
 		sessionID,
 		string(threadIDsJSON),
-		includeSubAgentDeliveries,
+		selection.includeSubAgentDeliveries,
+		selection.preserveNonterminalRoutes,
 	)
 	if err != nil {
 		return nil, err
@@ -1850,7 +1921,7 @@ func insertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 		return false, err
 	}
 	if terminal.Success {
-		if err := markPendingToolResultResolvedTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
+		if err := resolveSettledToolRouteTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
 			return false, err
 		}
 	} else {
@@ -2005,7 +2076,10 @@ func cancelPendingToolUseForTerminalResultTx(ctx context.Context, tx *dbconnect.
 		resultEventID,
 		now,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func requestKindFromModelRequestStartProjection(projectionJSON string) (string, error) {

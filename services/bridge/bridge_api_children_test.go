@@ -344,6 +344,7 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public' WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make control source public: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	request := &bridgev1.AdmitChildInterruptRequest{Scope: scope, SourceToolUseEventId: sourceID}
@@ -398,6 +399,7 @@ func TestPostgreSQLDeliverInterAgentMailIsAtomicAcrossGeneratedGRPCAndConcurrent
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make mail Tool source public: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
 	listener := bufconn.Listen(1024 * 1024)
@@ -491,6 +493,7 @@ func TestPostgreSQLDeliverInterAgentMailQueueFailureRollsBackAllMailState(t *tes
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make mail Tool source public: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_atomic_agent_mail_queue_birth() RETURNS trigger AS $$
 		BEGIN RAISE EXCEPTION 'injected atomic agent mail Queue failure'; END; $$ LANGUAGE plpgsql;
 		CREATE TRIGGER fail_atomic_agent_mail_queue_birth BEFORE INSERT ON queue_jobs
@@ -548,6 +551,10 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+grandchildID+`","message":"must be rejected"},"evaluated_permission":"allow"}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, childSourceID, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID), "agent.tool_use",
 		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"late-child","prompt":"must be rejected"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, preSourceID)
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, siblingSource)
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, siblingID, lateSourceID)
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, siblingID, childSourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	mainScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
 	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
@@ -626,6 +633,7 @@ func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *te
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make resume Tool source public: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime',closed_at='2026-01-01T00:00:00Z'
 		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID); err != nil {
 		t.Fatalf("close resume target: %v", err)
@@ -668,6 +676,7 @@ func TestPostgreSQLMarkChildThreadActiveDerivesTargetFromDurableResumeTool(t *te
 			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 			t.Fatalf("make %s resume Tool source public: %v", test.status, err)
 		}
+		seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 		if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status=$3,closed_at='2026-01-01T00:00:00Z'
 			WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID, test.status); err != nil {
 			t.Fatalf("set resume target %s: %v", test.status, err)

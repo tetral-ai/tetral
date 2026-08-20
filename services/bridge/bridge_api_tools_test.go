@@ -604,7 +604,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 		{name: "ask missing approval", evaluatedPermission: "ask", wantCode: codes.FailedPrecondition},
 		{name: "ask denied", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "deny", wantCode: codes.FailedPrecondition},
 		{name: "unknown permission", evaluatedPermission: "unknown", wantCode: codes.FailedPrecondition},
-		{name: "approval identity conflict", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", approvalInput: `{"cmd":"different"}`, wantCode: codes.AlreadyExists},
+		{name: "resolved ask allow ignores duplicated route payload", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", approvalInput: `{"cmd":"different"}`, wantCode: codes.OK, wantAccepted: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -2152,6 +2152,7 @@ func durableMemoryRequestForTest(
 	); err != nil {
 		t.Fatalf("stamp durable memory Tool facts: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, db, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID)
 	return &bridgev1.RunMemoryRequest{Scope: scope, ToolUseEventId: toolUseEventID}
 }
 

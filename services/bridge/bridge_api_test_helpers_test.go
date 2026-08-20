@@ -830,9 +830,9 @@ func seedBridgeAPIAllowedToolRoute(
 			tool_name, input_json, status, decision, created_at, updated_at
 		)
 		SELECT e.workspace_id, e.session_id, e.session_thread_id, e.event_id,
-		       e.projection_json::jsonb ->> 'model_tool_call_id',
-		       e.projection_json::jsonb ->> 'tool_name',
-		       (e.projection_json::jsonb -> 'canonical_execution_input')::text,
+		       COALESCE(e.projection_json::jsonb ->> 'model_tool_call_id', 'call_' || e.event_id),
+		       COALESCE(e.projection_json::jsonb ->> 'tool_name', e.payload_json::jsonb ->> 'name'),
+		       COALESCE(e.projection_json::jsonb -> 'canonical_execution_input', e.payload_json::jsonb -> 'input')::text,
 		       'resolving', 'allow', clock_timestamp(), clock_timestamp()
 		  FROM session_events e
 		 WHERE e.workspace_id=$1 AND e.session_id=$2 AND e.session_thread_id=$3 AND e.event_id=$4`,
@@ -1103,6 +1103,7 @@ func seedBridgeAPIChildLifecycleToolSource(t *testing.T, db *sql.DB, sessionID s
 	FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, parentID, sourceID, string(payload)); err != nil {
 		t.Fatalf("seed child lifecycle Tool Use: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, db, "default", sessionID, parentID, sourceID)
 	return sourceID
 }
 

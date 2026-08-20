@@ -779,7 +779,7 @@ func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, cla
 				return err
 			}
 		}
-		if err := markPendingToolResultResolvedTx(ctx, tx, scope, execution.ToolUseEventID, eventID, now); err != nil {
+		if err := resolveSettledToolRouteTx(ctx, tx, scope, execution.ToolUseEventID, eventID, now); err != nil {
 			return err
 		}
 		if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, execution.ToolUseEventID, eventID, "cleanup_wait_expired", now); err != nil {

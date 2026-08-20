@@ -579,6 +579,9 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		if !dbconnect.IsNoRows(err) {
 			return err
 		}
+		if err := lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID); err != nil {
+			return err
+		}
 		var writeSequence int64
 		if terminalResult == "" && kind == "stdin" {
 			writeSequence, err = allocateBackgroundTaskWriteSequenceTx(ctx, tx, scope, taskID, now)
@@ -691,6 +694,9 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 			return nil
 		}
 		if !dbconnect.IsNoRows(err) {
+			return err
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID); err != nil {
 			return err
 		}
 		state := "pending"

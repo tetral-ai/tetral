@@ -1328,7 +1328,7 @@ func applyToolEventBookkeepingTx(
 		if projection.State != "completed" && projection.State != "error" && projection.State != "cancelled" {
 			return status.Error(codes.FailedPrecondition, "tool result declaration state is not terminal")
 		}
-		if err := markPendingToolResultResolvedTx(ctx, tx, scope, toolUseEventID, eventID, now); err != nil {
+		if err := resolveSettledToolRouteTx(ctx, tx, scope, toolUseEventID, eventID, now); err != nil {
 			return err
 		}
 		if eventType == "agent.tool_result" {
@@ -1600,18 +1600,20 @@ func upsertPendingToolRouteTx(
 	return err
 }
 
-func markPendingToolResultResolvedTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, resultEventID string, now time.Time) error {
-	_, err := tx.Exec(ctx,
+func resolveSettledToolRouteTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, resultEventID string, now time.Time) error {
+	result, err := tx.Exec(ctx,
 		`UPDATE session_pending_tool_uses
 		    SET status = 'resolved',
-		        result_event_id = COALESCE(result_event_id, $5),
-		        resolved_at = COALESCE(resolved_at, $6),
+		        result_event_id = $5,
+		        resolved_at = $6,
 		        updated_at = $6
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4
-		    AND status = 'resolving'`,
+		    AND status = 'resolving'
+		    AND decision IN ('allow','deny')
+		    AND result_event_id IS NULL`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -1621,6 +1623,9 @@ func markPendingToolResultResolvedTx(ctx context.Context, tx *dbconnect.Tx, scop
 	)
 	if err != nil {
 		return err
+	}
+	if !rowsAffected(result) {
+		return status.Error(codes.FailedPrecondition, "durable Tool route settlement did not close its exact route")
 	}
 	return nil
 }
