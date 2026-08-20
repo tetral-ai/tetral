@@ -176,7 +176,7 @@ func TestPostgreSQLActorEffectsRejectExecutableCapabilitySubstitution(t *testing
 			case "spawn_agent":
 				var createResponse *bridgev1.CreateSubagentThreadResponse
 				createResponse, err = store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-					Scope: scope, SourceToolUseEventId: toolUseID, TaskName: "capability-worker", AgentType: "worker", ForkTurns: "all", InitialPrompt: "do not create",
+					Scope: scope, SourceToolUseEventId: toolUseID, TaskName: "capability-worker", AgentType: "worker", InitialPrompt: "do not create",
 				})
 				responseNonNil = createResponse != nil
 			case "send_message":

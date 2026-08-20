@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,7 +26,7 @@ const (
 	childCreateSourceReviewerTrunk   = "reviewer_trunk_ensure"
 	childCreateSourceReviewerSidecar = "reviewer_sidecar_ensure"
 	actorTaskNameMaxBytes            = 128
-	actorForkTurnsMax                = 1000
+	actorParentMessageRefsMax        = 8192
 )
 
 func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, request *bridgev1.CreateSubagentThreadRequest) (response *bridgev1.CreateSubagentThreadResponse, resultErr error) {
@@ -43,10 +42,11 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 	default:
 		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent agent_type")
 	}
-	if !validForkTurns(request.GetForkTurns()) {
-		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent fork_turns")
+	if !validParentMessageSequences(request.GetParentMessageSequences()) {
+		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent parent Message references")
 	}
-	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetForkTurns(), request.GetInitialPrompt())
+	parentMessageSequencesJSON, _ := json.Marshal(request.GetParentMessageSequences())
+	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetInitialPrompt(), string(parentMessageSequencesJSON))
 	now := s.now()
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.create_subagent_thread", func(tx *dbconnect.Tx) error {
@@ -76,7 +76,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := requireOpenChildParentTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
 		}
-		prefix, err := selectSubagentPrefixTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), request.GetForkTurns())
+		prefix, err := loadDeclaredSubagentPrefixTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), request.GetParentMessageSequences())
 		if err != nil {
 			return err
 		}
@@ -94,13 +94,10 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err != nil {
 			return err
 		}
-		initialEventID, err := appendDeclaredSubagentInitialReceivedEventTx(ctx, tx, scopeForThread(request.GetScope(), childThreadID), envelope, now)
+		_, err = appendDeclaredSubagentInitialReceivedEventTx(ctx, tx, scopeForThread(request.GetScope(), childThreadID), envelope, now)
 		if err != nil {
 			return err
 		}
-		result.InitialDeliveryID = envelope.DeliveryID
-		result.InitialRuntimeInputID = completionRuntimeInputID(envelope.DeliveryID)
-		result.InitialEventID = initialEventID
 		if err := persistCreatedChildOperationTx(ctx, tx, request.GetScope(), childCreateSourceSubagent, request.GetSourceToolUseEventId(), requestHash, result, now); err != nil {
 			return err
 		}
@@ -903,16 +900,18 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			return err
 		}
 		childScope := scopeForThread(request.GetScope(), childThreadID)
-		if existingResults, ok, err := readChildLifecycleOperationResultsTx(
+		if existingResults, ok, err := readChildLifecycleOperationResultSetTx(
 			ctx,
 			tx,
 			request.GetScope(),
-			[]string{childThreadID},
 			command,
 			bridgeOpMarkChildThreadActive,
 		); err != nil {
 			return err
 		} else if ok {
+			if len(existingResults) != 1 {
+				return status.Error(codes.FailedPrecondition, "child resume stored result set is invalid")
+			}
 			results = existingResults
 			duplicate = true
 			return nil
@@ -1097,7 +1096,7 @@ func parseChildLifecycleCommand(
 	operationID := ""
 	if action == "resume" {
 		operationSourceKind = "child_resume_command"
-		operationIDParts[0] = "child_resume"
+		operationIDParts = []string{"child_resume", sourceCommandID}
 	} else if sourceKind == "tool_use" {
 		// The Bridge-owned control operation is the sole close fence across
 		// admission, completion, lifecycle results, and hot release.
@@ -1459,11 +1458,11 @@ func requireOpenChildParentTx(ctx context.Context, tx *dbconnect.Tx, scope *brid
 	return nil
 }
 
-// selectSubagentPrefixTx snapshots the parent history at the exact source
-// event's Assistant boundary. Runtime owns spawn argument interpretation and
-// declares the normalized fork instruction; Bridge does not decode or compare
-// provider-visible Tool input.
-func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceToolUseEventID, forkTurns string) (*threadContextPrefixEnvelope, error) {
+// loadDeclaredSubagentPrefixTx snapshots exactly the ordered sealed parent
+// Messages declared by Runtime. Bridge verifies only durable ownership,
+// ordering, sealing, and the source Assistant boundary; it does not interpret
+// fork instructions or select conversation turns.
+func loadDeclaredSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceToolUseEventID string, messageSequences []int64) (*threadContextPrefixEnvelope, error) {
 	var modelRequestID string
 	if err := tx.QueryRow(ctx, `SELECT model_request_id
 		FROM session_events
@@ -1483,11 +1482,56 @@ func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridge
 	} else if err != nil {
 		return nil, err
 	}
-	entries, kinds, err := loadDurablePrefixEntriesThroughTx(ctx, tx, scope, boundarySequence-1)
-	if err != nil {
-		return nil, err
+	entries := make([]bridgeRuntimeContextEntry, 0, len(messageSequences))
+	if len(messageSequences) > 0 {
+		rows, err := tx.Query(ctx, `WITH requested AS (
+			SELECT sequence, ordinality
+			FROM unnest($5::bigint[]) WITH ORDINALITY AS selected(sequence, ordinality)
+		) SELECT m.kind,m.sequence,m.data_json,
+			CASE WHEN m.kind <> 'assistant' THEN true
+			     WHEN m.model_request_id IS NULL THEN false
+			     ELSE EXISTS (
+			       SELECT 1 FROM session_events ended
+			       WHERE ended.workspace_id=m.workspace_id AND ended.session_id=m.session_id
+			        AND ended.session_thread_id=m.session_thread_id
+			        AND ended.model_request_id=m.model_request_id
+			        AND ended.type='span.model_request_end'
+			     )
+			END AS sealed
+		FROM requested
+		JOIN session_messages m
+		  ON m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$3
+		 AND m.sequence=requested.sequence
+		WHERE m.sequence < $4
+		ORDER BY requested.ordinality`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), boundarySequence, messageSequences)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var kind, raw string
+			var sequence int64
+			var sealed bool
+			if err := rows.Scan(&kind, &sequence, &raw, &sealed); err != nil {
+				return nil, err
+			}
+			if !sealed {
+				return nil, status.Error(codes.FailedPrecondition, "sub-agent parent Message reference is not sealed")
+			}
+			parts, err := decodeStoredRuntimeContextParts(raw)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, bridgeRuntimeContextEntry{MessageSequence: sequence, ContextKind: kind, Parts: parts})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(entries) != len(messageSequences) {
+			return nil, status.Error(codes.FailedPrecondition, "sub-agent parent Message reference is missing or outside the source boundary")
+		}
 	}
-	entries = selectForkEntries(entries, kinds, forkTurns)
 	return &threadContextPrefixEnvelope{
 		SourceParentThreadID: scope.GetSessionThreadId(), ParentBoundaryEventID: sourceToolUseEventID, Entries: entries,
 	}, nil
@@ -1643,60 +1687,18 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 	return entries, kinds, rows.Err()
 }
 
-func selectForkEntries(entries []bridgeRuntimeContextEntry, kinds []string, forkTurns string) []bridgeRuntimeContextEntry {
-	if forkTurns == "none" {
-		return []bridgeRuntimeContextEntry{}
-	}
-	if forkTurns == "all" {
-		return entries
-	}
-	count, err := strconv.Atoi(forkTurns)
-	if err != nil || count <= 0 {
-		return []bridgeRuntimeContextEntry{}
-	}
-	type turn struct {
-		userLed bool
-		entries []bridgeRuntimeContextEntry
-	}
-	var turns []turn
-	for index, entry := range entries {
-		kind := kinds[index]
-		boundary := kind == "user" || kind == "runtime_notification"
-		if boundary || len(turns) == 0 {
-			turns = append(turns, turn{userLed: boundary})
-		}
-		turns[len(turns)-1].entries = append(turns[len(turns)-1].entries, entry)
-	}
-	var userTurns []turn
-	for _, value := range turns {
-		if value.userLed {
-			userTurns = append(userTurns, value)
-		}
-	}
-	if count > len(userTurns) {
-		count = len(userTurns)
-	}
-	var selected []bridgeRuntimeContextEntry
-	for _, value := range userTurns[len(userTurns)-count:] {
-		selected = append(selected, value.entries...)
-	}
-	return selected
-}
-
-func validForkTurns(value string) bool {
-	if value == "none" || value == "all" {
-		return true
-	}
-	if value == "" || value[0] == '0' {
+func validParentMessageSequences(values []int64) bool {
+	if len(values) > actorParentMessageRefsMax {
 		return false
 	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
+	var prior int64
+	for _, value := range values {
+		if value <= prior {
 			return false
 		}
+		prior = value
 	}
-	count, err := strconv.Atoi(value)
-	return err == nil && count > 0 && count <= actorForkTurnsMax
+	return true
 }
 
 func validActorTaskName(value string) bool {
@@ -1832,7 +1834,7 @@ func insertOwnedChildThreadTx(
 		return createChildThreadResult{}, err
 	}
 	childScope := scopeForThread(parentScope, childThreadID)
-	eventID, sequence, err := insertChildThreadCreatedEventTx(ctx, tx, childScope, parentThreadID, role, visibility, agentType, taskName, sourceToolUseEventID, now)
+	_, _, err := insertChildThreadCreatedEventTx(ctx, tx, childScope, parentThreadID, role, visibility, agentType, taskName, sourceToolUseEventID, now)
 	if err != nil {
 		return createChildThreadResult{}, err
 	}
@@ -1841,7 +1843,7 @@ func insertOwnedChildThreadTx(
 			return createChildThreadResult{}, err
 		}
 	}
-	return createChildThreadResult{Status: "created", ChildThreadID: childThreadID, ThreadCreatedEventID: eventID, ThreadCreatedSequence: sequence}, nil
+	return createChildThreadResult{ChildThreadID: childThreadID}, nil
 }
 
 func persistCreatedChildOperationTx(

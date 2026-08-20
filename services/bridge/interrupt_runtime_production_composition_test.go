@@ -839,7 +839,7 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 		t.Fatalf("interrupted-source mail = %v; want barrier stale", err)
 	}
 	if _, err := bridgeStore.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: siblingScope, SourceToolUseEventId: lateChild, TaskName: "late-child", AgentType: "worker", ForkTurns: "all", InitialPrompt: "must be stale",
+		Scope: siblingScope, SourceToolUseEventId: lateChild, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
 	}); !isSessionInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child birth = %v; want barrier stale", err)
 	}

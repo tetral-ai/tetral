@@ -35,6 +35,7 @@ const result = await runner.runTool({
 	toolUseEventId: "sevt_real_bash",
 	entry,
 	input: { command: "sleep 60", timeout: 120_000, run_in_background: true },
+	retainedContextEntries: [],
 	currentModel: { providerId: "anthropic", modelId: "claude-opus-4-8" },
 	abortSignal: new AbortController().signal,
 });

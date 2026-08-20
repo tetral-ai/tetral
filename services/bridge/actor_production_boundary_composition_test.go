@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -29,6 +31,7 @@ type lostACKSubagentBridge struct {
 	bridgev1.AgentRuntimeBridgeServiceServer
 	mu          sync.Mutex
 	createCalls int
+	requests    []*bridgev1.CreateSubagentThreadRequest
 }
 
 func (s *lostACKSubagentBridge) CreateSubagentThread(ctx context.Context, request *bridgev1.CreateSubagentThreadRequest) (*bridgev1.CreateSubagentThreadResponse, error) {
@@ -38,12 +41,19 @@ func (s *lostACKSubagentBridge) CreateSubagentThread(ctx context.Context, reques
 	}
 	s.mu.Lock()
 	s.createCalls++
+	s.requests = append(s.requests, proto.Clone(request).(*bridgev1.CreateSubagentThreadRequest))
 	call := s.createCalls
 	s.mu.Unlock()
 	if call == 1 {
 		return nil, status.Error(codes.Unavailable, "sub-agent creation acknowledgement unavailable")
 	}
 	return response, nil
+}
+
+func (s *lostACKSubagentBridge) capturedRequests() []*bridgev1.CreateSubagentThreadRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*bridgev1.CreateSubagentThreadRequest(nil), s.requests...)
 }
 
 func (s *lostACKSubagentBridge) calls() int {
@@ -58,12 +68,20 @@ type subagentProductionCompositionResult struct {
 	ProviderContexts    []json.RawMessage `json:"providerContexts"`
 }
 
+func contextEntrySequences(entries []bridgeRuntimeContextEntry) []int64 {
+	sequences := make([]int64, 0, len(entries))
+	for _, entry := range entries {
+		sequences = append(sequences, entry.MessageSequence)
+	}
+	return sequences
+}
+
 func runSubagentProductionComposition(
 	t *testing.T,
 	bridgeServer bridgev1.AgentRuntimeBridgeServiceServer,
 	sessionID, threadID, bindingID string,
 	bindingGeneration int64,
-	podUID, taskName, prompt string,
+	podUID, taskName, prompt, forkTurns string,
 ) subagentProductionCompositionResult {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -81,7 +99,7 @@ func runSubagentProductionComposition(
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default",
 		"sessionId": sessionID, "sessionThreadId": threadID,
 		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID,
-		"taskName": taskName, "prompt": prompt,
+		"taskName": taskName, "prompt": prompt, "forkTurns": forkTurns,
 	})
 	if err != nil {
 		t.Fatalf("encode subagent ToolRunner composition: %v", err)
@@ -124,13 +142,24 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 	}
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("subagent-toolrunner-composition-signing-key")
 	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
-	result := runSubagentProductionComposition(t, wrapped, sessionID, threadID, bindingID, 1, podUID, taskName, "complete the delegated task")
+	result := runSubagentProductionComposition(t, wrapped, sessionID, threadID, bindingID, 1, podUID, taskName, "complete the delegated task", "all")
 	if result.ResultType != "observed" || result.ProviderInvocations != 3 || wrapped.calls() != 2 {
 		t.Fatalf("subagent ToolRunner result = %+v create calls=%d", result, wrapped.calls())
 	}
+	requests := wrapped.capturedRequests()
+	if len(requests) != 2 || !proto.Equal(requests[0], requests[1]) {
+		t.Fatalf("lost-ack subagent declarations were not exact replay: %#v", requests)
+	}
+	declaration := requests[0]
+	if declaration.GetTaskName() != taskName || declaration.GetAgentType() != "worker" ||
+		declaration.GetInitialPrompt() != "complete the delegated task" ||
+		len(declaration.GetParentMessageSequences()) != 1 || declaration.GetParentMessageSequences()[0] != 1 {
+		t.Fatalf("Runtime-selected private subagent declaration = %#v", declaration)
+	}
 
-	var childID, prefixEntries, publicInput, receiptJSON, inboxID string
+	var childID, prefixEntries, publicInput, receiptJSON string
 	var children, createOperations, toolUses, toolResults, deliveries, openingSent, openingReceived, queuedJobs, reschedules int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT id FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'),
@@ -145,21 +174,38 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_received'),
 		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1 AND payload_json::jsonb->>'input_kind'='agent_mail'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_rescheduled'),
-		(SELECT result_json FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn'),
-		(SELECT runtime_input_id FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='agent_mail')`, sessionID, threadID).
+		(SELECT result_json FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread' AND source_kind='subagent_spawn')`, sessionID, threadID).
 		Scan(&childID, &prefixEntries, &publicInput, &children, &createOperations, &toolUses, &toolResults, &deliveries,
-			&openingSent, &openingReceived, &queuedJobs, &reschedules, &receiptJSON, &inboxID); err != nil {
+			&openingSent, &openingReceived, &queuedJobs, &reschedules, &receiptJSON); err != nil {
 		t.Fatalf("read subagent ToolRunner durable census: %v", err)
 	}
 	if childID == "" || children != 1 || createOperations != 1 || toolUses != 1 || toolResults != 1 || deliveries != 1 || openingSent != 1 || openingReceived != 1 || queuedJobs != 1 || reschedules != 1 {
 		t.Fatalf("subagent durable census child=%s children/ops/uses/results/deliveries/sent/received/queue=%d/%d/%d/%d/%d/%d/%d/%d",
 			childID, children, createOperations, toolUses, toolResults, deliveries, openingSent, openingReceived, queuedJobs)
 	}
-	if !strings.Contains(receiptJSON, childID) || !strings.Contains(receiptJSON, inboxID) || !strings.Contains(receiptJSON, "initial_event_id") {
-		t.Fatalf("atomic subagent receipt/input identity = %s/%s", receiptJSON, inboxID)
+	if receiptJSON != `{"child_thread_id":"`+childID+`"}` {
+		t.Fatalf("minimal subagent replay receipt = %s", receiptJSON)
 	}
 	if !strings.Contains(prefixEntries, "start a worker") || strings.Contains(prefixEntries, "call_subagent_production") {
 		t.Fatalf("subagent immutable prefix = %s", prefixEntries)
+	}
+	var persistedPrefix []bridgeRuntimeContextEntry
+	if err := json.Unmarshal([]byte(prefixEntries), &persistedPrefix); err != nil {
+		t.Fatalf("decode persisted subagent prefix: %v", err)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scopeForThread(bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), childID),
+	})
+	if err != nil {
+		t.Fatalf("cold-load exact subagent prefix: %v", err)
+	}
+	var cold bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &cold); err != nil {
+		t.Fatalf("decode cold subagent context: %v", err)
+	}
+	if cold.ThreadContextPrefix == nil || !slices.Equal(contextEntrySequences(persistedPrefix), []int64{1}) ||
+		!slices.Equal(contextEntrySequences(cold.ThreadContextPrefix.Entries), []int64{1}) {
+		t.Fatalf("all prefix persisted/cold = %v/%#v", contextEntrySequences(persistedPrefix), cold.ThreadContextPrefix)
 	}
 	canonicalPublicInput, err := canonicalRunToolJSON(publicInput)
 	if err != nil {
@@ -167,6 +213,152 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 	}
 	if canonicalPublicInput != `{"agent_type":"worker","fork_turns":"all","prompt":"complete the delegated task","task_name":"production-worker"}` {
 		t.Fatalf("subagent public provider input = %s", publicInput)
+	}
+}
+
+func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicForkTurns(t *testing.T) {
+	for _, testCase := range []struct {
+		name              string
+		forkTurns         string
+		expectedSequences []int64
+	}{
+		{name: "none", forkTurns: "none", expectedSequences: []int64{}},
+		{name: "numeric", forkTurns: "1", expectedSequences: []int64{1}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := testCase.name
+			sessionID := "sesn_subagent_fork_" + suffix
+			threadID := "thr_subagent_fork_" + suffix
+			bindingID := "bind_subagent_fork_" + suffix
+			podUID := "pod_subagent_fork_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_fork_"+suffix, "evt_subagent_fork_"+suffix, 1)
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
+				SET data_json='{"parts":[{"type":"text","text":"retained parent turn"}]}'
+				WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND sequence=1`, sessionID, threadID); err != nil {
+				t.Fatalf("seed retained parent turn: %v", err)
+			}
+
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			store.RuntimeBindingTokenHMACKey = []byte("subagent-fork-composition-signing-key")
+			wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
+			result := runSubagentProductionComposition(
+				t, wrapped, sessionID, threadID, bindingID, 1, podUID,
+				"fork-"+suffix, "execute the selected prefix", testCase.forkTurns,
+			)
+			requests := wrapped.capturedRequests()
+			if result.ResultType != "observed" || result.ProviderInvocations != 3 || len(requests) != 2 ||
+				!proto.Equal(requests[0], requests[1]) || !slices.Equal(requests[0].GetParentMessageSequences(), testCase.expectedSequences) {
+				t.Fatalf("fork_turns %q private declaration = result:%+v requests:%#v", testCase.forkTurns, result, requests)
+			}
+			var childID, prefixJSON string
+			if err := admin.QueryRowContext(context.Background(), `SELECT child.id,prefix.entries_json
+				FROM session_threads child JOIN session_thread_context_prefixes prefix
+				ON prefix.workspace_id=child.workspace_id AND prefix.session_id=child.session_id AND prefix.child_thread_id=child.id
+				WHERE child.workspace_id='default' AND child.session_id=$1 AND child.parent_thread_id=$2 AND child.role='subagent'`, sessionID, threadID).
+				Scan(&childID, &prefixJSON); err != nil {
+				t.Fatalf("read selected prefix: %v", err)
+			}
+			var persisted []bridgeRuntimeContextEntry
+			if err := json.Unmarshal([]byte(prefixJSON), &persisted); err != nil {
+				t.Fatalf("decode selected prefix: %v", err)
+			}
+			loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+				Scope: scopeForThread(bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), childID),
+			})
+			if err != nil {
+				t.Fatalf("cold-load selected prefix: %v", err)
+			}
+			var cold bridgeLoadContextPayload
+			if err := json.Unmarshal([]byte(loaded.GetContextJson()), &cold); err != nil {
+				t.Fatalf("decode selected cold context: %v", err)
+			}
+			if cold.ThreadContextPrefix == nil || !slices.Equal(contextEntrySequences(persisted), testCase.expectedSequences) ||
+				!slices.Equal(contextEntrySequences(cold.ThreadContextPrefix.Entries), testCase.expectedSequences) {
+				t.Fatalf("fork_turns %q persisted/cold = %v/%#v", testCase.forkTurns, contextEntrySequences(persisted), cold.ThreadContextPrefix)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_subagent_prompt_bound"
+		threadID  = "thr_subagent_prompt_bound"
+		bindingID = "bind_subagent_prompt_bound"
+		podUID    = "pod_subagent_prompt_bound"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_prompt_bound", "evt_subagent_prompt_bound", 1)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
+	result := runSubagentProductionComposition(
+		t, wrapped, sessionID, threadID, bindingID, 1, podUID,
+		"oversized-worker", strings.Repeat("x", 2*1024*1024+1), "none",
+	)
+	if result.ResultType != "observed" || result.ProviderInvocations != 3 || wrapped.calls() != 0 {
+		t.Fatalf("oversized prompt production result = %+v create calls=%d", result, wrapped.calls())
+	}
+	var children, operations, inbox, jobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='subagent'),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1)`, sessionID).
+		Scan(&children, &operations, &inbox, &jobs); err != nil {
+		t.Fatalf("read oversized prompt mutation census: %v", err)
+	}
+	if children != 0 || operations != 0 || inbox != 0 || jobs != 0 {
+		t.Fatalf("oversized prompt child/operation/inbox/queue mutations = %d/%d/%d/%d", children, operations, inbox, jobs)
+	}
+}
+
+func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_nested_subagent_source"
+		mainID    = "thr_nested_subagent_main"
+		parentID  = "thr_nested_subagent_parent"
+		bindingID = "bind_nested_subagent"
+		podUID    = "pod_nested_subagent"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
+		SET task_name='durable-parent',title='durable-parent',agent_type='worker'
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, parentID); err != nil {
+		t.Fatalf("name durable nested source Thread: %v", err)
+	}
+	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, parentID, "msg_nested_subagent_user", "evt_nested_subagent_user", 1)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	result := runSubagentProductionComposition(
+		t, BridgeAPIServer{store: store}, sessionID, parentID, bindingID, 1, podUID,
+		"durable-grandchild", "perform nested work", "all",
+	)
+	if result.ResultType != "observed" || result.ProviderInvocations != 3 {
+		t.Fatalf("nested Runtime spawn composition = %+v", result)
+	}
+	var grandchildID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT id FROM session_threads
+		WHERE workspace_id='default' AND session_id=$1 AND parent_thread_id=$2 AND role='subagent'`, sessionID, parentID).
+		Scan(&grandchildID); err != nil {
+		t.Fatalf("read nested Runtime-created child: %v", err)
+	}
+	var openingPayload string
+	if err := admin.QueryRowContext(context.Background(), `SELECT payload_json FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		AND type='agent.thread_message_received' ORDER BY sequence ASC LIMIT 1`, sessionID, grandchildID).
+		Scan(&openingPayload); err != nil {
+		t.Fatalf("read nested opening provenance: %v", err)
+	}
+	if testJSONPathString(t, openingPayload, "source_thread_id") != parentID ||
+		testJSONPathString(t, openingPayload, "source_task_name") != "durable-parent" {
+		t.Fatalf("nested opening provenance = %s", openingPayload)
 	}
 }
 
@@ -224,7 +416,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	client := startActorProductionBridge(t, runtime)
 	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	spawnRequest := &bridgev1.CreateSubagentThreadRequest{
-		Scope: parentScope, SourceToolUseEventId: spawnSourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all", InitialPrompt: "inspect the target-owned durable envelope",
+		Scope: parentScope, SourceToolUseEventId: spawnSourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "inspect the target-owned durable envelope", ParentMessageSequences: []int64{1},
 	}
 	spawned, err := client.CreateSubagentThread(context.Background(), spawnRequest)
 	if err != nil || spawned.GetCommitted().GetChildThreadId() == "" {
@@ -263,7 +455,7 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, repeatedRequestID, repeatedSourceID, "call_actor_production_spawn_repeated", "spawn_agent")
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, repeatedSourceID)
 	if repeated, err := client.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: parentScope, SourceToolUseEventId: repeatedSourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all", InitialPrompt: "inspect the target-owned durable envelope",
+		Scope: parentScope, SourceToolUseEventId: repeatedSourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "inspect the target-owned durable envelope", ParentMessageSequences: []int64{1},
 	}); status.Code(err) != codes.AlreadyExists || repeated != nil {
 		t.Fatalf("new Tool identity with repeated task name = %#v/%v; want AlreadyExists", repeated, err)
 	}

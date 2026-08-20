@@ -215,11 +215,15 @@ func appendDeclaredSubagentInitialReceivedEventTx(
 	if threadScope.role != "subagent" || envelope.TargetThreadID != targetScope.GetSessionThreadId() {
 		return "", status.Error(codes.FailedPrecondition, "sub-agent initial input target is invalid")
 	}
+	sourceTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, targetScope, envelope.SourceThreadID)
+	if err != nil {
+		return "", err
+	}
 	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
 		"type":                     "agent.thread_message_received",
 		"delivery_id":              envelope.DeliveryID,
 		"source_thread_id":         envelope.SourceThreadID,
-		"source_task_name":         nil,
+		"source_task_name":         nullableJSONString(sourceTaskName),
 		"source_tool_use_event_id": envelope.SourceToolUseEventID,
 		"message":                  envelope.PublicMessageJSON,
 	})

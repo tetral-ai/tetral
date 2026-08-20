@@ -105,6 +105,7 @@ export interface RuntimeToolExecutionRequest {
 	readonly toolUseEventId: string;
 	readonly entry: ToolEntry;
 	readonly input: RuntimeJsonValue;
+	readonly retainedContextEntries: readonly RuntimeContextEntry[];
 	readonly currentModel?:
 		| {
 				readonly providerId: string;

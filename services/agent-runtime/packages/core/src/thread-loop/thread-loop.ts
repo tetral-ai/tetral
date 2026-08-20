@@ -4552,6 +4552,7 @@ function resumeRecoveredToolJobEffect(
 				toolUseEventId: pending.toolUseEventId,
 				entry: pending.entry,
 				input: pending.job.input,
+				retainedContextEntries: session.state.contextManager.entries(),
 				...(currentModel !== undefined ? { currentModel } : {}),
 			};
 			let executionResult: RuntimeToolExecutionResult;
@@ -5190,6 +5191,7 @@ function coordinateRuntimeToolJobEffect(
 				toolUseEventId: toolUse.toolUseEventId,
 				entry,
 				input: job.input,
+				retainedContextEntries: session.state.contextManager.entries(),
 				...(session.state.currentModel() !== undefined
 					? { currentModel: session.state.currentModel() }
 					: {}),

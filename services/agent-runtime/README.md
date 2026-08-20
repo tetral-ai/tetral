@@ -340,9 +340,11 @@ thread sees tool use/result; child work stays child-thread-local.
 
 - Interface: the `subagent` route operations dispatch in `tool-runner.ts`; child
   threads are created through Bridge `CreateSubagentThread`; Runtime declares
-  the normalized child metadata and bounded initial prompt once, while Bridge
-  derives and stores the thread context prefix and initial custody atomically;
-  `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
+  the normalized child metadata and bounded initial prompt once, interprets
+  public `fork_turns`, and sends the exact ordered durable parent Message
+  references. Bridge validates and snapshots only those references while
+  committing initial custody atomically; turn partitioning is
+  `core/src/runtime/conversation-turns.ts`.
 - Lifecycle: `spawn_agent` commits the durable child row, immutable context
   prefix, opening sent/received Events, target Inbox/Queue custody, and one
   replay receipt directly from its live durable Tool Use, before the parent
@@ -357,7 +359,8 @@ Invariants a replacement must preserve:
 
 - Child thread, prefix, opening Events, Inbox/Queue custody, and receipt exist
   together or not at all. A crash after `CreateSubagentThread` commits reuses
-  that complete Bridge-owned lineage without a second opening delivery.
+  that complete Bridge-owned lineage without a second opening delivery; the
+  replay receipt carries only the child identity needed by Runtime.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → committed input
   result. Pod-loss reconciliation hands an accepted input back to the existing

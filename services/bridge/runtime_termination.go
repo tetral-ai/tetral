@@ -144,7 +144,6 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 		    AND e.session_id = $2
 		    AND ($3 = '' OR e.session_thread_id = $3)
 		    AND e.type IN ('agent.tool_use','agent.mcp_tool_use')
-		    AND e.visibility = 'public'
 		    AND NOT EXISTS (
 		        SELECT 1 FROM session_events result
 			         WHERE result.workspace_id = e.workspace_id

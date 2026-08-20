@@ -728,8 +728,10 @@ message CreateSubagentThreadRequest {
   string source_tool_use_event_id = 2;
   string task_name = 3;
   string agent_type = 4;
-  string fork_turns = 5;
+  reserved 5;
+  reserved "fork_turns";
   string initial_prompt = 6;
+  repeated int64 parent_message_sequences = 7;
 }
 
 message CreateSubagentThreadResponse {

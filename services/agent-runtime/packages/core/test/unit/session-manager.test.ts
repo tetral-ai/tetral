@@ -1326,7 +1326,17 @@ describe("SessionManager", () => {
 		const reviewerThreadId = "thrd_reviewer_failed_idle";
 		const siblingThreadId = "thrd_reviewer_sibling";
 		const parentThreadId = "thrd_reviewer_parent";
-		const threadLoop = makeControlledThreadLoop();
+		let closeoutCalls = 0;
+		const threadLoop = makeControlledThreadLoop({
+			closeFailedRun: () =>
+				Effect.sync(() => {
+					closeoutCalls += 1;
+					return {
+						type: "landed" as const,
+						disposition: "continuation" as const,
+					};
+				}),
+		});
 		await withSessionManager(
 			sessionManagerLayer(threadLoop),
 			async (manager) => {
@@ -1392,6 +1402,7 @@ describe("SessionManager", () => {
 					terminal: true,
 					timedOut: false,
 				});
+				expect(closeoutCalls).toBe(1);
 
 				expect(
 					await Effect.runPromise(

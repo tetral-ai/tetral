@@ -289,7 +289,7 @@ func TestPostgreSQLSessionInterruptBarrierRejectsSuccessorStartAndChildLifecycle
 		t.Fatalf("successor Request Start = %#v/%v; want barrier stale", started, err)
 	}
 	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: scope, SourceToolUseEventId: "evt_interrupt_barrier_spawn", TaskName: "blocked", AgentType: "worker", ForkTurns: "all", InitialPrompt: "blocked opening input",
+		Scope: scope, SourceToolUseEventId: "evt_interrupt_barrier_spawn", TaskName: "blocked", AgentType: "worker", InitialPrompt: "blocked opening input",
 	})
 	if err == nil || created != nil || !isSessionInterruptBarrierStaleError(err) {
 		t.Fatalf("successor child lifecycle = %#v/%v; want private barrier-stale result", created, err)

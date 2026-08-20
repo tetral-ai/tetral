@@ -341,11 +341,16 @@ func validateDeclaredPublicSubagentTargetTx(ctx context.Context, tx *dbconnect.T
 
 func loadCommittedChildControlCommandTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operationID string) (childControlCommand, error) {
 	var payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT payload_json
-		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type=$3
-		AND payload_json::jsonb ->> 'control_operation_id'=$4
-		ORDER BY event_id LIMIT 1 FOR SHARE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, operationID,
+	if err := tx.QueryRow(ctx, `SELECT event.payload_json
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'control_operation_id'=$5
+		ORDER BY event.event_id LIMIT 1 FOR SHARE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, operationID,
 	).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
 		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child interrupt control operation is unknown")
 	} else if err != nil {
@@ -452,8 +457,16 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, command
 }
 
 func readChildInterruptCensusTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operationID string) ([]*bridgev1.ChildInterruptTarget, bool, error) {
-	rows, err := tx.Query(ctx, `SELECT session_thread_id,event_id,sequence,payload_json FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type=$3 AND payload_json::jsonb ->> 'control_operation_id'=$4 ORDER BY session_thread_id FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, operationID)
+	rows, err := tx.Query(ctx, `SELECT event.session_thread_id,event.event_id,event.sequence,event.payload_json
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'control_operation_id'=$5
+		ORDER BY event.session_thread_id FOR UPDATE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, operationID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -487,11 +500,16 @@ func readChildInterruptCensusTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 
 func readChildInterruptCensusBySourceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID string) ([]*bridgev1.ChildInterruptTarget, string, bool, error) {
 	var operationID string
-	err := tx.QueryRow(ctx, `SELECT payload_json::jsonb ->> 'control_operation_id' FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND type=$3
-		AND payload_json::jsonb ->> 'source_tool_use_event_id'=$4
-		ORDER BY event_id LIMIT 1 FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, sourceID,
+	err := tx.QueryRow(ctx, `SELECT event.payload_json::jsonb ->> 'control_operation_id'
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'source_tool_use_event_id'=$5
+		ORDER BY event.event_id LIMIT 1 FOR UPDATE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, sourceID,
 	).Scan(&operationID)
 	if dbconnect.IsNoRows(err) {
 		return nil, "", false, nil
@@ -507,8 +525,15 @@ func readChildInterruptCensusBySourceTx(ctx context.Context, tx *dbconnect.Tx, s
 }
 
 func validateStoredChildInterruptRequestTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID, rootID string, action bridgev1.ChildControlAction, descendants bool, declarationDigest string) error {
-	rows, err := tx.Query(ctx, `SELECT payload_json FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type=$3 AND payload_json::jsonb ->> 'source_tool_use_event_id'=$4 FOR SHARE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, sourceID)
+	rows, err := tx.Query(ctx, `SELECT event.payload_json
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'source_tool_use_event_id'=$5 FOR SHARE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, sourceID)
 	if err != nil {
 		return err
 	}

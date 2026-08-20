@@ -26,26 +26,6 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-func TestSelectForkEntriesUsesUserLedTurnBoundaries(t *testing.T) {
-	entries := []bridgeRuntimeContextEntry{
-		{MessageSequence: 1, ContextKind: "user"},
-		{MessageSequence: 2, ContextKind: "assistant"},
-		{MessageSequence: 3, ContextKind: "compaction"},
-		{MessageSequence: 4, ContextKind: "runtime_notification"},
-		{MessageSequence: 5, ContextKind: "assistant"},
-	}
-	kinds := []string{"user", "assistant", "compaction", "runtime_notification", "assistant"}
-
-	selected := selectForkEntries(entries, kinds, "1")
-	if len(selected) != 2 || selected[0].MessageSequence != 4 || selected[1].MessageSequence != 5 {
-		t.Fatalf("last user-led turn = %#v; want sequences 4,5", selected)
-	}
-	all := selectForkEntries(entries, kinds, "2")
-	if len(all) != len(entries) {
-		t.Fatalf("two user-led turns selected %d entries; want %d", len(all), len(entries))
-	}
-}
-
 func TestDurablePrefixIncludesAcknowledgedFailedAndRescheduledAssistantParts(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -106,14 +86,14 @@ func TestActorCreationBoundsMatchTheRuntimeContract(t *testing.T) {
 	if validActorTaskName(" padded ") || validActorTaskName(string([]byte{0xff})) {
 		t.Fatal("non-canonical task name was accepted")
 	}
-	for _, value := range []string{"none", "all", "1", "1000"} {
-		if !validForkTurns(value) {
-			t.Fatalf("valid fork_turns %q was rejected", value)
+	for _, value := range [][]int64{nil, {}, {1}, {1, 2, 3}} {
+		if !validParentMessageSequences(value) {
+			t.Fatalf("valid parent Message references %v were rejected", value)
 		}
 	}
-	for _, value := range []string{"", "0", "01", "1001", "-1", "1.0"} {
-		if validForkTurns(value) {
-			t.Fatalf("invalid fork_turns %q was accepted", value)
+	for _, value := range [][]int64{{0}, {-1}, {2, 1}, {1, 1}, make([]int64, actorParentMessageRefsMax+1)} {
+		if validParentMessageSequences(value) {
+			t.Fatalf("invalid parent Message references %v were accepted", value)
 		}
 	}
 }
@@ -175,7 +155,7 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	request := func(sourceID, taskName string, candidateScope *bridgev1.RuntimeScope) *bridgev1.CreateSubagentThreadRequest {
 		return &bridgev1.CreateSubagentThreadRequest{
-			Scope: candidateScope, SourceToolUseEventId: sourceID, TaskName: taskName, AgentType: "worker", ForkTurns: "all", InitialPrompt: "perform the delegated task",
+			Scope: candidateScope, SourceToolUseEventId: sourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "perform the delegated task",
 		}
 	}
 	for name, candidate := range map[string]*bridgev1.CreateSubagentThreadRequest{
@@ -292,7 +272,7 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 				}
 			}
 			created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-				Scope: scope, SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), TaskName: "worker", AgentType: "worker", ForkTurns: "all", InitialPrompt: "perform the delegated task",
+				Scope: scope, SourceToolUseEventId: toolUse.GetCommitted().GetEventId(), TaskName: "worker", AgentType: "worker", InitialPrompt: "perform the delegated task", ParentMessageSequences: []int64{1},
 			})
 			if err != nil || created.GetCommitted().GetChildThreadId() == "" {
 				t.Fatalf("create child from %s = %#v/%v", name, created, err)
@@ -346,12 +326,14 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 		sessionID = "sesn_control_operation_identity"
 		parentID  = "thr_control_operation_parent"
 		childID   = "thr_control_operation_child"
+		siblingID = "thr_control_operation_sibling"
 		sourceID  = "evt_control_operation_source"
 		bindingID = "bind_control_operation_identity"
 		podUID    = "pod_control_operation_identity"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, siblingID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"close_agent","input":{"task_name":"provider-owned-different"}}`)
@@ -387,6 +369,13 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	}
 	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: sourceID}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("AwaitChildInterrupt accepted source Tool identity: %v", err)
+	}
+	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
+	if response, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: siblingScope, ControlOperationId: operationID}); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("sibling caller awaited another parent's control = %#v/%v; want FailedPrecondition", response, err)
+	}
+	if response, err := store.CloseChildControl(context.Background(), &bridgev1.CloseChildControlRequest{Scope: siblingScope, ControlOperationId: operationID}); status.Code(err) != codes.FailedPrecondition || response != nil {
+		t.Fatalf("sibling caller closed another parent's control = %#v/%v; want FailedPrecondition", response, err)
 	}
 	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: operationID}); status.Code(err) != codes.DeadlineExceeded {
 		t.Fatalf("AwaitChildInterrupt durable control lookup = %v; want pending census", err)
@@ -614,7 +603,7 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		t.Fatalf("interrupted-source mail error = %v; want interrupt barrier stale", err)
 	}
 	if _, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", ForkTurns: "all", InitialPrompt: "must be stale",
+		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
 	}); !isSessionInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child error = %v; want interrupt barrier stale", err)
 	}
@@ -742,12 +731,14 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 		sessionID = "sesn_durable_resume_target"
 		parentID  = "thr_durable_resume_parent"
 		childID   = "thr_durable_resume_child"
+		otherID   = "thr_durable_resume_other"
 		sourceID  = "evt_durable_resume_source"
 		bindingID = "bind_durable_resume"
 		podUID    = "pod_durable_resume"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, otherID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"provider-owned-different"}}`)
@@ -757,7 +748,7 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 	}
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime',closed_at='2026-01-01T00:00:00Z'
-		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID); err != nil {
+		WHERE workspace_id='default' AND session_id=$1 AND id IN ($2,$3)`, sessionID, childID, otherID); err != nil {
 		t.Fatalf("close resume target: %v", err)
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -772,16 +763,23 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 	if err != nil || replay.GetDuplicate().GetDisposition() != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED {
 		t.Fatalf("MarkChildThreadActive lost-ACK replay = %#v/%v; want duplicate resumed", replay, err)
 	}
+	if changedTarget, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
+		Scope: request.GetScope(), SourceToolUseEventId: sourceID, TargetChildThreadId: otherID,
+	}); status.Code(err) != codes.AlreadyExists || changedTarget != nil {
+		t.Fatalf("same resume source with changed target = %#v/%v; want AlreadyExists before a second effect", changedTarget, err)
+	}
 	var statusValue string
+	var otherStatus string
 	var operationCount int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$3),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1
-		 AND session_thread_id=$2 AND operation='mark_child_thread_active')`, sessionID, childID).Scan(&statusValue, &operationCount); err != nil {
+		 AND operation='mark_child_thread_active' AND idempotency_key=$4)`, sessionID, childID, otherID, stableRuntimeID("child_resume", sourceID)).Scan(&statusValue, &otherStatus, &operationCount); err != nil {
 		t.Fatalf("read resumed child: %v", err)
 	}
-	if statusValue != "idle" || operationCount != 1 {
-		t.Fatalf("resumed child status/receipt = %s/%d; want idle/1", statusValue, operationCount)
+	if statusValue != "idle" || otherStatus != "closed_for_runtime" || operationCount != 1 {
+		t.Fatalf("resumed/changed-target status/receipt = %s/%s/%d; want idle/closed_for_runtime/1", statusValue, otherStatus, operationCount)
 	}
 
 	for index, test := range []struct {

@@ -31,7 +31,7 @@ func TestPostgreSQLAtomicSubagentCreationCommitsAndReplaysWholeInitialLineage(t 
 	toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_atomic_subagent", "call_atomic_subagent", "spawn_agent",
 		`{"task_name":"provider-owned-name","agent_type":"general","fork_turns":"none","prompt":"provider-owned-prompt"}`)
 	request := &bridgev1.CreateSubagentThreadRequest{
-		Scope: scope, SourceToolUseEventId: toolUseID, TaskName: "runtime-worker", AgentType: "worker", ForkTurns: "all", InitialPrompt: prompt,
+		Scope: scope, SourceToolUseEventId: toolUseID, TaskName: "runtime-worker", AgentType: "worker", InitialPrompt: prompt,
 	}
 	created, err := store.CreateSubagentThread(context.Background(), request)
 	if err != nil || created.GetCommitted().GetChildThreadId() == "" {
@@ -79,7 +79,7 @@ func TestPostgreSQLAtomicSubagentCreationRollsBackEveryOwnedFact(t *testing.T) {
 		t.Fatalf("install atomic rollback trigger: %v", err)
 	}
 	request := &bridgev1.CreateSubagentThreadRequest{
-		Scope: scope, SourceToolUseEventId: toolUseID, TaskName: "rollback-worker", AgentType: "worker", ForkTurns: "all", InitialPrompt: "rollback opening",
+		Scope: scope, SourceToolUseEventId: toolUseID, TaskName: "rollback-worker", AgentType: "worker", InitialPrompt: "rollback opening",
 	}
 	if response, err := store.CreateSubagentThread(context.Background(), request); err == nil || response != nil {
 		t.Fatalf("injected atomic child failure = %#v/%v; want rollback", response, err)

@@ -241,6 +241,7 @@ function mcpRuntimeRequest(): RuntimeToolExecutionRequest {
 		toolUseEventId,
 		entry: mcpToolEntry(),
 		input: { title: "Bug", body: "Details" },
+		retainedContextEntries: [],
 		abortSignal: new AbortController().signal,
 	};
 }

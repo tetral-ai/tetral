@@ -1233,17 +1233,12 @@ export function layer(
 						!runSlot.stopping &&
 						exit.value.releaseSession?.reason !== "terminated"
 					) {
-						// A cleared durable-turn token after accepted input consumption is
-						// the applied FinishIdle result. Otherwise failed-run closeout must
-						// land that result before this token can become a reusable trunk.
-						const alreadyIdle =
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
-								.executionRunId === undefined &&
-							threadEntry.runtimeThread.state.acceptedInputCount() === 0 &&
-							exit.value.releaseSession === undefined;
-						const closeout = alreadyIdle
-							? ("continuation" as const)
-							: yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit);
+						// The run exit carries the durable closeout disposition when the
+						// ThreadLoop already landed it. Hot idle shape is not settlement
+						// authority; an absent disposition must still execute closeout.
+						const closeout =
+							exit.value.closeoutDisposition ??
+							(yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit));
 						if (
 							closeout === "continuation" &&
 							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint

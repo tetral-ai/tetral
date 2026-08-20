@@ -166,6 +166,7 @@ const request: RuntimeToolExecutionRequest = {
 	toolUseEventId: committed.toolUseEventId,
 	entry,
 	input: job.input,
+	retainedContextEntries: [],
 	abortSignal: new AbortController().signal,
 };
 const runner = new RuntimePodToolRunner({

@@ -927,8 +927,8 @@ export interface CreateSubagentThreadRequest {
   sourceToolUseEventId: string;
   taskName: string;
   agentType: string;
-  forkTurns: string;
   initialPrompt: string;
+  parentMessageSequences: number[];
 }
 
 export interface CreateSubagentThreadResponse {
@@ -11114,7 +11114,14 @@ export const FinishIdleStale: MessageFns<FinishIdleStale> = {
 };
 
 function createBaseCreateSubagentThreadRequest(): CreateSubagentThreadRequest {
-  return { scope: undefined, sourceToolUseEventId: "", taskName: "", agentType: "", forkTurns: "", initialPrompt: "" };
+  return {
+    scope: undefined,
+    sourceToolUseEventId: "",
+    taskName: "",
+    agentType: "",
+    initialPrompt: "",
+    parentMessageSequences: [],
+  };
 }
 
 export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest> = {
@@ -11131,12 +11138,14 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     if (message.agentType !== "") {
       writer.uint32(34).string(message.agentType);
     }
-    if (message.forkTurns !== "") {
-      writer.uint32(42).string(message.forkTurns);
-    }
     if (message.initialPrompt !== "") {
       writer.uint32(50).string(message.initialPrompt);
     }
+    writer.uint32(58).fork();
+    for (const v of message.parentMessageSequences) {
+      writer.int64(v);
+    }
+    writer.join();
     return writer;
   },
 
@@ -11179,14 +11188,6 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
           message.agentType = reader.string();
           continue;
         }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.forkTurns = reader.string();
-          continue;
-        }
         case 6: {
           if (tag !== 50) {
             break;
@@ -11194,6 +11195,24 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
 
           message.initialPrompt = reader.string();
           continue;
+        }
+        case 7: {
+          if (tag === 56) {
+            message.parentMessageSequences.push(longToNumber(reader.int64()));
+
+            continue;
+          }
+
+          if (tag === 58) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.parentMessageSequences.push(longToNumber(reader.int64()));
+            }
+
+            continue;
+          }
+
+          break;
         }
       }
       if ((tag & 7) === 4 || tag === 0) {
@@ -11222,16 +11241,16 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
         : isSet(object.agent_type)
         ? globalThis.String(object.agent_type)
         : "",
-      forkTurns: isSet(object.forkTurns)
-        ? globalThis.String(object.forkTurns)
-        : isSet(object.fork_turns)
-        ? globalThis.String(object.fork_turns)
-        : "",
       initialPrompt: isSet(object.initialPrompt)
         ? globalThis.String(object.initialPrompt)
         : isSet(object.initial_prompt)
         ? globalThis.String(object.initial_prompt)
         : "",
+      parentMessageSequences: globalThis.Array.isArray(object?.parentMessageSequences)
+        ? object.parentMessageSequences.map((e: any) => globalThis.Number(e))
+        : globalThis.Array.isArray(object?.parent_message_sequences)
+        ? object.parent_message_sequences.map((e: any) => globalThis.Number(e))
+        : [],
     };
   },
 
@@ -11249,11 +11268,11 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     if (message.agentType !== "") {
       obj.agentType = message.agentType;
     }
-    if (message.forkTurns !== "") {
-      obj.forkTurns = message.forkTurns;
-    }
     if (message.initialPrompt !== "") {
       obj.initialPrompt = message.initialPrompt;
+    }
+    if (message.parentMessageSequences?.length) {
+      obj.parentMessageSequences = message.parentMessageSequences.map((e) => Math.round(e));
     }
     return obj;
   },
@@ -11269,8 +11288,8 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
     message.taskName = object.taskName ?? "";
     message.agentType = object.agentType ?? "";
-    message.forkTurns = object.forkTurns ?? "";
     message.initialPrompt = object.initialPrompt ?? "";
+    message.parentMessageSequences = object.parentMessageSequences?.map((e) => e) || [];
     return message;
   },
 };

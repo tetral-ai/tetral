@@ -45,6 +45,7 @@ import type {
 	RuntimeToolExecutionRequest,
 	RuntimeToolExecutionResult,
 } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import { selectRecentUserLedTurns } from "@tetral/agent-runtime-core/src/runtime/conversation-turns.js";
 import type {
 	AcceptSandboxExecutionRequest,
 	AcceptSandboxExecutionResponse,
@@ -137,6 +138,7 @@ const WEB_SEARCH_DOMAINS_MAX = 4;
 const WEB_DOMAIN_MAX_BYTES = 253;
 const SUBAGENT_TASK_NAME_MAX_BYTES = 128;
 const SUBAGENT_FORK_TURNS_MAX = 1_000;
+const SUBAGENT_PROMPT_MAX_BYTES = 2 * 1024 * 1024;
 const TOOL_RESULT_BOUND_FAILURE =
 	"Tool result exceeds the 512 KiB model-visible output limit.";
 
@@ -848,11 +850,11 @@ export class RuntimePodToolRunner {
 		request: RuntimeToolExecutionRequest,
 	): Promise<RuntimeToolExecutionResult> {
 		const taskName = taskNameValue(request.input);
-		const prompt = requiredString(request.input, "prompt");
+		const prompt = boundedPromptValue(request.input);
 		if (taskName === undefined || prompt === undefined) {
 			return toolFailure(
 				request,
-				"spawn_agent requires a task_name of at most 128 UTF-8 bytes and prompt.",
+				"spawn_agent requires a task_name of at most 128 UTF-8 bytes and a prompt of at most 2 MiB.",
 				false,
 			);
 		}
@@ -892,13 +894,17 @@ export class RuntimePodToolRunner {
 		let durablyDeliveredThreadId: string | undefined;
 		try {
 			const metadata = await this.metadata();
+			const parentMessageSequences = selectSubagentParentMessageSequences(
+				request,
+				forkTurns,
+			);
 			const createRequest: CreateSubagentThreadRequest = {
 				scope: parentScope,
 				sourceToolUseEventId: request.toolUseEventId,
 				taskName,
 				agentType,
-				forkTurns,
 				initialPrompt: prompt,
+				parentMessageSequences,
 			};
 			const createResponse = await this.replayActorTransport(
 				request.abortSignal,
@@ -2128,6 +2134,14 @@ function taskNameValue(input: RuntimeJsonValue): string | undefined {
 		: undefined;
 }
 
+function boundedPromptValue(input: RuntimeJsonValue): string | undefined {
+	const value = requiredString(input, "prompt");
+	return value !== undefined &&
+		new TextEncoder().encode(value).byteLength <= SUBAGENT_PROMPT_MAX_BYTES
+		? value
+		: undefined;
+}
+
 function subAgentType(
 	input: RuntimeJsonValue,
 ): "general" | "research" | "worker" | undefined {
@@ -2152,6 +2166,23 @@ function forkTurnsValue(input: RuntimeJsonValue): string | undefined {
 	return Number.isSafeInteger(count) && count <= SUBAGENT_FORK_TURNS_MAX
 		? value
 		: undefined;
+}
+
+function selectSubagentParentMessageSequences(
+	request: RuntimeToolExecutionRequest,
+	forkTurns: string,
+): number[] {
+	if (forkTurns === "none") {
+		return [];
+	}
+	const selected =
+		forkTurns === "all"
+			? request.retainedContextEntries
+			: selectRecentUserLedTurns(
+					request.retainedContextEntries,
+					Number(forkTurns),
+				);
+	return selected.map((entry) => entry.messageSequence);
 }
 
 function parseChildThread(

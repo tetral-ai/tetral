@@ -2234,12 +2234,12 @@ describe("RuntimePodToolRunner", () => {
 
 		expect(result.type).toBe("completed");
 		expect(bridge.createSubagentThreadRequests).toEqual([
-			expect.objectContaining({
-				taskName: "researcher",
-				agentType: "research",
-				sourceToolUseEventId: "sevt_tool_1",
-				forkTurns: "none",
-				initialPrompt: "work on this",
+				expect.objectContaining({
+					taskName: "researcher",
+					agentType: "research",
+					sourceToolUseEventId: "sevt_tool_1",
+					initialPrompt: "work on this",
+					parentMessageSequences: [],
 			}),
 		]);
 		expect(bridge.deliverInterAgentMailRequests).toEqual([]);
@@ -2316,7 +2316,7 @@ describe("RuntimePodToolRunner", () => {
 		});
 	});
 
-	test("rejects oversized task names and fork counts before any durable actor mutation", async () => {
+	test("rejects oversized task names, prompts, and fork counts before any durable actor mutation", async () => {
 		const bridge = new RecordingBridgeClient();
 		const runner = makeRunner({
 			bridge,
@@ -2336,12 +2336,22 @@ describe("RuntimePodToolRunner", () => {
 				fork_turns: "1001",
 			}),
 		);
+		const oversizedPrompt = await runner.runTool(
+			toolRequest("spawn_agent", {
+				task_name: "worker",
+				prompt: "é".repeat(1024 * 1024 + 1),
+			}),
+		);
 
 		expect(oversizedName).toMatchObject({
 			type: "error",
 			error: { retryable: false },
 		});
 		expect(oversizedFork).toMatchObject({
+			type: "error",
+			error: { retryable: false },
+		});
+		expect(oversizedPrompt).toMatchObject({
 			type: "error",
 			error: { retryable: false },
 		});
@@ -2937,6 +2947,28 @@ describe("RuntimePodToolRunner", () => {
 				prompt: "work on the latest turn",
 				fork_turns: "1",
 			}),
+			retainedContextEntries: [
+				{
+					messageSequence: 1,
+					contextKind: "user" as const,
+					parts: [{ type: "text" as const, text: "earlier" }],
+				},
+				{
+					messageSequence: 2,
+					contextKind: "assistant" as const,
+					parts: [{ type: "text" as const, text: "earlier answer" }],
+				},
+				{
+					messageSequence: 3,
+					contextKind: "user" as const,
+					parts: [{ type: "text" as const, text: "latest" }],
+				},
+				{
+					messageSequence: 4,
+					contextKind: "assistant" as const,
+					parts: [{ type: "text" as const, text: "latest answer" }],
+				},
+			],
 		} satisfies RuntimeToolExecutionRequest;
 
 		const result = await runner.runTool(request);
@@ -2945,7 +2977,7 @@ describe("RuntimePodToolRunner", () => {
 		expect(bridge.createSubagentThreadRequests[0]).toEqual(
 			expect.objectContaining({
 				sourceToolUseEventId: request.toolUseEventId,
-				forkTurns: "1",
+				parentMessageSequences: [3, 4],
 			}),
 		);
 	});
@@ -4194,6 +4226,7 @@ function toolRequest(
 		toolUseEventId,
 		entry,
 		input,
+		retainedContextEntries: [],
 		currentModel: { providerId: "openai", modelId: "gpt-5.5" },
 		abortSignal,
 	};

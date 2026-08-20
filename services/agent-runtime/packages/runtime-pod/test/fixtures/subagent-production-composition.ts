@@ -30,6 +30,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly targetPodUid: string;
 	readonly taskName: string;
 	readonly prompt: string;
+	readonly forkTurns: string;
 };
 
 const bridgeOptions = {
@@ -96,7 +97,7 @@ const llmService = {
 						task_name: input.taskName,
 						prompt: input.prompt,
 						agent_type: "worker",
-						fork_turns: "all",
+						fork_turns: input.forkTurns,
 					},
 					inputPreview: {
 						preview: `{"task_name":"${input.taskName}"}`,
