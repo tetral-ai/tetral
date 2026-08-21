@@ -58,7 +58,11 @@ let nextId = 0;
 let providerInvocations = 0;
 let gatewayRequests = 0;
 const providerAttachmentCounts: number[] = [];
-const signalProviderStart = async (attachmentCount: number, attachmentBytes: number): Promise<void> => {
+const signalProviderStart = async (
+	attachmentCount: number,
+	attachmentBytes: number,
+	providerRequest: GatewayStreamTextInput,
+): Promise<void> => {
 	if (input.providerStartedPath === undefined) return;
 	await writeFile(
 		input.providerStartedPath,
@@ -67,6 +71,7 @@ const signalProviderStart = async (attachmentCount: number, attachmentBytes: num
 			gatewayRequests,
 			attachmentCount,
 			loweredAttachmentBytes: attachmentBytes,
+			providerRequest,
 		}),
 		{ mode: 0o600 },
 	);
@@ -81,7 +86,11 @@ const providerStreamer = new ProviderClientRegistry({
 		providerAttachmentCounts.push(attachmentFacts.count);
 		return {
 			fullStream: (async function* () {
-				await signalProviderStart(attachmentFacts.count, attachmentFacts.bytes);
+				await signalProviderStart(
+					attachmentFacts.count,
+					attachmentFacts.bytes,
+					providerRequest,
+				);
 				if (input.mode === "hang") {
 					await new Promise<void>(() => undefined);
 					return;

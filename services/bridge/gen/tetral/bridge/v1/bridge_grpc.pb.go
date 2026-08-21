@@ -45,6 +45,7 @@ const (
 	AgentRuntimeBridgeService_ReadCommandResult_FullMethodName             = "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult"
 	AgentRuntimeBridgeService_SendCommandInput_FullMethodName              = "/tetral.bridge.v1.AgentRuntimeBridgeService/SendCommandInput"
 	AgentRuntimeBridgeService_CancelCommand_FullMethodName                 = "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelCommand"
+	AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName     = "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution"
 	AgentRuntimeBridgeService_RunMemory_FullMethodName                     = "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory"
 	AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName    = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment"
 	AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata"
@@ -87,6 +88,7 @@ type AgentRuntimeBridgeServiceClient interface {
 	ReadCommandResult(ctx context.Context, in *ReadCommandResultRequest, opts ...grpc.CallOption) (*ReadCommandResultResponse, error)
 	SendCommandInput(ctx context.Context, in *SendCommandInputRequest, opts ...grpc.CallOption) (*SendCommandInputResponse, error)
 	CancelCommand(ctx context.Context, in *CancelCommandRequest, opts ...grpc.CallOption) (*CancelCommandResponse, error)
+	AuthorizeWebToolExecution(ctx context.Context, in *AuthorizeWebToolExecutionRequest, opts ...grpc.CallOption) (*AuthorizeWebToolExecutionResponse, error)
 	RunMemory(ctx context.Context, in *RunMemoryRequest, opts ...grpc.CallOption) (*RunMemoryResponse, error)
 	ResolveTransientAttachment(ctx context.Context, in *ResolveTransientAttachmentRequest, opts ...grpc.CallOption) (*ResolveTransientAttachmentResponse, error)
 	ResolveFileAttachmentMetadata(ctx context.Context, in *ResolveFileAttachmentMetadataRequest, opts ...grpc.CallOption) (*ResolveFileAttachmentMetadataResponse, error)
@@ -367,6 +369,16 @@ func (c *agentRuntimeBridgeServiceClient) CancelCommand(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *agentRuntimeBridgeServiceClient) AuthorizeWebToolExecution(ctx context.Context, in *AuthorizeWebToolExecutionRequest, opts ...grpc.CallOption) (*AuthorizeWebToolExecutionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AuthorizeWebToolExecutionResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentRuntimeBridgeServiceClient) RunMemory(ctx context.Context, in *RunMemoryRequest, opts ...grpc.CallOption) (*RunMemoryResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RunMemoryResponse)
@@ -497,6 +509,7 @@ type AgentRuntimeBridgeServiceServer interface {
 	ReadCommandResult(context.Context, *ReadCommandResultRequest) (*ReadCommandResultResponse, error)
 	SendCommandInput(context.Context, *SendCommandInputRequest) (*SendCommandInputResponse, error)
 	CancelCommand(context.Context, *CancelCommandRequest) (*CancelCommandResponse, error)
+	AuthorizeWebToolExecution(context.Context, *AuthorizeWebToolExecutionRequest) (*AuthorizeWebToolExecutionResponse, error)
 	RunMemory(context.Context, *RunMemoryRequest) (*RunMemoryResponse, error)
 	ResolveTransientAttachment(context.Context, *ResolveTransientAttachmentRequest) (*ResolveTransientAttachmentResponse, error)
 	ResolveFileAttachmentMetadata(context.Context, *ResolveFileAttachmentMetadataRequest) (*ResolveFileAttachmentMetadataResponse, error)
@@ -594,6 +607,9 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) SendCommandInput(context.Con
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) CancelCommand(context.Context, *CancelCommandRequest) (*CancelCommandResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CancelCommand not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) AuthorizeWebToolExecution(context.Context, *AuthorizeWebToolExecutionRequest) (*AuthorizeWebToolExecutionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AuthorizeWebToolExecution not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) RunMemory(context.Context, *RunMemoryRequest) (*RunMemoryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RunMemory not implemented")
@@ -1115,6 +1131,24 @@ func _AgentRuntimeBridgeService_CancelCommand_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRuntimeBridgeService_AuthorizeWebToolExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AuthorizeWebToolExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).AuthorizeWebToolExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).AuthorizeWebToolExecution(ctx, req.(*AuthorizeWebToolExecutionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentRuntimeBridgeService_RunMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RunMemoryRequest)
 	if err := dec(in); err != nil {
@@ -1405,6 +1439,10 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelCommand",
 			Handler:    _AgentRuntimeBridgeService_CancelCommand_Handler,
+		},
+		{
+			MethodName: "AuthorizeWebToolExecution",
+			Handler:    _AgentRuntimeBridgeService_AuthorizeWebToolExecution_Handler,
 		},
 		{
 			MethodName: "RunMemory",

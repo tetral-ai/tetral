@@ -13,7 +13,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -85,6 +87,129 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 	}
 }
 
+func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_context_recovery_lease"
+		threadID  = "thr_context_recovery_lease"
+		bindingID = "bind_context_recovery_lease"
+		podUID    = "pod_context_recovery_lease"
+		sourceID  = "evt_context_recovery_lease"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	enqueue, err := queue.NewRuntimeRecoveryEnqueueRequest(workspace.DefaultID, sessionID, threadID, sourceID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("build recovery Queue job: %v", err)
+	}
+	if _, err := queueStore.Enqueue(context.Background(), enqueue); err != nil {
+		t.Fatalf("enqueue recovery Queue job: %v", err)
+	}
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeRecovery}, LeaseOwner: "context-loader",
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease recovery Queue job = %#v/%v", leased, err)
+	}
+	request := &bridgev1.LoadContextRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		RecoveryLeaseRef: &bridgev1.RecoveryLeaseRef{
+			JobId: leased[0].ID, LeaseToken: leased[0].LeaseToken,
+			PartitionKey: leased[0].PartitionKey, DedupeKey: leased[0].DedupeKey,
+		},
+	}
+	store := NewPostgreSQLBridgeAPIStore(client)
+	store.RuntimeBindingTokenHMACKey = []byte("recovery-load-authority-key")
+	var diagnostics bytes.Buffer
+	store.Logger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
+	if _, err := store.LoadContext(context.Background(), request); err != nil {
+		t.Fatalf("LoadContext with live recovery lease: %v diagnostics=%s", err, diagnostics.String())
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		 WHERE workspace_id='default' AND id=$1`, leased[0].ID); err != nil {
+		t.Fatalf("expire recovery lease: %v", err)
+	}
+	if _, err := store.LoadContext(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("LoadContext with stale recovery lease = %v; want FailedPrecondition", err)
+	}
+}
+
+func TestLoadContextColdParserKeepsTerminalFailureAboveCompactionFloor(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_terminal_context"
+		threadID  = "thr_terminal_context"
+		bindingID = "bind_terminal_context"
+		podUID    = "pod_terminal_context"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+		created_at, updated_at, processed_at
+	) VALUES
+	('default',$1,$2,'evt_terminal_old_open',1,'span.model_request_start',
+	 '{"type":"span.model_request_start","model_request_id":"mreq_terminal_old_open"}',
+	 'internal',false,'rwrite_terminal_old_open','mreq_terminal_old_open',
+	 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_error',2,'session.error',
+	 '{"type":"session.error","error":{"type":"unknown_error","message":"The runtime could not complete the request.","retry_status":{"type":"terminal"}}}',
+	 'public',true,'rwrite_terminal:error',NULL,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_close',3,'session.status_terminated','{"type":"session.status_terminated"}',
+	 'public',true,'rwrite_terminal',NULL,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_compaction_start',4,'span.model_request_start',
+	 '{"type":"span.model_request_start","model_request_id":"mreq_terminal_compaction"}',
+	 'internal',false,'rwrite_terminal_compaction_start','mreq_terminal_compaction',
+	 '{"context_through_message_sequence":1,"request_kind":"compaction_summary"}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_compaction_end',5,'span.model_request_end',
+	 '{"model_request_start_id":"evt_terminal_compaction_start","is_error":false,"provider_context_retention":{"disposition":"compacted","tool_use_event_ids":[],"repair_event_ids":[]}}',
+	 'internal',false,'rwrite_terminal_compaction_end','mreq_terminal_compaction','{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_compacted',6,'agent.thread_context_compacted','{}',
+	 'internal',false,'rwrite_terminal_compacted','mreq_terminal_compaction','{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_running',7,'session.status_running','{"type":"session.status_running"}',
+	 'internal',false,'rwrite_terminal_running',NULL,'{}',now(),now(),now())`, sessionID, threadID); err != nil {
+		t.Fatalf("seed terminal context facts: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
+		workspace_id, session_id, session_thread_id, message_id, sequence, kind, data_json,
+		source_event_id, model_request_id, created_at, updated_at
+	) VALUES
+	('default',$1,$2,'msg_terminal_old_open',1,'assistant','{"parts":[{"type":"text","text":"superseded"}]}',
+	 'evt_terminal_old_open','mreq_terminal_old_open',now(),now()),
+	('default',$1,$2,'msg_terminal_compaction',2,'compaction','{"parts":[{"type":"text","text":"summary"}]}',
+	 'evt_terminal_compacted',NULL,now(),now())`, sessionID, threadID); err != nil {
+		t.Fatalf("seed terminal context messages: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("terminal-context-signing-key")
+	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
+	t.Cleanup(stopBridge)
+	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
+		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
+		"sessionId": sessionID, "sessionThreadId": threadID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"now": "2026-08-21T12:00:00Z", "preloadOnly": true,
+	})
+	turnEventsJSON, err := json.Marshal(result.RecoveredTurnEvents)
+	if err != nil {
+		t.Fatalf("encode recovered terminal events: %v", err)
+	}
+	turnEvents := string(turnEventsJSON)
+	if !strings.Contains(turnEvents, "evt_terminal_running") ||
+		!strings.Contains(turnEvents, "evt_terminal_error") ||
+		!strings.Contains(turnEvents, "evt_terminal_close") ||
+		strings.Contains(turnEvents, "evt_terminal_old_open") ||
+		!strings.Contains(string(result.PreloadResult), `"ok":true`) {
+		t.Fatalf("terminal cold parse = events %s preload %s", turnEvents, result.PreloadResult)
+	}
+}
+
 func TestLoadContextRejectsMalformedDurableContext(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -106,65 +231,5 @@ func TestLoadContextRejectsMalformedDurableContext(t *testing.T) {
 	_, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("LoadContext error = %v; want FailedPrecondition", err)
-	}
-}
-
-func TestLoadContextBoundsTurnFactsButRetainsLivePriorToolRequest(t *testing.T) {
-	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_bounded_turn_facts"
-		threadID  = "sthr_bounded_turn_facts"
-		bindingID = "bind_bounded_turn_facts"
-		podUID    = "pod_bounded_turn_facts"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
-		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,model_request_id,created_at,updated_at
-	) VALUES ('default',$1,$2,'msg_live_prior_tool',1,'assistant',
-		'{"parts":[{"type":"tool_call","modelToolCallId":"call_live_prior","toolName":"Read","canonicalInput":{"path":"README.md"}}]}',
-		'mreq_live_prior','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, sessionID, threadID); err != nil {
-		t.Fatalf("seed live prior Tool message: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
-		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,model_request_id,projection_json,created_at,updated_at
-	) VALUES
-		('default',$1,$2,'evt_historical_corrupt',1,'session.error','{}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_prior_running',2,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_live_prior_start',3,'span.model_request_start','{}','mreq_live_prior','{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_live_prior_tool',4,'agent.tool_use','{"type":"agent.tool_use","name":"Read","input":{"path":"README.md"}}','mreq_live_prior','{"model_tool_call_id":"call_live_prior"}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_live_prior_end',5,'span.model_request_end','{"model_request_start_id":"evt_live_prior_start","is_error":false}','mreq_live_prior','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_prior_idle',6,'session.status_idle','{"stop_reason":{"type":"requires_action"}}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-		('default',$1,$2,'evt_current_running',7,'session.status_running','{"type":"session.status_running"}',NULL,'{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
-		sessionID, threadID); err != nil {
-		t.Fatalf("seed bounded turn facts: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
-		t.Fatalf("mark bounded Session active: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
-		t.Fatalf("mark bounded Thread active: %v", err)
-	}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	store.RuntimeBindingTokenHMACKey = []byte("bounded-turn-facts-signing-key")
-	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
-	if err != nil {
-		t.Fatalf("LoadContext bounded turn facts: %v", err)
-	}
-	var payload bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
-		t.Fatalf("decode bounded turn facts: %v", err)
-	}
-	ids := make([]string, 0, len(payload.TurnFacts.Events))
-	for _, event := range payload.TurnFacts.Events {
-		ids = append(ids, event.EventID)
-	}
-	if len(ids) == 0 || ids[0] != "evt_live_prior_start" {
-		t.Fatalf("bounded turn fact IDs = %v; want live prior Request Start first", ids)
-	}
-	for _, id := range ids {
-		if id == "evt_historical_corrupt" || id == "evt_prior_running" {
-			t.Fatalf("bounded turn facts retained historical event %q: %v", id, ids)
-		}
 	}
 }

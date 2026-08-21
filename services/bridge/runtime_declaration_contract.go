@@ -85,7 +85,7 @@ func canonicalRuntimeContextParts(delta *bridgev1.RuntimeContextDelta) ([]map[st
 			if call == nil || !runtimeAlreadyCanonicalIdentifier(call.GetModelToolCallId()) || !runtimeAlreadyCanonicalIdentifier(call.GetToolName()) {
 				return nil, status.Error(codes.InvalidArgument, "runtime tool call context is invalid")
 			}
-			input, err := decodeRuntimeDeclarationValue(call.GetCanonicalInputJson())
+			input, err := decodeRuntimeDeclarationValue(call.GetProviderInputJson())
 			if err != nil || runtimeJSONBytes(input) > runtimeToolInputJSONMaxBytes {
 				return nil, status.Error(codes.InvalidArgument, "runtime tool call input is invalid")
 			}

@@ -104,6 +104,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequest, toolUseID, modelCallID, "exec_command")
+	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseID)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_messages SET source_event_id = $5
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
@@ -223,7 +224,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 		t.Fatalf("AwaitSandboxExecution behind unrelated Session lock = %+v, %v; want durable result", replayedResult, err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_events SET projection_json = '{"model_tool_call_id":"call_bridge_durable_tool_changed"}'
+		`UPDATE session_events SET projection_json = jsonb_set(
+		  projection_json::jsonb, '{model_tool_call_id}', '"call_bridge_durable_tool_changed"'::jsonb
+		)::text
 		  WHERE workspace_id = $1 AND event_id = $2`, workspaceID, toolUseID,
 	); err != nil {
 		t.Fatalf("mutate durable Tool identity: %v", err)
@@ -251,15 +254,21 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_patch_split_start", modelRequestID, "agent_provider_request", 0)
 
-	publicInputJSON, err := json.Marshal(map[string]string{"patch": rawPatch})
+	providerInputJSON, err := json.Marshal(rawPatch)
 	if err != nil {
-		t.Fatalf("marshal public patch input: %v", err)
+		t.Fatalf("marshal provider patch input: %v", err)
+	}
+	executionInputJSON, err := json.Marshal(map[string]string{"patch": rawPatch})
+	if err != nil {
+		t.Fatalf("marshal execution patch input: %v", err)
 	}
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_patch_split_tool", ModelRequestId: modelRequestID,
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"payload_must_not_win","input":{"patch":"wrong","runtime_only":"must_not_survive"},"evaluated_permission":"ask"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, "apply_patch", string(publicInputJSON)),
+		ToolDeclaration: func() *bridgev1.RuntimeToolDeclaration {
+			declaration := bridgeToolDeclarationForTest(modelToolCallID, "apply_patch", string(executionInputJSON), "allow", "sandbox_execute")
+			declaration.DistinctProviderInputJson = bridgeString(string(providerInputJSON))
+			return declaration
+		}(),
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent apply_patch: %v", err)
@@ -271,7 +280,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	}
 	if testJSONPathString(t, durableEventPayload, "name") != "apply_patch" ||
 		!reflect.DeepEqual(testJSONPathValue(t, durableEventPayload, "input"), map[string]any{"patch": rawPatch}) ||
-		strings.Contains(durableEventPayload, "runtime_only") || strings.Contains(durableEventPayload, "payload_must_not_win") {
+		strings.Contains(durableEventPayload, "runtime_only") {
 		t.Fatalf("authoritative Tool Use payload = %s", durableEventPayload)
 	}
 
@@ -300,7 +309,8 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 					t.Fatalf("decode Runtime context part: %v", err)
 				}
 				if part["modelToolCallId"] == modelToolCallID {
-					if part["type"] != "tool_call" || part["toolName"] != "apply_patch" {
+					if part["type"] != "tool_call" || part["toolName"] != "apply_patch" ||
+						!reflect.DeepEqual(part["canonicalInput"], rawPatch) {
 						t.Fatalf("Runtime patch identity = %#v", part)
 					}
 					return
@@ -310,34 +320,26 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		t.Fatal("LoadContext omitted apply_patch Tool Call context")
 	}
 
-	beforeApproval := load("rin_bridge_patch_split_before_approval")
-	assertRuntimeScalar(beforeApproval)
-	if len(beforeApproval.PendingToolUses) != 1 ||
-		beforeApproval.PendingToolUses[0].ToolUseEventID != toolUseEventID ||
-		beforeApproval.PendingToolUses[0].ModelRequestID != modelRequestID ||
-		beforeApproval.PendingToolUses[0].ModelToolCallID != modelToolCallID ||
-		beforeApproval.PendingToolUses[0].ToolName != "apply_patch" ||
-		string(beforeApproval.PendingToolUses[0].Input) != string(publicInputJSON) {
-		t.Fatalf("pending apply_patch approval = %#v; want object execution identity", beforeApproval.PendingToolUses)
+	beforeAcceptance := load("rin_bridge_patch_split_before_acceptance")
+	assertRuntimeScalar(beforeAcceptance)
+	if len(beforeAcceptance.PendingToolUses) != 1 ||
+		beforeAcceptance.PendingToolUses[0].ToolUseEventID != toolUseEventID ||
+		beforeAcceptance.PendingToolUses[0].ModelRequestID != modelRequestID ||
+		beforeAcceptance.PendingToolUses[0].ModelToolCallID != modelToolCallID ||
+		beforeAcceptance.PendingToolUses[0].ToolName != "apply_patch" ||
+		string(beforeAcceptance.PendingToolUses[0].Input) != string(executionInputJSON) ||
+		beforeAcceptance.PendingToolUses[0].Status != "resolving" ||
+		beforeAcceptance.PendingToolUses[0].Decision == nil ||
+		*beforeAcceptance.PendingToolUses[0].Decision != "allow" {
+		t.Fatalf("admitted apply_patch route = %#v; want durable allow execution identity", beforeAcceptance.PendingToolUses)
 	}
 
-	setBridgeAPIPendingApprovalStatus(t, admin, "default", sessionID, threadID, toolUseEventID, "resolving")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_bridge_patch_split_allow", 3, "user.tool_confirmation",
-		`{"type":"user.tool_confirmation","tool_use_id":"`+toolUseEventID+`","result":"allow"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_patch_split_allow", "tool_confirmation",
-		`["evt_bridge_patch_split_allow"]`, "accepted", bindingID, podUID, 3, 3)
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: "rin_bridge_patch_split_allow",
-	}); err != nil {
-		t.Fatalf("CommitInputs allow approval: %v", err)
-	}
-
-	canonicalInput, _, err := canonicalRunToolInput(string(publicInputJSON))
+	canonicalInput, _, err := canonicalRunToolInput(string(executionInputJSON))
 	if err != nil {
 		t.Fatalf("canonical patch input: %v", err)
 	}
-	if canonicalInput != string(publicInputJSON) {
-		t.Fatalf("canonical patch input = %q; want %q", canonicalInput, publicInputJSON)
+	if canonicalInput != string(executionInputJSON) {
+		t.Fatalf("canonical patch input = %q; want %q", canonicalInput, executionInputJSON)
 	}
 	accepted, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
 		Scope: scope, ToolUseEventId: toolUseEventID,
@@ -358,7 +360,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	execution := afterAcceptance.PendingSandboxExecutions[0]
 	if execution.ToolUseEventID != toolUseEventID || execution.ModelRequestID != modelRequestID ||
 		execution.ModelToolCallID != modelToolCallID || execution.ToolName != "apply_patch" ||
-		string(execution.Input) != string(publicInputJSON) {
+		string(execution.Input) != string(executionInputJSON) {
 		t.Fatalf("pending apply_patch execution = %#v; want unchanged object identity", execution)
 	}
 }
@@ -383,6 +385,7 @@ func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *te
 		t.Fatalf("stamp Tool Use model request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
+	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
@@ -556,9 +559,9 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 		}
 		response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: fmt.Sprintf("rwrite_memory_%d", index), ModelRequestId: modelRequestID,
-			EventType:             "agent.tool_use",
-			PayloadJson:           `{"type":"agent.tool_use","name":"memory","input":` + canonicalInput + `,"evaluated_permission":"allow"}`,
-			AssistantContextDelta: bridgeToolCallContextDeltaForTest(fmt.Sprintf("call_memory_%d", index), "memory", canonicalInput),
+			ToolDeclaration: bridgeToolDeclarationForTest(
+				fmt.Sprintf("call_memory_%d", index), "memory", canonicalInput, "allow", "memory_execute",
+			),
 		})
 		if err != nil || response.GetCommitted() == nil {
 			t.Fatalf("WriteEvent %d: response=%#v err=%v", index, response, err)
@@ -601,7 +604,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 		{name: "ask missing approval", evaluatedPermission: "ask", wantCode: codes.FailedPrecondition},
 		{name: "ask denied", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "deny", wantCode: codes.FailedPrecondition},
 		{name: "unknown permission", evaluatedPermission: "unknown", wantCode: codes.FailedPrecondition},
-		{name: "approval identity conflict", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", approvalInput: `{"cmd":"different"}`, wantCode: codes.AlreadyExists},
+		{name: "resolved ask allow ignores duplicated route payload", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", approvalInput: `{"cmd":"different"}`, wantCode: codes.OK, wantAccepted: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -622,6 +625,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 				t.Fatalf("stamp permission model request: %v", err)
 			}
 			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "exec_command")
+			if testCase.evaluatedPermission == "allow" {
+				seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+			}
 			if testCase.approvalStatus != "" {
 				approvalInput := testCase.approvalInput
 				if approvalInput == "" {
@@ -848,6 +854,29 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if _, err := store.CommitInternalToolRepair(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CommitInternalToolRepair err = %v; want AlreadyExists", err)
 	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_bridge_operations SET receipt_json='{}'
+		WHERE workspace_id='default' AND session_id='sesn_bridge_repair' AND operation=$1`,
+		bridgeOpCommitInternalToolRepair); err != nil {
+		t.Fatalf("corrupt superseded internal repair memo: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id='sesn_bridge_repair'`); err != nil {
+		t.Fatalf("supersede internal repair Runtime scope: %v", err)
+	}
+	staleReplay, err := store.CommitInternalToolRepair(context.Background(), request)
+	if err != nil || staleReplay.GetStale() == nil {
+		t.Fatalf("stale-scope internal repair replay = %#v/%v; want typed stale", staleReplay, err)
+	}
+	var repairOperations, repairEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_bridge_repair' AND operation=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_bridge_repair' AND runtime_write_id=$2)`,
+		bridgeOpCommitInternalToolRepair, repairKey).Scan(&repairOperations, &repairEvents); err != nil {
+		t.Fatalf("read stale-scope internal repair effects: %v", err)
+	}
+	if repairOperations != 1 || repairEvents != 1 {
+		t.Fatalf("stale-scope internal repair effects = operations:%d events:%d; want 1/1", repairOperations, repairEvents)
+	}
 }
 func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -858,8 +887,7 @@ func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_collision_start", "mreq_collision", requestKindAgentProviderRequest, 0)
 	public, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_collision_tool", ModelRequestId: "mreq_collision",
-		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"unknown_tool","input":{},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_collision", "unknown_tool", `{}`),
+		ToolDeclaration: bridgeToolDeclarationForTest("call_collision", "unknown_tool", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || public.GetCommitted() == nil {
 		t.Fatalf("seed public Tool Call: response=%#v err=%v", public, err)
@@ -959,6 +987,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_repair_after_end_close", ModelRequestId: modelRequestID,
 		FinishReason: "tool_calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}); err != nil {
 		t.Fatalf("write request end: %v", err)
 	}
@@ -978,7 +1007,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_repair_stale", "bind_bridge_repair_stale", 1, "pod_uid_repair_stale")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	_, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
+	response, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
 		Scope:              bridgeAPIScope("sesn_bridge_repair_stale", "thr_bridge_repair_stale", "bind_bridge_repair_stale", 2, "pod_uid_repair_stale"),
 		ModelRequestId:     "mreq_repair_stale",
 		ModelToolCallId:    "call_repair_stale",
@@ -987,8 +1016,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 		CanonicalInputJson: `{}`,
 		Error:              &bridgev1.RuntimeToolError{ErrorJson: `{"type":"provider_tool_protocol_error","message":"invalid tool","retryable":false}`},
 	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("stale CommitInternalToolRepair err = %v; want FailedPrecondition", err)
+	if err != nil || response.GetStale() == nil {
+		t.Fatalf("stale CommitInternalToolRepair = %#v/%v; want typed stale", response, err)
 	}
 	var messageCount int
 	if err := admin.QueryRowContext(context.Background(),
@@ -1073,6 +1102,27 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *test
 	}
 	if currentContent != "two" {
 		t.Fatalf("replaced memory content = %q; want two", currentContent)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreRunMemoryUsesDeclaredRouteWithoutToolNameAllowlist(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_declared_route", "bind_bridge_memory_declared_route", 1, "pod_uid_memory_declared_route")
+	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_declared_route", "memstore_bridge_memory_declared_route")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_memory_declared_route", "thr_bridge_memory_declared_route", "bind_bridge_memory_declared_route", 1, "pod_uid_memory_declared_route")
+	request := durableMemoryRequestForTest(t, admin, scope, "evt_tool_memory_declared_route",
+		`{"action":"create","path":"notes/declared.md","content":"declared"}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET projection_json=jsonb_set(projection_json::jsonb, '{tool_name}', '"runtime_memory_v2"'::jsonb)::text
+		WHERE workspace_id='default' AND event_id=$1`, request.GetToolUseEventId()); err != nil {
+		t.Fatalf("replace diagnostic Tool name while retaining declared route: %v", err)
+	}
+	response, err := store.RunMemory(context.Background(), request)
+	if err != nil || response.GetCommitted() == nil {
+		t.Fatalf("RunMemory declared route = %#v/%v", response, err)
 	}
 }
 
@@ -1891,7 +1941,7 @@ func TestPostgreSQLBridgeAPIStoreDurableToolOperationsReturnTypedStaleCustody(t 
 	if err != nil || read.GetStale() == nil {
 		t.Fatalf("ReadCommandResult stale = %#v/%v", read, err)
 	}
-	sent, err := store.SendCommandInput(context.Background(), &bridgev1.SendCommandInputRequest{Scope: stale, TaskId: "task_1", OperationId: "op_send", ToolUseEventId: "evt_send", InputJson: `{"chars":"x"}`})
+	sent, err := store.SendCommandInput(context.Background(), &bridgev1.SendCommandInputRequest{Scope: stale, TaskId: "task_1", OperationId: "op_send", ToolUseEventId: "evt_send"})
 	if err != nil || sent.GetStale() == nil {
 		t.Fatalf("SendCommandInput stale = %#v/%v", sent, err)
 	}
@@ -2046,10 +2096,22 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryUsesDurableInputAndReplays(t *testing.
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
 		SET payload_json='{"type":"agent.tool_use","name":"memory","input":{"action":"create","path":"notes/other.md","content":"two"},"evaluated_permission":"allow"}'
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, toolUseEventID); err != nil {
-		t.Fatalf("mutate durable memory Tool input: %v", err)
+		t.Fatalf("mutate public memory Tool input: %v", err)
+	}
+	if replayed, err := store.RunMemory(context.Background(), request); err != nil || replayed.GetDuplicate().GetResultJson() != committed.GetCommitted().GetResultJson() {
+		t.Fatalf("RunMemory after public input change = %#v/%v; want duplicate exact result", replayed, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET projection_json = jsonb_set(
+			projection_json::jsonb,
+			'{canonical_execution_input}',
+			'{"action":"create","path":"notes/other.md","content":"two"}'::jsonb
+		)
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, toolUseEventID); err != nil {
+		t.Fatalf("mutate canonical memory Tool input: %v", err)
 	}
 	if _, err := store.RunMemory(context.Background(), request); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("RunMemory after durable identity change = %v; want AlreadyExists", err)
+		t.Fatalf("RunMemory after canonical execution identity change = %v; want AlreadyExists", err)
 	}
 }
 
@@ -2078,11 +2140,9 @@ func writeDurableOrdinaryToolUseForTest(
 ) string {
 	t.Helper()
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_"+modelRequestID+"_start", modelRequestID, "agent_provider_request", 0)
-	payloadJSON := `{"type":"agent.tool_use","name":"` + toolName + `","input":` + inputJSON + `,"evaluated_permission":"allow"}`
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_tool", ModelRequestId: modelRequestID,
-		EventType: "agent.tool_use", PayloadJson: payloadJSON, SessionVisible: true,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, toolName, inputJSON),
+		ToolDeclaration: bridgeToolDeclarationWithRouteForTest(modelToolCallID, toolName, inputJSON, "allow"),
 	})
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("write durable ordinary Tool use: response=%#v err=%v", response, err)
@@ -2115,14 +2175,28 @@ func durableMemoryRequestForTest(
 	)
 	modelRequestID := "mreq_" + toolUseEventID
 	modelToolCallID := "call_" + toolUseEventID
+	projectionJSON, err := json.Marshal(map[string]any{
+		"event_type":                "agent.tool_use",
+		"evaluated_permission":      "allow",
+		"model_tool_call_id":        modelToolCallID,
+		"tool_name":                 "memory",
+		"provider_input":            json.RawMessage(inputJSON),
+		"canonical_execution_input": json.RawMessage(inputJSON),
+		"route_capability":          "memory_execute",
+		"state":                     "running",
+	})
+	if err != nil {
+		t.Fatalf("marshal durable memory Tool projection: %v", err)
+	}
 	if _, err := db.ExecContext(context.Background(),
 		`UPDATE session_events SET model_request_id=$3, projection_json=$4
 		  WHERE workspace_id=$1 AND event_id=$2`,
 		scope.GetWorkspaceId(), toolUseEventID, modelRequestID,
-		`{"model_tool_call_id":"`+modelToolCallID+`"}`,
+		string(projectionJSON),
 	); err != nil {
 		t.Fatalf("stamp durable memory Tool facts: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, db, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID)
 	return &bridgev1.RunMemoryRequest{Scope: scope, ToolUseEventId: toolUseEventID}
 }
 

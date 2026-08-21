@@ -308,6 +308,7 @@ describe("runtime boundary contracts", () => {
 			sessionThreadId: "thr_1",
 			writeId: "rwrite_1",
 			modelRequestId: "mreq_anchor_1",
+			toolRouteCapability: "sandbox_execute" as const,
 			assistantContextAppend: {
 				parts: [
 					{
@@ -386,6 +387,7 @@ describe("runtime boundary contracts", () => {
 					evaluated_permission: "allow",
 				},
 				modelRequestId: "mreq_without_anchor",
+				toolRouteCapability: "sandbox_execute",
 			}).success,
 		).toBe(true);
 
@@ -492,6 +494,11 @@ describe("runtime boundary contracts", () => {
 			modelRequestId: "mreq_1",
 			isError: false,
 			finishReason: "stop" as const,
+			providerContextRetention: {
+				disposition: "completed" as const,
+				toolUseEventIds: [],
+				repairEventIds: [],
+			},
 		};
 		const trailingContextAppend = {
 			parts: [
@@ -536,6 +543,11 @@ describe("runtime boundary contracts", () => {
 			modelRequestId: "mreq_attachments",
 			isError: false,
 			finishReason: "stop" as const,
+			providerContextRetention: {
+				disposition: "completed" as const,
+				toolUseEventIds: [],
+				repairEventIds: [],
+			},
 		};
 		const fileAttachments = Array.from({ length: 32 }, (_, index) => ({
 			sourceEventId: `sevt_file_${index}`,
@@ -631,6 +643,28 @@ describe("runtime boundary contracts", () => {
 				fatal: true,
 				retryStatus: { type: "terminal" },
 			}),
+			RuntimeFailureSchema.parse({
+				type: "provider",
+				code: "provider_unavailable",
+				message: "Provider is unavailable.",
+				retryable: false,
+				fatal: false,
+				statusCode: 400,
+				providerId: "anthropic",
+				modelId: "claude-opus-4-8",
+				retryStatus: { type: "exhausted" },
+			}),
+			RuntimeFailureSchema.parse({
+				type: "provider",
+				code: "provider_key_unavailable",
+				message: "The supplied provider credential is not usable.",
+				retryable: false,
+				fatal: true,
+				statusCode: 401,
+				providerId: "anthropic",
+				modelId: "claude-opus-4-8",
+				retryStatus: { type: "exhausted" },
+			}),
 		];
 
 		expect(
@@ -665,6 +699,22 @@ describe("runtime boundary contracts", () => {
 					type: "model_request_failed_error",
 					message: "Runtime operation failed.",
 					retry_status: { type: "terminal" },
+				},
+			},
+			{
+				type: "session.error",
+				error: {
+					type: "model_overloaded_error",
+					message: "Provider is unavailable.",
+					retry_status: { type: "exhausted" },
+				},
+			},
+			{
+				type: "session.error",
+				error: {
+					type: "model_request_failed_error",
+					message: "The supplied provider credential is not usable.",
+					retry_status: { type: "exhausted" },
 				},
 			},
 		]);

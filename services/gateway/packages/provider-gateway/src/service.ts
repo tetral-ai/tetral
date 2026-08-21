@@ -35,10 +35,11 @@ import type { RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/b
 import type { GatewayLogger } from "./logger.js";
 import { lookupGatewayModel } from "./providers/catalog.js";
 import { controlProviderStream } from "./providers/stream-control.js";
+import type { ProviderStreamWatchdogKind } from "./providers/stream-control.js";
 import { classifyProviderFailure, PlatformKeyPoolConstants, ProviderKeyFailureError } from "./providers/pool.js";
+import type { ProviderFailureClassification } from "./providers/pool.js";
 import type { ProviderCredentialResolver, ResolvedProviderCredential } from "./providers/credentials.js";
 import type { ProviderErrorInput } from "@tetral/gateway-lowering/src/errors.js";
-import type { ProviderStreamTimeoutKind } from "@tetral/gateway-lowering/src/errors.js";
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import { ProviderGatewayMetricsRegistry } from "./metrics.js";
 
@@ -326,6 +327,11 @@ export class ProviderGatewayServiceShell {
         DefaultProviderChunkTimeoutMs,
         overallTimeoutMs,
       ),
+      semanticProgressTimeoutMs: providerTimeoutMs(
+        this.options.providerStreamTimeouts?.semanticProgressTimeoutMs,
+        DefaultProviderSemanticProgressTimeoutMs,
+        overallTimeoutMs,
+      ),
     };
   }
 
@@ -365,9 +371,10 @@ export class ProviderGatewayServiceShell {
       attachments: attachmentResolution.attachments.map(({ data: _data, ...attachment }) => attachment),
     };
     // Per-turn provider loop. The `emitted` latch is set by the first event from
-    // the provider client and splits platform-key failover from Runtime-owned
-    // recovery. Attachment-rejections are emitted before this loop and do not
-    // close the failover window:
+    // the provider client and splits HTTP credential rejection from Runtime-owned
+    // stream recovery. Transport and watchdog failures without a captured
+    // provider semantic signal never mutate or switch credentials. Attachment
+    // rejections are emitted before this loop and do not close the failover window:
     //
     //   | phase                     | credential | on provider fault                        | re-enters loop? |
     //   | ------------------------- | ---------- | ---------------------------------------- | --------------- |
@@ -375,7 +382,9 @@ export class ProviderGatewayServiceShell {
     //   |                           |            | exclude this key for the turn              | fail-fast or    |
     //   |                           |            |                                            | max attempts    |
     //   | emitted == false          | session    | one attempt only; forward provider-error | no              |
-    //   | emitted == true (any src) | any        | no switch, no retry; forward terminal;    | no              |
+    //   | emitted == true (platform)| platform   | record key failure; no switch or retry;    | no              |
+    //   |                           |            | forward terminal; Runtime owns recovery   |                 |
+    //   | emitted == true (session) | session    | no switch or retry; forward terminal;      | no              |
     //   |                           |            | Runtime owns recovery                     |                 |
     //
     // ProviderOpenFragmentTracker validates only this attempt. A nominal finish or
@@ -384,14 +393,19 @@ export class ProviderGatewayServiceShell {
     const attemptedPlatformKeyIds = new Set<string>();
     let platformAttempts = 0;
     let lastPlatformProviderError: ProviderErrorInput | undefined;
+    let lastPlatformFailureAction: ProviderFailureClassification["action"] | undefined;
+    let lastPlatformFailureOrigin: "http_rejection" | "transport_failure" | undefined;
     while (true) {
       const credential = await withinProviderDeadline(
-        this.resolveCredential(request, attemptedPlatformKeyIds, lastPlatformProviderError),
+        this.resolveCredential(request, attemptedPlatformKeyIds, lastPlatformProviderError, lastPlatformFailureAction),
         abortSignal,
         providerDeadline,
         () => abortOnTimeout({ kind: "overall_timeout" }),
       );
       if (!credential.ok) {
+        if (lastPlatformProviderError !== undefined && lastPlatformFailureOrigin !== undefined) {
+          recordFailureOrigin(lastPlatformFailureOrigin);
+        }
         yield providerErrorEvent(credential.error);
         return;
       }
@@ -399,6 +413,7 @@ export class ProviderGatewayServiceShell {
       let emitted = false;
       let lastEventAt: number | undefined;
       let lastEventKind: string | undefined;
+      let lastTransportActivityAt = Date.now();
       const openFragments = new ProviderOpenFragmentTracker();
       try {
         const providerEvents = controlProviderStream(this.providerStreamer.stream({
@@ -406,6 +421,9 @@ export class ProviderGatewayServiceShell {
           abortSignal,
           credential: resolvedCredential,
           resolvedAttachments: attachmentResolution.attachments,
+          onTransportActivity: () => {
+            lastTransportActivityAt = Date.now();
+          },
         }), {
           abortSignal,
           abortOnTimeout: (kind) => abortOnTimeout({
@@ -417,6 +435,8 @@ export class ProviderGatewayServiceShell {
           }),
           ...this.providerStreamTimeouts(providerDeadlineRemainingMs(providerDeadline)),
           overallTimeoutMs: providerDeadlineRemainingMs(providerDeadline),
+          isSemanticProgress: isProviderSemanticProgress,
+          transportActivityAt: () => lastTransportActivityAt,
         });
         for await (const event of providerEvents) {
           const eventValidation = validateProviderStreamEvent(event);
@@ -446,10 +466,21 @@ export class ProviderGatewayServiceShell {
                 const input = providerAttemptFailureInput(error);
                 return new ProviderKeyFailureError(
                   classifyProviderFailure(resolvedCredential.providerId, input),
-                  input.networkError === true || input.timeout === true ? "transport_failure" : "http_rejection",
+                  input.networkError === true || input.timeout === true || input.statusCode === undefined
+                    ? "transport_failure"
+                    : "http_rejection",
                 );
               })()
             : undefined;
+        const capturedSemanticSignal = providerKeyFailure?.classification.semanticSignal === "deepseek_insufficient_balance";
+        if (
+          error instanceof ProviderStreamTimeoutError ||
+          (providerKeyFailure?.origin === "transport_failure" && !capturedSemanticSignal)
+        ) {
+          recordFailureOrigin("transport_failure");
+          yield providerErrorEvent(classifyProviderStreamError(error));
+          return;
+        }
         if (providerKeyFailure === undefined) {
           if (error instanceof ProviderIncompleteStreamError) {
             logProviderStreamIncomplete(this.options.logger, request, error);
@@ -458,19 +489,54 @@ export class ProviderGatewayServiceShell {
           yield providerErrorEvent(classifyProviderStreamError(error));
           return;
         }
-        if (resolvedCredential?.source !== "platform" || emitted) {
+        if (resolvedCredential?.source === "session") {
           recordFailureOrigin(providerKeyFailure.origin);
-          yield providerErrorEvent(providerKeyFailure.classification.providerError);
+          yield providerErrorEvent(
+            providerKeyFailure.classification.action === "quarantine" ||
+            providerKeyFailure.classification.providerError.statusCode === 401 ||
+            providerKeyFailure.classification.providerError.statusCode === 403
+              ? sessionCredentialUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
+          return;
+        }
+        if (resolvedCredential?.source !== "platform") {
+          recordFailureOrigin(providerKeyFailure.origin);
+          yield providerErrorEvent(
+            providerKeyFailure.classification.action === "quarantine"
+              ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
           return;
         }
         const platformKeyId = resolvedCredential.platformKey.keyId;
         this.options.credentialResolver?.recordPlatformFailure(platformKeyId, providerKeyFailure.classification);
+        if (emitted) {
+          recordFailureOrigin(providerKeyFailure.origin);
+          yield providerErrorEvent(
+            providerKeyFailure.classification.action === "quarantine"
+              ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
+          return;
+        }
         attemptedPlatformKeyIds.add(platformKeyId);
         platformAttempts += 1;
         lastPlatformProviderError = providerKeyFailure.classification.providerError;
-        if (providerKeyFailure.classification.action === "fail-fast" || platformAttempts >= PlatformKeyPoolConstants.maxKeySwitchesPerTurn) {
+        lastPlatformFailureAction = providerKeyFailure.classification.action;
+        lastPlatformFailureOrigin = providerKeyFailure.origin;
+        if (providerKeyFailure.classification.action === "fail-fast") {
           recordFailureOrigin(providerKeyFailure.origin);
           yield providerErrorEvent(providerKeyFailure.classification.providerError);
+          return;
+        }
+        if (platformAttempts >= PlatformKeyPoolConstants.maxKeySwitchesPerTurn) {
+          recordFailureOrigin(providerKeyFailure.origin);
+          yield providerErrorEvent(
+            providerKeyFailure.classification.action === "quarantine"
+              ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
           return;
         }
       }
@@ -481,6 +547,7 @@ export class ProviderGatewayServiceShell {
     request: ProviderRequest,
     attemptedPlatformKeyIds: ReadonlySet<string>,
     lastPlatformProviderError: ProviderErrorInput | undefined,
+    lastPlatformFailureAction: ProviderFailureClassification["action"] | undefined,
   ): Promise<{ readonly ok: true; readonly credential: ResolvedProviderCredential | undefined } | { readonly ok: false; readonly error: ProviderErrorInput }> {
     if (this.options.credentialResolver === undefined) {
       return { ok: true, credential: undefined };
@@ -491,8 +558,13 @@ export class ProviderGatewayServiceShell {
     if (resolved.ok) {
       return resolved;
     }
-    if (lastPlatformProviderError !== undefined && resolved.error.code === "platform_keys_exhausted") {
-      return { ok: false, error: lastPlatformProviderError };
+    if (resolved.error.code === "platform_keys_exhausted") {
+      return {
+        ok: false,
+        error: lastPlatformProviderError !== undefined && lastPlatformFailureAction !== "quarantine"
+          ? lastPlatformProviderError
+          : platformCredentialPoolUnavailableError(lastPlatformProviderError?.statusCode ?? resolved.error.statusCode),
+      };
     }
     return resolved;
   }
@@ -535,8 +607,28 @@ export class ProviderGatewayServiceShell {
   }
 }
 
+function platformCredentialPoolUnavailableError(statusCode: number | undefined): ProviderErrorInput {
+  return {
+    code: "provider_unavailable",
+    message: "Provider is unavailable.",
+    retryable: false,
+    fatal: false,
+    ...(statusCode === undefined ? {} : { statusCode }),
+  };
+}
+
+function sessionCredentialUnavailableError(statusCode: number | undefined): ProviderErrorInput {
+  return {
+    code: "provider_key_unavailable",
+    message: "The supplied provider credential is not usable.",
+    retryable: false,
+    fatal: true,
+    ...(statusCode === undefined ? {} : { statusCode }),
+  };
+}
+
 interface ProviderTimeoutObservation {
-  readonly kind: ProviderStreamTimeoutKind;
+  readonly kind: ProviderStreamWatchdogKind;
   readonly interEventGapMs?: number | undefined;
   readonly lastEventKind?: string | undefined;
 }
@@ -550,7 +642,12 @@ function logGatewayProviderTimeout(
 ): void {
   const kind = timeout.kind === "first_byte_timeout"
     ? "first_event"
-    : timeout.kind === "inter_chunk_timeout" ? "inter_event" : "overall";
+    : timeout.kind === "inter_chunk_timeout"
+      ? "inter_event"
+      : timeout.kind === "semantic_progress_timeout"
+        ? "semantic_progress"
+        : "overall";
+  const semanticProgressExpired = timeout.kind === "semantic_progress_timeout";
   try {
     logger.error({
       event: "gateway_provider_timeout",
@@ -565,9 +662,15 @@ function logGatewayProviderTimeout(
       }),
       ...(timeout.lastEventKind === undefined ? {} : { "stream.last_event.kind": timeout.lastEventKind }),
       ...semanticErrorFields({
-        errorClass: "provider_timeout",
-        errorCode: "provider_timeout",
-        messageSafe: "provider stream watchdog expired",
+        errorClass: semanticProgressExpired
+          ? "provider_transport_failure"
+          : "provider_timeout",
+        errorCode: semanticProgressExpired
+          ? "provider_stream_error"
+          : "provider_timeout",
+        messageSafe: semanticProgressExpired
+          ? "provider stream made no semantic progress"
+          : "provider stream watchdog expired",
       }),
     });
   } catch {
@@ -867,17 +970,20 @@ export interface ProviderRequestStreamInput {
   readonly abortSignal?: AbortSignal | undefined;
   readonly credential?: ResolvedProviderCredential | undefined;
   readonly resolvedAttachments?: readonly ResolvedProviderRequestAttachment[] | undefined;
+  readonly onTransportActivity?: (() => void) | undefined;
 }
 
-/** Configures first-event and between-event liveness watchdog budgets. */
+/** Configures first-event, between-event, and semantic-progress watchdog budgets. */
 export interface ProviderStreamTimeoutOptions {
   readonly firstByteTimeoutMs?: number | undefined;
   readonly interChunkTimeoutMs?: number | undefined;
+  readonly semanticProgressTimeoutMs?: number | undefined;
 }
 
 interface ResolvedProviderStreamTimeoutOptions {
   readonly firstByteTimeoutMs: number;
   readonly interChunkTimeoutMs: number;
+  readonly semanticProgressTimeoutMs: number;
 }
 
 class CatalogGatedProviderStreamer implements ProviderRequestStreamer {
@@ -928,6 +1034,23 @@ class TurnAdmissionGate {
 // long generations, so a healthy long stream finishes under the watchdog rather
 // than being truncated by the overall deadline.
 const DefaultProviderChunkTimeoutMs = 30_000;
+const DefaultProviderSemanticProgressTimeoutMs = 60_000;
+
+function isProviderSemanticProgress(value: unknown): boolean {
+  const event = value as ProviderStreamEvent;
+  switch (event.type) {
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
+      return (event.text?.text.length ?? 0) > 0;
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
+      return (event.reasoning?.text.length ?? 0) > 0;
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
+      return (event.toolInput?.text.length ?? 0) > 0;
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
+      return true;
+    default:
+      return false;
+  }
+}
 
 function attachmentUnavailableProviderError(): ProviderErrorInput {
   return {

@@ -193,6 +193,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
+	if err := validateProviderContextRetention(request); err != nil {
+		return nil, err
+	}
 	finishReason := defaultString(request.GetFinishReason(), "unknown")
 	usage, err := parseBridgeUsage(usageJSON)
 	if err != nil {
@@ -232,6 +235,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		}
 		evidence.Kind = "authorization"
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		evidence.Kind = "transaction"
@@ -280,9 +286,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			}
 			mutationCtx = withInterruptCloseout(ctx, interruptRequest.GetRuntimeInputId())
 		}
-		if err := verifyRuntimeScopeTx(mutationCtx, tx, request.GetScope()); err != nil {
-			return err
-		}
 		if err := verifyModelRequestStartTx(ctx, tx, request.GetScope(), requestStart.EventID, request.GetModelRequestId(), requestKind); err != nil {
 			return err
 		}
@@ -290,6 +293,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			return err
 		} else if exists {
 			return status.Error(codes.AlreadyExists, "model request is already closed")
+		}
+		if err := verifyProviderContextRetentionReferencesTx(ctx, tx, request); err != nil {
+			return err
 		}
 		threadScope, err := lockThreadMutationTx(mutationCtx, tx, request.GetScope())
 		if err != nil {
@@ -505,6 +511,52 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Committed{Committed: requestEndCommittedResult(facts)}}, nil
 }
 
+func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.WriteRequestEndRequest) error {
+	selection := request.GetProviderContextRetention()
+	if sequence := selection.AssistantMessageSequence; sequence != nil {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM session_messages
+			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			   AND model_request_id=$4 AND kind='assistant' AND sequence=$5
+		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), sequence).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return status.Error(codes.FailedPrecondition, "retained Assistant owner does not belong to the request")
+		}
+	}
+	for _, eventID := range selection.GetToolUseEventIds() {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM session_events
+			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			   AND model_request_id=$4 AND event_id=$5
+			   AND type IN ('agent.tool_use','agent.mcp_tool_use')
+		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), eventID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return status.Error(codes.FailedPrecondition, "retained Tool Use does not belong to the request")
+		}
+	}
+	for _, eventID := range selection.GetRepairEventIds() {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM session_events
+			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			   AND model_request_id=$4 AND event_id=$5 AND type='agent.tool_result'
+			   AND payload_json::jsonb ->> 'repair_kind'='invalid_tool'
+		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), eventID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return status.Error(codes.FailedPrecondition, "retained Tool repair does not belong to the request")
+		}
+	}
+	return nil
+}
+
 func requestEndCommittedResult(facts requestEndDurableFacts) *bridgev1.WriteRequestEndCommitted {
 	result := &bridgev1.WriteRequestEndCommitted{
 		RequestEndEventId:    facts.RequestEndEventID,
@@ -655,15 +707,23 @@ func (s *PostgreSQLBridgeAPIStore) applyRequestEndRescheduleTx(
 	if err := incrementTurnRetryCounterTx(ctx, tx, request.GetScope(), requestKind, now); err != nil {
 		return nil, err
 	}
-	if err := appendRequestRescheduledStatusTx(ctx, tx, request, threadScope, now); err != nil {
+	effectiveDeadline := effectiveRequestEndRescheduleDeadline(now, reschedule)
+	accepted := &requestEndDispositionResult{
+		Status:             "accepted",
+		Attempt:            reschedule.Attempt,
+		EffectiveDeadline:  effectiveDeadline.UTC().Format(time.RFC3339Nano),
+		ProviderAttempts:   providerAttempts,
+		CompactionAttempts: compactionAttempts,
+	}
+	if requestKind == requestKindCompactionSummary {
+		accepted.CompactionAttempts++
+	} else {
+		accepted.ProviderAttempts++
+	}
+	if err := appendRequestRescheduledStatusTx(ctx, tx, request, threadScope, accepted, now); err != nil {
 		return nil, err
 	}
-	effectiveDeadline := effectiveRequestEndRescheduleDeadline(now, reschedule)
-	return &requestEndDispositionResult{
-		Status:            "accepted",
-		Attempt:           reschedule.Attempt,
-		EffectiveDeadline: effectiveDeadline.UTC().Format(time.RFC3339Nano),
-	}, nil
+	return accepted, nil
 }
 
 func lockTurnRetryCountersTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) (int64, int64, error) {
@@ -756,6 +816,7 @@ func appendRequestRescheduledStatusTx(
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
 	threadScope threadMutationScope,
+	accepted *requestEndDispositionResult,
 	now time.Time,
 ) error {
 	eventType := "session.status_rescheduled"
@@ -768,6 +829,15 @@ func appendRequestRescheduledStatusTx(
 			return err
 		}
 	}
+	projectionJSON, err := json.Marshal(map[string]any{
+		"attempt":             accepted.Attempt,
+		"effective_deadline":  accepted.EffectiveDeadline,
+		"provider_attempts":   accepted.ProviderAttempts,
+		"compaction_attempts": accepted.CompactionAttempts,
+	})
+	if err != nil {
+		return err
+	}
 	visibility, sessionVisible := threadScope.publicProjection(eventType)
 	eventID := id.New("evt_")
 	sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
@@ -778,7 +848,7 @@ func appendRequestRescheduledStatusTx(
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $7, $12, $12, $12)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
 		request.GetScope().GetWorkspaceId(),
 		request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(),
@@ -790,6 +860,7 @@ func appendRequestRescheduledStatusTx(
 		sessionVisible,
 		request.GetRuntimeWriteId(),
 		request.GetModelRequestId(),
+		string(projectionJSON),
 		now,
 	); err != nil {
 		return err
@@ -853,6 +924,9 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -874,9 +948,6 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			}
 			duplicate = true
 			return nil
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -1132,15 +1203,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		// A termination ACK belongs to the binding that closed the Runtime turn.
-		// Replays must revalidate that binding before consulting idempotency state so
-		// a replaced Pod cannot recover the predecessor's hot closeout facts.
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitRuntimeTermination, request.GetRuntimeWriteId()); err != nil {
 			return err
 		} else if ok {
+			// The exact terminal receipt owns replay after residency is unbound.
 			if existing.RequestHash != requestHash {
 				return status.Error(codes.AlreadyExists, "runtime termination idempotency conflict")
 			}
@@ -1149,6 +1215,12 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			}
 			duplicate = true
 			return nil
+		}
+		if err := verifyRuntimeSessionNonTerminalTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := verifyRuntimeBindingTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -1162,7 +1234,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime termination durable turn is not open"))
 		}
 		result, custodyTransitions, err = settleRuntimeTerminationTx(
-			ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, failureJSON, false, now,
+			ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failure, failureJSON, now,
 		)
 		if err != nil {
 			return err
@@ -1196,9 +1268,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 
 // settleRuntimeTerminationTx is the Session termination owner shared by a
 // Runtime-declared terminal failure and Bridge's exhausted interrupt fence.
-// includeQueuedInputs is reserved for Session-wide exhaustion: it terminalizes
-// work that remained durably admitted behind the interrupt without projecting
-// those source Events into Messages.
+// Main-session termination also cancels queued and parked input: retaining the
+// binding for closeout replay must not leave delivery authority for a terminal
+// Session. Child termination remains scoped to active custody for that Thread.
 func settleRuntimeTerminationTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -1207,7 +1279,6 @@ func settleRuntimeTerminationTx(
 	runtimeWriteID string,
 	failure runtimeTerminationFailure,
 	failureJSON string,
-	includeQueuedInputs bool,
 	now time.Time,
 ) (runtimeTerminationResult, runtimeTerminationCustodyTransitions, error) {
 	if err := closeRuntimeTerminationSpansTx(ctx, tx, scope, failure, now); err != nil {
@@ -1228,7 +1299,9 @@ func settleRuntimeTerminationTx(
 			return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
 		}
 	}
-	transitions, err := cancelRuntimeTerminationInputsTx(ctx, tx, scope, threadScope.role == "main", includeQueuedInputs, now)
+	transitions, err := cancelRuntimeTerminationInputsTx(
+		ctx, tx, scope, threadScope.role == "main", threadScope.role == "main", now,
+	)
 	if err != nil {
 		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
 	}
@@ -1256,17 +1329,16 @@ func settleRuntimeTerminationTx(
 }
 
 type requestEndDispositionResult struct {
-	Status            string `json:"status"`
-	DenialReason      string `json:"denial_reason,omitempty"`
-	Attempt           int32  `json:"attempt,omitempty"`
-	EffectiveDeadline string `json:"effective_deadline,omitempty"`
+	Status             string `json:"status"`
+	DenialReason       string `json:"denial_reason,omitempty"`
+	Attempt            int32  `json:"attempt,omitempty"`
+	EffectiveDeadline  string `json:"effective_deadline,omitempty"`
+	ProviderAttempts   int64  `json:"provider_attempts,omitempty"`
+	CompactionAttempts int64  `json:"compaction_attempts,omitempty"`
 }
 
 type createChildThreadResult struct {
-	Status                string `json:"status"`
-	ChildThreadID         string `json:"child_thread_id"`
-	ThreadCreatedEventID  string `json:"thread_created_event_id"`
-	ThreadCreatedSequence int64  `json:"thread_created_sequence"`
+	ChildThreadID string `json:"child_thread_id"`
 }
 
 func scopeForThread(scope *bridgev1.RuntimeScope, threadID string) *bridgev1.RuntimeScope {
@@ -1306,11 +1378,43 @@ func modelRequestEndPayloadJSON(request *bridgev1.WriteRequestEndRequest, reques
 			"speed":                       nil,
 		},
 		"request_usage": json.RawMessage(defaultString(request.GetUsageJson(), "{}")),
+		"provider_context_retention": map[string]any{
+			"disposition":                request.GetProviderContextRetention().GetDisposition(),
+			"assistant_message_sequence": request.GetProviderContextRetention().AssistantMessageSequence,
+			"tool_use_event_ids":         request.GetProviderContextRetention().GetToolUseEventIds(),
+			"repair_event_ids":           request.GetProviderContextRetention().GetRepairEventIds(),
+		},
 	}
 	if request.GetErrorKind() != "" {
 		payload["error_kind"] = request.GetErrorKind()
 	}
 	return marshalBridgeJSON(payload)
+}
+
+func validateProviderContextRetention(request *bridgev1.WriteRequestEndRequest) error {
+	selection := request.GetProviderContextRetention()
+	if selection == nil {
+		return status.Error(codes.InvalidArgument, "provider-context retention declaration is required")
+	}
+	switch selection.GetDisposition() {
+	case "completed", "interrupted", "rescheduled", "failed", "compacted":
+	default:
+		return status.Error(codes.InvalidArgument, "provider-context retention disposition is invalid")
+	}
+	if len(selection.GetToolUseEventIds()) > 128 || len(selection.GetRepairEventIds()) > 128 {
+		return status.Error(codes.InvalidArgument, "provider-context retention declaration exceeds its bound")
+	}
+	seen := make(map[string]struct{}, len(selection.GetToolUseEventIds())+len(selection.GetRepairEventIds()))
+	for _, identity := range append(append([]string{}, selection.GetToolUseEventIds()...), selection.GetRepairEventIds()...) {
+		if identity == "" {
+			return status.Error(codes.InvalidArgument, "provider-context retention identity is invalid")
+		}
+		if _, exists := seen[identity]; exists {
+			return status.Error(codes.InvalidArgument, "provider-context retention identities must be unique")
+		}
+		seen[identity] = struct{}{}
+	}
+	return nil
 }
 
 func normalizeRequestKind(value string) (string, error) {

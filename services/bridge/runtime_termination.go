@@ -9,6 +9,8 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -144,7 +146,6 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 		    AND e.session_id = $2
 		    AND ($3 = '' OR e.session_thread_id = $3)
 		    AND e.type IN ('agent.tool_use','agent.mcp_tool_use')
-		    AND e.visibility = 'public'
 		    AND NOT EXISTS (
 		        SELECT 1 FROM session_events result
 			         WHERE result.workspace_id = e.workspace_id
@@ -402,13 +403,12 @@ func closeRuntimeTerminatedSessionSiblingsTx(
 		}
 	}
 
-	toolUses, err := runtimeTerminalOrphanToolUsesTx(
+	toolUses, err := selectRuntimeTerminationOrphanToolUsesTx(
 		ctx,
 		tx,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		threadIDs,
-		true,
 	)
 	if err != nil {
 		return err
@@ -546,6 +546,21 @@ func cancelRuntimeTerminationInputsTx(
 		now,
 		includeQueued,
 	).Scan(&transitions.accepted, &transitions.parked)
+	if err != nil || !sessionWide {
+		return transitions, err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status='cancelled', cancelled_at=$3,
+		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		        updated_at=$3
+		  WHERE workspace_id=$1 AND kind=$4 AND partition_key=$2
+		    AND status IN ('pending','leased')`,
+		scope.GetWorkspaceId(),
+		queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()),
+		now,
+		queue.KindRuntimeRecovery,
+	)
 	return transitions, err
 }
 
@@ -611,18 +626,6 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 		if !rowsAffected(result) {
 			return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "runtime session is stale")
 		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_runtime_status
-			    SET active_seconds_total = active_seconds_total + CASE
-			          WHEN running_since IS NULL THEN 0
-			          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($3 - running_since)))
-			        END,
-			        running_since = NULL,
-			        updated_at = $3
-			  WHERE workspace_id = $1 AND session_id = $2`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), now); err != nil {
-			return runtimeTerminationEventFact{}, err
-		}
 		result, err = tx.Exec(ctx,
 			`UPDATE session_threads
 			    SET status = 'failed',
@@ -649,7 +652,48 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 			return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "child thread status update failed")
 		}
 	}
-	return insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID, runtimeWriteID, eventType, payloadJSON, now)
+	statusStamp, err := insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID, runtimeWriteID, eventType, payloadJSON, now)
+	if err != nil {
+		return runtimeTerminationEventFact{}, err
+	}
+	if threadScope.role != "main" {
+		return statusStamp, nil
+	}
+	// Terminal receipt replay is independent of residency. Close the live
+	// binding and running markers in this transaction so cleanup/GC observes an
+	// unbound terminal Session and late Runtime declarations cannot re-arm it.
+	runtimeStatusResult, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status = 'idle',
+		        status_event_id = $3,
+		        idle_since = $4,
+		        binding_id = NULL,
+		        binding_generation = NULL,
+		        active_seconds_total = active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($4 - running_since)))
+		        END,
+		        running_since = NULL,
+		        cleanup_after = NULL,
+		        cleanup_enqueued_at = NULL,
+		        cleanup_claimed_at = NULL,
+		        cleanup_job_id = NULL,
+		        updated_at = $4
+		  WHERE workspace_id = $1 AND session_id = $2`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), statusStamp.EventID, now)
+	if err != nil {
+		return runtimeTerminationEventFact{}, err
+	}
+	if !rowsAffected(runtimeStatusResult) {
+		return runtimeTerminationEventFact{}, status.Error(codes.FailedPrecondition, "runtime residency closeout is stale")
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM session_runtime_bindings
+		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration()); err != nil {
+		return runtimeTerminationEventFact{}, err
+	}
+	return statusStamp, nil
 }
 
 type runtimeTerminationEventFact struct {

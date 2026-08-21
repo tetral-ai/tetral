@@ -318,6 +318,14 @@ export interface RuntimePendingApprovalToolJobState {
 	readonly currentModel?: SessionCurrentModel | undefined;
 }
 
+/** Cold Tool route whose durable allow/deny decision is already authoritative. */
+export interface RuntimeResolvedToolRouteJobState
+	extends RuntimePendingApprovalToolJobState {
+	readonly recoveryKind: "resolved_route";
+	readonly decision: "allow" | "deny";
+	readonly denyMessage?: string | undefined;
+}
+
 /** Hot reconstruction of an accepted Sandbox execution that still needs conversation settlement. */
 export interface RuntimePendingSandboxExecutionJobState {
 	readonly recoveryKind: "sandbox_execution";
@@ -593,6 +601,13 @@ export class ThreadState {
 		string,
 		RuntimePendingApprovalToolJobState | undefined
 	>;
+	#resolvedToolRouteJobs: Record<
+		string,
+		RuntimeResolvedToolRouteJobState | undefined
+	> = Object.create(null) as Record<
+		string,
+		RuntimeResolvedToolRouteJobState | undefined
+	>;
 	#pendingSandboxExecutionJobs: Record<
 		string,
 		RuntimePendingSandboxExecutionJobState | undefined
@@ -789,6 +804,28 @@ export class ThreadState {
 	removePendingApprovalToolJob(toolUseEventId: string): void {
 		delete this.#pendingApprovalToolJobs[toolUseEventId];
 		delete this.#toolConfirmations[toolUseEventId];
+	}
+
+	recordResolvedToolRouteJob(state: RuntimeResolvedToolRouteJobState): void {
+		this.#resolvedToolRouteJobs[state.toolUseEventId] = state;
+	}
+
+	resolvedToolRouteJobs(): readonly RuntimeResolvedToolRouteJobState[] {
+		return Object.values(this.#resolvedToolRouteJobs)
+			.filter(
+				(state): state is RuntimeResolvedToolRouteJobState =>
+					state !== undefined,
+			)
+			.sort((left, right) => {
+				if (left.modelRequestId !== right.modelRequestId) {
+					return left.modelRequestId.localeCompare(right.modelRequestId);
+				}
+				return left.job.modelOrder - right.job.modelOrder;
+			});
+	}
+
+	removeResolvedToolRouteJob(toolUseEventId: string): void {
+		delete this.#resolvedToolRouteJobs[toolUseEventId];
 	}
 
 	hasPendingApprovalToolJobs(): boolean {
@@ -1030,6 +1067,10 @@ export class ThreadState {
 		this.#threadProcessor?.finishRunBoundary();
 	}
 
+	blockAcceptedInputUntilRunExit(): void {
+		this.#threadProcessor?.blockAcceptedInputUntilRunExit();
+	}
+
 	userInterruptRequested(): boolean {
 		return this.#userInterrupt !== undefined;
 	}
@@ -1167,6 +1208,10 @@ export class ThreadState {
 		this.#pendingApprovalToolJobs = Object.create(null) as Record<
 			string,
 			RuntimePendingApprovalToolJobState | undefined
+		>;
+		this.#resolvedToolRouteJobs = Object.create(null) as Record<
+			string,
+			RuntimeResolvedToolRouteJobState | undefined
 		>;
 		this.#pendingSandboxExecutionJobs = Object.create(null) as Record<
 			string,

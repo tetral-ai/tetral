@@ -65,6 +65,7 @@ func isRuntimePodBridgeAPIMethod(method string) bool {
 		bridgev1.AgentRuntimeBridgeService_ReadCommandResult_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_SendCommandInput_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CancelCommand_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_RunMemory_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CommitRuntimeTermination_FullMethodName:

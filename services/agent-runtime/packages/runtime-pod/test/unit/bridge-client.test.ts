@@ -15,6 +15,7 @@ import type {
 	CommitInternalToolRepairRequest,
 	CommitRuntimeTerminationRequest,
 	CommitTaskNotificationResultRequest,
+	CloseApprovalReviewerRequest,
 	FinishIdleRequest,
 	LoadContextRequest,
 	ReadAgentMailRequest,
@@ -29,7 +30,10 @@ import {
 	BridgeAPIEventWriter,
 	BridgeAPIInternalToolRepairCommitter,
 } from "../../src/bridge-client.js";
-import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
+import type {
+	ApprovalReviewerThreadClose,
+	ApprovalReviewerThreadCreation,
+} from "../../src/approval-reviewer.js";
 import type {
 	RuntimePodLogger,
 	RuntimePodLogRecord,
@@ -130,6 +134,54 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		expect(bridge.approvalAdmissionRequests).toHaveLength(1);
 	});
 
+	test("replays an ambiguous Reviewer close with the exact settlement authority", async () => {
+		const bridge = new TypedBridge();
+		bridge.approvalCloseFailures.push(
+			Object.assign(new Error("close ACK lost"), { code: status.UNKNOWN }),
+		);
+		bridge.approvalCloseResponse = { duplicate: {} };
+		const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+		const close: ApprovalReviewerThreadClose = {
+			request: threadScope() as ApprovalReviewerThreadClose["request"],
+			reviewId: "arvw_lost_close_ack",
+			isTrunk: false,
+			reviewerThreadId: "thrd_reviewer",
+			settlement: { type: "failure", eventId: "evt_reviewer_failure" },
+		};
+
+		await expect(creator.closeApprovalReviewerThread(close)).resolves.toEqual({
+			ok: true,
+		});
+		expect(bridge.approvalCloseRequests).toHaveLength(2);
+		expect(bridge.approvalCloseRequests[1]).toEqual(
+			bridge.approvalCloseRequests[0],
+		);
+	});
+
+	test("does not replay a definitive Reviewer close rejection", async () => {
+		const bridge = new TypedBridge();
+		bridge.approvalCloseFailures.push(
+			Object.assign(new Error("invalid close"), {
+				code: status.INVALID_ARGUMENT,
+			}),
+		);
+		const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+
+		await expect(
+			creator.closeApprovalReviewerThread({
+				request: threadScope() as ApprovalReviewerThreadClose["request"],
+				reviewId: "arvw_invalid_close",
+				isTrunk: false,
+				reviewerThreadId: "thrd_reviewer",
+				settlement: { type: "decision", eventId: "evt_reviewer_decision" },
+			}),
+		).resolves.toEqual({
+			ok: false,
+			message: "approval reviewer thread close is unavailable",
+		});
+		expect(bridge.approvalCloseRequests).toHaveLength(1);
+	});
+
 	test("loads sealed context and the open Request draft as direct durable facts", async () => {
 		const bridge = new TypedBridge();
 		const loader = new BridgeAPIContextLoader(options(bridge));
@@ -137,7 +189,10 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		const loaded = await loader.loadThreadContext(threadScope());
 
 		expect(bridge.loadContextRequests).toEqual([
-			{ scope: expect.objectContaining({ sessionThreadId: "thrd_1" }) },
+			{
+				scope: expect.objectContaining({ sessionThreadId: "thrd_1" }),
+				recoveryLeaseRef: undefined,
+			},
 		]);
 		expect(loaded.contextEntries).toEqual([
 			{
@@ -742,7 +797,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			ok: true,
 			type: "committed",
 			eventId: "evt_1",
-			assistant: { messageSequence: 4, createdToolUseEventIds: ["tool_evt_1"] },
+			assistant: { messageSequence: 4, createdToolUseEventIds: ["evt_1"] },
 		});
 		expect(bridge.writeEventRequests[0]?.assistantContextDelta).toEqual({
 			parts: [
@@ -757,10 +812,69 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					toolCall: {
 						modelToolCallId: "call_1",
 						toolName: "lookup",
-						canonicalInputJson: JSON.stringify({ city: "Paris" }),
+						providerInputJson: JSON.stringify({ city: "Paris" }),
 					},
 				},
 			],
+		});
+	});
+
+	test("declares provider and canonical execution Tool inputs separately", async () => {
+		const bridge = new TypedBridge();
+		bridge.writeEventResponse = {
+			committed: {
+				eventId: "evt_patch",
+				assignedMessageSequence: 4,
+				createdToolUseEventIds: ["tool_evt_patch"],
+			},
+		};
+		const writer = new BridgeAPIEventWriter(options(bridge));
+		const rawPatch =
+			"*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n";
+		await expect(
+			writer.append({
+				...eventScope("write_patch"),
+				modelRequestId: "mrq_patch",
+				event: {
+					type: "agent.tool_use",
+					name: "apply_patch",
+					input: { patch: rawPatch },
+					evaluated_permission: "allow",
+				},
+				assistantContextAppend: {
+					parts: [
+						{
+							type: "tool",
+							modelToolCallId: "call_patch",
+							toolName: "apply_patch",
+							state: {
+								status: "running",
+								input: {
+									value: rawPatch,
+									preview: rawPatch,
+									truncated: false,
+								},
+							},
+						},
+					],
+				},
+				distinctProviderInput: rawPatch,
+				toolRouteCapability: "sandbox_execute",
+			}),
+		).resolves.toMatchObject({ ok: true, eventId: "evt_patch" });
+		expect(bridge.writeEventRequests[0]).toMatchObject({
+			eventType: "",
+			payloadJson: "",
+			assistantContextDelta: undefined,
+			toolDeclaration: {
+				modelToolCallId: "call_patch",
+				toolName: "apply_patch",
+				publicExecutionInputJson: JSON.stringify({ patch: rawPatch }),
+				distinctProviderInputJson: JSON.stringify(rawPatch),
+				evaluatedPermission: "allow",
+				routeCapability: "sandbox_execute",
+				leadingReasoning: [],
+			},
 		});
 	});
 
@@ -978,7 +1092,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					toolCall: {
 						modelToolCallId: "call_1",
 						toolName: "lookup",
-						canonicalInputJson: JSON.stringify({ q: "x" }),
+						providerInputJson: JSON.stringify({ q: "x" }),
 					},
 				},
 				{ toolResult: { modelToolCallId: "call_1", cancelled: {} } },
@@ -1077,6 +1191,8 @@ class TypedBridge {
 	readonly approvalAdmissionRequests: unknown[] = [];
 	readonly approvalAdmissionFailures: Array<Error & { readonly code?: number }> =
 		[];
+	readonly approvalCloseRequests: CloseApprovalReviewerRequest[] = [];
+	readonly approvalCloseFailures: Array<Error & { readonly code?: number }> = [];
 	readonly loadContextRequests: LoadContextRequest[] = [];
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
@@ -1126,6 +1242,7 @@ class TypedBridge {
 	approvalAdmissionResponse: unknown = {
 		committed: { runtimeInputId: "rin_reviewer" },
 	};
+	approvalCloseResponse: unknown = { committed: {} };
 
 	client(): AgentRuntimeBridgeServiceClient {
 		return {
@@ -1145,7 +1262,7 @@ class TypedBridge {
 				callback(null, this.approvalEnsureResponse);
 				return grpcCall();
 			},
-			admitApprovalReviewInput: (
+				admitApprovalReviewInput: (
 				request: unknown,
 				_metadata: Metadata,
 				callback: Callback,
@@ -1156,9 +1273,23 @@ class TypedBridge {
 					callback(failure, undefined);
 					return grpcCall();
 				}
-				callback(null, this.approvalAdmissionResponse);
-				return grpcCall();
-			},
+					callback(null, this.approvalAdmissionResponse);
+					return grpcCall();
+				},
+				closeApprovalReviewer: (
+					request: CloseApprovalReviewerRequest,
+					_metadata: Metadata,
+					callback: Callback,
+				) => {
+					this.approvalCloseRequests.push(request);
+					const failure = this.approvalCloseFailures.shift();
+					if (failure !== undefined) {
+						callback(failure, undefined);
+						return grpcCall();
+					}
+					callback(null, this.approvalCloseResponse);
+					return grpcCall();
+				},
 			loadContext: (
 				request: LoadContextRequest,
 				_metadata: Metadata,
@@ -1346,6 +1477,7 @@ function requestEndEnvelope(): SessionEventWriterRequestEndEnvelope {
 		...eventScope("end_write_1"),
 		modelRequestId: "mrq_1",
 		isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 		finishReason: "stop",
 	};
 }

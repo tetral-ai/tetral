@@ -31,6 +31,7 @@ service AgentRuntimeBridgeService {
   rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
   rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
   rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
+  rpc AuthorizeWebToolExecution(AuthorizeWebToolExecutionRequest) returns (AuthorizeWebToolExecutionResponse);
   rpc RunMemory(RunMemoryRequest) returns (RunMemoryResponse);
   rpc ResolveTransientAttachment(ResolveTransientAttachmentRequest) returns (ResolveTransientAttachmentResponse);
   rpc ResolveFileAttachmentMetadata(ResolveFileAttachmentMetadataRequest) returns (ResolveFileAttachmentMetadataResponse);
@@ -99,7 +100,9 @@ message RuntimeContextReasoning {
 message RuntimeContextToolCall {
   string model_tool_call_id = 1;
   string tool_name = 2;
-  string canonical_input_json = 3;
+  reserved 3;
+  reserved "canonical_input_json";
+  string provider_input_json = 4;
 }
 message RuntimeContextToolResult {
   string model_tool_call_id = 1;
@@ -165,6 +168,14 @@ message RuntimeScope {
 
 message LoadContextRequest {
   RuntimeScope scope = 1;
+  RecoveryLeaseRef recovery_lease_ref = 2;
+}
+
+message RecoveryLeaseRef {
+  string job_id = 1;
+  string lease_token = 2;
+  string partition_key = 3;
+  string dedupe_key = 4;
 }
 
 message LoadContextResponse {
@@ -526,7 +537,8 @@ message WriteEventRequest {
   string event_type = 4;
   string payload_json = 5;
   reserved 6;
-  bool session_visible = 7;
+  reserved 7;
+  reserved "session_visible";
   reserved 8, 9;
   reserved "server_tool_use";
   RuntimeContextDelta assistant_context_delta = 10;
@@ -537,6 +549,27 @@ message WriteEventRequest {
   reserved 15;
   reserved "tool_settlement";
   repeated FileAttachmentPair consumed_file_attachments = 16;
+  reserved 17;
+  reserved "canonical_execution_input_json";
+  RuntimeToolDeclaration tool_declaration = 18;
+}
+
+enum RuntimeToolEventKind {
+  RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED = 0;
+  RUNTIME_TOOL_EVENT_KIND_TOOL = 1;
+  RUNTIME_TOOL_EVENT_KIND_MCP = 2;
+}
+
+message RuntimeToolDeclaration {
+  RuntimeToolEventKind event_kind = 1;
+  string model_tool_call_id = 2;
+  string tool_name = 3;
+  string public_execution_input_json = 4;
+  optional string distinct_provider_input_json = 5;
+  string evaluated_permission = 6;
+  string route_capability = 7;
+  optional string mcp_server_name = 8;
+  repeated RuntimeContextReasoning leading_reasoning = 9;
 }
 
 message ServerToolUseUsage {
@@ -556,14 +589,16 @@ message WriteEventCommitted {
   reserved 2;
   reserved "event_sequence";
   optional int64 assigned_message_sequence = 3;
-  repeated string created_tool_use_event_ids = 4;
+  reserved 4;
+  reserved "created_tool_use_event_ids";
 }
 message WriteEventDuplicate {
   string event_id = 1;
   reserved 2;
   reserved "event_sequence";
   optional int64 assigned_message_sequence = 3;
-  repeated string created_tool_use_event_ids = 4;
+  reserved 4;
+  reserved "created_tool_use_event_ids";
 }
 message WriteEventStale {}
 
@@ -609,6 +644,14 @@ message WriteRequestEndRequest {
   string compaction_event_payload_json = 17;
   RequestEndInterruptSettlement interrupt_settlement = 18;
   RuntimeContextDelta compaction_context = 19;
+  ProviderContextRetention provider_context_retention = 20;
+}
+
+message ProviderContextRetention {
+  string disposition = 1;
+  optional int64 assistant_message_sequence = 2;
+  repeated string tool_use_event_ids = 3;
+  repeated string repair_event_ids = 4;
 }
 
 message RequestEndInterruptSettlement {
@@ -694,7 +737,10 @@ message CreateSubagentThreadRequest {
   string source_tool_use_event_id = 2;
   string task_name = 3;
   string agent_type = 4;
-  string fork_turns = 5;
+  reserved 5;
+  reserved "fork_turns";
+  string initial_prompt = 6;
+  repeated int64 parent_message_sequences = 7;
 }
 
 message CreateSubagentThreadResponse {
@@ -849,6 +895,8 @@ message ChildInterruptTarget {
 message AdmitChildInterruptRequest {
   RuntimeScope scope = 1;
   string source_tool_use_event_id = 2;
+  string target_child_thread_id = 3;
+  ChildControlAction action = 4;
 }
 
 message AdmitChildInterruptResponse {
@@ -907,6 +955,14 @@ message CloseApprovalReviewerRequest {
   RuntimeScope scope = 1;
   string reviewer_thread_id = 2;
   string review_id = 3;
+  ApprovalReviewerCloseSettlementKind settlement_kind = 4;
+  string settlement_event_id = 5;
+}
+enum ApprovalReviewerCloseSettlementKind {
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED = 0;
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION = 1;
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE = 2;
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST = 3;
 }
 message CloseApprovalReviewerResponse {
   oneof outcome {
@@ -927,6 +983,7 @@ message ChildLifecycleResult {
 message MarkChildThreadActiveRequest {
   RuntimeScope scope = 1;
   string source_tool_use_event_id = 2;
+  string target_child_thread_id = 3;
 }
 
 message MarkChildThreadActiveResponse {
@@ -1010,7 +1067,8 @@ message SendCommandInputRequest {
   RuntimeScope scope = 1;
   string task_id = 2;
   int32 max_output_tokens = 3;
-  string input_json = 4;
+  reserved 4;
+  reserved "input_json";
   string tool_use_event_id = 5;
   string operation_id = 6;
 }
@@ -1058,6 +1116,21 @@ message CommandCancelDuplicate {
   string result_json = 1;
 }
 message CommandCancelStale {}
+
+message AuthorizeWebToolExecutionRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+}
+
+message AuthorizeWebToolExecutionResponse {
+  oneof outcome {
+    WebToolExecutionAuthorized authorized = 1;
+    WebToolExecutionStale stale = 2;
+  }
+}
+
+message WebToolExecutionAuthorized {}
+message WebToolExecutionStale {}
 
 message RunMemoryRequest {
   reserved 3, 4, 5, 6;

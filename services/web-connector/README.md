@@ -65,6 +65,18 @@ returns and stops.
 | Execution | run `search_query`, then `open`, then `find` in field order | per-operation `tool_error` / `runtime_error` in the composed result | stub / snapshot writes as each operation dictates |
 | Settlement | write the create-only job record | — | see result-class table below |
 
+An in-flight identity remains owned for the maximum legal call: eight input
+items, four domain requests per search item, every configured provider-key
+attempt at the 30-second backend timeout, and a 30-second result-commit margin.
+The duration is `8 * 4 * configured-key-count * 30s + 30s`.
+The configured key count is fixed when the backend is constructed; dead or
+cooling keys do not shorten later claims. A duplicate
+waits with deadline-clamped exponential polling from 25 milliseconds to a
+one-second cap. Only an identity still in flight after that complete window is
+settled through the existing outcome-unknown path; no second backend execution
+is started. The winner's compare-and-swap is bounded by the earliest of its
+parent context, the stored claim expiry, and the 30-second commit margin.
+
 ### Result classes and persistence
 
 | Result status | Persisted as job record? | Same-key retry | Notes |
@@ -175,6 +187,7 @@ Go interface, `Backend` (`types.go`):
 
 ```go
 type Backend interface {
+    MaxAttemptsPerCall() int
     Search(context.Context, string, []string) ([]SearchHit, BackendOutcome)
     Fetch(context.Context, string) (Page, BackendOutcome)
 }
@@ -193,9 +206,10 @@ needs that manifest edit; and the vendor's fixtures must be recorded before the
 suite can stay fixture-only (see the testing guide).
 
 **Lifecycle.** A backend is constructed once (`NewJinaBackend`) with the key
-pool and endpoints, and lives for the process. It holds the key-pool cooldown
-state (in memory) and, optionally, the metrics sink. It performs no storage
-and no formatting.
+pool and endpoints, and lives for the process. It exposes that construction-
+fixed key count as the maximum provider-attempt bound for one logical call. It
+holds the key-pool cooldown state (in memory) and, optionally, the metrics sink.
+It performs no storage and no formatting.
 
 **Invariants a replacement must preserve:**
 
@@ -331,9 +345,9 @@ fixtures before the tests can pin it.
 | --- | --- |
 | `service_test.go` | `RunWeb` end-to-end: identity and binding rejected before dependencies; search+open usage summed; failed search does not count backend requests; validation errors have usage and no side effects |
 | `admission_test.go` | binding admission rejects every tampered claim before any blob/backend access; matching claims proceed; the web port leaves the sibling provider stream `UNIMPLEMENTED` |
-| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; runtime failures re-execute; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
+| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; maximum-call claim ownership, immutable expiry, bounded winner CAS, parent-context authority, bounded duplicate polling, boundary settlement, exact replay, and abandoned-claim convergence; runtime failures re-execute; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
 | `storage_test.go` | snapshot normalization order (truncate → CRLF split → wrap → count); create-only writes never replace bytes; UTF-8-safe truncation; every stored line addressable; window continuation to the final window; canonical input-hash stability and array-order sensitivity |
-| `backend_test.go` | Jina backend: closed header tables; fixture-driven search/fetch mapping; usage from the data block; target-redirect status treated as readable; full failure taxonomy; key-pool rotation, cooldown boundaries, dead-key persistence, exhaustion; domain fan-out dedup and too-many-domains rejection |
+| `backend_test.go` | Jina backend: closed header tables; fixture-driven search/fetch mapping; usage from the data block; target-redirect status treated as readable; full failure taxonomy; construction-fixed attempt bound; key-pool rotation, cooldown boundaries, dead-key persistence, exhaustion; domain fan-out dedup and too-many-domains rejection |
 | `classifier_test.go` | URL classifier accepts public `http`/`https` and rejects every non-public target class |
 | `format_test.go` | formatter goldens for search / open / find / error vocabulary; no model-visible string carries the vendor name, endpoints, bucket, key material, or raw binary/base64 |
 | `metrics_test.go` | the metrics endpoint exports exactly the closed, low-cardinality metric families |

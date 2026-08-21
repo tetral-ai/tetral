@@ -75,6 +75,8 @@ export interface ProviderFailureClassification {
   readonly action: ProviderFailureAction;
   readonly providerError: ProviderErrorInput;
   readonly cooldownMs?: number | undefined;
+  /** Captured semantic evidence allowed to survive a status-less transport origin. */
+  readonly semanticSignal?: "deepseek_insufficient_balance" | undefined;
 }
 
 export type ProviderFailureOrigin = "http_rejection" | "transport_failure";
@@ -239,10 +241,17 @@ export class PlatformKeyPool {
       this.coolingUntilMs.set(keyId, this.now() + clampCooldown(classification.cooldownMs));
     }
     if (classification.action === "quarantine") {
+      if (this.quarantined.has(keyId)) {
+        return;
+      }
       this.quarantined.add(keyId);
       const key = this.findKey(keyId);
       if (key !== undefined) {
-        this.onQuarantine?.({ keyId, providerId: key.providerId, providerError: classification.providerError });
+        try {
+          this.onQuarantine?.({ keyId, providerId: key.providerId, providerError: classification.providerError });
+        } catch {
+          // Quarantine is authoritative for this process; observability is best-effort.
+        }
       }
     }
   }
@@ -307,9 +316,10 @@ export class PlatformKeyPool {
 
 /**
  * Classifies a provider attempt into a redacted Runtime-facing error and a
- * candidate platform-key action. Orchestration applies that action only to a
- * platform-owned attempt that has emitted no downstream event; session-owned
- * and post-event failures use the normalized error without changing key state.
+ * candidate platform-key action. Orchestration records the action for every
+ * platform-owned attempt so later turns avoid a proven-bad key, but switches
+ * credentials within the current turn only before its first downstream event.
+ * Session-owned failures use only the normalized error.
  */
 export function classifyProviderFailure(
   providerId: GatewayCatalogProviderId,
@@ -331,6 +341,17 @@ export function classifyProviderFailure(
     if (openAIError !== undefined) {
       return providerFailureFromOpenAIError(code, openAIError);
     }
+  }
+  if (providerId === "anthropic" && isAnthropicCreditExhaustion(input.statusCode, code, input.body)) {
+    return quarantine("provider_key_unavailable", "Provider key is not usable.", input.statusCode);
+  }
+  if (providerId === "deepseek" && isDeepSeekInsufficientBalance(input.body)) {
+    return quarantine(
+      "provider_key_unavailable",
+      "Provider key is not usable.",
+      input.statusCode,
+      "deepseek_insufficient_balance",
+    );
   }
   if (input.timeout === true || input.networkError === true || (input.statusCode !== undefined && input.statusCode >= 500)) {
     return classification("retryable", "provider_stream_error", true, statusMessage(input.statusCode), input.statusCode);
@@ -362,7 +383,7 @@ export function classifyProviderFailure(
       if (input.statusCode === 429) {
         return cooling(rateLimitMessage(), DefaultCooldownMs);
       }
-      if (input.statusCode === 401 || input.statusCode === 402 || bodyText.includes("Insufficient Balance")) {
+      if (input.statusCode === 401 || input.statusCode === 402) {
         return quarantine("provider_key_unavailable", "Provider key is not usable.", input.statusCode);
       }
       break;
@@ -395,7 +416,29 @@ export function classifyProviderFailure(
   if (isFallbackRateLimit(input.statusCode, bodyText)) {
     return cooling(rateLimitMessage(), retryAfterMs(input.headers?.["retry-after"]) ?? resetHeaderMs(input.headers) ?? retryDelayFromTextMs(bodyText));
   }
+  if (input.statusCode === undefined) {
+    return classification("retryable", "provider_stream_error", true, "Provider stream failed.", undefined);
+  }
   return classification("fail-fast", "provider_request_failed", false, "Provider request failed.", input.statusCode);
+}
+
+function isAnthropicCreditExhaustion(statusCode: number | undefined, code: string, body: unknown): boolean {
+  if (statusCode !== 400 || code !== "invalid_request_error") {
+    return false;
+  }
+  const object = bodyObject(body);
+  const nestedError = nestedObject(object.error);
+  const message = nestedError?.message ?? object.message;
+  return typeof message === "string" && /^Your credit balance is too low(?:\s|\.|$)/i.test(message.trim());
+}
+
+function isDeepSeekInsufficientBalance(body: unknown): boolean {
+  if (body === "Insufficient Balance") {
+    return true;
+  }
+  const object = bodyObject(body);
+  const message = nestedObject(object.error)?.message ?? object.message;
+  return message === "Insufficient Balance";
 }
 
 function isOpenAICompatibleFamily(providerId: GatewayCatalogProviderId): boolean {
@@ -432,8 +475,16 @@ function cooling(message: string, cooldownMs: number | undefined): ProviderFailu
   };
 }
 
-function quarantine(code: string, message: string, statusCode: number | undefined): ProviderFailureClassification {
-  return classification("quarantine", code, false, message, statusCode);
+function quarantine(
+  code: string,
+  message: string,
+  statusCode: number | undefined,
+  semanticSignal?: ProviderFailureClassification["semanticSignal"],
+): ProviderFailureClassification {
+  return {
+    ...classification("quarantine", code, false, message, statusCode),
+    ...(semanticSignal === undefined ? {} : { semanticSignal }),
+  };
 }
 
 function providerFailureFromOpenAIError(providerCode: string, providerError: ProviderErrorInput): ProviderFailureClassification {
@@ -539,7 +590,8 @@ function providerBodyText(body: unknown): string {
     return body;
   }
   try {
-    return JSON.stringify(body);
+    const normalized = JSON.stringify(body);
+    return typeof normalized === "string" ? normalized : "";
   } catch {
     return "";
   }

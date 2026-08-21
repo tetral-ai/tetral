@@ -42,7 +42,7 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
 	 'public', true, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 	('default', $1, $2, 'evt_cleanup_narrow_end', 3, 'span.model_request_end',
-	 '{"type":"span.model_request_end","model_request_start_id":"evt_cleanup_narrow_start","is_error":false}',
+	 '{"type":"span.model_request_end","model_request_start_id":"evt_cleanup_narrow_start","is_error":false,"provider_context_retention":{"disposition":"completed","assistant_message_sequence":1,"tool_use_event_ids":["evt_cleanup_narrow_tool_use"],"repair_event_ids":[]}}',
 	 'internal', false, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		sessionID, threadID, modelRequestID, toolUseEventID,
 	); err != nil {
@@ -1127,9 +1127,9 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("tool-call-cleanup-cold-approval", "Write", string(approvalInputJSON)),
+		ToolDeclaration: bridgeToolDeclarationForTest(
+			"tool-call-cleanup-cold-approval", "Write", string(approvalInputJSON), "ask", "sandbox_execute",
+		),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write cleanup approval Tool Use: response=%#v err=%v", toolUse, err)
@@ -1138,6 +1138,10 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	if _, err := bridgeStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_end", ModelRequestId: modelRequestID,
 		FinishReason: "tool_calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", AssistantMessageSequence: toolUse.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds: []string{toolUseEventID},
+		},
 	}); err != nil {
 		t.Fatalf("seal cleanup approval request: %v", err)
 	}

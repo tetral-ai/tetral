@@ -40,6 +40,7 @@ import type {
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
+	projectFailedRequestsProviderContext,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
@@ -221,9 +222,10 @@ export async function buildRuntimeCoreHosts(
 			? {
 					loadThreadContext: async (
 						command: RuntimeThreadAddressState,
+						loadOptions,
 					): Promise<RuntimeThreadPreloadState> => {
 						const context =
-							await options.contextLoader.loadThreadContext!(command);
+							await options.contextLoader.loadThreadContext!(command, loadOptions);
 						const pendingAgentMail: Array<
 							Extract<
 								RuntimeAcceptedInputState,
@@ -245,9 +247,19 @@ export async function buildRuntimeCoreHosts(
 						}
 						let turnCheckpoint: ThreadTurnCheckpoint;
 						let turnToolRouteView: ThreadToolRouteView;
+						let residentContext: ReturnType<
+							typeof projectFailedRequestsProviderContext
+						>;
 						try {
 							turnCheckpoint = extractThreadTurnCheckpoint({
 								contextEntries: context.contextEntries,
+								facts: context.turnFacts,
+							});
+							residentContext = projectFailedRequestsProviderContext({
+								contextEntries: context.contextEntries,
+								...(context.openRequestDraft === undefined
+									? {}
+									: { openRequestDraft: context.openRequestDraft }),
 								facts: context.turnFacts,
 							});
 							turnToolRouteView = extractColdThreadToolRouteView({
@@ -274,9 +286,9 @@ export async function buildRuntimeCoreHosts(
 							...(context.thread !== undefined
 								? { thread: context.thread }
 								: {}),
-							contextEntries: context.contextEntries,
-							...(context.openRequestDraft !== undefined
-								? { openRequestDraft: context.openRequestDraft }
+							contextEntries: residentContext.contextEntries,
+							...(residentContext.openRequestDraft !== undefined
+								? { openRequestDraft: residentContext.openRequestDraft }
 								: {}),
 							turnCheckpoint,
 							turnToolRouteView,
@@ -368,6 +380,24 @@ export async function buildRuntimeCoreHosts(
 	};
 	return {
 		commandRunHost: {
+			handleRecoverThread: async (command) => {
+				const result = await Effect.runPromise(
+					host.handleEnsureThreadInstalled(command, {
+						startPendingWork: true,
+						loadOptions: { recovery: command.recoveryLeaseRef },
+					}),
+				);
+				return result.ok
+					? { ok: true, sessionId: result.sessionId, applied: result.applied }
+					: {
+							ok: false,
+							sessionId: result.sessionId,
+							reason: result.reason === "local_session_capacity_exceeded"
+								? "local_session_capacity_exceeded"
+								: "context_load_failed",
+							...(result.retryable === undefined ? {} : { retryable: result.retryable }),
+						};
+			},
 			handleAcceptInput: async (command) => {
 				const acceptedInput = runtimeAcceptedInputFromCommand(command);
 				try {

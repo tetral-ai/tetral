@@ -789,6 +789,7 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, siblingSource, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+siblingID+`","message":"external sibling mail waits"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, siblingSource)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateMail, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+grandchildID+`","message":"must be stale"},"evaluated_permission":"allow"}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateChild, 2, "agent.tool_use",
@@ -838,7 +839,7 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 		t.Fatalf("interrupted-source mail = %v; want barrier stale", err)
 	}
 	if _, err := bridgeStore.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: siblingScope, SourceToolUseEventId: lateChild, TaskName: "late-child", AgentType: "worker", ForkTurns: "all",
+		Scope: siblingScope, SourceToolUseEventId: lateChild, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
 	}); !isSessionInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child birth = %v; want barrier stale", err)
 	}

@@ -93,11 +93,16 @@ Selection keeps the highest-priority tier, weighted-random within it (weight
 floor `weight + 10`), and fails over across keys **only before the first
 provider-originated event** (up to `min(healthy keys, 3)` attempts, no backoff
 between different keys). After the first provider byte there is no key switch and
-no retry — the terminal event is forwarded and the runtime owns recovery. The
+no retry — the terminal event is forwarded and the runtime owns recovery, while
+an evidence-backed platform-key failure is still recorded so a later turn does
+not select that key. The
 pre-stream `attachment-rejections` event is gateway-originated and does not close
 the failover window. User-credential sessions never enter the pool (one key,
 dead is dead). An empty tier → `provider-error(code = platform_keys_exhausted,
-retryable = true, retry-after = shortest remaining cooldown)`.
+retryable = true, retry-after = shortest remaining cooldown)`. If a turn first
+quarantines an unusable key and no healthy key remains, the outward failure is
+the generic non-retryable `provider_unavailable`; the failed credential is not
+selected again, and the Runtime closes only that turn.
 
 ### Error classification (`packages/lowering/src/errors.ts`)
 
@@ -105,7 +110,10 @@ retryable = true, retry-after = shortest remaining cooldown)`.
 | --- | --- |
 | 5xx, network/connection, timeout classes | `retryable = true` regardless of the SDK's own flag |
 | OpenAI-family 404 | `retryable = true` (documented provider misbehavior) |
+| Anthropic 400 `invalid_request_error` with the verified credit-exhaustion discriminator | quarantine the failed platform key before generic shape classification; outward pool exhaustion stays generic |
+| DeepSeek status-less body whose captured message is exactly `Insufficient Balance` | quarantine the failed platform key even though transport supplied no status; never generalize other body text or other providers |
 | 400/422 request-shape | fail fast to caller, do **not** rotate the key |
+| no status without that captured DeepSeek signal | `provider_stream_error`, `retryable = true`; Runtime owns the existing bounded turn retry |
 | context overflow (413, `context_length_exceeded`, message-pattern) | `code = context_overflow`, `retryable = false` (arms runtime reactive compaction) |
 | subscription/entitlement (`usage_not_included`, `insufficient_quota`, `invalid_prompt`) | `retryable = false`, human-actionable public message |
 | 429 on providers that overload it (openai/moonshotai/zai) | parse the body `code`/`type` to split transient rate-limit (`COOLING`) from terminal quota (`QUARANTINE`) |
@@ -113,7 +121,9 @@ retryable = true, retry-after = shortest remaining cooldown)`.
 `provider-error.error` carries only bounded fields (code, public message,
 retryable, fatal, status code, retry-after). Credentials, raw headers/bodies,
 stack traces, and signed URLs are stripped before the event leaves the process.
-The gateway itself never retries.
+Platform-key failover never repeats the failed key. A rejected session-supplied
+credential receives one attempt and credential-specific safe wording; it never
+enters the platform pool. The gateway does not own Runtime turn retries.
 
 ### Process lifecycle
 
@@ -260,6 +270,11 @@ it preserves the stated invariants and passes the named suites.
   `providers/openai-oauth.ts` (authorization swap, subscription-URL rewrite,
   system text carried as the call's `instructions`).
 - **Lifecycle.** One SDK stream per turn; SDK client retries are disabled.
+- **Liveness.** First-event and inter-event watchdogs bound transport stalls.
+  Independently, a 60-second semantic-progress watchdog is measured from the
+  last non-empty text/reasoning delta or Tool Call/input delta. Metadata,
+  keepalive traffic, and start/end markers do not re-arm it; expiry uses the
+  existing retryable provider-stream timeout projection.
 - **Invariants.** Raw-wire access is confined to the enumerated file-and-purpose
   points — a raw-wire mutation elsewhere is a boundary violation. Provider
   fetches may target only catalog base URLs plus the OAuth issuer/subscription
@@ -316,7 +331,7 @@ it preserves the stated invariants and passes the named suites.
 | `credentials*.test.ts`, `openai-oauth-refresh.test.ts` | Fail-closed enumeration, positive resolution to the provider-native credential header, Go↔TS decryption round-trip, OAuth single-flight refresh and rotation CAS |
 | `platform-pool.test.ts`, `platform-key-cli.test.ts` | Body-level classification, cool/quarantine transitions, pre-first-byte failover and switch cap, cooldown clamp, weighted selection, cache-scope startup refusal, operator-CLI round-trip |
 | `leak-guards.test.ts` | No key/token sentinel appears in any captured log, event, or error payload |
-| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk timeouts, admission cap, and the Bun/grpc-js tripwire (high event count + trailers + clean status) |
+| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap, and the Bun/grpc-js tripwire (high event count + trailers + clean status) |
 | `http-server.test.ts` | Ops-route responses and readiness-first graceful shutdown |
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |

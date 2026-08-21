@@ -8,6 +8,7 @@ import type {
 	CleanupSessionRequest,
 	InterruptRequest,
 	ResolveToolConfirmationRequest,
+	RecoverThreadRequest,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import {
 	AcceptInputFailure,
@@ -24,6 +25,7 @@ import type {
 	RuntimeCleanupController,
 	RuntimeControlInputCommitter,
 	RuntimeSessionRunHost,
+	RuntimeRecoveryCommand,
 } from "../../src/runtime-service.js";
 import {
 	GrpcStatusError,
@@ -180,6 +182,89 @@ describe("RuntimeControlService method-specific ingress", () => {
 				"/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput",
 			"operation.id": "rin_1",
 		});
+	});
+
+	test("preloads one exact durable recovery root without echoing it", async () => {
+		const fixture = makeFixture();
+		const request: RecoverThreadRequest = {
+			workspaceId: "default",
+			sessionId: "sesn_recovery",
+			sessionThreadId: "thr_recovery",
+			bindingId: "bind_recovery",
+			bindingGeneration: 4,
+			targetPodUid: "uid-a",
+			sourceEventId: "evt_tool_recovery",
+			recoveryLeaseRef: {
+				jobId: "job_recovery",
+				leaseToken: "lease_recovery",
+				partitionKey: "session:default:sesn_recovery",
+				dedupeKey: "runtime_recovery:default:sesn_recovery:evt_tool_recovery",
+			},
+		};
+		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ accepted: {} });
+		expect(fixture.host.recoveries).toEqual([{
+			workspaceId: "default", sessionId: "sesn_recovery", sessionThreadId: "thr_recovery",
+			bindingId: "bind_recovery", bindingGeneration: 4, targetPodUid: "uid-a",
+			sourceEventId: "evt_tool_recovery",
+			recoveryLeaseRef: request.recoveryLeaseRef!,
+		}]);
+		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ duplicate: {} });
+	});
+
+	test("concurrent recovery leases reach the Runtime owner independently", async () => {
+		const fixture = makeFixture();
+		let releaseRecoveries = (): void => undefined;
+		fixture.host.recoveryGate = new Promise<void>((resolve) => {
+			releaseRecoveries = resolve;
+		});
+		const request: RecoverThreadRequest = {
+			workspaceId: "default",
+			sessionId: "sesn_recovery_race",
+			sessionThreadId: "thr_recovery_race",
+			bindingId: "bind_recovery_race",
+			bindingGeneration: 4,
+			targetPodUid: "uid-a",
+			sourceEventId: "evt_recovery_race",
+			recoveryLeaseRef: {
+				jobId: "job_recovery_race",
+				leaseToken: "lease_recovery_old",
+				partitionKey: "session:default:sesn_recovery_race",
+				dedupeKey:
+					"runtime_recovery:default:sesn_recovery_race:evt_recovery_race",
+			},
+		};
+		const oldRecovery = fixture.service.recoverThread(request, metadata());
+		for (
+			let attempt = 0;
+			attempt < 100 && fixture.host.recoveryCalls.length < 1;
+			attempt += 1
+		) {
+			await new Promise<void>((resolve) => queueMicrotask(resolve));
+		}
+		const currentRecovery = fixture.service.recoverThread(
+			{
+				...request,
+				recoveryLeaseRef: {
+					...request.recoveryLeaseRef!,
+					leaseToken: "lease_recovery_current",
+				},
+			},
+			metadata(),
+		);
+		for (
+			let attempt = 0;
+			attempt < 100 && fixture.host.recoveryCalls.length < 2;
+			attempt += 1
+		) {
+			await new Promise<void>((resolve) => queueMicrotask(resolve));
+		}
+		expect(fixture.host.recoveryCalls.map((call) => call.recoveryLeaseRef.leaseToken)).toEqual([
+			"lease_recovery_old",
+			"lease_recovery_current",
+		]);
+		releaseRecoveries();
+		expect(await oldRecovery).toEqual({ accepted: {} });
+		expect(await currentRecovery).toEqual({ duplicate: {} });
 	});
 
 	test("accepts a bounded rejection without rejected content", async () => {
@@ -703,6 +788,9 @@ class FixedAuthenticator implements RuntimeAuthenticator {
 }
 
 class RecordingRunHost implements RuntimeSessionRunHost {
+	readonly recoveries: RuntimeRecoveryCommand[] = [];
+	readonly recoveryCalls: RuntimeRecoveryCommand[] = [];
+	recoveryGate: Promise<void> | undefined;
 	readonly inputs: Array<
 		Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]
 	> = [];
@@ -727,6 +815,19 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 	}> = [];
 	acceptInputGate: Promise<void> | undefined;
 	configNoResidency = false;
+
+	async handleRecoverThread(command: RuntimeRecoveryCommand) {
+		this.recoveryCalls.push(command);
+		await this.recoveryGate;
+		if (this.recoveries.some((recovery) =>
+			recovery.sessionThreadId === command.sessionThreadId &&
+			recovery.sourceEventId === command.sourceEventId
+		)) {
+			return { ok: true as const, sessionId: command.sessionId, applied: false };
+		}
+		this.recoveries.push(command);
+		return { ok: true as const, sessionId: command.sessionId, applied: true };
+	}
 
 	async handleAcceptInput(
 		command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0],

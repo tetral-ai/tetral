@@ -11,6 +11,7 @@ import { Metadata } from "@grpc/grpc-js";
 
 const Audience = "tetral-internal-grpc";
 const RuntimePodMethods = new Set([
+	"/tetral.agent_runtime.v1.AgentRuntimePodService/RecoverThread",
   "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput",
   "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail",
   "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptTaskNotification",

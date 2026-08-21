@@ -183,7 +183,7 @@ func retainRuntimePodLostToolPairsTx(
 		}
 		switch eventType {
 		case "agent.tool_use", "agent.mcp_tool_use":
-			call, err := runtimeToolCallPartFromDirectFacts(payloadJSON, projectionJSON)
+			call, err := runtimeToolCallPartFromProjection(projectionJSON)
 			if err != nil {
 				return err
 			}
@@ -252,33 +252,14 @@ func retainRuntimePodLostToolPairsTx(
 	return nil
 }
 
-func runtimeToolCallPartFromDirectFacts(payloadJSON string, projectionJSON string) (map[string]any, error) {
-	var payload runtimeToolUseEventPayload
-	var projection struct {
-		ModelToolCallID string `json:"model_tool_call_id"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.Name == "" || len(payload.Input) == 0 ||
-		json.Unmarshal([]byte(projectionJSON), &projection) != nil || projection.ModelToolCallID == "" {
-		return nil, status.Error(codes.FailedPrecondition, "durable Tool Use event is malformed")
-	}
-	var input any
-	if err := json.Unmarshal(payload.Input, &input); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, "durable Tool input event is malformed")
-	}
-	return map[string]any{
-		"type": "tool_call", "modelToolCallId": projection.ModelToolCallID,
-		"toolName": payload.Name, "canonicalInput": input,
-	}, nil
-}
-
 func runtimeToolCallPartFromProjection(projectionJSON string) (map[string]any, error) {
 	var projection runtimeToolProjectionPayload
 	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil ||
-		projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.Input) == 0 {
+		projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.ProviderInput) == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "durable Tool projection is malformed")
 	}
 	var input any
-	if err := json.Unmarshal(projection.Input, &input); err != nil {
+	if err := json.Unmarshal(projection.ProviderInput, &input); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "durable Tool input projection is malformed")
 	}
 	return map[string]any{
@@ -716,6 +697,20 @@ func settleRuntimePodLostLiveScopeTx(
 	if err != nil {
 		return err
 	}
+	rescheduleEventID, rescheduleActive, err := activeRuntimePodLostRescheduleTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if rescheduleActive {
+		return retireRuntimePodLostRescheduledBindingTx(ctx, tx, scope, binding, rescheduleEventID, now)
+	}
+	toolUseEventID, ownedToolRoute, err := runtimePodLostNonterminalToolOwnerTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if ownedToolRoute {
+		return retireRuntimePodLostOwnedToolBindingTx(ctx, tx, scope, binding, toolUseEventID, now)
+	}
 	interruptedThenLost, err := runtimePodLostInterruptedThenLostTx(ctx, tx, workspaceID, sessionID, threadID)
 	if err != nil {
 		return err
@@ -830,6 +825,156 @@ func settleRuntimePodLostLiveScopeTx(
 		formattedNow,
 		now.Add(defaultIdleCleanupDelay),
 	)
+	return err
+}
+
+func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (string, bool, error) {
+	var toolUseEventID string
+	err := tx.QueryRow(ctx,
+		`SELECT route.tool_use_event_id
+		     FROM session_pending_tool_uses route
+		     JOIN session_events tool_use
+		       ON tool_use.workspace_id=route.workspace_id AND tool_use.session_id=route.session_id
+		      AND tool_use.session_thread_id=route.session_thread_id AND tool_use.event_id=route.tool_use_event_id
+		    WHERE route.workspace_id=$1 AND route.session_id=$2 AND route.session_thread_id=$3
+		      AND route.status IN ('pending','resolving')
+		      AND NOT EXISTS (
+		        SELECT 1 FROM session_events result
+		         WHERE result.workspace_id=route.workspace_id
+		           AND result.session_id=route.session_id
+		           AND result.session_thread_id=route.session_thread_id
+		           AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		           AND COALESCE(
+		                 result.payload_json::jsonb ->> 'tool_use_event_id',
+		                 result.payload_json::jsonb ->> 'tool_use_id',
+		                 result.payload_json::jsonb ->> 'mcp_tool_use_id'
+		               )=route.tool_use_event_id
+		      )
+		    ORDER BY tool_use.sequence, route.tool_use_event_id
+		    LIMIT 1
+		    FOR UPDATE OF route`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	).Scan(&toolUseEventID)
+	if dbconnect.IsNoRows(err) {
+		return "", false, nil
+	}
+	return toolUseEventID, err == nil, err
+}
+
+// A lost binding does not own a Runtime-selected nonterminal Tool route. Retire
+// only the process custody; the existing Thread lifecycle remains recoverable
+// so a replacement Runtime can wait on the same durable owner.
+func retireRuntimePodLostOwnedToolBindingTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	binding runtimeBindingForDelivery,
+	toolUseEventID string,
+	now time.Time,
+) error {
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status='idle',
+		        idle_since=$5,
+		        active_seconds_total=active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($5 - running_since)))
+		        END,
+		        running_since=NULL,
+		        cleanup_after=$6,
+		        cleanup_enqueued_at=NULL,
+		        cleanup_claimed_at=NULL,
+		        cleanup_job_id=NULL,
+		        updated_at=$5
+		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
+		now, now.Add(defaultIdleCleanupDelay),
+	); err != nil {
+		return err
+	}
+	return enqueueRuntimeRecoveryTx(ctx, tx, scope, toolUseEventID, now)
+}
+
+func activeRuntimePodLostRescheduleTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+) (string, bool, error) {
+	var eventID, eventType string
+	var consumed bool
+	err := tx.QueryRow(ctx,
+		`SELECT lifecycle.event_id, lifecycle.type, EXISTS (
+		     SELECT 1 FROM session_events request_start
+		      WHERE request_start.workspace_id=lifecycle.workspace_id
+		        AND request_start.session_id=lifecycle.session_id
+		        AND request_start.session_thread_id=lifecycle.session_thread_id
+		        AND request_start.type='span.model_request_start'
+		        AND request_start.sequence > lifecycle.sequence
+		   )
+		   FROM session_events lifecycle
+		  WHERE lifecycle.workspace_id=$1 AND lifecycle.session_id=$2 AND lifecycle.session_thread_id=$3
+		    AND lifecycle.type IN (
+		      'session.status_running','session.thread_status_running',
+		      'session.status_rescheduled','session.thread_status_rescheduled',
+		      'session.status_idle','session.thread_status_idle',
+		      'session.status_terminated','session.thread_status_terminated'
+		    )
+		  ORDER BY sequence DESC
+		  LIMIT 1`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	).Scan(&eventID, &eventType, &consumed)
+	if dbconnect.IsNoRows(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return eventID, !consumed && (eventType == "session.status_rescheduled" || eventType == "session.thread_status_rescheduled"), nil
+}
+
+// A committed reschedule remains the Turn owner after pod loss. Repair may
+// finish its outstanding Tool effects, but the lost binding is retired without
+// projecting a competing idle closeout or resetting the accepted retry facts.
+func retireRuntimePodLostRescheduledBindingTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	binding runtimeBindingForDelivery,
+	rescheduleEventID string,
+	now time.Time,
+) error {
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status='idle',
+		        status_event_id=$5,
+		        idle_since=$6,
+		        active_seconds_total=active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
+		        END,
+		        running_since=NULL,
+		        cleanup_after=$7,
+		        cleanup_enqueued_at=NULL,
+		        cleanup_claimed_at=NULL,
+		        cleanup_job_id=NULL,
+		        updated_at=$6
+		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
+		rescheduleEventID, now, now.Add(defaultIdleCleanupDelay),
+	); err != nil {
+		return err
+	}
+	return enqueueRuntimeRecoveryTx(ctx, tx, scope, rescheduleEventID, now)
+}
+
+func enqueueRuntimeRecoveryTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceEventID string, now time.Time) error {
+	request, err := queue.NewRuntimeRecoveryEnqueueRequest(
+		workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), scope.GetSessionThreadId(), sourceEventID, now,
+	)
+	if err != nil {
+		return err
+	}
+	_, err = queue.EnqueueTx(ctx, tx, request)
 	return err
 }
 
@@ -1175,10 +1320,23 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 }
 
 func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOrphanToolUse, error) {
-	return runtimeTerminalOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs, false)
+	return runtimeOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs, runtimeOrphanToolSelection{
+		preserveNonterminalRoutes: true,
+	})
 }
 
-func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string, includeSubAgentDeliveries bool) ([]runtimeOrphanToolUse, error) {
+type runtimeOrphanToolSelection struct {
+	includeSubAgentDeliveries bool
+	preserveNonterminalRoutes bool
+}
+
+func selectRuntimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOrphanToolUse, error) {
+	return runtimeOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs, runtimeOrphanToolSelection{
+		includeSubAgentDeliveries: true,
+	})
+}
+
+func runtimeOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string, selection runtimeOrphanToolSelection) ([]runtimeOrphanToolUse, error) {
 	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
 	if err != nil {
 		return nil, err
@@ -1203,6 +1361,15 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 			      e.type <> 'agent.tool_use'
 			      OR COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
 			    ))
+			    AND (NOT $5 OR NOT EXISTS (
+			      SELECT 1
+			        FROM session_pending_tool_uses route
+			       WHERE route.workspace_id = e.workspace_id
+			         AND route.session_id = e.session_id
+			         AND route.session_thread_id = e.session_thread_id
+			         AND route.tool_use_event_id = e.event_id
+			         AND route.status IN ('pending','resolving')
+			    ))
 			    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events result
@@ -1224,7 +1391,8 @@ func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, work
 		workspaceID,
 		sessionID,
 		string(threadIDsJSON),
-		includeSubAgentDeliveries,
+		selection.includeSubAgentDeliveries,
+		selection.preserveNonterminalRoutes,
 	)
 	if err != nil {
 		return nil, err
@@ -1268,14 +1436,19 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 		return false, err
 	}
 	visibility, sessionVisible := threadScope.publicProjection("span.model_request_end")
+	retention, err := runtimeTerminalRequestRetentionTx(ctx, tx, scope, start.ModelRequestID)
+	if err != nil {
+		return false, err
+	}
 	request := &bridgev1.WriteRequestEndRequest{
-		Scope:          scope,
-		RuntimeWriteId: writeIDPrefix + start.ModelRequestID,
-		ModelRequestId: start.ModelRequestID,
-		IsError:        true,
-		ErrorKind:      errorKind,
-		FinishReason:   "error",
-		UsageJson:      "{}",
+		Scope:                    scope,
+		RuntimeWriteId:           writeIDPrefix + start.ModelRequestID,
+		ModelRequestId:           start.ModelRequestID,
+		IsError:                  true,
+		ErrorKind:                errorKind,
+		FinishReason:             "error",
+		UsageJson:                "{}",
+		ProviderContextRetention: retention,
 	}
 	payloadJSON, err := modelRequestEndPayloadJSON(request, start.EventID, start.RequestKind, "error", bridgeUsage{})
 	if err != nil {
@@ -1327,6 +1500,79 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 		return false, err
 	}
 	return true, nil
+}
+
+// A synthetic terminal Request boundary preserves only identities carried by
+// direct durable ownership relations. A live Tool route requires its exact
+// Assistant message owner and Tool Use event to survive cold reconstruction;
+// provider-visible content and Tool payloads are never consulted here.
+func runtimeTerminalRequestRetentionTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+) (*bridgev1.ProviderContextRetention, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT route.tool_use_event_id
+		   FROM session_pending_tool_uses route
+		   JOIN session_events tool_use
+		     ON tool_use.workspace_id = route.workspace_id
+		    AND tool_use.session_id = route.session_id
+		    AND tool_use.session_thread_id = route.session_thread_id
+		    AND tool_use.event_id = route.tool_use_event_id
+		    AND tool_use.model_request_id = $4
+		  WHERE route.workspace_id = $1
+		    AND route.session_id = $2
+		    AND route.session_thread_id = $3
+		    AND route.status IN ('pending', 'resolving')
+		  ORDER BY tool_use.sequence ASC, route.tool_use_event_id ASC`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	toolUseEventIDs := make([]string, 0)
+	for rows.Next() {
+		var toolUseEventID string
+		if err := rows.Scan(&toolUseEventID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		toolUseEventIDs = append(toolUseEventIDs, toolUseEventID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	retention := &bridgev1.ProviderContextRetention{
+		Disposition:     "failed",
+		ToolUseEventIds: toolUseEventIDs,
+	}
+	if len(toolUseEventIDs) == 0 {
+		return retention, nil
+	}
+	var assistantCount int
+	var assistantSequence int64
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*), COALESCE(MAX(sequence), 0)
+		   FROM session_messages
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
+		    AND kind = 'assistant'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+	).Scan(&assistantCount, &assistantSequence); err != nil {
+		return nil, err
+	}
+	if assistantCount != 1 || assistantSequence <= 0 {
+		return nil, status.Error(codes.FailedPrecondition, "live Tool routes have no exact Assistant owner")
+	}
+	retention.AssistantMessageSequence = &assistantSequence
+	return retention, nil
 }
 
 func lockRuntimePodLossRequestEndMutationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {
@@ -1776,7 +2022,7 @@ func insertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 		return false, err
 	}
 	if terminal.Success {
-		if err := markPendingToolResultResolvedTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
+		if err := resolveSettledToolRouteTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
 			return false, err
 		}
 	} else {
@@ -1931,7 +2177,10 @@ func cancelPendingToolUseForTerminalResultTx(ctx context.Context, tx *dbconnect.
 		resultEventID,
 		now,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func requestKindFromModelRequestStartProjection(projectionJSON string) (string, error) {

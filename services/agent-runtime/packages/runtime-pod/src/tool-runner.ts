@@ -45,6 +45,7 @@ import type {
 	RuntimeToolExecutionRequest,
 	RuntimeToolExecutionResult,
 } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import { selectRecentUserLedTurns } from "@tetral/agent-runtime-core/src/runtime/conversation-turns.js";
 import type {
 	AcceptSandboxExecutionRequest,
 	AcceptSandboxExecutionResponse,
@@ -54,6 +55,10 @@ import type {
 	AwaitChildInterruptResponse,
 	AwaitSandboxExecutionRequest,
 	AwaitSandboxExecutionResponse,
+	AuthorizeWebToolExecutionRequest,
+	AuthorizeWebToolExecutionResponse,
+	CancelCommandRequest,
+	CancelCommandResponse,
 	ChildThreadFact,
 	CloseChildControlRequest,
 	CloseChildControlResponse,
@@ -78,6 +83,7 @@ import type {
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	AgentRuntimeBridgeServiceClient,
+	ChildControlAction,
 	ChildInterruptOutcome,
 	ChildLifecycleDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -136,6 +142,7 @@ const WEB_SEARCH_DOMAINS_MAX = 4;
 const WEB_DOMAIN_MAX_BYTES = 253;
 const SUBAGENT_TASK_NAME_MAX_BYTES = 128;
 const SUBAGENT_FORK_TURNS_MAX = 1_000;
+const SUBAGENT_PROMPT_MAX_BYTES = 2 * 1024 * 1024;
 const TOOL_RESULT_BOUND_FAILURE =
 	"Tool result exceeds the 512 KiB model-visible output limit.";
 
@@ -175,6 +182,27 @@ type SendCommandInputResult =
 	| { readonly type: "duplicate"; readonly resultJson: string }
 	| { readonly type: "stale" };
 
+type CancelCommandResult =
+	| { readonly type: "committed"; readonly resultJson: string }
+	| { readonly type: "duplicate"; readonly resultJson: string }
+	| { readonly type: "stale" };
+
+const SandboxBackgroundCommandMaxAttempts = 5;
+const SandboxBackgroundProviderTimeoutMs = 45_000;
+const SandboxBackgroundQueueRetryCapMs = 60_000;
+const SandboxBackgroundResultCommitMarginMs = 30_000;
+// This is an observation bound, not a retry budget. It covers the Sandbox
+// runner's existing attempts, provider timeout, capped Queue backoff, and the
+// final durable-result commit margin before Runtime gives up observing it.
+const SandboxBackgroundCommandObservationTimeoutMs =
+	SandboxBackgroundCommandMaxAttempts * SandboxBackgroundProviderTimeoutMs +
+	(SandboxBackgroundCommandMaxAttempts - 1) * SandboxBackgroundQueueRetryCapMs +
+	SandboxBackgroundResultCommitMarginMs;
+
+type AuthorizeWebToolExecutionResult =
+	| { readonly type: "authorized" }
+	| { readonly type: "stale" };
+
 type RunMemoryResult =
 	| { readonly type: "committed"; readonly resultJson: string }
 	| { readonly type: "duplicate"; readonly resultJson: string }
@@ -206,6 +234,8 @@ export interface RuntimePodToolRunnerOptions {
 		| "runMemory"
 		| "sendCommandInput"
 		| "readCommandResult"
+		| "cancelCommand"
+		| "authorizeWebToolExecution"
 		| "createSubagentThread"
 		| "resolveChildThread"
 		| "listChildThreads"
@@ -252,6 +282,8 @@ export class RuntimePodToolRunner {
 		| "runMemory"
 		| "sendCommandInput"
 		| "readCommandResult"
+		| "cancelCommand"
+		| "authorizeWebToolExecution"
 		| "createSubagentThread"
 		| "resolveChildThread"
 		| "listChildThreads"
@@ -571,10 +603,9 @@ export class RuntimePodToolRunner {
 					{
 						scope,
 						taskId,
-						operationId,
-						maxOutputTokens,
-						inputJson: stableJsonStringify(request.input),
-						toolUseEventId: request.toolUseEventId,
+							operationId,
+							maxOutputTokens,
+							toolUseEventId: request.toolUseEventId,
 					},
 					metadata,
 					request.abortSignal,
@@ -586,7 +617,14 @@ export class RuntimePodToolRunner {
 				return resultJsonToExecutionResult(request, result.resultJson);
 			} catch (error) {
 				if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-					return toolCancelled(request, "Command task was cancelled.");
+					if (request.backgroundCancellationIntent?.() !== "user_interrupt") {
+						return { type: "stale_custody" };
+					}
+					return await this.cancelJoinedBackgroundCommand(
+						request,
+						scope,
+						taskId,
+					);
 				}
 				if (isDurableBridgeRejection(error)) {
 					return toolFailure(
@@ -605,6 +643,71 @@ export class RuntimePodToolRunner {
 				await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
 			}
 		}
+	}
+
+	private async cancelJoinedBackgroundCommand(
+		request: RuntimeToolExecutionRequest,
+		scope: RuntimeScope,
+		taskId: string,
+	): Promise<RuntimeToolExecutionResult> {
+		const durableRequest: CancelCommandRequest = {
+			scope,
+			taskId,
+			reason: "runtime_interrupted",
+			toolUseEventId: request.toolUseEventId,
+			operationId: stableId(
+				"req",
+				`command-cancel:${request.toolUseEventId}:${taskId}`,
+			),
+		};
+		const cancellationSignal = new AbortController().signal;
+		for (
+			let attempt = 0;
+			attempt < SessionEventWriterRetryPolicy.attempts;
+			attempt++
+		) {
+			try {
+				const result = parseCancelCommandResult(
+					await cancelCommand(
+						this.bridgeClient,
+						durableRequest,
+						await this.metadata(),
+						SandboxBackgroundCommandObservationTimeoutMs,
+					),
+				);
+				if (result.type === "stale") {
+					return { type: "stale_custody" };
+				}
+				return resultJsonToExecutionResult(request, result.resultJson);
+			} catch (error) {
+				if (error instanceof BridgeToolResultContractError) {
+					return toolFailure(
+						request,
+						"Bridge returned a malformed command cancellation result.",
+						true,
+					);
+				}
+				if (isDurableBridgeRejection(error)) {
+					return { type: "stale_custody" };
+				}
+				if (attempt + 1 >= SessionEventWriterRetryPolicy.attempts) {
+					return toolFailure(
+						request,
+						"Command cancellation result is unavailable.",
+						true,
+					);
+				}
+				await this.sleep(
+					SessionEventWriterRetryPolicy.backoffMs[attempt] ?? 0,
+					cancellationSignal,
+				);
+			}
+		}
+		return toolFailure(
+			request,
+			"Command cancellation result is unavailable.",
+			true,
+		);
 	}
 
 	private async runBridgeTool(
@@ -688,6 +791,21 @@ export class RuntimePodToolRunner {
 			return toolFailure(request, validatedInput.reason, false);
 		}
 		try {
+			const authorization = parseAuthorizeWebToolExecutionResult(
+				await authorizeWebToolExecution(
+					this.bridgeClient,
+					{
+						scope: this.scope(request),
+						toolUseEventId: request.toolUseEventId,
+					},
+					await this.metadata(),
+					request.abortSignal,
+				),
+			);
+			if (authorization.type === "stale") {
+				return { type: "stale_custody" };
+			}
+			throwIfToolRouteAborted(request.abortSignal);
 			const response = await runWeb(
 				this.webClient,
 				{
@@ -732,6 +850,16 @@ export class RuntimePodToolRunner {
 			}
 			if (error instanceof ToolResultContractError) {
 				return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+			}
+			if (error instanceof BridgeToolResultContractError) {
+				return toolFailure(
+					request,
+					"Bridge returned a malformed Web authorization result.",
+					true,
+				);
+			}
+			if (isDurableBridgeRejection(error)) {
+				return { type: "stale_custody" };
 			}
 			return toolFailure(
 				request,
@@ -848,11 +976,11 @@ export class RuntimePodToolRunner {
 		request: RuntimeToolExecutionRequest,
 	): Promise<RuntimeToolExecutionResult> {
 		const taskName = taskNameValue(request.input);
-		const prompt = requiredString(request.input, "prompt");
+		const prompt = boundedPromptValue(request.input);
 		if (taskName === undefined || prompt === undefined) {
 			return toolFailure(
 				request,
-				"spawn_agent requires a task_name of at most 128 UTF-8 bytes and prompt.",
+				"spawn_agent requires a task_name of at most 128 UTF-8 bytes and a prompt of at most 2 MiB.",
 				false,
 			);
 		}
@@ -892,12 +1020,17 @@ export class RuntimePodToolRunner {
 		let durablyDeliveredThreadId: string | undefined;
 		try {
 			const metadata = await this.metadata();
+			const parentMessageSequences = selectSubagentParentMessageSequences(
+				request,
+				forkTurns,
+			);
 			const createRequest: CreateSubagentThreadRequest = {
 				scope: parentScope,
 				sourceToolUseEventId: request.toolUseEventId,
 				taskName,
 				agentType,
-				forkTurns,
+				initialPrompt: prompt,
+				parentMessageSequences,
 			};
 			const createResponse = await this.replayActorTransport(
 				request.abortSignal,
@@ -920,8 +1053,9 @@ export class RuntimePodToolRunner {
 			if (childThreadId === undefined || childThreadId.length === 0) {
 				throw new BridgeToolResultContractError("CreateSubagentThread");
 			}
+			durablyDeliveredThreadId = childThreadId;
 			throwIfToolRouteAborted(request.abortSignal);
-			const preloaded = await preloadChildThread(
+			await preloadChildThread(
 				host,
 				request,
 				parentScope,
@@ -935,39 +1069,9 @@ export class RuntimePodToolRunner {
 					status: "idle",
 				},
 			);
-			if (!preloaded.ok && preloaded.reason !== "thread_busy") {
-				return toolFailure(
-					request,
-					`Sub-agent context preload failed: ${preloaded.reason}.`,
-					preloaded.reason === "local_session_capacity_exceeded",
-				);
-			}
-			const delivery = deliveryIdentity(
-				request.toolUseEventId,
-				childThreadId,
-				0,
-			);
-			const deliveryRequest: DeliverInterAgentMailRequest = {
-				scope: parentScope,
-				deliveryId: delivery.deliveryId,
-				targetThreadId: childThreadId,
-				sourceToolUseEventId: request.toolUseEventId,
-				content: prompt,
-			};
-			const delivered = await this.replayActorTransport(
-				request.abortSignal,
-				async () =>
-					await deliverInterAgentMail(
-						this.bridgeClient,
-						deliveryRequest,
-						metadata,
-						request.abortSignal,
-					),
-			);
-			if (!exactlyOneDefined(delivered.committed, delivered.duplicate)) {
-				throw new BridgeToolResultContractError("DeliverInterAgentMail");
-			}
-			durablyDeliveredThreadId = childThreadId;
+			// Creation already committed the opening input. Preload is a hot-path
+			// optimization; Queue custody remains the durable delivery owner when
+			// this pod cannot host the child immediately.
 			return completedText(
 				`task_name: ${taskName}\nsession_thread_id: ${childThreadId}\nstatus: delivered`,
 			);
@@ -1256,6 +1360,8 @@ export class RuntimePodToolRunner {
 						const control = await this.admitAndAwaitChildInterrupt(
 							request,
 							parentScope,
+							child.sessionThreadId,
+							ChildControlAction.CHILD_CONTROL_ACTION_INTERRUPT,
 							metadata,
 						);
 						if (!control.ok) {
@@ -1317,6 +1423,8 @@ export class RuntimePodToolRunner {
 						const control = await this.admitAndAwaitChildInterrupt(
 							request,
 							parentScope,
+							child.sessionThreadId,
+							ChildControlAction.CHILD_CONTROL_ACTION_CLOSE,
 							metadata,
 						);
 						if (!control.ok) {
@@ -1411,6 +1519,8 @@ export class RuntimePodToolRunner {
 	private async admitAndAwaitChildInterrupt(
 		request: RuntimeToolExecutionRequest,
 		parentScope: RuntimeScope,
+		targetChildThreadId: string,
+		action: ChildControlAction,
 		metadata: Metadata,
 	): Promise<
 		| {
@@ -1431,6 +1541,8 @@ export class RuntimePodToolRunner {
 			const admissionRequest: AdmitChildInterruptRequest = {
 				scope: parentScope,
 				sourceToolUseEventId: request.toolUseEventId,
+				targetChildThreadId,
+				action,
 			};
 			admitted = await this.replayActorTransport(
 				request.abortSignal,
@@ -1588,6 +1700,7 @@ export class RuntimePodToolRunner {
 							const resumeRequest: MarkChildThreadActiveRequest = {
 								scope: parentScope,
 								sourceToolUseEventId: request.toolUseEventId,
+								targetChildThreadId: child.sessionThreadId,
 							};
 							response = await this.replayActorTransport(
 								request.abortSignal,
@@ -2147,6 +2260,14 @@ function taskNameValue(input: RuntimeJsonValue): string | undefined {
 		: undefined;
 }
 
+function boundedPromptValue(input: RuntimeJsonValue): string | undefined {
+	const value = requiredString(input, "prompt");
+	return value !== undefined &&
+		new TextEncoder().encode(value).byteLength <= SUBAGENT_PROMPT_MAX_BYTES
+		? value
+		: undefined;
+}
+
 function subAgentType(
 	input: RuntimeJsonValue,
 ): "general" | "research" | "worker" | undefined {
@@ -2171,6 +2292,23 @@ function forkTurnsValue(input: RuntimeJsonValue): string | undefined {
 	return Number.isSafeInteger(count) && count <= SUBAGENT_FORK_TURNS_MAX
 		? value
 		: undefined;
+}
+
+function selectSubagentParentMessageSequences(
+	request: RuntimeToolExecutionRequest,
+	forkTurns: string,
+): number[] {
+	if (forkTurns === "none") {
+		return [];
+	}
+	const selected =
+		forkTurns === "all"
+			? request.retainedContextEntries
+			: selectRecentUserLedTurns(
+					request.retainedContextEntries,
+					Number(forkTurns),
+				);
+	return selected.map((entry) => entry.messageSequence);
 }
 
 function parseChildThread(
@@ -2351,6 +2489,45 @@ function parseSendCommandInputResult(
 	return { type: "stale" };
 }
 
+function parseCancelCommandResult(
+	response: CancelCommandResponse,
+): CancelCommandResult {
+	const variantCount =
+		Number(response.committed !== undefined) +
+		Number(response.duplicate !== undefined) +
+		Number(response.stale !== undefined);
+	if (variantCount !== 1) {
+		throw new BridgeToolResultContractError("CancelCommand");
+	}
+	if (response.committed !== undefined) {
+		return {
+			type: "committed",
+			resultJson: response.committed.resultJson,
+		};
+	}
+	if (response.duplicate !== undefined) {
+		return {
+			type: "duplicate",
+			resultJson: response.duplicate.resultJson,
+		};
+	}
+	return { type: "stale" };
+}
+
+function parseAuthorizeWebToolExecutionResult(
+	response: AuthorizeWebToolExecutionResponse,
+): AuthorizeWebToolExecutionResult {
+	const variantCount =
+		Number(response.authorized !== undefined) +
+		Number(response.stale !== undefined);
+	if (variantCount !== 1) {
+		throw new BridgeToolResultContractError("AuthorizeWebToolExecution");
+	}
+	return response.authorized !== undefined
+		? { type: "authorized" }
+		: { type: "stale" };
+}
+
 function parseRunMemoryResult(response: RunMemoryResponse): RunMemoryResult {
 	const variantCount =
 		Number(response.committed !== undefined) +
@@ -2453,6 +2630,49 @@ function readCommandResult(
 		abortSignal,
 		(unaryRequest, unaryMetadata, callback) =>
 			client.readCommandResult(unaryRequest, unaryMetadata, callback),
+	);
+}
+
+function cancelCommand(
+	client: Pick<AgentRuntimeBridgeServiceClient, "cancelCommand">,
+	request: CancelCommandRequest,
+	metadata: Metadata,
+	timeoutMs: number,
+): Promise<CancelCommandResponse> {
+	const options: CallOptions = {
+		deadline: Date.now() + timeoutMs,
+	};
+	return new Promise((resolve, reject) => {
+		try {
+			client.cancelCommand(request, metadata, options, (error, response) => {
+				if (error !== null) {
+					reject(error);
+					return;
+				}
+				resolve(response);
+			});
+		} catch (error) {
+			reject(error);
+		}
+	});
+}
+
+function authorizeWebToolExecution(
+	client: Pick<AgentRuntimeBridgeServiceClient, "authorizeWebToolExecution">,
+	request: AuthorizeWebToolExecutionRequest,
+	metadata: Metadata,
+	abortSignal: AbortSignal,
+): Promise<AuthorizeWebToolExecutionResponse> {
+	return cancellableUnaryCall(
+		request,
+		metadata,
+		abortSignal,
+		(unaryRequest, unaryMetadata, callback) =>
+			client.authorizeWebToolExecution(
+				unaryRequest,
+				unaryMetadata,
+				callback,
+			),
 	);
 }
 

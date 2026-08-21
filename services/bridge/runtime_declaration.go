@@ -119,7 +119,6 @@ func writeEventDeclarationDigest(
 	payloadJSON string,
 	consumedFileJSON string,
 ) (string, error) {
-	payloadJSON = stripInternalProviderFields(payloadJSON)
 	assistantDelta, err := canonicalRuntimeContextDelta(request.GetAssistantContextDelta())
 	if err != nil {
 		return "", err
@@ -138,6 +137,36 @@ func writeEventDeclarationDigest(
 		declaration["consumed_file_attachments"] = json.RawMessage(consumedFileJSON)
 	}
 	raw, err := marshalRuntimeDeclarationObjectWithRawField(declaration, "payload", payloadJSON)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := canonicalRunToolJSON(string(raw))
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(canonical), nil
+}
+
+func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, declaration runtimeToolProjectionPayload) (string, error) {
+	contextDelta, err := canonicalRuntimeContextDelta(runtimeToolContextDelta(declaration))
+	if err != nil {
+		return "", err
+	}
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+		"assistant_context_delta": contextDelta,
+		"evaluated_permission":    declaration.EvaluatedPermission,
+		"event_type":              declaration.EventType,
+		"mcp_server_name":         nullableDeclarationString(declaration.MCPServerName),
+		"model_request_id":        request.GetModelRequestId(),
+		"model_tool_call_id":      declaration.ModelToolCallID,
+		"operation_kind":          bridgeOpWriteEvent,
+		"provider_input":          declaration.ProviderInput,
+		"public_execution_input":  declaration.CanonicalExecutionInput,
+		"route_capability":        declaration.RouteCapability,
+		"runtime_write_id":        request.GetRuntimeWriteId(),
+		"session_thread_id":       request.GetScope().GetSessionThreadId(),
+		"tool_name":               declaration.ToolName,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -196,6 +225,15 @@ func writeRequestEndDeclarationDigest(
 			"runtime_input_id": value.GetRuntimeInputId(),
 		}
 	}
+	var providerContextRetention any
+	if value := request.GetProviderContextRetention(); value != nil {
+		providerContextRetention = map[string]any{
+			"disposition":                value.GetDisposition(),
+			"assistant_message_sequence": value.AssistantMessageSequence,
+			"tool_use_event_ids":         value.GetToolUseEventIds(),
+			"repair_event_ids":           value.GetRepairEventIds(),
+		}
+	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"compacted_through_message_sequence": compactedThrough,
 		"compaction_context":                 compactionContext,
@@ -208,6 +246,7 @@ func writeRequestEndDeclarationDigest(
 		"model_request_id":                   request.GetModelRequestId(),
 		"operation_kind":                     bridgeOpWriteRequestEnd,
 		"prefix_consumption":                 prefixConsumption,
+		"provider_context_retention":         providerContextRetention,
 		"request_kind":                       requestKind,
 		"reschedule":                         reschedule,
 		"session_thread_id":                  request.GetScope().GetSessionThreadId(),
@@ -269,15 +308,22 @@ func childLifecycleDeclarationDigest(
 	childThreadID string,
 	sourceKind string,
 	sourceCommandID string,
+	settlementKind string,
+	settlementEventID string,
 ) (string, error) {
-	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+	declaration := map[string]any{
 		"action":            action,
 		"child_thread_id":   childThreadID,
 		"operation_kind":    operationKind,
 		"session_thread_id": sessionThreadID,
 		"source_command_id": sourceCommandID,
 		"source_kind":       sourceKind,
-	})
+	}
+	if settlementKind != "" || settlementEventID != "" {
+		declaration["settlement_kind"] = settlementKind
+		declaration["settlement_event_id"] = settlementEventID
+	}
+	raw, err := marshalRuntimeDeclarationObject(declaration)
 	if err != nil {
 		return "", err
 	}
@@ -470,9 +516,8 @@ type durableContextWrite struct {
 }
 
 type writeEventDurableFacts struct {
-	EventID                string   `json:"eventId"`
-	MessageSequence        *int64   `json:"messageSequence,omitempty"`
-	CreatedToolUseEventIDs []string `json:"createdToolUseEventIds"`
+	EventID         string `json:"eventId"`
+	MessageSequence *int64 `json:"messageSequence,omitempty"`
 }
 
 func commitWriteEventContextTx(
@@ -485,14 +530,13 @@ func commitWriteEventContextTx(
 	delta *bridgev1.RuntimeContextDelta,
 	now time.Time,
 ) (writeEventDurableFacts, error) {
-	facts := writeEventDurableFacts{EventID: eventID, CreatedToolUseEventIDs: []string{}}
+	facts := writeEventDurableFacts{EventID: eventID}
 	if delta != nil {
 		write, err := appendRuntimeAssistantContextTx(ctx, tx, scope, eventType, eventID, modelRequestID, delta, now)
 		if err != nil {
 			return writeEventDurableFacts{}, err
 		}
 		facts.MessageSequence = &write.MessageSequence
-		facts.CreatedToolUseEventIDs = write.CreatedToolUseEventIDs
 	}
 	return facts, nil
 }
@@ -996,9 +1040,10 @@ func decodeRuntimeToolErrorJSON(raw string) (map[string]any, error) {
 
 func runtimeToolProjectionFromDurableTool(tool durableToolExecution, result map[string]any) runtimeToolProjectionPayload {
 	projection := runtimeToolProjectionPayload{
-		ModelToolCallID: tool.ModelToolCallID,
-		ToolName:        tool.ToolName,
-		Input:           json.RawMessage(tool.InputJSON),
+		ModelToolCallID:         tool.ModelToolCallID,
+		ToolName:                tool.ToolName,
+		ProviderInput:           json.RawMessage(tool.ProviderInputJSON),
+		CanonicalExecutionInput: json.RawMessage(tool.InputJSON),
 	}
 	if result != nil {
 		projection.State, _ = result["type"].(string)
@@ -1098,7 +1143,7 @@ func commitInternalToolRepairContextTx(
 	}
 	delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{
 		{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
-			ModelToolCallId: modelToolCallID, ToolName: toolName, CanonicalInputJson: canonicalInputJSON,
+			ModelToolCallId: modelToolCallID, ToolName: toolName, ProviderInputJson: canonicalInputJSON,
 		}}},
 		{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{
 			ModelToolCallId: modelToolCallID,

@@ -760,6 +760,19 @@ func (s *recordingRuntimeCommandSender) AcceptInput(_ context.Context, target Ru
 	}
 	return &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Rejected{Rejected: &agentruntimev1.AcceptInputRejected{Reason: agentruntimev1.AcceptInputFailure_ACCEPT_INPUT_FAILURE_IDENTITY_CONFLICT, Retryable: result.Retryable}}}, nil
 }
+func (s *recordingRuntimeCommandSender) RecoverThread(_ context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	result, err := s.record(target, request)
+	if err != nil || result.Status == "" {
+		return nil, err
+	}
+	if result.Status == RuntimeDeliveryDuplicate {
+		return &agentruntimev1.RecoverThreadResponse{Outcome: &agentruntimev1.RecoverThreadResponse_Duplicate{Duplicate: &agentruntimev1.RecoverThreadDuplicate{}}}, nil
+	}
+	if result.Status == RuntimeDeliveryRejected {
+		return &agentruntimev1.RecoverThreadResponse{Outcome: &agentruntimev1.RecoverThreadResponse_Rejected{Rejected: &agentruntimev1.RecoverThreadRejected{Reason: agentruntimev1.RecoverThreadFailure_RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED, Retryable: result.Retryable}}}, nil
+	}
+	return &agentruntimev1.RecoverThreadResponse{Outcome: &agentruntimev1.RecoverThreadResponse_Accepted{Accepted: &agentruntimev1.RecoverThreadAccepted{}}}, nil
+}
 func (s *recordingRuntimeCommandSender) AcceptAgentMail(_ context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
 	result, err := s.record(target, request)
 	if err != nil || result.Status == "" {

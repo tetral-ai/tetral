@@ -5,6 +5,7 @@ package tetral.agent_runtime.v1;
 option go_package = "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1;agentruntimev1";
 
 service AgentRuntimePodService {
+  rpc RecoverThread(RecoverThreadRequest) returns (RecoverThreadResponse);
   rpc AcceptInput(AcceptInputRequest) returns (AcceptInputResponse);
   rpc AcceptAgentMail(AcceptAgentMailRequest) returns (AcceptAgentMailResponse);
   rpc AcceptTaskNotification(AcceptTaskNotificationRequest) returns (AcceptTaskNotificationResponse);
@@ -12,6 +13,47 @@ service AgentRuntimePodService {
   rpc ResolveToolConfirmation(ResolveToolConfirmationRequest) returns (ResolveToolConfirmationResponse);
   rpc ApplyRuntimeConfig(ApplyRuntimeConfigRequest) returns (ApplyRuntimeConfigResponse);
   rpc CleanupSession(CleanupSessionRequest) returns (CleanupSessionResponse);
+}
+
+message RecoverThreadRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string binding_id = 4;
+  int64 binding_generation = 5;
+  string target_pod_uid = 6;
+  string source_event_id = 7;
+  reserved 8;
+  reserved "recovery_kind";
+  RecoveryLeaseRef recovery_lease_ref = 9;
+}
+
+message RecoveryLeaseRef {
+  string job_id = 1;
+  string lease_token = 2;
+  string partition_key = 3;
+  string dedupe_key = 4;
+}
+
+message RecoverThreadResponse {
+  oneof outcome {
+    RecoverThreadAccepted accepted = 1;
+    RecoverThreadDuplicate duplicate = 2;
+    RecoverThreadRejected rejected = 3;
+  }
+}
+message RecoverThreadAccepted {}
+message RecoverThreadDuplicate {}
+message RecoverThreadRejected {
+  RecoverThreadFailure reason = 1;
+  bool retryable = 2;
+}
+enum RecoverThreadFailure {
+  RECOVER_THREAD_FAILURE_UNSPECIFIED = 0;
+  RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH = 1;
+  RECOVER_THREAD_FAILURE_BINDING_MISMATCH = 2;
+  RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT = 3;
+  RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED = 4;
 }
 
 message AcceptInputRequest {

@@ -455,8 +455,10 @@ const (
 		)
 	)`
 
-	// session_pending_tool_uses tracks public tool calls whose result waits on
-	// approval via user.tool_confirmation.
+	// session_pending_tool_uses is the durable route for every public Tool Call
+	// until its terminal Tool Result commits. It closes the crash gap between
+	// the Tool Use declaration and executor admission; approval is one route
+	// state, not the table's ownership boundary.
 	// The row is a cold-resume and stale-reply routing record, NOT a context
 	// message: LoadContext installs unresolved rows as thread-local ToolJob
 	// state, and a rehydrated decision is applied, never re-evaluated under
@@ -464,13 +466,11 @@ const (
 	//
 	//   status      meaning                             entered on                                 legal next
 	//   pending     approval opened, undecided          agent.tool_use(ask) projection             resolving, cancelled
-	//                                                   (upsertPendingToolApproval)
-	//   resolving   user decision recorded, awaiting    user.tool_confirmation processing          resolved, cancelled
-	//               the terminal tool result            (Bridge CommitInputs /
-	//                                                   recordPendingToolConfirmationDecision)
+	//   resolving   execution authorized or denied,     agent.tool_use(allow/deny) projection or   resolved, cancelled
+	//               awaiting the terminal Tool Result   user.tool_confirmation processing
 	//   resolved    terminal agent.tool_result          markPendingToolResultResolved              (terminal)
 	//               committed (sets result_event_id)
-	//   cancelled   owner turn failed/interrupted       interrupt / pod-loss cancel                (terminal)
+	//   cancelled   route closed without Tool Result    interrupt or request closeout              (terminal)
 	//
 	// UPDATE-WITH: services/bridge pending-tool projection, input-commit,
 	// terminal settlement, and LoadContext paths.
@@ -1134,7 +1134,7 @@ const (
 		last_error_message TEXT,
 		PRIMARY KEY (id),
 		UNIQUE (workspace_id, id),
-		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'environment_build', 'environment_ready_fanout', 'sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')),
+		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_recovery', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'environment_build', 'environment_ready_fanout', 'sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')),
 		CONSTRAINT queue_jobs_status_shape CHECK (status IN ('pending', 'leased', 'acknowledged', 'cancelled', 'dead_lettered')),
 		CONSTRAINT queue_jobs_payload_version_shape CHECK (payload_version > 0),
 		CONSTRAINT queue_jobs_partition_sequence_shape CHECK (queue_partition_sequence > 0),

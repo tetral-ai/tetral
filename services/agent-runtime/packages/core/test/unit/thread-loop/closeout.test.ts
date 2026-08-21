@@ -103,8 +103,14 @@ describe("ThreadLoop", () => {
 					new Error(defectCanary),
 					testRunCustody(),
 				);
-				expect(yield* closeout).toEqual({ type: "landed" });
-				expect(yield* closeout).toEqual({ type: "landed" });
+				expect(yield* closeout).toEqual({
+					type: "landed",
+					disposition: "continuation",
+				});
+				expect(yield* closeout).toEqual({
+					type: "landed",
+					disposition: "continuation",
+				});
 			}).pipe(
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
@@ -196,7 +202,7 @@ describe("ThreadLoop", () => {
 			),
 		);
 
-		expect(result).toEqual({ type: "landed" });
+		expect(result).toEqual({ type: "landed", disposition: "terminal" });
 		expect(appended).toEqual([]);
 		expect(terminations).toHaveLength(1);
 		expect(terminations[0]).toMatchObject({
@@ -291,8 +297,14 @@ describe("ThreadLoop", () => {
 			type: "committed",
 		});
 		await flushMicrotasks(10);
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
 		expect(errorCalls).toBe(1);
 		expect(idleCalls).toBe(1);
 	});
@@ -393,7 +405,10 @@ describe("ThreadLoop", () => {
 			type: "committed",
 		});
 		await flushMicrotasks(10);
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
 		expect(errorCalls).toBe(1);
 		expect(idleCalls).toBe(1);
 	});
@@ -458,7 +473,10 @@ describe("ThreadLoop", () => {
 			type: "retry",
 			error: { code: "unavailable" },
 		});
-		expect(await Effect.runPromise(closeout)).toEqual({ type: "landed" });
+		expect(await Effect.runPromise(closeout)).toEqual({
+			type: "landed",
+			disposition: "continuation",
+		});
 		expect(appendWriteIds).toHaveLength(
 			SessionEventWriterRetryPolicy.attempts + 1,
 		);
@@ -1100,6 +1118,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toHaveLength(1);
 		expect(requestEnds[0]).toMatchObject({
 			isError: true,
+			providerContextRetention: { disposition: "interrupted", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "runtime_interrupted",
 			finishReason: "cancelled",
 		});
@@ -1290,6 +1309,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+				providerContextRetention: { disposition: "interrupted", toolUseEventIds: [], repairEventIds: [] },
 				errorKind: "runtime_interrupted",
 				finishReason: "cancelled",
 			}),
@@ -1486,6 +1506,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+				providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				errorKind: "runtime_interrupted",
 				finishReason: "cancelled",
 			}),
@@ -2022,7 +2043,7 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "sevt_partial_requires_action_end",
 						isError: false,
-						rescheduled: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 					},
 					toolMembers: [
 						{
@@ -2763,6 +2784,7 @@ describe("ThreadLoop", () => {
 			expect.objectContaining({
 				modelRequestId: expect.any(String),
 				isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				errorKind: "provider_error",
 				finishReason: "error",
 			}),
@@ -2943,6 +2965,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				finishReason: "error",
 			}),
 		]);
@@ -2951,11 +2974,6 @@ describe("ThreadLoop", () => {
 				messageSequence: 1,
 				contextKind: "user",
 				parts: [{ type: "text", text: "hello" }],
-			},
-			{
-				messageSequence: 2,
-				contextKind: "assistant",
-				parts: [{ type: "text", text: "partial stream answer" }],
 			},
 		]);
 	});
@@ -3026,6 +3044,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 				finishReason: "error",
 			}),
 		]);
@@ -3113,7 +3132,7 @@ describe("ThreadLoop", () => {
 		).toBe(false);
 		expect(order).toEqual([]);
 	});
-	test("terminal provider failure preserves completed text with a durable message ACK", async () => {
+	test("terminal provider failure keeps completed text as audit but excludes it from provider context", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const loader = new RecordingContextLoader([], {
 			type: "context",
@@ -3165,10 +3184,13 @@ describe("ThreadLoop", () => {
 				content: [{ type: "text", text: "durably completed" }],
 			},
 		]);
-		expect(session.state.contextManager.entries().at(-1)).toMatchObject({
-			contextKind: "assistant",
-			parts: [{ type: "text", text: "durably completed" }],
-		});
+		expect(session.state.contextManager.entries()).toEqual([
+			{
+				messageSequence: 1,
+				contextKind: "user",
+				parts: [{ type: "text", text: "hello" }],
+			},
+		]);
 	});
 	test("runtime layer does not publish active draft when provider-error terminal append fails", async () => {
 		const order: string[] = [];

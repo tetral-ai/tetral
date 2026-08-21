@@ -97,8 +97,8 @@ describe("Thread-turn semantic characterization", () => {
 		const reviewerDecision = sealedRequest([], "approval_reviewer");
 		const reviewerFailure = sealedRequest([], "approval_reviewer", {
 			isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 			errorKind: "provider_stream_error",
-			rescheduled: false,
 		});
 		const reviewerCancelled = {
 			...reviewerDecision,
@@ -400,11 +400,19 @@ function sealedRequest(
 	>["requestKind"] = "agent_provider_request",
 	end: {
 		readonly isError: boolean;
-		readonly rescheduled: boolean;
+		readonly providerContextRetention: NonNullable<
+			NonNullable<ThreadTurnCheckpoint["request"]>["requestEnd"]
+		>["providerContextRetention"];
+		readonly reschedule?: {
+			readonly attempt: number;
+			readonly effectiveDeadline: string;
+			readonly providerAttempts: number;
+			readonly compactionAttempts: number;
+		};
 		readonly errorKind?: string;
 	} = {
 		isError: false,
-		rescheduled: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 	},
 ): ThreadTurnCheckpoint {
 	return {

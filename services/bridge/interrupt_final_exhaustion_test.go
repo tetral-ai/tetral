@@ -260,6 +260,7 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, 1, 1)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
@@ -356,7 +357,7 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 		}
 		return
 	}
-	if receiptOutcome.err != nil || receiptOutcome.commit.GetBarrierStale() == nil || !terminationOutcome.finalized.QueueLeaseSettled || inboxStatus != "cancelled" || sessionStatus != "terminated" || bindings != 0 {
+	if receiptOutcome.err != nil || receiptOutcome.commit.GetStale() == nil || !terminationOutcome.finalized.QueueLeaseSettled || inboxStatus != "cancelled" || sessionStatus != "terminated" || bindings != 0 {
 		t.Fatalf("termination-first winner = commit %#v/%v final %+v Inbox %s Session %s bindings %d",
 			receiptOutcome.commit, receiptOutcome.err, terminationOutcome.finalized, inboxStatus, sessionStatus, bindings)
 	}
@@ -513,6 +514,7 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 	now := time.Now().UTC().Add(-time.Minute)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -735,6 +737,7 @@ func TestJobRunnerFinalAttemptInvalidInterruptUsesExactTerminalOwner(t *testing.
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, followerEvt, 2, "user.message", `{"content":[{"type":"text","text":"wait behind interrupt"}]}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
@@ -824,6 +827,7 @@ func TestPostgreSQLMalformedInterruptFinalizationRollbackPreservesExactLease(t *
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -876,6 +880,7 @@ func TestPostgreSQLMalformedInterruptResponseLossReplaysTerminalResult(t *testin
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,

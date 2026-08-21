@@ -135,7 +135,19 @@ export type ThreadTurnFact =
 			readonly modelRequestId: string;
 			readonly isError: boolean;
 			readonly errorKind?: string;
-			readonly rescheduled: boolean;
+			readonly providerContextRetention: NonNullable<
+				ThreadTurnCheckpoint["request"]
+			>["requestEnd"] extends infer T
+				? T extends { readonly providerContextRetention: infer R }
+					? R
+					: never
+				: never;
+			readonly reschedule?: {
+				readonly attempt: number;
+				readonly effectiveDeadline: string;
+				readonly providerAttempts: number;
+				readonly compactionAttempts: number;
+			};
 	  }
 	| {
 			readonly fact: "finish_idle_committed";
@@ -190,6 +202,15 @@ export function deriveThreadTurnDecision(
 		};
 	}
 	if (checkpoint.terminalCloseout !== undefined) {
+		if (checkpoint.terminalCloseout.disposition === "retries_exhausted") {
+			const acceptedInput = commitAcceptedInputDecision(
+				checkpoint,
+				acceptedInputIds,
+			);
+			if (acceptedInput !== undefined) {
+				return acceptedInput;
+			}
+		}
 		return { state: { state: "idle" }, action: { action: "await_input" } };
 	}
 
@@ -230,7 +251,7 @@ export function deriveThreadTurnDecision(
 		};
 	}
 
-	if (request.requestEnd.isError || request.requestEnd.rescheduled) {
+	if (request.requestEnd.isError || request.requestEnd.reschedule !== undefined) {
 		return {
 			state: {
 				state: "request_sealed",
@@ -716,7 +737,10 @@ export function reduceThreadTurn(
 					...(fact.errorKind !== undefined
 						? { errorKind: fact.errorKind }
 						: {}),
-					rescheduled: fact.rescheduled,
+					providerContextRetention: fact.providerContextRetention,
+					...(fact.reschedule !== undefined
+						? { reschedule: fact.reschedule }
+						: {}),
 				},
 			});
 			return {

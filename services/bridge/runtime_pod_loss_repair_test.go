@@ -26,7 +26,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-func TestPostgreSQLRuntimePodLossSweepClosesActiveTurnWithoutInputAndIsIdempotent(t *testing.T) {
+func TestPostgreSQLRuntimePodLossSweepPreservesActiveToolOwnerAndIsIdempotent(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 80, "Write", "idle", false, false, false, false, true)
 	var logs bytes.Buffer
@@ -65,8 +65,8 @@ func TestPostgreSQLRuntimePodLossSweepClosesActiveTurnWithoutInputAndIsIdempoten
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID).Scan(&bindingRows); err != nil {
 		t.Fatalf("count repaired binding: %v", err)
 	}
-	if requestEnds != 1 || toolResults != 1 || sessionErrors != 1 || sessionStatus != "idle" || bindingRows != 0 {
-		t.Fatalf("closeout facts end=%d result=%d errors=%d status=%s bindings=%d; want 1/1/1/idle/0", requestEnds, toolResults, sessionErrors, sessionStatus, bindingRows)
+	if requestEnds != 1 || toolResults != 0 || sessionErrors != 0 || sessionStatus != "idle" || bindingRows != 0 {
+		t.Fatalf("recovery facts end=%d result=%d errors=%d status=%s bindings=%d; want 1/0/0/idle/0", requestEnds, toolResults, sessionErrors, sessionStatus, bindingRows)
 	}
 	for _, event := range []string{"runtime_pod_loss_detected", "runtime_pod_loss_repaired", "runtime_pod_loss_sweep_completed"} {
 		if !strings.Contains(logs.String(), `"event":"`+event+`"`) {
@@ -634,8 +634,8 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 		  AND payload_json::jsonb ->> 'reason'='runtime_pod_lost'`, fixture.sessionID, fixture.toolUseEventID).Scan(&toolResults); err != nil {
 		t.Fatalf("count racing tool results: %v", err)
 	}
-	if requestEnds != 1 || toolResults != 1 {
-		t.Fatalf("racing closeout facts end=%d result=%d; want exactly 1/1", requestEnds, toolResults)
+	if requestEnds != 1 || toolResults != 0 {
+		t.Fatalf("racing recovery facts end=%d result=%d; want exactly 1/0", requestEnds, toolResults)
 	}
 }
 

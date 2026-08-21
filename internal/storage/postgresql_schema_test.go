@@ -816,6 +816,9 @@ func TestSandboxQueueSchemaCarriesClosedKindsMaintenanceAndCleanupIndexes(t *tes
 		"sandbox_background_reconcile",
 	}
 	kindConstraint := readCheckConstraintDefinition(t, admin, schema, "queue_jobs", "queue_jobs_kind_shape")
+	if !strings.Contains(kindConstraint, "'runtime_recovery'") {
+		t.Fatalf("queue_jobs kind constraint = %q; missing runtime_recovery", kindConstraint)
+	}
 	for _, kind := range sandboxKinds {
 		if !strings.Contains(kindConstraint, "'"+kind+"'") {
 			t.Fatalf("queue_jobs kind constraint = %q; missing %s", kindConstraint, kind)

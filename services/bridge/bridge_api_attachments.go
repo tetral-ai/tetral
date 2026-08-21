@@ -533,28 +533,6 @@ func logTransientAttachmentGC(logger *slog.Logger, result TransientAttachmentGCR
 	}
 }
 
-// Provider execution metadata is not part of a durable Tool output or its
-// declaration digest; Bridge removes it before comparing or storing output.
-var internalProviderPayloadFields = map[string]struct{}{
-	"background_task":                {},
-	"engine_sandbox_id":              {},
-	"provider_sandbox_id":            {},
-	"provider_session_id":            {},
-	"provider_command_id":            {},
-	"provider_command_metadata":      {},
-	"provider_command_metadata_json": {},
-	"provider_metadata":              {},
-	"provider_metadata_json":         {},
-}
-
-func stripInternalProviderFields(raw string) string {
-	stripped, err := canonicalRunToolJSONWithoutObjectFields(raw, internalProviderPayloadFields)
-	if err != nil {
-		return raw
-	}
-	return stripped
-}
-
 type transientAttachmentCreate struct {
 	Scope                *bridgev1.RuntimeScope
 	SourceToolUseEventID string

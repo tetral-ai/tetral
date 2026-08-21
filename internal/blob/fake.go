@@ -84,6 +84,35 @@ func (f *FakeBlobStore) Put(ctx context.Context, key string, content io.Reader, 
 	return nil
 }
 
+// CompareAndSwap replaces key only when its current ETag matches
+// expectedETag. A stale writer receives DuplicateKeyError and cannot overwrite
+// the winner selected after it read the object.
+func (f *FakeBlobStore) CompareAndSwap(ctx context.Context, key string, expectedETag string, content io.Reader, size int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	body, err := io.ReadAll(content)
+	if err != nil {
+		return err
+	}
+	if size >= 0 && int64(len(body)) != size {
+		return &ConfigError{Message: "blob: declared size does not match body length"}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stored, exists := f.objects[key]
+	if !exists {
+		return &NotFoundError{Key: key}
+	}
+	if expectedETag == "" || metadataForBytes(stored).ETag != expectedETag {
+		return &DuplicateKeyError{Key: key}
+	}
+	updated := make([]byte, len(body))
+	copy(updated, body)
+	f.objects[key] = updated
+	return nil
+}
+
 // Get returns the bytes stored at key. Missing keys surface as
 // NotFoundError. The returned reader is over a private copy so the
 // caller cannot mutate the stored bytes.

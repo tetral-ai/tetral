@@ -105,12 +105,13 @@ primary key; there is no reliance on connection-level row filtering.
 
 There is no `deleting` state — delete tombstones synchronously and enqueues its
 cleanup atomically. `lifecycle_state` is one of three distinct durable axes;
-mutations also read `session_runtime_status.status` (one of
-`idle`, `running`, `rescheduling`, `terminated`, with cleanup tracked by
-separate columns). A session mutation — `update`, resource add, resource
-delete — requires the runtime status to equal `idle` exactly: any non-`idle`
-status (`running`, `rescheduling`, or `terminated`) is rejected, and so is a
-`lifecycle_state` of `archiving`. A non-idle or archiving target returns
+mutations also read the projected Session status, which combines stored
+`sessions.status` (`idle`, `rescheduling`, or `terminated`) with the live
+`session_runtime_status.status` residency row (`idle` or `running`). A session
+mutation — `update`, resource add, resource delete — requires the projected
+status to equal `idle` exactly: any non-`idle` status (`running`,
+`rescheduling`, or `terminated`) is rejected, and so is a `lifecycle_state` of
+`archiving`. A non-idle or archiving target returns
 `409 invalid_request_error`. Session
 delete is likewise refused while the runtime status is `running` or
 `rescheduling`.

@@ -22,26 +22,50 @@ import (
 
 type Service struct {
 	providergatewayv1.UnimplementedProviderGatewayServiceServer
-	store    *SnapshotStore
-	backend  Backend
-	verifier *BindingVerifier
-	metrics  *Metrics
-	now      func() time.Time
-	logger   *slog.Logger
+	store            *SnapshotStore
+	backend          Backend
+	verifier         *BindingVerifier
+	metrics          *Metrics
+	now              func() time.Time
+	jobClaimDuration time.Duration
+	jobCommitMargin  time.Duration
+	jobPollInterval  time.Duration
+	waitForJobPoll   func(context.Context, time.Duration) error
+	logger           *slog.Logger
 }
 
 func (s *Service) WithLogger(logger *slog.Logger) *Service { s.logger = logger; return s }
 
 type jobRecord struct {
-	InputHash string          `json:"input_hash"`
-	Response  json.RawMessage `json:"response"`
-	SettledAt string          `json:"settled_at"`
+	InputHash      string          `json:"input_hash"`
+	State          string          `json:"state"`
+	LeaseExpiresAt string          `json:"lease_expires_at,omitempty"`
+	Response       json.RawMessage `json:"response,omitempty"`
+	SettledAt      string          `json:"settled_at,omitempty"`
 }
 
 var (
 	errIdempotencyConflict = errors.New("idempotency conflict")
 	errInvalidJobRecord    = errors.New("invalid job record")
 )
+
+const (
+	webJobStateInFlight  = "in_flight"
+	webJobStateCompleted = "completed"
+	// The claim covers the largest legal fan-out, every backend timeout, and
+	// one bounded object-store result commit. Duplicate waiters may settle an
+	// outcome as unknown only after this complete static window.
+	// UPDATE-WITH: types.go maxOperations/maxSearchDomains, backend.go
+	// BackendRequestTimeout, and the result persistence path in persistJob.
+	webJobResultCommitMargin = 30 * time.Second
+	webJobPollInterval       = 25 * time.Millisecond
+	webJobPollMaximum        = time.Second
+)
+
+type webJobClaim struct {
+	ETag      string
+	ExpiresAt time.Time
+}
 
 type executionResult struct {
 	response    *providergatewayv1.RunWebResponse
@@ -55,7 +79,22 @@ func NewService(blobs blob.BlobStore, backend Backend, verifier *BindingVerifier
 	if metrics == nil {
 		metrics = NewMetrics()
 	}
-	return &Service{store: NewSnapshotStore(blobs, random, now), backend: backend, verifier: verifier, metrics: metrics, now: now}
+	return &Service{
+		store:            NewSnapshotStore(blobs, random, now),
+		backend:          backend,
+		verifier:         verifier,
+		metrics:          metrics,
+		now:              now,
+		jobClaimDuration: webJobClaimDuration(backend.MaxAttemptsPerCall()),
+		jobCommitMargin:  webJobResultCommitMargin,
+		jobPollInterval:  webJobPollInterval,
+		waitForJobPoll:   waitForWebJobPoll,
+	}
+}
+
+func webJobClaimDuration(maxAttemptsPerBackendCall int) time.Duration {
+	return time.Duration(maxOperations*maxSearchDomains*maxAttemptsPerBackendCall)*BackendRequestTimeout +
+		webJobResultCommitMargin
 }
 
 func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebRequest) (response *providergatewayv1.RunWebResponse, err error) {
@@ -96,14 +135,17 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 	}
 	scope := Scope{request.GetWorkspaceId(), request.GetSessionId(), request.GetSessionThreadId()}
 	inputHash := CanonicalInputHash(canonicalInput(request.GetInput()))
-	if replay, replayErr := s.loadJob(ctx, scope, request.GetToolUseEventId(), inputHash); replayErr == nil {
+	claim, replay, claimErr := s.claimJob(ctx, scope, request.GetToolUseEventId(), inputHash, operation, started)
+	if claimErr == nil && replay != nil {
 		return replay, nil
-	} else if errors.Is(replayErr, errIdempotencyConflict) {
+	}
+	if errors.Is(claimErr, errIdempotencyConflict) {
 		if s.logger != nil {
 			s.logger.Warn("web.idempotency.conflict", slog.String("operation", "web.idempotency.lookup"), slog.String("error.code", "idempotency_conflict"))
 		}
 		return s.errorResponse(providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR, "tool delivery conflict", operation, started), nil
-	} else if !isNotFound(replayErr) {
+	}
+	if claimErr != nil || claim == nil {
 		if s.logger != nil {
 			s.logger.Warn("web.idempotency.lookup_failed", slog.String("operation", "web.idempotency.lookup"), slog.String("error.code", "cache_unavailable"))
 		}
@@ -116,13 +158,9 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 		s.store.DeleteKeys(ctx, executed.createdKeys)
 		executed.createdKeys = nil
 	}
-	if response.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED &&
-		response.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_TOOL_ERROR {
-		return response, nil
-	}
-	if persistErr := s.persistJob(ctx, scope, request.GetToolUseEventId(), inputHash, response); persistErr != nil {
+	if persistErr := s.persistClaimedJob(ctx, scope, request.GetToolUseEventId(), inputHash, claim, response); persistErr != nil {
 		if isDuplicate(persistErr) {
-			winner, winnerErr := s.loadJob(ctx, scope, request.GetToolUseEventId(), inputHash)
+			winner, winnerErr := s.awaitJob(ctx, scope, request.GetToolUseEventId(), inputHash, operation, started)
 			if winnerErr == nil {
 				s.store.DeleteKeys(ctx, executed.createdKeys)
 				return winner, nil
@@ -352,17 +390,161 @@ func validRefID(value string) bool {
 	return true
 }
 
-func (s *Service) persistJob(ctx context.Context, scope Scope, eventID, inputHash string, response *providergatewayv1.RunWebResponse) error {
+func (s *Service) claimJob(
+	ctx context.Context,
+	scope Scope,
+	eventID string,
+	inputHash string,
+	operation string,
+	started time.Time,
+) (*webJobClaim, *providergatewayv1.RunWebResponse, error) {
+	return s.resolveJob(ctx, scope, eventID, inputHash, operation, started, true)
+}
+
+func (s *Service) awaitJob(
+	ctx context.Context,
+	scope Scope,
+	eventID string,
+	inputHash string,
+	operation string,
+	started time.Time,
+) (*providergatewayv1.RunWebResponse, error) {
+	_, response, err := s.resolveJob(ctx, scope, eventID, inputHash, operation, started, false)
+	return response, err
+}
+
+func (s *Service) resolveJob(
+	ctx context.Context,
+	scope Scope,
+	eventID string,
+	inputHash string,
+	operation string,
+	started time.Time,
+	allowCreate bool,
+) (*webJobClaim, *providergatewayv1.RunWebResponse, error) {
+	pollInterval := s.jobPollInterval
+	for {
+		created := false
+		raw, etag, err := s.store.GetJobVersion(ctx, scope, eventID)
+		if isNotFound(err) && allowCreate {
+			claimRaw, marshalErr := json.Marshal(jobRecord{
+				InputHash:      inputHash,
+				State:          webJobStateInFlight,
+				LeaseExpiresAt: s.now().Add(s.jobClaimDuration).UTC().Format(time.RFC3339Nano),
+			})
+			if marshalErr != nil {
+				return nil, nil, marshalErr
+			}
+			if putErr := s.store.PutJob(ctx, scope, eventID, claimRaw); putErr != nil {
+				if isDuplicate(putErr) {
+					continue
+				}
+				return nil, nil, putErr
+			}
+			created = true
+			raw, etag, err = s.store.GetJobVersion(ctx, scope, eventID)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		record, parseErr := parseJobRecord(raw)
+		if parseErr != nil {
+			return nil, nil, parseErr
+		}
+		if record.InputHash != inputHash {
+			return nil, nil, errIdempotencyConflict
+		}
+		if record.State == webJobStateCompleted {
+			response, responseErr := responseFromJobRecord(record)
+			return nil, response, responseErr
+		}
+		leaseExpiresAt, _ := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt)
+		if created {
+			return &webJobClaim{ETag: etag, ExpiresAt: leaseExpiresAt}, nil, nil
+		}
+		if !s.now().Before(leaseExpiresAt) {
+			response := s.errorResponse(
+				providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR,
+				"web backend temporarily unavailable",
+				operation,
+				started,
+			)
+			persistErr := s.persistJob(func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), s.jobCommitMargin)
+			}, scope, eventID, inputHash, etag, response)
+			if persistErr != nil {
+				if isDuplicate(persistErr) {
+					continue
+				}
+				return nil, nil, persistErr
+			}
+			return nil, response, nil
+		}
+		wait := pollInterval
+		if remaining := leaseExpiresAt.Sub(s.now()); remaining < wait {
+			wait = remaining
+		}
+		if wait <= 0 {
+			continue
+		}
+		if waitErr := s.waitForJobPoll(ctx, wait); waitErr != nil {
+			return nil, nil, waitErr
+		}
+		if pollInterval < webJobPollMaximum {
+			pollInterval *= 2
+			if pollInterval > webJobPollMaximum {
+				pollInterval = webJobPollMaximum
+			}
+		}
+	}
+}
+
+func (s *Service) persistClaimedJob(
+	ctx context.Context,
+	scope Scope,
+	eventID string,
+	inputHash string,
+	claim *webJobClaim,
+	response *providergatewayv1.RunWebResponse,
+) error {
+	// The context factory runs immediately before object-store CAS, so the
+	// commit margin starts at the CAS boundary rather than during encoding.
+	return s.persistJob(func() (context.Context, context.CancelFunc) {
+		deadline := claim.ExpiresAt
+		if marginDeadline := s.now().Add(s.jobCommitMargin); marginDeadline.Before(deadline) {
+			deadline = marginDeadline
+		}
+		if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+			deadline = parentDeadline
+		}
+		return context.WithDeadline(ctx, deadline)
+	}, scope, eventID, inputHash, claim.ETag, response)
+}
+
+func waitForWebJobPoll(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (s *Service) persistJob(commitContext func() (context.Context, context.CancelFunc), scope Scope, eventID, inputHash, expectedETag string, response *providergatewayv1.RunWebResponse) error {
 	baseStoredBytes := response.GetUsage().GetStoredBytes()
 	target := baseStoredBytes
 	for i := 0; i < 8; i++ {
 		candidate := proto.Clone(response).(*providergatewayv1.RunWebResponse)
 		candidate.Usage.StoredBytes = target
 		responseRaw, _ := protojson.MarshalOptions{UseProtoNames: true}.Marshal(candidate)
-		recordRaw, _ := json.Marshal(jobRecord{InputHash: inputHash, Response: responseRaw, SettledAt: s.now().UTC().Format(time.RFC3339Nano)})
+		recordRaw, _ := json.Marshal(jobRecord{InputHash: inputHash, State: webJobStateCompleted, Response: responseRaw, SettledAt: s.now().UTC().Format(time.RFC3339Nano)})
 		next := baseStoredBytes + int64(len(recordRaw))
 		if next == target {
-			err := s.store.PutJob(ctx, scope, eventID, recordRaw)
+			ctx, cancel := commitContext()
+			err := s.store.CompareAndSwapJob(ctx, scope, eventID, expectedETag, recordRaw)
+			cancel()
 			if err == nil {
 				response.Usage.StoredBytes = target
 				s.metrics.ObserveCacheBytes(int64(len(recordRaw)))
@@ -374,31 +556,49 @@ func (s *Service) persistJob(ctx context.Context, scope Scope, eventID, inputHas
 	candidate := proto.Clone(response).(*providergatewayv1.RunWebResponse)
 	candidate.Usage.StoredBytes = target
 	responseRaw, _ := protojson.MarshalOptions{UseProtoNames: true}.Marshal(candidate)
-	recordRaw, _ := json.Marshal(jobRecord{InputHash: inputHash, Response: responseRaw, SettledAt: s.now().UTC().Format(time.RFC3339Nano)})
-	err := s.store.PutJob(ctx, scope, eventID, recordRaw)
+	recordRaw, _ := json.Marshal(jobRecord{InputHash: inputHash, State: webJobStateCompleted, Response: responseRaw, SettledAt: s.now().UTC().Format(time.RFC3339Nano)})
+	ctx, cancel := commitContext()
+	err := s.store.CompareAndSwapJob(ctx, scope, eventID, expectedETag, recordRaw)
+	cancel()
 	if err == nil {
 		response.Usage.StoredBytes = target
 		s.metrics.ObserveCacheBytes(int64(len(recordRaw)))
 	}
 	return err
 }
-func (s *Service) loadJob(ctx context.Context, scope Scope, eventID, inputHash string) (*providergatewayv1.RunWebResponse, error) {
-	raw, err := s.store.GetJob(ctx, scope, eventID)
-	if err != nil {
-		return nil, err
-	}
+
+func parseJobRecord(raw []byte) (jobRecord, error) {
 	var record jobRecord
 	if json.Unmarshal(raw, &record) != nil {
-		return nil, errInvalidJobRecord
+		return jobRecord{}, errInvalidJobRecord
 	}
-	if !validInputHash(record.InputHash) || len(record.Response) == 0 {
-		return nil, errInvalidJobRecord
+	if !validInputHash(record.InputHash) {
+		return jobRecord{}, errInvalidJobRecord
 	}
-	if _, parseErr := time.Parse(time.RFC3339Nano, record.SettledAt); parseErr != nil {
-		return nil, errInvalidJobRecord
+	switch record.State {
+	case webJobStateInFlight:
+		if record.LeaseExpiresAt == "" || len(record.Response) != 0 || record.SettledAt != "" {
+			return jobRecord{}, errInvalidJobRecord
+		}
+		if _, err := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt); err != nil {
+			return jobRecord{}, errInvalidJobRecord
+		}
+	case webJobStateCompleted:
+		if record.LeaseExpiresAt != "" || len(record.Response) == 0 || record.SettledAt == "" {
+			return jobRecord{}, errInvalidJobRecord
+		}
+		if _, err := time.Parse(time.RFC3339Nano, record.SettledAt); err != nil {
+			return jobRecord{}, errInvalidJobRecord
+		}
+	default:
+		return jobRecord{}, errInvalidJobRecord
 	}
-	if record.InputHash != inputHash {
-		return nil, errIdempotencyConflict
+	return record, nil
+}
+
+func responseFromJobRecord(record jobRecord) (*providergatewayv1.RunWebResponse, error) {
+	if record.State != webJobStateCompleted {
+		return nil, errInvalidJobRecord
 	}
 	response := &providergatewayv1.RunWebResponse{}
 	if protojson.Unmarshal(record.Response, response) != nil {

@@ -37,6 +37,7 @@ type BridgeAPIStore interface {
 	ReadCommandResult(context.Context, *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error)
 	SendCommandInput(context.Context, *bridgev1.SendCommandInputRequest) (*bridgev1.SendCommandInputResponse, error)
 	CancelCommand(context.Context, *bridgev1.CancelCommandRequest) (*bridgev1.CancelCommandResponse, error)
+	AuthorizeWebToolExecution(context.Context, *bridgev1.AuthorizeWebToolExecutionRequest) (*bridgev1.AuthorizeWebToolExecutionResponse, error)
 	RunMemory(context.Context, *bridgev1.RunMemoryRequest) (*bridgev1.RunMemoryResponse, error)
 	ResolveTransientAttachment(context.Context, *bridgev1.ResolveTransientAttachmentRequest) (*bridgev1.ResolveTransientAttachmentResponse, error)
 	ResolveFileAttachmentMetadata(context.Context, *bridgev1.ResolveFileAttachmentMetadataRequest) (*bridgev1.ResolveFileAttachmentMetadataResponse, error)
@@ -327,6 +328,14 @@ func (s BridgeAPIServer) CancelCommand(ctx context.Context, request *bridgev1.Ca
 		return nil, err
 	}
 	return store.CancelCommand(ctx, request)
+}
+
+func (s BridgeAPIServer) AuthorizeWebToolExecution(ctx context.Context, request *bridgev1.AuthorizeWebToolExecutionRequest) (*bridgev1.AuthorizeWebToolExecutionResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.AuthorizeWebToolExecution(ctx, request)
 }
 
 func (s BridgeAPIServer) RunMemory(ctx context.Context, request *bridgev1.RunMemoryRequest) (*bridgev1.RunMemoryResponse, error) {

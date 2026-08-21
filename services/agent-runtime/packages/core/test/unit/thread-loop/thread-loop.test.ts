@@ -19,6 +19,7 @@ import {
 	normalizeSessionEventWriterError,
 	RuntimeContextEntrySchema,
 } from "../../../src/contracts/runtime.js";
+import type { LLMEvent } from "../../../src/llm/llm-event.js";
 import { runtimeFailureFromProviderError } from "../../../src/llm/llm-event.js";
 import type {
 	LLMRequest,
@@ -830,7 +831,7 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "event_end_cold_tool_continuation",
 						isError: false,
-						rescheduled: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 					},
 					toolMembers: [
 						{
@@ -985,7 +986,7 @@ describe("ThreadLoop", () => {
 			action: { action: "await_input" },
 		});
 	});
-	test("cold retry action that escaped pod-loss fencing fails closed instead of ending normally", async () => {
+	test("cold committed reschedule reopens exactly one provider request", async () => {
 		const session = new ThreadRuntime("sesn_cold_reschedule_fence");
 		const message = userMessage(
 			"msg_cold_reschedule_fence",
@@ -1006,8 +1007,14 @@ describe("ThreadLoop", () => {
 					requestEnd: {
 						eventId: "sevt_cold_reschedule_end",
 						isError: true,
+			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
 						errorKind: "provider_error",
-						rescheduled: true,
+						reschedule: {
+							attempt: 1,
+							effectiveDeadline: "2026-06-14T00:00:05.000Z",
+							providerAttempts: 1,
+							compactionAttempts: 1,
+						},
 					},
 					toolMembers: [],
 				},
@@ -1016,6 +1023,26 @@ describe("ThreadLoop", () => {
 		);
 		const appended: SessionEvent[] = [];
 		let providerCalls = 0;
+		const waitedMs: number[] = [];
+		const requestEndAttempts: Array<number | undefined> = [];
+		let runtimeId = 0;
+		const baseWriter = writerFrom((envelope) => {
+			appended.push(envelope.event);
+			return {
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+				eventSequence: 1,
+			};
+		});
+		const coldRetryFailure = runtimeFailureFromProviderError(
+			normalizeProviderError({
+				code: "provider_stream_error",
+				message: "retry after cold recovery",
+				retryable: true,
+				fatal: false,
+			}),
+		);
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				return yield* (yield* ThreadLoop.Service).run(
@@ -1024,41 +1051,55 @@ describe("ThreadLoop", () => {
 				);
 			}).pipe(
 				Effect.provide(
-					runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
-						installLoaderState: false,
-						onStream: () => {
-							providerCalls += 1;
-						},
-						writer: writerFrom((envelope) => {
-							appended.push(envelope.event);
-							return {
-								ok: true,
-								eventId: `bridge-${envelope.writeId}`,
-								type: "committed",
-								eventSequence: 1,
-							};
-						}),
+						runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+							installLoaderState: false,
+							runtime: {
+								now: () => createdAt,
+								monotonicMs: () => 0,
+								createId: (prefix) => `${prefix}-${++runtimeId}`,
+								sleep: async (delayMs) => {
+									waitedMs.push(delayMs);
+									return true;
+								},
+							},
+							llmService: {
+								stream: () => {
+									providerCalls += 1;
+									return Stream.fromIterable<LLMEvent>(
+										providerCalls === 1
+											? [{ type: "provider-error" as const, error: coldRetryFailure }]
+											: [
+													{ type: "text-start" as const, id: "cold-retry-text" },
+													{ type: "text-delta" as const, id: "cold-retry-text", text_delta: "done" },
+													{ type: "text-end" as const, id: "cold-retry-text" },
+													{ type: "finish" as const, finishReason: "stop" as const },
+												],
+									);
+								},
+							},
+							writer: {
+								...baseWriter,
+								writeRequestEnd: async (envelope) => {
+									requestEndAttempts.push(envelope.reschedule?.attempt);
+									return await baseWriter.writeRequestEnd(envelope);
+								},
+							},
 					}),
 				),
 			),
 		);
 
-		expect(result).toMatchObject({
-			type: "failed",
-			error: {
-				code: "runtime_invalid_sequence",
-				reason: "runtime_contract_validation",
-				retryStatus: { type: "exhausted" },
-			},
-		});
-		expect(providerCalls).toBe(0);
-		expect(appended.map((event) => event.type)).toEqual([
-			"session.error",
-			"session.status_idle",
-		]);
+		expect(result).toMatchObject({ type: "completed" });
+		expect(waitedMs.slice(0, 2)).toEqual([5_000, 2_000]);
+		expect(providerCalls).toBe(2);
+		expect(requestEndAttempts).toEqual([2, undefined]);
+		expect(appended.filter((event) => event.type === "session.error")).toHaveLength(1);
+		expect(
+			appended.filter((event) => event.type === "span.model_request_start"),
+		).toHaveLength(2);
 		expect(appended.at(-1)).toEqual({
 			type: "session.status_idle",
-			stop_reason: { type: "retries_exhausted" },
+			stop_reason: { type: "end_turn" },
 		});
 		expect(session.state.threadTurnReduction()).toMatchObject({
 			state: { state: "idle" },

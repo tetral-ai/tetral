@@ -303,6 +303,90 @@ export function fileAttachmentRejectionReasonToJSON(object: FileAttachmentReject
   }
 }
 
+export enum RuntimeToolEventKind {
+  RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED = 0,
+  RUNTIME_TOOL_EVENT_KIND_TOOL = 1,
+  RUNTIME_TOOL_EVENT_KIND_MCP = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function runtimeToolEventKindFromJSON(object: any): RuntimeToolEventKind {
+  switch (object) {
+    case 0:
+    case "RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED":
+      return RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED;
+    case 1:
+    case "RUNTIME_TOOL_EVENT_KIND_TOOL":
+      return RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_TOOL;
+    case 2:
+    case "RUNTIME_TOOL_EVENT_KIND_MCP":
+      return RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_MCP;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RuntimeToolEventKind.UNRECOGNIZED;
+  }
+}
+
+export function runtimeToolEventKindToJSON(object: RuntimeToolEventKind): string {
+  switch (object) {
+    case RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED:
+      return "RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED";
+    case RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_TOOL:
+      return "RUNTIME_TOOL_EVENT_KIND_TOOL";
+    case RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_MCP:
+      return "RUNTIME_TOOL_EVENT_KIND_MCP";
+    case RuntimeToolEventKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ApprovalReviewerCloseSettlementKind {
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED = 0,
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION = 1,
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE = 2,
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function approvalReviewerCloseSettlementKindFromJSON(object: any): ApprovalReviewerCloseSettlementKind {
+  switch (object) {
+    case 0:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED;
+    case 1:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION;
+    case 2:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE;
+    case 3:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ApprovalReviewerCloseSettlementKind.UNRECOGNIZED;
+  }
+}
+
+export function approvalReviewerCloseSettlementKindToJSON(object: ApprovalReviewerCloseSettlementKind): string {
+  switch (object) {
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED";
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION";
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE";
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST";
+    case ApprovalReviewerCloseSettlementKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface RuntimeContextDelta {
   parts: RuntimeContextPart[];
 }
@@ -326,7 +410,7 @@ export interface RuntimeContextReasoning {
 export interface RuntimeContextToolCall {
   modelToolCallId: string;
   toolName: string;
-  canonicalInputJson: string;
+  providerInputJson: string;
 }
 
 export interface RuntimeContextToolResult {
@@ -388,6 +472,14 @@ export interface RuntimeScope {
 
 export interface LoadContextRequest {
   scope: RuntimeScope | undefined;
+  recoveryLeaseRef: RecoveryLeaseRef | undefined;
+}
+
+export interface RecoveryLeaseRef {
+  jobId: string;
+  leaseToken: string;
+  partitionKey: string;
+  dedupeKey: string;
 }
 
 export interface LoadContextResponse {
@@ -721,11 +813,23 @@ export interface WriteEventRequest {
   modelRequestId: string;
   eventType: string;
   payloadJson: string;
-  sessionVisible: boolean;
   assistantContextDelta: RuntimeContextDelta | undefined;
   contextThroughMessageSequence?: number | undefined;
   requestKind: string;
   consumedFileAttachments: FileAttachmentPair[];
+  toolDeclaration: RuntimeToolDeclaration | undefined;
+}
+
+export interface RuntimeToolDeclaration {
+  eventKind: RuntimeToolEventKind;
+  modelToolCallId: string;
+  toolName: string;
+  publicExecutionInputJson: string;
+  distinctProviderInputJson?: string | undefined;
+  evaluatedPermission: string;
+  routeCapability: string;
+  mcpServerName?: string | undefined;
+  leadingReasoning: RuntimeContextReasoning[];
 }
 
 export interface ServerToolUseUsage {
@@ -742,13 +846,11 @@ export interface WriteEventResponse {
 export interface WriteEventCommitted {
   eventId: string;
   assignedMessageSequence?: number | undefined;
-  createdToolUseEventIds: string[];
 }
 
 export interface WriteEventDuplicate {
   eventId: string;
   assignedMessageSequence?: number | undefined;
-  createdToolUseEventIds: string[];
 }
 
 export interface WriteEventStale {
@@ -790,6 +892,14 @@ export interface WriteRequestEndRequest {
   compactionEventPayloadJson: string;
   interruptSettlement: RequestEndInterruptSettlement | undefined;
   compactionContext: RuntimeContextDelta | undefined;
+  providerContextRetention: ProviderContextRetention | undefined;
+}
+
+export interface ProviderContextRetention {
+  disposition: string;
+  assistantMessageSequence?: number | undefined;
+  toolUseEventIds: string[];
+  repairEventIds: string[];
 }
 
 export interface RequestEndInterruptSettlement {
@@ -870,7 +980,8 @@ export interface CreateSubagentThreadRequest {
   sourceToolUseEventId: string;
   taskName: string;
   agentType: string;
-  forkTurns: string;
+  initialPrompt: string;
+  parentMessageSequences: number[];
 }
 
 export interface CreateSubagentThreadResponse {
@@ -1037,6 +1148,8 @@ export interface ChildInterruptTarget {
 export interface AdmitChildInterruptRequest {
   scope: RuntimeScope | undefined;
   sourceToolUseEventId: string;
+  targetChildThreadId: string;
+  action: ChildControlAction;
 }
 
 export interface AdmitChildInterruptResponse {
@@ -1097,6 +1210,8 @@ export interface CloseApprovalReviewerRequest {
   scope: RuntimeScope | undefined;
   reviewerThreadId: string;
   reviewId: string;
+  settlementKind: ApprovalReviewerCloseSettlementKind;
+  settlementEventId: string;
 }
 
 export interface CloseApprovalReviewerResponse {
@@ -1122,6 +1237,7 @@ export interface ChildLifecycleResult {
 export interface MarkChildThreadActiveRequest {
   scope: RuntimeScope | undefined;
   sourceToolUseEventId: string;
+  targetChildThreadId: string;
 }
 
 export interface MarkChildThreadActiveResponse {
@@ -1203,7 +1319,6 @@ export interface SendCommandInputRequest {
   scope: RuntimeScope | undefined;
   taskId: string;
   maxOutputTokens: number;
-  inputJson: string;
   toolUseEventId: string;
   operationId: string;
 }
@@ -1248,6 +1363,22 @@ export interface CommandCancelDuplicate {
 }
 
 export interface CommandCancelStale {
+}
+
+export interface AuthorizeWebToolExecutionRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+}
+
+export interface AuthorizeWebToolExecutionResponse {
+  authorized?: WebToolExecutionAuthorized | undefined;
+  stale?: WebToolExecutionStale | undefined;
+}
+
+export interface WebToolExecutionAuthorized {
+}
+
+export interface WebToolExecutionStale {
 }
 
 export interface RunMemoryRequest {
@@ -1597,7 +1728,7 @@ export const RuntimeContextReasoning: MessageFns<RuntimeContextReasoning> = {
 };
 
 function createBaseRuntimeContextToolCall(): RuntimeContextToolCall {
-  return { modelToolCallId: "", toolName: "", canonicalInputJson: "" };
+  return { modelToolCallId: "", toolName: "", providerInputJson: "" };
 }
 
 export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
@@ -1608,8 +1739,8 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
     if (message.toolName !== "") {
       writer.uint32(18).string(message.toolName);
     }
-    if (message.canonicalInputJson !== "") {
-      writer.uint32(26).string(message.canonicalInputJson);
+    if (message.providerInputJson !== "") {
+      writer.uint32(34).string(message.providerInputJson);
     }
     return writer;
   },
@@ -1637,12 +1768,12 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
           message.toolName = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
+        case 4: {
+          if (tag !== 34) {
             break;
           }
 
-          message.canonicalInputJson = reader.string();
+          message.providerInputJson = reader.string();
           continue;
         }
       }
@@ -1666,10 +1797,10 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
         : isSet(object.tool_name)
         ? globalThis.String(object.tool_name)
         : "",
-      canonicalInputJson: isSet(object.canonicalInputJson)
-        ? globalThis.String(object.canonicalInputJson)
-        : isSet(object.canonical_input_json)
-        ? globalThis.String(object.canonical_input_json)
+      providerInputJson: isSet(object.providerInputJson)
+        ? globalThis.String(object.providerInputJson)
+        : isSet(object.provider_input_json)
+        ? globalThis.String(object.provider_input_json)
         : "",
     };
   },
@@ -1682,8 +1813,8 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
     if (message.toolName !== "") {
       obj.toolName = message.toolName;
     }
-    if (message.canonicalInputJson !== "") {
-      obj.canonicalInputJson = message.canonicalInputJson;
+    if (message.providerInputJson !== "") {
+      obj.providerInputJson = message.providerInputJson;
     }
     return obj;
   },
@@ -1695,7 +1826,7 @@ export const RuntimeContextToolCall: MessageFns<RuntimeContextToolCall> = {
     const message = createBaseRuntimeContextToolCall();
     message.modelToolCallId = object.modelToolCallId ?? "";
     message.toolName = object.toolName ?? "";
-    message.canonicalInputJson = object.canonicalInputJson ?? "";
+    message.providerInputJson = object.providerInputJson ?? "";
     return message;
   },
 };
@@ -2654,13 +2785,16 @@ export const RuntimeScope: MessageFns<RuntimeScope> = {
 };
 
 function createBaseLoadContextRequest(): LoadContextRequest {
-  return { scope: undefined };
+  return { scope: undefined, recoveryLeaseRef: undefined };
 }
 
 export const LoadContextRequest: MessageFns<LoadContextRequest> = {
   encode(message: LoadContextRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.scope !== undefined) {
       RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.recoveryLeaseRef !== undefined) {
+      RecoveryLeaseRef.encode(message.recoveryLeaseRef, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -2680,6 +2814,14 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
           message.scope = RuntimeScope.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.recoveryLeaseRef = RecoveryLeaseRef.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2690,13 +2832,23 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
   },
 
   fromJSON(object: any): LoadContextRequest {
-    return { scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined };
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      recoveryLeaseRef: isSet(object.recoveryLeaseRef)
+        ? RecoveryLeaseRef.fromJSON(object.recoveryLeaseRef)
+        : isSet(object.recovery_lease_ref)
+        ? RecoveryLeaseRef.fromJSON(object.recovery_lease_ref)
+        : undefined,
+    };
   },
 
   toJSON(message: LoadContextRequest): unknown {
     const obj: any = {};
     if (message.scope !== undefined) {
       obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.recoveryLeaseRef !== undefined) {
+      obj.recoveryLeaseRef = RecoveryLeaseRef.toJSON(message.recoveryLeaseRef);
     }
     return obj;
   },
@@ -2709,6 +2861,133 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     message.scope = (object.scope !== undefined && object.scope !== null)
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
+    message.recoveryLeaseRef = (object.recoveryLeaseRef !== undefined && object.recoveryLeaseRef !== null)
+      ? RecoveryLeaseRef.fromPartial(object.recoveryLeaseRef)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRecoveryLeaseRef(): RecoveryLeaseRef {
+  return { jobId: "", leaseToken: "", partitionKey: "", dedupeKey: "" };
+}
+
+export const RecoveryLeaseRef: MessageFns<RecoveryLeaseRef> = {
+  encode(message: RecoveryLeaseRef, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.jobId !== "") {
+      writer.uint32(10).string(message.jobId);
+    }
+    if (message.leaseToken !== "") {
+      writer.uint32(18).string(message.leaseToken);
+    }
+    if (message.partitionKey !== "") {
+      writer.uint32(26).string(message.partitionKey);
+    }
+    if (message.dedupeKey !== "") {
+      writer.uint32(34).string(message.dedupeKey);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoveryLeaseRef {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoveryLeaseRef();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.jobId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.leaseToken = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.partitionKey = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.dedupeKey = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RecoveryLeaseRef {
+    return {
+      jobId: isSet(object.jobId)
+        ? globalThis.String(object.jobId)
+        : isSet(object.job_id)
+        ? globalThis.String(object.job_id)
+        : "",
+      leaseToken: isSet(object.leaseToken)
+        ? globalThis.String(object.leaseToken)
+        : isSet(object.lease_token)
+        ? globalThis.String(object.lease_token)
+        : "",
+      partitionKey: isSet(object.partitionKey)
+        ? globalThis.String(object.partitionKey)
+        : isSet(object.partition_key)
+        ? globalThis.String(object.partition_key)
+        : "",
+      dedupeKey: isSet(object.dedupeKey)
+        ? globalThis.String(object.dedupeKey)
+        : isSet(object.dedupe_key)
+        ? globalThis.String(object.dedupe_key)
+        : "",
+    };
+  },
+
+  toJSON(message: RecoveryLeaseRef): unknown {
+    const obj: any = {};
+    if (message.jobId !== "") {
+      obj.jobId = message.jobId;
+    }
+    if (message.leaseToken !== "") {
+      obj.leaseToken = message.leaseToken;
+    }
+    if (message.partitionKey !== "") {
+      obj.partitionKey = message.partitionKey;
+    }
+    if (message.dedupeKey !== "") {
+      obj.dedupeKey = message.dedupeKey;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoveryLeaseRef>, I>>(base?: I): RecoveryLeaseRef {
+    return RecoveryLeaseRef.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoveryLeaseRef>, I>>(object: I): RecoveryLeaseRef {
+    const message = createBaseRecoveryLeaseRef();
+    message.jobId = object.jobId ?? "";
+    message.leaseToken = object.leaseToken ?? "";
+    message.partitionKey = object.partitionKey ?? "";
+    message.dedupeKey = object.dedupeKey ?? "";
     return message;
   },
 };
@@ -8141,11 +8420,11 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     modelRequestId: "",
     eventType: "",
     payloadJson: "",
-    sessionVisible: false,
     assistantContextDelta: undefined,
     contextThroughMessageSequence: undefined,
     requestKind: "",
     consumedFileAttachments: [],
+    toolDeclaration: undefined,
   };
 }
 
@@ -8166,9 +8445,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.payloadJson !== "") {
       writer.uint32(42).string(message.payloadJson);
     }
-    if (message.sessionVisible !== false) {
-      writer.uint32(56).bool(message.sessionVisible);
-    }
     if (message.assistantContextDelta !== undefined) {
       RuntimeContextDelta.encode(message.assistantContextDelta, writer.uint32(82).fork()).join();
     }
@@ -8180,6 +8456,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     for (const v of message.consumedFileAttachments) {
       FileAttachmentPair.encode(v!, writer.uint32(130).fork()).join();
+    }
+    if (message.toolDeclaration !== undefined) {
+      RuntimeToolDeclaration.encode(message.toolDeclaration, writer.uint32(146).fork()).join();
     }
     return writer;
   },
@@ -8231,14 +8510,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.payloadJson = reader.string();
           continue;
         }
-        case 7: {
-          if (tag !== 56) {
-            break;
-          }
-
-          message.sessionVisible = reader.bool();
-          continue;
-        }
         case 10: {
           if (tag !== 82) {
             break;
@@ -8269,6 +8540,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           }
 
           message.consumedFileAttachments.push(FileAttachmentPair.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.toolDeclaration = RuntimeToolDeclaration.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -8303,11 +8582,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.payload_json)
         ? globalThis.String(object.payload_json)
         : "",
-      sessionVisible: isSet(object.sessionVisible)
-        ? globalThis.Boolean(object.sessionVisible)
-        : isSet(object.session_visible)
-        ? globalThis.Boolean(object.session_visible)
-        : false,
       assistantContextDelta: isSet(object.assistantContextDelta)
         ? RuntimeContextDelta.fromJSON(object.assistantContextDelta)
         : isSet(object.assistant_context_delta)
@@ -8328,6 +8602,11 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : globalThis.Array.isArray(object?.consumed_file_attachments)
         ? object.consumed_file_attachments.map((e: any) => FileAttachmentPair.fromJSON(e))
         : [],
+      toolDeclaration: isSet(object.toolDeclaration)
+        ? RuntimeToolDeclaration.fromJSON(object.toolDeclaration)
+        : isSet(object.tool_declaration)
+        ? RuntimeToolDeclaration.fromJSON(object.tool_declaration)
+        : undefined,
     };
   },
 
@@ -8348,9 +8627,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.payloadJson !== "") {
       obj.payloadJson = message.payloadJson;
     }
-    if (message.sessionVisible !== false) {
-      obj.sessionVisible = message.sessionVisible;
-    }
     if (message.assistantContextDelta !== undefined) {
       obj.assistantContextDelta = RuntimeContextDelta.toJSON(message.assistantContextDelta);
     }
@@ -8362,6 +8638,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.consumedFileAttachments?.length) {
       obj.consumedFileAttachments = message.consumedFileAttachments.map((e) => FileAttachmentPair.toJSON(e));
+    }
+    if (message.toolDeclaration !== undefined) {
+      obj.toolDeclaration = RuntimeToolDeclaration.toJSON(message.toolDeclaration);
     }
     return obj;
   },
@@ -8378,7 +8657,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.modelRequestId = object.modelRequestId ?? "";
     message.eventType = object.eventType ?? "";
     message.payloadJson = object.payloadJson ?? "";
-    message.sessionVisible = object.sessionVisible ?? false;
     message.assistantContextDelta =
       (object.assistantContextDelta !== undefined && object.assistantContextDelta !== null)
         ? RuntimeContextDelta.fromPartial(object.assistantContextDelta)
@@ -8387,6 +8665,243 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.requestKind = object.requestKind ?? "";
     message.consumedFileAttachments = object.consumedFileAttachments?.map((e) => FileAttachmentPair.fromPartial(e)) ||
       [];
+    message.toolDeclaration = (object.toolDeclaration !== undefined && object.toolDeclaration !== null)
+      ? RuntimeToolDeclaration.fromPartial(object.toolDeclaration)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeToolDeclaration(): RuntimeToolDeclaration {
+  return {
+    eventKind: 0,
+    modelToolCallId: "",
+    toolName: "",
+    publicExecutionInputJson: "",
+    distinctProviderInputJson: undefined,
+    evaluatedPermission: "",
+    routeCapability: "",
+    mcpServerName: undefined,
+    leadingReasoning: [],
+  };
+}
+
+export const RuntimeToolDeclaration: MessageFns<RuntimeToolDeclaration> = {
+  encode(message: RuntimeToolDeclaration, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.eventKind !== 0) {
+      writer.uint32(8).int32(message.eventKind);
+    }
+    if (message.modelToolCallId !== "") {
+      writer.uint32(18).string(message.modelToolCallId);
+    }
+    if (message.toolName !== "") {
+      writer.uint32(26).string(message.toolName);
+    }
+    if (message.publicExecutionInputJson !== "") {
+      writer.uint32(34).string(message.publicExecutionInputJson);
+    }
+    if (message.distinctProviderInputJson !== undefined) {
+      writer.uint32(42).string(message.distinctProviderInputJson);
+    }
+    if (message.evaluatedPermission !== "") {
+      writer.uint32(50).string(message.evaluatedPermission);
+    }
+    if (message.routeCapability !== "") {
+      writer.uint32(58).string(message.routeCapability);
+    }
+    if (message.mcpServerName !== undefined) {
+      writer.uint32(66).string(message.mcpServerName);
+    }
+    for (const v of message.leadingReasoning) {
+      RuntimeContextReasoning.encode(v!, writer.uint32(74).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeToolDeclaration {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeToolDeclaration();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.eventKind = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.modelToolCallId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.toolName = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.publicExecutionInputJson = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.distinctProviderInputJson = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.evaluatedPermission = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.routeCapability = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.mcpServerName = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.leadingReasoning.push(RuntimeContextReasoning.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeToolDeclaration {
+    return {
+      eventKind: isSet(object.eventKind)
+        ? runtimeToolEventKindFromJSON(object.eventKind)
+        : isSet(object.event_kind)
+        ? runtimeToolEventKindFromJSON(object.event_kind)
+        : 0,
+      modelToolCallId: isSet(object.modelToolCallId)
+        ? globalThis.String(object.modelToolCallId)
+        : isSet(object.model_tool_call_id)
+        ? globalThis.String(object.model_tool_call_id)
+        : "",
+      toolName: isSet(object.toolName)
+        ? globalThis.String(object.toolName)
+        : isSet(object.tool_name)
+        ? globalThis.String(object.tool_name)
+        : "",
+      publicExecutionInputJson: isSet(object.publicExecutionInputJson)
+        ? globalThis.String(object.publicExecutionInputJson)
+        : isSet(object.public_execution_input_json)
+        ? globalThis.String(object.public_execution_input_json)
+        : "",
+      distinctProviderInputJson: isSet(object.distinctProviderInputJson)
+        ? globalThis.String(object.distinctProviderInputJson)
+        : isSet(object.distinct_provider_input_json)
+        ? globalThis.String(object.distinct_provider_input_json)
+        : undefined,
+      evaluatedPermission: isSet(object.evaluatedPermission)
+        ? globalThis.String(object.evaluatedPermission)
+        : isSet(object.evaluated_permission)
+        ? globalThis.String(object.evaluated_permission)
+        : "",
+      routeCapability: isSet(object.routeCapability)
+        ? globalThis.String(object.routeCapability)
+        : isSet(object.route_capability)
+        ? globalThis.String(object.route_capability)
+        : "",
+      mcpServerName: isSet(object.mcpServerName)
+        ? globalThis.String(object.mcpServerName)
+        : isSet(object.mcp_server_name)
+        ? globalThis.String(object.mcp_server_name)
+        : undefined,
+      leadingReasoning: globalThis.Array.isArray(object?.leadingReasoning)
+        ? object.leadingReasoning.map((e: any) => RuntimeContextReasoning.fromJSON(e))
+        : globalThis.Array.isArray(object?.leading_reasoning)
+        ? object.leading_reasoning.map((e: any) => RuntimeContextReasoning.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: RuntimeToolDeclaration): unknown {
+    const obj: any = {};
+    if (message.eventKind !== 0) {
+      obj.eventKind = runtimeToolEventKindToJSON(message.eventKind);
+    }
+    if (message.modelToolCallId !== "") {
+      obj.modelToolCallId = message.modelToolCallId;
+    }
+    if (message.toolName !== "") {
+      obj.toolName = message.toolName;
+    }
+    if (message.publicExecutionInputJson !== "") {
+      obj.publicExecutionInputJson = message.publicExecutionInputJson;
+    }
+    if (message.distinctProviderInputJson !== undefined) {
+      obj.distinctProviderInputJson = message.distinctProviderInputJson;
+    }
+    if (message.evaluatedPermission !== "") {
+      obj.evaluatedPermission = message.evaluatedPermission;
+    }
+    if (message.routeCapability !== "") {
+      obj.routeCapability = message.routeCapability;
+    }
+    if (message.mcpServerName !== undefined) {
+      obj.mcpServerName = message.mcpServerName;
+    }
+    if (message.leadingReasoning?.length) {
+      obj.leadingReasoning = message.leadingReasoning.map((e) => RuntimeContextReasoning.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeToolDeclaration>, I>>(base?: I): RuntimeToolDeclaration {
+    return RuntimeToolDeclaration.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeToolDeclaration>, I>>(object: I): RuntimeToolDeclaration {
+    const message = createBaseRuntimeToolDeclaration();
+    message.eventKind = object.eventKind ?? 0;
+    message.modelToolCallId = object.modelToolCallId ?? "";
+    message.toolName = object.toolName ?? "";
+    message.publicExecutionInputJson = object.publicExecutionInputJson ?? "";
+    message.distinctProviderInputJson = object.distinctProviderInputJson ?? undefined;
+    message.evaluatedPermission = object.evaluatedPermission ?? "";
+    message.routeCapability = object.routeCapability ?? "";
+    message.mcpServerName = object.mcpServerName ?? undefined;
+    message.leadingReasoning = object.leadingReasoning?.map((e) => RuntimeContextReasoning.fromPartial(e)) || [];
     return message;
   },
 };
@@ -8574,7 +9089,7 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
 };
 
 function createBaseWriteEventCommitted(): WriteEventCommitted {
-  return { eventId: "", assignedMessageSequence: undefined, createdToolUseEventIds: [] };
+  return { eventId: "", assignedMessageSequence: undefined };
 }
 
 export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
@@ -8584,9 +9099,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
     }
     if (message.assignedMessageSequence !== undefined) {
       writer.uint32(24).int64(message.assignedMessageSequence);
-    }
-    for (const v of message.createdToolUseEventIds) {
-      writer.uint32(34).string(v!);
     }
     return writer;
   },
@@ -8614,14 +9126,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
           message.assignedMessageSequence = longToNumber(reader.int64());
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.createdToolUseEventIds.push(reader.string());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8643,11 +9147,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
         : isSet(object.assigned_message_sequence)
         ? globalThis.Number(object.assigned_message_sequence)
         : undefined,
-      createdToolUseEventIds: globalThis.Array.isArray(object?.createdToolUseEventIds)
-        ? object.createdToolUseEventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.created_tool_use_event_ids)
-        ? object.created_tool_use_event_ids.map((e: any) => globalThis.String(e))
-        : [],
     };
   },
 
@@ -8659,9 +9158,6 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
     if (message.assignedMessageSequence !== undefined) {
       obj.assignedMessageSequence = Math.round(message.assignedMessageSequence);
     }
-    if (message.createdToolUseEventIds?.length) {
-      obj.createdToolUseEventIds = message.createdToolUseEventIds;
-    }
     return obj;
   },
 
@@ -8672,13 +9168,12 @@ export const WriteEventCommitted: MessageFns<WriteEventCommitted> = {
     const message = createBaseWriteEventCommitted();
     message.eventId = object.eventId ?? "";
     message.assignedMessageSequence = object.assignedMessageSequence ?? undefined;
-    message.createdToolUseEventIds = object.createdToolUseEventIds?.map((e) => e) || [];
     return message;
   },
 };
 
 function createBaseWriteEventDuplicate(): WriteEventDuplicate {
-  return { eventId: "", assignedMessageSequence: undefined, createdToolUseEventIds: [] };
+  return { eventId: "", assignedMessageSequence: undefined };
 }
 
 export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
@@ -8688,9 +9183,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
     }
     if (message.assignedMessageSequence !== undefined) {
       writer.uint32(24).int64(message.assignedMessageSequence);
-    }
-    for (const v of message.createdToolUseEventIds) {
-      writer.uint32(34).string(v!);
     }
     return writer;
   },
@@ -8718,14 +9210,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
           message.assignedMessageSequence = longToNumber(reader.int64());
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.createdToolUseEventIds.push(reader.string());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8747,11 +9231,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
         : isSet(object.assigned_message_sequence)
         ? globalThis.Number(object.assigned_message_sequence)
         : undefined,
-      createdToolUseEventIds: globalThis.Array.isArray(object?.createdToolUseEventIds)
-        ? object.createdToolUseEventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.created_tool_use_event_ids)
-        ? object.created_tool_use_event_ids.map((e: any) => globalThis.String(e))
-        : [],
     };
   },
 
@@ -8763,9 +9242,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
     if (message.assignedMessageSequence !== undefined) {
       obj.assignedMessageSequence = Math.round(message.assignedMessageSequence);
     }
-    if (message.createdToolUseEventIds?.length) {
-      obj.createdToolUseEventIds = message.createdToolUseEventIds;
-    }
     return obj;
   },
 
@@ -8776,7 +9252,6 @@ export const WriteEventDuplicate: MessageFns<WriteEventDuplicate> = {
     const message = createBaseWriteEventDuplicate();
     message.eventId = object.eventId ?? "";
     message.assignedMessageSequence = object.assignedMessageSequence ?? undefined;
-    message.createdToolUseEventIds = object.createdToolUseEventIds?.map((e) => e) || [];
     return message;
   },
 };
@@ -9148,6 +9623,7 @@ function createBaseWriteRequestEndRequest(): WriteRequestEndRequest {
     compactionEventPayloadJson: "",
     interruptSettlement: undefined,
     compactionContext: undefined,
+    providerContextRetention: undefined,
   };
 }
 
@@ -9197,6 +9673,9 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     }
     if (message.compactionContext !== undefined) {
       RuntimeContextDelta.encode(message.compactionContext, writer.uint32(154).fork()).join();
+    }
+    if (message.providerContextRetention !== undefined) {
+      ProviderContextRetention.encode(message.providerContextRetention, writer.uint32(162).fork()).join();
     }
     return writer;
   },
@@ -9328,6 +9807,14 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
           message.compactionContext = RuntimeContextDelta.decode(reader, reader.uint32());
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.providerContextRetention = ProviderContextRetention.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9406,6 +9893,11 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
         : isSet(object.compaction_context)
         ? RuntimeContextDelta.fromJSON(object.compaction_context)
         : undefined,
+      providerContextRetention: isSet(object.providerContextRetention)
+        ? ProviderContextRetention.fromJSON(object.providerContextRetention)
+        : isSet(object.provider_context_retention)
+        ? ProviderContextRetention.fromJSON(object.provider_context_retention)
+        : undefined,
     };
   },
 
@@ -9456,6 +9948,9 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     if (message.compactionContext !== undefined) {
       obj.compactionContext = RuntimeContextDelta.toJSON(message.compactionContext);
     }
+    if (message.providerContextRetention !== undefined) {
+      obj.providerContextRetention = ProviderContextRetention.toJSON(message.providerContextRetention);
+    }
     return obj;
   },
 
@@ -9491,6 +9986,130 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     message.compactionContext = (object.compactionContext !== undefined && object.compactionContext !== null)
       ? RuntimeContextDelta.fromPartial(object.compactionContext)
       : undefined;
+    message.providerContextRetention =
+      (object.providerContextRetention !== undefined && object.providerContextRetention !== null)
+        ? ProviderContextRetention.fromPartial(object.providerContextRetention)
+        : undefined;
+    return message;
+  },
+};
+
+function createBaseProviderContextRetention(): ProviderContextRetention {
+  return { disposition: "", assistantMessageSequence: undefined, toolUseEventIds: [], repairEventIds: [] };
+}
+
+export const ProviderContextRetention: MessageFns<ProviderContextRetention> = {
+  encode(message: ProviderContextRetention, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.disposition !== "") {
+      writer.uint32(10).string(message.disposition);
+    }
+    if (message.assistantMessageSequence !== undefined) {
+      writer.uint32(16).int64(message.assistantMessageSequence);
+    }
+    for (const v of message.toolUseEventIds) {
+      writer.uint32(26).string(v!);
+    }
+    for (const v of message.repairEventIds) {
+      writer.uint32(34).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProviderContextRetention {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProviderContextRetention();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.disposition = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.assistantMessageSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.toolUseEventIds.push(reader.string());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.repairEventIds.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProviderContextRetention {
+    return {
+      disposition: isSet(object.disposition) ? globalThis.String(object.disposition) : "",
+      assistantMessageSequence: isSet(object.assistantMessageSequence)
+        ? globalThis.Number(object.assistantMessageSequence)
+        : isSet(object.assistant_message_sequence)
+        ? globalThis.Number(object.assistant_message_sequence)
+        : undefined,
+      toolUseEventIds: globalThis.Array.isArray(object?.toolUseEventIds)
+        ? object.toolUseEventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.tool_use_event_ids)
+        ? object.tool_use_event_ids.map((e: any) => globalThis.String(e))
+        : [],
+      repairEventIds: globalThis.Array.isArray(object?.repairEventIds)
+        ? object.repairEventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.repair_event_ids)
+        ? object.repair_event_ids.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: ProviderContextRetention): unknown {
+    const obj: any = {};
+    if (message.disposition !== "") {
+      obj.disposition = message.disposition;
+    }
+    if (message.assistantMessageSequence !== undefined) {
+      obj.assistantMessageSequence = Math.round(message.assistantMessageSequence);
+    }
+    if (message.toolUseEventIds?.length) {
+      obj.toolUseEventIds = message.toolUseEventIds;
+    }
+    if (message.repairEventIds?.length) {
+      obj.repairEventIds = message.repairEventIds;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProviderContextRetention>, I>>(base?: I): ProviderContextRetention {
+    return ProviderContextRetention.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProviderContextRetention>, I>>(object: I): ProviderContextRetention {
+    const message = createBaseProviderContextRetention();
+    message.disposition = object.disposition ?? "";
+    message.assistantMessageSequence = object.assistantMessageSequence ?? undefined;
+    message.toolUseEventIds = object.toolUseEventIds?.map((e) => e) || [];
+    message.repairEventIds = object.repairEventIds?.map((e) => e) || [];
     return message;
   },
 };
@@ -10714,7 +11333,14 @@ export const FinishIdleStale: MessageFns<FinishIdleStale> = {
 };
 
 function createBaseCreateSubagentThreadRequest(): CreateSubagentThreadRequest {
-  return { scope: undefined, sourceToolUseEventId: "", taskName: "", agentType: "", forkTurns: "" };
+  return {
+    scope: undefined,
+    sourceToolUseEventId: "",
+    taskName: "",
+    agentType: "",
+    initialPrompt: "",
+    parentMessageSequences: [],
+  };
 }
 
 export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest> = {
@@ -10731,9 +11357,14 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     if (message.agentType !== "") {
       writer.uint32(34).string(message.agentType);
     }
-    if (message.forkTurns !== "") {
-      writer.uint32(42).string(message.forkTurns);
+    if (message.initialPrompt !== "") {
+      writer.uint32(50).string(message.initialPrompt);
     }
+    writer.uint32(58).fork();
+    for (const v of message.parentMessageSequences) {
+      writer.int64(v);
+    }
+    writer.join();
     return writer;
   },
 
@@ -10776,13 +11407,31 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
           message.agentType = reader.string();
           continue;
         }
-        case 5: {
-          if (tag !== 42) {
+        case 6: {
+          if (tag !== 50) {
             break;
           }
 
-          message.forkTurns = reader.string();
+          message.initialPrompt = reader.string();
           continue;
+        }
+        case 7: {
+          if (tag === 56) {
+            message.parentMessageSequences.push(longToNumber(reader.int64()));
+
+            continue;
+          }
+
+          if (tag === 58) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.parentMessageSequences.push(longToNumber(reader.int64()));
+            }
+
+            continue;
+          }
+
+          break;
         }
       }
       if ((tag & 7) === 4 || tag === 0) {
@@ -10811,11 +11460,16 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
         : isSet(object.agent_type)
         ? globalThis.String(object.agent_type)
         : "",
-      forkTurns: isSet(object.forkTurns)
-        ? globalThis.String(object.forkTurns)
-        : isSet(object.fork_turns)
-        ? globalThis.String(object.fork_turns)
+      initialPrompt: isSet(object.initialPrompt)
+        ? globalThis.String(object.initialPrompt)
+        : isSet(object.initial_prompt)
+        ? globalThis.String(object.initial_prompt)
         : "",
+      parentMessageSequences: globalThis.Array.isArray(object?.parentMessageSequences)
+        ? object.parentMessageSequences.map((e: any) => globalThis.Number(e))
+        : globalThis.Array.isArray(object?.parent_message_sequences)
+        ? object.parent_message_sequences.map((e: any) => globalThis.Number(e))
+        : [],
     };
   },
 
@@ -10833,8 +11487,11 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     if (message.agentType !== "") {
       obj.agentType = message.agentType;
     }
-    if (message.forkTurns !== "") {
-      obj.forkTurns = message.forkTurns;
+    if (message.initialPrompt !== "") {
+      obj.initialPrompt = message.initialPrompt;
+    }
+    if (message.parentMessageSequences?.length) {
+      obj.parentMessageSequences = message.parentMessageSequences.map((e) => Math.round(e));
     }
     return obj;
   },
@@ -10850,7 +11507,8 @@ export const CreateSubagentThreadRequest: MessageFns<CreateSubagentThreadRequest
     message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
     message.taskName = object.taskName ?? "";
     message.agentType = object.agentType ?? "";
-    message.forkTurns = object.forkTurns ?? "";
+    message.initialPrompt = object.initialPrompt ?? "";
+    message.parentMessageSequences = object.parentMessageSequences?.map((e) => e) || [];
     return message;
   },
 };
@@ -13514,7 +14172,7 @@ export const ChildInterruptTarget: MessageFns<ChildInterruptTarget> = {
 };
 
 function createBaseAdmitChildInterruptRequest(): AdmitChildInterruptRequest {
-  return { scope: undefined, sourceToolUseEventId: "" };
+  return { scope: undefined, sourceToolUseEventId: "", targetChildThreadId: "", action: 0 };
 }
 
 export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> = {
@@ -13524,6 +14182,12 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
     }
     if (message.sourceToolUseEventId !== "") {
       writer.uint32(18).string(message.sourceToolUseEventId);
+    }
+    if (message.targetChildThreadId !== "") {
+      writer.uint32(26).string(message.targetChildThreadId);
+    }
+    if (message.action !== 0) {
+      writer.uint32(32).int32(message.action);
     }
     return writer;
   },
@@ -13551,6 +14215,22 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
           message.sourceToolUseEventId = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.targetChildThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.action = reader.int32() as any;
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13568,6 +14248,12 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
         : isSet(object.source_tool_use_event_id)
         ? globalThis.String(object.source_tool_use_event_id)
         : "",
+      targetChildThreadId: isSet(object.targetChildThreadId)
+        ? globalThis.String(object.targetChildThreadId)
+        : isSet(object.target_child_thread_id)
+        ? globalThis.String(object.target_child_thread_id)
+        : "",
+      action: isSet(object.action) ? childControlActionFromJSON(object.action) : 0,
     };
   },
 
@@ -13578,6 +14264,12 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
     }
     if (message.sourceToolUseEventId !== "") {
       obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.targetChildThreadId !== "") {
+      obj.targetChildThreadId = message.targetChildThreadId;
+    }
+    if (message.action !== 0) {
+      obj.action = childControlActionToJSON(message.action);
     }
     return obj;
   },
@@ -13591,6 +14283,8 @@ export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> 
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
+    message.targetChildThreadId = object.targetChildThreadId ?? "";
+    message.action = object.action ?? 0;
     return message;
   },
 };
@@ -14455,7 +15149,7 @@ export const CloseChildControlStale: MessageFns<CloseChildControlStale> = {
 };
 
 function createBaseCloseApprovalReviewerRequest(): CloseApprovalReviewerRequest {
-  return { scope: undefined, reviewerThreadId: "", reviewId: "" };
+  return { scope: undefined, reviewerThreadId: "", reviewId: "", settlementKind: 0, settlementEventId: "" };
 }
 
 export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerRequest> = {
@@ -14468,6 +15162,12 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
     }
     if (message.reviewId !== "") {
       writer.uint32(26).string(message.reviewId);
+    }
+    if (message.settlementKind !== 0) {
+      writer.uint32(32).int32(message.settlementKind);
+    }
+    if (message.settlementEventId !== "") {
+      writer.uint32(42).string(message.settlementEventId);
     }
     return writer;
   },
@@ -14503,6 +15203,22 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
           message.reviewId = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.settlementKind = reader.int32() as any;
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.settlementEventId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14525,6 +15241,16 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
         : isSet(object.review_id)
         ? globalThis.String(object.review_id)
         : "",
+      settlementKind: isSet(object.settlementKind)
+        ? approvalReviewerCloseSettlementKindFromJSON(object.settlementKind)
+        : isSet(object.settlement_kind)
+        ? approvalReviewerCloseSettlementKindFromJSON(object.settlement_kind)
+        : 0,
+      settlementEventId: isSet(object.settlementEventId)
+        ? globalThis.String(object.settlementEventId)
+        : isSet(object.settlement_event_id)
+        ? globalThis.String(object.settlement_event_id)
+        : "",
     };
   },
 
@@ -14539,6 +15265,12 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
     if (message.reviewId !== "") {
       obj.reviewId = message.reviewId;
     }
+    if (message.settlementKind !== 0) {
+      obj.settlementKind = approvalReviewerCloseSettlementKindToJSON(message.settlementKind);
+    }
+    if (message.settlementEventId !== "") {
+      obj.settlementEventId = message.settlementEventId;
+    }
     return obj;
   },
 
@@ -14552,6 +15284,8 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
       : undefined;
     message.reviewerThreadId = object.reviewerThreadId ?? "";
     message.reviewId = object.reviewId ?? "";
+    message.settlementKind = object.settlementKind ?? 0;
+    message.settlementEventId = object.settlementEventId ?? "";
     return message;
   },
 };
@@ -14866,7 +15600,7 @@ export const ChildLifecycleResult: MessageFns<ChildLifecycleResult> = {
 };
 
 function createBaseMarkChildThreadActiveRequest(): MarkChildThreadActiveRequest {
-  return { scope: undefined, sourceToolUseEventId: "" };
+  return { scope: undefined, sourceToolUseEventId: "", targetChildThreadId: "" };
 }
 
 export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveRequest> = {
@@ -14876,6 +15610,9 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     }
     if (message.sourceToolUseEventId !== "") {
       writer.uint32(18).string(message.sourceToolUseEventId);
+    }
+    if (message.targetChildThreadId !== "") {
+      writer.uint32(26).string(message.targetChildThreadId);
     }
     return writer;
   },
@@ -14903,6 +15640,14 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
           message.sourceToolUseEventId = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.targetChildThreadId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14920,6 +15665,11 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
         : isSet(object.source_tool_use_event_id)
         ? globalThis.String(object.source_tool_use_event_id)
         : "",
+      targetChildThreadId: isSet(object.targetChildThreadId)
+        ? globalThis.String(object.targetChildThreadId)
+        : isSet(object.target_child_thread_id)
+        ? globalThis.String(object.target_child_thread_id)
+        : "",
     };
   },
 
@@ -14930,6 +15680,9 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     }
     if (message.sourceToolUseEventId !== "") {
       obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.targetChildThreadId !== "") {
+      obj.targetChildThreadId = message.targetChildThreadId;
     }
     return obj;
   },
@@ -14943,6 +15696,7 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
+    message.targetChildThreadId = object.targetChildThreadId ?? "";
     return message;
   },
 };
@@ -16144,7 +16898,7 @@ export const CommandReadStale: MessageFns<CommandReadStale> = {
 };
 
 function createBaseSendCommandInputRequest(): SendCommandInputRequest {
-  return { scope: undefined, taskId: "", maxOutputTokens: 0, inputJson: "", toolUseEventId: "", operationId: "" };
+  return { scope: undefined, taskId: "", maxOutputTokens: 0, toolUseEventId: "", operationId: "" };
 }
 
 export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
@@ -16157,9 +16911,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
     }
     if (message.maxOutputTokens !== 0) {
       writer.uint32(24).int32(message.maxOutputTokens);
-    }
-    if (message.inputJson !== "") {
-      writer.uint32(34).string(message.inputJson);
     }
     if (message.toolUseEventId !== "") {
       writer.uint32(42).string(message.toolUseEventId);
@@ -16201,14 +16952,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
           message.maxOutputTokens = reader.int32();
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.inputJson = reader.string();
-          continue;
-        }
         case 5: {
           if (tag !== 42) {
             break;
@@ -16247,11 +16990,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
         : isSet(object.max_output_tokens)
         ? globalThis.Number(object.max_output_tokens)
         : 0,
-      inputJson: isSet(object.inputJson)
-        ? globalThis.String(object.inputJson)
-        : isSet(object.input_json)
-        ? globalThis.String(object.input_json)
-        : "",
       toolUseEventId: isSet(object.toolUseEventId)
         ? globalThis.String(object.toolUseEventId)
         : isSet(object.tool_use_event_id)
@@ -16276,9 +17014,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
     if (message.maxOutputTokens !== 0) {
       obj.maxOutputTokens = Math.round(message.maxOutputTokens);
     }
-    if (message.inputJson !== "") {
-      obj.inputJson = message.inputJson;
-    }
     if (message.toolUseEventId !== "") {
       obj.toolUseEventId = message.toolUseEventId;
     }
@@ -16298,7 +17033,6 @@ export const SendCommandInputRequest: MessageFns<SendCommandInputRequest> = {
       : undefined;
     message.taskId = object.taskId ?? "";
     message.maxOutputTokens = object.maxOutputTokens ?? 0;
-    message.inputJson = object.inputJson ?? "";
     message.toolUseEventId = object.toolUseEventId ?? "";
     message.operationId = object.operationId ?? "";
     return message;
@@ -16981,6 +17715,262 @@ export const CommandCancelStale: MessageFns<CommandCancelStale> = {
   },
 };
 
+function createBaseAuthorizeWebToolExecutionRequest(): AuthorizeWebToolExecutionRequest {
+  return { scope: undefined, toolUseEventId: "" };
+}
+
+export const AuthorizeWebToolExecutionRequest: MessageFns<AuthorizeWebToolExecutionRequest> = {
+  encode(message: AuthorizeWebToolExecutionRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AuthorizeWebToolExecutionRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAuthorizeWebToolExecutionRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AuthorizeWebToolExecutionRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+    };
+  },
+
+  toJSON(message: AuthorizeWebToolExecutionRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AuthorizeWebToolExecutionRequest>, I>>(
+    base?: I,
+  ): AuthorizeWebToolExecutionRequest {
+    return AuthorizeWebToolExecutionRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AuthorizeWebToolExecutionRequest>, I>>(
+    object: I,
+  ): AuthorizeWebToolExecutionRequest {
+    const message = createBaseAuthorizeWebToolExecutionRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    return message;
+  },
+};
+
+function createBaseAuthorizeWebToolExecutionResponse(): AuthorizeWebToolExecutionResponse {
+  return { authorized: undefined, stale: undefined };
+}
+
+export const AuthorizeWebToolExecutionResponse: MessageFns<AuthorizeWebToolExecutionResponse> = {
+  encode(message: AuthorizeWebToolExecutionResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.authorized !== undefined) {
+      WebToolExecutionAuthorized.encode(message.authorized, writer.uint32(10).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      WebToolExecutionStale.encode(message.stale, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AuthorizeWebToolExecutionResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAuthorizeWebToolExecutionResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.authorized = WebToolExecutionAuthorized.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.stale = WebToolExecutionStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AuthorizeWebToolExecutionResponse {
+    return {
+      authorized: isSet(object.authorized) ? WebToolExecutionAuthorized.fromJSON(object.authorized) : undefined,
+      stale: isSet(object.stale) ? WebToolExecutionStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: AuthorizeWebToolExecutionResponse): unknown {
+    const obj: any = {};
+    if (message.authorized !== undefined) {
+      obj.authorized = WebToolExecutionAuthorized.toJSON(message.authorized);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = WebToolExecutionStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AuthorizeWebToolExecutionResponse>, I>>(
+    base?: I,
+  ): AuthorizeWebToolExecutionResponse {
+    return AuthorizeWebToolExecutionResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AuthorizeWebToolExecutionResponse>, I>>(
+    object: I,
+  ): AuthorizeWebToolExecutionResponse {
+    const message = createBaseAuthorizeWebToolExecutionResponse();
+    message.authorized = (object.authorized !== undefined && object.authorized !== null)
+      ? WebToolExecutionAuthorized.fromPartial(object.authorized)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? WebToolExecutionStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseWebToolExecutionAuthorized(): WebToolExecutionAuthorized {
+  return {};
+}
+
+export const WebToolExecutionAuthorized: MessageFns<WebToolExecutionAuthorized> = {
+  encode(_: WebToolExecutionAuthorized, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WebToolExecutionAuthorized {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseWebToolExecutionAuthorized();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): WebToolExecutionAuthorized {
+    return {};
+  },
+
+  toJSON(_: WebToolExecutionAuthorized): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WebToolExecutionAuthorized>, I>>(base?: I): WebToolExecutionAuthorized {
+    return WebToolExecutionAuthorized.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WebToolExecutionAuthorized>, I>>(_: I): WebToolExecutionAuthorized {
+    const message = createBaseWebToolExecutionAuthorized();
+    return message;
+  },
+};
+
+function createBaseWebToolExecutionStale(): WebToolExecutionStale {
+  return {};
+}
+
+export const WebToolExecutionStale: MessageFns<WebToolExecutionStale> = {
+  encode(_: WebToolExecutionStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WebToolExecutionStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseWebToolExecutionStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): WebToolExecutionStale {
+    return {};
+  },
+
+  toJSON(_: WebToolExecutionStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WebToolExecutionStale>, I>>(base?: I): WebToolExecutionStale {
+    return WebToolExecutionStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WebToolExecutionStale>, I>>(_: I): WebToolExecutionStale {
+    const message = createBaseWebToolExecutionStale();
+    return message;
+  },
+};
+
 function createBaseRunMemoryRequest(): RunMemoryRequest {
   return { scope: undefined, toolUseEventId: "" };
 }
@@ -17622,6 +18612,19 @@ export const AgentRuntimeBridgeServiceService = {
       Buffer.from(CancelCommandResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): CancelCommandResponse => CancelCommandResponse.decode(value),
   },
+  authorizeWebToolExecution: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AuthorizeWebToolExecutionRequest): Buffer =>
+      Buffer.from(AuthorizeWebToolExecutionRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AuthorizeWebToolExecutionRequest =>
+      AuthorizeWebToolExecutionRequest.decode(value),
+    responseSerialize: (value: AuthorizeWebToolExecutionResponse): Buffer =>
+      Buffer.from(AuthorizeWebToolExecutionResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AuthorizeWebToolExecutionResponse =>
+      AuthorizeWebToolExecutionResponse.decode(value),
+  },
   runMemory: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory" as const,
     requestStream: false as const,
@@ -17775,6 +18778,7 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   readCommandResult: handleUnaryCall<ReadCommandResultRequest, ReadCommandResultResponse>;
   sendCommandInput: handleUnaryCall<SendCommandInputRequest, SendCommandInputResponse>;
   cancelCommand: handleUnaryCall<CancelCommandRequest, CancelCommandResponse>;
+  authorizeWebToolExecution: handleUnaryCall<AuthorizeWebToolExecutionRequest, AuthorizeWebToolExecutionResponse>;
   runMemory: handleUnaryCall<RunMemoryRequest, RunMemoryResponse>;
   resolveTransientAttachment: handleUnaryCall<ResolveTransientAttachmentRequest, ResolveTransientAttachmentResponse>;
   resolveFileAttachmentMetadata: handleUnaryCall<
@@ -18180,6 +19184,21 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: CancelCommandResponse) => void,
+  ): ClientUnaryCall;
+  authorizeWebToolExecution(
+    request: AuthorizeWebToolExecutionRequest,
+    callback: (error: ServiceError | null, response: AuthorizeWebToolExecutionResponse) => void,
+  ): ClientUnaryCall;
+  authorizeWebToolExecution(
+    request: AuthorizeWebToolExecutionRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AuthorizeWebToolExecutionResponse) => void,
+  ): ClientUnaryCall;
+  authorizeWebToolExecution(
+    request: AuthorizeWebToolExecutionRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AuthorizeWebToolExecutionResponse) => void,
   ): ClientUnaryCall;
   runMemory(
     request: RunMemoryRequest,

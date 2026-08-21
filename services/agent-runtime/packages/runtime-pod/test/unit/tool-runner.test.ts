@@ -40,6 +40,8 @@ import type {
 	AwaitChildInterruptRequest,
 	AwaitSandboxExecutionRequest,
 	AwaitSandboxExecutionResponse,
+	AuthorizeWebToolExecutionRequest,
+	AuthorizeWebToolExecutionResponse,
 	CancelCommandRequest,
 	CloseChildControlRequest,
 	CreateSubagentThreadRequest,
@@ -55,6 +57,7 @@ import type {
 	SendCommandInputResponse,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
+	ChildControlAction,
 	ChildInterruptOutcome,
 	ChildLifecycleDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -1301,8 +1304,6 @@ describe("RuntimePodToolRunner", () => {
 				operationId: stableTestId("req", "command-followup:sevt_tool_send"),
 				taskId: "task_1",
 				maxOutputTokens: 123,
-				inputJson:
-					'{"chars":"hello","max_output_tokens":123,"session_id":"task_1"}',
 				toolUseEventId: "sevt_tool_send",
 			}),
 		]);
@@ -1420,20 +1421,21 @@ describe("RuntimePodToolRunner", () => {
 		).toBe(true);
 	});
 
-	test("cancels only the local command wait when its tool fiber aborts", async () => {
+	test("durably cancels an actively joined command when its tool fiber aborts", async () => {
 		const bridge = new RecordingBridgeClient();
 		bridge.deferReadCommandResult = true;
 		const runner = makeRunner({ bridge });
 		const abortController = new AbortController();
 
-		const resultPromise = runner.runTool(
-			toolRequest(
+		const resultPromise = runner.runTool({
+			...toolRequest(
 				"write_stdin",
 				{ session_id: "task_1", chars: "" },
 				"sevt_tool_poll",
 				abortController.signal,
 			),
-		);
+			backgroundCancellationIntent: () => "user_interrupt",
+		});
 		await waitForCondition(
 			() => bridge.readCommandResultRequests.length === 1,
 			"read command request",
@@ -1442,7 +1444,124 @@ describe("RuntimePodToolRunner", () => {
 		const result = await resultPromise;
 
 		expect(result.type).toBe("cancelled");
-		expect(bridge.cancelCommandRequests).toEqual([]);
+		expect(bridge.cancelCommandRequests).toEqual([
+			expect.objectContaining({
+				taskId: "task_1",
+				toolUseEventId: "sevt_tool_poll",
+				reason: "runtime_interrupted",
+			}),
+		]);
+	});
+
+	test("replays the same command cancellation identity after a lost ACK", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.deferReadCommandResult = true;
+		bridge.cancelCommandErrors.push(
+			Object.assign(new Error("lost cancellation ACK"), {
+				code: GrpcStatus.UNKNOWN,
+			}),
+		);
+		const sleep = new ControlledSleep();
+		const runner = makeRunner({ bridge, sleep: sleep.sleep });
+		const abortController = new AbortController();
+		const resultPromise = runner.runTool({
+			...toolRequest(
+				"write_stdin",
+				{ session_id: "task_1", chars: "" },
+				"sevt_tool_poll_replay",
+				abortController.signal,
+			),
+			backgroundCancellationIntent: () => "user_interrupt",
+		});
+		await waitForCondition(
+			() => bridge.readCommandResultRequests.length === 1,
+			"read command request",
+		);
+		abortController.abort();
+		await waitForCondition(
+			() => bridge.cancelCommandRequests.length === 1,
+			"first cancel command request",
+		);
+		sleep.releaseNext();
+		const result = await resultPromise;
+
+		expect(result.type).toBe("cancelled");
+		expect(bridge.cancelCommandRequests).toHaveLength(2);
+		expect(bridge.cancelCommandRequests[1]).toEqual(
+			bridge.cancelCommandRequests[0],
+		);
+	});
+
+	test.each(["runtime shutdown", "local fiber abort"])(
+		"hands off a joined command without durable cancellation on %s",
+		async () => {
+			const bridge = new RecordingBridgeClient();
+			bridge.deferReadCommandResult = true;
+			const abortController = new AbortController();
+			const resultPromise = makeRunner({ bridge }).runTool(
+				toolRequest(
+					"write_stdin",
+					{ session_id: "task_1", chars: "" },
+					"sevt_tool_poll_handoff",
+					abortController.signal,
+				),
+			);
+			await waitForCondition(
+				() => bridge.readCommandResultRequests.length === 1,
+				"joined background read",
+			);
+			abortController.abort();
+
+			await expect(resultPromise).resolves.toEqual({ type: "stale_custody" });
+			expect(bridge.cancelCommandRequests).toHaveLength(0);
+		},
+	);
+
+	test("hands off server-originated command cancellation without writing a cancel", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.readCommandResultErrors.push(
+			Object.assign(new Error("server cancelled"), {
+				code: GrpcStatus.CANCELLED,
+			}),
+		);
+		const result = await makeRunner({ bridge }).runTool(
+			toolRequest("write_stdin", { session_id: "task_1", chars: "" }),
+		);
+
+		expect(result).toEqual({ type: "stale_custody" });
+		expect(bridge.cancelCommandRequests).toHaveLength(0);
+	});
+
+	test("returns a natural completion that wins the cancellation race", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.deferReadCommandResult = true;
+		bridge.cancelCommandResponses.push({
+			committed: {
+				resultJson:
+					'{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}',
+			},
+		});
+		const abortController = new AbortController();
+		const resultPromise = makeRunner({ bridge }).runTool({
+			...toolRequest(
+				"write_stdin",
+				{ session_id: "task_1", chars: "" },
+				"sevt_tool_poll_completion_wins",
+				abortController.signal,
+			),
+			backgroundCancellationIntent: () => "user_interrupt",
+		});
+		await waitForCondition(
+			() => bridge.readCommandResultRequests.length === 1,
+			"joined background read",
+		);
+		abortController.abort();
+
+		await expect(resultPromise).resolves.toMatchObject({
+			type: "completed",
+			output: { text: expect.stringContaining("done") },
+		});
+		expect(bridge.cancelCommandRequests).toHaveLength(1);
 	});
 
 	test.each([
@@ -1624,8 +1743,9 @@ describe("RuntimePodToolRunner", () => {
 	});
 
 	test("routes web through Gateway RunWeb with Runtime binding token", async () => {
+		const bridge = new RecordingBridgeClient();
 		const gateway = new RecordingGatewayClient();
-		const runner = makeRunner({ gateway });
+		const runner = makeRunner({ bridge, gateway });
 
 		const result = await runner.runTool(
 			toolRequest("web", {
@@ -1654,6 +1774,22 @@ describe("RuntimePodToolRunner", () => {
 				},
 			}),
 		]);
+		expect(bridge.authorizeWebToolExecutionRequests).toEqual([
+			expect.objectContaining({ toolUseEventId: "sevt_tool_1" }),
+		]);
+	});
+
+	test("does not dispatch Web after the durable route becomes stale", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.authorizeWebToolExecutionResponse = { stale: {} };
+		const gateway = new RecordingGatewayClient();
+
+		const result = await makeRunner({ bridge, gateway }).runTool(
+			toolRequest("web", { search_query: [{ q: "tetral" }] }),
+		);
+
+		expect(result).toEqual({ type: "stale_custody" });
+		expect(gateway.runWebRequests).toEqual([]);
 	});
 
 	test("uses the Web connector's model-visible text without encoding the response twice", async () => {
@@ -2219,7 +2355,7 @@ describe("RuntimePodToolRunner", () => {
 		});
 	});
 
-	test("spawns a sub-agent by creating the child and handing its stored instruction to durable delivery", async () => {
+	test("spawns a sub-agent by atomically declaring the child and its opening input", async () => {
 		const bridge = new RecordingBridgeClient();
 		const subAgentHost = new RecordingSubAgentHost();
 		const runner = makeRunner({ bridge, subAgentHost });
@@ -2235,21 +2371,15 @@ describe("RuntimePodToolRunner", () => {
 
 		expect(result.type).toBe("completed");
 		expect(bridge.createSubagentThreadRequests).toEqual([
-			expect.objectContaining({
-				taskName: "researcher",
-				agentType: "research",
-				sourceToolUseEventId: "sevt_tool_1",
-				forkTurns: "none",
+				expect.objectContaining({
+					taskName: "researcher",
+					agentType: "research",
+					sourceToolUseEventId: "sevt_tool_1",
+					initialPrompt: "work on this",
+					parentMessageSequences: [],
 			}),
 		]);
-		expect(bridge.deliverInterAgentMailRequests).toEqual([
-			expect.objectContaining({
-				deliveryId: expect.any(String),
-				targetThreadId: "thr_child_1",
-				sourceToolUseEventId: "sevt_tool_1",
-				content: "work on this",
-			}),
-		]);
+		expect(bridge.deliverInterAgentMailRequests).toEqual([]);
 		expect(subAgentHost.actions).toEqual(["preload"]);
 		expect(subAgentHost.preloaded).toEqual([
 			expect.objectContaining({
@@ -2323,7 +2453,7 @@ describe("RuntimePodToolRunner", () => {
 		});
 	});
 
-	test("rejects oversized task names and fork counts before any durable actor mutation", async () => {
+	test("rejects oversized task names, prompts, and fork counts before any durable actor mutation", async () => {
 		const bridge = new RecordingBridgeClient();
 		const runner = makeRunner({
 			bridge,
@@ -2343,12 +2473,22 @@ describe("RuntimePodToolRunner", () => {
 				fork_turns: "1001",
 			}),
 		);
+		const oversizedPrompt = await runner.runTool(
+			toolRequest("spawn_agent", {
+				task_name: "worker",
+				prompt: "é".repeat(1024 * 1024 + 1),
+			}),
+		);
 
 		expect(oversizedName).toMatchObject({
 			type: "error",
 			error: { retryable: false },
 		});
 		expect(oversizedFork).toMatchObject({
+			type: "error",
+			error: { retryable: false },
+		});
+		expect(oversizedPrompt).toMatchObject({
 			type: "error",
 			error: { retryable: false },
 		});
@@ -2461,7 +2601,7 @@ describe("RuntimePodToolRunner", () => {
 		).toMatchObject({ type: "error" });
 	});
 
-	test("durable sub-agent delivery returns delivered without enqueueing child input", async () => {
+	test("atomic sub-agent creation returns delivered without enqueueing child input in process", async () => {
 		const bridge = new RecordingBridgeClient();
 		const subAgentHost = new RecordingSubAgentHost();
 		const runner = makeRunner({ bridge, subAgentHost });
@@ -2481,16 +2621,16 @@ describe("RuntimePodToolRunner", () => {
 				text: expect.stringContaining("status: delivered"),
 			}),
 		});
-		expect(bridge.deliverInterAgentMailRequests).toHaveLength(1);
+		expect(bridge.createSubagentThreadRequests[0]?.initialPrompt).toBe(
+			"work on this",
+		);
+		expect(bridge.deliverInterAgentMailRequests).toHaveLength(0);
 		expect(subAgentHost.enqueued).toEqual([]);
 	});
 
-	test("replays ambiguous child creation and mail delivery with identical durable identities", async () => {
+	test("replays ambiguous atomic child creation with an identical declaration", async () => {
 		const bridge = new RecordingBridgeClient();
 		bridge.createSubagentThreadErrors.push(grpcError(GrpcStatus.UNAVAILABLE));
-		bridge.deliverInterAgentMailErrors.push(
-			grpcError(GrpcStatus.DEADLINE_EXCEEDED),
-		);
 		const runner = makeRunner({
 			bridge,
 			subAgentHost: new RecordingSubAgentHost(),
@@ -2509,10 +2649,7 @@ describe("RuntimePodToolRunner", () => {
 		expect(bridge.createSubagentThreadRequests[1]).toEqual(
 			bridge.createSubagentThreadRequests[0],
 		);
-		expect(bridge.deliverInterAgentMailRequests).toHaveLength(2);
-		expect(bridge.deliverInterAgentMailRequests[1]).toEqual(
-			bridge.deliverInterAgentMailRequests[0],
-		);
+		expect(bridge.deliverInterAgentMailRequests).toHaveLength(0);
 	});
 
 	test("replays ambiguous child interrupt admission and await with identical operation identities", async () => {
@@ -2530,6 +2667,12 @@ describe("RuntimePodToolRunner", () => {
 
 		expect(result).toMatchObject({ type: "completed" });
 		expect(bridge.admitChildInterruptRequests).toHaveLength(2);
+		expect(bridge.admitChildInterruptRequests[0]).toEqual(
+			expect.objectContaining({
+				targetChildThreadId: "thr_child_1",
+				action: ChildControlAction.CHILD_CONTROL_ACTION_INTERRUPT,
+			}),
+		);
 		expect(bridge.admitChildInterruptRequests[1]).toEqual(
 			bridge.admitChildInterruptRequests[0],
 		);
@@ -2549,6 +2692,12 @@ describe("RuntimePodToolRunner", () => {
 			toolRequest("close_agent", { task_name: "worker" }, "sevt_close"),
 		);
 		expect(close).toMatchObject({ type: "completed" });
+		expect(closeBridge.admitChildInterruptRequests[0]).toEqual(
+			expect.objectContaining({
+				targetChildThreadId: "thr_child_1",
+				action: ChildControlAction.CHILD_CONTROL_ACTION_CLOSE,
+			}),
+		);
 		expect(closeBridge.closeChildControlRequests).toHaveLength(2);
 		expect(closeBridge.closeChildControlRequests[1]).toEqual(
 			closeBridge.closeChildControlRequests[0],
@@ -2567,6 +2716,9 @@ describe("RuntimePodToolRunner", () => {
 		);
 		expect(resume).toMatchObject({ type: "completed" });
 		expect(resumeBridge.markChildThreadActiveRequests).toHaveLength(2);
+		expect(resumeBridge.markChildThreadActiveRequests[0]).toEqual(
+			expect.objectContaining({ targetChildThreadId: "thr_child_1" }),
+		);
 		expect(resumeBridge.markChildThreadActiveRequests[1]).toEqual(
 			resumeBridge.markChildThreadActiveRequests[0],
 		);
@@ -2932,6 +3084,28 @@ describe("RuntimePodToolRunner", () => {
 				prompt: "work on the latest turn",
 				fork_turns: "1",
 			}),
+			retainedContextEntries: [
+				{
+					messageSequence: 1,
+					contextKind: "user" as const,
+					parts: [{ type: "text" as const, text: "earlier" }],
+				},
+				{
+					messageSequence: 2,
+					contextKind: "assistant" as const,
+					parts: [{ type: "text" as const, text: "earlier answer" }],
+				},
+				{
+					messageSequence: 3,
+					contextKind: "user" as const,
+					parts: [{ type: "text" as const, text: "latest" }],
+				},
+				{
+					messageSequence: 4,
+					contextKind: "assistant" as const,
+					parts: [{ type: "text" as const, text: "latest answer" }],
+				},
+			],
 		} satisfies RuntimeToolExecutionRequest;
 
 		const result = await runner.runTool(request);
@@ -2940,7 +3114,7 @@ describe("RuntimePodToolRunner", () => {
 		expect(bridge.createSubagentThreadRequests[0]).toEqual(
 			expect.objectContaining({
 				sourceToolUseEventId: request.toolUseEventId,
-				forkTurns: "1",
+				parentMessageSequences: [3, 4],
 			}),
 		);
 	});
@@ -3735,7 +3909,10 @@ describe("RuntimePodToolRunner", () => {
 
 		expect(result.type).toBe("completed");
 		expect(bridge.markChildThreadActiveRequests).toEqual([
-			expect.objectContaining({ sourceToolUseEventId: "sevt_tool_1" }),
+			expect.objectContaining({
+				sourceToolUseEventId: "sevt_tool_1",
+				targetChildThreadId: "thr_child_1",
+			}),
 		]);
 		expect(subAgentHost.preloaded).toEqual([
 			expect.objectContaining({
@@ -4044,7 +4221,11 @@ function resumeTurnFactsForPendingTool(input: {
 				requestEnd: {
 					requestStartEventId: `start_${input.modelRequestId}`,
 					isError: false,
-					rescheduled: false,
+					providerContextRetention: {
+						disposition: "completed",
+						toolUseEventIds: [input.toolUseEventId],
+						repairEventIds: [],
+					},
 				},
 			},
 		],
@@ -4182,6 +4363,7 @@ function toolRequest(
 		toolUseEventId,
 		entry,
 		input,
+		retainedContextEntries: [],
 		currentModel: { providerId: "openai", modelId: "gpt-5.5" },
 		abortSignal,
 	};
@@ -4298,6 +4480,13 @@ class RecordingBridgeClient {
 	readonly readCommandResultRequests: ReadCommandResultRequest[] = [];
 	readonly readCommandResultResponses: ReadCommandResultResponse[] = [];
 	readonly cancelCommandRequests: CancelCommandRequest[] = [];
+	readonly cancelCommandErrors: Error[] = [];
+	readonly cancelCommandResponses: unknown[] = [];
+	readonly authorizeWebToolExecutionRequests: AuthorizeWebToolExecutionRequest[] =
+		[];
+	authorizeWebToolExecutionResponse: AuthorizeWebToolExecutionResponse = {
+		authorized: {},
+	};
 	readonly createSubagentThreadRequests: CreateSubagentThreadRequest[] = [];
 	readonly resolveChildThreadRequests: ResolveChildThreadRequest[] = [];
 	readonly listChildThreadsRequests: ListChildThreadsRequest[] = [];
@@ -4373,6 +4562,7 @@ class RecordingBridgeClient {
 		| "sendCommandInput"
 		| "readCommandResult"
 		| "cancelCommand"
+		| "authorizeWebToolExecution"
 		| "createSubagentThread"
 		| "resolveChildThread"
 		| "listChildThreads"
@@ -4389,6 +4579,8 @@ class RecordingBridgeClient {
 			sendCommandInput: this.sendCommandInput.bind(this),
 			readCommandResult: this.readCommandResult.bind(this),
 			cancelCommand: this.cancelCommand.bind(this),
+			authorizeWebToolExecution:
+				this.authorizeWebToolExecution.bind(this),
 			createSubagentThread: this.createSubagentThread.bind(this),
 			resolveChildThread: this.resolveChildThread.bind(this),
 			listChildThreads: this.listChildThreads.bind(this),
@@ -4405,6 +4597,7 @@ class RecordingBridgeClient {
 			| "sendCommandInput"
 			| "readCommandResult"
 			| "cancelCommand"
+			| "authorizeWebToolExecution"
 			| "createSubagentThread"
 			| "resolveChildThread"
 			| "listChildThreads"
@@ -4545,12 +4738,31 @@ class RecordingBridgeClient {
 	private cancelCommand(
 		request: CancelCommandRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.cancelCommandRequests.push(request);
-		callback(null, {
-			committed: { resultJson: '{"status":"cancelled"}' },
-		});
+		const error = this.cancelCommandErrors.shift();
+		if (error !== undefined) {
+			callback(error, undefined);
+			return grpcCall();
+		}
+		callback(
+			null,
+			this.cancelCommandResponses.shift() ?? {
+				committed: { resultJson: '{"status":"cancelled"}' },
+			},
+		);
+		return grpcCall();
+	}
+
+	private authorizeWebToolExecution(
+		request: AuthorizeWebToolExecutionRequest,
+		_metadata: Metadata,
+		callback: (error: Error | null, response: unknown) => void,
+	): unknown {
+		this.authorizeWebToolExecutionRequests.push(request);
+		callback(null, this.authorizeWebToolExecutionResponse);
 		return grpcCall();
 	}
 

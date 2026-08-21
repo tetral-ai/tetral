@@ -76,7 +76,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyApprovedToolExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+		if err := lockExecutableSandboxToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		}
 		now := s.now()
@@ -186,9 +186,11 @@ type durableToolExecution struct {
 	ModelToolCallID     string
 	ToolName            string
 	MCPServerName       string
+	ProviderInputJSON   string
 	InputJSON           string
 	NormalizedInputHash string
 	EvaluatedPermission string
+	RouteCapability     string
 }
 
 func loadDurableToolExecutionTx(
@@ -199,44 +201,53 @@ func loadDurableToolExecutionTx(
 	eventType string,
 	lock bool,
 ) (durableToolExecution, error) {
-	query := `SELECT payload_json, projection_json, model_request_id
+	query := `SELECT projection_json, model_request_id
 		  FROM session_events
 		 WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		   AND event_id = $4 AND type = $5`
 	if lock {
 		query += ` FOR UPDATE`
 	}
-	var payloadJSON, projectionJSON string
+	var projectionJSON string
 	var modelRequestID sql.NullString
 	if err := tx.QueryRow(ctx, query,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID, eventType,
-	).Scan(&payloadJSON, &projectionJSON, &modelRequestID); dbconnect.IsNoRows(err) {
+	).Scan(&projectionJSON, &modelRequestID); dbconnect.IsNoRows(err) {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use is missing")
 	} else if err != nil {
 		return durableToolExecution{}, err
 	}
-	var payload runtimeToolUseEventPayload
 	var projection struct {
-		ModelToolCallID string `json:"model_tool_call_id"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use payload is invalid")
+		ModelToolCallID         string          `json:"model_tool_call_id"`
+		ToolName                string          `json:"tool_name"`
+		ProviderInput           json.RawMessage `json:"provider_input"`
+		CanonicalExecutionInput json.RawMessage `json:"canonical_execution_input"`
+		RouteCapability         string          `json:"route_capability"`
+		EvaluatedPermission     string          `json:"evaluated_permission"`
+		EventType               string          `json:"event_type"`
+		MCPServerName           string          `json:"mcp_server_name"`
 	}
 	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool use projection is invalid")
 	}
-	inputJSON, inputHash, err := canonicalRunToolInput(string(defaultRawJSON(payload.Input, json.RawMessage(`{}`))))
-	if err != nil || !modelRequestID.Valid || modelRequestID.String == "" || projection.ModelToolCallID == "" || payload.Name == "" {
+	inputJSON, inputHash, err := canonicalRunToolInput(string(projection.CanonicalExecutionInput))
+	if err != nil || !modelRequestID.Valid || modelRequestID.String == "" || projection.ModelToolCallID == "" ||
+		projection.ToolName == "" || len(projection.ProviderInput) == 0 ||
+		!runtimeToolRouteCapabilityAllowed(projection.RouteCapability) ||
+		projection.EventType != eventType ||
+		(projection.EvaluatedPermission != "allow" && projection.EvaluatedPermission != "ask" && projection.EvaluatedPermission != "deny") {
 		return durableToolExecution{}, status.Error(codes.FailedPrecondition, "durable tool execution facts are incomplete")
 	}
 	return durableToolExecution{
 		ModelRequestID:      modelRequestID.String,
 		ModelToolCallID:     projection.ModelToolCallID,
-		ToolName:            payload.Name,
-		MCPServerName:       payload.MCPServerName,
+		ToolName:            projection.ToolName,
+		MCPServerName:       projection.MCPServerName,
+		ProviderInputJSON:   string(projection.ProviderInput),
 		InputJSON:           inputJSON,
 		NormalizedInputHash: inputHash,
-		EvaluatedPermission: payload.EvaluatedPermission,
+		EvaluatedPermission: projection.EvaluatedPermission,
+		RouteCapability:     projection.RouteCapability,
 	}, nil
 }
 
@@ -255,61 +266,141 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	return nil
 }
 
-func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMessage {
-	if len(value) == 0 || string(value) == "null" {
-		return fallback
-	}
-	return value
-}
-
-func verifyApprovedToolExecutionHandoffTx(
+// lockExecutableToolRouteTx is the mechanical first-effect gate shared by
+// Bridge-owned executors. It locks the exact durable route and its Runtime-
+// declared endpoint capability without interpreting Tool identity, arguments,
+// or policy.
+func lockExecutableToolRouteTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	toolUseEventID string,
-	tool durableToolExecution,
+	expectedCapabilities ...string,
 ) error {
-	var modelToolCallID, toolName, inputJSON, statusValue string
+	var statusValue string
 	var decision sql.NullString
+	var resultEventID sql.NullString
+	var routeCapability string
+	var terminalResultExists bool
 	err := tx.QueryRow(ctx,
-		`SELECT model_tool_call_id, tool_name, input_json, status, decision
-		   FROM session_pending_tool_uses
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND tool_use_event_id = $4
+		`SELECT route.status, route.decision, route.result_event_id,
+		        source.projection_json::jsonb ->> 'route_capability',
+		        EXISTS (
+		          SELECT 1 FROM session_events result
+		           WHERE result.workspace_id=route.workspace_id
+		             AND result.session_id=route.session_id
+		             AND result.session_thread_id=route.session_thread_id
+		             AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		             AND COALESCE(
+		                   result.payload_json::jsonb ->> 'tool_use_event_id',
+		                   result.payload_json::jsonb ->> 'tool_use_id',
+		                   result.payload_json::jsonb ->> 'mcp_tool_use_id'
+		                 ) = route.tool_use_event_id
+		        )
+		   FROM session_pending_tool_uses route
+		   JOIN session_events source
+		     ON source.workspace_id=route.workspace_id AND source.session_id=route.session_id
+		    AND source.session_thread_id=route.session_thread_id AND source.event_id=route.tool_use_event_id
+		  WHERE route.workspace_id = $1 AND route.session_id = $2 AND route.session_thread_id = $3
+		    AND route.tool_use_event_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-	).Scan(&modelToolCallID, &toolName, &inputJSON, &statusValue, &decision)
+	).Scan(&statusValue, &decision, &resultEventID, &routeCapability, &terminalResultExists)
 	if dbconnect.IsNoRows(err) {
-		switch tool.EvaluatedPermission {
-		case "allow":
-			return nil
-		case "ask", "deny":
-			return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
-		default:
-			return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
-		}
+		return status.Error(codes.FailedPrecondition, "durable Tool route is missing")
 	}
 	if err != nil {
 		return err
 	}
-	canonicalApprovalInput, _, err := canonicalRunToolInput(inputJSON)
-	if err != nil || modelToolCallID != tool.ModelToolCallID || toolName != tool.ToolName ||
-		canonicalApprovalInput != tool.InputJSON {
-		return status.Error(codes.AlreadyExists, "approved tool identity conflicts with execution")
+	if statusValue != "resolving" || !decision.Valid || decision.String != "allow" ||
+		resultEventID.Valid || terminalResultExists {
+		return status.Error(codes.FailedPrecondition, "durable Tool route is not executable")
 	}
-	switch tool.EvaluatedPermission {
-	case "allow":
-		return nil
-	case "deny":
-		return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
-	case "ask":
-		if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
-			return status.Error(codes.FailedPrecondition, "sandbox tool approval is not executable")
+	if len(expectedCapabilities) > 0 {
+		matched := false
+		for _, expected := range expectedCapabilities {
+			matched = matched || routeCapability == expected
 		}
-		return nil
-	default:
-		return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
+		if !matched {
+			return status.Error(codes.FailedPrecondition, "durable Tool route capability does not match the effect endpoint")
+		}
 	}
+	return nil
+}
+
+// lockExecutableSandboxToolRouteTx binds Sandbox admission to the capability
+// declared by Runtime for this exact Tool route.
+func lockExecutableSandboxToolRouteTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+) error {
+	return lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID, "sandbox_execute")
+}
+
+// AuthorizeWebToolExecution is the final durable first-effect gate before
+// Runtime dispatches an exact Web Tool identity to Web Connector. Web input
+// remains owned and validated by Runtime and Web Connector.
+func (s *PostgreSQLBridgeAPIStore) AuthorizeWebToolExecution(ctx context.Context, request *bridgev1.AuthorizeWebToolExecutionRequest) (*bridgev1.AuthorizeWebToolExecutionResponse, error) {
+	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
+		return nil, err
+	}
+	var response *bridgev1.AuthorizeWebToolExecutionResponse
+	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.authorize_web_tool_execution", func(tx *dbconnect.Tx) error {
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "web_execute"); err != nil {
+			if status.Code(err) == codes.FailedPrecondition {
+				response = &bridgev1.AuthorizeWebToolExecutionResponse{Outcome: &bridgev1.AuthorizeWebToolExecutionResponse_Stale{Stale: &bridgev1.WebToolExecutionStale{}}}
+				return nil
+			}
+			return err
+		}
+		response = &bridgev1.AuthorizeWebToolExecutionResponse{Outcome: &bridgev1.AuthorizeWebToolExecutionResponse_Authorized{Authorized: &bridgev1.WebToolExecutionAuthorized{}}}
+		return nil
+	})
+	if err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.AuthorizeWebToolExecutionResponse{Outcome: &bridgev1.AuthorizeWebToolExecutionResponse_Stale{Stale: &bridgev1.WebToolExecutionStale{}}}, nil
+		}
+		return nil, err
+	}
+	return response, nil
+}
+
+// lockSettleableToolRouteTx separates terminal Result authority from executor
+// admission. Both an allowed execution and a policy-owned denial may settle,
+// but a pending, cancelled, resolved, missing, or conflicting route may not.
+func lockSettleableToolRouteTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+) error {
+	var statusValue string
+	var decision sql.NullString
+	var resultEventID sql.NullString
+	err := tx.QueryRow(ctx,
+		`SELECT status, decision, result_event_id
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		    AND tool_use_event_id=$4
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+	).Scan(&statusValue, &decision, &resultEventID)
+	if dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "durable Tool settlement route is missing")
+	}
+	if err != nil {
+		return err
+	}
+	if statusValue != "resolving" || !decision.Valid ||
+		(decision.String != "allow" && decision.String != "deny") || resultEventID.Valid {
+		return status.Error(codes.FailedPrecondition, "durable Tool route is not settleable")
+	}
+	return nil
 }
 
 func sandboxExecutionIdentityMatches(existing runtimeToolResult, tool durableToolExecution) bool {
@@ -398,9 +489,6 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		if err != nil {
 			return err
 		}
-		if tool.ToolName != "memory" || tool.MCPServerName != "" {
-			return status.Error(codes.FailedPrecondition, "durable tool is not a memory operation")
-		}
 		var memoryInput memoryToolInput
 		if err := json.Unmarshal([]byte(tool.InputJSON), &memoryInput); err != nil || memoryInput.Action == "" {
 			return status.Error(codes.FailedPrecondition, "durable memory input is invalid")
@@ -417,6 +505,9 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 			}
 			response = duplicateMemoryRunResponse(existing.ResultJSON)
 			return nil
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "memory_execute"); err != nil {
+			return err
 		}
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -533,6 +624,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -554,9 +648,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			}
 			duplicate = true
 			return nil
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -613,7 +704,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			now,
 		)
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isConversationMutationStaleError(err) {
 			return &bridgev1.CommitInternalToolRepairResponse{Outcome: &bridgev1.CommitInternalToolRepairResponse_Stale{Stale: &bridgev1.CommitInternalToolRepairStale{}}}, nil
 		}
 		return nil, err
@@ -699,10 +790,11 @@ func insertInternalToolRepairEventTx(
 		return "", 0, err
 	}
 	projection := runtimeToolProjectionFromDurableTool(durableToolExecution{
-		ModelRequestID:  request.GetModelRequestId(),
-		ModelToolCallID: request.GetModelToolCallId(),
-		ToolName:        request.GetToolName(),
-		InputJSON:       request.GetCanonicalInputJson(),
+		ModelRequestID:    request.GetModelRequestId(),
+		ModelToolCallID:   request.GetModelToolCallId(),
+		ToolName:          request.GetToolName(),
+		ProviderInputJSON: request.GetCanonicalInputJson(),
+		InputJSON:         request.GetCanonicalInputJson(),
 	}, map[string]any{"type": "error", "error": errorValue})
 	projectionJSON, err := marshalBridgeJSON(projection)
 	if err != nil {

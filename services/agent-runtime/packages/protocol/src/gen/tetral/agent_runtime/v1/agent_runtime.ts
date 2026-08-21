@@ -21,6 +21,57 @@ import {
 
 export const protobufPackage = "tetral.agent_runtime.v1";
 
+export enum RecoverThreadFailure {
+  RECOVER_THREAD_FAILURE_UNSPECIFIED = 0,
+  RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH = 1,
+  RECOVER_THREAD_FAILURE_BINDING_MISMATCH = 2,
+  RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT = 3,
+  RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function recoverThreadFailureFromJSON(object: any): RecoverThreadFailure {
+  switch (object) {
+    case 0:
+    case "RECOVER_THREAD_FAILURE_UNSPECIFIED":
+      return RecoverThreadFailure.RECOVER_THREAD_FAILURE_UNSPECIFIED;
+    case 1:
+    case "RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH":
+      return RecoverThreadFailure.RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "RECOVER_THREAD_FAILURE_BINDING_MISMATCH":
+      return RecoverThreadFailure.RECOVER_THREAD_FAILURE_BINDING_MISMATCH;
+    case 3:
+    case "RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT":
+      return RecoverThreadFailure.RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT;
+    case 4:
+    case "RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED":
+      return RecoverThreadFailure.RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RecoverThreadFailure.UNRECOGNIZED;
+  }
+}
+
+export function recoverThreadFailureToJSON(object: RecoverThreadFailure): string {
+  switch (object) {
+    case RecoverThreadFailure.RECOVER_THREAD_FAILURE_UNSPECIFIED:
+      return "RECOVER_THREAD_FAILURE_UNSPECIFIED";
+    case RecoverThreadFailure.RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH:
+      return "RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH";
+    case RecoverThreadFailure.RECOVER_THREAD_FAILURE_BINDING_MISMATCH:
+      return "RECOVER_THREAD_FAILURE_BINDING_MISMATCH";
+    case RecoverThreadFailure.RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT:
+      return "RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT";
+    case RecoverThreadFailure.RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED:
+      return "RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED";
+    case RecoverThreadFailure.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export enum AcceptInputRejectionReason {
   ACCEPT_INPUT_REJECTION_REASON_UNSPECIFIED = 0,
   ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE = 1,
@@ -630,6 +681,41 @@ export function cleanupSessionFailureToJSON(object: CleanupSessionFailure): stri
   }
 }
 
+export interface RecoverThreadRequest {
+  workspaceId: string;
+  sessionId: string;
+  sessionThreadId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  targetPodUid: string;
+  sourceEventId: string;
+  recoveryLeaseRef: RecoveryLeaseRef | undefined;
+}
+
+export interface RecoveryLeaseRef {
+  jobId: string;
+  leaseToken: string;
+  partitionKey: string;
+  dedupeKey: string;
+}
+
+export interface RecoverThreadResponse {
+  accepted?: RecoverThreadAccepted | undefined;
+  duplicate?: RecoverThreadDuplicate | undefined;
+  rejected?: RecoverThreadRejected | undefined;
+}
+
+export interface RecoverThreadAccepted {
+}
+
+export interface RecoverThreadDuplicate {
+}
+
+export interface RecoverThreadRejected {
+  reason: RecoverThreadFailure;
+  retryable: boolean;
+}
+
 export interface AcceptInputRequest {
   workspaceId: string;
   sessionId: string;
@@ -860,6 +946,605 @@ export interface CleanupSessionRejected {
   reason: CleanupSessionFailure;
   retryable: boolean;
 }
+
+function createBaseRecoverThreadRequest(): RecoverThreadRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    sessionThreadId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    sourceEventId: "",
+    recoveryLeaseRef: undefined,
+  };
+}
+
+export const RecoverThreadRequest: MessageFns<RecoverThreadRequest> = {
+  encode(message: RecoverThreadRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.sessionThreadId !== "") {
+      writer.uint32(26).string(message.sessionThreadId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(34).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(40).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(50).string(message.targetPodUid);
+    }
+    if (message.sourceEventId !== "") {
+      writer.uint32(58).string(message.sourceEventId);
+    }
+    if (message.recoveryLeaseRef !== undefined) {
+      RecoveryLeaseRef.encode(message.recoveryLeaseRef, writer.uint32(74).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoverThreadRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoverThreadRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.sourceEventId = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.recoveryLeaseRef = RecoveryLeaseRef.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RecoverThreadRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      sourceEventId: isSet(object.sourceEventId)
+        ? globalThis.String(object.sourceEventId)
+        : isSet(object.source_event_id)
+        ? globalThis.String(object.source_event_id)
+        : "",
+      recoveryLeaseRef: isSet(object.recoveryLeaseRef)
+        ? RecoveryLeaseRef.fromJSON(object.recoveryLeaseRef)
+        : isSet(object.recovery_lease_ref)
+        ? RecoveryLeaseRef.fromJSON(object.recovery_lease_ref)
+        : undefined,
+    };
+  },
+
+  toJSON(message: RecoverThreadRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.sourceEventId !== "") {
+      obj.sourceEventId = message.sourceEventId;
+    }
+    if (message.recoveryLeaseRef !== undefined) {
+      obj.recoveryLeaseRef = RecoveryLeaseRef.toJSON(message.recoveryLeaseRef);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoverThreadRequest>, I>>(base?: I): RecoverThreadRequest {
+    return RecoverThreadRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoverThreadRequest>, I>>(object: I): RecoverThreadRequest {
+    const message = createBaseRecoverThreadRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.sourceEventId = object.sourceEventId ?? "";
+    message.recoveryLeaseRef = (object.recoveryLeaseRef !== undefined && object.recoveryLeaseRef !== null)
+      ? RecoveryLeaseRef.fromPartial(object.recoveryLeaseRef)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRecoveryLeaseRef(): RecoveryLeaseRef {
+  return { jobId: "", leaseToken: "", partitionKey: "", dedupeKey: "" };
+}
+
+export const RecoveryLeaseRef: MessageFns<RecoveryLeaseRef> = {
+  encode(message: RecoveryLeaseRef, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.jobId !== "") {
+      writer.uint32(10).string(message.jobId);
+    }
+    if (message.leaseToken !== "") {
+      writer.uint32(18).string(message.leaseToken);
+    }
+    if (message.partitionKey !== "") {
+      writer.uint32(26).string(message.partitionKey);
+    }
+    if (message.dedupeKey !== "") {
+      writer.uint32(34).string(message.dedupeKey);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoveryLeaseRef {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoveryLeaseRef();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.jobId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.leaseToken = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.partitionKey = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.dedupeKey = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RecoveryLeaseRef {
+    return {
+      jobId: isSet(object.jobId)
+        ? globalThis.String(object.jobId)
+        : isSet(object.job_id)
+        ? globalThis.String(object.job_id)
+        : "",
+      leaseToken: isSet(object.leaseToken)
+        ? globalThis.String(object.leaseToken)
+        : isSet(object.lease_token)
+        ? globalThis.String(object.lease_token)
+        : "",
+      partitionKey: isSet(object.partitionKey)
+        ? globalThis.String(object.partitionKey)
+        : isSet(object.partition_key)
+        ? globalThis.String(object.partition_key)
+        : "",
+      dedupeKey: isSet(object.dedupeKey)
+        ? globalThis.String(object.dedupeKey)
+        : isSet(object.dedupe_key)
+        ? globalThis.String(object.dedupe_key)
+        : "",
+    };
+  },
+
+  toJSON(message: RecoveryLeaseRef): unknown {
+    const obj: any = {};
+    if (message.jobId !== "") {
+      obj.jobId = message.jobId;
+    }
+    if (message.leaseToken !== "") {
+      obj.leaseToken = message.leaseToken;
+    }
+    if (message.partitionKey !== "") {
+      obj.partitionKey = message.partitionKey;
+    }
+    if (message.dedupeKey !== "") {
+      obj.dedupeKey = message.dedupeKey;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoveryLeaseRef>, I>>(base?: I): RecoveryLeaseRef {
+    return RecoveryLeaseRef.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoveryLeaseRef>, I>>(object: I): RecoveryLeaseRef {
+    const message = createBaseRecoveryLeaseRef();
+    message.jobId = object.jobId ?? "";
+    message.leaseToken = object.leaseToken ?? "";
+    message.partitionKey = object.partitionKey ?? "";
+    message.dedupeKey = object.dedupeKey ?? "";
+    return message;
+  },
+};
+
+function createBaseRecoverThreadResponse(): RecoverThreadResponse {
+  return { accepted: undefined, duplicate: undefined, rejected: undefined };
+}
+
+export const RecoverThreadResponse: MessageFns<RecoverThreadResponse> = {
+  encode(message: RecoverThreadResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== undefined) {
+      RecoverThreadAccepted.encode(message.accepted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      RecoverThreadDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      RecoverThreadRejected.encode(message.rejected, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoverThreadResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoverThreadResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.accepted = RecoverThreadAccepted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = RecoverThreadDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.rejected = RecoverThreadRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RecoverThreadResponse {
+    return {
+      accepted: isSet(object.accepted) ? RecoverThreadAccepted.fromJSON(object.accepted) : undefined,
+      duplicate: isSet(object.duplicate) ? RecoverThreadDuplicate.fromJSON(object.duplicate) : undefined,
+      rejected: isSet(object.rejected) ? RecoverThreadRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: RecoverThreadResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== undefined) {
+      obj.accepted = RecoverThreadAccepted.toJSON(message.accepted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = RecoverThreadDuplicate.toJSON(message.duplicate);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = RecoverThreadRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoverThreadResponse>, I>>(base?: I): RecoverThreadResponse {
+    return RecoverThreadResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoverThreadResponse>, I>>(object: I): RecoverThreadResponse {
+    const message = createBaseRecoverThreadResponse();
+    message.accepted = (object.accepted !== undefined && object.accepted !== null)
+      ? RecoverThreadAccepted.fromPartial(object.accepted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? RecoverThreadDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? RecoverThreadRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRecoverThreadAccepted(): RecoverThreadAccepted {
+  return {};
+}
+
+export const RecoverThreadAccepted: MessageFns<RecoverThreadAccepted> = {
+  encode(_: RecoverThreadAccepted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoverThreadAccepted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoverThreadAccepted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): RecoverThreadAccepted {
+    return {};
+  },
+
+  toJSON(_: RecoverThreadAccepted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoverThreadAccepted>, I>>(base?: I): RecoverThreadAccepted {
+    return RecoverThreadAccepted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoverThreadAccepted>, I>>(_: I): RecoverThreadAccepted {
+    const message = createBaseRecoverThreadAccepted();
+    return message;
+  },
+};
+
+function createBaseRecoverThreadDuplicate(): RecoverThreadDuplicate {
+  return {};
+}
+
+export const RecoverThreadDuplicate: MessageFns<RecoverThreadDuplicate> = {
+  encode(_: RecoverThreadDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoverThreadDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoverThreadDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): RecoverThreadDuplicate {
+    return {};
+  },
+
+  toJSON(_: RecoverThreadDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoverThreadDuplicate>, I>>(base?: I): RecoverThreadDuplicate {
+    return RecoverThreadDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoverThreadDuplicate>, I>>(_: I): RecoverThreadDuplicate {
+    const message = createBaseRecoverThreadDuplicate();
+    return message;
+  },
+};
+
+function createBaseRecoverThreadRejected(): RecoverThreadRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const RecoverThreadRejected: MessageFns<RecoverThreadRejected> = {
+  encode(message: RecoverThreadRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoverThreadRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoverThreadRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RecoverThreadRejected {
+    return {
+      reason: isSet(object.reason) ? recoverThreadFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: RecoverThreadRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = recoverThreadFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoverThreadRejected>, I>>(base?: I): RecoverThreadRejected {
+    return RecoverThreadRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoverThreadRejected>, I>>(object: I): RecoverThreadRejected {
+    const message = createBaseRecoverThreadRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
 
 function createBaseAcceptInputRequest(): AcceptInputRequest {
   return {
@@ -4771,6 +5456,16 @@ export const CleanupSessionRejected: MessageFns<CleanupSessionRejected> = {
 
 export type AgentRuntimePodServiceService = typeof AgentRuntimePodServiceService;
 export const AgentRuntimePodServiceService = {
+  recoverThread: {
+    path: "/tetral.agent_runtime.v1.AgentRuntimePodService/RecoverThread" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RecoverThreadRequest): Buffer => Buffer.from(RecoverThreadRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RecoverThreadRequest => RecoverThreadRequest.decode(value),
+    responseSerialize: (value: RecoverThreadResponse): Buffer =>
+      Buffer.from(RecoverThreadResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RecoverThreadResponse => RecoverThreadResponse.decode(value),
+  },
   acceptInput: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput" as const,
     requestStream: false as const,
@@ -4849,6 +5544,7 @@ export const AgentRuntimePodServiceService = {
 } as const;
 
 export interface AgentRuntimePodServiceServer extends UntypedServiceImplementation {
+  recoverThread: handleUnaryCall<RecoverThreadRequest, RecoverThreadResponse>;
   acceptInput: handleUnaryCall<AcceptInputRequest, AcceptInputResponse>;
   acceptAgentMail: handleUnaryCall<AcceptAgentMailRequest, AcceptAgentMailResponse>;
   acceptTaskNotification: handleUnaryCall<AcceptTaskNotificationRequest, AcceptTaskNotificationResponse>;
@@ -4859,6 +5555,21 @@ export interface AgentRuntimePodServiceServer extends UntypedServiceImplementati
 }
 
 export interface AgentRuntimePodServiceClient extends Client {
+  recoverThread(
+    request: RecoverThreadRequest,
+    callback: (error: ServiceError | null, response: RecoverThreadResponse) => void,
+  ): ClientUnaryCall;
+  recoverThread(
+    request: RecoverThreadRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RecoverThreadResponse) => void,
+  ): ClientUnaryCall;
+  recoverThread(
+    request: RecoverThreadRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RecoverThreadResponse) => void,
+  ): ClientUnaryCall;
   acceptInput(
     request: AcceptInputRequest,
     callback: (error: ServiceError | null, response: AcceptInputResponse) => void,

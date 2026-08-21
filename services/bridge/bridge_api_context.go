@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -33,6 +34,12 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.load_context", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
+		}
+		if request.GetRecoveryLeaseRef() != nil {
+			phase = "recovery_authority"
+			if err := verifyRuntimeRecoveryLoadAuthorityTx(ctx, tx, request.GetScope(), request.GetRecoveryLeaseRef()); err != nil {
+				return err
+			}
 		}
 		phase = "thread_validation"
 		if err := verifyRuntimeThreadScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -64,6 +71,54 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 		return nil, err
 	}
 	return response, nil
+}
+
+func verifyRuntimeRecoveryLoadAuthorityTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	ref *bridgev1.RecoveryLeaseRef,
+) error {
+	if ref.GetJobId() == "" || ref.GetLeaseToken() == "" || ref.GetPartitionKey() == "" || ref.GetDedupeKey() == "" ||
+		ref.GetPartitionKey() != queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()) {
+		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
+	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+		WorkspaceID: workspace.ID(scope.GetWorkspaceId()),
+		JobID:       ref.GetJobId(), LeaseToken: ref.GetLeaseToken(), Kind: queue.KindRuntimeRecovery,
+		PartitionKey: ref.GetPartitionKey(), DedupeKey: ref.GetDedupeKey(),
+	})
+	if err != nil {
+		return err
+	}
+	if !live {
+		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+	}
+	var payloadJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+		    AND kind=$4 AND partition_key=$5 AND dedupe_key=$6 AND status='leased'`,
+		scope.GetWorkspaceId(), ref.GetJobId(), ref.GetLeaseToken(), queue.KindRuntimeRecovery,
+		ref.GetPartitionKey(), ref.GetDedupeKey(),
+	).Scan(&payloadJSON); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+		}
+		return err
+	}
+	var payload struct {
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		SourceEventID   string `json:"source_event_id"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.SessionID != scope.GetSessionId() ||
+		payload.SessionThreadID != scope.GetSessionThreadId() || payload.SourceEventID == "" ||
+		ref.GetDedupeKey() != queue.FormatRuntimeRecoveryDedupeKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), payload.SourceEventID) {
+		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
+	return nil
 }
 
 func logRuntimeContextLoadRejected(logger *slog.Logger, scope *bridgev1.RuntimeScope, phase string, rejection error) {
@@ -124,11 +179,9 @@ type bridgeLoadContextPayload struct {
 }
 
 type bridgeLoadContextMessageDescriptor struct {
-	Kind            string
-	MessageID       string
-	MessageSequence int64
-	SourceEventID   *string
-	ModelRequestID  *string
+	Kind           string
+	SourceEventID  *string
+	ModelRequestID *string
 }
 
 type bridgeRuntimeContextEntry struct {
@@ -276,6 +329,11 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
+	pendingModelRequestIDs, pendingToolUseEventIDs := loadContextPendingToolIdentities(
+		pendingToolUses,
+		pendingSandboxExecutions,
+	)
+	pendingModelRequestIDsJSON, _ := json.Marshal(pendingModelRequestIDs)
 	pendingAttachments, err := loadThreadPendingAttachmentsTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
@@ -304,9 +362,10 @@ func loadThreadContextJSONTx(
 			   AND session_id = $2
 			   AND session_thread_id = $3
 			   AND kind = 'compaction'
+		), pending_requests AS (
+			SELECT jsonb_array_elements_text($4::jsonb) AS model_request_id
 		)
 			SELECT m.kind,
-			       m.message_id,
 			       m.sequence,
 			       m.data_json,
 			       m.source_event_id,
@@ -321,80 +380,48 @@ func loadThreadContextJSONTx(
 			              AND ended.model_request_id = m.model_request_id
 			              AND ended.type = 'span.model_request_end'
 			         ) THEN 'open'
-			         WHEN EXISTS (
-			           SELECT 1 FROM session_events ended
-			            WHERE ended.workspace_id = m.workspace_id
-			              AND ended.session_id = m.session_id
-			              AND ended.session_thread_id = m.session_thread_id
-			              AND ended.model_request_id = m.model_request_id
-			              AND ended.type = 'span.model_request_end'
-			              AND ended.payload_json::jsonb ->> 'error_kind' = 'runtime_pod_lost'
-			         ) THEN 'pod_lost'
 			         ELSE 'sealed'
 			       END AS context_state
-			       , COALESCE((
-			         SELECT ended.payload_json::jsonb ->> 'error_kind'
-			           FROM session_events ended
-			          WHERE ended.workspace_id = m.workspace_id
-			            AND ended.session_id = m.session_id
-			            AND ended.session_thread_id = m.session_thread_id
-			            AND ended.model_request_id = m.model_request_id
-			            AND ended.type = 'span.model_request_end'
-			          ORDER BY ended.sequence DESC
-			          LIMIT 1
-			       ), '') AS request_error_kind
-			       , EXISTS (
-			         SELECT 1 FROM session_events rescheduled
-			          WHERE rescheduled.workspace_id = m.workspace_id
-			            AND rescheduled.session_id = m.session_id
-			            AND rescheduled.session_thread_id = m.session_thread_id
-			            AND rescheduled.model_request_id = m.model_request_id
-			            AND rescheduled.type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
-			       ) AS request_rescheduled
-			       , (
-			         (
-			           EXISTS (
-			             SELECT 1 FROM session_events tool_use
-			              WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
-			                AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
-			                AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
-			           )
-			           OR EXISTS (
-			             SELECT 1 FROM session_events repair
-			              WHERE repair.workspace_id=m.workspace_id AND repair.session_id=m.session_id
-			                AND repair.session_thread_id=m.session_thread_id AND repair.model_request_id=m.model_request_id
-			                AND repair.type='agent.tool_result'
-			                AND repair.payload_json::jsonb ->> 'repair_kind'='invalid_tool'
-			           )
-			         )
-			         AND NOT EXISTS (
-			           SELECT 1 FROM session_events tool_use
-			            WHERE tool_use.workspace_id=m.workspace_id AND tool_use.session_id=m.session_id
-			              AND tool_use.session_thread_id=m.session_thread_id AND tool_use.model_request_id=m.model_request_id
-			              AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
-			              AND NOT EXISTS (
-			                SELECT 1 FROM session_events tool_result
-			                 WHERE tool_result.workspace_id=tool_use.workspace_id AND tool_result.session_id=tool_use.session_id
-			                   AND tool_result.session_thread_id=tool_use.session_thread_id
-			                   AND tool_result.type IN ('agent.tool_result','agent.mcp_tool_result')
-			                   AND COALESCE(
-			                         tool_result.payload_json::jsonb ->> 'tool_use_event_id',
-			                         tool_result.payload_json::jsonb ->> 'tool_use_id',
-			                         tool_result.payload_json::jsonb ->> 'mcp_tool_use_id'
-			                       )=tool_use.event_id
-			              )
-			         )
-			       ) AS complete_tool_repair
 		  FROM session_messages m
 		  CROSS JOIN latest_compaction c
 		 WHERE m.workspace_id = $1
 		   AND m.session_id = $2
 		   AND m.session_thread_id = $3
 		   AND (c.boundary_sequence IS NULL OR m.sequence >= c.boundary_sequence)
+		   AND (
+		     m.kind <> 'assistant'
+		     OR (
+		       m.model_request_id IS NOT NULL
+		       AND (
+		         NOT EXISTS (
+		           SELECT 1 FROM session_events ended
+		            WHERE ended.workspace_id = m.workspace_id
+		              AND ended.session_id = m.session_id
+		              AND ended.session_thread_id = m.session_thread_id
+		              AND ended.model_request_id = m.model_request_id
+		              AND ended.type = 'span.model_request_end'
+		         )
+		         OR EXISTS (
+		           SELECT 1 FROM session_events ended
+		            WHERE ended.workspace_id = m.workspace_id
+		              AND ended.session_id = m.session_id
+		              AND ended.session_thread_id = m.session_thread_id
+		              AND ended.model_request_id = m.model_request_id
+		              AND ended.type = 'span.model_request_end'
+		              AND ended.payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}' = m.sequence::text
+		         )
+		         OR EXISTS (
+		           SELECT 1 FROM pending_requests pending
+		            WHERE pending.model_request_id = m.model_request_id
+		         )
+		       )
+		     )
+		   )
 		 ORDER BY m.sequence ASC`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
+		string(pendingModelRequestIDsJSON),
 	)
 	if err != nil {
 		return "", err
@@ -405,26 +432,18 @@ func loadThreadContextJSONTx(
 	messageDescriptors := make([]bridgeLoadContextMessageDescriptor, 0)
 	for rows.Next() {
 		var kind string
-		var messageID string
 		var sequence int64
 		var raw string
 		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
 		var contextState string
-		var requestErrorKind string
-		var requestRescheduled bool
-		var completeToolRepair bool
 		if err := rows.Scan(
 			&kind,
-			&messageID,
 			&sequence,
 			&raw,
 			&sourceEventID,
 			&modelRequestID,
 			&contextState,
-			&requestErrorKind,
-			&requestRescheduled,
-			&completeToolRepair,
 		); err != nil {
 			return "", err
 		}
@@ -434,9 +453,6 @@ func loadThreadContextJSONTx(
 		parts, err := decodeStoredRuntimeContextParts(raw)
 		if err != nil {
 			return "", err
-		}
-		if contextState == "pod_lost" && requestErrorKind == "runtime_pod_lost" && !requestRescheduled && completeToolRepair {
-			contextState = "sealed"
 		}
 		switch contextState {
 		case "sealed":
@@ -454,22 +470,15 @@ func loadThreadContextJSONTx(
 				MessageSequence: sequence,
 				Parts:           parts,
 			}
-		case "pod_lost":
-			// A Pod-loss draft has no hot owner. Only the complete Tool repair
-			// promoted above is safe provider-visible history.
 		default:
 			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
 		}
-		descriptor := bridgeLoadContextMessageDescriptor{
-			Kind:            kind,
-			MessageID:       messageID,
-			MessageSequence: sequence,
+		descriptor := bridgeLoadContextMessageDescriptor{Kind: kind}
+		if sourceEventID.Valid {
+			descriptor.SourceEventID = &sourceEventID.String
 		}
 		if modelRequestID.Valid {
 			descriptor.ModelRequestID = &modelRequestID.String
-		}
-		if sourceEventID.Valid {
-			descriptor.SourceEventID = &sourceEventID.String
 		}
 		messageDescriptors = append(messageDescriptors, descriptor)
 	}
@@ -479,7 +488,15 @@ func loadThreadContextJSONTx(
 	if err := rows.Close(); err != nil {
 		return "", err
 	}
-	turnFacts, err := loadThreadTurnFactsTx(ctx, tx, scope, messageDescriptors, durableTurnID)
+	turnFacts, err := loadThreadTurnFactsTx(
+		ctx,
+		tx,
+		scope,
+		messageDescriptors,
+		durableTurnID,
+		pendingModelRequestIDs,
+		pendingToolUseEventIDs,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -496,6 +513,33 @@ func loadThreadContextJSONTx(
 		PendingAttachments:       pendingAttachments,
 		PendingAgentMail:         pendingAgentMail,
 	})
+}
+
+func loadContextPendingToolIdentities(
+	pendingToolUses []bridgeLoadContextPendingTool,
+	pendingSandboxExecutions []bridgeLoadContextSandboxExecution,
+) ([]string, []string) {
+	modelRequestIDs := make([]string, 0, len(pendingToolUses)+len(pendingSandboxExecutions))
+	toolUseEventIDs := make([]string, 0, len(pendingToolUses)+len(pendingSandboxExecutions))
+	seenRequests := make(map[string]struct{})
+	seenTools := make(map[string]struct{})
+	appendIdentity := func(modelRequestID, toolUseEventID string) {
+		if _, exists := seenRequests[modelRequestID]; !exists {
+			seenRequests[modelRequestID] = struct{}{}
+			modelRequestIDs = append(modelRequestIDs, modelRequestID)
+		}
+		if _, exists := seenTools[toolUseEventID]; !exists {
+			seenTools[toolUseEventID] = struct{}{}
+			toolUseEventIDs = append(toolUseEventIDs, toolUseEventID)
+		}
+	}
+	for _, pending := range pendingToolUses {
+		appendIdentity(pending.ModelRequestID, pending.ToolUseEventID)
+	}
+	for _, execution := range pendingSandboxExecutions {
+		appendIdentity(execution.ModelRequestID, execution.ToolUseEventID)
+	}
+	return modelRequestIDs, toolUseEventIDs
 }
 
 func loadThreadContextPrefixTx(

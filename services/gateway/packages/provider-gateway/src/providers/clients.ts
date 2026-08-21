@@ -254,6 +254,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
         abortSignal: input.abortSignal,
         overallTimeoutMs: input.request.limits?.timeoutMs,
         timeouts: this.providerFetchTimeouts,
+        onTransportActivity: input.onTransportActivity,
       }),
     };
     const provider = this.anthropicProviderFactory(providerSettings);
@@ -450,6 +451,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
         abortSignal: input.abortSignal,
         overallTimeoutMs: input.request.limits?.timeoutMs,
         timeouts: this.providerFetchTimeouts,
+        onTransportActivity: input.onTransportActivity,
       }),
     };
     const provider = this.openAICompatibleProviderFactory(providerSettings);
@@ -553,6 +555,7 @@ function officialOpenAIProviderFetch(
     abortSignal: input.abortSignal,
     overallTimeoutMs: input.request.limits?.timeoutMs,
     timeouts,
+    onTransportActivity: input.onTransportActivity,
   }));
 }
 
@@ -565,6 +568,7 @@ function providerFetch(options: {
   readonly abortSignal?: AbortSignal | undefined;
   readonly overallTimeoutMs?: number | undefined;
   readonly timeouts: ProviderFetchTimeoutOptions;
+  readonly onTransportActivity?: (() => void) | undefined;
 }): FetchFunction {
   const allowedRoots = allowedProviderURLRoots(options.allowedBaseURLs);
   const targetFetch = options.fetchImpl ?? fetch;
@@ -581,7 +585,11 @@ function providerFetch(options: {
       for (let redirectCount = 0; redirectCount <= MaxProviderRedirects; redirectCount += 1) {
         const response = await targetFetch(new Request(request.clone(), { signal: timers.signal, redirect: "manual" }));
         if (!providerRedirectStatus(response.status)) {
-          return wrapProviderResponseBody(response, timers);
+          return wrapProviderResponseBody(
+            response,
+            timers,
+            options.onTransportActivity,
+          );
         }
         const location = response.headers.get("location");
         if (location === null || location.length === 0) {
@@ -807,6 +815,7 @@ function providerFetchTimers(input: {
 function wrapProviderResponseBody(
   response: Response,
   timers: ReturnType<typeof providerFetchTimers>,
+  onTransportActivity: (() => void) | undefined,
 ): Response {
   if (response.body === null) {
     timers.clearAll();
@@ -832,6 +841,7 @@ function wrapProviderResponseBody(
           return;
         }
         timers.armChunk();
+        onTransportActivity?.();
         controller.enqueue(chunk.value);
       } catch (error) {
         timers.clearAll();
@@ -964,7 +974,9 @@ function toAIAssistantPart(part: LoweredAssistantContentPart): ModelMessageForRo
       return {
         type: "reasoning",
         text: part.text,
-        providerOptions: mergePartProviderOptions(part.providerMetadata, part.providerOptions) as ProviderOptions,
+        providerOptions: reasoningProviderOptionsForSDK(
+          mergePartProviderOptions(part.providerMetadata, part.providerOptions),
+        ) as ProviderOptions,
       };
     case "tool-call":
       return {
@@ -975,6 +987,30 @@ function toAIAssistantPart(part: LoweredAssistantContentPart): ModelMessageForRo
         ...(part.providerOptions !== undefined ? { providerOptions: part.providerOptions as ProviderOptions } : {}),
       };
   }
+}
+
+// ProviderContext carries provider-native durable metadata. The OpenAI AI SDK
+// exposes the same Responses value under its typed camel-case adapter field;
+// translate only that spelling at the adapter boundary after lowering has
+// already removed stateless item identities.
+function reasoningProviderOptionsForSDK(
+  providerOptions: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const openAI = providerOptions.openai;
+  if (typeof openAI !== "object" || openAI === null || Array.isArray(openAI)) {
+    return providerOptions;
+  }
+  const { encrypted_content: encryptedContent, ...rest } = openAI as Readonly<Record<string, unknown>>;
+  if (typeof encryptedContent !== "string") {
+    return providerOptions;
+  }
+  return {
+    ...providerOptions,
+    openai: {
+      ...rest,
+      reasoningEncryptedContent: encryptedContent,
+    },
+  };
 }
 
 function toAIToolResultPart(part: LoweredToolResultPart): ModelMessageForRole<"tool">["content"][number] {
@@ -1113,7 +1149,9 @@ function classifiedProviderError(providerId: GatewayCatalogProviderId, error: un
   const input = providerFailureInput(error);
   return new ProviderKeyFailureError(
     classifyProviderFailure(providerId, input),
-    input.networkError === true || input.timeout === true ? "transport_failure" : "http_rejection",
+    input.networkError === true || input.timeout === true || input.statusCode === undefined
+      ? "transport_failure"
+      : "http_rejection",
   );
 }
 

@@ -69,7 +69,8 @@ func TestRunWebSearchAndOpenSumBackendUsage(t *testing.T) {
 		fetchOutcome:  BackendOutcome{Kind: BackendSuccess, Tokens: 29, Requests: 1},
 	}
 	key := []byte("binding-verifier-key-with-at-least-32-bytes")
-	now := func() time.Time { return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC) }
+	nowValue := time.Now().UTC()
+	now := func() time.Time { return nowValue }
 	service := NewService(blob.NewFakeBlobStore(), backend, NewBindingVerifier(key, now), NewMetrics(), now, nil)
 	request := validRequest(t)
 	request.Input = &providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "example", Domains: []string{"example.com", "example.org"}}}, Open: []*providergatewayv1.WebOpenRequest{{Url: strptr("https://example.com/")}}}
@@ -161,7 +162,8 @@ func TestRunWebFailedSearchDoesNotCountSuccessfulBackendRequests(t *testing.T) {
 			t.Parallel()
 			backend := &fakeBackend{searchOutcome: test.outcome}
 			key := []byte("binding-verifier-key-with-at-least-32-bytes")
-			now := func() time.Time { return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC) }
+			nowValue := time.Now().UTC()
+			now := func() time.Time { return nowValue }
 			service := NewService(blob.NewFakeBlobStore(), backend, NewBindingVerifier(key, now), NewMetrics(), now, nil)
 			request := validRequest(t)
 			request.Input = &providergatewayv1.WebToolInput{
@@ -195,7 +197,8 @@ func TestRunWebValidationErrorHasUsageAndNoSideEffects(t *testing.T) {
 	t.Parallel()
 	backend := &fakeBackend{}
 	key := []byte("binding-verifier-key-with-at-least-32-bytes")
-	now := func() time.Time { return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC) }
+	nowValue := time.Now().UTC()
+	now := func() time.Time { return nowValue }
 	service := NewService(blob.NewFakeBlobStore(), backend, NewBindingVerifier(key, now), NewMetrics(), now, nil)
 	request := validRequest(t)
 	request.Input = &providergatewayv1.WebToolInput{}
@@ -215,10 +218,18 @@ func TestRunWebValidationErrorHasUsageAndNoSideEffects(t *testing.T) {
 
 type fakeBackend struct {
 	calls         int
+	maxAttempts   int
 	search        []SearchHit
 	page          Page
 	searchOutcome BackendOutcome
 	fetchOutcome  BackendOutcome
+}
+
+func (f *fakeBackend) MaxAttemptsPerCall() int {
+	if f.maxAttempts == 0 {
+		return 1
+	}
+	return f.maxAttempts
 }
 
 func (f *fakeBackend) Search(context.Context, string, []string) ([]SearchHit, BackendOutcome) {

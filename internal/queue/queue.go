@@ -25,6 +25,7 @@ const (
 
 const (
 	KindRuntimeInput                = "runtime_input"
+	KindRuntimeRecovery             = "runtime_recovery"
 	KindRuntimeConfigUpdate         = "runtime_config_update"
 	KindCleanupSession              = "cleanup_session"
 	KindSessionDeleteCleanup        = "session_delete_cleanup"
@@ -630,6 +631,27 @@ func FormatRuntimeInputDedupeKey(workspaceID workspace.ID, sessionID string, run
 	return "runtime_input:" + string(workspaceID) + ":" + sessionID + ":" + runtimeInputID
 }
 
+func FormatRuntimeRecoveryDedupeKey(workspaceID workspace.ID, sessionID string, sourceEventID string) string {
+	return formatQueueDedupeKey(KindRuntimeRecovery, workspaceID, sessionID, sourceEventID)
+}
+
+func NewRuntimeRecoveryEnqueueRequest(workspaceID workspace.ID, sessionID string, sessionThreadID string, sourceEventID string, now time.Time) (EnqueueRequest, error) {
+	payload, err := json.Marshal(struct {
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		SourceEventID   string `json:"source_event_id"`
+	}{sessionID, sessionThreadID, sourceEventID})
+	if err != nil {
+		return EnqueueRequest{}, err
+	}
+	return EnqueueRequest{
+		ID: NewJobID(), WorkspaceID: workspaceID, Kind: KindRuntimeRecovery,
+		PartitionKey:   FormatSessionPartitionKey(workspaceID, sessionID),
+		DedupeKey:      FormatRuntimeRecoveryDedupeKey(workspaceID, sessionID, sourceEventID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: DefaultMaxAttempts, Now: now,
+	}, nil
+}
+
 func FormatTaskNotificationRuntimeInputID(taskID string) string {
 	if taskID == "" {
 		return ""
@@ -796,12 +818,14 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 		return err
 	}
 	payload := payloadTokens(rawPayload)
-	workspaceID, ok := payload["workspace_id"]
-	if !ok || workspaceID == "" {
-		return &ValidationError{Message: "payload_json missing workspace_id"}
-	}
-	if workspaceID != string(request.WorkspaceID) {
-		return &ValidationError{Message: "payload workspace_id must match queue workspace_id"}
+	if request.Kind != KindRuntimeRecovery {
+		workspaceID, ok := payload["workspace_id"]
+		if !ok || workspaceID == "" {
+			return &ValidationError{Message: "payload_json missing workspace_id"}
+		}
+		if workspaceID != string(request.WorkspaceID) {
+			return &ValidationError{Message: "payload workspace_id must match queue workspace_id"}
+		}
 	}
 	if IsSandboxJobKind(request.Kind) && request.MaxAttempts <= 0 {
 		return &ValidationError{Message: "max_attempts must be positive for " + request.Kind}
@@ -812,6 +836,18 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 		}
 	}
 	switch request.Kind {
+	case KindRuntimeRecovery:
+		if err := validatePayloadKeys(rawPayload, "session_id", "session_thread_id", "source_event_id"); err != nil {
+			return err
+		}
+		sessionID, sourceEventID, err := requiredPayloadTokens(payload, "session_id", "source_event_id")
+		if err != nil {
+			return err
+		}
+		if _, err := requiredPayloadToken(payload, "session_thread_id"); err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeRecoveryDedupeKey(request.WorkspaceID, sessionID, sourceEventID))
 	case KindRuntimeInput:
 		runtimeInputKeys := []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "event_ids", "sequence_from", "sequence_to", "input_kind"}
 		if err := validatePayloadKeys(rawPayload, runtimeInputKeys...); err != nil {
@@ -1262,7 +1298,7 @@ func payloadStringArray(raw map[string]json.RawMessage, key string, allowEmpty b
 
 func isKnownKind(kind string) bool {
 	switch kind {
-	case KindRuntimeInput, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindEnvironmentBuild, KindEnvironmentReadyFanout,
+	case KindRuntimeInput, KindRuntimeRecovery, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindEnvironmentBuild, KindEnvironmentReadyFanout,
 		KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
 		KindSandboxOutputCapture, KindSandboxOutputCaptureCleanup, KindSandboxMemoryProjection, KindSandboxBackgroundCommand, KindSandboxBackgroundReconcile:
 		return true

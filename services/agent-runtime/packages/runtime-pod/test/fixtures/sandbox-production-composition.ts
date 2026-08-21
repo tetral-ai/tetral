@@ -1,10 +1,22 @@
 import { readFile } from "node:fs/promises";
+import type { RuntimeJsonValue } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { ProviderStreamAccumulatorWriter } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import { ProviderStreamAccumulator } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import { ContextManager } from "@tetral/agent-runtime-core/src/session/context-manager.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
-import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import type { RuntimeToolRegistrationState } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import {
-	createToolCatalog,
-	lookupToolEntry,
-} from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
+	distinctProviderInputForEntry,
+	publicInputForRegisteredTool,
+	publicToolEventForEntry,
+	registerRuntimeToolCall,
+	routeCapabilityForEntry,
+	runtimeToolSettlement,
+} from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
+import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
+import { ToolScheduler } from "@tetral/agent-runtime-core/src/tools/tool-scheduler.js";
 import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 
@@ -22,15 +34,124 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly targetPodUid: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
-	readonly toolUseEventId: string;
+	readonly toolName: string;
+	readonly providerInput: RuntimeJsonValue;
 };
 
-const entry = lookupToolEntry(
-	createToolCatalog({ family: "gpt" }),
-	"exec_command",
+const source = { providerId: "openai", modelId: "gpt-5" } as const;
+const writer = new BridgeAPIEventWriter({
+	address: input.address,
+	tokenPath: input.tokenPath,
+	sleep: async () => {},
+});
+const processorWriter: ProviderStreamAccumulatorWriter = {
+	appendEvent: async (
+		event,
+		_source,
+		declaration,
+		modelRequestId,
+	) => {
+		const envelope = {
+			workspaceId: input.workspaceId,
+			sessionId: input.sessionId,
+			sessionThreadId: input.sessionThreadId,
+			bindingId: input.bindingId,
+			bindingGeneration: input.bindingGeneration,
+			targetPodUid: input.targetPodUid,
+			writeId: `rwrite_${input.modelRequestId}_${input.modelToolCallId}`,
+			event,
+			...(modelRequestId === undefined ? {} : { modelRequestId }),
+			...(declaration ?? {}),
+		};
+		let result = await writer.append(envelope);
+		for (
+			let attempt = 1;
+			!result.ok && attempt < SessionEventWriterRetryPolicy.attempts;
+			attempt += 1
+		) {
+			result = await writer.append(envelope);
+		}
+		return result;
+	},
+	settleToolResult: writer.settleToolResult.bind(writer),
+	commitInternalToolRepair: async () => {
+		throw new Error("internal repair is outside the Sandbox composition");
+	},
+};
+const contextManager = new ContextManager(input.sessionId);
+const processor = new ProviderStreamAccumulator({
+	modelRequestId: input.modelRequestId,
+	requestId: `req_${input.modelRequestId}`,
+	workspaceId: input.workspaceId,
+	sessionId: input.sessionId,
+	sessionThreadId: input.sessionThreadId,
+	bindingId: input.bindingId,
+	bindingGeneration: input.bindingGeneration,
+	targetPodUid: input.targetPodUid,
+	contextOwner: contextManager,
+	writer: processorWriter,
+});
+const providerEvent = {
+	type: "tool-call" as const,
+	id: input.modelToolCallId,
+	toolName: input.toolName,
+	input: input.providerInput,
+	inputPreview: {
+		preview: JSON.stringify(input.providerInput),
+		truncated: false,
+	},
+};
+const processed = await processor.process({ ...source, event: providerEvent });
+if (!processed.ok)
+	throw new Error("Runtime rejected the production provider Tool event");
+
+const toolScheduler = new ToolScheduler();
+const toolCatalog = createToolCatalog({ family: "gpt" });
+const registrationState: RuntimeToolRegistrationState = {
+	executionPolicy: { toolCatalog },
+	toolScheduler,
+	toolEntries: {},
+	nextToolModelOrder: 0,
+};
+const registered = registerRuntimeToolCall(
+	input.modelRequestId,
+	registrationState,
+	providerEvent,
 );
-if (entry === undefined)
-	throw new Error("exec_command is unavailable in the production catalog");
+if (registered.type !== "registered")
+	throw new Error("Runtime catalog rejected the production provider Tool event");
+const job = toolScheduler
+	.jobs()
+	.find((candidate) => candidate.id === registered.jobId);
+const entry = registrationState.toolEntries[registered.jobId];
+if (job === undefined || entry === undefined)
+	throw new Error("Runtime catalog omitted the registered production Tool job");
+const gateDecision = evaluateToolGate({
+	catalog: toolCatalog,
+	toolName: job.name,
+	approvalMode: "full_access",
+});
+if (gateDecision.type !== "run")
+	throw new Error("Runtime gate did not authorize the production Tool job");
+if (
+	!processor.reservePublicToolUse(
+		source,
+		job.modelToolCallId,
+		publicToolEventForEntry(entry),
+		distinctProviderInputForEntry(entry, input.providerInput),
+		routeCapabilityForEntry(entry),
+	)
+)
+	throw new Error("Runtime could not reserve the production Tool declaration");
+const committed = await processor.commitPublicToolUse(
+	source,
+	job.modelToolCallId,
+	publicInputForRegisteredTool(job.input),
+	gateDecision.evaluatedPermission,
+);
+if (!committed.ok)
+	throw new Error("Runtime could not durably commit the production Tool declaration");
+
 const request: RuntimeToolExecutionRequest = {
 	workspaceId: input.workspaceId,
 	sessionId: input.sessionId,
@@ -41,10 +162,11 @@ const request: RuntimeToolExecutionRequest = {
 	targetPodUid: input.targetPodUid,
 	modelRequestId: input.modelRequestId,
 	modelToolCallId: input.modelToolCallId,
-	modelOrder: 0,
-	toolUseEventId: input.toolUseEventId,
+	modelOrder: job.modelOrder,
+	toolUseEventId: committed.toolUseEventId,
 	entry,
-	input: { cmd: "printf production-boundary" },
+	input: job.input,
+	retainedContextEntries: [],
 	abortSignal: new AbortController().signal,
 };
 const runner = new RuntimePodToolRunner({
@@ -58,11 +180,6 @@ const result = await runner.runTool(request);
 if (result.type !== "completed")
 	throw new Error(`Sandbox production result was ${result.type}`);
 
-const writer = new BridgeAPIEventWriter({
-	address: input.address,
-	tokenPath: input.tokenPath,
-	sleep: async () => {},
-});
 const settlement = await writer.settleToolResult({
 	workspaceId: input.workspaceId,
 	sessionId: input.sessionId,
@@ -71,9 +188,16 @@ const settlement = await writer.settleToolResult({
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
 	settlement: {
-		toolUseEventId: input.toolUseEventId,
+		toolUseEventId: committed.toolUseEventId,
 		outcome: runtimeToolSettlement(result),
 	},
 });
 if (!settlement.ok) throw settlement.error;
-process.stdout.write(JSON.stringify({ result, settlement: settlement.result }));
+process.stdout.write(
+	JSON.stringify({
+		toolUseEventId: committed.toolUseEventId,
+		canonicalExecutionInput: job.input,
+		result,
+		settlement: settlement.result,
+	}),
+);

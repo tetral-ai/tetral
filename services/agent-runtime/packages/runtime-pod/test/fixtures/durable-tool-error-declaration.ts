@@ -83,6 +83,7 @@ const request: RuntimeToolExecutionRequest = {
 	toolUseEventId: input.toolUseEventId,
 	entry,
 	input: { file_path: "/missing.txt" },
+	retainedContextEntries: [],
 	abortSignal: new AbortController().signal,
 };
 const runner = new RuntimePodToolRunner({

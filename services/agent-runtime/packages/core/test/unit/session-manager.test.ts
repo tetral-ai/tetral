@@ -10,6 +10,7 @@ import type {
 	RuntimeMetricsSink,
 } from "../../src/runtime/metrics.js";
 import * as SessionManager from "../../src/session/session-manager.js";
+import type { FailedRunCloseoutResult } from "../../src/thread-loop/closeout.js";
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
 import type {
@@ -306,7 +307,8 @@ function threadLoopService(
 	overrides: Pick<ThreadLoop.Interface, "run"> & Partial<ThreadLoop.Interface>,
 ): ThreadLoop.Interface {
 	return ThreadLoop.Service.of({
-		closeFailedRun: () => Effect.succeed({ type: "landed" }),
+		closeFailedRun: () =>
+			Effect.succeed({ type: "landed", disposition: "terminal" }),
 		seedRuntimeModel: () => {},
 		installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 		installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),
@@ -1324,7 +1326,17 @@ describe("SessionManager", () => {
 		const reviewerThreadId = "thrd_reviewer_failed_idle";
 		const siblingThreadId = "thrd_reviewer_sibling";
 		const parentThreadId = "thrd_reviewer_parent";
-		const threadLoop = makeControlledThreadLoop();
+		let closeoutCalls = 0;
+		const threadLoop = makeControlledThreadLoop({
+			closeFailedRun: () =>
+				Effect.sync(() => {
+					closeoutCalls += 1;
+					return {
+						type: "landed" as const,
+						disposition: "continuation" as const,
+					};
+				}),
+		});
 		await withSessionManager(
 			sessionManagerLayer(threadLoop),
 			async (manager) => {
@@ -1390,6 +1402,7 @@ describe("SessionManager", () => {
 					terminal: true,
 					timedOut: false,
 				});
+				expect(closeoutCalls).toBe(1);
 
 				expect(
 					await Effect.runPromise(
@@ -1896,7 +1909,7 @@ describe("SessionManager", () => {
 							requestEnd: {
 								eventId: "sevt_idle_interrupt_end",
 								isError: false,
-								rescheduled: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 							},
 							toolMembers: [
 								{
@@ -3045,6 +3058,341 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("recovery joining another installation fences a reclaimed installer before publication", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const command = threadControl("sesn_recovery_install_join");
+		let reportFirstLoad = (): void => undefined;
+		let releaseFirstLoad = (): void => undefined;
+		const firstLoadStarted = new Promise<void>((resolve) => {
+			reportFirstLoad = resolve;
+		});
+		const firstLoadGate = new Promise<void>((resolve) => {
+			releaseFirstLoad = resolve;
+		});
+		const recovery = {
+			jobId: "qjob_current_recovery",
+			leaseToken: "lease_current_recovery",
+			partitionKey: "session:wksp_test:sesn_recovery_install_join",
+			dedupeKey:
+				"runtime_recovery:wksp_test:sesn_recovery_install_join:evt_recovery_install_join",
+		};
+		const oldRecovery = {
+			...recovery,
+			leaseToken: "lease_reclaimed_recovery",
+		};
+		const observedRecoveries: Array<typeof recovery | undefined> = [];
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (loadCommand, loadOptions) => {
+					observedRecoveries.push(loadOptions?.recovery);
+					if (observedRecoveries.length === 1) {
+						reportFirstLoad();
+						await firstLoadGate;
+					}
+					return {
+						...loadCommand,
+						runtimeBindingToken: "runtime-binding-token-recovery-install-join",
+						contextEntries: [
+							RuntimeContextEntrySchema.parse({
+								messageSequence: 1,
+								contextKind: "user",
+								parts: [
+									{
+										type: "text",
+										text:
+											loadOptions?.recovery?.leaseToken === recovery.leaseToken
+												? "current recovery context"
+												: "reclaimed recovery context",
+									},
+								],
+							}),
+						],
+						thread: { role: "main", visibility: "public", status: "idle" },
+					};
+				},
+			}),
+			async (manager) => {
+				const reclaimedInstall = Effect.runPromise(
+					manager.ensureThreadInstalled(command, {
+						loadOptions: { recovery: oldRecovery },
+					}),
+				);
+				await firstLoadStarted;
+				const currentRecovery = Effect.runPromise(
+					manager.ensureThreadInstalled(command, {
+						startPendingWork: true,
+						loadOptions: { recovery },
+					}),
+				);
+				releaseFirstLoad();
+				await expect(reclaimedInstall).resolves.toMatchObject({
+					ok: false,
+					reason: "context_load_failed",
+				});
+				await expect(currentRecovery).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				expect(observedRecoveries).toEqual([oldRecovery, recovery]);
+				await expect(
+					Effect.runPromise(manager.inspectThread(command)),
+				).resolves.toMatchObject({
+					ok: true,
+					observed: true,
+					entries: [
+						expect.objectContaining({
+							parts: [{ type: "text", text: "current recovery context" }],
+						}),
+					],
+				});
+			},
+		);
+	});
+
+	test("recovery does not inherit another installation failure", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const command = threadControl("sesn_recovery_install_failure");
+		let reportFirstLoad = (): void => undefined;
+		let releaseFirstLoad = (): void => undefined;
+		const firstLoadStarted = new Promise<void>((resolve) => {
+			reportFirstLoad = resolve;
+		});
+		const firstLoadGate = new Promise<void>((resolve) => {
+			releaseFirstLoad = resolve;
+		});
+		const recovery = {
+			jobId: "qjob_current_recovery_failure",
+			leaseToken: "lease_current_recovery_failure",
+			partitionKey: "session:wksp_test:sesn_recovery_install_failure",
+			dedupeKey:
+				"runtime_recovery:wksp_test:sesn_recovery_install_failure:evt_recovery_install_failure",
+		};
+		let loadCount = 0;
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (loadCommand, loadOptions) => {
+					loadCount += 1;
+					if (loadCount === 1) {
+						reportFirstLoad();
+						await firstLoadGate;
+						throw new Error("unrelated installation failed");
+					}
+					expect(loadOptions?.recovery).toEqual(recovery);
+					return {
+						...loadCommand,
+						runtimeBindingToken: "runtime-binding-token-recovery-install-failure",
+						contextEntries: [],
+						thread: { role: "main", visibility: "public", status: "idle" },
+					};
+				},
+			}),
+			async (manager) => {
+				const unrelatedInstall = Effect.runPromise(
+					manager.ensureThreadInstalled(command),
+				);
+				await firstLoadStarted;
+				const currentRecovery = Effect.runPromise(
+					manager.ensureThreadInstalled(command, {
+						startPendingWork: true,
+						loadOptions: { recovery },
+					}),
+				);
+				releaseFirstLoad();
+				await expect(unrelatedInstall).resolves.toMatchObject({
+					ok: false,
+					reason: "context_load_failed",
+				});
+				await expect(currentRecovery).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				expect(loadCount).toBe(2);
+			},
+		);
+	});
+
+	test("thread close admits behind prior work without retaining the Session gate", async () => {
+		const sessionId = "sesn_close_command_order";
+		const mainThreadId = `thrd_${sessionId}`;
+		const siblingThreadId = "thrd_close_command_sibling";
+		const toolUseEventId = "sevt_close_command_tool";
+		let reportCommitStarted = (): void => undefined;
+		let releaseCommit = (): void => undefined;
+		const commitStarted = new Promise<void>((resolve) => {
+			reportCommitStarted = resolve;
+		});
+		const commitGate = new Promise<void>((resolve) => {
+			releaseCommit = resolve;
+		});
+		const threadLoop = makeControlledThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.startTestRunThroughAcceptedInput(sessionId),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForRuns(threadLoop, 1);
+				const session = threadLoop.runs[0]?.session;
+				expect(session).toBeDefined();
+				threadLoop.runs[0]?.release();
+				await waitForThreadIdle(manager, sessionId, mainThreadId);
+				session?.state.installThreadTurn(
+					{
+						pendingInputContextSequences: [],
+						request: {
+							modelRequestId: "mreq_close_command_order",
+							requestStartEventId: "sevt_close_command_request",
+							requestKind: "agent_provider_request",
+							contextThroughMessageSequence: 0,
+							toolMembers: [
+								{
+									memberKind: "public_tool_use",
+									modelToolCallId: "call_close_command_tool",
+									toolUseEventId,
+									toolName: "Write",
+								},
+							],
+						},
+					},
+					{
+						routes: [
+							{
+								toolUseEventId,
+								disposition: "requires_user_action",
+							},
+						],
+					},
+				);
+				session?.state.recordPendingApprovalToolJob({
+					toolUseEventId,
+					modelRequestId: "mreq_close_command_order",
+					source: { providerId: "fake", modelId: "fake-chat" },
+					assistantMessageSequence: pendingApprovalAssistantEntry(
+						sessionId,
+						toolUseEventId,
+					).messageSequence,
+					toolPart: pendingApprovalToolPart(sessionId, toolUseEventId),
+					entry: {} as never,
+					job: {
+						id: "mreq_close_command_order:call_close_command_tool",
+						modelOrder: 0,
+						toolUseEventId,
+						modelToolCallId: "call_close_command_tool",
+						kind: "builtin",
+						name: "Write",
+						route: { kind: "gateway", operation: "RunWeb" },
+						input: { file_path: "close-order.txt" },
+						runPolicy: { mode: "parallel_safe", conflictKeys: null },
+						gateState: "waiting_approval",
+						approvalSource: "user",
+					},
+				});
+				expect(
+					await Effect.runPromise(
+						manager.preloadThread({
+							...threadControl(
+								sessionId,
+								"rin_close_order_sibling_preload",
+								siblingThreadId,
+							),
+							runtimeBindingToken: "runtime-binding-token-close-order",
+							contextEntries: [],
+							thread: {
+								parentThreadId: mainThreadId,
+								role: "subagent",
+								visibility: "public",
+								status: "idle",
+							},
+						}),
+					),
+				).toMatchObject({ ok: true, applied: true });
+
+				const confirmationAheadOfClose = Effect.runPromise(
+					manager.resolveToolConfirmation(
+						sessionId,
+						{
+							...threadControl(sessionId),
+							runtimeInputId: "rin_close_order_confirmation",
+							toolUseEventId,
+							decision: "allow",
+						},
+						async (declaration) => {
+							reportCommitStarted();
+							await commitGate;
+							return buildRuntimeControlCommitResult(
+								"tool_confirmation",
+								declaration,
+							);
+						},
+					),
+				);
+				await commitStarted;
+				const mainClose = Effect.runPromise(
+					manager.markThreadClosed(
+						threadControl(
+							sessionId,
+							"rin_close_order_main_close",
+							mainThreadId,
+						),
+					),
+				);
+				await waitForCondition(async () => {
+					const snapshot = await Effect.runPromise(
+						manager.inspectThread(
+							threadControl(
+								sessionId,
+								"rin_close_order_main_inspect",
+								mainThreadId,
+							),
+						),
+					);
+					return (
+						snapshot.ok &&
+						"observed" in snapshot &&
+						snapshot.observed &&
+						snapshot.status === "closed_for_runtime"
+					);
+				}, "main close admission");
+				await expect(
+					Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(
+								sessionId,
+								"rin_close_order_late",
+								mainThreadId,
+							),
+						),
+					),
+				).resolves.toMatchObject({ ok: false, reason: "thread_busy" });
+
+				const siblingClose = Effect.runPromise(
+					manager.markThreadClosed(
+						threadControl(
+							sessionId,
+							"rin_close_order_sibling_close",
+							siblingThreadId,
+						),
+					),
+				);
+				await expect(siblingClose).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				releaseCommit();
+				await expect(confirmationAheadOfClose).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				await expect(mainClose).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+			},
+		);
+	});
+
 	test("manifest update observation follows the effective generation and skips nonresident ACKs", async () => {
 		const manifestUpdates: SessionManager.RuntimeMCPManifestUpdateEvent[] = [];
 		const threadLoop = makeControlledThreadLoop();
@@ -3293,7 +3641,7 @@ describe("SessionManager", () => {
 							requestEnd: {
 								eventId: "sevt_request_end_1",
 								isError: false,
-								rescheduled: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 							},
 							toolMembers: [
 								{
@@ -5146,7 +5494,7 @@ describe("SessionManager", () => {
 		});
 	});
 
-	test("value-level failed exit releases queued completion mail for cold redelivery", async () => {
+	test("value-level continuation hands queued completion mail to the next hot owner", async () => {
 		const threadLoop = makeControlledThreadLoop();
 		const sessionID = "sesn_failed_agent_mail_redelivery";
 		const threadID = "thrd_failed_agent_mail_redelivery_main";
@@ -5203,36 +5551,13 @@ describe("SessionManager", () => {
 				if (failure.type !== "failed") {
 					throw new Error("expected failed run fixture");
 				}
-				threadLoop.runs[0]?.release({ type: "failed", error: failure.error });
-				await waitForCondition(async () => {
-					const snapshot = await Effect.runPromise(
-						manager.inspectThread(
-							threadControl(
-								sessionID,
-								"rin_inspect_failed_agent_mail_release",
-								threadID,
-							),
-						),
-					);
-					return snapshot.ok && !snapshot.observed;
-				}, "failed agent-mail recipient release");
-
-				expect(
-					await Effect.runPromise(
-						manager.preloadThread({
-							...threadControl(
-								sessionID,
-								"rin_reload_failed_agent_mail_redelivery",
-								threadID,
-							),
-							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
-							thread,
-							pendingAgentMail: [mail],
-						}),
-					),
-				).toMatchObject({ ok: true, applied: true });
+				threadLoop.runs[0]?.release({
+					type: "failed",
+					error: failure.error,
+					closeoutDisposition: "continuation",
+				});
 				await waitForRuns(threadLoop, 2);
+				expect(threadLoop.runs[1]?.session).toBe(threadLoop.runs[0]?.session);
 				expect(
 					threadLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId,
 				).toBe(mail.runtimeInputId);
@@ -5242,6 +5567,266 @@ describe("SessionManager", () => {
 				});
 			},
 		);
+	});
+
+	test("a user input accepted during failed-run closeout starts the next hot run", async () => {
+		let duplicateCloseoutCalls = 0;
+		const threadLoop = makeControlledThreadLoop({
+			closeFailedRun: () =>
+				Effect.sync(() => {
+					duplicateCloseoutCalls += 1;
+					return {
+						type: "landed" as const,
+						disposition: "continuation" as const,
+					};
+				}),
+		});
+		const sessionID = "sesn_failed_turn_follow_up";
+		const threadID = "thrd_failed_turn_follow_up";
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionID, "rin_failed_turn_initial", threadID),
+						),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForRuns(threadLoop, 1);
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionID, "rin_failed_turn_follow_up", threadID),
+						),
+					),
+				).toMatchObject({ ok: true, started: false });
+
+				const failure = fatalRunResult("crashed");
+				if (failure.type !== "failed") {
+					throw new Error("expected failed run fixture");
+				}
+				threadLoop.runs[0]?.release({
+					type: "failed",
+					error: failure.error,
+					closeoutDisposition: "continuation",
+				});
+				await waitForRuns(threadLoop, 2);
+				expect(threadLoop.runs[1]?.session).toBe(threadLoop.runs[0]?.session);
+				expect(
+					threadLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId,
+				).toBe("rin_failed_turn_follow_up");
+				expect(duplicateCloseoutCalls).toBe(0);
+				threadLoop.runs[1]?.release();
+			},
+		);
+	});
+
+	test("child close fences failed-closeout continuation before and after its decision", async () => {
+		for (const closeOrdering of ["before_continuation", "after_continuation"] as const) {
+			let closeoutStartedResolve: () => void = () => {};
+			let closeoutReleaseResolve: () => void = () => {};
+			const closeoutStarted = new Promise<void>((resolve) => {
+				closeoutStartedResolve = resolve;
+			});
+			const closeoutRelease = new Promise<void>((resolve) => {
+				closeoutReleaseResolve = resolve;
+			});
+			const threadLoop = makeControlledCrashThreadLoop("die", {
+				closeFailedRun: () =>
+					Effect.promise(async () => {
+						closeoutStartedResolve();
+						await closeoutRelease;
+						return {
+							type: "landed" as const,
+							disposition: "continuation" as const,
+						};
+					}),
+			});
+			const sessionId = `sesn_child_closeout_${closeOrdering}`;
+			const childId = `thrd_child_closeout_${closeOrdering}`;
+
+			await withSessionManager(
+				sessionManagerLayer(threadLoop),
+				async (manager) => {
+					expect(
+						await Effect.runPromise(
+							manager.preloadThread({
+								...threadControl(sessionId, "rin_preload", childId),
+								runtimeBindingToken: "runtime-binding-token",
+								contextEntries: [],
+								thread: {
+									parentThreadId: `thrd_${sessionId}`,
+									role: "subagent",
+									visibility: "public",
+									taskName: "closing-child",
+									agentType: "worker",
+									status: "idle",
+								},
+							}),
+						),
+					).toMatchObject({ ok: true, applied: true });
+					expect(
+						await Effect.runPromise(
+							manager.acceptInput(
+								acceptedInput(sessionId, "rin_initial", childId),
+							),
+						),
+					).toMatchObject({ ok: true, started: true });
+					await waitForCrashRuns(threadLoop, 1);
+					expect(
+						await Effect.runPromise(
+							manager.acceptInput(
+								acceptedInput(sessionId, "rin_follower", childId),
+							),
+						),
+					).toMatchObject({ ok: true, started: false });
+
+					threadLoop.runs[0]?.releaseCrash();
+					await closeoutStarted;
+					let closePromise: Promise<SessionManager.ThreadLifecycleResult>;
+					if (closeOrdering === "before_continuation") {
+						closePromise = Effect.runPromise(
+							manager.markThreadClosed(
+								threadControl(sessionId, "rin_close", childId),
+							),
+						);
+						await Promise.resolve();
+						closeoutReleaseResolve();
+					} else {
+						closeoutReleaseResolve();
+						await waitForCrashRuns(threadLoop, 2);
+						closePromise = Effect.runPromise(
+							manager.markThreadClosed(
+								threadControl(sessionId, "rin_close", childId),
+							),
+						);
+					}
+					expect(await closePromise).toMatchObject({ ok: true, applied: true });
+					expect(threadLoop.runs).toHaveLength(
+						closeOrdering === "before_continuation" ? 1 : 2,
+					);
+					expect(
+						await Effect.runPromise(
+							manager.inspectThread(
+								threadControl(sessionId, "rin_inspect", childId),
+							),
+						),
+					).toMatchObject({ observed: false });
+				},
+			);
+		}
+	});
+
+	test("durable failed-closeout disposition owns every accepted follower family", async () => {
+		for (const disposition of ["continuation", "terminal"] as const) {
+			for (const inputKind of [
+				"messages",
+				"inter_agent_message",
+				"task_notification",
+				"rejection",
+			] as const) {
+				let closeoutStartedResolve: () => void = () => {};
+				let closeoutReleaseResolve: () => void = () => {};
+				const closeoutStarted = new Promise<void>((resolve) => {
+					closeoutStartedResolve = resolve;
+				});
+				const closeoutRelease = new Promise<void>((resolve) => {
+					closeoutReleaseResolve = resolve;
+				});
+				const threadLoop = makeControlledCrashThreadLoop("die", {
+					closeFailedRun: () =>
+						Effect.promise(async () => {
+							closeoutStartedResolve();
+							await closeoutRelease;
+							return {
+								type: "landed",
+								disposition,
+							} as unknown as FailedRunCloseoutResult;
+						}),
+				});
+				const sessionId = `sesn_closeout_${disposition}_${inputKind}`;
+				const threadId = `thrd_closeout_${disposition}_${inputKind}`;
+
+				await withSessionManager(
+					sessionManagerLayer(threadLoop),
+					async (manager) => {
+						expect(
+							await Effect.runPromise(
+								manager.acceptInput(
+									acceptedInput(sessionId, `rin_initial_${inputKind}`, threadId),
+								),
+							),
+						).toMatchObject({ ok: true, started: true });
+						await waitForCrashRuns(threadLoop, 1);
+						threadLoop.runs[0]?.session.state.acknowledgeAcceptedInput(
+							`rin_initial_${inputKind}`,
+						);
+						threadLoop.runs[0]?.releaseCrash();
+						await closeoutStarted;
+
+						const runtimeInputId = `rin_follower_${disposition}_${inputKind}`;
+						if (inputKind === "task_notification") {
+							expect(
+								await Effect.runPromise(
+									manager.commitTaskNotification(sessionId, {
+										...threadControl(sessionId, runtimeInputId, threadId),
+										inputOrder: 2,
+										taskId: `task_${disposition}`,
+										sourceToolUseEventId: `sevt_${disposition}`,
+										status: "completed",
+										notificationJson: '{"status":"completed"}',
+									}),
+								),
+							).toMatchObject({ ok: true, applied: true });
+						} else {
+							let follower: RuntimeAcceptedInputState;
+							if (inputKind === "messages") {
+								follower = acceptedInput(sessionId, runtimeInputId, threadId);
+							} else if (inputKind === "inter_agent_message") {
+								follower = agentMailInput(
+									sessionId,
+									runtimeInputId,
+									threadId,
+									`thrd_source_${disposition}`,
+									{ role: "main", visibility: "public", status: "running" },
+								);
+							} else {
+								const { contentJson: _contentJson, ...scope } = acceptedInput(
+									sessionId,
+									runtimeInputId,
+									threadId,
+								);
+								follower = {
+									...scope,
+									kind: "rejection",
+									reasonCode: "runtime_command_rejected",
+								};
+							}
+							expect(
+								await Effect.runPromise(manager.acceptInput(follower)),
+							).toMatchObject({ ok: true, started: false });
+						}
+
+						closeoutReleaseResolve();
+						if (disposition === "continuation") {
+							await waitForCrashRuns(threadLoop, 2);
+							expect(
+								threadLoop.runs[1]?.session.state.peekAcceptedInput(),
+							).toMatchObject({ kind: inputKind, runtimeInputId });
+						} else {
+							await waitForCondition(async () => {
+								const snapshot = await Effect.runPromise(
+									manager.inspectThread(threadControl(sessionId, "rin_inspect", threadId)),
+								);
+								return snapshot.ok && !snapshot.observed;
+							}, "terminal failed-closeout release");
+							expect(threadLoop.runs).toHaveLength(1);
+						}
+					},
+				);
+			}
+		}
 	});
 
 	test("discard-requested interruption removes hot state before the next command", async () => {
@@ -5565,7 +6150,10 @@ describe("SessionManager", () => {
 				Effect.promise(async () => {
 					closeoutStartedResolve();
 					await closeoutRelease;
-					return { type: "landed" as const };
+					return {
+						type: "landed" as const,
+						disposition: "terminal" as const,
+					};
 				}),
 		});
 		const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
@@ -5650,7 +6238,10 @@ describe("SessionManager", () => {
 									code: "unavailable",
 								}),
 							}
-						: { type: "landed" as const };
+						: {
+								type: "landed" as const,
+								disposition: "terminal" as const,
+							};
 				}),
 		});
 		const layer = sessionManagerLayer(threadLoop, {
@@ -5696,7 +6287,10 @@ describe("SessionManager", () => {
 				Effect.sync(() => {
 					attempts += 1;
 					return ledgerAvailable
-						? { type: "landed" as const }
+						? {
+								type: "landed" as const,
+								disposition: "terminal" as const,
+							}
 						: {
 								type: "retry" as const,
 								error: normalizeSessionEventWriterError({
@@ -6049,7 +6643,10 @@ describe("SessionManager", () => {
 				Effect.promise(async () => {
 					closeoutStartedResolve();
 					await closeoutRelease;
-					return { type: "landed" as const };
+					return {
+						type: "landed" as const,
+						disposition: "terminal" as const,
+					};
 				}),
 		});
 
@@ -6134,6 +6731,7 @@ describe("SessionManager", () => {
 		const sessionId = "sesn_close_tree";
 		const childId = "thrd_close_tree_child";
 		const grandchildId = "thrd_close_tree_grandchild";
+		const siblingId = "thrd_close_tree_sibling";
 
 		await withSessionManager(layer, async (manager) => {
 			const threads = [
@@ -6157,6 +6755,18 @@ describe("SessionManager", () => {
 						role: "subagent" as const,
 						visibility: "public" as const,
 						taskName: "grandchild",
+						agentType: "worker" as const,
+						status: "idle" as const,
+					},
+					},
+				{
+					id: siblingId,
+					runtimeInputId: "rin_close_tree_sibling",
+					metadata: {
+						parentThreadId: "thrd_close_tree_main",
+						role: "subagent" as const,
+						visibility: "public" as const,
+						taskName: "sibling",
 						agentType: "worker" as const,
 						status: "idle" as const,
 					},
@@ -6188,7 +6798,7 @@ describe("SessionManager", () => {
 					started: true,
 				});
 			}
-			await waitForCondition(() => runs.length === 2, "child subtree runs");
+			await waitForCondition(() => runs.length === 3, "child and sibling runs");
 
 			expect(
 				await Effect.runPromise(
@@ -6228,6 +6838,17 @@ describe("SessionManager", () => {
 			expect(interruptedThreadIds.sort()).toEqual(
 				[childId, grandchildId].sort(),
 			);
+			expect(
+				await Effect.runPromise(
+					manager.inspectThread(
+						threadControl(
+							sessionId,
+							"rin_close_tree_sibling_inspect",
+							siblingId,
+						),
+					),
+				),
+			).toMatchObject({ observed: true, status: "running" });
 		});
 	});
 

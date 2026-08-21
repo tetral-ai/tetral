@@ -102,7 +102,7 @@ describe("anthropic request lowering", () => {
     }))).toThrow("does not support freeform tool declarations");
   });
 
-  test("anthropic-content-normalization drops empty text and unsigned empty reasoning while preserving signed reasoning", () => {
+  test("anthropic-content-normalization drops empty text and unsigned empty reasoning while preserving only declared signed reasoning", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
       context: [
         {
@@ -125,14 +125,13 @@ describe("anthropic request lowering", () => {
     expect(assistant).toMatchObject({
       role: "assistant",
       content: [
-        { type: "text", text: " " },
         { type: "reasoning", text: "", providerMetadata: { anthropic: { signature: "sig_1" } } },
       ],
     });
     expect(lowered.messages).toHaveLength(2);
   });
 
-  test("L3 gives a signed reasoning-only assistant message a companion text part", () => {
+  test("signed reasoning-only history emits no invented Assistant text", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
       context: [{
         role: ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT,
@@ -144,7 +143,6 @@ describe("anthropic request lowering", () => {
       role: "assistant",
       content: [
         { type: "reasoning", text: "thinking", providerMetadata: { anthropic: { signature: "sig_1" } } },
-        { type: "text", text: " " },
       ],
     });
   });

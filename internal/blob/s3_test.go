@@ -209,6 +209,35 @@ func TestS3BlobStorePutBuildsObjectInputWithCallerSuppliedSize(t *testing.T) {
 	}
 }
 
+func TestS3BlobStoreCompareAndSwapSendsExactIfMatch(t *testing.T) {
+	const (
+		bucket = "tetral-bucket"
+		key    = "default/session/thread/jobs/event.job"
+		etag   = "claim-etag"
+	)
+	body := []byte("completed job")
+	store := blob.NewS3BlobStoreFromAPI(stubS3API{
+		putObject: func(ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+			if got := aws.ToString(in.Bucket); got != bucket {
+				t.Errorf("Bucket = %q; want %q", got, bucket)
+			}
+			if got := aws.ToString(in.Key); got != key {
+				t.Errorf("Key = %q; want %q", got, key)
+			}
+			if got := aws.ToString(in.IfMatch); got != `"claim-etag"` {
+				t.Errorf("IfMatch = %q; want quoted ETag", got)
+			}
+			if in.IfNoneMatch != nil {
+				t.Errorf("IfNoneMatch = %q; want unset", aws.ToString(in.IfNoneMatch))
+			}
+			return &s3.PutObjectOutput{}, nil
+		},
+	}, bucket)
+	if err := store.CompareAndSwap(context.Background(), key, etag, bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatalf("CompareAndSwap: %v", err)
+	}
+}
+
 func TestS3BlobStoreCopyObjectBuildsCreateOnlyProviderCopyInput(t *testing.T) {
 	const (
 		bucket         = "tetral-bucket"

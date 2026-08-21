@@ -72,6 +72,7 @@ func TestPostgreSQLAcceptanceTimeTaskNotificationParkingLogsCommittedCustody(t *
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	if _, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
 		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
+		TargetChildThreadId: childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}); err != nil {
 		t.Fatalf("admit close fence: %v", err)
 	}
@@ -152,6 +153,7 @@ func TestPostgreSQLPrepareTaskNotificationParksQueuedCustodyBeforeRuntimeResolut
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	if _, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
 		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
+		TargetChildThreadId: childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}); err != nil {
 		t.Fatalf("admit close fence: %v", err)
 	}
@@ -208,6 +210,7 @@ func TestPostgreSQLChildCloseAdmissionParksQueuedTaskNotificationAndCancelsQueue
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.AdmitChildInterruptRequest{
 		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
+		TargetChildThreadId: childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}
 	first, err := store.AdmitChildInterrupt(context.Background(), request)
 	if err != nil || first.GetCommitted() == nil {

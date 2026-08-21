@@ -273,8 +273,8 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	).Scan(&waitFailureCount); err != nil {
 		t.Fatalf("count repaired wait result: %v", err)
 	}
-	if waitFailureCount != 1 {
-		t.Fatalf("repaired wait results = %d; want 1", waitFailureCount)
+	if waitFailureCount != 0 {
+		t.Fatalf("repaired wait results = %d; want no synthetic Result", waitFailureCount)
 	}
 
 	current, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
@@ -446,6 +446,7 @@ func seedRuntimePodLostDeliveryFixture(
 		"call_"+fixture.toolUseEventID,
 		toolName,
 	)
+	seedBridgeAPIAllowedToolRoute(t, db, "default", fixture.sessionID, fixture.parentThreadID, fixture.toolUseEventID)
 	sequence++
 	if withSent {
 		messageJSON := bridgePublicMessageJSONForTest(t, "hello worker")
@@ -471,6 +472,13 @@ func seedRuntimePodLostDeliveryFixture(
 	if withTerminal {
 		payload := fmt.Sprintf(`{"type":"agent.tool_result","tool_use_event_id":%q,"content":[{"type":"text","text":"existing terminal"}],"is_error":false}`, fixture.toolUseEventID)
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_result_"+fixture.toolUseEventID, sequence, "agent.tool_result", payload, "public", true)
+		if _, err := db.ExecContext(context.Background(), `UPDATE session_pending_tool_uses
+			SET status='resolved',result_event_id=$5,resolved_at=$6,updated_at=$6
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
+			"default", fixture.sessionID, fixture.parentThreadID, fixture.toolUseEventID,
+			"evt_result_"+fixture.toolUseEventID, fixture.now); err != nil {
+			t.Fatalf("resolve existing delivery Tool route: %v", err)
+		}
 		sequence++
 	}
 	if withRequestEnd {

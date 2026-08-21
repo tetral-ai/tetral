@@ -31,7 +31,10 @@ export interface ContextLoader {
 	 * Reads one complete durable-fact baseline for a ThreadEntry.
 	 * A residency never calls this operation again after installation.
 	 */
-	readonly loadThreadContext?: (command: RuntimeThreadAddressState) => Promise<{
+	readonly loadThreadContext?: (
+		command: RuntimeThreadAddressState,
+		options?: RuntimeContextLoadOptions,
+	) => Promise<{
 		readonly contextEntries: readonly RuntimeContextEntry[];
 		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
 		readonly turnFacts: ThreadTurnLoadFacts;
@@ -66,6 +69,18 @@ export interface ContextLoader {
 		command: RuntimeThreadAddressState,
 		sourceThreadId: string,
 	) => Promise<RuntimeLoadedAgentMail | undefined>;
+}
+
+/** One-use durable authority for a pod-loss cold load. */
+export interface RuntimeRecoveryLoadAuthority {
+	readonly jobId: string;
+	readonly leaseToken: string;
+	readonly partitionKey: string;
+	readonly dedupeKey: string;
+}
+
+export interface RuntimeContextLoadOptions {
+	readonly recovery?: RuntimeRecoveryLoadAuthority | undefined;
 }
 
 /** Result of committing one accepted command before mutating its hot thread state. */

@@ -13,6 +13,7 @@ import { credentials, status } from "@grpc/grpc-js";
 import type {
 	AcceptedInputCommitResult,
 	ContextLoader,
+	RuntimeContextLoadOptions,
 	RuntimeLoadedAgentMail,
 	RuntimeLoadedPendingToolUse,
 } from "@tetral/agent-runtime-core/src/context/context-loader.js";
@@ -99,9 +100,12 @@ import type {
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	AgentRuntimeBridgeServiceClient,
+	ApprovalReviewerCloseSettlementKind,
+	RuntimeToolEventKind,
 	WriteEventRequest as WriteEventRequestMessage,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
+	ApprovalReviewerThreadClose,
 	ApprovalReviewerThreadCreation,
 	RuntimeApprovalReviewerThreadCreator,
 } from "./approval-reviewer.js";
@@ -618,7 +622,7 @@ export class BridgeAPIApprovalReviewerThreadCreator
 	}
 
 	/** Closes the reviewer child thread and releases local scope only after Bridge acknowledges it. */
-	async closeApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
+	async closeApprovalReviewerThread(input: ApprovalReviewerThreadClose) {
 		let metadata: Metadata;
 		try {
 			metadata = await this.metadataFactory({
@@ -630,22 +634,36 @@ export class BridgeAPIApprovalReviewerThreadCreator
 				message: "approval reviewer thread credential is unavailable",
 			};
 		}
+		const request = {
+			scope: approvalReviewerParentScope(input),
+			reviewerThreadId: input.reviewerThreadId,
+			reviewId: input.reviewId,
+			settlementKind:
+				input.settlement.type === "decision"
+					? ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION
+					: input.settlement.type === "failure"
+						? ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE
+						: ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST,
+			settlementEventId: input.settlement.eventId,
+		};
 		let response: CloseApprovalReviewerResponse;
 		try {
-			response = await closeApprovalReviewer(
-				this.client,
-				{
-					scope: approvalReviewerParentScope(input),
-					reviewerThreadId: input.reviewerThreadId ?? "",
-					reviewId: input.reviewId,
-				},
-				metadata,
-			);
-		} catch {
-			return {
-				ok: false as const,
-				message: "approval reviewer thread close is unavailable",
-			};
+			response = await closeApprovalReviewer(this.client, request, metadata);
+		} catch (error) {
+			if (!bridgeDeclarationTransportUnknown(error)) {
+				return {
+					ok: false as const,
+					message: "approval reviewer thread close is unavailable",
+				};
+			}
+			try {
+				response = await closeApprovalReviewer(this.client, request, metadata);
+			} catch {
+				return {
+					ok: false as const,
+					message: "approval reviewer thread close is unavailable",
+				};
+			}
 		}
 		if (
 			!exactlyOneDefined(response.committed, response.duplicate, response.stale)
@@ -819,7 +837,10 @@ export class BridgeAPIContextLoader implements ContextLoader {
 	}
 
 	/** Loads and validates the complete cold-start projection for the supplied thread command. */
-	async loadThreadContext(command: RuntimeThreadAddressState): Promise<{
+	async loadThreadContext(
+		command: RuntimeThreadAddressState,
+		options?: RuntimeContextLoadOptions,
+	): Promise<{
 		readonly contextEntries: readonly RuntimeContextEntry[];
 		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
 		readonly turnFacts: ThreadTurnLoadFacts;
@@ -840,7 +861,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			| undefined;
 		readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
 	}> {
-		return await this.loadContext(command);
+		return await this.loadContext(command, options);
 	}
 
 	/** Reads target-owned durable mail without mutating sender or Inbox state. */
@@ -1015,7 +1036,10 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		};
 	}
 
-	private async loadContext(input: RuntimeThreadAddressState): Promise<{
+	private async loadContext(
+		input: RuntimeThreadAddressState,
+		options?: RuntimeContextLoadOptions,
+	): Promise<{
 		readonly contextEntries: readonly RuntimeContextEntry[];
 		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
 		readonly turnFacts: ThreadTurnLoadFacts;
@@ -1041,6 +1065,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			this.client,
 			{
 				scope: bridgeScope(input),
+				recoveryLeaseRef: options?.recovery,
 			},
 			metadata,
 		);
@@ -1107,26 +1132,79 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 			envelope.event.type === "approval_review.failure";
 		try {
 			const event = sessionEventForDurableWrite(envelope.event);
+			const toolEvent =
+				event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use";
+			const toolDeclarationParts = toolEvent
+				? (envelope.assistantContextAppend?.parts ?? [])
+				: [];
+			const declaredToolParts = toolDeclarationParts.filter(
+				(part) => part.type === "tool",
+			);
+			const declaredToolPart = declaredToolParts[0];
+			if (
+				toolEvent &&
+				(declaredToolParts.length !== 1 ||
+					declaredToolPart?.type !== "tool" ||
+					toolDeclarationParts.some(
+						(part) => part.type !== "reasoning" && part.type !== "tool",
+					))
+			) {
+				return eventWriterOperationSchemaFailure(
+					envelope.sessionId,
+					envelope.writeId,
+				);
+			}
 			const request: WriteEventRequest = {
 				scope: bridgeScope(envelope),
 				runtimeWriteId: envelope.writeId,
-				modelRequestId:
-					envelope.modelRequestId ?? modelRequestIdForEvent(event),
-				eventType: event.type,
-				payloadJson: JSON.stringify(event),
-				sessionVisible: false,
-				contextThroughMessageSequence: envelope.contextThroughMessageSequence,
-				requestKind: envelope.requestKind ?? "",
-				consumedFileAttachments: (envelope.consumedFileAttachments ?? []).map(
-					(attachment) => ({
-						sourceEventId: attachment.sourceEventId,
-						fileId: attachment.fileId,
-					}),
-				),
+				modelRequestId: envelope.modelRequestId ?? modelRequestIdForEvent(event),
+				eventType: toolEvent ? "" : event.type,
+				payloadJson: toolEvent ? "" : JSON.stringify(event),
+				contextThroughMessageSequence: toolEvent
+					? undefined
+					: envelope.contextThroughMessageSequence,
+				requestKind: toolEvent ? "" : (envelope.requestKind ?? ""),
+				consumedFileAttachments: toolEvent
+					? []
+					: (envelope.consumedFileAttachments ?? []).map((attachment) => ({
+							sourceEventId: attachment.sourceEventId,
+							fileId: attachment.fileId,
+						})),
 				assistantContextDelta:
-					envelope.assistantContextAppend === undefined
+					toolEvent || envelope.assistantContextAppend === undefined
 						? undefined
 						: runtimeContextDeltaForBridge(envelope.assistantContextAppend),
+				toolDeclaration:
+					!toolEvent || declaredToolPart?.type !== "tool"
+						? undefined
+						: {
+								eventKind:
+									event.type === "agent.mcp_tool_use"
+										? RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_MCP
+										: RuntimeToolEventKind.RUNTIME_TOOL_EVENT_KIND_TOOL,
+								modelToolCallId: declaredToolPart.modelToolCallId,
+								toolName: event.name,
+								publicExecutionInputJson: JSON.stringify(event.input),
+								distinctProviderInputJson:
+									envelope.distinctProviderInput === undefined
+										? undefined
+										: JSON.stringify(envelope.distinctProviderInput),
+								evaluatedPermission: event.evaluated_permission,
+								routeCapability: envelope.toolRouteCapability ?? "",
+								mcpServerName:
+									event.type === "agent.mcp_tool_use"
+										? event.mcp_server_name
+										: undefined,
+								leadingReasoning: toolDeclarationParts
+									.filter((part) => part.type === "reasoning")
+									.map((part) => ({
+										text: part.text,
+										providerMetadataJson:
+											part.providerMetadata === undefined
+												? undefined
+												: JSON.stringify(part.providerMetadata),
+									})),
+							},
 			};
 			if (
 				WriteEventRequestMessage.encode(request).finish().byteLength >
@@ -1165,18 +1243,11 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				result === undefined ||
 				result.eventId.length === 0 ||
 				(envelope.assistantContextAppend === undefined &&
-					(result.assignedMessageSequence !== undefined ||
-						result.createdToolUseEventIds.length !== 0)) ||
+					result.assignedMessageSequence !== undefined) ||
 				(envelope.assistantContextAppend !== undefined &&
 					(result.assignedMessageSequence === undefined ||
 						!Number.isSafeInteger(result.assignedMessageSequence) ||
-						result.assignedMessageSequence <= 0 ||
-						result.createdToolUseEventIds.length !== expectedToolUseEventIds ||
-						result.createdToolUseEventIds.some(
-							(eventId) => eventId.length === 0,
-						) ||
-						new Set(result.createdToolUseEventIds).size !==
-							result.createdToolUseEventIds.length))
+						result.assignedMessageSequence <= 0))
 			) {
 				return eventWriterOperationSchemaFailure(
 					envelope.sessionId,
@@ -1192,7 +1263,8 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 					: {
 							assistant: {
 								messageSequence: result.assignedMessageSequence,
-								createdToolUseEventIds: result.createdToolUseEventIds,
+								createdToolUseEventIds:
+									expectedToolUseEventIds === 0 ? [] : [result.eventId],
 							},
 						}),
 			};
@@ -1264,6 +1336,17 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				scope: bridgeScope(envelope),
 				runtimeWriteId: envelope.writeId,
 				modelRequestId: envelope.modelRequestId,
+				providerContextRetention: {
+					disposition: envelope.providerContextRetention.disposition,
+					assistantMessageSequence:
+						envelope.providerContextRetention.assistantMessageSequence,
+					toolUseEventIds: [
+						...envelope.providerContextRetention.toolUseEventIds,
+					],
+					repairEventIds: [
+						...envelope.providerContextRetention.repairEventIds,
+					],
+				},
 				finishReason: envelope.finishReason,
 				isError: envelope.isError,
 				errorKind: envelope.errorKind ?? "",
@@ -1844,7 +1927,7 @@ function runtimeContextDeltaForBridge(
 				toolCall: {
 					modelToolCallId: part.modelToolCallId,
 					toolName: part.toolName,
-					canonicalInputJson: JSON.stringify(part.state.input.value),
+					providerInputJson: JSON.stringify(part.state.input.value),
 				},
 			};
 		}),
@@ -1875,7 +1958,7 @@ function runtimeSealedContextDeltaForBridge(context: {
 						toolCall: {
 							modelToolCallId: part.modelToolCallId,
 							toolName: part.toolName,
-							canonicalInputJson: JSON.stringify(part.canonicalInput),
+							providerInputJson: JSON.stringify(part.canonicalInput),
 						},
 					};
 				case "tool_result": {

@@ -98,6 +98,7 @@ try {
 		toolUseEventId: input.sourceToolUseEventId,
 		entry,
 		input: { task_name: input.childTaskName },
+		retainedContextEntries: [],
 		currentModel: { providerId: "anthropic", modelId: "claude-sonnet-4-6" },
 		abortSignal: new AbortController().signal,
 	};

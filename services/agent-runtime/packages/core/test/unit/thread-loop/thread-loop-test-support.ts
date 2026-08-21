@@ -320,7 +320,7 @@ function installRecoveredToolTurn(
 				requestEnd: {
 					eventId: `${modelRequestId}_end`,
 					isError: false,
-					rescheduled: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
 				},
 			},
 		},

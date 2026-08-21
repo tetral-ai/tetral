@@ -38,6 +38,12 @@ const daytonaDiskCapacityResponse = `Total disk limit exceeded. Maximum allowed:
 Consider archiving your unused Sandboxes to free up available storage.
 To increase concurrency limits, upgrade your organization's Tier by visiting https://app.daytona.io/dashboard/limits.`
 
+const daytonaCPUCapacityResponse = `Total CPU limit exceeded. Maximum allowed: 10.
+To increase concurrency limits, upgrade your organization's Tier by visiting https://app.daytona.io/dashboard/limits.`
+
+const daytonaMemoryCapacityResponse = `Total memory limit exceeded. Maximum allowed: 16GiB.
+To increase concurrency limits, upgrade your organization's Tier by visiting https://app.daytona.io/dashboard/limits.`
+
 func findDaytonaCapacityLogRecord(t *testing.T, encoded []byte, key string, value any) map[string]any {
 	t.Helper()
 	for _, line := range bytes.Split(encoded, []byte{'\n'}) {
@@ -100,62 +106,71 @@ func TestDaytonaAdapterExposesCreateCapacityAsProvedNotStarted(t *testing.T) {
 }
 
 func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
-	t.Run("capacity returns before exhaustion", func(t *testing.T) {
-		harness := newDaytonaActivationHarness(t, []error{
-			daytonaerrors.NewDaytonaValidationError(daytonaDiskCapacityResponse, nil),
-			nil,
-		})
-		before := harness.activationIdentity(t)
-		if before.providerResourceID.Valid {
-			t.Fatalf("binding provider handle exists before Create: %q", before.providerResourceID.String)
-		}
-
-		harness.runOnce(t)
-		if harness.sdk.createCalls != 1 {
-			t.Fatalf("Daytona Create calls = %d; want one rejected submission", harness.sdk.createCalls)
-		}
-		harness.assertQueue(t, queue.StatusPending, 1, "quota_exceeded")
-		providerRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "operation", "sandbox.provider.create")
-		assertDaytonaCapacityLogFields(t, providerRecord, map[string]any{
-			"provider.name": "daytona", "provider.status_code": float64(400),
-			"error.code": "quota_exceeded", "error.message_safe": "sandbox provider capacity is unavailable",
-		})
-		attemptRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "event", "sandbox_activation_attempt_completed")
-		assertDaytonaCapacityLogFields(t, attemptRecord, map[string]any{
-			"provider.name": "daytona", "outcome": "retry", "error.code": "quota_exceeded",
-			"error.message_safe":  "sandbox activation will be retried",
-			"queue.attempt.count": float64(1), "queue.attempt.max": float64(sandboxActivationMaxAttempts),
-			"session.id": "sesn_execution_store", "operation.id": harness.operationID, "job.id": harness.queueJobID,
-		})
-		for _, forbidden := range daytonaCapacityForbiddenDetails() {
-			if strings.Contains(harness.logs.String(), forbidden) {
-				t.Fatalf("provider completion log exposed %q: %s", forbidden, harness.logs.String())
+	for _, response := range []struct {
+		name string
+		body string
+	}{
+		{name: "disk", body: daytonaDiskCapacityResponse},
+		{name: "CPU", body: daytonaCPUCapacityResponse},
+		{name: "memory", body: daytonaMemoryCapacityResponse},
+	} {
+		t.Run(response.name+" capacity returns before exhaustion", func(t *testing.T) {
+			harness := newDaytonaActivationHarness(t, []error{
+				daytonaerrors.NewDaytonaValidationError(response.body, nil),
+				nil,
+			})
+			before := harness.activationIdentity(t)
+			if before.providerResourceID.Valid {
+				t.Fatalf("binding provider handle exists before Create: %q", before.providerResourceID.String)
 			}
-		}
 
-		harness.makeQueueJobAvailable(t)
-		harness.runOnce(t)
-		if harness.sdk.createCalls != 2 {
-			t.Fatalf("Daytona Create calls = %d; want retry followed by success", harness.sdk.createCalls)
-		}
-		harness.assertQueue(t, queue.StatusAcknowledged, 2, "")
-		after := harness.activationIdentity(t)
-		if after.operationID != before.operationID || after.queueJobID != before.queueJobID ||
-			after.logicalSandboxID != before.logicalSandboxID {
-			t.Fatalf("activation custody changed: before=%+v after=%+v", before, after)
-		}
-		if !after.providerResourceID.Valid || after.providerResourceID.String != "provider_capacity_recovered" {
-			t.Fatalf("binding provider handle = %+v; want recovered Daytona handle", after.providerResourceID)
-		}
-		var bindingCount int
-		if err := harness.admin.QueryRow(`SELECT count(*) FROM session_sandbox_bindings
+			harness.runOnce(t)
+			if harness.sdk.createCalls != 1 {
+				t.Fatalf("Daytona Create calls = %d; want one rejected submission", harness.sdk.createCalls)
+			}
+			harness.assertQueue(t, queue.StatusPending, 1, "quota_exceeded")
+			providerRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "operation", "sandbox.provider.create")
+			assertDaytonaCapacityLogFields(t, providerRecord, map[string]any{
+				"provider.name": "daytona", "provider.status_code": float64(400),
+				"error.code": "quota_exceeded", "error.message_safe": "sandbox provider capacity is unavailable",
+			})
+			attemptRecord := findDaytonaCapacityLogRecord(t, harness.logs.Bytes(), "event", "sandbox_activation_attempt_completed")
+			assertDaytonaCapacityLogFields(t, attemptRecord, map[string]any{
+				"provider.name": "daytona", "outcome": "retry", "error.code": "quota_exceeded",
+				"error.message_safe":  "sandbox activation will be retried",
+				"queue.attempt.count": float64(1), "queue.attempt.max": float64(sandboxActivationMaxAttempts),
+				"session.id": "sesn_execution_store", "operation.id": harness.operationID, "job.id": harness.queueJobID,
+			})
+			for _, forbidden := range daytonaCapacityForbiddenDetails() {
+				if strings.Contains(harness.logs.String(), forbidden) {
+					t.Fatalf("provider completion log exposed %q: %s", forbidden, harness.logs.String())
+				}
+			}
+
+			harness.makeQueueJobAvailable(t)
+			harness.runOnce(t)
+			if harness.sdk.createCalls != 2 {
+				t.Fatalf("Daytona Create calls = %d; want retry followed by success", harness.sdk.createCalls)
+			}
+			harness.assertQueue(t, queue.StatusAcknowledged, 2, "")
+			after := harness.activationIdentity(t)
+			if after.operationID != before.operationID || after.queueJobID != before.queueJobID ||
+				after.logicalSandboxID != before.logicalSandboxID {
+				t.Fatalf("activation custody changed: before=%+v after=%+v", before, after)
+			}
+			if !after.providerResourceID.Valid || after.providerResourceID.String != "provider_capacity_recovered" {
+				t.Fatalf("binding provider handle = %+v; want recovered Daytona handle", after.providerResourceID)
+			}
+			var bindingCount int
+			if err := harness.admin.QueryRow(`SELECT count(*) FROM session_sandbox_bindings
 			WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'`).Scan(&bindingCount); err != nil {
-			t.Fatalf("count logical bindings: %v", err)
-		}
-		if bindingCount != 1 {
-			t.Fatalf("logical binding count = %d; want one stable binding", bindingCount)
-		}
-	})
+				t.Fatalf("count logical bindings: %v", err)
+			}
+			if bindingCount != 1 {
+				t.Fatalf("logical binding count = %d; want one stable binding", bindingCount)
+			}
+		})
+	}
 
 	t.Run("unrelated validation remains terminal", func(t *testing.T) {
 		harness := newDaytonaActivationHarness(t, []error{
@@ -181,7 +196,7 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 	t.Run("persistent capacity exhausts without a sixth Create", func(t *testing.T) {
 		errorsByAttempt := make([]error, sandboxActivationSubmissionMaxAttempts)
 		for index := range errorsByAttempt {
-			errorsByAttempt[index] = daytonaerrors.NewDaytonaValidationError(daytonaDiskCapacityResponse, nil)
+			errorsByAttempt[index] = daytonaerrors.NewDaytonaValidationError(daytonaCPUCapacityResponse, nil)
 		}
 		harness := newDaytonaActivationHarness(t, errorsByAttempt)
 		for attempt := 1; attempt <= sandboxActivationMaxAttempts; attempt++ {
@@ -215,7 +230,7 @@ func TestDaytonaCreateCapacityUsesExistingActivationCustody(t *testing.T) {
 	t.Run("persistent capacity contains shared operation failure", func(t *testing.T) {
 		errorsByAttempt := make([]error, sandboxActivationSubmissionMaxAttempts)
 		for index := range errorsByAttempt {
-			errorsByAttempt[index] = daytonaerrors.NewDaytonaValidationError(daytonaDiskCapacityResponse, nil)
+			errorsByAttempt[index] = daytonaerrors.NewDaytonaValidationError(daytonaMemoryCapacityResponse, nil)
 		}
 		harness := newDaytonaActivationHarness(t, errorsByAttempt)
 		sharedWaiter := harness.attachSharedActivationWaiter(t)
@@ -313,23 +328,18 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_tool_use", ModelRequestId: modelRequestID,
-		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
-			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
-				ToolCall: &bridgev1.RuntimeContextToolCall{
-					ModelToolCallId: modelToolCallID, ToolName: "exec_command", CanonicalInputJson: inputJSON,
-				},
-			}}},
+		ToolDeclaration: &bridgev1.RuntimeToolDeclaration{
+			EventKind: bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_TOOL, ModelToolCallId: modelToolCallID,
+			ToolName: "exec_command", PublicExecutionInputJson: inputJSON, EvaluatedPermission: "allow", RouteCapability: "sandbox_execute",
 		},
 	})
 	if err != nil {
 		t.Fatalf("commit capacity-chain Tool Use: %v", err)
 	}
-	if toolUse.GetCommitted() == nil || len(toolUse.GetCommitted().GetCreatedToolUseEventIds()) != 1 {
+	if toolUse.GetCommitted() == nil || toolUse.GetCommitted().GetEventId() == "" {
 		t.Fatalf("capacity-chain Tool Use result = %#v; want one committed Tool identity", toolUse)
 	}
-	toolUseEventID := toolUse.GetCommitted().GetCreatedToolUseEventIds()[0]
+	toolUseEventID := toolUse.GetCommitted().GetEventId()
 	inputHash := sandboxCapacitySHA256(inputJSON)
 	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
 		SET tool_use_event_id=$1, normalized_input_hash=$2, tool_name='exec_command', input_json=$3,
@@ -447,23 +457,18 @@ func (h *daytonaActivationHarness) attachSharedActivationWaiter(t *testing.T) da
 	)
 	written, err := h.bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: h.bridgeScope, RuntimeWriteId: "rwrite_capacity_chain_shared_tool_use", ModelRequestId: h.modelRequestID,
-		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"exec_command","input":{"cmd":"printf shared"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: &bridgev1.RuntimeContextDelta{
-			Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{
-				ToolCall: &bridgev1.RuntimeContextToolCall{
-					ModelToolCallId: modelToolCallID, ToolName: "exec_command", CanonicalInputJson: inputJSON,
-				},
-			}}},
+		ToolDeclaration: &bridgev1.RuntimeToolDeclaration{
+			EventKind: bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_TOOL, ModelToolCallId: modelToolCallID,
+			ToolName: "exec_command", PublicExecutionInputJson: inputJSON, EvaluatedPermission: "allow", RouteCapability: "sandbox_execute",
 		},
 	})
 	if err != nil {
 		t.Fatalf("commit shared capacity Tool Use: %v", err)
 	}
-	if written.GetCommitted() == nil || len(written.GetCommitted().GetCreatedToolUseEventIds()) != 1 {
+	if written.GetCommitted() == nil || written.GetCommitted().GetEventId() == "" {
 		t.Fatalf("shared capacity Tool Use result = %#v; want one committed Tool identity", written)
 	}
-	toolUseEventID := written.GetCommitted().GetCreatedToolUseEventIds()[0]
+	toolUseEventID := written.GetCommitted().GetEventId()
 	inputHash := sandboxCapacitySHA256(inputJSON)
 	if _, err := h.admin.Exec(`UPDATE session_runtime_tool_results
 		SET tool_use_event_id=$1, normalized_input_hash=$2, tool_name='exec_command', input_json=$3,
@@ -738,7 +743,11 @@ func (h *daytonaActivationHarness) assertSessionAndThreadRemainUsable(t *testing
 func daytonaCapacityForbiddenDetails() []string {
 	return []string{
 		daytonaDiskCapacityResponse,
+		daytonaCPUCapacityResponse,
+		daytonaMemoryCapacityResponse,
 		"30GiB",
+		"16GiB",
+		"Maximum allowed",
 		"organization",
 		"upgrade",
 		"https://app.daytona.io/dashboard/limits",

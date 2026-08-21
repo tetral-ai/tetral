@@ -14,7 +14,7 @@ func TestRuntimeContextDeltaAcceptsOnlyNarrowProviderParts(t *testing.T) {
 	delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{
 		{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: "done"}}},
 		{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{Text: "why", ProviderMetadataJson: bridgeString(`{"provider":"x"}`)}}},
-		{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call_1", ToolName: "read", CanonicalInputJson: `{"path":"a"}`}}},
+		{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call_1", ToolName: "read", ProviderInputJson: `{"path":"a"}`}}},
 		{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call_1", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: `{"type":"tool_failure","message":"safe","retryable":false}`}}}}},
 	}}
 	parts, err := canonicalRuntimeContextParts(delta)
@@ -39,7 +39,7 @@ func TestRuntimeContextDeltaRejectsUnknownAndOversizedValues(t *testing.T) {
 		delta *bridgev1.RuntimeContextDelta
 	}{
 		{name: "missing part", delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{nil}}},
-		{name: "invalid input", delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "read", CanonicalInputJson: `{`}}}}}},
+		{name: "invalid input", delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "read", ProviderInputJson: `{`}}}}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -66,7 +66,7 @@ func TestRuntimeContextDeltaEnforcesExactJSONByteBounds(t *testing.T) {
 		{
 			name: "Tool input", maxBytes: runtimeToolInputJSONMaxBytes, emptyJSON: `{"x":""}`,
 			delta: func(raw string) *bridgev1.RuntimeContextDelta {
-				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "read", CanonicalInputJson: raw}}}}}
+				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "read", ProviderInputJson: raw}}}}}
 			},
 		},
 		{
@@ -97,6 +97,20 @@ func TestRuntimeContextDeltaEnforcesExactJSONByteBounds(t *testing.T) {
 				t.Fatalf("one byte over error = %v; want InvalidArgument", err)
 			}
 		})
+	}
+}
+
+func TestRuntimeToolProjectionEnforcesCanonicalExecutionInputBound(t *testing.T) {
+	exact := `{"patch":"` + strings.Repeat("x", runtimeToolInputJSONMaxBytes-len(`{"patch":""}`)) + `"}`
+	if len(exact) != runtimeToolInputJSONMaxBytes {
+		t.Fatalf("exact canonical execution input bytes = %d", len(exact))
+	}
+	if _, err := normalizeRuntimeToolDeclaration(bridgeToolDeclarationForTest("call", "apply_patch", exact, "allow", "sandbox_execute")); err != nil {
+		t.Fatalf("exact canonical execution input rejected: %v", err)
+	}
+	over := `{"patch":"` + strings.Repeat("x", runtimeToolInputJSONMaxBytes-len(`{"patch":""}`)+1) + `"}`
+	if _, err := normalizeRuntimeToolDeclaration(bridgeToolDeclarationForTest("call", "apply_patch", over, "allow", "sandbox_execute")); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("oversized canonical execution input error = %v; want InvalidArgument", err)
 	}
 }
 
@@ -135,7 +149,7 @@ func TestRuntimeContextTextAndIdentifiersMatchGatewayByteBounds(t *testing.T) {
 	for _, size := range []int{runtimeContextIdentifierMaxBytes, runtimeContextIdentifierMaxBytes + 1} {
 		identifier := strings.Repeat("i", size)
 		delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
-			ModelToolCallId: identifier, ToolName: "Read", CanonicalInputJson: `{}`,
+			ModelToolCallId: identifier, ToolName: "Read", ProviderInputJson: `{}`,
 		}}}}}
 		_, err := canonicalRuntimeContextParts(delta)
 		if size == runtimeContextIdentifierMaxBytes && err != nil {
@@ -168,7 +182,7 @@ func TestRuntimeContextDeltaRejectsUnpairedUnicodeSurrogates(t *testing.T) {
 		},
 		{
 			name:  "input",
-			delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "read", CanonicalInputJson: `{"x":"\udc00"}`}}}}},
+			delta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "read", ProviderInputJson: `{"x":"\udc00"}`}}}}},
 		},
 		{
 			name:  "output",

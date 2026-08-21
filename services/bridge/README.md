@@ -68,8 +68,8 @@ separate 32 MiB transport fuse and existing per-attachment semantic limits.
 | Context | `LoadContext` | Cold-start one thread from current durable facts: ordered Messages, Request/Tool Events, direct internal-repair Message/Event references, unresolved pending tool waits, per-server MCP manifests, and pending media. Runtime reconstructs its checkpoint from these direct identities; Bridge does not project Message mutation history. |
 | Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction. Tool confirmation settles the named pending-tool state. Interrupt intent makes Bridge census every unfinished durable Tool Use, write and consume one honest terminal conversation result per target, and return only minimal hot-state projections; background-task settlement remains independently Sandbox-owned and never creates a second public Tool Result. |
 | Events | `WriteEvent`, `CommitInternalToolRepair` | One non-result semantic event plus its projection in one transaction; a public Tool Use may carry the anchored prefix of completed reasoning parts. The event-less invalid-tool repair row is atomic and rehydratable. |
-| Settlement | `SettleToolResult`, `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | `SettleToolResult` derives one public result Event and terminal Tool projection from the named durable Tool Use; its closed result is only committed, duplicate, or stale. Request End writes usage and cumulative projection in one transaction. An ordinary successful end may append only its final not-yet-durable Assistant members before sealing the existing model-request projection; retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open provider request joins its separately owned `CommitInputs` envelope. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, waits without a database transaction, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn and stores only deterministic terminal declarations. A child failure remains local and, when the child is a sub-agent, commits its completion mail; a Main failure atomically closes every non-terminal sibling request and Tool obligation before terminating the Session, without mailing the terminal Main Thread. |
-| Children | `CreateSubagentThread`, `EnsureApprovalReviewerTrunk`, `EnsureApprovalReviewerSidecar`, `AdmitApprovalReviewInput`, `ResolveChildThread`, `ListChildThreads`, `DeliverInterAgentMail`, `ReadAgentMail`, `AdmitChildInterrupt`, `AwaitChildInterrupt`, `CloseChildControl`, `CloseApprovalReviewer`, `MarkChildThreadActive` | Bridge-owned child identity and context prefix; accepted reviewer Inbox custody; durable sender-time mail delivery plus target-owned text reads; durable subtree interrupt admission and completion; operation-specific child control and reviewer lifecycle marks |
+| Settlement | `SettleToolResult`, `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | `SettleToolResult` derives one public result Event and terminal Tool projection from the named durable Tool Use; its closed result is only committed, duplicate, or stale. Request End writes usage and cumulative projection in one transaction. An ordinary successful end may append only its final not-yet-durable Assistant members before sealing the existing model-request projection; retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open provider request joins its separately owned `CommitInputs` envelope. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, waits without a database transaction, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn and stores only deterministic terminal declarations. A child failure remains local and, when the child is a sub-agent, commits its completion mail; a Main failure atomically closes every non-terminal sibling request and Tool obligation, cancels remaining Session input custody, closes the live residency row to `idle` without arming ordinary TTL cleanup, and terminates the Session while retaining the binding identity only for closeout replay, without mailing the terminal Main Thread. |
+| Children | `CreateSubagentThread`, `EnsureApprovalReviewerTrunk`, `EnsureApprovalReviewerSidecar`, `AdmitApprovalReviewInput`, `ResolveChildThread`, `ListChildThreads`, `DeliverInterAgentMail`, `ReadAgentMail`, `AdmitChildInterrupt`, `AwaitChildInterrupt`, `CloseChildControl`, `CloseApprovalReviewer`, `MarkChildThreadActive` | Bridge-owned child identity and exact snapshot of Runtime-selected parent Message references; accepted reviewer Inbox custody; durable sender-time mail delivery plus target-owned text reads; durable subtree interrupt admission and completion; operation-specific child control and reviewer lifecycle marks |
 | Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups whose operation kind, task, and executor input are selected from the durable Tool declaration; durable memory writes with content-match conflict checks |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
 | MCP | `McpManifestChanged`, `ClaimMcpToolResult`, `CommitMcpToolResult`, `RelinquishMcpToolResult` | Manifest capture-before-deliver and runtime redelivery; leased pre-execution reservation, refs-only durable result commit, and exact-claim deterministic relinquish |
@@ -140,7 +140,9 @@ terminal result (`spawn_agent` / `send_message` settle delivery-aware by their
 `delivery_id`, keyed on the durable inter-agent delivery state); a delivered-
 but-uncommitted input replays from the inbox; pending waits owned by the lost
 binding are cancelled; every included scope the loss left unsettled
-resolves to idle with its `session.error` — **except** an interrupted-then-
+resolves to idle with its `session.error` — **except** a scope whose committed
+Request End already owns provider reschedule, where repair retires only the
+lost residency row and preserves the accepted retry facts, and an interrupted-then-
 lost scope, which settles quietly as `end_turn` with no error because the
 user's own processed `user.interrupt` (the thread's highest-sequence committed
 input) is the durable proof the stop was requested; the retry budget resets;
@@ -267,7 +269,10 @@ and active lifecycle facts directly from durable rows.
   census in the nested input transaction. The response carries only the
   operation-specific interrupt Tool outcomes needed by the caller.
   The reschedule leg increments `session_turn_retries` and writes rescheduled
-  status only when the ceiling admits. `FinishIdle` adopts a Sandbox-staged
+  status only when the ceiling admits. Private `LoadContext` direct facts pair
+  that accepted attempt with the effective deadline from the request-end receipt
+  and identify the request's Assistant message sequence; Runtime consumes those
+  identities before constructing provider-visible entries. `FinishIdle` adopts a Sandbox-staged
   output-capture generation into `session_output_captures` and the file tables,
   then writes `session.status_idle` in the same transaction.
   `CommitRuntimeTermination` accepts only the live loop's current-thread
@@ -278,6 +283,27 @@ and active lifecycle facts directly from durable rows.
   evidence, marks those children terminated, and terminates the Session in the
   same transaction. The response returns only the declaring Thread's
   database-assigned stamps.
+- **Child creation authority.** Runtime interprets `spawn_agent` and declares
+  normalized child metadata plus the bounded initial prompt once, together
+  with the exact ordered durable parent Message references selected from
+  public `fork_turns`.
+  `CreateSubagentThread` verifies the exact public executable Tool route, live
+  parent scope, mutation barrier, reference custody and bounds, and source-event
+  idempotency without parsing Tool business arguments. The Tool Use may belong
+  to an open provider request: Bridge snapshots exactly the referenced Messages
+  before its durable Assistant boundary and commits the
+  child, immutable prefix, opening sent/received Events, target Inbox/Queue
+  custody, and minimal child-identity operation receipt in one transaction. Exact replay returns that
+  committed lineage without requiring the route to remain executable or
+  rereading later parent Message growth; a new Tool Use identity still crosses
+  task-name uniqueness rather than aliasing the earlier receipt.
+- **Child-control authority.** Runtime resolves `task_name` and declares the
+  exact direct public subagent plus interrupt/close action (or resume target).
+  Bridge checks the route capability and parent-child ownership mechanically;
+  interrupt targets only the declared child, close freezes that child and its
+  descendants, and resume targets exactly that child. Committed operation
+  replay validates the stored declaration digest without requiring an
+  executable route or decoding the source Tool input again.
 - **Lifecycle.** At most one terminal end per `model_request_id` (pod close and
   repair close both check inside the transaction, serialized on the start-row
   lock; a divergent loser is rejected and cold-recovers the durable winner). `FinishIdle` and
@@ -324,12 +350,13 @@ and active lifecycle facts directly from durable rows.
   return the operation-specific result; a changed declaration conflicts.
 - **Failure behavior.** An error or rescheduled request end carries no new
   Assistant append. Every member already acknowledged by its owning
-  `WriteEvent` remains durable and provider-visible; request-local fragments
-  still buffered in pod memory are discarded and regenerated on retry. A
-  committed Tool Use forces its preceding ordered prefix through the same
-  durable append boundary, but Tool membership is not a separate survival
-  rule. Pod loss remains stricter: an abandoned open draft is excluded unless
-  reconciliation completes the exact Tool Call/Result repair pair.
+  `WriteEvent` remains durable audit history. Bridge returns that direct Message
+  plus Request/Tool facts; Runtime alone decides provider eligibility, excluding
+  failed text while retaining exact terminal Tool Call/Result pairs and holding
+  nonterminal Tool ownership privately. Request-local fragments still buffered
+  in pod memory are discarded. Pod loss remains stricter: an abandoned open
+  draft is excluded unless reconciliation completes the exact Tool Call/Result
+  repair pair.
 - **File attachment boundary.** A provider Request Start privately declares
   the exact file-backed `(source Event, file)` ride. Bridge writes those
   consumption rows atomically with the Start Event only when exactly one

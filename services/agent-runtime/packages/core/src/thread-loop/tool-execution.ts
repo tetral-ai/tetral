@@ -15,10 +15,12 @@ import type {
 	RuntimeContextEntry,
 	RuntimeContextPart,
 	RuntimeFailure,
+	RuntimeJsonObject,
 	RuntimeJsonValue,
 	RuntimeOpenRequestDraft,
 	RuntimeProviderAttachment,
 	RuntimeToolSettlement,
+	RuntimeToolRouteCapability,
 	SessionEventWriterError,
 } from "../contracts/runtime.js";
 import {
@@ -55,6 +57,7 @@ import type {
 	RuntimePendingSandboxExecutionJobState,
 	RuntimePreloadedPendingToolUseState,
 	RuntimePreloadedSandboxExecutionState,
+	RuntimeResolvedToolRouteJobState,
 } from "./thread-state.js";
 
 /** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
@@ -102,11 +105,15 @@ export interface RuntimeToolExecutionRequest {
 	readonly toolUseEventId: string;
 	readonly entry: ToolEntry;
 	readonly input: RuntimeJsonValue;
+	readonly retainedContextEntries: readonly RuntimeContextEntry[];
 	readonly currentModel?:
 		| {
 				readonly providerId: string;
 				readonly modelId: string;
 		  }
+		| undefined;
+	readonly backgroundCancellationIntent?:
+		| (() => "user_interrupt" | "custody_handoff")
 		| undefined;
 	readonly abortSignal: AbortSignal;
 }
@@ -299,6 +306,58 @@ function executionInputForToolCall(
 		: undefined;
 }
 
+export function publicInputForRegisteredTool(
+	input: RuntimeJsonValue,
+): RuntimeJsonObject {
+	if (typeof input !== "object" || input === null || Array.isArray(input)) {
+		throw new Error("registered Tool execution input must be an object");
+	}
+	return input as RuntimeJsonObject;
+}
+
+export function distinctProviderInputForEntry(
+	entry: ToolEntry,
+	providerInput: RuntimeJsonValue,
+): RuntimeJsonValue | undefined {
+	return entry.inputContract.kind === "freeform_string"
+		? providerInput
+		: undefined;
+}
+
+export function routeCapabilityForEntry(
+	entry: ToolEntry,
+): RuntimeToolRouteCapability {
+	switch (entry.route.kind) {
+		case "sandbox":
+			return entry.route.operation === "CommandIO"
+				? "background_command"
+				: "sandbox_execute";
+		case "gateway":
+			return entry.route.operation === "RunMcpTool"
+				? "mcp_execute"
+				: "web_execute";
+		case "bridge":
+			return "memory_execute";
+		case "subagent":
+			switch (entry.route.operation) {
+				case "spawn_agent":
+					return "child_create";
+				case "send_message":
+					return "child_message";
+				case "wait_agent":
+					return "child_wait";
+				case "interrupt_agent":
+					return "child_interrupt";
+				case "close_agent":
+					return "child_close";
+				case "resume_agent":
+					return "child_resume";
+				case "list_agents":
+					return "child_list";
+			}
+	}
+}
+
 function recoveredExecutionInput(
 	entry: ToolEntry,
 	input: RuntimeJsonValue,
@@ -366,6 +425,7 @@ export function installLoadedPendingToolUses(
 					"pending tool use context is missing its sole unresolved Tool Call",
 				);
 			}
+			const decision = pending.decision;
 			const job: ToolJob = {
 				id: `${pending.modelRequestId}:${pending.modelToolCallId}`,
 				modelOrder: pendingOrder,
@@ -380,10 +440,17 @@ export function installLoadedPendingToolUses(
 				route: entry.route,
 				input,
 				runPolicy: inferToolRunPolicy(entry, input),
-				gateState: "waiting_approval",
-				approvalSource: "user",
+				gateState:
+					decision === undefined
+						? "waiting_approval"
+						: decision === "allow"
+							? "runnable"
+							: "terminal",
+				...(decision === undefined
+					? { approvalSource: "user" as const }
+					: { decision }),
 			};
-			session.state.recordPendingApprovalToolJob({
+			const restored = {
 				toolUseEventId: pending.toolUseEventId,
 				modelRequestId: pending.modelRequestId,
 				source,
@@ -392,32 +459,28 @@ export function installLoadedPendingToolUses(
 				job,
 				entry,
 				currentModel,
-			});
-			if (pending.decision !== undefined) {
-				if (pending.decision === "allow" && pending.denyMessage !== undefined) {
+			};
+			if (decision === undefined) {
+				if (pending.denyMessage !== undefined) {
+					throw new Error(
+						"pending tool use context contains a deny message without a decision",
+					);
+				}
+				session.state.recordPendingApprovalToolJob(restored);
+			} else {
+				if (decision === "allow" && pending.denyMessage !== undefined) {
 					throw new Error(
 						"pending tool use context contains allow decision with deny message",
 					);
 				}
-				const confirmationResult = session.state.resolveToolConfirmation({
-					workspaceId: session.identity.workspaceId,
-					sessionId: session.identity.sessionId,
-					sessionThreadId: session.identity.sessionThreadId,
-					bindingId: session.identity.bindingId,
-					bindingGeneration: session.identity.bindingGeneration,
-					targetPodUid: session.identity.targetPodUid,
-					runtimeInputId: `load_context:${pending.toolUseEventId}`,
-					toolUseEventId: pending.toolUseEventId,
-					decision: pending.decision,
+				session.state.recordResolvedToolRouteJob({
+					...restored,
+					recoveryKind: "resolved_route",
+					decision,
 					...(pending.denyMessage === undefined
 						? {}
 						: { denyMessage: pending.denyMessage }),
 				});
-				if (confirmationResult === "conflict") {
-					throw new Error(
-						"pending tool use context contains conflicting decision",
-					);
-				}
 			}
 		}
 		return { ok: true };
@@ -635,12 +698,19 @@ export function findPendingApprovalSettlementDescriptor(
 
 export type RuntimeRecoveredToolJobState =
 	| RuntimePendingApprovalToolJobState
+	| RuntimeResolvedToolRouteJobState
 	| RuntimePendingSandboxExecutionJobState;
 
 export function isPendingSandboxExecution(
 	state: RuntimeRecoveredToolJobState,
 ): state is RuntimePendingSandboxExecutionJobState {
 	return "recoveryKind" in state && state.recoveryKind === "sandbox_execution";
+}
+
+export function isResolvedToolRoute(
+	state: RuntimeRecoveredToolJobState,
+): state is RuntimeResolvedToolRouteJobState {
+	return "recoveryKind" in state && state.recoveryKind === "resolved_route";
 }
 
 export function pendingSandboxExecutionToolUseEventIds(

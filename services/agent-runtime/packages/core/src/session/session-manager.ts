@@ -39,6 +39,7 @@ import {
 	Semaphore,
 } from "effect";
 import type { RuntimeContextEntry } from "../contracts/runtime.js";
+import type { RuntimeContextLoadOptions } from "../context/context-loader.js";
 import {
 	ContextLoaderErrorSchema,
 	normalizeRuntimeFailure,
@@ -239,6 +240,7 @@ export type ThreadSnapshotResult =
 			readonly observed: boolean;
 			readonly status?: RuntimeThreadStatusState | undefined;
 			readonly hasPendingApprovalToolJobs?: boolean | undefined;
+			readonly hasUnsettledToolOwner?: boolean | undefined;
 			readonly entries: readonly RuntimeContextEntry[];
 	  }
 	| {
@@ -277,6 +279,7 @@ export type ReviewerExecutionWaitResult =
 			readonly status?: RuntimeThreadStatusState | undefined;
 			readonly terminal: boolean;
 			readonly timedOut: boolean;
+			readonly requestEndEventId?: string | undefined;
 	  }
 	| {
 			readonly ok: false;
@@ -347,7 +350,11 @@ export interface Interface {
 	) => Effect.Effect<ThreadLifecycleResult>;
 	readonly ensureThreadInstalled: (
 		command: RuntimeThreadAddressState,
-		options?: { readonly requirePendingApprovalToolJobs?: boolean | undefined },
+		options?: {
+			readonly requirePendingApprovalToolJobs?: boolean | undefined;
+			readonly startPendingWork?: boolean | undefined;
+			readonly loadOptions?: RuntimeContextLoadOptions | undefined;
+		},
 	) => Effect.Effect<ThreadLifecycleResult>;
 	readonly interruptReviewerExecution: (
 		command: RuntimeThreadAddressState,
@@ -398,6 +405,7 @@ export interface LayerOptions {
 	) => Promise<string>;
 	readonly loadThreadContext?: (
 		command: RuntimeThreadAddressState,
+		loadOptions?: RuntimeContextLoadOptions,
 	) => Promise<RuntimeThreadPreloadState>;
 	readonly closeoutMonotonicMs?: (() => number) | undefined;
 	readonly closeoutSleep?:
@@ -516,6 +524,23 @@ interface ThreadInstallation {
 	readonly result: Deferred.Deferred<ThreadLifecycleResult>;
 	readonly cleanup: Deferred.Deferred<void>;
 	fiber: Fiber.Fiber<void, never> | undefined;
+	startPendingWork: boolean;
+	superseded: boolean;
+	readonly loadOptions: RuntimeContextLoadOptions | undefined;
+}
+
+function recoveryAuthoritiesEqual(
+	left: RuntimeContextLoadOptions["recovery"],
+	right: RuntimeContextLoadOptions["recovery"],
+): boolean {
+	return (
+		left !== undefined &&
+		right !== undefined &&
+		left.jobId === right.jobId &&
+		left.leaseToken === right.leaseToken &&
+		left.partitionKey === right.partitionKey &&
+		left.dedupeKey === right.dedupeKey
+	);
 }
 
 interface SessionEntry {
@@ -920,19 +945,22 @@ export function layer(
 				threadEntry: ThreadEntry,
 			): Effect.Effect<void> =>
 				Effect.gen(function* () {
-					const residentChildren = [...sessionEntry.threads.values()].filter(
-						(childEntry) =>
-							childEntry.parentThreadId === threadEntry.sessionThreadId,
+					const residentChildren = yield* sessionEntry.controlGate.withPermit(
+						Effect.sync(() => {
+							const children = [...sessionEntry.threads.values()].filter(
+								(childEntry) =>
+									childEntry.parentThreadId === threadEntry.sessionThreadId,
+							);
+							for (const childEntry of children) {
+								childEntry.status = "closed_for_runtime";
+								childEntry.runtimeThread.state.beginRuntimeShutdown();
+								if (childEntry.runSlot !== undefined) {
+									childEntry.runSlot.stopping = true;
+								}
+							}
+							return children;
+						}),
 					);
-					for (const childEntry of residentChildren) {
-						childEntry.status = "closed_for_runtime";
-						childEntry.runtimeThread.state.beginRuntimeShutdown();
-						const childRunSlot = childEntry.runSlot;
-						if (childRunSlot === undefined) {
-							continue;
-						}
-						childRunSlot.stopping = true;
-					}
 					yield* Effect.all(
 						residentChildren.map((childEntry) => {
 							const childRunSlot = childEntry.runSlot;
@@ -1006,63 +1034,79 @@ export function layer(
 					{ concurrency: "unbounded", discard: true },
 				);
 
+			const threadRunCanStart = (
+				sessionEntry: SessionEntry,
+				threadEntry: ThreadEntry,
+			): boolean =>
+				!sessionEntry.runtimeShutdown.requested &&
+				sessionEntry.threads.get(threadEntry.sessionThreadId) === threadEntry &&
+				threadEntry.status !== "closed_for_runtime" &&
+				threadEntry.status !== "failed" &&
+				threadEntry.status !== "terminated" &&
+				threadEntry.runSlot === undefined &&
+				threadEntry.installationState === "ready" &&
+				sessionEntry.sharedStateStatus === "ready";
+
+			const startThreadRunUnderControl = (
+				sessionEntry: SessionEntry,
+				threadEntry: ThreadEntry,
+				reviewId: string | undefined = undefined,
+			): Effect.Effect<boolean> =>
+				Effect.gen(function* () {
+					if (!threadRunCanStart(sessionEntry, threadEntry)) {
+						return false;
+					}
+					const runScope = yield* Scope.make();
+					const runId = allocateRunId();
+					const runSlot: ThreadRunSlot = {
+						runId,
+						ownerFiber: undefined,
+						doneDeferred: yield* Deferred.make<
+							ThreadLoop.ThreadLoopRunResult,
+							unknown
+						>(),
+						scope: runScope,
+						stopping: false,
+						reviewerExecutionToken:
+							reviewId === undefined
+								? undefined
+								: {
+										reviewId,
+										reviewerThreadId: threadEntry.sessionThreadId,
+										runId,
+									},
+					};
+					threadEntry.runSlot = runSlot;
+					threadEntry.status = "running";
+					recordHotStateMetrics();
+					const custody: ThreadLoop.ThreadLoopRunCustody = {
+						activeTurnId: (session) =>
+							session.state.threadTurnReduction().checkpoint.executionRunId,
+						interruptLeaseRef: (runtimeInputId) =>
+							threadEntry.runtimeThread.state.userInterruptCommand()
+								?.runtimeInputId === runtimeInputId
+								? threadEntry.interruptLeaseRef
+								: undefined,
+					};
+					const run = threadLoop.run(threadEntry.runtimeThread, custody).pipe(
+						Scope.provide(runScope),
+						Effect.onExit((exit) =>
+							finishThreadRun(sessionEntry, threadEntry, runSlot, exit),
+						),
+					);
+					const fiber = yield* Effect.forkIn(run, runScope);
+					runSlot.ownerFiber = fiber;
+					recordHotStateMetrics();
+					return true;
+				});
+
 			const startThreadRun = (
 				sessionEntry: SessionEntry,
 				threadEntry: ThreadEntry,
 				reviewId: string | undefined = undefined,
 			): Effect.Effect<boolean> =>
 				sessionEntry.controlGate.withPermit(
-					Effect.gen(function* () {
-						if (
-							threadEntry.runSlot !== undefined ||
-							threadEntry.installationState !== "ready" ||
-							sessionEntry.sharedStateStatus !== "ready"
-						) {
-							return false;
-						}
-						const runScope = yield* Scope.make();
-						const runId = allocateRunId();
-						const runSlot: ThreadRunSlot = {
-							runId,
-							ownerFiber: undefined,
-							doneDeferred: yield* Deferred.make<
-								ThreadLoop.ThreadLoopRunResult,
-								unknown
-							>(),
-							scope: runScope,
-							stopping: false,
-							reviewerExecutionToken:
-								reviewId === undefined
-									? undefined
-									: {
-											reviewId,
-											reviewerThreadId: threadEntry.sessionThreadId,
-											runId,
-										},
-						};
-						threadEntry.runSlot = runSlot;
-						threadEntry.status = "running";
-						recordHotStateMetrics();
-						const custody: ThreadLoop.ThreadLoopRunCustody = {
-							activeTurnId: (session) =>
-								session.state.threadTurnReduction().checkpoint.executionRunId,
-							interruptLeaseRef: (runtimeInputId) =>
-								threadEntry.runtimeThread.state.userInterruptCommand()
-									?.runtimeInputId === runtimeInputId
-									? threadEntry.interruptLeaseRef
-									: undefined,
-						};
-						const run = threadLoop.run(threadEntry.runtimeThread, custody).pipe(
-							Scope.provide(runScope),
-							Effect.onExit((exit) =>
-								finishThreadRun(sessionEntry, threadEntry, runSlot, exit),
-							),
-						);
-						const fiber = yield* Effect.forkIn(run, runScope);
-						runSlot.ownerFiber = fiber;
-						recordHotStateMetrics();
-						return true;
-					}),
+					startThreadRunUnderControl(sessionEntry, threadEntry, reviewId),
 				);
 
 			const completeRunSlot = (
@@ -1089,7 +1133,13 @@ export function layer(
 				sessionEntry: SessionEntry,
 				threadEntry: ThreadEntry,
 				exit: Exit.Exit<ThreadLoop.ThreadLoopRunResult, unknown>,
-			): Effect.Effect<"disposed" | "unrepairable" | "shutdown"> => {
+			): Effect.Effect<
+				| "continuation"
+				| "terminal"
+				| "superseded"
+				| "unrepairable"
+				| "shutdown"
+			> => {
 				const closeoutId = beginFailedRunCloseout();
 				const custody: ThreadLoop.ThreadLoopRunCustody = {
 					activeTurnId: (session) =>
@@ -1109,8 +1159,11 @@ export function layer(
 					let backoffMs = CloseoutRetryInitialBackoffMs;
 					for (;;) {
 						const result = yield* attempt;
-						if (result.type === "landed" || result.type === "superseded") {
-							return "disposed" as const;
+						if (result.type === "landed") {
+							return result.disposition;
+						}
+						if (result.type === "superseded") {
+							return "superseded" as const;
 						}
 						if (result.type === "unrepairable") {
 							const current = activeCloseouts.get(closeoutId);
@@ -1144,6 +1197,32 @@ export function layer(
 					),
 				);
 			};
+
+			const startAcceptedFollowerAfterFailedCloseout = (
+				sessionEntry: SessionEntry,
+				threadEntry: ThreadEntry,
+				completedRunSlot: ThreadRunSlot,
+			): Effect.Effect<boolean> =>
+				sessionEntry.controlGate.withPermit(
+					Effect.gen(function* () {
+						if (
+							threadEntry.runtimeThread.state.acceptedInputCount() === 0 ||
+							threadEntry.runSlot !== completedRunSlot ||
+							completedRunSlot.stopping ||
+							threadEntry.status === "closed_for_runtime" ||
+							threadEntry.status === "failed" ||
+							threadEntry.status === "terminated" ||
+							sessionEntry.runtimeShutdown.requested ||
+							sessionEntry.threads.get(threadEntry.sessionThreadId) !== threadEntry
+						) {
+							return false;
+						}
+						threadEntry.runSlot = undefined;
+						threadEntry.status = "idle";
+						recordHotStateMetrics();
+						return yield* startThreadRunUnderControl(sessionEntry, threadEntry);
+					}),
+				);
 
 			const finishThreadRun = (
 				sessionEntry: SessionEntry,
@@ -1180,6 +1259,17 @@ export function layer(
 							yield* completeRunSlot(runSlot, exit);
 							return;
 						}
+						if (
+							closeout === "continuation" &&
+							(yield* startAcceptedFollowerAfterFailedCloseout(
+								sessionEntry,
+								threadEntry,
+								runSlot,
+							))
+						) {
+							yield* completeRunSlot(runSlot, exit);
+							return;
+						}
 						yield* releaseThreadEntry(sessionEntry, threadEntry);
 						yield* completeRunSlot(runSlot, exit);
 						return;
@@ -1191,19 +1281,14 @@ export function layer(
 						!runSlot.stopping &&
 						exit.value.releaseSession?.reason !== "terminated"
 					) {
-						// A cleared durable-turn token after accepted input consumption is
-						// the applied FinishIdle result. Otherwise failed-run closeout must
-						// land that result before this token can become a reusable trunk.
-						const alreadyIdle =
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
-								.executionRunId === undefined &&
-							threadEntry.runtimeThread.state.acceptedInputCount() === 0 &&
-							exit.value.releaseSession === undefined;
-						const closeout = alreadyIdle
-							? ("disposed" as const)
-							: yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit);
+						// The run exit carries the durable closeout disposition when the
+						// ThreadLoop already landed it. Hot idle shape is not settlement
+						// authority; an absent disposition must still execute closeout.
+						const closeout =
+							exit.value.closeoutDisposition ??
+							(yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit));
 						if (
-							closeout === "disposed" &&
+							closeout === "continuation" &&
 							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
 								.executionRunId === undefined
 						) {
@@ -1236,11 +1321,19 @@ export function layer(
 					const valueLevelFailed =
 						Exit.isSuccess(exit) && exit.value.type === "failed";
 					if (valueLevelFailed) {
+						let closeout:
+							| "continuation"
+							| "terminal"
+							| "superseded"
+							| "unrepairable"
+							| "shutdown"
+							| undefined = exit.value.closeoutDisposition;
 						if (
+							closeout === undefined &&
 							threadEntry.runtimeThread.state.acceptedInputCount() > 0 &&
 							exit.value.releaseSession?.reason !== "terminated"
 						) {
-							const closeout = yield* settleFailedRunCloseout(
+							closeout = yield* settleFailedRunCloseout(
 								sessionEntry,
 								threadEntry,
 								exit,
@@ -1249,6 +1342,17 @@ export function layer(
 								yield* completeRunSlot(runSlot, exit);
 								return;
 							}
+						}
+						if (
+							closeout === "continuation" &&
+							(yield* startAcceptedFollowerAfterFailedCloseout(
+								sessionEntry,
+								threadEntry,
+								runSlot,
+							))
+						) {
+							yield* completeRunSlot(runSlot, exit);
+							return;
 						}
 						yield* releaseThreadEntry(sessionEntry, threadEntry);
 						yield* completeRunSlot(runSlot, exit);
@@ -1310,9 +1414,14 @@ export function layer(
 						| "thread_busy",
 					retryable?: boolean,
 				) => CommandResult,
+				startPendingWork = false,
 			): Effect.Effect<CommandResult> =>
 				Effect.gen(function* () {
-					const prepared = yield* prepareThreadInstallation(command, metadata);
+					const prepared = yield* prepareThreadInstallation(
+						command,
+						metadata,
+						startPendingWork,
+					);
 					if (prepared.threadResult === undefined) {
 						return unavailable(
 							prepared.failedResult.reason,
@@ -1327,7 +1436,11 @@ export function layer(
 								if (
 									prepared.threadResult.sessionEntry.threads.get(
 										command.sessionThreadId,
-									) !== prepared.threadResult.threadEntry
+									) !== prepared.threadResult.threadEntry ||
+									prepared.threadResult.threadEntry.status ===
+										"closed_for_runtime" ||
+									prepared.threadResult.threadEntry.status === "failed" ||
+									prepared.threadResult.threadEntry.status === "terminated"
 								) {
 									return Option.none();
 								}
@@ -1546,6 +1659,7 @@ export function layer(
 						try {
 							const pendingTools = [
 								...threadEntry.runtimeThread.state.pendingApprovalToolJobs(),
+								...threadEntry.runtimeThread.state.resolvedToolRouteJobs(),
 								...threadEntry.runtimeThread.state.pendingSandboxExecutionJobs(),
 							];
 							threadEntry.runtimeThread.state.contextManager.appendInterruptToolResults(
@@ -1578,6 +1692,9 @@ export function layer(
 									metrics.addPendingApprovals(-1);
 								}
 								threadEntry.runtimeThread.state.clearThreadToolRoute(
+									cancellation.toolUseEventId,
+								);
+								threadEntry.runtimeThread.state.removeResolvedToolRouteJob(
 									cancellation.toolUseEventId,
 								);
 							}
@@ -2000,10 +2117,11 @@ export function layer(
 									reason:
 										reason === "local_session_capacity_exceeded"
 											? "local_session_capacity_exceeded"
-											: reason === "context_load_failed"
-												? "context_load_failed"
-												: "control_busy",
+										: reason === "context_load_failed"
+											? "context_load_failed"
+											: "control_busy",
 								}) as RuntimeControlResult,
+							true,
 						);
 					if (
 						result.ok &&
@@ -2199,9 +2317,10 @@ export function layer(
 				command: RuntimeThreadPreloadState,
 				initializeSharedState?: boolean,
 				startPendingWork = true,
+				canPublish: () => boolean = () => true,
 			): Effect.Effect<ThreadLifecycleResult> =>
 				Effect.gen(function* () {
-					if (admissionClosed) {
+					if (admissionClosed || !canPublish()) {
 						return {
 							ok: false,
 							sessionId: command.sessionId,
@@ -2282,8 +2401,12 @@ export function layer(
 						...(command.mcpManifests ?? []),
 					];
 					if (shouldInitializeSharedState) {
-						yield* threadResult.sessionEntry.controlGate.withPermit(
+						const installedSharedState =
+							yield* threadResult.sessionEntry.controlGate.withPermit(
 							Effect.sync(() => {
+								if (!canPublish()) {
+									return false;
+								}
 								for (const patch of observedSharedPatches) {
 									const disposition =
 										threadResult.sessionEntry.configuration.apply(patch);
@@ -2316,8 +2439,17 @@ export function layer(
 								}
 								threadResult.sessionEntry.sharedStateStatus = "ready";
 								threadResult.sessionEntry.completeSharedStateReady(true);
+								return true;
 							}),
 						);
+						if (!installedSharedState) {
+							return {
+								ok: false,
+								sessionId: command.sessionId,
+								sessionThreadId: command.sessionThreadId,
+								reason: "context_load_failed",
+							};
+						}
 					} else {
 						const sharedStateReady = yield* Effect.promise(
 							() => threadResult.sessionEntry.sharedStateReady,
@@ -2423,6 +2555,7 @@ export function layer(
 							Effect.sync(() => {
 								if (
 									admissionClosed ||
+									!canPublish() ||
 									threadResult.sessionEntry.threads.get(
 										command.sessionThreadId,
 									) !== threadResult.threadEntry
@@ -2466,6 +2599,8 @@ export function layer(
 			const prepareThreadInstallation = (
 				command: RuntimeThreadAddressState,
 				metadata: RuntimeAcceptedThreadMetadataState = {},
+				startPendingWork = false,
+				loadOptions?: RuntimeContextLoadOptions,
 			) =>
 				Effect.gen(function* () {
 					const failedResult = {
@@ -2528,10 +2663,23 @@ export function layer(
 						} as const;
 					}
 					if (threadResult.threadEntry.installation !== undefined) {
+						const installation = threadResult.threadEntry.installation;
+						const incomingRecovery = loadOptions?.recovery;
+						if (
+							incomingRecovery !== undefined &&
+							!recoveryAuthoritiesEqual(
+								installation.loadOptions?.recovery,
+								incomingRecovery,
+							)
+						) {
+							installation.superseded = true;
+						} else {
+							installation.startPendingWork ||= startPendingWork;
+						}
 						return {
 							threadResult,
 							failedResult,
-							installation: threadResult.threadEntry.installation,
+							installation,
 							createdInstallation: false,
 						} as const;
 					}
@@ -2548,6 +2696,9 @@ export function layer(
 						result: resultDeferred,
 						cleanup: cleanupDeferred,
 						fiber: undefined,
+						startPendingWork,
+						superseded: false,
+						loadOptions,
 					};
 					threadResult.threadEntry.installation = installation;
 					const install = Effect.uninterruptibleMask((restore) =>
@@ -2556,22 +2707,49 @@ export function layer(
 							const installExit = yield* restore(
 								Effect.gen(function* () {
 									const context = yield* Effect.tryPromise({
-										try: () => options.loadThreadContext!(command),
+										try: () =>
+											options.loadThreadContext!(
+												command,
+												installation.loadOptions,
+											),
 										catch: (error) => error,
 									});
 									if (
 										admissionClosed ||
+										installation.superseded ||
 										threadResult.sessionEntry.threads.get(
 											command.sessionThreadId,
 										) !== threadResult.threadEntry
 									) {
 										return failedResult;
 									}
-									return yield* preloadThread(
+									const preloadResult = yield* preloadThread(
 										context,
 										initializeSharedState,
 										false,
+										() => !installation.superseded,
 									);
+									if (!preloadResult.ok) {
+										return preloadResult;
+									}
+									if (installation.superseded) {
+										return failedResult;
+									}
+									if (
+										installation.startPendingWork &&
+										(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
+											undefined ||
+											ThreadLoop.threadTurnActionNeedsRun(
+												threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
+													.action,
+											))
+									) {
+										yield* startThreadRun(
+											threadResult.sessionEntry,
+											threadResult.threadEntry,
+										).pipe(Effect.asVoid);
+									}
+									return preloadResult;
 								}),
 							).pipe(Effect.exit);
 							const loadFailure = Exit.isFailure(installExit)
@@ -2591,6 +2769,7 @@ export function layer(
 									};
 							if (!result.ok) {
 								if (
+									!installation.superseded &&
 									initializeSharedState &&
 									threadResult.sessionEntry.sharedStateStatus === "initializing"
 								) {
@@ -2657,42 +2836,83 @@ export function layer(
 				command: RuntimeThreadAddressState,
 				installOptions: {
 					readonly requirePendingApprovalToolJobs?: boolean | undefined;
+					readonly startPendingWork?: boolean | undefined;
+					readonly loadOptions?: RuntimeContextLoadOptions | undefined;
 				} = {},
 			): Effect.Effect<ThreadLifecycleResult> =>
 				Effect.gen(function* () {
-					const prepared = yield* prepareThreadInstallation(command);
-					if (prepared.threadResult === undefined) {
-						return prepared.failedResult;
-					}
-					if (prepared.installation === undefined) {
+					for (;;) {
+						const prepared = yield* prepareThreadInstallation(
+							command,
+							{},
+							installOptions.startPendingWork === true,
+							installOptions.loadOptions,
+						);
+						if (prepared.threadResult === undefined) {
+							return prepared.failedResult;
+						}
+						if (prepared.installation === undefined) {
+							if (
+								installOptions.loadOptions?.recovery !== undefined &&
+								options.loadThreadContext !== undefined
+							) {
+								const authorityExit = yield* Effect.tryPromise({
+									try: () =>
+										options.loadThreadContext!(
+											command,
+											installOptions.loadOptions,
+										),
+									catch: (error) => error,
+								}).pipe(Effect.exit);
+								if (Exit.isFailure(authorityExit)) {
+									const loadFailure = Option.getOrUndefined(
+										Cause.findErrorOption(authorityExit.cause),
+									);
+									const parsedLoadFailure =
+										ContextLoaderErrorSchema.safeParse(loadFailure);
+									return {
+										...prepared.failedResult,
+										retryable: parsedLoadFailure.success
+											? parsedLoadFailure.data.retryable
+											: false,
+									};
+								}
+							}
+							if (
+								installOptions.requirePendingApprovalToolJobs === true &&
+								!prepared.threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
+							) {
+								return prepared.failedResult;
+							}
+							return {
+								ok: true,
+								sessionId: command.sessionId,
+								sessionThreadId: command.sessionThreadId,
+								applied: false,
+							};
+						}
+						if (prepared.createdInstallation) {
+							yield* Deferred.succeed(prepared.installation.start, undefined);
+						}
+						const result = yield* Deferred.await(prepared.installation.result);
+						if (!result.ok) {
+							yield* Deferred.await(prepared.installation.cleanup);
+						}
 						if (
+							!prepared.createdInstallation &&
+							installOptions.loadOptions?.recovery !== undefined
+						) {
+							continue;
+						}
+						if (
+							result.ok &&
 							installOptions.requirePendingApprovalToolJobs === true &&
 							!prepared.threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
 						) {
 							return prepared.failedResult;
 						}
-						return {
-							ok: true,
-							sessionId: command.sessionId,
-							sessionThreadId: command.sessionThreadId,
-							applied: false,
-						};
+						return result;
 					}
-					if (prepared.createdInstallation) {
-						yield* Deferred.succeed(prepared.installation.start, undefined);
-					}
-					const result = yield* Deferred.await(prepared.installation.result);
-					if (!result.ok) {
-						yield* Deferred.await(prepared.installation.cleanup);
-					}
-					if (
-						result.ok &&
-						installOptions.requirePendingApprovalToolJobs === true &&
-						!prepared.threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
-					) {
-						return prepared.failedResult;
-					}
-					return result;
 				});
 
 			const interruptReviewerExecution = (
@@ -2891,19 +3111,46 @@ export function layer(
 							applied: false,
 						};
 					}
-					threadEntry.runtimeThread.updateIdentity(controlIdentity(command));
-					const runSlot = threadEntry.runSlot;
-					yield* submitThreadCommand(
-						threadEntry,
-						Effect.sync(() => {
-							threadEntry.bridgeScope = command;
-							threadEntry.status = "closed_for_runtime";
-							if (runSlot !== undefined) {
-								runSlot.stopping = true;
-								threadEntry.runtimeThread.state.beginCooperativeCancel();
+					const queued = yield* sessionEntry.controlGate.withPermit(
+						Effect.gen(function* () {
+							if (
+								sessionEntry.threads.get(command.sessionThreadId) !==
+									threadEntry ||
+								threadEntry.status === "closed_for_runtime" ||
+								threadEntry.status === "failed" ||
+								threadEntry.status === "terminated"
+							) {
+								return Option.none<Effect.Effect<ThreadRunSlot | undefined>>();
 							}
+							threadEntry.status = "closed_for_runtime";
+							return yield* threadEntry.commandChannel
+								.enqueue(
+									Effect.sync(() => {
+										threadEntry.runtimeThread.updateIdentity(
+											controlIdentity(command),
+										);
+										threadEntry.bridgeScope = command;
+										const capturedRunSlot = threadEntry.runSlot;
+										if (capturedRunSlot !== undefined) {
+											capturedRunSlot.stopping = true;
+											threadEntry.runtimeThread.state.beginCooperativeCancel();
+										}
+										return capturedRunSlot;
+									}),
+								)
+								.pipe(Effect.option);
 						}),
-						undefined,
+					);
+					if (Option.isNone(queued)) {
+						return {
+							ok: true,
+							sessionId: command.sessionId,
+							sessionThreadId: command.sessionThreadId,
+							applied: false,
+						};
+					}
+					const runSlot = yield* queued.value.pipe(
+						Effect.catchCause(() => Effect.succeed(undefined)),
 					);
 					let requestedRunExitOutcome: RunExitOutcome | undefined;
 					if (runSlot?.ownerFiber !== undefined) {
@@ -3059,6 +3306,14 @@ export function layer(
 							"reviewer_execution_mismatch",
 						);
 					}
+					const reviewerRequestEndEventId = (): string | undefined => {
+						const request =
+							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
+								.request;
+						return request?.requestKind === "approval_reviewer"
+							? request.requestEnd?.eventId
+							: undefined;
+					};
 					const runSlot = threadEntry.runSlot;
 					if (runSlot === undefined) {
 						return reviewerTokensEqual(
@@ -3072,6 +3327,7 @@ export function layer(
 									status: threadEntry.status,
 									terminal: true,
 									timedOut: false,
+									requestEndEventId: reviewerRequestEndEventId(),
 								}
 							: reviewerExecutionRejection(
 									command,
@@ -3093,18 +3349,23 @@ export function layer(
 							status: threadEntry.status,
 							terminal: true,
 							timedOut: false,
+							requestEndEventId: reviewerRequestEndEventId(),
 						};
 					}
 					const completed = yield* awaitRunSlot(runSlot).pipe(
 						Effect.timeoutOption(`${Math.max(0, timeoutMs)} millis`),
 					);
+					const terminal = Option.isSome(completed);
 					return {
 						ok: true,
 						sessionId: command.sessionId,
 						sessionThreadId: command.sessionThreadId,
 						status: threadEntry.status,
-						terminal: Option.isSome(completed),
+						terminal,
 						timedOut: Option.isNone(completed),
+						...(terminal
+							? { requestEndEventId: reviewerRequestEndEventId() }
+							: {}),
 					};
 				});
 
@@ -3132,6 +3393,12 @@ export function layer(
 						status: threadEntry.status,
 						hasPendingApprovalToolJobs:
 							threadEntry.runtimeThread.state.hasPendingApprovalToolJobs(),
+						hasUnsettledToolOwner:
+							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request?.toolMembers.some(
+								(member) =>
+									member.memberKind === "public_tool_use" &&
+									member.terminalResult === undefined,
+							) ?? false,
 						entries: threadEntry.runtimeThread.state.contextManager.entries(),
 					};
 				});

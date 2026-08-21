@@ -312,8 +312,8 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 		if commitResult.err != nil || commitResult.commit.GetCommitted() == nil {
 			t.Fatalf("commit-first input result = %#v/%v; want committed", commitResult.commit, commitResult.err)
 		}
-	} else if commitResult.err == nil {
-		t.Fatalf("termination-first input commit = %#v; want fenced rejection", commitResult.commit)
+	} else if commitResult.err != nil || commitResult.commit.GetStale() == nil {
+		t.Fatalf("termination-first input commit = %#v/%v; want terminal stale receipt", commitResult.commit, commitResult.err)
 	}
 	var messageCount, inboxCount, activeJobs int
 	var inboxStatus, queueStatus, sessionStatus string

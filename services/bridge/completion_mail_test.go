@@ -190,6 +190,18 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 		scope := bridgeAPIScope(sessionID, reviewerID, "bind_completion_reviewer_terminate", 1, "pod_completion_reviewer_terminate")
 		seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_completion_reviewer_terminate")
+		const privateToolUseID = "evt_completion_reviewer_private_tool"
+		seedBridgeAPIEvent(t, admin, "default", sessionID, reviewerID, privateToolUseID,
+			nextBridgeAPIEventSequenceForTest(t, admin, sessionID, reviewerID), "agent.tool_use",
+			`{"type":"agent.tool_use","name":"Read","input":{"path":"review.txt"},"evaluated_permission":"allow"}`)
+		if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+			SET visibility='internal',session_visible=false
+			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, privateToolUseID); err != nil {
+			t.Fatalf("make reviewer Tool route private: %v", err)
+		}
+		seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, reviewerID,
+			"mreq_completion_reviewer_private_tool", privateToolUseID, "call_completion_reviewer_private_tool", "Read")
+		seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, reviewerID, privateToolUseID)
 		if _, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
 			Scope:          scope,
 			RuntimeWriteId: "rwrite_completion_reviewer_terminate",
@@ -200,6 +212,19 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 		mailCount, jobCount, _ := completionMailRows(t, admin, sessionID)
 		if mailCount != 0 || jobCount != 0 {
 			t.Fatalf("reviewer termination completion rows = %d/%d; want zero", mailCount, jobCount)
+		}
+		var privateResults int
+		var routeStatus string
+		if err := admin.QueryRowContext(context.Background(), `SELECT
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$3 AND visibility='internal'),
+			(SELECT status FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1
+			 AND session_thread_id=$2 AND tool_use_event_id=$3)`, sessionID, reviewerID, privateToolUseID).
+			Scan(&privateResults, &routeStatus); err != nil {
+			t.Fatalf("read terminated private reviewer route: %v", err)
+		}
+		if privateResults != 1 || routeStatus != "cancelled" {
+			t.Fatalf("terminated private reviewer results/route = %d/%s; want 1/cancelled", privateResults, routeStatus)
 		}
 	})
 }

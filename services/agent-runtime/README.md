@@ -215,13 +215,17 @@ Invariants a replacement must preserve:
 - The stable `tool-call` is the execution boundary; `tool-input` fragments start
   nothing.
 - The next request cannot start until the stream is terminal, the request end is
-  ACKed, its terminal assistant projection is installed in hot context, and the
-  per-turn tool-fiber set has settled. A rescheduled request carries only parts
-  already proven durable; successful closeout adds the request's complete stable
-  reasoning set in the same settlement.
-- The pod is the only retry driver: a retryable failure parks in-run until the
-  Bridge-effective deadline and re-issues the request rebuilt from committed
-  context, or settles as retries-exhausted.
+  ACKed, and every committed Tool Use has reached its existing settlement owner.
+  A failed attempt's text remains durable audit history but is excluded from all
+  later provider requests. Runtime retains only exact terminal Tool Call/Result
+  pairs and their ordered reasoning; a nonterminal Tool Call stays in the private
+  open draft until that same Tool route settles, without executor replay or a
+  fabricated result.
+- The pod is the only retry driver. The accepted Request End reschedule receipt
+  carries the attempt and Bridge-effective deadline through hot or cold recovery;
+  Runtime waits only the remaining deadline and re-issues exactly one request
+  rebuilt from eligible committed context. The durable attempt seeds the next
+  proposal, so pod loss cannot reset the budget.
 - The reviewer model and provider credentials are platform-owned; Gateway injects
   credentials but never chooses or replaces the model.
 - Media attachments obey `MaxProviderRequestAttachments` = 32
@@ -335,18 +339,28 @@ specialized sub-agent loop and no reviewer-only model-call path. The parent
 thread sees tool use/result; child work stays child-thread-local.
 
 - Interface: the `subagent` route operations dispatch in `tool-runner.ts`; child
-  threads are created through Bridge `CreateSubagentThread`; Bridge derives and stores the thread context prefix;
-  `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
-- Lifecycle: `spawn_agent` prepares a durable child row and context prefix before the
-  first message; `send_message` resolves the child by `task_name`, delivering
-  every instruction through the stored envelope and durable Runtime input rail;
+  threads are created through Bridge `CreateSubagentThread`; Runtime declares
+  the normalized child metadata and bounded initial prompt once, interprets
+  public `fork_turns`, and sends the exact ordered durable parent Message
+  references. Bridge validates and snapshots only those references while
+  committing initial custody atomically; turn partitioning is
+  `core/src/runtime/conversation-turns.ts`.
+- Lifecycle: `spawn_agent` commits the durable child row, immutable context
+  prefix, opening sent/received Events, target Inbox/Queue custody, and one
+  replay receipt directly from its live durable Tool Use, before the parent
+  Provider Request End. Later `send_message` calls resolve the child by
+  `task_name` and deliver through their own stored envelope and durable Runtime input rail;
   `wait_agent`, `interrupt_agent`, `close_agent`, `resume_agent`, and
-  `list_agents` operate over durable `session_threads`.
+  `list_agents` operate over durable `session_threads`. Runtime resolves
+  `task_name` before child control and declares the exact child ID plus fixed
+  interrupt/close action; Bridge never reinterprets those Tool arguments.
 
 Invariants a replacement must preserve:
 
-- Child durable thread and context prefix exist before the initial message; a crash
-  after a duplicate `CreateSubagentThread` result reuses the same Bridge-owned child and prefix.
+- Child thread, prefix, opening Events, Inbox/Queue custody, and receipt exist
+  together or not at all. A crash after `CreateSubagentThread` commits reuses
+  that complete Bridge-owned lineage without a second opening delivery; the
+  replay receipt carries only the child identity needed by Runtime.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → committed input
   result. Pod-loss reconciliation hands an accepted input back to the existing

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,7 +26,7 @@ const (
 	childCreateSourceReviewerTrunk   = "reviewer_trunk_ensure"
 	childCreateSourceReviewerSidecar = "reviewer_sidecar_ensure"
 	actorTaskNameMaxBytes            = 128
-	actorForkTurnsMax                = 1000
+	actorParentMessageRefsMax        = 8192
 )
 
 func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, request *bridgev1.CreateSubagentThreadRequest) (response *bridgev1.CreateSubagentThreadResponse, resultErr error) {
@@ -35,18 +34,15 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "create_subagent_thread", request.GetSourceToolUseEventId(), phase, resultErr)
 	}()
-	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorTaskName(request.GetTaskName()) {
-		return nil, status.Error(codes.InvalidArgument, "sub-agent source Tool, task name, and scope are required")
+	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorTaskName(request.GetTaskName()) ||
+		!validActorIdentity(request.GetAgentType()) || !validActorInitialPrompt(request.GetInitialPrompt()) {
+		return nil, status.Error(codes.InvalidArgument, "sub-agent source Tool, task name, initial prompt, and scope are required")
 	}
-	switch request.GetAgentType() {
-	case "general", "research", "worker":
-	default:
-		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent agent_type")
+	if !validParentMessageSequences(request.GetParentMessageSequences()) {
+		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent parent Message references")
 	}
-	if !validForkTurns(request.GetForkTurns()) {
-		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent fork_turns")
-	}
-	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetForkTurns())
+	parentMessageSequencesJSON, _ := json.Marshal(request.GetParentMessageSequences())
+	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetInitialPrompt(), string(parentMessageSequencesJSON))
 	now := s.now()
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.create_subagent_thread", func(tx *dbconnect.Tx) error {
@@ -69,11 +65,14 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_create"); err != nil {
+			return err
+		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
 		if err := requireOpenChildParentTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
 		}
-		prefix, err := selectSubagentPrefixTx(ctx, tx, request)
+		prefix, err := loadDeclaredSubagentPrefixTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), request.GetParentMessageSequences())
 		if err != nil {
 			return err
 		}
@@ -82,6 +81,16 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 			return err
 		}
 		result, err := insertOwnedChildThreadTx(ctx, tx, request.GetScope(), childThreadID, parentThreadID, "subagent", "public", request.GetAgentType(), request.GetTaskName(), false, request.GetSourceToolUseEventId(), prefix, now)
+		if err != nil {
+			return err
+		}
+		envelope, err := appendDeclaredSubagentInitialEnvelopeTx(
+			ctx, tx, request.GetScope(), childThreadID, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetInitialPrompt(), now,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = appendDeclaredSubagentInitialReceivedEventTx(ctx, tx, scopeForThread(request.GetScope(), childThreadID), envelope, now)
 		if err != nil {
 			return err
 		}
@@ -448,6 +457,9 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 				targetThread:      request.GetTargetThreadId(),
 			})
 		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_message"); err != nil {
+			return err
+		}
 		envelope, err := appendSubagentMailEnvelopeTx(
 			ctx,
 			tx,
@@ -559,7 +571,7 @@ func (s *PostgreSQLBridgeAPIStore) CloseChildControl(ctx context.Context, reques
 	var childThreadID string
 	phase = "derive_authority"
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.derive_child_close", func(tx *dbconnect.Tx) error {
-		command, err := deriveChildControlCommandByOperationTx(ctx, tx, request.GetScope(), request.GetControlOperationId())
+		command, err := loadCommittedChildControlCommandTx(ctx, tx, request.GetScope(), request.GetControlOperationId())
 		if err != nil {
 			return err
 		}
@@ -572,7 +584,7 @@ func (s *PostgreSQLBridgeAPIStore) CloseChildControl(ctx context.Context, reques
 		return nil, err
 	}
 	phase = "durable_transaction"
-	result, err := s.closeChildLifecycle(ctx, request.GetScope(), childThreadID, "tool_use", request.GetControlOperationId(), bridgeOpCloseChildControl)
+	result, err := s.closeChildLifecycle(ctx, request.GetScope(), childThreadID, "tool_use", request.GetControlOperationId(), bridgeOpCloseChildControl, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -593,8 +605,12 @@ func (s *PostgreSQLBridgeAPIStore) CloseApprovalReviewer(ctx context.Context, re
 	if request.GetScope() == nil || !validActorIdentity(request.GetReviewerThreadId()) || !validActorIdentity(request.GetReviewId()) {
 		return nil, status.Error(codes.InvalidArgument, "reviewer close identities are required")
 	}
+	authority, err := parseApprovalReviewerCloseAuthority(request)
+	if err != nil {
+		return nil, err
+	}
 	phase = "durable_transaction"
-	result, err := s.closeChildLifecycle(ctx, request.GetScope(), request.GetReviewerThreadId(), "approval_review", request.GetReviewId(), bridgeOpCloseApprovalReviewer)
+	result, err := s.closeChildLifecycle(ctx, request.GetScope(), request.GetReviewerThreadId(), "approval_review", request.GetReviewId(), bridgeOpCloseApprovalReviewer, &authority)
 	if err != nil {
 		return nil, err
 	}
@@ -620,6 +636,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 	sourceKind string,
 	sourceCommandID string,
 	operationKind string,
+	reviewerCloseAuthority *approvalReviewerCloseAuthority,
 ) (*closeChildLifecycleResult, error) {
 	now := s.now()
 	command, err := parseChildLifecycleCommand(
@@ -630,6 +647,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		sourceCommandID,
 		operationKind,
 		"close",
+		reviewerCloseAuthority,
 	)
 	if err != nil {
 		return nil, err
@@ -850,8 +868,8 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "mark_child_thread_active", request.GetSourceToolUseEventId(), phase, resultErr)
 	}()
-	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "child resume scope and source Tool identity are required")
+	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorIdentity(request.GetTargetChildThreadId()) {
+		return nil, status.Error(codes.InvalidArgument, "child resume scope, source Tool identity, and target are required")
 	}
 	now := s.now()
 	var (
@@ -868,34 +886,39 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		var err error
-		childThreadID, err = deriveChildResumeTargetTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId())
-		if err != nil {
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		childThreadID = request.GetTargetChildThreadId()
+		if err := validateDeclaredPublicSubagentTargetTx(ctx, tx, request.GetScope(), childThreadID); err != nil {
+			return err
+		}
+		var err error
 		command, err = parseChildLifecycleCommand(
 			request.GetScope(), childThreadID, now, "tool_use", request.GetSourceToolUseEventId(),
-			bridgeOpMarkChildThreadActive, "resume",
+			bridgeOpMarkChildThreadActive, "resume", nil,
 		)
 		if err != nil {
 			return err
 		}
 		childScope := scopeForThread(request.GetScope(), childThreadID)
-		if existingResults, ok, err := readChildLifecycleOperationResultsTx(
+		if existingResults, ok, err := readChildLifecycleOperationResultSetTx(
 			ctx,
 			tx,
 			request.GetScope(),
-			[]string{childThreadID},
 			command,
 			bridgeOpMarkChildThreadActive,
 		); err != nil {
 			return err
 		} else if ok {
+			if len(existingResults) != 1 {
+				return status.Error(codes.FailedPrecondition, "child resume stored result set is invalid")
+			}
 			results = existingResults
 			duplicate = true
 			return nil
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_resume"); err != nil {
 			return err
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, childScope)
@@ -1052,6 +1075,29 @@ type childLifecycleCommand struct {
 	requestedAt         string
 	requestedTime       time.Time
 	declarationDigest   string
+	reviewerClose       *approvalReviewerCloseAuthority
+}
+
+type approvalReviewerCloseAuthority struct {
+	settlementKind    bridgev1.ApprovalReviewerCloseSettlementKind
+	settlementEventID string
+}
+
+func parseApprovalReviewerCloseAuthority(request *bridgev1.CloseApprovalReviewerRequest) (approvalReviewerCloseAuthority, error) {
+	switch request.GetSettlementKind() {
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION,
+		bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE,
+		bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST:
+	default:
+		return approvalReviewerCloseAuthority{}, status.Error(codes.InvalidArgument, "reviewer close settlement kind is required")
+	}
+	if !validActorIdentity(request.GetSettlementEventId()) {
+		return approvalReviewerCloseAuthority{}, status.Error(codes.InvalidArgument, "reviewer close settlement event is required")
+	}
+	return approvalReviewerCloseAuthority{
+		settlementKind:    request.GetSettlementKind(),
+		settlementEventID: request.GetSettlementEventId(),
+	}, nil
 }
 
 func parseChildLifecycleCommand(
@@ -1062,6 +1108,7 @@ func parseChildLifecycleCommand(
 	sourceCommandID string,
 	operationKind string,
 	action string,
+	reviewerCloseAuthority *approvalReviewerCloseAuthority,
 ) (childLifecycleCommand, error) {
 	requestedAt := requestedTime.UTC().Format(time.RFC3339Nano)
 	if sourceKind != "tool_use" && sourceKind != "approval_review" {
@@ -1075,7 +1122,7 @@ func parseChildLifecycleCommand(
 	operationID := ""
 	if action == "resume" {
 		operationSourceKind = "child_resume_command"
-		operationIDParts[0] = "child_resume"
+		operationIDParts = []string{"child_resume", sourceCommandID}
 	} else if sourceKind == "tool_use" {
 		// The Bridge-owned control operation is the sole close fence across
 		// admission, completion, lifecycle results, and hot release.
@@ -1084,6 +1131,12 @@ func parseChildLifecycleCommand(
 	if operationID == "" {
 		operationID = stableRuntimeID(operationIDParts...)
 	}
+	settlementKind := ""
+	settlementEventID := ""
+	if reviewerCloseAuthority != nil {
+		settlementKind = reviewerCloseAuthority.settlementKind.String()
+		settlementEventID = reviewerCloseAuthority.settlementEventID
+	}
 	declarationDigest, err := childLifecycleDeclarationDigest(
 		operationKind,
 		action,
@@ -1091,6 +1144,8 @@ func parseChildLifecycleCommand(
 		childThreadID,
 		sourceKind,
 		sourceCommandID,
+		settlementKind,
+		settlementEventID,
 	)
 	if err != nil {
 		return childLifecycleCommand{}, err
@@ -1104,51 +1159,8 @@ func parseChildLifecycleCommand(
 		requestedAt:         requestedAt,
 		requestedTime:       requestedTime.UTC(),
 		declarationDigest:   declarationDigest,
+		reviewerClose:       reviewerCloseAuthority,
 	}, nil
-}
-
-func deriveChildResumeTargetTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	sourceToolUseEventID string,
-) (string, error) {
-	var payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT payload_json
-		FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		AND event_id=$4 AND type='agent.tool_use' AND visibility='public'
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceToolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool Use is missing")
-	} else if err != nil {
-		return "", err
-	}
-	var tool runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &tool); err != nil || tool.Name != "resume_agent" {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool Use is invalid")
-	}
-	var input struct {
-		TaskName string `json:"task_name"`
-	}
-	if err := json.Unmarshal(tool.Input, &input); err != nil || strings.TrimSpace(input.TaskName) == "" {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool input is invalid")
-	}
-	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, sourceToolUseEventID); err != nil {
-		return "", err
-	} else if terminal {
-		return "", status.Error(codes.FailedPrecondition, "child resume source Tool Use is terminal")
-	}
-	var childThreadID string
-	if err := tx.QueryRow(ctx, `SELECT id
-		FROM session_threads
-		WHERE workspace_id=$1 AND session_id=$2 AND parent_thread_id=$3
-		AND role='subagent' AND visibility='public' AND task_name=$4
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), strings.TrimSpace(input.TaskName)).Scan(&childThreadID); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.NotFound, "child resume target is missing")
-	} else if err != nil {
-		return "", err
-	}
-	return childThreadID, nil
 }
 
 func validateChildLifecycleSourceTx(
@@ -1190,7 +1202,10 @@ func validateChildLifecycleSourceTx(
 			return status.Error(codes.FailedPrecondition, "child lifecycle reviewer source does not match the durable reviewer thread")
 		}
 		if command.action == "close" {
-			return validateSettledApprovalReviewerCloseTx(ctx, tx, scope, childThreadID, command.sourceCommandID)
+			if command.reviewerClose == nil {
+				return status.Error(codes.InvalidArgument, "reviewer close settlement authority is required")
+			}
+			return validateSettledApprovalReviewerCloseTx(ctx, tx, scope, childThreadID, command.sourceCommandID, *command.reviewerClose)
 		}
 		return nil
 	}
@@ -1214,7 +1229,7 @@ func validateChildLifecycleSourceTx(
 		return status.Error(codes.FailedPrecondition, "child lifecycle tool source does not own the durable child")
 	}
 	if command.action == "close" {
-		control, err := deriveChildControlCommandByOperationTx(ctx, tx, scope, command.sourceCommandID)
+		control, err := loadCommittedChildControlCommandTx(ctx, tx, scope, command.sourceCommandID)
 		if err != nil {
 			return err
 		}
@@ -1223,46 +1238,58 @@ func validateChildLifecycleSourceTx(
 		}
 		return nil
 	}
-	derivedChildThreadID, err := deriveChildResumeTargetTx(ctx, tx, scope, command.sourceCommandID)
-	if err != nil {
-		return err
-	}
-	if derivedChildThreadID != childThreadID {
-		return status.Error(codes.FailedPrecondition, "child resume source does not own the durable child")
-	}
 	return nil
 }
 
-func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID, reviewID string) error {
-	var outcomeCount int
-	err := tx.QueryRow(ctx, `SELECT COUNT(*)
-		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		 AND type IN ('approval_review.decision','approval_review.failure')
-		 AND payload_json::jsonb->>'review_id'=$4`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, reviewID).Scan(&outcomeCount)
+func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID, reviewID string, authority approvalReviewerCloseAuthority) error {
+	expectedType := ""
+	switch authority.settlementKind {
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION:
+		expectedType = "approval_review.decision"
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE:
+		expectedType = "approval_review.failure"
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST:
+		expectedType = "span.model_request_end"
+	default:
+		return status.Error(codes.InvalidArgument, "reviewer close settlement kind is required")
+	}
+	var eventType, modelRequestID, runtimeWriteID string
+	err := tx.QueryRow(ctx, `SELECT type, COALESCE(model_request_id, ''),
+		COALESCE(runtime_write_id, '')
+		FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, authority.settlementEventID).
+		Scan(&eventType, &modelRequestID, &runtimeWriteID)
+	if dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement is missing")
+	}
 	if err != nil {
 		return err
 	}
-	if outcomeCount > 1 {
-		return status.Error(codes.FailedPrecondition, "approval reviewer close found competing durable outcomes")
+	if eventType != expectedType {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement type conflicts")
 	}
-	outcomeSettled := outcomeCount == 1
-	var cancelledRequestSettled bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1
-		  FROM session_events end_event
-		 WHERE end_event.workspace_id=$1
-		   AND end_event.session_id=$2
-		   AND end_event.session_thread_id=$3
-		   AND end_event.type='span.model_request_end'
-		   AND end_event.payload_json::jsonb->>'request_kind'='approval_reviewer'
-		   AND end_event.payload_json::jsonb->>'error_kind'='runtime_interrupted'
-		   AND end_event.payload_json::jsonb->>'finish_reason'='cancelled')`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID).Scan(&cancelledRequestSettled)
-	if err != nil {
-		return err
+	if authority.settlementKind == bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION && runtimeWriteID != "rwrite_"+reviewID+"_decision" {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement belongs to another review")
 	}
-	if !outcomeSettled && !cancelledRequestSettled {
-		return status.Error(codes.FailedPrecondition, "approval reviewer close requires a durable outcome or cancelled request")
+	if authority.settlementKind == bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE && runtimeWriteID != "rwrite_"+reviewID+"_failure" {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement belongs to another review")
+	}
+	if authority.settlementKind == bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST {
+		if modelRequestID == "" {
+			return status.Error(codes.FailedPrecondition, "approval reviewer close request settlement is incomplete")
+		}
+		var reviewerRequest bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM request_usage_details
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			AND model_request_id=$4 AND request_kind='approval_reviewer')`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, modelRequestID).Scan(&reviewerRequest); err != nil {
+			return err
+		}
+		if !reviewerRequest {
+			return status.Error(codes.FailedPrecondition, "approval reviewer close request settlement is unrelated")
+		}
 	}
 	var unfinished bool
 	err = tx.QueryRow(ctx, `SELECT
@@ -1341,51 +1368,6 @@ func readChildLifecycleOperationResultSetTx(
 		return nil, false, err
 	}
 	return results, len(results) > 0, nil
-}
-
-func readChildLifecycleOperationResultsTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	callerScope *bridgev1.RuntimeScope,
-	targetIDs []string,
-	command childLifecycleCommand,
-	operationKind string,
-) ([]*bridgev1.ChildLifecycleResult, bool, error) {
-	results := make([]*bridgev1.ChildLifecycleResult, 0, len(targetIDs))
-	existingCount := 0
-	for _, targetID := range targetIDs {
-		targetScope := scopeForThread(callerScope, targetID)
-		existing, ok, err := readBridgeDeclarationOperationTx(
-			ctx,
-			tx,
-			targetScope,
-			operationKind,
-			command.operationSourceKind,
-			command.operationID,
-		)
-		if err != nil {
-			return nil, false, err
-		}
-		if !ok {
-			continue
-		}
-		existingCount++
-		if existing.DeclarationDigest != command.declarationDigest || existing.ReceiptJSON == "" {
-			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle idempotency conflict")
-		}
-		result, err := unmarshalChildLifecycleStoredResult(existing.ReceiptJSON, targetID, command.action)
-		if err != nil {
-			return nil, false, err
-		}
-		results = append(results, result)
-	}
-	if existingCount == 0 {
-		return nil, false, nil
-	}
-	if existingCount != len(targetIDs) {
-		return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle stored result set is incomplete")
-	}
-	return results, true, nil
 }
 
 func unmarshalChildLifecycleStoredResult(raw, targetID, action string) (*bridgev1.ChildLifecycleResult, error) {
@@ -1488,69 +1470,82 @@ func requireOpenChildParentTx(ctx context.Context, tx *dbconnect.Tx, scope *brid
 	return nil
 }
 
-func selectSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CreateSubagentThreadRequest) (*threadContextPrefixEnvelope, error) {
-	var payloadJSON string
-	var modelRequestID sql.NullString
-	err := tx.QueryRow(ctx, `SELECT payload_json, model_request_id
-		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		 AND event_id=$4 AND type='agent.tool_use' AND visibility='public' FOR SHARE`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetSourceToolUseEventId(),
-	).Scan(&payloadJSON, &modelRequestID)
-	if dbconnect.IsNoRows(err) {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool Use is invalid")
-	}
-	if err != nil {
+// loadDeclaredSubagentPrefixTx snapshots exactly the ordered sealed parent
+// Messages declared by Runtime. Bridge verifies only durable ownership,
+// ordering, sealing, and the source Assistant boundary; it does not interpret
+// fork instructions or select conversation turns.
+func loadDeclaredSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceToolUseEventID string, messageSequences []int64) (*threadContextPrefixEnvelope, error) {
+	var modelRequestID string
+	if err := tx.QueryRow(ctx, `SELECT model_request_id
+		FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4
+		 AND type='agent.tool_use' AND visibility='public' AND model_request_id IS NOT NULL
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceToolUseEventID).Scan(&modelRequestID); dbconnect.IsNoRows(err) {
+		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool boundary is missing")
+	} else if err != nil {
 		return nil, err
-	}
-	var tool runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &tool); err != nil || tool.Name != "spawn_agent" || !modelRequestID.Valid || modelRequestID.String == "" {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool Use is invalid")
-	}
-	var input struct {
-		TaskName  string `json:"task_name"`
-		AgentType string `json:"agent_type"`
-		ForkTurns string `json:"fork_turns"`
-	}
-	if err := json.Unmarshal(tool.Input, &input); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source Tool input is malformed")
-	}
-	input.AgentType = defaultString(input.AgentType, "general")
-	input.ForkTurns = defaultString(input.ForkTurns, "all")
-	if input.TaskName != request.GetTaskName() || input.AgentType != request.GetAgentType() || input.ForkTurns != request.GetForkTurns() {
-		return nil, status.Error(codes.AlreadyExists, "sub-agent declaration conflicts with its durable Tool Use")
 	}
 	var boundarySequence int64
 	if err := tx.QueryRow(ctx, `SELECT sequence FROM session_messages
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), modelRequestID.String,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
 	).Scan(&boundarySequence); dbconnect.IsNoRows(err) {
 		return nil, status.Error(codes.FailedPrecondition, "sub-agent source request has no durable Assistant context")
 	} else if err != nil {
 		return nil, err
 	}
-	var requestEnded bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_events ended
-		WHERE ended.workspace_id=$1 AND ended.session_id=$2 AND ended.session_thread_id=$3
-		 AND ended.type='span.model_request_end' AND ended.model_request_id=$4
-		 AND NOT COALESCE((ended.payload_json::jsonb ->> 'is_error')::boolean, FALSE)
-		 AND NOT EXISTS (SELECT 1 FROM session_events rescheduled
-		   WHERE rescheduled.workspace_id=ended.workspace_id AND rescheduled.session_id=ended.session_id
-		    AND rescheduled.session_thread_id=ended.session_thread_id AND rescheduled.model_request_id=ended.model_request_id
-		    AND rescheduled.type IN ('session.status_rescheduled','session.thread_status_rescheduled')))`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), modelRequestID.String,
-	).Scan(&requestEnded); err != nil {
-		return nil, err
+	entries := make([]bridgeRuntimeContextEntry, 0, len(messageSequences))
+	if len(messageSequences) > 0 {
+		rows, err := tx.Query(ctx, `WITH requested AS (
+			SELECT sequence, ordinality
+			FROM unnest($5::bigint[]) WITH ORDINALITY AS selected(sequence, ordinality)
+		) SELECT m.kind,m.sequence,m.data_json,
+			CASE WHEN m.kind <> 'assistant' THEN true
+			     WHEN m.model_request_id IS NULL THEN false
+			     ELSE EXISTS (
+			       SELECT 1 FROM session_events ended
+			       WHERE ended.workspace_id=m.workspace_id AND ended.session_id=m.session_id
+			        AND ended.session_thread_id=m.session_thread_id
+			        AND ended.model_request_id=m.model_request_id
+			        AND ended.type='span.model_request_end'
+			     )
+			END AS sealed
+		FROM requested
+		JOIN session_messages m
+		  ON m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$3
+		 AND m.sequence=requested.sequence
+		WHERE m.sequence < $4
+		ORDER BY requested.ordinality`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), boundarySequence, messageSequences)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var kind, raw string
+			var sequence int64
+			var sealed bool
+			if err := rows.Scan(&kind, &sequence, &raw, &sealed); err != nil {
+				return nil, err
+			}
+			if !sealed {
+				return nil, status.Error(codes.FailedPrecondition, "sub-agent parent Message reference is not sealed")
+			}
+			parts, err := decodeStoredRuntimeContextParts(raw)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, bridgeRuntimeContextEntry{MessageSequence: sequence, ContextKind: kind, Parts: parts})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(entries) != len(messageSequences) {
+			return nil, status.Error(codes.FailedPrecondition, "sub-agent parent Message reference is missing or outside the source boundary")
+		}
 	}
-	if !requestEnded {
-		return nil, status.Error(codes.FailedPrecondition, "sub-agent source request is not durably sealed")
-	}
-	entries, kinds, err := loadDurablePrefixEntriesThroughTx(ctx, tx, request.GetScope(), boundarySequence)
-	if err != nil {
-		return nil, err
-	}
-	entries = selectForkEntries(entries, kinds, request.GetForkTurns())
 	return &threadContextPrefixEnvelope{
-		SourceParentThreadID: request.GetScope().GetSessionThreadId(), ParentBoundaryEventID: request.GetSourceToolUseEventId(), Entries: entries,
+		SourceParentThreadID: scope.GetSessionThreadId(), ParentBoundaryEventID: sourceToolUseEventID, Entries: entries,
 	}, nil
 }
 
@@ -1704,64 +1699,26 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 	return entries, kinds, rows.Err()
 }
 
-func selectForkEntries(entries []bridgeRuntimeContextEntry, kinds []string, forkTurns string) []bridgeRuntimeContextEntry {
-	if forkTurns == "none" {
-		return []bridgeRuntimeContextEntry{}
-	}
-	if forkTurns == "all" {
-		return entries
-	}
-	count, err := strconv.Atoi(forkTurns)
-	if err != nil || count <= 0 {
-		return []bridgeRuntimeContextEntry{}
-	}
-	type turn struct {
-		userLed bool
-		entries []bridgeRuntimeContextEntry
-	}
-	var turns []turn
-	for index, entry := range entries {
-		kind := kinds[index]
-		boundary := kind == "user" || kind == "runtime_notification"
-		if boundary || len(turns) == 0 {
-			turns = append(turns, turn{userLed: boundary})
-		}
-		turns[len(turns)-1].entries = append(turns[len(turns)-1].entries, entry)
-	}
-	var userTurns []turn
-	for _, value := range turns {
-		if value.userLed {
-			userTurns = append(userTurns, value)
-		}
-	}
-	if count > len(userTurns) {
-		count = len(userTurns)
-	}
-	var selected []bridgeRuntimeContextEntry
-	for _, value := range userTurns[len(userTurns)-count:] {
-		selected = append(selected, value.entries...)
-	}
-	return selected
-}
-
-func validForkTurns(value string) bool {
-	if value == "none" || value == "all" {
-		return true
-	}
-	if value == "" || value[0] == '0' {
+func validParentMessageSequences(values []int64) bool {
+	if len(values) > actorParentMessageRefsMax {
 		return false
 	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
+	var prior int64
+	for _, value := range values {
+		if value <= prior {
 			return false
 		}
+		prior = value
 	}
-	count, err := strconv.Atoi(value)
-	return err == nil && count > 0 && count <= actorForkTurnsMax
+	return true
 }
 
 func validActorTaskName(value string) bool {
 	return value == strings.TrimSpace(value) && value != "" && utf8.ValidString(value) && len([]byte(value)) <= actorTaskNameMaxBytes
+}
+
+func validActorInitialPrompt(value string) bool {
+	return value == strings.TrimSpace(value) && value != "" && utf8.ValidString(value) && len([]byte(value)) <= AgentMailContentMaxBytes
 }
 
 func validActorIdentity(value string) bool {
@@ -1889,7 +1846,7 @@ func insertOwnedChildThreadTx(
 		return createChildThreadResult{}, err
 	}
 	childScope := scopeForThread(parentScope, childThreadID)
-	eventID, sequence, err := insertChildThreadCreatedEventTx(ctx, tx, childScope, parentThreadID, role, visibility, agentType, taskName, sourceToolUseEventID, now)
+	_, _, err := insertChildThreadCreatedEventTx(ctx, tx, childScope, parentThreadID, role, visibility, agentType, taskName, sourceToolUseEventID, now)
 	if err != nil {
 		return createChildThreadResult{}, err
 	}
@@ -1898,7 +1855,7 @@ func insertOwnedChildThreadTx(
 			return createChildThreadResult{}, err
 		}
 	}
-	return createChildThreadResult{Status: "created", ChildThreadID: childThreadID, ThreadCreatedEventID: eventID, ThreadCreatedSequence: sequence}, nil
+	return createChildThreadResult{ChildThreadID: childThreadID}, nil
 }
 
 func persistCreatedChildOperationTx(

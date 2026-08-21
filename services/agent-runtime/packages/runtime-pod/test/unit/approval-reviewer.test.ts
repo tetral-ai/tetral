@@ -20,7 +20,10 @@ import type {
 import type { ToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { Effect, Fiber, Scope } from "effect";
-import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
+import type {
+	ApprovalReviewerThreadClose,
+	ApprovalReviewerThreadCreation,
+} from "../../src/approval-reviewer.js";
 import { createRuntimeApprovalReviewer as createEffectRuntimeApprovalReviewer } from "../../src/approval-reviewer.js";
 
 const createdAt = "2026-07-06T00:00:00.000Z";
@@ -3109,6 +3112,9 @@ class RecordingReviewerHost {
 					...(result.status === undefined ? {} : { status: result.status }),
 					terminal: !result.timedOut,
 					timedOut: result.timedOut,
+					...(result.timedOut
+						? {}
+						: { requestEndEventId: `evt_request_end_${token.reviewId}` }),
 				};
 			};
 		if (abortSignal === undefined) {
@@ -3309,7 +3315,7 @@ class RecordingLogger {
 
 class RecordingReviewerThreadCreator {
 	readonly creations: ApprovalReviewerThreadCreation[] = [];
-	readonly closes: ApprovalReviewerThreadCreation[] = [];
+	readonly closes: ApprovalReviewerThreadClose[] = [];
 
 	constructor(
 		private readonly steps: string[] = [],
@@ -3340,7 +3346,7 @@ class RecordingReviewerThreadCreator {
 		};
 	}
 
-	async closeApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
+	async closeApprovalReviewerThread(input: ApprovalReviewerThreadClose) {
 		this.closes.push(input);
 		await this.closeGate;
 		if (this.closeThrows) {

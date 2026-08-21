@@ -233,9 +233,9 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 
 	toolUse, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_error_use", ModelRequestId: "mreq_durable_error",
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/missing.txt"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_durable_error", "Read", `{"file_path":"/missing.txt"}`),
+		ToolDeclaration: bridgeSignedReasoningToolDeclarationForTest(
+			"call_durable_error", "Read", `{"file_path":"/missing.txt"}`, "allow",
+		),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write Tool Use: response=%#v err=%v", toolUse, err)
@@ -243,6 +243,10 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if _, err := client.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_error_end", ModelRequestId: "mreq_durable_error",
 		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", AssistantMessageSequence: toolUse.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("write Request End: %v", err)
 	}
@@ -269,17 +273,23 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		adapter.RuntimeSettlement.Type != "error" || adapter.ErrorJSON == "" {
 		t.Fatalf("ordinary missing-file Read adapter = %+v", adapter)
 	}
-	settled, err := client.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+	settlementRequest := bridgeToolSettlementRequestForTest(
 		scope,
 		&bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUse.GetCommitted().GetEventId(),
 			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: adapter.ErrorJSON}},
 		},
-	))
+	)
+	settled, err := client.SettleToolResult(context.Background(), settlementRequest)
 	if err != nil {
 		t.Fatalf("settle durable Tool error: %v", err)
 	}
 	bridgeRequireToolSettlementOutcomeForTest(t, settled, "committed")
+	replayed, err := client.SettleToolResult(context.Background(), settlementRequest)
+	if err != nil {
+		t.Fatalf("replay durable Tool error after lost acknowledgement: %v", err)
+	}
+	bridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
 
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
@@ -288,7 +298,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		t.Fatalf("read durable Tool error context: %v", err)
 	}
 	parts, err := decodeStoredRuntimeContextParts(dataJSON)
-	if err != nil || len(parts) != 2 {
+	if err != nil || len(parts) != 3 {
 		t.Fatalf("durable Tool error context = %s err=%v", dataJSON, err)
 	}
 	var result struct {
@@ -299,7 +309,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 			Error json.RawMessage `json:"error"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal(parts[1], &result); err != nil {
+	if err := json.Unmarshal(parts[2], &result); err != nil {
 		t.Fatalf("decode durable Tool result: %v", err)
 	}
 	var gotError, wantError map[string]any
@@ -322,11 +332,11 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode cold context: %v", err)
 	}
-	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 2 {
+	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 3 {
 		t.Fatalf("cold durable Tool context = entries=%#v draft=%#v", payload.ContextEntries, payload.OpenRequestDraft)
 	}
-	if string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
-		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.ContextEntries[0].Parts[1], parts[1])
+	if string(payload.ContextEntries[0].Parts[2]) != string(parts[2]) {
+		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.ContextEntries[0].Parts[2], parts[2])
 	}
 	assertRuntimeHotColdToolComposition(
 		t,
@@ -401,9 +411,7 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_truncation_use", ModelRequestId: modelRequestID,
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(modelToolCallID, "Read", `{}`),
+		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write truncated Tool Use: response=%#v err=%v", toolUse, err)
@@ -411,6 +419,10 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_truncation_end", ModelRequestId: modelRequestID,
 		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", AssistantMessageSequence: toolUse.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("write truncated Tool Request End: %v", err)
 	}
@@ -513,9 +525,7 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_durable_cancel_start", modelRequestID, requestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_cancel_use", ModelRequestId: modelRequestID,
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_durable_cancel", "Read", `{}`),
+		ToolDeclaration: bridgeToolDeclarationForTest("call_durable_cancel", "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write cancelled Tool Use: response=%#v err=%v", toolUse, err)
@@ -523,6 +533,10 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_durable_cancel_end", ModelRequestId: modelRequestID,
 		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", AssistantMessageSequence: toolUse.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds: []string{toolUse.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("seal cancelled Tool request: %v", err)
 	}
@@ -616,9 +630,9 @@ func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_direct_tool_start", modelRequestID, requestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_direct_tool_use", ModelRequestId: modelRequestID,
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{"file_path":"/owned.txt"},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_direct_tool_authority", "Read", `{"file_path":"/owned.txt"}`),
+		ToolDeclaration: bridgeToolDeclarationForTest(
+			"call_direct_tool_authority", "Read", `{"file_path":"/owned.txt"}`, "allow", "sandbox_execute",
+		),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write direct Tool authority: %#v/%v", toolUse, err)
@@ -698,16 +712,16 @@ func assertRuntimeHotColdToolComposition(
 		t.Fatalf("run Runtime hot/cold Tool composition: %v: %s", err, output)
 	}
 	var composed struct {
-		Checkpoint          any `json:"checkpoint"`
-		ToolRouteView       any `json:"toolRouteView"`
-		ReducerAction       any `json:"reducerAction"`
-		ProviderComposition any `json:"providerComposition"`
+		Checkpoint          any                        `json:"checkpoint"`
+		ToolRouteView       any                        `json:"toolRouteView"`
+		ReducerAction       any                        `json:"reducerAction"`
+		ProviderComposition runtimeProviderComposition `json:"providerComposition"`
 		Hot                 struct {
-			Checkpoint          any `json:"checkpoint"`
-			ToolRouteView       any `json:"toolRouteView"`
-			ReducerAction       any `json:"reducerAction"`
-			ProviderComposition any `json:"providerComposition"`
-			ToolPart            any `json:"toolPart"`
+			Checkpoint          any                        `json:"checkpoint"`
+			ToolRouteView       any                        `json:"toolRouteView"`
+			ReducerAction       any                        `json:"reducerAction"`
+			ProviderComposition runtimeProviderComposition `json:"providerComposition"`
+			ToolPart            any                        `json:"toolPart"`
 		} `json:"hot"`
 	}
 	if err := json.Unmarshal(output, &composed); err != nil {
@@ -718,6 +732,272 @@ func assertRuntimeHotColdToolComposition(
 		!reflect.DeepEqual(composed.ReducerAction, composed.Hot.ReducerAction) ||
 		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) || composed.Hot.ToolPart == nil {
 		t.Fatalf("Runtime hot/cold Tool composition diverged: %s", output)
+	}
+	assertNoInventedAssistantText(t, composed.ProviderComposition)
+	assertNoInventedAssistantText(t, composed.Hot.ProviderComposition)
+	assertProviderCompositionToolOrder(t, composed.ProviderComposition, []string{modelToolCallID})
+	assertProviderCompositionToolOrder(t, composed.Hot.ProviderComposition, []string{modelToolCallID})
+}
+
+type runtimeProviderComposition struct {
+	CarrierMessages []struct {
+		Role    int `json:"role"`
+		Content []struct {
+			Text *struct {
+				Text string `json:"text"`
+			} `json:"text"`
+			Reasoning *struct {
+				Text string `json:"text"`
+			} `json:"reasoning"`
+			ToolCall *struct {
+				ModelToolCallID string `json:"modelToolCallId"`
+				Name            string `json:"name"`
+				InputJSON       string `json:"inputJson"`
+			} `json:"toolCall"`
+			ToolResult *struct {
+				ModelToolCallID string `json:"modelToolCallId"`
+				Completed       *struct {
+					OutputJSON string `json:"outputJson"`
+				} `json:"completed"`
+				Error *struct {
+					ErrorJSON string `json:"errorJson"`
+				} `json:"error"`
+				Cancelled *struct{} `json:"cancelled"`
+			} `json:"toolResult"`
+		} `json:"content"`
+	} `json:"carrierMessages"`
+	Strategies []struct {
+		ProviderID     string `json:"providerId"`
+		ModelID        string `json:"modelId"`
+		ProviderFamily string `json:"providerFamily"`
+		Validation     struct {
+			OK bool `json:"ok"`
+		} `json:"validation"`
+		ProviderRequest json.RawMessage `json:"providerRequest"`
+		LoweredMessages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"loweredMessages"`
+	} `json:"strategies"`
+}
+
+type runtimeColdContextComposition struct {
+	ReducerAction struct {
+		Action          string   `json:"action"`
+		ToolUseEventIDs []string `json:"toolUseEventIds"`
+	} `json:"reducerAction"`
+	ProviderComposition runtimeProviderComposition `json:"providerComposition"`
+}
+
+func runRuntimeColdContextComposition(t *testing.T, contextJSON string, composeProvider bool) runtimeColdContextComposition {
+	t.Helper()
+	input, err := json.Marshal(map[string]any{
+		"contextJson":         contextJSON,
+		"providerComposition": composeProvider,
+	})
+	if err != nil {
+		t.Fatalf("encode Runtime cold context composition: %v", err)
+	}
+	inputPath := t.TempDir() + "/runtime-cold-context.json"
+	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
+		t.Fatalf("write Runtime cold context composition: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/cold-checkpoint-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run Runtime cold context composition: %v: %s", err, output)
+	}
+	var composed runtimeColdContextComposition
+	if err := json.Unmarshal(output, &composed); err != nil {
+		t.Fatalf("decode Runtime cold context composition: %v: %s", err, output)
+	}
+	return composed
+}
+
+type loweredProviderToolPart struct {
+	Type       string `json:"type"`
+	ToolCallID string `json:"toolCallId"`
+	ToolName   string `json:"toolName"`
+	Input      any    `json:"input"`
+	Output     any    `json:"output"`
+	IsError    bool   `json:"isError"`
+}
+
+func assertProviderCompositionToolOrder(t *testing.T, composition runtimeProviderComposition, expectedIDs []string) {
+	t.Helper()
+	if len(composition.Strategies) != 7 {
+		t.Fatalf("Runtime provider strategies = %d; want the seven approved model paths", len(composition.Strategies))
+	}
+	type carrierCall struct {
+		name  string
+		input any
+		index int
+	}
+	type carrierResult struct {
+		output  any
+		isError bool
+		index   int
+	}
+	calls := map[string]carrierCall{}
+	results := map[string]carrierResult{}
+	callOrder := make([]string, 0, len(expectedIDs))
+	resultOrder := make([]string, 0, len(expectedIDs))
+	carrierIndex := 0
+	for _, message := range composition.CarrierMessages {
+		for _, item := range message.Content {
+			if item.ToolCall != nil {
+				var input any
+				if err := json.Unmarshal([]byte(item.ToolCall.InputJSON), &input); err != nil {
+					t.Fatalf("decode carrier Tool Call %s input: %v", item.ToolCall.ModelToolCallID, err)
+				}
+				calls[item.ToolCall.ModelToolCallID] = carrierCall{name: item.ToolCall.Name, input: input, index: carrierIndex}
+				callOrder = append(callOrder, item.ToolCall.ModelToolCallID)
+			}
+			if item.ToolResult != nil {
+				var output any
+				isError := false
+				switch {
+				case item.ToolResult.Completed != nil:
+					if err := json.Unmarshal([]byte(item.ToolResult.Completed.OutputJSON), &output); err != nil {
+						t.Fatalf("decode carrier Tool Result %s output: %v", item.ToolResult.ModelToolCallID, err)
+					}
+				case item.ToolResult.Error != nil:
+					if err := json.Unmarshal([]byte(item.ToolResult.Error.ErrorJSON), &output); err != nil {
+						t.Fatalf("decode carrier Tool Result %s error: %v", item.ToolResult.ModelToolCallID, err)
+					}
+					isError = true
+				case item.ToolResult.Cancelled != nil:
+					output = map[string]any{
+						"type": "text",
+						"text": "[tool execution cancelled]",
+					}
+					isError = true
+				default:
+					t.Fatalf("carrier Tool Result %s has no terminal outcome", item.ToolResult.ModelToolCallID)
+				}
+				results[item.ToolResult.ModelToolCallID] = carrierResult{output: output, isError: isError, index: carrierIndex}
+				resultOrder = append(resultOrder, item.ToolResult.ModelToolCallID)
+			}
+			carrierIndex++
+		}
+	}
+	if !reflect.DeepEqual(callOrder, expectedIDs) || !reflect.DeepEqual(resultOrder, expectedIDs) {
+		t.Fatalf("Runtime carrier Tool order calls/results = %v/%v; want %v/%v", callOrder, resultOrder, expectedIDs, expectedIDs)
+	}
+	for _, id := range expectedIDs {
+		if calls[id].index >= results[id].index {
+			t.Fatalf("Runtime carrier Tool Result %s precedes its Call", id)
+		}
+	}
+
+	for _, strategy := range composition.Strategies {
+		label := strategy.ProviderID + "/" + strategy.ModelID
+		if !strategy.Validation.OK || len(strategy.ProviderRequest) == 0 {
+			t.Fatalf("%s Runtime ProviderRequest = validation:%t bytes:%d; want one valid request", label, strategy.Validation.OK, len(strategy.ProviderRequest))
+		}
+		wireCalls := make([]loweredProviderToolPart, 0, len(expectedIDs))
+		wireResults := make([]loweredProviderToolPart, 0, len(expectedIDs))
+		callEnvelope := -1
+		resultEnvelope := -1
+		for messageIndex, message := range strategy.LoweredMessages {
+			if len(message.Content) == 0 || message.Content[0] != '[' {
+				continue
+			}
+			var parts []loweredProviderToolPart
+			if err := json.Unmarshal(message.Content, &parts); err != nil {
+				t.Fatalf("decode %s lowered content: %v", label, err)
+			}
+			for _, part := range parts {
+				switch part.Type {
+				case "tool-call":
+					if callEnvelope >= 0 && callEnvelope != messageIndex {
+						t.Fatalf("%s duplicated Assistant Tool Call envelope", label)
+					}
+					callEnvelope = messageIndex
+					wireCalls = append(wireCalls, part)
+				case "tool-result":
+					if resultEnvelope >= 0 && resultEnvelope != messageIndex {
+						t.Fatalf("%s duplicated Tool Result envelope", label)
+					}
+					resultEnvelope = messageIndex
+					wireResults = append(wireResults, part)
+				}
+			}
+		}
+		if callEnvelope < 0 || resultEnvelope <= callEnvelope || len(wireCalls) != len(expectedIDs) || len(wireResults) != len(expectedIDs) {
+			t.Fatalf("%s Tool envelopes/order calls/results = %d/%d at %d/%d", label, len(wireCalls), len(wireResults), callEnvelope, resultEnvelope)
+		}
+		for index, id := range expectedIDs {
+			call := wireCalls[index]
+			result := wireResults[index]
+			carrierCall := calls[id]
+			carrierResult := results[id]
+			if call.ToolCallID != id || call.ToolName != carrierCall.name || !reflect.DeepEqual(call.Input, carrierCall.input) {
+				t.Fatalf("%s Tool Call %d = %+v; want %s/%s/%v", label, index, call, id, carrierCall.name, carrierCall.input)
+			}
+			if result.ToolCallID != id || result.ToolName != carrierCall.name || !reflect.DeepEqual(result.Output, carrierResult.output) || result.IsError != carrierResult.isError {
+				t.Fatalf("%s Tool Result %d = %+v; want %s/%s/%v error=%t", label, index, result, id, carrierCall.name, carrierResult.output, carrierResult.isError)
+			}
+		}
+	}
+}
+
+func assertNoInventedAssistantText(t *testing.T, composition runtimeProviderComposition) {
+	t.Helper()
+	declaredText := make(map[string]int)
+	for _, message := range composition.CarrierMessages {
+		if message.Role != 2 {
+			continue
+		}
+		for _, part := range message.Content {
+			if part.Text != nil {
+				declaredText[part.Text.Text]++
+			}
+			if part.Reasoning != nil {
+				declaredText[part.Reasoning.Text]++
+			}
+		}
+	}
+	for _, strategy := range composition.Strategies {
+		actual := make([]string, 0)
+		remaining := make(map[string]int, len(declaredText))
+		for text, count := range declaredText {
+			remaining[text] = count
+		}
+		for _, message := range strategy.LoweredMessages {
+			if message.Role != "assistant" || len(message.Content) == 0 || string(message.Content) == "null" {
+				continue
+			}
+			var text string
+			if err := json.Unmarshal(message.Content, &text); err == nil {
+				actual = append(actual, text)
+				continue
+			}
+			if message.Content[0] != '[' {
+				t.Fatalf("decode %s Assistant content: %s", strategy.ProviderFamily, message.Content)
+			}
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(message.Content, &parts); err != nil {
+				t.Fatalf("decode %s Assistant content: %v", strategy.ProviderFamily, err)
+			}
+			for _, part := range parts {
+				if part.Type == "text" {
+					actual = append(actual, part.Text)
+				}
+			}
+		}
+		for _, text := range actual {
+			if remaining[text] == 0 {
+				t.Fatalf("%s lowered Assistant text %q was not declared by Runtime; carrier text/reasoning = %v", strategy.ProviderFamily, text, declaredText)
+			}
+			remaining[text]--
+		}
 	}
 }
 
@@ -783,9 +1063,7 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) 
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reject_error_start", "mreq_reject_error", requestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reject_error_use", ModelRequestId: "mreq_reject_error",
-		EventType:             "agent.tool_use",
-		PayloadJson:           `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest("call_reject_error", "Read", `{}`),
+		ToolDeclaration: bridgeToolDeclarationForTest("call_reject_error", "Read", `{}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write Tool Use: response=%#v err=%v", toolUse, err)
@@ -844,9 +1122,7 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 		t.Helper()
 		response, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: "mreq_multi",
-			EventType:             "agent.tool_use",
-			PayloadJson:           `{"type":"agent.tool_use","name":"` + toolName + `","input":{},"evaluated_permission":"allow"}`,
-			AssistantContextDelta: bridgeToolCallContextDeltaForTest(callID, toolName, `{}`),
+			ToolDeclaration: bridgeToolDeclarationForTest(callID, toolName, `{}`, "allow", "sandbox_execute"),
 		})
 		if err != nil || response.GetCommitted() == nil {
 			t.Fatalf("write %s: response=%#v err=%v", callID, response, err)
@@ -860,6 +1136,13 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 	}
 	if _, err := client.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_multi_end", ModelRequestId: "mreq_multi", FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", AssistantMessageSequence: callA.GetCommitted().AssignedMessageSequence,
+			ToolUseEventIds: []string{
+				callA.GetCommitted().GetEventId(),
+				callB.GetCommitted().GetEventId(),
+			},
+		},
 	}); err != nil {
 		t.Fatalf("seal multi-Tool Request: %v", err)
 	}

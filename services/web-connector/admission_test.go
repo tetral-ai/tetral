@@ -82,7 +82,7 @@ func TestBindingAdmissionRejectsEveryTamperedClaimBeforeBlobOrBackendAccess(t *t
 
 func TestBindingAdmissionAcceptsMatchingClaimsBeforeHarmlessExecution(t *testing.T) {
 	t.Parallel()
-	nowValue := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	nowValue := time.Now().UTC()
 	now := func() time.Time { return nowValue }
 	key := []byte("binding-verifier-key-with-at-least-32-bytes")
 	objects := blob.NewFakeBlobStore()
@@ -192,6 +192,9 @@ func signedBindingPayload(raw, key []byte) string {
 type panicBlobStore struct{}
 
 func (panicBlobStore) Put(context.Context, string, io.Reader, int64) error {
+	panic("blob access before admission")
+}
+func (panicBlobStore) CompareAndSwap(context.Context, string, string, io.Reader, int64) error {
 	panic("blob access before admission")
 }
 func (panicBlobStore) Get(context.Context, string) (io.ReadCloser, error) {

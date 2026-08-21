@@ -20,6 +20,7 @@ import type {
 	RuntimeProcessorSource,
 	RuntimeToolSettlement,
 	RuntimeToolSettlementDeclaration,
+	RuntimeToolRouteCapability,
 	SessionEvent,
 	SessionEventWriterAppendEvent,
 	SessionEventWriterAppendResult,
@@ -95,6 +96,8 @@ export interface FrozenAssistantPartAppend {
 	readonly source: RuntimeProcessorSource;
 	readonly append: RuntimeAssistantContextAppend;
 	readonly event: Promise<SessionEventWriterAppendEvent>;
+	readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+	readonly toolRouteCapability?: RuntimeToolRouteCapability | undefined;
 	readonly toolCallId?: string | undefined;
 }
 
@@ -139,6 +142,8 @@ export interface ProviderStreamAccumulatorWriter {
 		_source: RuntimeProcessorSource,
 		declaration?: {
 			readonly assistantContextAppend: RuntimeAssistantContextAppend;
+			readonly distinctProviderInput?: RuntimeJsonValue | undefined;
+			readonly toolRouteCapability?: RuntimeToolRouteCapability | undefined;
 		},
 		modelRequestId?: string,
 	) => Promise<SessionEventWriterAppendResult>;
@@ -253,7 +258,17 @@ export class ProviderStreamAccumulator {
 				const result = await this.options.writer.appendEvent(
 					event,
 					frozen.source,
-					{ assistantContextAppend: frozen.append },
+					{
+						assistantContextAppend: frozen.append,
+						...(frozen.distinctProviderInput === undefined
+							? {}
+							: {
+									distinctProviderInput: frozen.distinctProviderInput,
+								}),
+						...(frozen.toolRouteCapability === undefined
+							? {}
+							: { toolRouteCapability: frozen.toolRouteCapability }),
+					},
 					this.options.modelRequestId,
 				);
 				if (!result.ok)
@@ -569,6 +584,8 @@ export class ProviderStreamAccumulator {
 		source: RuntimeProcessorSource,
 		toolCallId: string,
 		toolEvent: PublicToolEvent,
+		distinctProviderInput: RuntimeJsonValue | undefined,
+		toolRouteCapability: RuntimeToolRouteCapability,
 	): boolean {
 		if (this.reservedToolMembers.has(toolCallId)) return true;
 		const existing = this.toolParts.get(toolCallId);
@@ -586,6 +603,8 @@ export class ProviderStreamAccumulator {
 			source,
 			append,
 			event,
+			...(distinctProviderInput === undefined ? {} : { distinctProviderInput }),
+			toolRouteCapability,
 			toolCallId,
 		});
 		this.reservedToolMembers.set(toolCallId, {
@@ -1119,8 +1138,6 @@ function toolUseSessionEvent(
 	permission: "allow" | "ask" | "deny",
 	toolEvent: PublicToolEvent,
 ): SessionEventWriterAppendEvent {
-	if (!isRuntimeJsonObject(input))
-		throw new Error("public Tool input must be an object");
 	return toolEvent.kind === "mcp"
 		? SessionEventWriterAppendEventSchema.parse({
 				type: "agent.mcp_tool_use",
@@ -1178,16 +1195,6 @@ function isTerminalTool(part: ToolPartCreate): boolean {
 		part.state.status === "completed" ||
 		part.state.status === "error" ||
 		part.state.status === "cancelled"
-	);
-}
-function isRuntimeJsonObject(
-	value: RuntimeJsonValue,
-): value is { readonly [key: string]: RuntimeJsonValue } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		!Array.isArray(value) &&
-		Object.getPrototypeOf(value) === Object.prototype
 	);
 }
 function withinJsonStringBudget(value: string, maxBytes: number): boolean {

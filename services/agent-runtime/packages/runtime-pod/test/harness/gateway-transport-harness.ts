@@ -584,6 +584,7 @@ export async function runMaximumReadTransportProof() {
 		toolUseEventId: "event_maximum_read",
 		entry,
 		input,
+		retainedContextEntries: [],
 		currentModel: { providerId: "openai", modelId: "gpt-5.5" },
 		abortSignal: new AbortController().signal,
 	};

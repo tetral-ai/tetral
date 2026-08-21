@@ -151,10 +151,65 @@ func bridgeTextContextDeltaForTest(text string) *bridgev1.RuntimeContextDelta {
 	return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: text}}}}}
 }
 
-func bridgeToolCallContextDeltaForTest(modelToolCallID, toolName, canonicalInputJSON string) *bridgev1.RuntimeContextDelta {
-	return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
-		ModelToolCallId: modelToolCallID, ToolName: toolName, CanonicalInputJson: canonicalInputJSON,
-	}}}}}
+func bridgeToolDeclarationForTest(modelToolCallID, toolName, inputJSON, permission, routeCapability string) *bridgev1.RuntimeToolDeclaration {
+	return &bridgev1.RuntimeToolDeclaration{
+		EventKind:                bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_TOOL,
+		ModelToolCallId:          modelToolCallID,
+		ToolName:                 toolName,
+		PublicExecutionInputJson: inputJSON,
+		EvaluatedPermission:      permission,
+		RouteCapability:          routeCapability,
+	}
+}
+
+func bridgeToolDeclarationWithRouteForTest(modelToolCallID, toolName, inputJSON, permission string) *bridgev1.RuntimeToolDeclaration {
+	routeCapability := "sandbox_execute"
+	switch toolName {
+	case "memory":
+		routeCapability = "memory_execute"
+	case "spawn_agent":
+		routeCapability = "child_create"
+	case "send_message", "send_input":
+		routeCapability = "child_message"
+	case "wait", "wait_agent", "wait_threads":
+		routeCapability = "child_wait"
+	case "interrupt_agent":
+		routeCapability = "child_interrupt"
+	case "close_agent":
+		routeCapability = "child_close"
+	case "resume_agent":
+		routeCapability = "child_resume"
+	case "list_agents":
+		routeCapability = "child_list"
+	case "background_command":
+		routeCapability = "background_command"
+	case "write_stdin":
+		routeCapability = "background_command"
+	case "web", "web_search", "web_fetch":
+		routeCapability = "web_execute"
+	}
+	return bridgeToolDeclarationForTest(modelToolCallID, toolName, inputJSON, permission, routeCapability)
+}
+
+func bridgeMCPToolDeclarationForTest(modelToolCallID, toolName, serverName, inputJSON, permission string) *bridgev1.RuntimeToolDeclaration {
+	return &bridgev1.RuntimeToolDeclaration{
+		EventKind:                bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_MCP,
+		ModelToolCallId:          modelToolCallID,
+		ToolName:                 toolName,
+		PublicExecutionInputJson: inputJSON,
+		EvaluatedPermission:      permission,
+		RouteCapability:          "mcp_execute",
+		McpServerName:            bridgeString(serverName),
+	}
+}
+
+func bridgeSignedReasoningToolDeclarationForTest(modelToolCallID, toolName, inputJSON, permission string) *bridgev1.RuntimeToolDeclaration {
+	declaration := bridgeToolDeclarationWithRouteForTest(modelToolCallID, toolName, inputJSON, permission)
+	declaration.LeadingReasoning = []*bridgev1.RuntimeContextReasoning{{
+		Text:                 "provider-declared reasoning",
+		ProviderMetadataJson: bridgeString(`{"anthropic":{"signature":"sig_provider_context"}}`),
+	}}
+	return declaration
 }
 
 type panicSlogHandler struct{}
@@ -417,10 +472,17 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity", 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf '<>&'","workdir":"/workspace"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_events
-		    SET model_request_id = 'mreq_tool_identity', projection_json = '{"model_tool_call_id":"call_tool_identity"}'
+		    SET model_request_id = 'mreq_tool_identity',
+		        projection_json = jsonb_build_object(
+		          'model_tool_call_id', 'call_tool_identity',
+		          'tool_name', payload_json::jsonb ->> 'name',
+		          'provider_input', payload_json::jsonb -> 'input',
+		          'canonical_execution_input', payload_json::jsonb -> 'input'
+		        )
 		  WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
@@ -778,15 +840,122 @@ func seedBridgeAPIDurableToolMessage(
 	if _, err := db.ExecContext(context.Background(),
 		`UPDATE session_events
 		    SET model_request_id = $4,
-		        projection_json = COALESCE(projection_json, '{}')::jsonb || $5::jsonb
+		        projection_json = COALESCE(projection_json, '{}')::jsonb || jsonb_build_object(
+		          'event_type', type,
+		          'evaluated_permission', COALESCE(payload_json::jsonb ->> 'evaluated_permission','allow'),
+		          'model_tool_call_id', $5::text,
+		          'tool_name', $6::text,
+		          'provider_input', payload_json::jsonb -> 'input',
+		          'canonical_execution_input', payload_json::jsonb -> 'input',
+		          'route_capability', CASE WHEN type='agent.mcp_tool_use' THEN 'mcp_execute' ELSE $7::text END,
+		          'mcp_server_name', payload_json::jsonb ->> 'mcp_server_name',
+		          'state', 'running'
+		        )
 		  WHERE workspace_id = $1 AND session_id = $2 AND event_id = $3`,
 		workspaceID,
 		sessionID,
 		toolUseEventID,
 		modelRequestID,
-		fmt.Sprintf(`{"model_tool_call_id":%q,"tool_name":%q}`, toolCallID, toolName),
+		toolCallID,
+		toolName,
+		bridgeToolDeclarationWithRouteForTest(toolCallID, toolName, `{}`, "allow").GetRouteCapability(),
 	); err != nil {
 		t.Fatalf("seed durable Tool Use identity: %v", err)
+	}
+}
+
+func seedBridgeAPIAllowedToolRoute(
+	t *testing.T,
+	db *sql.DB,
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	toolUseEventID string,
+) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_events AS event
+		SET model_request_id=COALESCE(NULLIF(event.model_request_id,''),'mreq_' || event.event_id),
+		    projection_json=jsonb_build_object(
+		      'event_type', event.type,
+		      'evaluated_permission', COALESCE(NULLIF(event.projection_json::jsonb ->> 'evaluated_permission',''),event.payload_json::jsonb ->> 'evaluated_permission','allow'),
+		      'model_tool_call_id', COALESCE(NULLIF(event.projection_json::jsonb ->> 'model_tool_call_id',''),'call_' || event.event_id),
+		      'tool_name', COALESCE(NULLIF(event.projection_json::jsonb ->> 'tool_name',''),event.payload_json::jsonb ->> 'name'),
+		      'provider_input', COALESCE(event.projection_json::jsonb -> 'provider_input',event.payload_json::jsonb -> 'input'),
+		      'canonical_execution_input', COALESCE(event.projection_json::jsonb -> 'canonical_execution_input',event.payload_json::jsonb -> 'input'),
+		      'route_capability', COALESCE(NULLIF(event.projection_json::jsonb ->> 'route_capability',''),CASE
+		        WHEN event.type='agent.mcp_tool_use' THEN 'mcp_execute'
+		        WHEN event.payload_json::jsonb ->> 'name'='memory' THEN 'memory_execute'
+		        WHEN event.payload_json::jsonb ->> 'name' IN ('web_search','web_fetch') THEN 'web_execute'
+		        WHEN event.payload_json::jsonb ->> 'name'='write_stdin' THEN 'background_command'
+		        WHEN event.payload_json::jsonb ->> 'name'='spawn_agent' THEN 'child_create'
+		        WHEN event.payload_json::jsonb ->> 'name' IN ('send_message','send_input') THEN 'child_message'
+		        WHEN event.payload_json::jsonb ->> 'name' IN ('wait','wait_agent','wait_threads') THEN 'child_wait'
+		        WHEN event.payload_json::jsonb ->> 'name'='interrupt_agent' THEN 'child_interrupt'
+		        WHEN event.payload_json::jsonb ->> 'name'='close_agent' THEN 'child_close'
+		        WHEN event.payload_json::jsonb ->> 'name'='resume_agent' THEN 'child_resume'
+		        WHEN event.payload_json::jsonb ->> 'name'='list_agents' THEN 'child_list'
+		        ELSE 'sandbox_execute' END),
+		      'mcp_server_name', COALESCE(NULLIF(event.projection_json::jsonb ->> 'mcp_server_name',''),event.payload_json::jsonb ->> 'mcp_server_name'),
+		      'state', 'running'
+		    )
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.session_thread_id=$3 AND event.event_id=$4
+		  AND event.type IN ('agent.tool_use','agent.mcp_tool_use')`,
+		workspaceID, sessionID, threadID, toolUseEventID); err != nil {
+		t.Fatalf("seed allowed Tool declaration projection: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO session_pending_tool_uses (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+			tool_name, input_json, status, decision, created_at, updated_at
+		)
+		SELECT e.workspace_id, e.session_id, e.session_thread_id, e.event_id,
+		       COALESCE(e.projection_json::jsonb ->> 'model_tool_call_id', 'call_' || e.event_id),
+		       COALESCE(e.projection_json::jsonb ->> 'tool_name', e.payload_json::jsonb ->> 'name'),
+		       COALESCE(e.projection_json::jsonb -> 'canonical_execution_input', e.payload_json::jsonb -> 'input')::text,
+		       'resolving', 'allow', clock_timestamp(), clock_timestamp()
+		  FROM session_events e
+		 WHERE e.workspace_id=$1 AND e.session_id=$2 AND e.session_thread_id=$3 AND e.event_id=$4`,
+		workspaceID, sessionID, threadID, toolUseEventID,
+	); err != nil {
+		t.Fatalf("seed allowed Tool route: %v", err)
+	}
+}
+
+func seedBridgeAPIToolDeclarationProjection(
+	t *testing.T,
+	db *sql.DB,
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	toolUseEventID string,
+	modelToolCallID string,
+	toolName string,
+	inputJSON string,
+	routeCapability string,
+) {
+	t.Helper()
+	canonicalInput, _, err := canonicalRunToolInput(inputJSON)
+	if err != nil {
+		t.Fatalf("canonicalize seeded Tool declaration input: %v", err)
+	}
+	projectionJSON, err := marshalBridgeJSON(map[string]any{
+		"event_type":                "agent.tool_use",
+		"evaluated_permission":      "allow",
+		"model_tool_call_id":        modelToolCallID,
+		"tool_name":                 toolName,
+		"provider_input":            json.RawMessage(canonicalInput),
+		"canonical_execution_input": json.RawMessage(canonicalInput),
+		"route_capability":          routeCapability,
+		"state":                     "running",
+	})
+	if err != nil {
+		t.Fatalf("marshal seeded Tool declaration projection: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_events
+		SET model_request_id=$5, projection_json=$6
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4 AND type='agent.tool_use'`,
+		workspaceID, sessionID, threadID, toolUseEventID, "mreq_"+toolUseEventID, projectionJSON); err != nil {
+		t.Fatalf("seed Tool declaration projection: %v", err)
 	}
 }
 
@@ -1051,6 +1220,7 @@ func seedBridgeAPIChildLifecycleToolSource(t *testing.T, db *sql.DB, sessionID s
 	FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, parentID, sourceID, string(payload)); err != nil {
 		t.Fatalf("seed child lifecycle Tool Use: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, db, "default", sessionID, parentID, sourceID)
 	return sourceID
 }
 
@@ -1136,7 +1306,8 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 		'agent.tool_result', jsonb_build_object('type','agent.tool_result','tool_use_event_id',$4,'content',jsonb_build_array(jsonb_build_object('type','text','text','Background command accepted.'))),
 		'internal', false, 'mreq_' || $4,
 		jsonb_build_object(
-			'model_tool_call_id','call_' || $4,'tool_name','exec_command','input','{}'::jsonb,'state','completed',
+			'model_tool_call_id','call_' || $4,'tool_name','exec_command',
+			'provider_input','{}'::jsonb,'canonical_execution_input','{}'::jsonb,'state','completed',
 			'output',jsonb_build_object('text','Background command accepted.','truncated',false)
 		),
 		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'

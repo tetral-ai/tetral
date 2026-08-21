@@ -33,7 +33,10 @@ import type { ThreadRuntime } from "./thread-runtime.js";
 
 /** Reports whether failed-run closeout landed or which durable retry disposition applies. */
 export type FailedRunCloseoutResult =
-	| { readonly type: "landed" }
+	| {
+			readonly type: "landed";
+			readonly disposition: "continuation" | "terminal";
+	  }
 	| { readonly type: "retry"; readonly error: SessionEventWriterError }
 	| { readonly type: "superseded"; readonly error: SessionEventWriterError }
 	| { readonly type: "unrepairable"; readonly error: SessionEventWriterError };
@@ -114,6 +117,12 @@ export async function closeFailedThreadRun(
 		session.state.threadTurnReduction().checkpoint.request?.requestKind ===
 		"approval_reviewer";
 	if (reviewerRequest || !isRuntimeTerminationFailure(failure)) {
+		if (!reviewerRequest) {
+			// A failed provider Turn closes before any concurrently admitted input
+			// may open its successor. The accepted fact remains hot and durable, but
+			// only the next run may commit it after this closeout returns.
+			session.state.blockAcceptedInputUntilRunExit();
+		}
 		// An internal reviewer request must leave its reusable trunk durably idle;
 		// its separately acknowledged outcome owns whether the parent falls back
 		// to user approval. Even a fatal request-local failure therefore closes
@@ -139,9 +148,9 @@ export async function closeFailedThreadRun(
 		}
 		if (reviewerRequest) {
 			const { releaseSession: _releaseSession, ...reviewerResult } = result;
-			return reviewerResult;
+			return { ...reviewerResult, closeoutDisposition: "continuation" };
 		}
-		return result;
+		return { ...result, closeoutDisposition: "continuation" };
 	}
 
 	const pendingTools = unfinishedToolUseEventIds(session).map(
@@ -179,6 +188,7 @@ export async function closeFailedThreadRun(
 	}
 	return {
 		...result,
+		closeoutDisposition: "terminal",
 		releaseSession: result.releaseSession ?? { reason: "terminated" },
 	};
 }
@@ -355,6 +365,13 @@ export async function closeFailedRunDurably(
 		if (session.state.acceptedInputCount() > 0) {
 			const durableTurnId = closeout.durableTurnId;
 			if (durableTurnId === undefined) {
+				const checkpoint = session.state.threadTurnReduction().checkpoint;
+				if (checkpoint.terminalCloseout !== undefined) {
+					return { type: "landed", disposition: "terminal" };
+				}
+				if (checkpoint.idleCloseout !== undefined) {
+					return { type: "landed", disposition: "continuation" };
+				}
 				return {
 					type: "unrepairable",
 					error: normalizeSessionEventWriterError({
@@ -398,7 +415,7 @@ export async function closeFailedRunDurably(
 			for (const pending of pendingTools) {
 				session.state.removePendingApprovalToolJob(pending.toolUseEventId);
 			}
-			return { type: "landed" };
+			return { type: "landed", disposition: "terminal" };
 		}
 		const errorAppend = await observeFailedRunCloseoutStep(
 			closeout.errorStep,
@@ -493,7 +510,7 @@ export async function closeFailedRunDurably(
 				stopReason: { type: "end_turn", failedRun: true },
 			});
 		}
-		return { type: "landed" };
+		return { type: "landed", disposition: "continuation" };
 	} finally {
 		observationController?.abort();
 	}

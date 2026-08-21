@@ -10,6 +10,8 @@ import {
   MaxBindingGeneration,
   MaxIdBytes,
   MaxInputOrder,
+  MaxQueueDedupeKeyBytes,
+  MaxQueuePartitionKeyBytes,
   MaxRuntimeIngressContentBytes,
   validateAcceptAgentMailRequest,
   validateAcceptInputRequest,
@@ -17,6 +19,7 @@ import {
   validateApplyRuntimeConfigRequest,
   validateCleanupSessionRequest,
   validateInterruptRequest,
+  validateRecoverThreadRequest,
   validateResolveToolConfirmationRequest,
 } from "../../src/bounds.js";
 
@@ -43,6 +46,22 @@ describe("method-specific Runtime ingress bounds", () => {
 
   test("validates each dedicated operation's owned fields", () => {
     const scope = threadScope();
+    const recovery = {
+      ...scope,
+      sourceEventId: "evt_recovery",
+      recoveryLeaseRef: {
+        jobId: "qjob_recovery",
+        leaseToken: "lease_recovery",
+        partitionKey: "p".repeat(MaxQueuePartitionKeyBytes),
+        dedupeKey: "d".repeat(MaxQueueDedupeKeyBytes),
+      },
+    };
+    expect(validateRecoverThreadRequest(recovery)).toEqual({ ok: true });
+    expectInvalid(validateRecoverThreadRequest({
+      ...recovery,
+      recoveryLeaseRef: { ...recovery.recoveryLeaseRef, dedupeKey: oversized(MaxQueueDedupeKeyBytes) },
+    }));
+
     expect(validateAcceptAgentMailRequest({ ...scope, runtimeInputId: "agent_mail:d1", deliveryId: "d1", content: "mail" })).toEqual({ ok: true });
     expectInvalid(validateAcceptAgentMailRequest({ ...scope, runtimeInputId: "agent_mail:d1", deliveryId: "", content: "mail" }));
 

@@ -181,6 +181,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	if _, err := apiStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_consumed_end", ModelRequestId: "mreq_attachment_consumed",
 		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
 	}); err != nil {
 		t.Fatalf("settle attachment-consuming request: %v", err)
 	}
@@ -491,6 +492,7 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, resumeSourceID); err != nil {
 		t.Fatalf("authorize terminal-media resume source: %v", err)
 	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentThreadID, resumeSourceID)
 	assertClosedThreadResumeWithoutPhantomAttachment(t, runtime, map[string]any{
 		"workspaceId": "default", "sessionId": sessionID, "parentThreadId": parentThreadID,
 		"childThreadId": threadID, "childTaskName": childTaskName, "bindingId": bindingID,

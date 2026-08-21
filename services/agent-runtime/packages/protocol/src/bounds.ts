@@ -16,6 +16,7 @@ import type {
   CleanupSessionRequest,
   InterruptRequest,
   ResolveToolConfirmationRequest,
+  RecoverThreadRequest,
 } from "./gen/tetral/agent_runtime/v1/agent_runtime.js";
 
 /** Maximum UTF-8 bytes accepted for one Runtime command identifier. */
@@ -26,6 +27,10 @@ export const MaxPodIdentityBytes = 253;
 export const MaxBindingGeneration = 0xffffffff;
 /** Largest exact JavaScript integer accepted for durable Runtime input order. */
 export const MaxInputOrder = Number.MAX_SAFE_INTEGER;
+/** Maximum UTF-8 bytes accepted for an existing Queue partition key. */
+export const MaxQueuePartitionKeyBytes = 512;
+/** Maximum UTF-8 bytes accepted for an existing Queue dedupe key. */
+export const MaxQueueDedupeKeyBytes = 1280;
 
 // This fuse is above the largest admission-legal payload and protects the
 // Runtime Pod before method-specific content parsing. Keep it aligned with the
@@ -47,6 +52,23 @@ interface ThreadBindingScope {
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly targetPodUid: string;
+}
+
+/** Validates one durable lost-custody recovery trigger. */
+export function validateRecoverThreadRequest(input: RecoverThreadRequest): ValidationResult {
+  const scope = validateThreadBindingScope(input);
+  if (
+    !scope.ok ||
+    !validId(input.sourceEventId) ||
+    input.recoveryLeaseRef === undefined ||
+    !validId(input.recoveryLeaseRef.jobId) ||
+    !validId(input.recoveryLeaseRef.leaseToken) ||
+    !validQueueKey(input.recoveryLeaseRef.partitionKey, MaxQueuePartitionKeyBytes) ||
+    !validQueueKey(input.recoveryLeaseRef.dedupeKey, MaxQueueDedupeKeyBytes)
+  ) {
+    return invalidRequest();
+  }
+  return { ok: true };
 }
 
 interface SessionBindingScope {
@@ -114,8 +136,8 @@ export function validateInterruptRequest(input: InterruptRequest): ValidationRes
     input.interruptLeaseRef === undefined ||
     !validId(input.interruptLeaseRef.jobId) ||
     !validId(input.interruptLeaseRef.leaseToken) ||
-    !validId(input.interruptLeaseRef.partitionKey) ||
-    !validId(input.interruptLeaseRef.dedupeKey) ||
+    !validQueueKey(input.interruptLeaseRef.partitionKey, MaxQueuePartitionKeyBytes) ||
+    !validQueueKey(input.interruptLeaseRef.dedupeKey, MaxQueueDedupeKeyBytes) ||
     (input.origin !== 1 && input.origin !== 2)
   ) {
     return invalidRequest();
@@ -197,6 +219,10 @@ function validateSessionBindingScope(input: SessionBindingScope): ValidationResu
 
 function validId(value: string): boolean {
   return !invalidBytes(value, MaxIdBytes);
+}
+
+function validQueueKey(value: string, maxBytes: number): boolean {
+  return !invalidBytes(value, maxBytes);
 }
 
 function validPositiveInteger(value: number): boolean {

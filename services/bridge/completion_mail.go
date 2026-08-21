@@ -49,11 +49,10 @@ func agentMailDeliveryID(sourceToolUseEventID string, targetThreadID string) str
 	return "delivery_" + hex.EncodeToString(digest[:])[:32]
 }
 
-// appendSubagentMailEnvelopeTx owns the sender-side half of direct agent mail.
-// The durable Tool Use is the command authority: the caller supplies only its
-// exact identity, target, deterministic delivery identity, and bounded text.
-// Bridge validates those facts and authors the Runtime message and public sent
-// event before Inbox/Queue custody is born in the same transaction.
+// appendSubagentMailEnvelopeTx owns the sender-side half of later direct agent
+// mail. Runtime supplies the already interpreted target and bounded text;
+// Bridge validates only the deterministic identity and exact parent-child
+// ownership before birthing Event and Inbox/Queue custody atomically.
 func appendSubagentMailEnvelopeTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -70,40 +69,8 @@ func appendSubagentMailEnvelopeTx(
 	if deliveryID != agentMailDeliveryID(sourceToolUseEventID, targetThreadID) {
 		return storedAgentMailEnvelope{}, status.Error(codes.InvalidArgument, "agent mail delivery identity is invalid")
 	}
-	var payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT payload_json
-		FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		AND event_id=$4 AND type='agent.tool_use' AND visibility='public'
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceToolUseEventID).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool Use is missing")
-	} else if err != nil {
-		return storedAgentMailEnvelope{}, err
-	}
-	var tool runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &tool); err != nil {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool Use is malformed")
-	}
-	var input struct {
-		TaskName string `json:"task_name"`
-		Prompt   string `json:"prompt"`
-		Message  string `json:"message"`
-	}
-	if err := json.Unmarshal(tool.Input, &input); err != nil {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool input is malformed")
-	}
-	input.TaskName = strings.TrimSpace(input.TaskName)
-	durableContent := ""
-	switch tool.Name {
-	case "spawn_agent":
-		durableContent = strings.TrimSpace(input.Prompt)
-	case "send_message":
-		durableContent = strings.TrimSpace(input.Message)
-	default:
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail source Tool name is invalid")
-	}
-	if !validActorTaskName(input.TaskName) || durableContent == "" || durableContent != content {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail request conflicts with its durable Tool Use")
+	if content != strings.TrimSpace(content) {
+		return storedAgentMailEnvelope{}, status.Error(codes.InvalidArgument, "agent mail content is not normalized")
 	}
 	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, sourceToolUseEventID); err != nil {
 		return storedAgentMailEnvelope{}, err
@@ -114,10 +81,10 @@ func appendSubagentMailEnvelopeTx(
 	if err := tx.QueryRow(ctx, `SELECT task_name
 		FROM session_threads
 		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND parent_thread_id=$4
-		AND role='subagent' AND visibility='public' AND task_name=$5
+		AND role='subagent' AND visibility='public'
 		AND status NOT IN ('closed_for_runtime','failed','terminated')
-		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, scope.GetSessionThreadId(), input.TaskName).Scan(&targetTaskName); dbconnect.IsNoRows(err) {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail target does not match the durable Tool Use")
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, scope.GetSessionThreadId()).Scan(&targetTaskName); dbconnect.IsNoRows(err) {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail target is not a receivable public sub-agent owned by the parent")
 	} else if err != nil {
 		return storedAgentMailEnvelope{}, err
 	}
@@ -161,6 +128,126 @@ func appendSubagentMailEnvelopeTx(
 		DeliveryID: deliveryID, SourceThreadID: scope.GetSessionThreadId(), TargetThreadID: targetThreadID,
 		SourceToolUseEventID: sourceToolUseEventID, Content: content, PublicMessageJSON: json.RawMessage(messageJSON),
 	}, nil
+}
+
+// appendDeclaredSubagentInitialEnvelopeTx persists the Runtime-declared opening
+// input without rereading Tool business arguments. The executable route has
+// already been locked by CreateSubagentThread; this helper owns only the
+// declared parent-child envelope and its durable Inbox/Queue birth.
+func appendDeclaredSubagentInitialEnvelopeTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	targetThreadID string,
+	sourceToolUseEventID string,
+	targetTaskName string,
+	content string,
+	now time.Time,
+) (storedAgentMailEnvelope, error) {
+	if targetThreadID == "" || sourceToolUseEventID == "" || !validActorTaskName(targetTaskName) || !validActorInitialPrompt(content) {
+		return storedAgentMailEnvelope{}, status.Error(codes.InvalidArgument, "sub-agent initial input declaration is invalid")
+	}
+	var targetExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM session_threads
+		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND parent_thread_id=$4
+		 AND role='subagent' AND visibility='public' AND task_name=$5
+	)`, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, scope.GetSessionThreadId(), targetTaskName).Scan(&targetExists); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if !targetExists {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "sub-agent initial input target is invalid")
+	}
+	deliveryID := agentMailDeliveryID(sourceToolUseEventID, targetThreadID)
+	messageJSON, err := publicAgentMailMessageJSON(content)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":                     "agent.thread_message_sent",
+		"delivery_id":              deliveryID,
+		"source_thread_id":         scope.GetSessionThreadId(),
+		"target_thread_id":         targetThreadID,
+		"target_task_name":         targetTaskName,
+		"source_tool_use_event_id": sourceToolUseEventID,
+		"message":                  json.RawMessage(messageJSON),
+	})
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	eventID := stableRuntimeID("agent_mail_sent_event", scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), deliveryID)
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO session_events (
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
+		visibility,session_visible,runtime_write_id,projection_json,created_at,updated_at,processed_at
+	) VALUES ($1,$2,$3,$4,$5,'agent.thread_message_sent',$6,'public',true,$7,$6,$8,$8,$8)`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
+		eventPayloadJSON, deliveryID, now); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, "public", true, now); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if err := birthCompletionMailCustodyTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, deliveryID, now); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	return storedAgentMailEnvelope{
+		SentEventID: eventID, SentSequence: sequence, SentThreadID: scope.GetSessionThreadId(),
+		DeliveryID: deliveryID, SourceThreadID: scope.GetSessionThreadId(), TargetThreadID: targetThreadID,
+		SourceToolUseEventID: sourceToolUseEventID, Content: content, PublicMessageJSON: json.RawMessage(messageJSON),
+	}, nil
+}
+
+func appendDeclaredSubagentInitialReceivedEventTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	targetScope *bridgev1.RuntimeScope,
+	envelope storedAgentMailEnvelope,
+	now time.Time,
+) (string, error) {
+	threadScope, err := lockThreadMutationTx(ctx, tx, targetScope)
+	if err != nil {
+		return "", err
+	}
+	if threadScope.role != "subagent" || envelope.TargetThreadID != targetScope.GetSessionThreadId() {
+		return "", status.Error(codes.FailedPrecondition, "sub-agent initial input target is invalid")
+	}
+	sourceTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, targetScope, envelope.SourceThreadID)
+	if err != nil {
+		return "", err
+	}
+	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":                     "agent.thread_message_received",
+		"delivery_id":              envelope.DeliveryID,
+		"source_thread_id":         envelope.SourceThreadID,
+		"source_task_name":         nullableJSONString(sourceTaskName),
+		"source_tool_use_event_id": envelope.SourceToolUseEventID,
+		"message":                  envelope.PublicMessageJSON,
+	})
+	if err != nil {
+		return "", err
+	}
+	eventID := stableRuntimeID("agent_mail_received_event", targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId(), envelope.DeliveryID)
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, targetScope)
+	if err != nil {
+		return "", err
+	}
+	visibility, sessionVisible := threadScope.publicProjection("agent.thread_message_received")
+	if _, err := tx.Exec(ctx, `INSERT INTO session_events (
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
+		visibility,session_visible,projection_json,created_at,updated_at,processed_at
+	) VALUES ($1,$2,$3,$4,$5,'agent.thread_message_received',$6,$7,$8,$6,$9,$9,NULL)`,
+		targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId(), eventID, sequence,
+		eventPayloadJSON, visibility, sessionVisible, now); err != nil {
+		return "", err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, targetScope, eventID, visibility, sessionVisible, now); err != nil {
+		return "", err
+	}
+	return eventID, nil
 }
 
 func publicAgentMailMessageJSON(content string) (string, error) {

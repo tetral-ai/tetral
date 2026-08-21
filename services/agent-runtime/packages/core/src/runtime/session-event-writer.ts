@@ -108,10 +108,11 @@ export function sessionEventForDurableWrite(
 // | -------------------------------------- | -------------------------- |
 // | type != provider                       | unknown_error              |
 // | provider, code=provider_rate_limited   | model_rate_limited_error   |
+// | provider, credential rejected          | model_request_failed_error |
 // | provider, retryStatus=exhausted        | model_overloaded_error     |
 // | provider, otherwise                    | model_request_failed_error |
-// (MCP members pass through unchanged elsewhere; billing/credential-host failures
-// have no member and fall through to unknown_error.)
+// MCP members pass through unchanged elsewhere. Credential rejection uses the
+// existing request-failed member while its retry_status remains exhausted.
 //
 // retry_status (publicRetryStatus): ThreadLoop stamps exhausted on RuntimeFailure
 // values when its retry lifecycle spends the budget; this mapper preserves that
@@ -136,6 +137,8 @@ function publicSessionError(failure: RuntimeFailure): {
 			? "unknown_error"
 			: failure.code === "provider_rate_limited"
 				? "model_rate_limited_error"
+				: failure.code === "provider_key_unavailable"
+					? "model_request_failed_error"
 				: failure.retryStatus?.type === "exhausted"
 					? "model_overloaded_error"
 					: "model_request_failed_error";

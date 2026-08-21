@@ -337,15 +337,12 @@ function lowerProviderContextEntry(
 
   const assistantContent: LoweredAssistantContentPart[] = [];
   const toolContent: LoweredToolResultPart[] = [];
-  const hasSignedReasoning = entry.content.some((item) => item.reasoning !== undefined && hasSignedProviderReasoning(item, rules));
 
   for (const item of entry.content) {
     if (item.text !== undefined) {
       const text = sanitizeText(item.text.text);
       if (text.length > 0) {
         assistantContent.push({ type: "text", text });
-      } else if (hasSignedReasoning && entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT) {
-        assistantContent.push({ type: "text", text: " " });
       }
       continue;
     }
@@ -366,14 +363,6 @@ function lowerProviderContextEntry(
     if (item.toolResult !== undefined) {
       toolContent.push(lowerToolResult(item.toolResult, toolCalls, toolResults));
     }
-  }
-
-  if (
-    hasSignedReasoning &&
-    entry.role === ProviderContextRole.PROVIDER_CONTEXT_ROLE_ASSISTANT &&
-    !assistantContent.some((part) => part.type === "text")
-  ) {
-    assistantContent.push({ type: "text", text: " " });
   }
 
   const envelopes: LoweredMessageEnvelope[] = [];
@@ -937,15 +926,6 @@ function withPartProviderOption<T extends LoweredUserContentPart | LoweredAssist
       cacheControl: { type: "ephemeral" },
     }),
   };
-}
-
-function hasSignedProviderReasoning(item: ProviderContextItem, rules: ProviderRules): boolean {
-  if (rules.reasoning.strategy !== "provider-metadata") {
-    return false;
-  }
-  const metadata = parseMetadataJson(item.reasoning?.metadataJson ?? "{}");
-  const providerMetadata = providerMetadataFor(metadata, rules.reasoning.metadataKey);
-  return providerMetadata !== undefined && hasSignedMetadata(providerMetadata);
 }
 
 function withProviderOption<T extends LoweredProviderMessage>(

@@ -102,6 +102,7 @@ describe("Gateway platform key pool", () => {
 
     const deadKey = classifyProviderFailure("anthropic", { statusCode: 401, body: { error: { type: "authentication_error" } } });
     pool.recordFailure("pfk_dead", deadKey);
+    pool.recordFailure("pfk_dead", deadKey);
 
     expect(deadKey).toMatchObject({ action: "quarantine", providerError: { retryable: false } });
     expect(quarantineEvents).toEqual([
@@ -149,6 +150,106 @@ describe("Gateway platform key pool", () => {
         statusCode: testCase.statusCode,
         body: testCase.body,
       }).action, testCase.name).toBe(testCase.wantAction);
+    }
+  });
+
+  test("classifies the verified Anthropic credit exhaustion before generic 400 request shape", () => {
+    const billingBody = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+      },
+    };
+
+    expect(classifyProviderFailure("anthropic", { statusCode: 400, body: billingBody })).toMatchObject({
+      action: "quarantine",
+      providerError: {
+        code: "provider_key_unavailable",
+        message: "Provider key is not usable.",
+        retryable: false,
+        fatal: true,
+        statusCode: 400,
+      },
+    });
+    expect(classifyProviderFailure("anthropic", {
+      statusCode: 400,
+      body: { type: "error", error: { type: "invalid_request_error", message: "messages: Input should be valid." } },
+    })).toMatchObject({
+      action: "fail-fast",
+      providerError: { code: "provider_request_invalid", retryable: false, fatal: true, statusCode: 400 },
+    });
+  });
+
+  test("classifies a status-less untagged provider failure as retryable stream transport", () => {
+    expect(classifyProviderFailure("anthropic", {})).toMatchObject({
+      action: "retryable",
+      providerError: {
+        code: "provider_stream_error",
+        retryable: true,
+        fatal: false,
+      },
+    });
+  });
+
+  test("distinguishes the captured status-less DeepSeek balance signal from Moonshot body text", () => {
+    expect(classifyProviderFailure("deepseek", {
+      body: { message: "Insufficient Balance" },
+      networkError: true,
+    })).toMatchObject({
+      action: "quarantine",
+      semanticSignal: "deepseek_insufficient_balance",
+      providerError: {
+        code: "provider_key_unavailable",
+        retryable: false,
+        fatal: true,
+      },
+    });
+    expect(classifyProviderFailure("moonshotai", {
+      body: { message: "balance is not enough" },
+      networkError: true,
+    })).toMatchObject({
+      action: "retryable",
+      providerError: {
+        code: "provider_stream_error",
+        retryable: true,
+        fatal: false,
+      },
+    });
+    expect(classifyProviderFailure("deepseek", {
+      body: { message: "prefix Insufficient Balance" },
+      networkError: true,
+    })).toMatchObject({
+      action: "retryable",
+      providerError: { code: "provider_stream_error" },
+    });
+  });
+
+  test("normalizes every opaque status-less provider body without throwing or exposing it", () => {
+    const cyclic: { self?: unknown; canary: string } = { canary: "cyclic-provider-body-canary" };
+    cyclic.self = cyclic;
+    const bodies: readonly unknown[] = [
+      undefined,
+      null,
+      false,
+      42,
+      { opaque: "object-provider-body-canary" },
+      "{malformed-provider-body-canary",
+      cyclic,
+    ];
+
+    for (const body of bodies) {
+      const classified = classifyProviderFailure("deepseek", { body, networkError: true });
+      expect(classified).toMatchObject({
+        action: "retryable",
+        providerError: {
+          code: "provider_stream_error",
+          message: "Provider request failed.",
+          retryable: true,
+          fatal: false,
+        },
+      });
+      expect(JSON.stringify(classified)).not.toMatch(/provider-body-canary/i);
     }
   });
 

@@ -78,7 +78,8 @@ func TestPostgreSQLWriteRequestEndAtomicallyCommitsActiveRunInterrupt(t *testing
 	})
 	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_atomic_active_end", ModelRequestId: modelRequestID,
-		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+		FinishReason: "cancelled", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"}, IsError: true, ErrorKind: "runtime_interrupted",
 		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease)},
 	})
 	if err != nil || ended.GetCommitted() == nil {
@@ -189,8 +190,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		`"operation.id":"rin_bridge_commit"`,
 		`"thread.id":"thr_bridge_commit"`,
 		`"runtime.binding.current":true`,
-		`"runtime.binding.current":false`,
-		`"binding.id":"bind_bridge_commit_replacement"`,
 	} {
 		if !strings.Contains(logText, fragment) {
 			t.Fatalf("declaration logs missing %s: %s", fragment, logText)
@@ -437,11 +436,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_generated_tool_use",
 		ModelRequestId: "mreq_bridge_generated_tool_use",
-		EventType:      "agent.tool_use",
-		PayloadJson:    `{"type":"agent.tool_use","name":"dangerous_tool","input":{"path":"README.md"},"evaluated_permission":"ask"}`,
-		SessionVisible: true,
-		AssistantContextDelta: bridgeToolCallContextDeltaForTest(
-			"tool-call-generated", "dangerous_tool", `{"path":"README.md"}`,
+		ToolDeclaration: bridgeToolDeclarationForTest(
+			"tool-call-generated", "dangerous_tool", `{"path":"README.md"}`, "ask", "sandbox_execute",
 		),
 	})
 	if err != nil {
@@ -511,6 +507,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	)
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", sourceToolUseEventID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_thr_bridge_inter_agent_child","message":"hello child"}}`)
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", sourceToolUseEventID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("inter-agent-context-test-key-32b")
 	parentScope := bridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")

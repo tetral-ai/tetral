@@ -31,6 +31,7 @@ type childInterruptEventPayload struct {
 	Disposition          string `json:"disposition"`
 	RequestedAt          string `json:"requested_at"`
 	RuntimeInputID       string `json:"runtime_input_id,omitempty"`
+	DeclarationDigest    string `json:"declaration_digest"`
 }
 
 type childControlCommand struct {
@@ -40,12 +41,14 @@ type childControlCommand struct {
 	rootChildThreadID    string
 	action               bridgev1.ChildControlAction
 	includeDescendants   bool
+	declarationDigest    string
 }
 
 func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, request *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error) {
 	ctx = withInterruptBarrierBirth(ctx)
-	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" {
-		err := status.Error(codes.InvalidArgument, "child interrupt scope and source identity are required")
+	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorIdentity(request.GetTargetChildThreadId()) ||
+		(request.GetAction() != bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT && request.GetAction() != bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE) {
+		err := status.Error(codes.InvalidArgument, "child interrupt scope, source, target, and action are required")
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "admit_child_interrupt", request.GetSourceToolUseEventId(), "validate", err)
 		return nil, err
 	}
@@ -55,9 +58,12 @@ func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, requ
 	}
 	now := s.now()
 	var targets []*bridgev1.ChildInterruptTarget
-	var command childControlCommand
+	command, err := declaredChildControlCommand(request.GetScope(), request.GetSourceToolUseEventId(), request.GetTargetChildThreadId(), request.GetAction())
+	if err != nil {
+		return nil, err
+	}
 	duplicate := false
-	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.admit_child_interrupt", func(tx *dbconnect.Tx) error {
+	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.admit_child_interrupt", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
@@ -67,9 +73,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, requ
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		var err error
-		command, err = deriveChildControlCommandTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId())
-		if err != nil {
+		if err := validateDeclaredPublicSubagentTargetTx(ctx, tx, request.GetScope(), command.rootChildThreadID); err != nil {
 			return err
 		}
 		stored, operationID, ok, err := readChildInterruptCensusBySourceTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId())
@@ -78,16 +82,14 @@ func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, requ
 		}
 		if ok {
 			command.controlOperationID = operationID
-			if err := validateStoredChildInterruptRequestTx(ctx, tx, command.scope, command.sourceToolUseEventID, command.rootChildThreadID, command.action, command.includeDescendants); err != nil {
+			if err := validateStoredChildInterruptRequestTx(ctx, tx, command.scope, command.sourceToolUseEventID, command.rootChildThreadID, command.action, command.includeDescendants, command.declarationDigest); err != nil {
 				return err
-			}
-			if terminal, err := childControlSourceTerminalTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId()); err != nil {
-				return err
-			} else if terminal {
-				return status.Error(codes.FailedPrecondition, "child_control_source_terminal")
 			}
 			targets, duplicate = stored, true
 			return nil
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), childControlRouteCapability(command.action)); err != nil {
+			return err
 		}
 		command.controlOperationID = id.New("ctrl_")
 		targetIDs, err := childInterruptTargetIDsTx(ctx, tx, command)
@@ -138,7 +140,7 @@ func (s *PostgreSQLBridgeAPIStore) AwaitChildInterrupt(ctx context.Context, requ
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		command, err := deriveChildControlCommandByOperationTx(ctx, tx, request.GetScope(), request.GetControlOperationId())
+		command, err := loadCommittedChildControlCommandTx(ctx, tx, request.GetScope(), request.GetControlOperationId())
 		if err != nil {
 			return err
 		}
@@ -149,7 +151,7 @@ func (s *PostgreSQLBridgeAPIStore) AwaitChildInterrupt(ctx context.Context, requ
 		if !ok {
 			return status.Error(codes.FailedPrecondition, "child interrupt census is missing or conflicting")
 		}
-		if err := validateStoredChildInterruptRequestTx(ctx, tx, command.scope, command.sourceToolUseEventID, command.rootChildThreadID, command.action, command.includeDescendants); err != nil {
+		if err := validateStoredChildInterruptRequestTx(ctx, tx, command.scope, command.sourceToolUseEventID, command.rootChildThreadID, command.action, command.includeDescendants, command.declarationDigest); err != nil {
 			return err
 		}
 		if terminal, err := childControlSourceTerminalTx(ctx, tx, request.GetScope(), command.sourceToolUseEventID); err != nil {
@@ -303,65 +305,71 @@ func childInterruptTargetIDsTx(ctx context.Context, tx *dbconnect.Tx, command ch
 	return []string{command.rootChildThreadID}, nil
 }
 
-func deriveChildControlCommandTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID string) (childControlCommand, error) {
-	var payload string
-	if err := tx.QueryRow(ctx, `SELECT payload_json FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4 AND type='agent.tool_use' AND visibility='public' FOR SHARE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), sourceID).Scan(&payload); dbconnect.IsNoRows(err) {
-		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child control source Tool Use is invalid")
-	} else if err != nil {
-		return childControlCommand{}, err
+func declaredChildControlCommand(scope *bridgev1.RuntimeScope, sourceID, targetID string, action bridgev1.ChildControlAction) (childControlCommand, error) {
+	if scope == nil || !validActorIdentity(sourceID) || !validActorIdentity(targetID) {
+		return childControlCommand{}, status.Error(codes.InvalidArgument, "child control declaration identities are invalid")
 	}
-	var tool runtimeToolUseEventPayload
-	if err := json.Unmarshal([]byte(payload), &tool); err != nil {
-		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child control source Tool Use is malformed")
-	}
-	command := childControlCommand{scope: scope, sourceToolUseEventID: sourceID}
-	switch tool.Name {
-	case "interrupt_agent":
-		command.action = bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT
-	case "close_agent":
-		command.action = bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE
-		command.includeDescendants = true
+	includeDescendants := false
+	switch action {
+	case bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT:
+	case bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE:
+		includeDescendants = true
 	default:
-		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child control source Tool name is invalid")
+		return childControlCommand{}, status.Error(codes.InvalidArgument, "child control declaration action is invalid")
 	}
-	var input struct {
-		TaskName string `json:"task_name"`
-	}
-	if err := json.Unmarshal(tool.Input, &input); err != nil || input.TaskName == "" {
-		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child control source Tool input is malformed")
-	}
-	if err := tx.QueryRow(ctx, `SELECT id FROM session_threads
-		WHERE workspace_id=$1 AND session_id=$2 AND parent_thread_id=$3 AND task_name=$4 AND role='subagent' FOR SHARE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), input.TaskName,
-	).Scan(&command.rootChildThreadID); dbconnect.IsNoRows(err) {
-		return childControlCommand{}, status.Error(codes.NotFound, "child thread not found")
-	} else if err != nil {
-		return childControlCommand{}, err
-	}
-	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, sourceID); err != nil {
-		return childControlCommand{}, err
-	} else if terminal {
-		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child_control_source_terminal")
-	}
-	return command, nil
+	return childControlCommand{
+		scope: scope, sourceToolUseEventID: sourceID, rootChildThreadID: targetID,
+		action: action, includeDescendants: includeDescendants,
+		declarationDigest: bridgeRequestHash("child_control", sourceID, targetID, action.String()),
+	}, nil
 }
 
-func deriveChildControlCommandByOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operationID string) (childControlCommand, error) {
-	var sourceID string
-	if err := tx.QueryRow(ctx, `SELECT payload_json::jsonb ->> 'source_tool_use_event_id'
-		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type=$3
-		AND payload_json::jsonb ->> 'control_operation_id'=$4
-		ORDER BY event_id LIMIT 1 FOR SHARE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, operationID,
-	).Scan(&sourceID); dbconnect.IsNoRows(err) {
+func validateDeclaredPublicSubagentTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, targetID string) error {
+	var role, visibility, parentThreadID string
+	if err := tx.QueryRow(ctx, `SELECT role,visibility,COALESCE(parent_thread_id,'') FROM session_threads
+		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 FOR SHARE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), targetID).Scan(&role, &visibility, &parentThreadID); dbconnect.IsNoRows(err) {
+		return status.Error(codes.NotFound, "child control target is missing")
+	} else if err != nil {
+		return err
+	}
+	if role != "subagent" || visibility != "public" || parentThreadID != scope.GetSessionThreadId() {
+		return status.Error(codes.FailedPrecondition, "child control target is not a public sub-agent owned by the parent")
+	}
+	return nil
+}
+
+func loadCommittedChildControlCommandTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operationID string) (childControlCommand, error) {
+	var payloadJSON string
+	if err := tx.QueryRow(ctx, `SELECT event.payload_json
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'control_operation_id'=$5
+		ORDER BY event.event_id LIMIT 1 FOR SHARE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, operationID,
+	).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
 		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child interrupt control operation is unknown")
 	} else if err != nil {
 		return childControlCommand{}, err
 	}
-	command, err := deriveChildControlCommandTx(ctx, tx, scope, sourceID)
+	var payload childInterruptEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.ControlOperationID != operationID {
+		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child interrupt control operation is malformed")
+	}
+	action, err := childControlActionFromName(payload.Action)
 	if err != nil {
 		return childControlCommand{}, err
+	}
+	command, err := declaredChildControlCommand(scope, payload.SourceToolUseEventID, payload.RootChildThreadID, action)
+	if err != nil {
+		return childControlCommand{}, err
+	}
+	if payload.IncludeDescendants != command.includeDescendants || payload.DeclarationDigest != command.declarationDigest {
+		return childControlCommand{}, status.Error(codes.FailedPrecondition, "child interrupt declaration digest is invalid")
 	}
 	command.controlOperationID = operationID
 	return command, nil
@@ -402,6 +410,7 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, command
 		RootChildThreadID:  command.rootChildThreadID, Action: childControlActionName(command.action),
 		IncludeDescendants: command.includeDescendants, TargetThreadID: targetID,
 		Disposition: dispositionName, RequestedAt: now.UTC().Format(time.RFC3339Nano),
+		DeclarationDigest: command.declarationDigest,
 	}
 	if disposition == bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL {
 		payload.RuntimeInputID = runtimeInputID
@@ -448,8 +457,16 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, command
 }
 
 func readChildInterruptCensusTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operationID string) ([]*bridgev1.ChildInterruptTarget, bool, error) {
-	rows, err := tx.Query(ctx, `SELECT session_thread_id,event_id,sequence,payload_json FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type=$3 AND payload_json::jsonb ->> 'control_operation_id'=$4 ORDER BY session_thread_id FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, operationID)
+	rows, err := tx.Query(ctx, `SELECT event.session_thread_id,event.event_id,event.sequence,event.payload_json
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'control_operation_id'=$5
+		ORDER BY event.session_thread_id FOR UPDATE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, operationID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -483,11 +500,16 @@ func readChildInterruptCensusTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 
 func readChildInterruptCensusBySourceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID string) ([]*bridgev1.ChildInterruptTarget, string, bool, error) {
 	var operationID string
-	err := tx.QueryRow(ctx, `SELECT payload_json::jsonb ->> 'control_operation_id' FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND type=$3
-		AND payload_json::jsonb ->> 'source_tool_use_event_id'=$4
-		ORDER BY event_id LIMIT 1 FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, sourceID,
+	err := tx.QueryRow(ctx, `SELECT event.payload_json::jsonb ->> 'control_operation_id'
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'source_tool_use_event_id'=$5
+		ORDER BY event.event_id LIMIT 1 FOR UPDATE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, sourceID,
 	).Scan(&operationID)
 	if dbconnect.IsNoRows(err) {
 		return nil, "", false, nil
@@ -502,9 +524,16 @@ func readChildInterruptCensusBySourceTx(ctx context.Context, tx *dbconnect.Tx, s
 	return targets, operationID, ok, err
 }
 
-func validateStoredChildInterruptRequestTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID, rootID string, action bridgev1.ChildControlAction, descendants bool) error {
-	rows, err := tx.Query(ctx, `SELECT payload_json FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type=$3 AND payload_json::jsonb ->> 'source_tool_use_event_id'=$4 FOR SHARE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childInterruptRequestedEventType, sourceID)
+func validateStoredChildInterruptRequestTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceID, rootID string, action bridgev1.ChildControlAction, descendants bool, declarationDigest string) error {
+	rows, err := tx.Query(ctx, `SELECT event.payload_json
+		FROM session_events event
+		JOIN session_threads root
+		  ON root.workspace_id=event.workspace_id AND root.session_id=event.session_id
+		 AND root.id=event.payload_json::jsonb ->> 'root_child_thread_id'
+		 AND root.parent_thread_id=$3
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.type=$4
+		 AND event.payload_json::jsonb ->> 'source_tool_use_event_id'=$5 FOR SHARE OF event`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), childInterruptRequestedEventType, sourceID)
 	if err != nil {
 		return err
 	}
@@ -516,7 +545,7 @@ func validateStoredChildInterruptRequestTx(ctx context.Context, tx *dbconnect.Tx
 			return err
 		}
 		var payload childInterruptEventPayload
-		if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload.RootChildThreadID != rootID || payload.Action != childControlActionName(action) || payload.IncludeDescendants != descendants || payload.SourceToolUseEventID != sourceID {
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload.RootChildThreadID != rootID || payload.Action != childControlActionName(action) || payload.IncludeDescendants != descendants || payload.SourceToolUseEventID != sourceID || payload.DeclarationDigest != declarationDigest {
 			return status.Error(codes.AlreadyExists, "child interrupt idempotency conflict")
 		}
 		count++
@@ -683,14 +712,14 @@ func validateChildCloseCensusTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 	if !ok {
 		return status.Error(codes.FailedPrecondition, "child close requires its frozen interrupt census")
 	}
-	command, err := deriveChildControlCommandByOperationTx(ctx, tx, scope, operationID)
+	command, err := loadCommittedChildControlCommandTx(ctx, tx, scope, operationID)
 	if err != nil {
 		return err
 	}
 	if command.rootChildThreadID != childThreadID || command.action != bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE || !command.includeDescendants {
 		return status.Error(codes.FailedPrecondition, "child close control operation is invalid")
 	}
-	if err := validateStoredChildInterruptRequestTx(ctx, tx, scope, command.sourceToolUseEventID, childThreadID, bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE, true); err != nil {
+	if err := validateStoredChildInterruptRequestTx(ctx, tx, scope, command.sourceToolUseEventID, childThreadID, bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE, true, command.declarationDigest); err != nil {
 		return err
 	}
 	if terminal, err := childControlSourceTerminalTx(ctx, tx, scope, command.sourceToolUseEventID); err != nil {
@@ -733,6 +762,24 @@ func childControlActionName(action bridgev1.ChildControlAction) string {
 		return "close"
 	}
 	return "interrupt"
+}
+
+func childControlActionFromName(value string) (bridgev1.ChildControlAction, error) {
+	switch value {
+	case "interrupt":
+		return bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT, nil
+	case "close":
+		return bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE, nil
+	default:
+		return bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_UNSPECIFIED, status.Error(codes.FailedPrecondition, "child control action is invalid")
+	}
+}
+
+func childControlRouteCapability(action bridgev1.ChildControlAction) string {
+	if action == bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE {
+		return "child_close"
+	}
+	return "child_interrupt"
 }
 
 func childInterruptDisposition(value string) bridgev1.ChildInterruptDisposition {

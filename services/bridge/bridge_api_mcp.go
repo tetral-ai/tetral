@@ -102,7 +102,13 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		if tool.MCPServerName == "" {
 			return status.Error(codes.FailedPrecondition, "durable tool is not an MCP operation")
 		}
-		if err := verifyApprovedToolExecutionHandoffTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), tool); err != nil {
+		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
+			return err
+		} else if ok {
+			response, err = claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
+			return err
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "mcp_execute"); err != nil {
 			return err
 		}
 		response, err = claimMCPToolResultTx(ctx, tx, request, tool, now)
@@ -136,6 +142,9 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		existingOperation, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -153,9 +162,6 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 			}
 			response = duplicateMCPRelinquishResponse()
 			return nil
-		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
 		}
 		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
 		if err != nil {
@@ -553,6 +559,12 @@ func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request
 		}
 		if active {
 			return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_InFlight{InFlight: &bridgev1.McpToolClaimInFlight{}}}, nil
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "mcp_execute"); err != nil {
+			if status.Code(err) == codes.FailedPrecondition {
+				return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolClaimStale{}}}, nil
+			}
+			return nil, err
 		}
 		if err := renewMCPToolResultClaimTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), request.GetClaimId(), now); err != nil {
 			return nil, err
