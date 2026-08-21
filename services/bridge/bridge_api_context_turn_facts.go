@@ -271,6 +271,9 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 	          payload_json::jsonb ->> 'tool_use_id',
 	          payload_json::jsonb ->> 'mcp_tool_use_id'
 	        ) IN (SELECT event_id FROM retained_tools))
+	     OR (type = 'agent.tool_result'
+	         AND model_request_id IN (SELECT model_request_id FROM retained_requests)
+	         AND payload_json::jsonb ? 'repair_kind')
 	     OR (type = 'agent.tool_result' AND event_id IN (SELECT event_id FROM retained_repairs))
 	     OR (type IN ('user.interrupt', 'agent.thread_interrupt_requested') AND event_id IN (SELECT event_id FROM pending_interrupts))
 	   )
