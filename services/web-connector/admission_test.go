@@ -194,6 +194,9 @@ type panicBlobStore struct{}
 func (panicBlobStore) Put(context.Context, string, io.Reader, int64) error {
 	panic("blob access before admission")
 }
+func (panicBlobStore) CompareAndSwap(context.Context, string, string, io.Reader, int64) error {
+	panic("blob access before admission")
+}
 func (panicBlobStore) Get(context.Context, string) (io.ReadCloser, error) {
 	panic("blob access before admission")
 }

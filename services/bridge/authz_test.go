@@ -81,6 +81,9 @@ func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {
 	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName); err != nil {
 		t.Fatalf("runtime pod AwaitChildInterrupt authorization error = %v; want nil", err)
 	}
+	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName); err != nil {
+		t.Fatalf("runtime pod AuthorizeWebToolExecution authorization error = %v; want nil", err)
+	}
 	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("runtime pod McpManifestChanged authorization error = %v; want PermissionDenied", err)
 	}

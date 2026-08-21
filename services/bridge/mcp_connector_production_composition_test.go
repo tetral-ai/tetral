@@ -49,6 +49,16 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	store.RuntimeBindingTokenHMACKey = []byte("mcp-production-context-signing-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+	cancelledToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_cancelled_use", ModelRequestId: "mreq_mcp_durable_claim",
+		ToolDeclaration: bridgeMCPToolDeclarationForTest(
+			"call_mcp_production_cancelled", "create_issue", "github", `{"mode":"cancel-between"}`, "allow",
+		),
+	})
+	if err != nil || cancelledToolUse.GetCommitted() == nil || cancelledToolUse.GetCommitted().GetEventId() == "" {
+		t.Fatalf("write cancellation-between-claims MCP Tool use = %#v/%v", cancelledToolUse, err)
+	}
+	cancelledToolUseEventID := cancelledToolUse.GetCommitted().GetEventId()
 	cleanupToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_cleanup_use", ModelRequestId: "mreq_mcp_durable_claim",
 		ToolDeclaration: bridgeMCPToolDeclarationForTest(
@@ -65,15 +75,16 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
 			Disposition:              "completed",
 			AssistantMessageSequence: cleanupToolUse.GetCommitted().AssignedMessageSequence,
-			ToolUseEventIds:          []string{toolUseEventID, cleanupToolUseEventID},
+			ToolUseEventIds:          []string{toolUseEventID, cancelledToolUseEventID, cleanupToolUseEventID},
 		},
 	}); err != nil {
 		t.Fatalf("seal MCP production request: %v", err)
 	}
 
 	bridge := &mcpConnectorProductionBridgeServer{
-		store: store,
-		now:   time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC),
+		store:                   store,
+		cancelledToolUseEventID: cancelledToolUseEventID,
+		now:                     time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC),
 	}
 	store.Clock = bridge.clock
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -134,6 +145,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		runtimeTokenPath,
 		toolUseEventID,
 		cleanupToolUseEventID,
+		cancelledToolUseEventID,
 	) //nolint:gosec // fixed repository fixture and test-owned arguments.
 	command.Dir = gatewayRoot
 	var stdout bytes.Buffer
@@ -160,6 +172,15 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 			Status     int32  `json:"status"`
 			ResultText string `json:"resultText"`
 		} `json:"cleanupReacquired"`
+		CancelledTakeover struct {
+			Status    int32 `json:"status"`
+			ErrorKind int32 `json:"errorKind"`
+		} `json:"cancelledTakeover"`
+		CancelledFirst struct {
+			Status     int32  `json:"status"`
+			ResultText string `json:"resultText"`
+			ErrorKind  int32  `json:"errorKind"`
+		} `json:"cancelledFirst"`
 		RuntimeResult struct {
 			Type   string `json:"type"`
 			Output struct {
@@ -173,10 +194,12 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("decode MCP Connector production composition: %v\nstdout=%s", err, stdout.String())
 	}
-	if len(result.ExecutionCalls) != 4 ||
+	if len(result.ExecutionCalls) != 5 ||
 		result.Takeover.Status != 1 || result.Takeover.ResultText != "takeover claimant" ||
 		result.StaleFirst.Status != 3 || result.StaleFirst.ErrorKind != 11 ||
 		result.StaleFirst.ResultText != "MCP tool execution lost runtime custody." ||
+		result.CancelledTakeover.Status != 3 || result.CancelledTakeover.ErrorKind != 11 ||
+		result.CancelledFirst.Status != 1 || result.CancelledFirst.ResultText != "cancelled claimant" ||
 		result.CleanupFailureCode != int32(codes.Internal) ||
 		result.CleanupReacquired.Status != 1 || result.CleanupReacquired.ResultText != "reacquired claimant" ||
 		result.RuntimeResult.Type != "completed" || result.RuntimeResult.Output.Text != "takeover claimant" ||
@@ -185,16 +208,18 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	}
 
 	claims, commits, relinquishes, commitDropped, relinquishDropped, settlementDropped := bridge.snapshot()
-	if len(claims) != 5 || claims[0] != "claim_mcp_production_old" ||
+	if len(claims) != 7 || claims[0] != "claim_mcp_production_old" ||
 		claims[1] != "claim_mcp_production_takeover" ||
-		claims[2] != "claim_mcp_production_cleanup_failed" ||
-		claims[3] != "claim_mcp_production_cleanup_reacquired" ||
-		claims[4] != "claim_mcp_production_runtime_replay" {
+		claims[2] != "claim_mcp_production_runtime_replay" ||
+		claims[3] != "claim_mcp_production_cancel_old" ||
+		claims[4] != "claim_mcp_production_cancel_takeover" ||
+		claims[5] != "claim_mcp_production_cleanup_failed" ||
+		claims[6] != "claim_mcp_production_cleanup_reacquired" {
 		t.Fatalf("Bridge claim sequence = %v; want receipt convergence and immediate cleanup reacquisition", claims)
 	}
-	if len(commits) != 4 || commits[0] != "claim_mcp_production_takeover" ||
+	if len(commits) != 5 || commits[0] != "claim_mcp_production_takeover" ||
 		commits[1] != "claim_mcp_production_takeover" || commits[2] != "claim_mcp_production_old" ||
-		commits[3] != "claim_mcp_production_cleanup_reacquired" ||
+		commits[3] != "claim_mcp_production_cancel_old" || commits[4] != "claim_mcp_production_cleanup_reacquired" ||
 		len(relinquishes) != 3 || relinquishes[0] != "claim_mcp_production_old" ||
 		relinquishes[1] != "claim_mcp_production_cleanup_failed" ||
 		relinquishes[2] != "claim_mcp_production_cleanup_failed" ||
@@ -281,13 +306,15 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	assertNoInventedAssistantText(t, ready.ProviderComposition)
 	assertProviderCompositionToolOrder(t, ready.ProviderComposition, []string{
 		"call_mcp_durable_claim",
+		"call_mcp_production_cancelled",
 		"call_mcp_production_cleanup",
 	})
 }
 
 type mcpConnectorProductionBridgeServer struct {
 	bridgev1.UnimplementedAgentRuntimeBridgeServiceServer
-	store *PostgreSQLBridgeAPIStore
+	store                   *PostgreSQLBridgeAPIStore
+	cancelledToolUseEventID string
 
 	mu                   sync.Mutex
 	now                  time.Time
@@ -311,7 +338,19 @@ func (s *mcpConnectorProductionBridgeServer) ClaimMcpToolResult(ctx context.Cont
 	if request.GetClaimId() == "claim_mcp_production_takeover" {
 		s.now = time.Date(2026, 1, 1, 0, 4, 0, 0, time.UTC)
 	}
+	if request.GetClaimId() == "claim_mcp_production_cancel_takeover" {
+		s.now = time.Date(2026, 1, 1, 0, 8, 0, 0, time.UTC)
+	}
 	s.mu.Unlock()
+	if request.GetClaimId() == "claim_mcp_production_cancel_takeover" {
+		response, err := s.store.SettleToolResult(ctx, bridgeToolSettlementRequestForTest(request.GetScope(), &bridgev1.RuntimeToolSettlement{
+			ToolUseEventId: s.cancelledToolUseEventID,
+			Outcome:        &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{}},
+		}))
+		if err != nil || response.GetCommitted() == nil {
+			return nil, status.Error(codes.Internal, "could not settle the route before takeover")
+		}
+	}
 	return s.store.ClaimMcpToolResult(ctx, request)
 }
 

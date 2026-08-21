@@ -1206,6 +1206,55 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultClaimLease(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreExpiredMCPClaimTakeoverRevalidatesRoute(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_takeover_route"
+		threadID  = "thr_mcp_takeover_route"
+		bindingID = "bind_mcp_takeover_route"
+		podUID    = "pod_mcp_takeover_route"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.Clock = func() time.Time { return now }
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
+
+	firstClaim := &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_route_first",
+	}
+	first, err := store.ClaimMcpToolResult(context.Background(), firstClaim)
+	if err != nil || first.GetAcquired() == nil {
+		t.Fatalf("first claim = %#v/%v; want acquired", first, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses
+		SET status='cancelled', updated_at=now()
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID); err != nil {
+		t.Fatalf("cancel durable MCP route: %v", err)
+	}
+	now = now.Add(mcpClaimLeaseTTL + time.Second)
+
+	takeover, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_route_takeover",
+	})
+	if err != nil || takeover.GetStale() == nil {
+		t.Fatalf("expired takeover after route cancellation = %#v/%v; want stale", takeover, err)
+	}
+	var claimID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT mcp_claim_id
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID).Scan(&claimID); err != nil {
+		t.Fatalf("read retained MCP claim: %v", err)
+	}
+	if claimID != firstClaim.GetClaimId() {
+		t.Fatalf("retained MCP claim = %q; want %q", claimID, firstClaim.GetClaimId())
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreMCPOperationsReturnTypedStaleCustody(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

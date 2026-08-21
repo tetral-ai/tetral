@@ -27,6 +27,10 @@ type SnapshotStore struct {
 	now    func() time.Time
 }
 
+type compareAndSwapBlobStore interface {
+	CompareAndSwap(ctx context.Context, key string, expectedETag string, content io.Reader, size int64) error
+}
+
 type metadataRecord struct {
 	URL      string  `json:"url"`
 	Title    *string `json:"title"`
@@ -168,6 +172,27 @@ func (s *SnapshotStore) PutJob(ctx context.Context, scope Scope, eventID string,
 
 func (s *SnapshotStore) GetJob(ctx context.Context, scope Scope, eventID string) ([]byte, error) {
 	return getBytes(ctx, s.blobs, jobKey(scope, eventID))
+}
+
+func (s *SnapshotStore) GetJobVersion(ctx context.Context, scope Scope, eventID string) ([]byte, string, error) {
+	key := jobKey(scope, eventID)
+	metadata, err := s.blobs.HeadObject(ctx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, err := getBytes(ctx, s.blobs, key)
+	if err != nil {
+		return nil, "", err
+	}
+	return raw, metadata.ETag, nil
+}
+
+func (s *SnapshotStore) CompareAndSwapJob(ctx context.Context, scope Scope, eventID, expectedETag string, raw []byte) error {
+	store, ok := s.blobs.(compareAndSwapBlobStore)
+	if !ok {
+		return errors.New("web job store does not support compare-and-swap")
+	}
+	return store.CompareAndSwap(ctx, jobKey(scope, eventID), expectedETag, bytes.NewReader(raw), int64(len(raw)))
 }
 
 func (s *SnapshotStore) DeleteKeys(ctx context.Context, keys []string) {

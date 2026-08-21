@@ -560,6 +560,12 @@ func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request
 		if active {
 			return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_InFlight{InFlight: &bridgev1.McpToolClaimInFlight{}}}, nil
 		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "mcp_execute"); err != nil {
+			if status.Code(err) == codes.FailedPrecondition {
+				return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolClaimStale{}}}, nil
+			}
+			return nil, err
+		}
 		if err := renewMCPToolResultClaimTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), request.GetClaimId(), now); err != nil {
 			return nil, err
 		}

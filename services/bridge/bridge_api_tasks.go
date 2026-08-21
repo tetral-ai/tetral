@@ -643,9 +643,23 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID, toolUseEventID)
+		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID, "")
 		if err != nil {
 			return err
+		}
+		var controlTaskID, controlKind string
+		if err := tx.QueryRow(ctx, `SELECT background_task_id, background_operation_kind
+			FROM session_runtime_tool_results
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			  AND tool_use_event_id=$4 AND tool_kind='sandbox_background'
+			FOR UPDATE`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+		).Scan(&controlTaskID, &controlKind); dbconnect.IsNoRows(err) {
+			return status.Error(codes.FailedPrecondition, "background control operation is missing")
+		} else if err != nil {
+			return err
+		}
+		if controlTaskID != taskID || (controlKind != "poll" && controlKind != "stdin") {
+			return status.Error(codes.FailedPrecondition, "background control operation does not own the selected task")
 		}
 		var existingKind, existingState, existingRequestID, existingTaskID, existingInputHash, existingInputJSON string
 		var existingResult sql.NullString

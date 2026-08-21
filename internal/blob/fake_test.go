@@ -52,6 +52,27 @@ func TestFakeBlobStorePutCreateOnlyRejectsDuplicate(t *testing.T) {
 	}
 }
 
+func TestFakeBlobStoreCompareAndSwapRequiresExactETag(t *testing.T) {
+	store := blob.NewFakeBlobStore()
+	if err := store.Put(context.Background(), "job", bytes.NewReader([]byte("claim")), int64(len("claim"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	metadata, err := store.HeadObject(context.Background(), "job")
+	if err != nil {
+		t.Fatalf("HeadObject: %v", err)
+	}
+	if err = store.CompareAndSwap(context.Background(), "job", metadata.ETag, bytes.NewReader([]byte("result")), int64(len("result"))); err != nil {
+		t.Fatalf("CompareAndSwap exact ETag: %v", err)
+	}
+	if err = store.CompareAndSwap(context.Background(), "job", metadata.ETag, bytes.NewReader([]byte("stale")), int64(len("stale"))); !errors.As(err, new(*blob.DuplicateKeyError)) {
+		t.Fatalf("CompareAndSwap stale ETag = %v; want DuplicateKeyError", err)
+	}
+	got, ok := store.Bytes("job")
+	if !ok || string(got) != "result" {
+		t.Fatalf("stored bytes = %q/%t; want result/true", got, ok)
+	}
+}
+
 func TestFakeBlobStorePutSizeMismatchRejects(t *testing.T) {
 	store := blob.NewFakeBlobStore()
 	body := []byte("ten-bytes!")

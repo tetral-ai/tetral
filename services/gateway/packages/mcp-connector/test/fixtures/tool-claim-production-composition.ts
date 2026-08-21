@@ -25,23 +25,27 @@ const gatewayTokenPath = process.argv[3];
 const runtimeTokenPath = process.argv[4];
 const toolUseEventIdArgument = process.argv[5];
 const cleanupToolUseEventIdArgument = process.argv[6];
+const cancelledToolUseEventIdArgument = process.argv[7];
 if (
 	bridgeAddress === undefined ||
 	gatewayTokenPath === undefined ||
 	runtimeTokenPath === undefined ||
 	toolUseEventIdArgument === undefined ||
-	cleanupToolUseEventIdArgument === undefined
+	cleanupToolUseEventIdArgument === undefined ||
+	cancelledToolUseEventIdArgument === undefined
 ) {
 	throw new Error(
-		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id>",
+		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id>",
 	);
 }
 const toolUseEventId: string = toolUseEventIdArgument;
 const cleanupToolUseEventId: string = cleanupToolUseEventIdArgument;
+const cancelledToolUseEventId: string = cancelledToolUseEventIdArgument;
 
 class TakeoverMcpClient implements McpClient {
 	readonly calls: string[] = [];
 	#cleanupCalls = 0;
+	#cancelCalls = 0;
 	#firstStartedResolve!: () => void;
 	readonly #firstStarted = new Promise<void>((resolve) => {
 		this.#firstStartedResolve = resolve;
@@ -50,12 +54,31 @@ class TakeoverMcpClient implements McpClient {
 	readonly #firstRelease = new Promise<void>((resolve) => {
 		this.#firstReleaseResolve = resolve;
 	});
+	#cancelStartedResolve!: () => void;
+	readonly #cancelStarted = new Promise<void>((resolve) => {
+		this.#cancelStartedResolve = resolve;
+	});
+	#cancelReleaseResolve!: () => void;
+	readonly #cancelRelease = new Promise<void>((resolve) => {
+		this.#cancelReleaseResolve = resolve;
+	});
 
 	async listTools() {
 		return [];
 	}
 
 	async callTool(input: Parameters<McpClient["callTool"]>[0]) {
+		if (input.input["mode"] === "cancel-between") {
+			this.#cancelCalls += 1;
+			this.calls.push(`cancel:${this.#cancelCalls}:${input.toolName}`);
+			if (this.#cancelCalls === 1) {
+				this.#cancelStartedResolve();
+				await this.#cancelRelease;
+			}
+			return {
+				content: [{ type: "text" as const, text: "cancelled claimant" }],
+			};
+		}
 		if (input.input["mode"] === "cleanup") {
 			this.#cleanupCalls += 1;
 			this.calls.push(`cleanup:${this.#cleanupCalls}:${input.toolName}`);
@@ -89,6 +112,14 @@ class TakeoverMcpClient implements McpClient {
 	releaseFirstExecution(): void {
 		this.#firstReleaseResolve();
 	}
+
+	async waitForCancelledExecution(): Promise<void> {
+		await this.#cancelStarted;
+	}
+
+	releaseCancelledExecution(): void {
+		this.#cancelReleaseResolve();
+	}
 }
 
 const runtimePodUid = "pod_mcp_production_composition";
@@ -110,22 +141,6 @@ await client.waitForFirstExecution();
 const takeover = await takeoverService.runMcpTool(request, metadata);
 client.releaseFirstExecution();
 const staleFirst = await first;
-
-let cleanupFailureCode = -1;
-try {
-	await serviceForClaim("claim_mcp_production_cleanup_failed").runMcpTool(
-		runRequest(cleanupToolUseEventId),
-		metadata,
-	);
-} catch (error) {
-	cleanupFailureCode =
-		typeof error === "object" && error !== null && "code" in error
-			? Number((error as { readonly code: unknown }).code)
-			: -1;
-}
-const cleanupReacquired = await serviceForClaim(
-	"claim_mcp_production_cleanup_reacquired",
-).runMcpTool(runRequest(cleanupToolUseEventId), metadata);
 
 const runtimeService = serviceForClaim("claim_mcp_production_runtime_replay");
 const connectorServer = createMcpConnectorGrpcServer(runtimeService);
@@ -160,11 +175,39 @@ const settlement = await writer.settleToolResult({
 await connectorServer.shutdown();
 if (!settlement.ok) throw settlement.error;
 
+const cancelledFirstPromise = serviceForClaim(
+	"claim_mcp_production_cancel_old",
+).runMcpTool(runRequest(cancelledToolUseEventId), metadata);
+await client.waitForCancelledExecution();
+const cancelledTakeover = await serviceForClaim(
+	"claim_mcp_production_cancel_takeover",
+).runMcpTool(runRequest(cancelledToolUseEventId), metadata);
+client.releaseCancelledExecution();
+const cancelledFirst = await cancelledFirstPromise;
+
+let cleanupFailureCode = -1;
+try {
+	await serviceForClaim("claim_mcp_production_cleanup_failed").runMcpTool(
+		runRequest(cleanupToolUseEventId),
+		metadata,
+	);
+} catch (error) {
+	cleanupFailureCode =
+		typeof error === "object" && error !== null && "code" in error
+			? Number((error as { readonly code: unknown }).code)
+			: -1;
+}
+const cleanupReacquired = await serviceForClaim(
+	"claim_mcp_production_cleanup_reacquired",
+).runMcpTool(runRequest(cleanupToolUseEventId), metadata);
+
 process.stdout.write(
 	JSON.stringify({
 		executionCalls: client.calls,
 		takeover: responseSummary(takeover),
 		staleFirst: responseSummary(staleFirst),
+		cancelledTakeover: responseSummary(cancelledTakeover),
+		cancelledFirst: responseSummary(cancelledFirst),
 		cleanupFailureCode,
 		cleanupReacquired: responseSummary(cleanupReacquired),
 		runtimeResult,

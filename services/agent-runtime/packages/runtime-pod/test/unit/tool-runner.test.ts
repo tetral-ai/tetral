@@ -40,6 +40,8 @@ import type {
 	AwaitChildInterruptRequest,
 	AwaitSandboxExecutionRequest,
 	AwaitSandboxExecutionResponse,
+	AuthorizeWebToolExecutionRequest,
+	AuthorizeWebToolExecutionResponse,
 	CancelCommandRequest,
 	CloseChildControlRequest,
 	CreateSubagentThreadRequest,
@@ -1419,7 +1421,7 @@ describe("RuntimePodToolRunner", () => {
 		).toBe(true);
 	});
 
-	test("cancels only the local command wait when its tool fiber aborts", async () => {
+	test("durably cancels an actively joined command when its tool fiber aborts", async () => {
 		const bridge = new RecordingBridgeClient();
 		bridge.deferReadCommandResult = true;
 		const runner = makeRunner({ bridge });
@@ -1441,7 +1443,51 @@ describe("RuntimePodToolRunner", () => {
 		const result = await resultPromise;
 
 		expect(result.type).toBe("cancelled");
-		expect(bridge.cancelCommandRequests).toEqual([]);
+		expect(bridge.cancelCommandRequests).toEqual([
+			expect.objectContaining({
+				taskId: "task_1",
+				toolUseEventId: "sevt_tool_poll",
+				reason: "runtime_interrupted",
+			}),
+		]);
+	});
+
+	test("replays the same command cancellation identity after a lost ACK", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.deferReadCommandResult = true;
+		bridge.cancelCommandErrors.push(
+			Object.assign(new Error("lost cancellation ACK"), {
+				code: GrpcStatus.UNKNOWN,
+			}),
+		);
+		const sleep = new ControlledSleep();
+		const runner = makeRunner({ bridge, sleep: sleep.sleep });
+		const abortController = new AbortController();
+		const resultPromise = runner.runTool(
+			toolRequest(
+				"write_stdin",
+				{ session_id: "task_1", chars: "" },
+				"sevt_tool_poll_replay",
+				abortController.signal,
+			),
+		);
+		await waitForCondition(
+			() => bridge.readCommandResultRequests.length === 1,
+			"read command request",
+		);
+		abortController.abort();
+		await waitForCondition(
+			() => bridge.cancelCommandRequests.length === 1,
+			"first cancel command request",
+		);
+		sleep.releaseNext();
+		const result = await resultPromise;
+
+		expect(result.type).toBe("cancelled");
+		expect(bridge.cancelCommandRequests).toHaveLength(2);
+		expect(bridge.cancelCommandRequests[1]).toEqual(
+			bridge.cancelCommandRequests[0],
+		);
 	});
 
 	test.each([
@@ -1623,8 +1669,9 @@ describe("RuntimePodToolRunner", () => {
 	});
 
 	test("routes web through Gateway RunWeb with Runtime binding token", async () => {
+		const bridge = new RecordingBridgeClient();
 		const gateway = new RecordingGatewayClient();
-		const runner = makeRunner({ gateway });
+		const runner = makeRunner({ bridge, gateway });
 
 		const result = await runner.runTool(
 			toolRequest("web", {
@@ -1653,6 +1700,22 @@ describe("RuntimePodToolRunner", () => {
 				},
 			}),
 		]);
+		expect(bridge.authorizeWebToolExecutionRequests).toEqual([
+			expect.objectContaining({ toolUseEventId: "sevt_tool_1" }),
+		]);
+	});
+
+	test("does not dispatch Web after the durable route becomes stale", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.authorizeWebToolExecutionResponse = { stale: {} };
+		const gateway = new RecordingGatewayClient();
+
+		const result = await makeRunner({ bridge, gateway }).runTool(
+			toolRequest("web", { search_query: [{ q: "tetral" }] }),
+		);
+
+		expect(result).toEqual({ type: "stale_custody" });
+		expect(gateway.runWebRequests).toEqual([]);
 	});
 
 	test("uses the Web connector's model-visible text without encoding the response twice", async () => {
@@ -4343,6 +4406,12 @@ class RecordingBridgeClient {
 	readonly readCommandResultRequests: ReadCommandResultRequest[] = [];
 	readonly readCommandResultResponses: ReadCommandResultResponse[] = [];
 	readonly cancelCommandRequests: CancelCommandRequest[] = [];
+	readonly cancelCommandErrors: Error[] = [];
+	readonly authorizeWebToolExecutionRequests: AuthorizeWebToolExecutionRequest[] =
+		[];
+	authorizeWebToolExecutionResponse: AuthorizeWebToolExecutionResponse = {
+		authorized: {},
+	};
 	readonly createSubagentThreadRequests: CreateSubagentThreadRequest[] = [];
 	readonly resolveChildThreadRequests: ResolveChildThreadRequest[] = [];
 	readonly listChildThreadsRequests: ListChildThreadsRequest[] = [];
@@ -4418,6 +4487,7 @@ class RecordingBridgeClient {
 		| "sendCommandInput"
 		| "readCommandResult"
 		| "cancelCommand"
+		| "authorizeWebToolExecution"
 		| "createSubagentThread"
 		| "resolveChildThread"
 		| "listChildThreads"
@@ -4434,6 +4504,8 @@ class RecordingBridgeClient {
 			sendCommandInput: this.sendCommandInput.bind(this),
 			readCommandResult: this.readCommandResult.bind(this),
 			cancelCommand: this.cancelCommand.bind(this),
+			authorizeWebToolExecution:
+				this.authorizeWebToolExecution.bind(this),
 			createSubagentThread: this.createSubagentThread.bind(this),
 			resolveChildThread: this.resolveChildThread.bind(this),
 			listChildThreads: this.listChildThreads.bind(this),
@@ -4450,6 +4522,7 @@ class RecordingBridgeClient {
 			| "sendCommandInput"
 			| "readCommandResult"
 			| "cancelCommand"
+			| "authorizeWebToolExecution"
 			| "createSubagentThread"
 			| "resolveChildThread"
 			| "listChildThreads"
@@ -4590,12 +4663,28 @@ class RecordingBridgeClient {
 	private cancelCommand(
 		request: CancelCommandRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.cancelCommandRequests.push(request);
+		const error = this.cancelCommandErrors.shift();
+		if (error !== undefined) {
+			callback(error, undefined);
+			return grpcCall();
+		}
 		callback(null, {
 			committed: { resultJson: '{"status":"cancelled"}' },
 		});
+		return grpcCall();
+	}
+
+	private authorizeWebToolExecution(
+		request: AuthorizeWebToolExecutionRequest,
+		_metadata: Metadata,
+		callback: (error: Error | null, response: unknown) => void,
+	): unknown {
+		this.authorizeWebToolExecutionRequests.push(request);
+		callback(null, this.authorizeWebToolExecutionResponse);
 		return grpcCall();
 	}
 

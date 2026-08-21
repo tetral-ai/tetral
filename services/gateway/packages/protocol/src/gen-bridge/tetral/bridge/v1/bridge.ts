@@ -1310,6 +1310,22 @@ export interface CommandCancelDuplicate {
 export interface CommandCancelStale {
 }
 
+export interface AuthorizeWebToolExecutionRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+}
+
+export interface AuthorizeWebToolExecutionResponse {
+  authorized?: WebToolExecutionAuthorized | undefined;
+  stale?: WebToolExecutionStale | undefined;
+}
+
+export interface WebToolExecutionAuthorized {
+}
+
+export interface WebToolExecutionStale {
+}
+
 export interface RunMemoryRequest {
   scope: RuntimeScope | undefined;
   toolUseEventId: string;
@@ -17456,6 +17472,262 @@ export const CommandCancelStale: MessageFns<CommandCancelStale> = {
   },
 };
 
+function createBaseAuthorizeWebToolExecutionRequest(): AuthorizeWebToolExecutionRequest {
+  return { scope: undefined, toolUseEventId: "" };
+}
+
+export const AuthorizeWebToolExecutionRequest: MessageFns<AuthorizeWebToolExecutionRequest> = {
+  encode(message: AuthorizeWebToolExecutionRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AuthorizeWebToolExecutionRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAuthorizeWebToolExecutionRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AuthorizeWebToolExecutionRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+    };
+  },
+
+  toJSON(message: AuthorizeWebToolExecutionRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AuthorizeWebToolExecutionRequest>, I>>(
+    base?: I,
+  ): AuthorizeWebToolExecutionRequest {
+    return AuthorizeWebToolExecutionRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AuthorizeWebToolExecutionRequest>, I>>(
+    object: I,
+  ): AuthorizeWebToolExecutionRequest {
+    const message = createBaseAuthorizeWebToolExecutionRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    return message;
+  },
+};
+
+function createBaseAuthorizeWebToolExecutionResponse(): AuthorizeWebToolExecutionResponse {
+  return { authorized: undefined, stale: undefined };
+}
+
+export const AuthorizeWebToolExecutionResponse: MessageFns<AuthorizeWebToolExecutionResponse> = {
+  encode(message: AuthorizeWebToolExecutionResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.authorized !== undefined) {
+      WebToolExecutionAuthorized.encode(message.authorized, writer.uint32(10).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      WebToolExecutionStale.encode(message.stale, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AuthorizeWebToolExecutionResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAuthorizeWebToolExecutionResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.authorized = WebToolExecutionAuthorized.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.stale = WebToolExecutionStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AuthorizeWebToolExecutionResponse {
+    return {
+      authorized: isSet(object.authorized) ? WebToolExecutionAuthorized.fromJSON(object.authorized) : undefined,
+      stale: isSet(object.stale) ? WebToolExecutionStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: AuthorizeWebToolExecutionResponse): unknown {
+    const obj: any = {};
+    if (message.authorized !== undefined) {
+      obj.authorized = WebToolExecutionAuthorized.toJSON(message.authorized);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = WebToolExecutionStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AuthorizeWebToolExecutionResponse>, I>>(
+    base?: I,
+  ): AuthorizeWebToolExecutionResponse {
+    return AuthorizeWebToolExecutionResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AuthorizeWebToolExecutionResponse>, I>>(
+    object: I,
+  ): AuthorizeWebToolExecutionResponse {
+    const message = createBaseAuthorizeWebToolExecutionResponse();
+    message.authorized = (object.authorized !== undefined && object.authorized !== null)
+      ? WebToolExecutionAuthorized.fromPartial(object.authorized)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? WebToolExecutionStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseWebToolExecutionAuthorized(): WebToolExecutionAuthorized {
+  return {};
+}
+
+export const WebToolExecutionAuthorized: MessageFns<WebToolExecutionAuthorized> = {
+  encode(_: WebToolExecutionAuthorized, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WebToolExecutionAuthorized {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseWebToolExecutionAuthorized();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): WebToolExecutionAuthorized {
+    return {};
+  },
+
+  toJSON(_: WebToolExecutionAuthorized): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WebToolExecutionAuthorized>, I>>(base?: I): WebToolExecutionAuthorized {
+    return WebToolExecutionAuthorized.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WebToolExecutionAuthorized>, I>>(_: I): WebToolExecutionAuthorized {
+    const message = createBaseWebToolExecutionAuthorized();
+    return message;
+  },
+};
+
+function createBaseWebToolExecutionStale(): WebToolExecutionStale {
+  return {};
+}
+
+export const WebToolExecutionStale: MessageFns<WebToolExecutionStale> = {
+  encode(_: WebToolExecutionStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WebToolExecutionStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseWebToolExecutionStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): WebToolExecutionStale {
+    return {};
+  },
+
+  toJSON(_: WebToolExecutionStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WebToolExecutionStale>, I>>(base?: I): WebToolExecutionStale {
+    return WebToolExecutionStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WebToolExecutionStale>, I>>(_: I): WebToolExecutionStale {
+    const message = createBaseWebToolExecutionStale();
+    return message;
+  },
+};
+
 function createBaseRunMemoryRequest(): RunMemoryRequest {
   return { scope: undefined, toolUseEventId: "" };
 }
@@ -18097,6 +18369,19 @@ export const AgentRuntimeBridgeServiceService = {
       Buffer.from(CancelCommandResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): CancelCommandResponse => CancelCommandResponse.decode(value),
   },
+  authorizeWebToolExecution: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AuthorizeWebToolExecutionRequest): Buffer =>
+      Buffer.from(AuthorizeWebToolExecutionRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AuthorizeWebToolExecutionRequest =>
+      AuthorizeWebToolExecutionRequest.decode(value),
+    responseSerialize: (value: AuthorizeWebToolExecutionResponse): Buffer =>
+      Buffer.from(AuthorizeWebToolExecutionResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AuthorizeWebToolExecutionResponse =>
+      AuthorizeWebToolExecutionResponse.decode(value),
+  },
   runMemory: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory" as const,
     requestStream: false as const,
@@ -18250,6 +18535,7 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   readCommandResult: handleUnaryCall<ReadCommandResultRequest, ReadCommandResultResponse>;
   sendCommandInput: handleUnaryCall<SendCommandInputRequest, SendCommandInputResponse>;
   cancelCommand: handleUnaryCall<CancelCommandRequest, CancelCommandResponse>;
+  authorizeWebToolExecution: handleUnaryCall<AuthorizeWebToolExecutionRequest, AuthorizeWebToolExecutionResponse>;
   runMemory: handleUnaryCall<RunMemoryRequest, RunMemoryResponse>;
   resolveTransientAttachment: handleUnaryCall<ResolveTransientAttachmentRequest, ResolveTransientAttachmentResponse>;
   resolveFileAttachmentMetadata: handleUnaryCall<
@@ -18655,6 +18941,21 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: CancelCommandResponse) => void,
+  ): ClientUnaryCall;
+  authorizeWebToolExecution(
+    request: AuthorizeWebToolExecutionRequest,
+    callback: (error: ServiceError | null, response: AuthorizeWebToolExecutionResponse) => void,
+  ): ClientUnaryCall;
+  authorizeWebToolExecution(
+    request: AuthorizeWebToolExecutionRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AuthorizeWebToolExecutionResponse) => void,
+  ): ClientUnaryCall;
+  authorizeWebToolExecution(
+    request: AuthorizeWebToolExecutionRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AuthorizeWebToolExecutionResponse) => void,
   ): ClientUnaryCall;
   runMemory(
     request: RunMemoryRequest,

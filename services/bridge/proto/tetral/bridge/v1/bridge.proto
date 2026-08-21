@@ -31,6 +31,7 @@ service AgentRuntimeBridgeService {
   rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
   rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
   rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
+  rpc AuthorizeWebToolExecution(AuthorizeWebToolExecutionRequest) returns (AuthorizeWebToolExecutionResponse);
   rpc RunMemory(RunMemoryRequest) returns (RunMemoryResponse);
   rpc ResolveTransientAttachment(ResolveTransientAttachmentRequest) returns (ResolveTransientAttachmentResponse);
   rpc ResolveFileAttachmentMetadata(ResolveFileAttachmentMetadataRequest) returns (ResolveFileAttachmentMetadataResponse);
@@ -1099,6 +1100,21 @@ message CommandCancelDuplicate {
   string result_json = 1;
 }
 message CommandCancelStale {}
+
+message AuthorizeWebToolExecutionRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+}
+
+message AuthorizeWebToolExecutionResponse {
+  oneof outcome {
+    WebToolExecutionAuthorized authorized = 1;
+    WebToolExecutionStale stale = 2;
+  }
+}
+
+message WebToolExecutionAuthorized {}
+message WebToolExecutionStale {}
 
 message RunMemoryRequest {
   reserved 3, 4, 5, 6;

@@ -339,6 +339,37 @@ func lockExecutableSandboxToolRouteTx(
 	return lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID, "sandbox_execute")
 }
 
+// AuthorizeWebToolExecution is the final durable first-effect gate before
+// Runtime dispatches an exact Web Tool identity to Web Connector. Web input
+// remains owned and validated by Runtime and Web Connector.
+func (s *PostgreSQLBridgeAPIStore) AuthorizeWebToolExecution(ctx context.Context, request *bridgev1.AuthorizeWebToolExecutionRequest) (*bridgev1.AuthorizeWebToolExecutionResponse, error) {
+	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
+		return nil, err
+	}
+	var response *bridgev1.AuthorizeWebToolExecutionResponse
+	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.authorize_web_tool_execution", func(tx *dbconnect.Tx) error {
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "web_execute"); err != nil {
+			if status.Code(err) == codes.FailedPrecondition {
+				response = &bridgev1.AuthorizeWebToolExecutionResponse{Outcome: &bridgev1.AuthorizeWebToolExecutionResponse_Stale{Stale: &bridgev1.WebToolExecutionStale{}}}
+				return nil
+			}
+			return err
+		}
+		response = &bridgev1.AuthorizeWebToolExecutionResponse{Outcome: &bridgev1.AuthorizeWebToolExecutionResponse_Authorized{Authorized: &bridgev1.WebToolExecutionAuthorized{}}}
+		return nil
+	})
+	if err != nil {
+		if isScopeSupersededError(err) {
+			return &bridgev1.AuthorizeWebToolExecutionResponse{Outcome: &bridgev1.AuthorizeWebToolExecutionResponse_Stale{Stale: &bridgev1.WebToolExecutionStale{}}}, nil
+		}
+		return nil, err
+	}
+	return response, nil
+}
+
 // lockSettleableToolRouteTx separates terminal Result authority from executor
 // admission. Both an allowed execution and a policy-owned denial may settle,
 // but a pending, cancelled, resolved, missing, or conflicting route may not.

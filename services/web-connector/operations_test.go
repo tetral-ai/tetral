@@ -522,18 +522,9 @@ func TestIdempotentReplayIsExactAndConflictingInputDoesNotReexecute(t *testing.T
 	if backend.calls != 1 {
 		t.Fatalf("conflict reexecuted backend: %d", backend.calls)
 	}
-	if err := objects.Delete(context.Background(), jobKey(Scope{"ws", "ses", "thr"}, "event-replay")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = service.RunWeb(testContext(), request); err != nil {
-		t.Fatal(err)
-	}
-	if backend.calls != 2 {
-		t.Fatalf("expired replay backend calls=%d; want reexecution", backend.calls)
-	}
 }
 
-func TestRuntimeFailureIsNotPersistedAndSameKeyRetryReexecutes(t *testing.T) {
+func TestRuntimeFailureIsDurableAndSameIdentityDoesNotReexecute(t *testing.T) {
 	t.Parallel()
 	objects := blob.NewFakeBlobStore()
 	backend := &sequenceSearchBackend{
@@ -556,11 +547,58 @@ func TestRuntimeFailureIsNotPersistedAndSameKeyRetryReexecutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED {
-		t.Fatalf("second status = %s; want completed", second.GetStatus())
+	if second.String() != first.String() {
+		t.Fatalf("runtime failure replay differs\nfirst=%s\nsecond=%s", first, second)
 	}
-	if backend.calls != 2 {
-		t.Fatalf("backend calls = %d; want retry execution", backend.calls)
+	if backend.calls != 1 {
+		t.Fatalf("backend calls = %d; want one first execution", backend.calls)
+	}
+}
+
+func TestExpiredFirstExecutionClaimSettlesUnknownWithoutSecondBackendCall(t *testing.T) {
+	objects := blob.NewFakeBlobStore()
+	backend := &blockingSearchBackend{started: make(chan struct{}), release: make(chan struct{})}
+	nowValue := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	now := func() time.Time { return nowValue }
+	key := []byte("binding-verifier-key-with-at-least-32-bytes")
+	service := NewService(objects, backend, NewBindingVerifier(key, now), NewMetrics(), now, nil)
+	service.jobLeaseTTL = time.Second
+	service.jobPollInterval = time.Millisecond
+	request := testRequest(&providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "query"}}}, "event-expired-claim", key, now)
+
+	firstContext, cancelFirst := context.WithCancel(testContext())
+	firstResult := make(chan *providergatewayv1.RunWebResponse, 1)
+	firstError := make(chan error, 1)
+	go func() {
+		response, err := service.RunWeb(firstContext, request)
+		firstResult <- response
+		firstError <- err
+	}()
+	<-backend.started
+	cancelFirst()
+	first := <-firstResult
+	if err := <-firstError; err != nil {
+		t.Fatalf("first RunWeb: %v", err)
+	}
+	if first.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR {
+		t.Fatalf("first status = %s; want runtime error", first.GetStatus())
+	}
+
+	nowValue = nowValue.Add(2 * time.Second)
+	replayed, err := service.RunWeb(testContext(), request)
+	if err != nil {
+		t.Fatalf("expired claim replay: %v", err)
+	}
+	if replayed.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR ||
+		replayed.GetResultText() != "web backend temporarily unavailable" {
+		t.Fatalf("expired claim replay = %+v", replayed)
+	}
+	if backend.calls.Load() != 1 {
+		t.Fatalf("backend calls = %d; want original uncertain call only", backend.calls.Load())
+	}
+	secondReplay, err := service.RunWeb(testContext(), request)
+	if err != nil || secondReplay.String() != replayed.String() || backend.calls.Load() != 1 {
+		t.Fatalf("settled replay = %+v/%v calls=%d", secondReplay, err, backend.calls.Load())
 	}
 }
 
@@ -745,12 +783,8 @@ func TestBackendFailureTaxonomyProducesClosedPublicResponsesWithoutSnapshots(t *
 			if response.GetStatus() != test.wantStatus || response.GetResultText() != test.wantText {
 				t.Fatalf("response=%+v; want status=%s text=%q", response, test.wantStatus, test.wantText)
 			}
-			wantObjects := 1
-			if test.wantStatus == providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR {
-				wantObjects = 0
-			}
-			if len(response.GetRefs()) != 0 || objects.Len() != wantObjects {
-				t.Fatalf("refs=%v objects=%d; want %d persisted job records", response.GetRefs(), objects.Len(), wantObjects)
+			if len(response.GetRefs()) != 0 || objects.Len() != 1 {
+				t.Fatalf("refs=%v objects=%d; want one durable job and zero snapshots", response.GetRefs(), objects.Len())
 			}
 		})
 	}
@@ -811,19 +845,20 @@ func TestRecordedBackendFixturesDriveAllOperationsEndToEnd(t *testing.T) {
 	}
 }
 
-func TestConcurrentIdempotentDeliveryReturnsWinnerAndCleansLoserObjects(t *testing.T) {
-	inner := blob.NewFakeBlobStore()
-	barrier := &jobBarrierBlobStore{inner: inner, ready: make(chan struct{})}
-	backend := &concurrentSearchBackend{}
-	service, key, now := testService(barrier, backend)
+func TestConcurrentIdempotentDeliveryExecutesBackendOnceAndReturnsWinner(t *testing.T) {
+	objects := blob.NewFakeBlobStore()
+	backend := &blockingSearchBackend{started: make(chan struct{}), release: make(chan struct{})}
+	service, key, now := testService(objects, backend)
 	request := testRequest(&providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "query"}}}, "event-concurrent", key, now)
 	responses := make([]*providergatewayv1.RunWebResponse, 2)
 	errs := make([]error, 2)
 	var wg sync.WaitGroup
-	for i := range responses {
-		wg.Add(1)
-		go func(i int) { defer wg.Done(); responses[i], errs[i] = service.RunWeb(testContext(), request) }(i)
-	}
+	wg.Add(1)
+	go func() { defer wg.Done(); responses[0], errs[0] = service.RunWeb(testContext(), request) }()
+	<-backend.started
+	wg.Add(1)
+	go func() { defer wg.Done(); responses[1], errs[1] = service.RunWeb(testContext(), request) }()
+	close(backend.release)
 	wg.Wait()
 	for _, err := range errs {
 		if err != nil {
@@ -833,64 +868,15 @@ func TestConcurrentIdempotentDeliveryReturnsWinnerAndCleansLoserObjects(t *testi
 	if responses[0].String() != responses[1].String() {
 		t.Fatalf("responses differ: %s / %s", responses[0], responses[1])
 	}
-	if inner.Len() != 2 {
-		t.Fatalf("objects=%d; want winner metadata and job", inner.Len())
-	}
-	if len(inner.Deletes()) != 1 {
-		t.Fatalf("deletes=%v; want loser metadata cleanup", inner.Deletes())
-	}
-}
-
-func TestConcurrentLazyUpgradeLoserNeverDeletesTheSharedWinnerSnapshot(t *testing.T) {
-	inner := blob.NewFakeBlobStore()
-	store := &lazyUpgradeJobRaceBlobStore{
-		inner:           inner,
-		firstJobBlocked: make(chan struct{}),
-		winnerStored:    make(chan struct{}),
-	}
-	backend := &concurrentBackend{page: Page{URL: "https://example.com/", Title: "Example", Content: "winner body", TargetHTTPStatus: 200}}
-	service, key, now := testService(store, backend)
-	snapshotStore := NewSnapshotStore(inner, zeroRandom, now)
-	stub, _, err := snapshotStore.StoreStub(context.Background(), Scope{"ws", "ses", "thr"}, SearchHit{URL: "https://example.com/", Title: "Example"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := func() *providergatewayv1.RunWebRequest {
-		return testRequest(&providergatewayv1.WebToolInput{Open: []*providergatewayv1.WebOpenRequest{{RefId: stringptr(stub.ID)}}}, "event-lazy-job-race", key, now)
-	}
-
-	firstResult := make(chan *providergatewayv1.RunWebResponse, 1)
-	firstError := make(chan error, 1)
-	go func() {
-		response, runErr := service.RunWeb(testContext(), request())
-		firstResult <- response
-		firstError <- runErr
-	}()
-	<-store.firstJobBlocked
-	second, err := service.RunWeb(testContext(), request())
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := <-firstResult
-	if err = <-firstError; err != nil {
-		t.Fatal(err)
-	}
-	if first.String() != second.String() {
-		t.Fatalf("responses differ: %s / %s", first, second)
-	}
-	if !inner.Has(docKey(Scope{"ws", "ses", "thr"}, stub.ID)) {
-		t.Fatal("losing idempotency execution deleted the shared lazy-upgrade snapshot")
-	}
-	replayed, err := service.RunWeb(testContext(), request())
-	if err != nil || !strings.Contains(replayed.GetResultText(), "winner body") {
-		t.Fatalf("replay=%+v err=%v", replayed, err)
+	if backend.calls.Load() != 1 {
+		t.Fatalf("backend calls=%d; want one first execution", backend.calls.Load())
 	}
 }
 
 func TestJobPersistenceFailurePreservesIncurredBackendUsage(t *testing.T) {
 	t.Parallel()
 	inner := blob.NewFakeBlobStore()
-	objects := &jobFailureBlobStore{BlobStore: inner, mode: "put"}
+	objects := &jobFailureBlobStore{BlobStore: inner, mode: "compare_and_swap"}
 	backend := &fakeBackend{
 		page:         Page{URL: "https://example.com/", Content: "body", TargetHTTPStatus: 200},
 		fetchOutcome: BackendOutcome{Kind: BackendSuccess, Tokens: 41, Requests: 1, TargetHTTPStatus: int32ptr(200)},
@@ -907,8 +893,8 @@ func TestJobPersistenceFailurePreservesIncurredBackendUsage(t *testing.T) {
 	if usage.GetBackendTokens() != 41 || usage.GetWebFetchRequests() != 1 || usage.GetTargetHttpStatus() != 200 || usage.GetStoredBytes() == 0 {
 		t.Fatalf("usage=%+v; incurred backend call and cache write must remain accounted", usage)
 	}
-	if inner.Len() != 0 {
-		t.Fatalf("objects=%d; failed execution cleanup did not remove its private snapshot", inner.Len())
+	if inner.Len() != 1 {
+		t.Fatalf("objects=%d; want only the durable in-flight claim after result persistence failure", inner.Len())
 	}
 }
 
@@ -968,7 +954,13 @@ type concurrentBackend struct {
 	calls int
 	page  Page
 }
-type concurrentSearchBackend struct{ calls atomic.Int64 }
+
+type blockingSearchBackend struct {
+	calls   atomic.Int64
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
 
 type sequenceSearchResult struct {
 	hits    []SearchHit
@@ -1034,6 +1026,17 @@ func (s *jobFailureBlobStore) Put(ctx context.Context, key string, body io.Reade
 	return s.BlobStore.Put(ctx, key, body, size)
 }
 
+func (s *jobFailureBlobStore) CompareAndSwap(ctx context.Context, key, expectedETag string, body io.Reader, size int64) error {
+	if s.mode == "compare_and_swap" && strings.Contains(key, "/jobs/") {
+		return errors.New("test job compare-and-swap failure")
+	}
+	store, ok := s.BlobStore.(compareAndSwapBlobStore)
+	if !ok {
+		return errors.New("test job store does not support compare-and-swap")
+	}
+	return store.CompareAndSwap(ctx, key, expectedETag, body, size)
+}
+
 func (s *metadataReadFailureBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	switch {
 	case strings.HasSuffix(key, ".doc"):
@@ -1047,89 +1050,18 @@ func (s *metadataReadFailureBlobStore) Get(ctx context.Context, key string) (io.
 	}
 }
 
-func (b *concurrentSearchBackend) Search(context.Context, string, []string) ([]SearchHit, BackendOutcome) {
+func (b *blockingSearchBackend) Search(ctx context.Context, _ string, _ []string) ([]SearchHit, BackendOutcome) {
 	b.calls.Add(1)
+	b.once.Do(func() { close(b.started) })
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return nil, BackendOutcome{Kind: BackendRuntimeError}
+	}
 	return []SearchHit{{URL: "https://example.com/", Title: "Example"}}, BackendOutcome{Kind: BackendSuccess, Requests: 1}
 }
-func (b *concurrentSearchBackend) Fetch(context.Context, string) (Page, BackendOutcome) {
+func (b *blockingSearchBackend) Fetch(context.Context, string) (Page, BackendOutcome) {
 	panic("unexpected fetch")
-}
-
-type jobBarrierBlobStore struct {
-	inner    *blob.FakeBlobStore
-	arrivals atomic.Int32
-	ready    chan struct{}
-	once     sync.Once
-}
-
-type lazyUpgradeJobRaceBlobStore struct {
-	inner           *blob.FakeBlobStore
-	jobPuts         atomic.Int32
-	firstJobBlocked chan struct{}
-	winnerStored    chan struct{}
-}
-
-func (s *lazyUpgradeJobRaceBlobStore) Put(ctx context.Context, key string, body io.Reader, size int64) error {
-	if !strings.Contains(key, "/jobs/") {
-		return s.inner.Put(ctx, key, body, size)
-	}
-	if s.jobPuts.Add(1) == 1 {
-		close(s.firstJobBlocked)
-		select {
-		case <-s.winnerStored:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		return s.inner.Put(ctx, key, body, size)
-	}
-	err := s.inner.Put(ctx, key, body, size)
-	close(s.winnerStored)
-	return err
-}
-
-func (s *lazyUpgradeJobRaceBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	return s.inner.Get(ctx, key)
-}
-func (s *lazyUpgradeJobRaceBlobStore) HeadObject(ctx context.Context, key string) (blob.ObjectMetadata, error) {
-	return s.inner.HeadObject(ctx, key)
-}
-func (s *lazyUpgradeJobRaceBlobStore) CopyObject(ctx context.Context, source, destination string) error {
-	return s.inner.CopyObject(ctx, source, destination)
-}
-func (s *lazyUpgradeJobRaceBlobStore) Delete(ctx context.Context, key string) error {
-	return s.inner.Delete(ctx, key)
-}
-func (s *lazyUpgradeJobRaceBlobStore) DeletePrefix(ctx context.Context, prefix string) error {
-	return s.inner.DeletePrefix(ctx, prefix)
-}
-
-func (s *jobBarrierBlobStore) Put(ctx context.Context, key string, body io.Reader, size int64) error {
-	if strings.Contains(key, "/jobs/") {
-		if s.arrivals.Add(1) == 2 {
-			s.once.Do(func() { close(s.ready) })
-		}
-		select {
-		case <-s.ready:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return s.inner.Put(ctx, key, body, size)
-}
-func (s *jobBarrierBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	return s.inner.Get(ctx, key)
-}
-func (s *jobBarrierBlobStore) HeadObject(ctx context.Context, key string) (blob.ObjectMetadata, error) {
-	return s.inner.HeadObject(ctx, key)
-}
-func (s *jobBarrierBlobStore) CopyObject(ctx context.Context, source, destination string) error {
-	return s.inner.CopyObject(ctx, source, destination)
-}
-func (s *jobBarrierBlobStore) Delete(ctx context.Context, key string) error {
-	return s.inner.Delete(ctx, key)
-}
-func (s *jobBarrierBlobStore) DeletePrefix(ctx context.Context, prefix string) error {
-	return s.inner.DeletePrefix(ctx, prefix)
 }
 
 func (b *concurrentBackend) Search(context.Context, string, []string) ([]SearchHit, BackendOutcome) {

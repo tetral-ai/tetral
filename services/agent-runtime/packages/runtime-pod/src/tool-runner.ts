@@ -55,6 +55,10 @@ import type {
 	AwaitChildInterruptResponse,
 	AwaitSandboxExecutionRequest,
 	AwaitSandboxExecutionResponse,
+	AuthorizeWebToolExecutionRequest,
+	AuthorizeWebToolExecutionResponse,
+	CancelCommandRequest,
+	CancelCommandResponse,
 	ChildThreadFact,
 	CloseChildControlRequest,
 	CloseChildControlResponse,
@@ -178,6 +182,15 @@ type SendCommandInputResult =
 	| { readonly type: "duplicate"; readonly resultJson: string }
 	| { readonly type: "stale" };
 
+type CancelCommandResult =
+	| { readonly type: "committed" }
+	| { readonly type: "duplicate" }
+	| { readonly type: "stale" };
+
+type AuthorizeWebToolExecutionResult =
+	| { readonly type: "authorized" }
+	| { readonly type: "stale" };
+
 type RunMemoryResult =
 	| { readonly type: "committed"; readonly resultJson: string }
 	| { readonly type: "duplicate"; readonly resultJson: string }
@@ -209,6 +222,8 @@ export interface RuntimePodToolRunnerOptions {
 		| "runMemory"
 		| "sendCommandInput"
 		| "readCommandResult"
+		| "cancelCommand"
+		| "authorizeWebToolExecution"
 		| "createSubagentThread"
 		| "resolveChildThread"
 		| "listChildThreads"
@@ -255,6 +270,8 @@ export class RuntimePodToolRunner {
 		| "runMemory"
 		| "sendCommandInput"
 		| "readCommandResult"
+		| "cancelCommand"
+		| "authorizeWebToolExecution"
 		| "createSubagentThread"
 		| "resolveChildThread"
 		| "listChildThreads"
@@ -588,7 +605,11 @@ export class RuntimePodToolRunner {
 				return resultJsonToExecutionResult(request, result.resultJson);
 			} catch (error) {
 				if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-					return toolCancelled(request, "Command task was cancelled.");
+					return await this.cancelJoinedBackgroundCommand(
+						request,
+						scope,
+						taskId,
+					);
 				}
 				if (isDurableBridgeRejection(error)) {
 					return toolFailure(
@@ -607,6 +628,70 @@ export class RuntimePodToolRunner {
 				await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
 			}
 		}
+	}
+
+	private async cancelJoinedBackgroundCommand(
+		request: RuntimeToolExecutionRequest,
+		scope: RuntimeScope,
+		taskId: string,
+	): Promise<RuntimeToolExecutionResult> {
+		const durableRequest: CancelCommandRequest = {
+			scope,
+			taskId,
+			reason: "runtime_interrupted",
+			toolUseEventId: request.toolUseEventId,
+			operationId: stableId(
+				"req",
+				`command-cancel:${request.toolUseEventId}:${taskId}`,
+			),
+		};
+		const cancellationSignal = new AbortController().signal;
+		for (
+			let attempt = 0;
+			attempt < SessionEventWriterRetryPolicy.attempts;
+			attempt++
+		) {
+			try {
+				const result = parseCancelCommandResult(
+					await cancelCommand(
+						this.bridgeClient,
+						durableRequest,
+						await this.metadata(),
+					),
+				);
+				if (result.type === "stale") {
+					return { type: "stale_custody" };
+				}
+				return toolCancelled(request, "Command task was cancelled.");
+			} catch (error) {
+				if (error instanceof BridgeToolResultContractError) {
+					return toolFailure(
+						request,
+						"Bridge returned a malformed command cancellation result.",
+						true,
+					);
+				}
+				if (isDurableBridgeRejection(error)) {
+					return { type: "stale_custody" };
+				}
+				if (attempt + 1 >= SessionEventWriterRetryPolicy.attempts) {
+					return toolFailure(
+						request,
+						"Command cancellation result is unavailable.",
+						true,
+					);
+				}
+				await this.sleep(
+					SessionEventWriterRetryPolicy.backoffMs[attempt] ?? 0,
+					cancellationSignal,
+				);
+			}
+		}
+		return toolFailure(
+			request,
+			"Command cancellation result is unavailable.",
+			true,
+		);
 	}
 
 	private async runBridgeTool(
@@ -690,6 +775,21 @@ export class RuntimePodToolRunner {
 			return toolFailure(request, validatedInput.reason, false);
 		}
 		try {
+			const authorization = parseAuthorizeWebToolExecutionResult(
+				await authorizeWebToolExecution(
+					this.bridgeClient,
+					{
+						scope: this.scope(request),
+						toolUseEventId: request.toolUseEventId,
+					},
+					await this.metadata(),
+					request.abortSignal,
+				),
+			);
+			if (authorization.type === "stale") {
+				return { type: "stale_custody" };
+			}
+			throwIfToolRouteAborted(request.abortSignal);
 			const response = await runWeb(
 				this.webClient,
 				{
@@ -734,6 +834,16 @@ export class RuntimePodToolRunner {
 			}
 			if (error instanceof ToolResultContractError) {
 				return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+			}
+			if (error instanceof BridgeToolResultContractError) {
+				return toolFailure(
+					request,
+					"Bridge returned a malformed Web authorization result.",
+					true,
+				);
+			}
+			if (isDurableBridgeRejection(error)) {
+				return { type: "stale_custody" };
 			}
 			return toolFailure(
 				request,
@@ -2363,6 +2473,39 @@ function parseSendCommandInputResult(
 	return { type: "stale" };
 }
 
+function parseCancelCommandResult(
+	response: CancelCommandResponse,
+): CancelCommandResult {
+	const variantCount =
+		Number(response.committed !== undefined) +
+		Number(response.duplicate !== undefined) +
+		Number(response.stale !== undefined);
+	if (variantCount !== 1) {
+		throw new BridgeToolResultContractError("CancelCommand");
+	}
+	if (response.committed !== undefined) {
+		return { type: "committed" };
+	}
+	if (response.duplicate !== undefined) {
+		return { type: "duplicate" };
+	}
+	return { type: "stale" };
+}
+
+function parseAuthorizeWebToolExecutionResult(
+	response: AuthorizeWebToolExecutionResponse,
+): AuthorizeWebToolExecutionResult {
+	const variantCount =
+		Number(response.authorized !== undefined) +
+		Number(response.stale !== undefined);
+	if (variantCount !== 1) {
+		throw new BridgeToolResultContractError("AuthorizeWebToolExecution");
+	}
+	return response.authorized !== undefined
+		? { type: "authorized" }
+		: { type: "stale" };
+}
+
 function parseRunMemoryResult(response: RunMemoryResponse): RunMemoryResult {
 	const variantCount =
 		Number(response.committed !== undefined) +
@@ -2465,6 +2608,48 @@ function readCommandResult(
 		abortSignal,
 		(unaryRequest, unaryMetadata, callback) =>
 			client.readCommandResult(unaryRequest, unaryMetadata, callback),
+	);
+}
+
+function cancelCommand(
+	client: Pick<AgentRuntimeBridgeServiceClient, "cancelCommand">,
+	request: CancelCommandRequest,
+	metadata: Metadata,
+): Promise<CancelCommandResponse> {
+	const options: CallOptions = {
+		deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+	};
+	return new Promise((resolve, reject) => {
+		try {
+			client.cancelCommand(request, metadata, options, (error, response) => {
+				if (error !== null) {
+					reject(error);
+					return;
+				}
+				resolve(response);
+			});
+		} catch (error) {
+			reject(error);
+		}
+	});
+}
+
+function authorizeWebToolExecution(
+	client: Pick<AgentRuntimeBridgeServiceClient, "authorizeWebToolExecution">,
+	request: AuthorizeWebToolExecutionRequest,
+	metadata: Metadata,
+	abortSignal: AbortSignal,
+): Promise<AuthorizeWebToolExecutionResponse> {
+	return cancellableUnaryCall(
+		request,
+		metadata,
+		abortSignal,
+		(unaryRequest, unaryMetadata, callback) =>
+			client.authorizeWebToolExecution(
+				unaryRequest,
+				unaryMetadata,
+				callback,
+			),
 	);
 }
 

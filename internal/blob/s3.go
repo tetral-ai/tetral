@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -123,6 +124,22 @@ func (s *S3BlobStore) Put(ctx context.Context, key string, content io.Reader, si
 		Body:          content,
 		ContentLength: aws.Int64(size),
 		IfNoneMatch:   aws.String("*"),
+	})
+	if err != nil {
+		return mapPutErr(err)
+	}
+	return nil
+}
+
+// CompareAndSwap replaces one exact object version. If-Match keeps stale
+// claimants from overwriting a result committed by the current owner.
+func (s *S3BlobStore) CompareAndSwap(ctx context.Context, key string, expectedETag string, content io.Reader, size int64) error {
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		Body:          content,
+		ContentLength: aws.Int64(size),
+		IfMatch:       aws.String(strconv.Quote(expectedETag)),
 	})
 	if err != nil {
 		return mapPutErr(err)

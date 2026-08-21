@@ -297,9 +297,10 @@ func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testi
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_cancel_receipt")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"sleep 60"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_bridge_cancel_receipt","chars":""},"evaluated_permission":"allow"}`)
+	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, toolUseEventID, "call_bridge_cancel_receipt", "write_stdin", `{"session_id":"task_bridge_cancel_receipt","chars":""}`, "background_command")
 	seedBridgeAPIAllowedToolRoute(t, admin, workspaceID, sessionID, threadID, toolUseEventID)
-	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, "evt_source_bridge_cancel_receipt")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
 		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 		normalized_input_hash, tool_name, input_json, ack_status,
@@ -404,7 +405,6 @@ func TestPostgreSQLBridgeAPIStoreBackgroundCommandsRejectUnrelatedSameThreadAuth
 	seedBridgeAPIToolDeclarationProjection(t, admin, workspaceID, sessionID, threadID, "evt_command_other_exec", "call_command_other_exec", "exec_command", `{"cmd":"sleep 30"}`, "sandbox_execute")
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_expected", "evt_command_exec")
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, "task_command_other", "evt_command_other_exec")
-
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_command_authority")
 	if _, err := store.ReadCommandResult(context.Background(), &bridgev1.ReadCommandResultRequest{
@@ -412,10 +412,19 @@ func TestPostgreSQLBridgeAPIStoreBackgroundCommandsRejectUnrelatedSameThreadAuth
 	}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("read with unrelated task error = %v; want FailedPrecondition", err)
 	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status,
+		background_operation_kind, background_operation_state, background_request_id,
+		background_task_id, background_max_output_tokens, created_at, updated_at
+	) VALUES ($1,$2,$3,'evt_command_poll','sandbox_background','poll_hash','write_stdin','{}','committed',
+		'poll','pending','cmdop_poll_expected','task_command_expected',0,now(),now())`, workspaceID, sessionID, threadID); err != nil {
+		t.Fatalf("seed accepted poll control: %v", err)
+	}
 	if _, err := store.CancelCommand(context.Background(), &bridgev1.CancelCommandRequest{
-		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_exec", OperationId: "cmdop_wrong_cancel",
+		Scope: scope, TaskId: "task_command_other", ToolUseEventId: "evt_command_poll", OperationId: "cmdop_wrong_cancel",
 	}); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("cancel with unrelated source Tool error = %v; want FailedPrecondition", err)
+		t.Fatalf("cancel with unrelated accepted control error = %v; want FailedPrecondition", err)
 	}
 	var count int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
