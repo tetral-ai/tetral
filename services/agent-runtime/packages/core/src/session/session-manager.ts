@@ -2770,44 +2770,78 @@ export function layer(
 				} = {},
 			): Effect.Effect<ThreadLifecycleResult> =>
 				Effect.gen(function* () {
-					const prepared = yield* prepareThreadInstallation(
-						command,
-						{},
-						installOptions.startPendingWork === true,
-						installOptions.loadOptions,
-					);
-					if (prepared.threadResult === undefined) {
-						return prepared.failedResult;
-					}
-					if (prepared.installation === undefined) {
+					for (;;) {
+						const prepared = yield* prepareThreadInstallation(
+							command,
+							{},
+							installOptions.startPendingWork === true,
+							installOptions.loadOptions,
+						);
+						if (prepared.threadResult === undefined) {
+							return prepared.failedResult;
+						}
+						if (prepared.installation === undefined) {
+							if (
+								installOptions.loadOptions?.recovery !== undefined &&
+								options.loadThreadContext !== undefined
+							) {
+								const authorityExit = yield* Effect.tryPromise({
+									try: () =>
+										options.loadThreadContext!(
+											command,
+											installOptions.loadOptions,
+										),
+									catch: (error) => error,
+								}).pipe(Effect.exit);
+								if (Exit.isFailure(authorityExit)) {
+									const loadFailure = Option.getOrUndefined(
+										Cause.findErrorOption(authorityExit.cause),
+									);
+									const parsedLoadFailure =
+										ContextLoaderErrorSchema.safeParse(loadFailure);
+									return {
+										...prepared.failedResult,
+										retryable: parsedLoadFailure.success
+											? parsedLoadFailure.data.retryable
+											: false,
+									};
+								}
+							}
+							if (
+								installOptions.requirePendingApprovalToolJobs === true &&
+								!prepared.threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
+							) {
+								return prepared.failedResult;
+							}
+							return {
+								ok: true,
+								sessionId: command.sessionId,
+								sessionThreadId: command.sessionThreadId,
+								applied: false,
+							};
+						}
+						if (prepared.createdInstallation) {
+							yield* Deferred.succeed(prepared.installation.start, undefined);
+						}
+						const result = yield* Deferred.await(prepared.installation.result);
+						if (!result.ok) {
+							yield* Deferred.await(prepared.installation.cleanup);
+						}
 						if (
+							!prepared.createdInstallation &&
+							installOptions.loadOptions?.recovery !== undefined
+						) {
+							continue;
+						}
+						if (
+							result.ok &&
 							installOptions.requirePendingApprovalToolJobs === true &&
 							!prepared.threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
 						) {
 							return prepared.failedResult;
 						}
-						return {
-							ok: true,
-							sessionId: command.sessionId,
-							sessionThreadId: command.sessionThreadId,
-							applied: false,
-						};
+						return result;
 					}
-					if (prepared.createdInstallation) {
-						yield* Deferred.succeed(prepared.installation.start, undefined);
-					}
-					const result = yield* Deferred.await(prepared.installation.result);
-					if (!result.ok) {
-						yield* Deferred.await(prepared.installation.cleanup);
-					}
-					if (
-						result.ok &&
-						installOptions.requirePendingApprovalToolJobs === true &&
-						!prepared.threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
-					) {
-						return prepared.failedResult;
-					}
-					return result;
 				});
 
 			const interruptReviewerExecution = (

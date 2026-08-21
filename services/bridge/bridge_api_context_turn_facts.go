@@ -118,8 +118,8 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND session_id = $2
 		   AND session_thread_id = $3
 		   AND type IN ('session.status_running', 'session.thread_status_running')
-		   AND $4 <> ''
-		   AND event_id = $4
+		   AND $5 <> ''
+		   AND event_id = $5
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	), current_running AS MATERIALIZED (
@@ -133,7 +133,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	), previous_lifecycle AS MATERIALIZED (
-		SELECT event_id, sequence
+		SELECT event_id, sequence, type, runtime_write_id
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
@@ -158,6 +158,17 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND sequence >= COALESCE((SELECT sequence FROM turn_root), 9223372036854775807)
 		 ORDER BY sequence DESC
 		 LIMIT 1
+	), terminal_failure AS MATERIALIZED (
+		SELECT failure.event_id
+		  FROM previous_lifecycle closeout
+		  JOIN session_events failure
+		    ON failure.workspace_id = $1
+		   AND failure.session_id = $2
+		   AND failure.session_thread_id = $3
+		   AND failure.type = 'session.error'
+		   AND closeout.type IN ('session.status_terminated', 'session.thread_status_terminated')
+		   AND closeout.runtime_write_id IS NOT NULL
+		   AND failure.runtime_write_id = closeout.runtime_write_id || ':error'
 	),
 	open_request AS MATERIALIZED (
 		SELECT request_start.sequence, request_start.model_request_id
@@ -166,6 +177,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND request_start.session_id = $2
 		   AND request_start.session_thread_id = $3
 		   AND request_start.type = 'span.model_request_start'
+		   AND request_start.sequence >= $4
 		   AND request_start.model_request_id IS NOT NULL
 		   AND NOT EXISTS (
 		     SELECT 1 FROM session_events request_end
@@ -179,10 +191,10 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		 LIMIT 1
 	),
 	selected_request_input AS MATERIALIZED (
-		SELECT jsonb_array_elements_text($5::jsonb) AS model_request_id
+		SELECT jsonb_array_elements_text($6::jsonb) AS model_request_id
 	),
 	pending_tools AS MATERIALIZED (
-		SELECT jsonb_array_elements_text($6::jsonb) AS event_id
+		SELECT jsonb_array_elements_text($7::jsonb) AS event_id
 	),
 	pending_interrupts AS MATERIALIZED (
 		SELECT jsonb_array_elements_text(inbox.event_ids_json::jsonb) AS event_id
@@ -263,6 +275,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 	     OR event_id IN (SELECT event_id FROM current_running)
 	     OR event_id IN (SELECT event_id FROM previous_lifecycle)
 	     OR event_id IN (SELECT event_id FROM current_reschedule)
+	     OR event_id IN (SELECT event_id FROM terminal_failure)
 	     OR event_id IN (SELECT event_id FROM retained_ends)
 	     OR (type = 'span.model_request_start' AND model_request_id IN (SELECT model_request_id FROM retained_requests))
 	     OR (type IN ('agent.tool_use', 'agent.mcp_tool_use') AND event_id IN (SELECT event_id FROM retained_tools))
@@ -296,6 +309,10 @@ func loadThreadTurnFactsTx(
 		Events:          make([]bridgeLoadContextTurnEvent, 0),
 		InternalRepairs: make([]bridgeLoadContextRepairFact, 0),
 	}
+	compactionFloor, err := loadContextCompactionEventFloorTx(ctx, tx, scope, messages)
+	if err != nil {
+		return facts, err
+	}
 	durableTurnEventID := ""
 	if durableTurnID != nil {
 		durableTurnEventID = *durableTurnID
@@ -322,6 +339,7 @@ func loadThreadTurnFactsTx(
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
+		compactionFloor,
 		durableTurnEventID,
 		string(selectedModelRequestIDsJSON),
 		string(pendingToolUseEventIDsJSON),
@@ -390,6 +408,48 @@ func loadThreadTurnFactsTx(
 		}
 	}
 	return facts, nil
+}
+
+func loadContextCompactionEventFloorTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	messages []bridgeLoadContextMessageDescriptor,
+) (int64, error) {
+	var compactionFloor int64
+	for _, message := range messages {
+		if message.Kind != "compaction" {
+			continue
+		}
+		if message.SourceEventID == nil || *message.SourceEventID == "" {
+			return 0, status.Error(codes.FailedPrecondition, "compaction message has no source event identity")
+		}
+		var sequence int64
+		err := tx.QueryRow(ctx,
+			`SELECT request_start.sequence
+			   FROM session_events compacted
+			   JOIN session_events request_start
+			     ON request_start.workspace_id = compacted.workspace_id
+			    AND request_start.session_id = compacted.session_id
+			    AND request_start.session_thread_id = compacted.session_thread_id
+			    AND request_start.model_request_id = compacted.model_request_id
+			    AND request_start.type = 'span.model_request_start'
+			  WHERE compacted.workspace_id = $1
+			    AND compacted.session_id = $2
+			    AND compacted.session_thread_id = $3
+			    AND compacted.event_id = $4
+			    AND compacted.type = 'agent.thread_context_compacted'`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *message.SourceEventID,
+		).Scan(&sequence)
+		if dbconnect.IsNoRows(err) {
+			return 0, status.Error(codes.FailedPrecondition, "compaction message has no Request Start")
+		}
+		if err != nil {
+			return 0, err
+		}
+		compactionFloor = sequence
+	}
+	return compactionFloor, nil
 }
 
 // Child-control admission stores its complete durable census as events, but

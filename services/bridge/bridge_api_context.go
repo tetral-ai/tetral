@@ -179,6 +179,8 @@ type bridgeLoadContextPayload struct {
 }
 
 type bridgeLoadContextMessageDescriptor struct {
+	Kind           string
+	SourceEventID  *string
 	ModelRequestID *string
 }
 
@@ -366,6 +368,7 @@ func loadThreadContextJSONTx(
 			SELECT m.kind,
 			       m.sequence,
 			       m.data_json,
+			       m.source_event_id,
 			       m.model_request_id,
 			       CASE
 			         WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
@@ -431,12 +434,14 @@ func loadThreadContextJSONTx(
 		var kind string
 		var sequence int64
 		var raw string
+		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
 		var contextState string
 		if err := rows.Scan(
 			&kind,
 			&sequence,
 			&raw,
+			&sourceEventID,
 			&modelRequestID,
 			&contextState,
 		); err != nil {
@@ -468,7 +473,10 @@ func loadThreadContextJSONTx(
 		default:
 			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
 		}
-		descriptor := bridgeLoadContextMessageDescriptor{}
+		descriptor := bridgeLoadContextMessageDescriptor{Kind: kind}
+		if sourceEventID.Valid {
+			descriptor.SourceEventID = &sourceEventID.String
+		}
 		if modelRequestID.Valid {
 			descriptor.ModelRequestID = &modelRequestID.String
 		}

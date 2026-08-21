@@ -706,12 +706,15 @@ func TestRuntimePodLossUsesDurablePrivateRequestKind(t *testing.T) {
 func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 	for _, testCase := range []struct {
 		name                  string
+		openRequest           bool
 		settleBeforeWake      bool
 		wantPendingAtWake     int
 		wantResultCountAtWake int
 	}{
 		{name: "settlement before replacement wake", settleBeforeWake: true, wantPendingAtWake: 0, wantResultCountAtWake: 1},
 		{name: "replacement wake before settlement", wantPendingAtWake: 1, wantResultCountAtWake: 0},
+		{name: "open request settlement before replacement wake", openRequest: true, settleBeforeWake: true, wantPendingAtWake: 0, wantResultCountAtWake: 1},
+		{name: "open request replacement wake before settlement", openRequest: true, wantPendingAtWake: 1, wantResultCountAtWake: 0},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -766,7 +769,8 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			).Scan(&assistantSequence); err != nil {
 				t.Fatalf("read pending approval Assistant sequence: %v", err)
 			}
-			if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+			if !testCase.openRequest {
+				if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 				visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 			) VALUES
@@ -782,15 +786,16 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			 '{"stop_reason":{"type":"requires_action"}}','internal',false,NULL,'{}',now(),now()),
 			('default',$1,$2,$9,5,'session.status_running',
 			 '{"type":"session.status_running"}','internal',false,NULL,'{}',now(),now())`,
-				sessionID, threadID, toolUseEventID,
-				"evt_pod_loss_approval_end_"+suffix,
-				"evt_pod_loss_approval_start_"+suffix,
-				assistantSequence,
-				modelRequestID,
-				"evt_pod_loss_approval_idle_"+suffix,
-				"evt_pod_loss_approval_running_"+suffix,
-			); err != nil {
-				t.Fatalf("seed completed requires-action approval journey: %v", err)
+					sessionID, threadID, toolUseEventID,
+					"evt_pod_loss_approval_end_"+suffix,
+					"evt_pod_loss_approval_start_"+suffix,
+					assistantSequence,
+					modelRequestID,
+					"evt_pod_loss_approval_idle_"+suffix,
+					"evt_pod_loss_approval_running_"+suffix,
+				); err != nil {
+					t.Fatalf("seed completed requires-action approval journey: %v", err)
+				}
 			}
 
 			apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -921,14 +926,14 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			).Scan(&requestEndCount, &requestEndIsError); err != nil {
 				t.Fatalf("read approval Request End: %v", err)
 			}
-			if requestEndCount != 1 || requestEndIsError {
-				t.Fatalf("approval Request End count/error = %d/%v; want one completed pre-approval request", requestEndCount, requestEndIsError)
+			if requestEndCount != 1 || requestEndIsError != testCase.openRequest {
+				t.Fatalf("approval Request End count/error = %d/%v; want one request with error=%t", requestEndCount, requestEndIsError, testCase.openRequest)
 			}
 
 			snapshot := string(preloaded.LastSnapshot)
 			wantUnsettledOwner := testCase.wantPendingAtWake == 1
 			if strings.Contains(snapshot, `"hasUnsettledToolOwner":true`) != wantUnsettledOwner ||
-				(wantUnsettledOwner && (!strings.Contains(snapshot, `"contextKind":"assistant"`) ||
+				(wantUnsettledOwner && !testCase.openRequest && (!strings.Contains(snapshot, `"contextKind":"assistant"`) ||
 					!strings.Contains(snapshot, `"modelToolCallId":"tool-call-pod-loss-approval-`+suffix+`"`))) {
 				t.Fatalf("replacement Runtime checkpoint = %s; want unsettled owner %t with exact Assistant Tool Call", snapshot, wantUnsettledOwner)
 			}

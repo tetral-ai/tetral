@@ -3058,6 +3058,128 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("recovery joining another installation rechecks its exact lease after publication", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const command = threadControl("sesn_recovery_install_join");
+		let reportFirstLoad = (): void => undefined;
+		let releaseFirstLoad = (): void => undefined;
+		const firstLoadStarted = new Promise<void>((resolve) => {
+			reportFirstLoad = resolve;
+		});
+		const firstLoadGate = new Promise<void>((resolve) => {
+			releaseFirstLoad = resolve;
+		});
+		const recovery = {
+			jobId: "qjob_current_recovery",
+			leaseToken: "lease_current_recovery",
+			partitionKey: "session:wksp_test:sesn_recovery_install_join",
+			dedupeKey:
+				"runtime_recovery:wksp_test:sesn_recovery_install_join:evt_recovery_install_join",
+		};
+		const observedRecoveries: Array<typeof recovery | undefined> = [];
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (loadCommand, loadOptions) => {
+					observedRecoveries.push(loadOptions?.recovery);
+					if (observedRecoveries.length === 1) {
+						reportFirstLoad();
+						await firstLoadGate;
+					}
+					return {
+						...loadCommand,
+						runtimeBindingToken: "runtime-binding-token-recovery-install-join",
+						contextEntries: [],
+						thread: { role: "main", visibility: "public", status: "idle" },
+					};
+				},
+			}),
+			async (manager) => {
+				const unrelatedInstall = Effect.runPromise(
+					manager.ensureThreadInstalled(command),
+				);
+				await firstLoadStarted;
+				const currentRecovery = Effect.runPromise(
+					manager.ensureThreadInstalled(command, {
+						startPendingWork: true,
+						loadOptions: { recovery },
+					}),
+				);
+				releaseFirstLoad();
+				await expect(unrelatedInstall).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				await expect(currentRecovery).resolves.toMatchObject({
+					ok: true,
+					applied: false,
+				});
+				expect(observedRecoveries).toEqual([undefined, recovery]);
+			},
+		);
+	});
+
+	test("recovery does not inherit another installation failure", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const command = threadControl("sesn_recovery_install_failure");
+		let reportFirstLoad = (): void => undefined;
+		let releaseFirstLoad = (): void => undefined;
+		const firstLoadStarted = new Promise<void>((resolve) => {
+			reportFirstLoad = resolve;
+		});
+		const firstLoadGate = new Promise<void>((resolve) => {
+			releaseFirstLoad = resolve;
+		});
+		const recovery = {
+			jobId: "qjob_current_recovery_failure",
+			leaseToken: "lease_current_recovery_failure",
+			partitionKey: "session:wksp_test:sesn_recovery_install_failure",
+			dedupeKey:
+				"runtime_recovery:wksp_test:sesn_recovery_install_failure:evt_recovery_install_failure",
+		};
+		let loadCount = 0;
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (loadCommand, loadOptions) => {
+					loadCount += 1;
+					if (loadCount === 1) {
+						reportFirstLoad();
+						await firstLoadGate;
+						throw new Error("unrelated installation failed");
+					}
+					expect(loadOptions?.recovery).toEqual(recovery);
+					return {
+						...loadCommand,
+						runtimeBindingToken: "runtime-binding-token-recovery-install-failure",
+						contextEntries: [],
+						thread: { role: "main", visibility: "public", status: "idle" },
+					};
+				},
+			}),
+			async (manager) => {
+				const unrelatedInstall = Effect.runPromise(
+					manager.ensureThreadInstalled(command),
+				);
+				await firstLoadStarted;
+				const currentRecovery = Effect.runPromise(
+					manager.ensureThreadInstalled(command, {
+						startPendingWork: true,
+						loadOptions: { recovery },
+					}),
+				);
+				releaseFirstLoad();
+				await expect(unrelatedInstall).resolves.toMatchObject({
+					ok: false,
+					reason: "context_load_failed",
+				});
+				await expect(currentRecovery).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				expect(loadCount).toBe(2);
+			},
+		);
+	});
+
 	test("manifest update observation follows the effective generation and skips nonresident ACKs", async () => {
 		const manifestUpdates: SessionManager.RuntimeMCPManifestUpdateEvent[] = [];
 		const threadLoop = makeControlledThreadLoop();

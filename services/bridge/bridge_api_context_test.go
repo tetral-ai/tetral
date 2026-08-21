@@ -139,6 +139,77 @@ func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) 
 	}
 }
 
+func TestLoadContextColdParserKeepsTerminalFailureAboveCompactionFloor(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_terminal_context"
+		threadID  = "thr_terminal_context"
+		bindingID = "bind_terminal_context"
+		podUID    = "pod_terminal_context"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+		created_at, updated_at, processed_at
+	) VALUES
+	('default',$1,$2,'evt_terminal_old_open',1,'span.model_request_start',
+	 '{"type":"span.model_request_start","model_request_id":"mreq_terminal_old_open"}',
+	 'internal',false,'rwrite_terminal_old_open','mreq_terminal_old_open',
+	 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_error',2,'session.error',
+	 '{"type":"session.error","error":{"type":"unknown_error","message":"The runtime could not complete the request.","retry_status":{"type":"terminal"}}}',
+	 'public',true,'rwrite_terminal:error',NULL,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_close',3,'session.status_terminated','{"type":"session.status_terminated"}',
+	 'public',true,'rwrite_terminal',NULL,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_compaction_start',4,'span.model_request_start',
+	 '{"type":"span.model_request_start","model_request_id":"mreq_terminal_compaction"}',
+	 'internal',false,'rwrite_terminal_compaction_start','mreq_terminal_compaction',
+	 '{"context_through_message_sequence":1,"request_kind":"compaction_summary"}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_compaction_end',5,'span.model_request_end',
+	 '{"model_request_start_id":"evt_terminal_compaction_start","is_error":false,"provider_context_retention":{"disposition":"compacted","tool_use_event_ids":[],"repair_event_ids":[]}}',
+	 'internal',false,'rwrite_terminal_compaction_end','mreq_terminal_compaction','{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_compacted',6,'agent.thread_context_compacted','{}',
+	 'internal',false,'rwrite_terminal_compacted','mreq_terminal_compaction','{}',now(),now(),now()),
+	('default',$1,$2,'evt_terminal_running',7,'session.status_running','{"type":"session.status_running"}',
+	 'internal',false,'rwrite_terminal_running',NULL,'{}',now(),now(),now())`, sessionID, threadID); err != nil {
+		t.Fatalf("seed terminal context facts: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
+		workspace_id, session_id, session_thread_id, message_id, sequence, kind, data_json,
+		source_event_id, model_request_id, created_at, updated_at
+	) VALUES
+	('default',$1,$2,'msg_terminal_old_open',1,'assistant','{"parts":[{"type":"text","text":"superseded"}]}',
+	 'evt_terminal_old_open','mreq_terminal_old_open',now(),now()),
+	('default',$1,$2,'msg_terminal_compaction',2,'compaction','{"parts":[{"type":"text","text":"summary"}]}',
+	 'evt_terminal_compacted',NULL,now(),now())`, sessionID, threadID); err != nil {
+		t.Fatalf("seed terminal context messages: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("terminal-context-signing-key")
+	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
+	t.Cleanup(stopBridge)
+	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
+		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
+		"sessionId": sessionID, "sessionThreadId": threadID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"now": "2026-08-21T12:00:00Z", "preloadOnly": true,
+	})
+	turnEventsJSON, err := json.Marshal(result.RecoveredTurnEvents)
+	if err != nil {
+		t.Fatalf("encode recovered terminal events: %v", err)
+	}
+	turnEvents := string(turnEventsJSON)
+	if !strings.Contains(turnEvents, "evt_terminal_running") ||
+		!strings.Contains(turnEvents, "evt_terminal_error") ||
+		!strings.Contains(turnEvents, "evt_terminal_close") ||
+		strings.Contains(turnEvents, "evt_terminal_old_open") ||
+		!strings.Contains(string(result.PreloadResult), `"ok":true`) {
+		t.Fatalf("terminal cold parse = events %s preload %s", turnEvents, result.PreloadResult)
+	}
+}
+
 func TestLoadContextRejectsMalformedDurableContext(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

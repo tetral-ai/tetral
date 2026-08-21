@@ -470,12 +470,8 @@ export class RuntimeControlService {
 			method: Methods.recoverThread,
 			operation: "RecoverThread",
 			operationId: request.sourceEventId,
-			dedupeKey: `recovery:${request.sessionThreadId}:${request.sourceEventId}`,
-			identity: () =>
-				stableIdentity({
-					...request,
-					recoveryLeaseRef: undefined,
-				}),
+			dedupeKey: `recovery:${request.sessionThreadId}:${request.sourceEventId}:${request.recoveryLeaseRef?.jobId ?? ""}:${request.recoveryLeaseRef?.leaseToken ?? ""}`,
+			identity: () => stableIdentity(request),
 			validate: validateRecoverThreadRequest,
 			selectedPodRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH, true),
 			bindingRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_BINDING_MISMATCH, true),

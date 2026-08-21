@@ -1436,17 +1436,19 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 		return false, err
 	}
 	visibility, sessionVisible := threadScope.publicProjection("span.model_request_end")
+	retention, err := runtimeTerminalRequestRetentionTx(ctx, tx, scope, start.ModelRequestID)
+	if err != nil {
+		return false, err
+	}
 	request := &bridgev1.WriteRequestEndRequest{
-		Scope:          scope,
-		RuntimeWriteId: writeIDPrefix + start.ModelRequestID,
-		ModelRequestId: start.ModelRequestID,
-		IsError:        true,
-		ErrorKind:      errorKind,
-		FinishReason:   "error",
-		UsageJson:      "{}",
-		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition: "failed",
-		},
+		Scope:                    scope,
+		RuntimeWriteId:           writeIDPrefix + start.ModelRequestID,
+		ModelRequestId:           start.ModelRequestID,
+		IsError:                  true,
+		ErrorKind:                errorKind,
+		FinishReason:             "error",
+		UsageJson:                "{}",
+		ProviderContextRetention: retention,
 	}
 	payloadJSON, err := modelRequestEndPayloadJSON(request, start.EventID, start.RequestKind, "error", bridgeUsage{})
 	if err != nil {
@@ -1498,6 +1500,79 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 		return false, err
 	}
 	return true, nil
+}
+
+// A synthetic terminal Request boundary preserves only identities carried by
+// direct durable ownership relations. A live Tool route requires its exact
+// Assistant message owner and Tool Use event to survive cold reconstruction;
+// provider-visible content and Tool payloads are never consulted here.
+func runtimeTerminalRequestRetentionTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+) (*bridgev1.ProviderContextRetention, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT route.tool_use_event_id
+		   FROM session_pending_tool_uses route
+		   JOIN session_events tool_use
+		     ON tool_use.workspace_id = route.workspace_id
+		    AND tool_use.session_id = route.session_id
+		    AND tool_use.session_thread_id = route.session_thread_id
+		    AND tool_use.event_id = route.tool_use_event_id
+		    AND tool_use.model_request_id = $4
+		  WHERE route.workspace_id = $1
+		    AND route.session_id = $2
+		    AND route.session_thread_id = $3
+		    AND route.status IN ('pending', 'resolving')
+		  ORDER BY tool_use.sequence ASC, route.tool_use_event_id ASC`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	toolUseEventIDs := make([]string, 0)
+	for rows.Next() {
+		var toolUseEventID string
+		if err := rows.Scan(&toolUseEventID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		toolUseEventIDs = append(toolUseEventIDs, toolUseEventID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	retention := &bridgev1.ProviderContextRetention{
+		Disposition:     "failed",
+		ToolUseEventIds: toolUseEventIDs,
+	}
+	if len(toolUseEventIDs) == 0 {
+		return retention, nil
+	}
+	var assistantCount int
+	var assistantSequence int64
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*), COALESCE(MAX(sequence), 0)
+		   FROM session_messages
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
+		    AND kind = 'assistant'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+	).Scan(&assistantCount, &assistantSequence); err != nil {
+		return nil, err
+	}
+	if assistantCount != 1 || assistantSequence <= 0 {
+		return nil, status.Error(codes.FailedPrecondition, "live Tool routes have no exact Assistant owner")
+	}
+	retention.AssistantMessageSequence = &assistantSequence
+	return retention, nil
 }
 
 func lockRuntimePodLossRequestEndMutationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {

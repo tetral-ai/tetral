@@ -1338,6 +1338,18 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 		if _, _, err := settleRuntimeTerminationTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now); err != nil {
 			return err
 		}
+		if threadScope.role != "main" {
+			settled, err := settleRuntimeRecoveryExactLeaseTx(ctx, tx, job, result, now)
+			if err != nil {
+				return err
+			}
+			if !settled {
+				return runtimeDeliveryPrepareError{kind: "runtime_recovery_authority_lost", message: "runtime recovery lease changed during finalization", retryable: true}
+			}
+			if err := reconcileRuntimeRecoverySessionResidencyTx(ctx, tx, job, scope, runtimeWriteID, now); err != nil {
+				return err
+			}
+		}
 		finalized = RuntimeDeliveryResult{
 			Status: RuntimeDeliveryRejected, Retryable: false,
 			ErrorKind: "runtime_delivery_exhausted", ErrorMessage: "runtime delivery attempts are exhausted",
@@ -1346,6 +1358,131 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 		return nil
 	})
 	return finalized, err
+}
+
+func settleRuntimeRecoveryExactLeaseTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	result RuntimeDeliveryResult,
+	now time.Time,
+) (bool, error) {
+	updated, err := tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status = 'dead_lettered', dead_lettered_at = $8,
+		        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
+		        last_error_kind = $9, last_error_message = $10, updated_at = $8
+		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3
+		    AND kind = $4 AND partition_key = $5 AND dedupe_key = $6
+		    AND status = 'leased' AND leased_until > clock_timestamp()
+		    AND max_attempts > 0 AND attempt_count = $7 AND attempt_count >= max_attempts`,
+		job.WorkspaceID, job.JobID, job.LeaseToken, job.Kind, job.PartitionKey, job.DedupeKey,
+		job.AttemptCount, now, result.ErrorKind, result.ErrorMessage,
+	)
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected(updated), nil
+}
+
+// Child recovery exhaustion closes only that Thread. Session residency stays
+// with the current binding while another direct durable owner still needs the
+// Runtime; otherwise it re-enters the existing idle cleanup path.
+func reconcileRuntimeRecoverySessionResidencyTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	scope *bridgev1.RuntimeScope,
+	runtimeWriteID string,
+	now time.Time,
+) error {
+	var remainingWork bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM session_threads
+		    WHERE workspace_id = $1 AND session_id = $2
+		      AND status IN ('running', 'rescheduling')
+		 ) OR EXISTS (
+		   SELECT 1 FROM session_runtime_inbox
+		    WHERE workspace_id = $1 AND session_id = $2
+		      AND status IN ('queued', 'delivering', 'accepted')
+		 ) OR EXISTS (
+		   SELECT 1 FROM queue_jobs
+		    WHERE workspace_id = $1 AND kind = $3 AND partition_key = $4
+		      AND status IN ('pending', 'leased')
+		 )`,
+		job.WorkspaceID, job.SessionID, queue.KindRuntimeRecovery,
+		queue.FormatSessionPartitionKey(workspace.ID(job.WorkspaceID), job.SessionID),
+	).Scan(&remainingWork); err != nil {
+		return err
+	}
+	if remainingWork {
+		return nil
+	}
+	var mainThreadID string
+	if err := tx.QueryRow(ctx,
+		`SELECT main_thread_id FROM sessions WHERE workspace_id = $1 AND id = $2`,
+		job.WorkspaceID, job.SessionID,
+	).Scan(&mainThreadID); err != nil {
+		return err
+	}
+	mainScope := scopeForThread(scope, mainThreadID)
+	mainThreadScope, err := lockThreadMutationRowTx(ctx, tx, mainScope)
+	if err != nil {
+		return err
+	}
+	idlePayload, err := idleStatusPayloadJSON(`{"type":"end_turn"}`)
+	if err != nil {
+		return err
+	}
+	idleWriteID := runtimeWriteID + ":session_idle"
+	idleStamp, err := insertRuntimeTerminationEventTx(
+		ctx, tx, mainScope, mainThreadScope, idleWriteID, idleWriteID,
+		"session.status_idle", idlePayload, now,
+	)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_threads
+		    SET status = 'idle', last_active_at = $4, updated_at = $4
+		  WHERE workspace_id = $1 AND session_id = $2 AND id = $3
+		    AND status IN ('idle', 'running', 'rescheduling')`,
+		job.WorkspaceID, job.SessionID, mainThreadID, now,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions
+		    SET status = CASE WHEN status = 'rescheduling' THEN 'idle' ELSE status END,
+		        updated_at = $3
+		  WHERE workspace_id = $1 AND id = $2 AND status <> 'terminated'`,
+		job.WorkspaceID, job.SessionID, now,
+	); err != nil {
+		return err
+	}
+	updated, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status = 'idle', status_event_id = $5, idle_since = $6,
+		        active_seconds_total = active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
+		        END,
+		        running_since = NULL, cleanup_after = $7,
+		        cleanup_enqueued_at = NULL, cleanup_claimed_at = NULL, cleanup_job_id = NULL,
+		        updated_at = $6
+		  WHERE workspace_id = $1 AND session_id = $2
+		    AND binding_id = $3 AND binding_generation = $4`,
+		job.WorkspaceID, job.SessionID, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(),
+		idleStamp.EventID, now, now.Add(defaultIdleCleanupDelay),
+	)
+	if err != nil {
+		return err
+	}
+	if !rowsAffected(updated) {
+		return status.Error(codes.FailedPrecondition, "runtime recovery residency is stale")
+	}
+	return nil
 }
 
 func finalizeInterruptDeliveryExhaustionTx(
