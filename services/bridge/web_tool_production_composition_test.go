@@ -192,6 +192,8 @@ func newWebEffectAuthorityBackend() *webEffectAuthorityBackend {
 	}
 }
 
+func (*webEffectAuthorityBackend) MaxAttemptsPerCall() int { return 1 }
+
 func (b *webEffectAuthorityBackend) Search(ctx context.Context, query string, _ []string) ([]webconnector.SearchHit, webconnector.BackendOutcome) {
 	b.mu.Lock()
 	b.calls[query]++
