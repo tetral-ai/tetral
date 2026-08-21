@@ -19,6 +19,10 @@ type keyState struct {
 	unavailableUntil time.Time
 }
 
+// BackendRequestTimeout is the maximum duration of one legal backend call.
+// The idempotency claim window derives from this same owning limit.
+const BackendRequestTimeout = 30 * time.Second
+
 type JinaBackend struct {
 	client         *http.Client
 	searchEndpoint string
@@ -42,7 +46,7 @@ func NewJinaBackend(client *http.Client, searchEndpoint, readerEndpoint string, 
 	if client == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.DisableCompression = true
-		client = &http.Client{Transport: transport, Timeout: 30 * time.Second}
+		client = &http.Client{Transport: transport, Timeout: BackendRequestTimeout}
 	} else {
 		copyClient := *client
 		if transport, ok := client.Transport.(*http.Transport); ok {

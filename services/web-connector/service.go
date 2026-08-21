@@ -22,14 +22,15 @@ import (
 
 type Service struct {
 	providergatewayv1.UnimplementedProviderGatewayServiceServer
-	store           *SnapshotStore
-	backend         Backend
-	verifier        *BindingVerifier
-	metrics         *Metrics
-	now             func() time.Time
-	jobLeaseTTL     time.Duration
-	jobPollInterval time.Duration
-	logger          *slog.Logger
+	store            *SnapshotStore
+	backend          Backend
+	verifier         *BindingVerifier
+	metrics          *Metrics
+	now              func() time.Time
+	jobClaimDuration time.Duration
+	jobPollInterval  time.Duration
+	waitForJobPoll   func(context.Context, time.Duration) error
+	logger           *slog.Logger
 }
 
 func (s *Service) WithLogger(logger *slog.Logger) *Service { s.logger = logger; return s }
@@ -50,8 +51,16 @@ var (
 const (
 	webJobStateInFlight  = "in_flight"
 	webJobStateCompleted = "completed"
-	webJobLeaseTTL       = 5 * time.Minute
-	webJobPollInterval   = 25 * time.Millisecond
+	// The claim covers the largest legal fan-out, every backend timeout, and
+	// one bounded object-store result commit. Duplicate waiters may settle an
+	// outcome as unknown only after this complete static window.
+	// UPDATE-WITH: types.go maxOperations/maxSearchDomains, backend.go
+	// BackendRequestTimeout, and the result persistence path in persistJob.
+	webJobResultCommitMargin = 30 * time.Second
+	webJobClaimDuration      = time.Duration(maxOperations*maxSearchDomains)*BackendRequestTimeout +
+		webJobResultCommitMargin
+	webJobPollInterval = 25 * time.Millisecond
+	webJobPollMaximum  = time.Second
 )
 
 type webJobClaim struct {
@@ -71,13 +80,14 @@ func NewService(blobs blob.BlobStore, backend Backend, verifier *BindingVerifier
 		metrics = NewMetrics()
 	}
 	return &Service{
-		store:           NewSnapshotStore(blobs, random, now),
-		backend:         backend,
-		verifier:        verifier,
-		metrics:         metrics,
-		now:             now,
-		jobLeaseTTL:     webJobLeaseTTL,
-		jobPollInterval: webJobPollInterval,
+		store:            NewSnapshotStore(blobs, random, now),
+		backend:          backend,
+		verifier:         verifier,
+		metrics:          metrics,
+		now:              now,
+		jobClaimDuration: webJobClaimDuration,
+		jobPollInterval:  webJobPollInterval,
+		waitForJobPoll:   waitForWebJobPoll,
 	}
 }
 
@@ -406,6 +416,7 @@ func (s *Service) resolveJob(
 	started time.Time,
 	allowCreate bool,
 ) (*webJobClaim, *providergatewayv1.RunWebResponse, error) {
+	pollInterval := s.jobPollInterval
 	for {
 		created := false
 		raw, etag, err := s.store.GetJobVersion(ctx, scope, eventID)
@@ -413,7 +424,7 @@ func (s *Service) resolveJob(
 			claimRaw, marshalErr := json.Marshal(jobRecord{
 				InputHash:      inputHash,
 				State:          webJobStateInFlight,
-				LeaseExpiresAt: s.now().Add(s.jobLeaseTTL).UTC().Format(time.RFC3339Nano),
+				LeaseExpiresAt: s.now().Add(s.jobClaimDuration).UTC().Format(time.RFC3339Nano),
 			})
 			if marshalErr != nil {
 				return nil, nil, marshalErr
@@ -460,19 +471,33 @@ func (s *Service) resolveJob(
 			}
 			return nil, response, nil
 		}
-		wait := s.jobPollInterval
+		wait := pollInterval
 		if remaining := leaseExpiresAt.Sub(s.now()); remaining < wait {
 			wait = remaining
 		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return nil, nil, ctx.Err()
-		case <-timer.C:
+		if wait <= 0 {
+			continue
 		}
+		if waitErr := s.waitForJobPoll(ctx, wait); waitErr != nil {
+			return nil, nil, waitErr
+		}
+		if pollInterval < webJobPollMaximum {
+			pollInterval *= 2
+			if pollInterval > webJobPollMaximum {
+				pollInterval = webJobPollMaximum
+			}
+		}
+	}
+}
+
+func waitForWebJobPoll(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

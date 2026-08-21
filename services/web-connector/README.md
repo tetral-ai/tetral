@@ -65,6 +65,14 @@ returns and stops.
 | Execution | run `search_query`, then `open`, then `find` in field order | per-operation `tool_error` / `runtime_error` in the composed result | stub / snapshot writes as each operation dictates |
 | Settlement | write the create-only job record | — | see result-class table below |
 
+An in-flight identity remains owned for the maximum legal call: eight input
+items, four domain requests per search item, the 30-second backend timeout, and
+a 30-second result-commit margin (16 minutes 30 seconds total). A duplicate
+waits with deadline-clamped exponential polling from 25 milliseconds to a
+one-second cap. Only an identity still in flight after that complete window is
+settled through the existing outcome-unknown path; no second backend execution
+is started.
+
 ### Result classes and persistence
 
 | Result status | Persisted as job record? | Same-key retry | Notes |
@@ -331,7 +339,7 @@ fixtures before the tests can pin it.
 | --- | --- |
 | `service_test.go` | `RunWeb` end-to-end: identity and binding rejected before dependencies; search+open usage summed; failed search does not count backend requests; validation errors have usage and no side effects |
 | `admission_test.go` | binding admission rejects every tampered claim before any blob/backend access; matching claims proceed; the web port leaves the sibling provider stream `UNIMPLEMENTED` |
-| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; runtime failures re-execute; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
+| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; maximum-call claim ownership, bounded duplicate polling, boundary settlement, and abandoned-claim convergence; runtime failures re-execute; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
 | `storage_test.go` | snapshot normalization order (truncate → CRLF split → wrap → count); create-only writes never replace bytes; UTF-8-safe truncation; every stored line addressable; window continuation to the final window; canonical input-hash stability and array-order sensitivity |
 | `backend_test.go` | Jina backend: closed header tables; fixture-driven search/fetch mapping; usage from the data block; target-redirect status treated as readable; full failure taxonomy; key-pool rotation, cooldown boundaries, dead-key persistence, exhaustion; domain fan-out dedup and too-many-domains rejection |
 | `classifier_test.go` | URL classifier accepts public `http`/`https` and rejects every non-public target class |

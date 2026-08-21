@@ -562,7 +562,7 @@ func TestExpiredFirstExecutionClaimSettlesUnknownWithoutSecondBackendCall(t *tes
 	now := func() time.Time { return nowValue }
 	key := []byte("binding-verifier-key-with-at-least-32-bytes")
 	service := NewService(objects, backend, NewBindingVerifier(key, now), NewMetrics(), now, nil)
-	service.jobLeaseTTL = time.Second
+	service.jobClaimDuration = time.Second
 	service.jobPollInterval = time.Millisecond
 	request := testRequest(&providergatewayv1.WebToolInput{SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "query"}}}, "event-expired-claim", key, now)
 
@@ -600,6 +600,147 @@ func TestExpiredFirstExecutionClaimSettlesUnknownWithoutSecondBackendCall(t *tes
 	if err != nil || secondReplay.String() != replayed.String() || backend.calls.Load() != 1 {
 		t.Fatalf("settled replay = %+v/%v calls=%d", secondReplay, err, backend.calls.Load())
 	}
+}
+
+func TestMaximumWebCallClaimSurvivesThroughBoundaryCommitAndExactReplay(t *testing.T) {
+	objects := blob.NewFakeBlobStore()
+	backend := &fakeBackend{}
+	clock := &webJobFakeClock{now: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)}
+	key := []byte("binding-verifier-key-with-at-least-32-bytes")
+	service := NewService(objects, backend, NewBindingVerifier(key, clock.Now), NewMetrics(), clock.Now, zeroRandom)
+	service.waitForJobPoll = clock.Wait
+	scope := Scope{"ws", "ses", "thr"}
+	input := maximumWebCallInput()
+	request := &providergatewayv1.RunWebRequest{
+		WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr",
+		ToolUseEventId: "event-maximum-claim", BindingId: "bind", BindingGeneration: 1,
+		Input: input,
+	}
+	request.RuntimeBindingToken = signRequest(request, "runtime-pod", clock.Now().Add(time.Hour), key)
+	if validation := validateSemanticEnvelope(request); validation != "" || !validStructuralRequest(request) {
+		t.Fatalf("maximum request validation = %q/%t", validation, validStructuralRequest(request))
+	}
+	inputHash := CanonicalInputHash(canonicalInput(input))
+	claim, replay, err := service.claimJob(context.Background(), scope, request.GetToolUseEventId(), inputHash, "search", clock.Now())
+	if err != nil || claim == nil || replay != nil {
+		t.Fatalf("initial claim = %#v/%+v/%v", claim, replay, err)
+	}
+
+	clock.now = clock.now.Add(16*time.Minute + 30*time.Second - time.Nanosecond)
+	waiterContext, cancelWaiter := context.WithCancel(testContext())
+	clock.cancel = cancelWaiter
+	waiterResponse, waitErr := service.RunWeb(waiterContext, request)
+	if waitErr != nil || waiterResponse.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR {
+		t.Fatalf("pre-deadline waiter = %+v/%v", waiterResponse, waitErr)
+	}
+	if backend.calls != 0 {
+		t.Fatalf("pre-deadline waiter executed backend %d times", backend.calls)
+	}
+	raw, etag, err := service.store.GetJobVersion(context.Background(), scope, request.GetToolUseEventId())
+	record, parseErr := parseJobRecord(raw)
+	if err != nil || parseErr != nil || etag != claim.ETag || record.State != webJobStateInFlight {
+		t.Fatalf("pre-deadline claim = %q/%q/%v/%v", etag, record.State, err, parseErr)
+	}
+
+	winner := &providergatewayv1.RunWebResponse{
+		Status:     providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED,
+		ResultText: "boundary winner",
+		Usage:      &providergatewayv1.WebUsage{Operation: "search"},
+	}
+	if err := service.persistJob(context.Background(), scope, request.GetToolUseEventId(), inputHash, claim.ETag, winner); err != nil {
+		t.Fatalf("boundary winner commit: %v", err)
+	}
+	_, duplicate, err := service.claimJob(context.Background(), scope, request.GetToolUseEventId(), inputHash, "search", clock.Now())
+	if err != nil || duplicate == nil || duplicate.String() != winner.String() {
+		t.Fatalf("boundary duplicate = %+v/%v; want %s", duplicate, err, winner)
+	}
+}
+
+func TestWebClaimWaitUsesBoundedBackoffThenSettlesAbandonedIdentity(t *testing.T) {
+	objects := blob.NewFakeBlobStore()
+	clock := &webJobFakeClock{now: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)}
+	service := NewService(objects, &fakeBackend{}, nil, NewMetrics(), clock.Now, zeroRandom)
+	service.waitForJobPoll = clock.Wait
+	scope := Scope{"ws", "ses", "thr"}
+	inputHash := CanonicalInputHash(canonicalInput(maximumWebCallInput()))
+	started := clock.Now()
+	if claim, replay, err := service.claimJob(context.Background(), scope, "event-abandoned-maximum", inputHash, "search", started); err != nil || claim == nil || replay != nil {
+		t.Fatalf("initial abandoned claim = %#v/%+v/%v", claim, replay, err)
+	}
+	_, replay, err := service.claimJob(context.Background(), scope, "event-abandoned-maximum", inputHash, "search", started)
+	if err != nil || replay.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR {
+		t.Fatalf("abandoned replay = %+v/%v", replay, err)
+	}
+	if len(clock.waits) > 1000 {
+		t.Fatalf("poll count = %d; want <= 1000", len(clock.waits))
+	}
+	wantPrefix := []time.Duration{25 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, time.Second}
+	if len(clock.waits) < len(wantPrefix) {
+		t.Fatalf("polls = %v; want prefix %v", clock.waits, wantPrefix)
+	}
+	remaining := webJobClaimDuration
+	for index, wait := range clock.waits {
+		if index < len(wantPrefix) && wait != wantPrefix[index] {
+			t.Fatalf("poll %d = %s; want %s", index, wait, wantPrefix[index])
+		}
+		if wait > time.Second || wait > remaining {
+			t.Fatalf("poll %d = %s with %s remaining", index, wait, remaining)
+		}
+		remaining -= wait
+	}
+	if remaining != 0 || !clock.Now().Equal(started.Add(webJobClaimDuration)) {
+		t.Fatalf("polling stopped with remaining=%s now=%s", remaining, clock.Now())
+	}
+
+	cancelledObjects := blob.NewFakeBlobStore()
+	cancelledClock := &webJobFakeClock{now: started}
+	cancelledService := NewService(cancelledObjects, &fakeBackend{}, nil, NewMetrics(), cancelledClock.Now, zeroRandom)
+	cancelledService.waitForJobPoll = cancelledClock.Wait
+	if claim, _, claimErr := cancelledService.claimJob(context.Background(), scope, "event-cancelled-wait", inputHash, "search", started); claimErr != nil || claim == nil {
+		t.Fatalf("cancelled wait claim = %#v/%v", claim, claimErr)
+	}
+	cancelledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err = cancelledService.claimJob(cancelledContext, scope, "event-cancelled-wait", inputHash, "search", started)
+	if !errors.Is(err, context.Canceled) || len(cancelledClock.waits) != 0 || !cancelledClock.Now().Equal(started) {
+		t.Fatalf("cancelled wait = %v waits=%v now=%s", err, cancelledClock.waits, cancelledClock.Now())
+	}
+}
+
+func maximumWebCallInput() *providergatewayv1.WebToolInput {
+	queries := make([]*providergatewayv1.WebSearchQuery, maxOperations)
+	for index := range queries {
+		queries[index] = &providergatewayv1.WebSearchQuery{
+			Q:       fmt.Sprintf("maximum query %d", index),
+			Domains: []string{"one.example", "two.example", "three.example", "four.example"},
+		}
+	}
+	return &providergatewayv1.WebToolInput{SearchQuery: queries}
+}
+
+type webJobFakeClock struct {
+	now    time.Time
+	waits  []time.Duration
+	cancel context.CancelFunc
+}
+
+func (c *webJobFakeClock) Now() time.Time { return c.now }
+
+func (c *webJobFakeClock) Wait(ctx context.Context, delay time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	c.waits = append(c.waits, delay)
+	if c.cancel != nil {
+		cancel := c.cancel
+		c.cancel = nil
+		cancel()
+		return context.Canceled
+	}
+	c.now = c.now.Add(delay)
+	return nil
 }
 
 func TestMultiItemCompositionUsesFieldOrderBlankLinesAndDeduplicatedRefs(t *testing.T) {

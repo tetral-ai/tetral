@@ -50,7 +50,7 @@ func run(ctx context.Context, env webconnector.Env) error {
 	authenticator := grpcauth.NewTokenReviewAuthenticator(reviewer, authCfg)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableCompression = true
-	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	client := &http.Client{Transport: transport, Timeout: webconnector.BackendRequestTimeout}
 	metrics := webconnector.NewMetrics()
 	backend := webconnector.NewJinaBackend(client, cfg.SearchEndpoint, cfg.ReaderEndpoint, cfg.APIKeys, time.Now).WithMetrics(metrics).WithLogger(logger)
 	service := webconnector.NewService(blobStore, backend, webconnector.NewBindingVerifier(cfg.BindingHMACKey, time.Now), metrics, time.Now, nil).WithLogger(logger)
