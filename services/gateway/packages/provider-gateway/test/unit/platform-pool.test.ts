@@ -192,6 +192,67 @@ describe("Gateway platform key pool", () => {
     });
   });
 
+  test("distinguishes the captured status-less DeepSeek balance signal from Moonshot body text", () => {
+    expect(classifyProviderFailure("deepseek", {
+      body: { message: "Insufficient Balance" },
+      networkError: true,
+    })).toMatchObject({
+      action: "quarantine",
+      semanticSignal: "deepseek_insufficient_balance",
+      providerError: {
+        code: "provider_key_unavailable",
+        retryable: false,
+        fatal: true,
+      },
+    });
+    expect(classifyProviderFailure("moonshotai", {
+      body: { message: "balance is not enough" },
+      networkError: true,
+    })).toMatchObject({
+      action: "retryable",
+      providerError: {
+        code: "provider_stream_error",
+        retryable: true,
+        fatal: false,
+      },
+    });
+    expect(classifyProviderFailure("deepseek", {
+      body: { message: "prefix Insufficient Balance" },
+      networkError: true,
+    })).toMatchObject({
+      action: "retryable",
+      providerError: { code: "provider_stream_error" },
+    });
+  });
+
+  test("normalizes every opaque status-less provider body without throwing or exposing it", () => {
+    const cyclic: { self?: unknown; canary: string } = { canary: "cyclic-provider-body-canary" };
+    cyclic.self = cyclic;
+    const bodies: readonly unknown[] = [
+      undefined,
+      null,
+      false,
+      42,
+      { opaque: "object-provider-body-canary" },
+      "{malformed-provider-body-canary",
+      cyclic,
+    ];
+
+    for (const body of bodies) {
+      const classified = classifyProviderFailure("deepseek", { body, networkError: true });
+      expect(classified).toMatchObject({
+        action: "retryable",
+        providerError: {
+          code: "provider_stream_error",
+          message: "Provider request failed.",
+          retryable: true,
+          fatal: false,
+        },
+      });
+      expect(JSON.stringify(classified)).not.toMatch(/provider-body-canary/i);
+    }
+  });
+
   test("T-POOL-1 applies fallback rate-limit detection for plaintext and JSON bodies", () => {
     expect(classifyProviderFailure("openai", {
       statusCode: 429,

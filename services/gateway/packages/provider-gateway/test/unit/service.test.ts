@@ -874,6 +874,177 @@ describe("ProviderGatewayServiceShell", () => {
     expect(JSON.stringify(logs)).not.toContain("statusless-private-canary");
   });
 
+  test("status-less DeepSeek balance evidence quarantines before progress and fails over once", async () => {
+    const base = validProviderRequest({ model: { providerId: "deepseek", modelId: "deepseek-v4-pro", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    const attempts: string[] = [];
+    const pool = new RecordingPlatformCredentialPool(["pfk_balance", "pfk_healthy"]);
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      credentialResolver: platformCredentialResolver(pool),
+      providerStreamer: {
+        stream: async function* (input) {
+          const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
+          attempts.push(keyID);
+          if (keyID === "pfk_balance") {
+            throw new ProviderKeyFailureError(
+              classifyProviderFailure("deepseek", {
+                body: { message: "Insufficient Balance" },
+                networkError: true,
+              }),
+              "transport_failure",
+            );
+          }
+          yield finishEvent();
+        },
+      },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(attempts).toEqual(["pfk_balance", "pfk_healthy"]);
+    expect(pool.recordedFailures).toEqual([
+      expect.objectContaining({
+        keyId: "pfk_balance",
+        classification: expect.objectContaining({
+          action: "quarantine",
+          semanticSignal: "deepseek_insufficient_balance",
+        }),
+      }),
+    ]);
+    expect(events.map((event) => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
+    expect(JSON.stringify(events)).not.toMatch(/balance|pfk_|sk-/i);
+  });
+
+  test("post-progress DeepSeek balance evidence affects only later turns", async () => {
+    const base = validProviderRequest({ model: { providerId: "deepseek", modelId: "deepseek-v4-pro", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    const attempts: string[] = [];
+    const pool = new RecordingPlatformCredentialPool(["pfk_balance", "pfk_healthy"]);
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      credentialResolver: platformCredentialResolver(pool),
+      providerStreamer: {
+        stream: async function* (input) {
+          const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
+          attempts.push(keyID);
+          if (keyID === "pfk_balance") {
+            yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            throw new ProviderKeyFailureError(
+              classifyProviderFailure("deepseek", {
+                body: { message: "Insufficient Balance" },
+                networkError: true,
+              }),
+              "transport_failure",
+            );
+          }
+          yield finishEvent();
+        },
+      },
+    });
+
+    const failed = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toEqual(["pfk_balance"]);
+    expect(pool.quarantined.has("pfk_balance")).toBe(true);
+    expect(failed.map((event) => event.type)).toEqual([
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+    ]);
+    expect(failed.at(-1)?.providerError?.error).toMatchObject({
+      code: "provider_unavailable",
+      message: "Provider is unavailable.",
+      retryable: false,
+    });
+    expect(JSON.stringify(failed)).not.toMatch(/balance|pfk_|sk-/i);
+
+    const nextTurn = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toEqual(["pfk_balance", "pfk_healthy"]);
+    expect(nextTurn.map((event) => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
+  });
+
+  test("status-less DeepSeek balance on a session credential never mutates the platform pool", async () => {
+    const base = validProviderRequest({ model: { providerId: "deepseek", modelId: "deepseek-v4-pro", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    let attempts = 0;
+    const resolver = {
+      resolve: async () => ({
+        ok: true as const,
+        credential: {
+          source: "session" as const,
+          authType: "provider_api_key" as const,
+          providerId: "deepseek" as const,
+          supplyMode: "deepseek-api-key" as const,
+          vaultId: "vlt_deepseek",
+          credentialId: "cred_deepseek",
+          accessMode: "api_key" as const,
+          apiKey: "session-key-canary",
+        },
+      }),
+      recordPlatformFailure: () => {
+        throw new Error("session credential mutated the platform pool");
+      },
+    } as unknown as ProviderCredentialResolver;
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      credentialResolver: resolver,
+      providerStreamer: {
+        stream: async function* () {
+          attempts += 1;
+          throw new ProviderKeyFailureError(
+            classifyProviderFailure("deepseek", {
+              body: { message: "Insufficient Balance" },
+              networkError: true,
+            }),
+            "transport_failure",
+          );
+        },
+      },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(attempts).toBe(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.providerError?.error).toMatchObject({
+      code: "provider_key_unavailable",
+      message: "The supplied provider credential is not usable.",
+      retryable: false,
+    });
+    expect(JSON.stringify(events)).not.toMatch(/balance|session-key-canary|platform|pool/i);
+  });
+
+  test("opaque status-less bodies stay typed transport failures through the provider client", async () => {
+    const cyclic: { self?: unknown; canary: string } = { canary: "cyclic-provider-body-canary" };
+    cyclic.self = cyclic;
+    const bodies: readonly unknown[] = [undefined, null, false, 42, { opaque: "object-provider-body-canary" }, "{malformed-provider-body-canary", cyclic];
+
+    for (const body of bodies) {
+      const base = validProviderRequest({ model: { providerId: "deepseek", modelId: "deepseek-v4-pro", variant: "" } });
+      const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+      const pool = new RecordingPlatformCredentialPool(["pfk_opaque"]);
+      const providerStreamer = new ProviderClientRegistry({
+        openAICompatibleProviderFactory: () => (modelId) => ({ provider: "deepseek", modelId }),
+        streamText: () => ({
+          fullStream: (async function* () {
+            yield { type: "error" as const, error: { data: body } };
+          })(),
+        }),
+      });
+      const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+        credentialResolver: platformCredentialResolver(pool),
+        providerStreamer,
+      });
+
+      const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+      expect(pool.recordedFailures).toEqual([]);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.providerError?.error).toMatchObject({
+        code: "provider_stream_error",
+        retryable: true,
+        fatal: false,
+      });
+      expect(JSON.stringify(events)).not.toMatch(/provider-body-canary|pfk_|sk-/i);
+    }
+  });
+
   test("T-POOL-4 quarantines a failed key after progress without switching the current turn", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({

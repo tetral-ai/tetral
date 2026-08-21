@@ -75,6 +75,8 @@ export interface ProviderFailureClassification {
   readonly action: ProviderFailureAction;
   readonly providerError: ProviderErrorInput;
   readonly cooldownMs?: number | undefined;
+  /** Captured semantic evidence allowed to survive a status-less transport origin. */
+  readonly semanticSignal?: "deepseek_insufficient_balance" | undefined;
 }
 
 export type ProviderFailureOrigin = "http_rejection" | "transport_failure";
@@ -343,6 +345,14 @@ export function classifyProviderFailure(
   if (providerId === "anthropic" && isAnthropicCreditExhaustion(input.statusCode, code, input.body)) {
     return quarantine("provider_key_unavailable", "Provider key is not usable.", input.statusCode);
   }
+  if (providerId === "deepseek" && isDeepSeekInsufficientBalance(input.body)) {
+    return quarantine(
+      "provider_key_unavailable",
+      "Provider key is not usable.",
+      input.statusCode,
+      "deepseek_insufficient_balance",
+    );
+  }
   if (input.timeout === true || input.networkError === true || (input.statusCode !== undefined && input.statusCode >= 500)) {
     return classification("retryable", "provider_stream_error", true, statusMessage(input.statusCode), input.statusCode);
   }
@@ -373,7 +383,7 @@ export function classifyProviderFailure(
       if (input.statusCode === 429) {
         return cooling(rateLimitMessage(), DefaultCooldownMs);
       }
-      if (input.statusCode === 401 || input.statusCode === 402 || bodyText.includes("Insufficient Balance")) {
+      if (input.statusCode === 401 || input.statusCode === 402) {
         return quarantine("provider_key_unavailable", "Provider key is not usable.", input.statusCode);
       }
       break;
@@ -422,6 +432,15 @@ function isAnthropicCreditExhaustion(statusCode: number | undefined, code: strin
   return typeof message === "string" && /^Your credit balance is too low(?:\s|\.|$)/i.test(message.trim());
 }
 
+function isDeepSeekInsufficientBalance(body: unknown): boolean {
+  if (body === "Insufficient Balance") {
+    return true;
+  }
+  const object = bodyObject(body);
+  const message = nestedObject(object.error)?.message ?? object.message;
+  return message === "Insufficient Balance";
+}
+
 function isOpenAICompatibleFamily(providerId: GatewayCatalogProviderId): boolean {
   return providerId === "openai" || providerId === "deepseek" || providerId === "zai";
 }
@@ -456,8 +475,16 @@ function cooling(message: string, cooldownMs: number | undefined): ProviderFailu
   };
 }
 
-function quarantine(code: string, message: string, statusCode: number | undefined): ProviderFailureClassification {
-  return classification("quarantine", code, false, message, statusCode);
+function quarantine(
+  code: string,
+  message: string,
+  statusCode: number | undefined,
+  semanticSignal?: ProviderFailureClassification["semanticSignal"],
+): ProviderFailureClassification {
+  return {
+    ...classification("quarantine", code, false, message, statusCode),
+    ...(semanticSignal === undefined ? {} : { semanticSignal }),
+  };
 }
 
 function providerFailureFromOpenAIError(providerCode: string, providerError: ProviderErrorInput): ProviderFailureClassification {
@@ -563,7 +590,8 @@ function providerBodyText(body: unknown): string {
     return body;
   }
   try {
-    return JSON.stringify(body);
+    const normalized = JSON.stringify(body);
+    return typeof normalized === "string" ? normalized : "";
   } catch {
     return "";
   }

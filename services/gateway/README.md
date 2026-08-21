@@ -93,7 +93,9 @@ Selection keeps the highest-priority tier, weighted-random within it (weight
 floor `weight + 10`), and fails over across keys **only before the first
 provider-originated event** (up to `min(healthy keys, 3)` attempts, no backoff
 between different keys). After the first provider byte there is no key switch and
-no retry — the terminal event is forwarded and the runtime owns recovery. The
+no retry — the terminal event is forwarded and the runtime owns recovery, while
+an evidence-backed platform-key failure is still recorded so a later turn does
+not select that key. The
 pre-stream `attachment-rejections` event is gateway-originated and does not close
 the failover window. User-credential sessions never enter the pool (one key,
 dead is dead). An empty tier → `provider-error(code = platform_keys_exhausted,
@@ -109,8 +111,9 @@ selected again, and the Runtime closes only that turn.
 | 5xx, network/connection, timeout classes | `retryable = true` regardless of the SDK's own flag |
 | OpenAI-family 404 | `retryable = true` (documented provider misbehavior) |
 | Anthropic 400 `invalid_request_error` with the verified credit-exhaustion discriminator | quarantine the failed platform key before generic shape classification; outward pool exhaustion stays generic |
+| DeepSeek status-less body whose captured message is exactly `Insufficient Balance` | quarantine the failed platform key even though transport supplied no status; never generalize other body text or other providers |
 | 400/422 request-shape | fail fast to caller, do **not** rotate the key |
-| no status and no explicit timeout/network tag | `provider_stream_error`, `retryable = true`; Runtime owns the existing bounded turn retry |
+| no status without that captured DeepSeek signal | `provider_stream_error`, `retryable = true`; Runtime owns the existing bounded turn retry |
 | context overflow (413, `context_length_exceeded`, message-pattern) | `code = context_overflow`, `retryable = false` (arms runtime reactive compaction) |
 | subscription/entitlement (`usage_not_included`, `insufficient_quota`, `invalid_prompt`) | `retryable = false`, human-actionable public message |
 | 429 on providers that overload it (openai/moonshotai/zai) | parse the body `code`/`type` to split transient rate-limit (`COOLING`) from terminal quota (`QUARANTINE`) |

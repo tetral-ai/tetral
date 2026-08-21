@@ -372,9 +372,9 @@ export class ProviderGatewayServiceShell {
     };
     // Per-turn provider loop. The `emitted` latch is set by the first event from
     // the provider client and splits HTTP credential rejection from Runtime-owned
-    // stream recovery. Statusless transport and watchdog failures never mutate or
-    // switch credentials. Attachment-rejections are emitted before this loop and
-    // do not close the failover window:
+    // stream recovery. Transport and watchdog failures without a captured
+    // provider semantic signal never mutate or switch credentials. Attachment
+    // rejections are emitted before this loop and do not close the failover window:
     //
     //   | phase                     | credential | on provider fault                        | re-enters loop? |
     //   | ------------------------- | ---------- | ---------------------------------------- | --------------- |
@@ -472,7 +472,11 @@ export class ProviderGatewayServiceShell {
                 );
               })()
             : undefined;
-        if (error instanceof ProviderStreamTimeoutError || providerKeyFailure?.origin === "transport_failure") {
+        const capturedSemanticSignal = providerKeyFailure?.classification.semanticSignal === "deepseek_insufficient_balance";
+        if (
+          error instanceof ProviderStreamTimeoutError ||
+          (providerKeyFailure?.origin === "transport_failure" && !capturedSemanticSignal)
+        ) {
           recordFailureOrigin("transport_failure");
           yield providerErrorEvent(classifyProviderStreamError(error));
           return;
