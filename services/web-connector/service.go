@@ -28,6 +28,7 @@ type Service struct {
 	metrics          *Metrics
 	now              func() time.Time
 	jobClaimDuration time.Duration
+	jobCommitMargin  time.Duration
 	jobPollInterval  time.Duration
 	waitForJobPoll   func(context.Context, time.Duration) error
 	logger           *slog.Logger
@@ -57,14 +58,13 @@ const (
 	// UPDATE-WITH: types.go maxOperations/maxSearchDomains, backend.go
 	// BackendRequestTimeout, and the result persistence path in persistJob.
 	webJobResultCommitMargin = 30 * time.Second
-	webJobClaimDuration      = time.Duration(maxOperations*maxSearchDomains)*BackendRequestTimeout +
-		webJobResultCommitMargin
-	webJobPollInterval = 25 * time.Millisecond
-	webJobPollMaximum  = time.Second
+	webJobPollInterval       = 25 * time.Millisecond
+	webJobPollMaximum        = time.Second
 )
 
 type webJobClaim struct {
-	ETag string
+	ETag      string
+	ExpiresAt time.Time
 }
 
 type executionResult struct {
@@ -85,10 +85,16 @@ func NewService(blobs blob.BlobStore, backend Backend, verifier *BindingVerifier
 		verifier:         verifier,
 		metrics:          metrics,
 		now:              now,
-		jobClaimDuration: webJobClaimDuration,
+		jobClaimDuration: webJobClaimDuration(backend.MaxAttemptsPerCall()),
+		jobCommitMargin:  webJobResultCommitMargin,
 		jobPollInterval:  webJobPollInterval,
 		waitForJobPoll:   waitForWebJobPoll,
 	}
+}
+
+func webJobClaimDuration(maxAttemptsPerBackendCall int) time.Duration {
+	return time.Duration(maxOperations*maxSearchDomains*maxAttemptsPerBackendCall)*BackendRequestTimeout +
+		webJobResultCommitMargin
 }
 
 func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebRequest) (response *providergatewayv1.RunWebResponse, err error) {
@@ -152,7 +158,7 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 		s.store.DeleteKeys(ctx, executed.createdKeys)
 		executed.createdKeys = nil
 	}
-	if persistErr := s.persistJob(ctx, scope, request.GetToolUseEventId(), inputHash, claim.ETag, response); persistErr != nil {
+	if persistErr := s.persistClaimedJob(ctx, scope, request.GetToolUseEventId(), inputHash, claim, response); persistErr != nil {
 		if isDuplicate(persistErr) {
 			winner, winnerErr := s.awaitJob(ctx, scope, request.GetToolUseEventId(), inputHash, operation, started)
 			if winnerErr == nil {
@@ -452,10 +458,10 @@ func (s *Service) resolveJob(
 			response, responseErr := responseFromJobRecord(record)
 			return nil, response, responseErr
 		}
-		if created {
-			return &webJobClaim{ETag: etag}, nil, nil
-		}
 		leaseExpiresAt, _ := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt)
+		if created {
+			return &webJobClaim{ETag: etag, ExpiresAt: leaseExpiresAt}, nil, nil
+		}
 		if !s.now().Before(leaseExpiresAt) {
 			response := s.errorResponse(
 				providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR,
@@ -463,7 +469,10 @@ func (s *Service) resolveJob(
 				operation,
 				started,
 			)
-			if persistErr := s.persistJob(ctx, scope, eventID, inputHash, etag, response); persistErr != nil {
+			persistErr := s.persistJob(func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), s.jobCommitMargin)
+			}, scope, eventID, inputHash, etag, response)
+			if persistErr != nil {
 				if isDuplicate(persistErr) {
 					continue
 				}
@@ -490,6 +499,28 @@ func (s *Service) resolveJob(
 	}
 }
 
+func (s *Service) persistClaimedJob(
+	ctx context.Context,
+	scope Scope,
+	eventID string,
+	inputHash string,
+	claim *webJobClaim,
+	response *providergatewayv1.RunWebResponse,
+) error {
+	// The context factory runs immediately before object-store CAS, so the
+	// commit margin starts at the CAS boundary rather than during encoding.
+	return s.persistJob(func() (context.Context, context.CancelFunc) {
+		deadline := claim.ExpiresAt
+		if marginDeadline := s.now().Add(s.jobCommitMargin); marginDeadline.Before(deadline) {
+			deadline = marginDeadline
+		}
+		if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+			deadline = parentDeadline
+		}
+		return context.WithDeadline(ctx, deadline)
+	}, scope, eventID, inputHash, claim.ETag, response)
+}
+
 func waitForWebJobPoll(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -501,7 +532,7 @@ func waitForWebJobPoll(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func (s *Service) persistJob(ctx context.Context, scope Scope, eventID, inputHash, expectedETag string, response *providergatewayv1.RunWebResponse) error {
+func (s *Service) persistJob(commitContext func() (context.Context, context.CancelFunc), scope Scope, eventID, inputHash, expectedETag string, response *providergatewayv1.RunWebResponse) error {
 	baseStoredBytes := response.GetUsage().GetStoredBytes()
 	target := baseStoredBytes
 	for i := 0; i < 8; i++ {
@@ -511,7 +542,9 @@ func (s *Service) persistJob(ctx context.Context, scope Scope, eventID, inputHas
 		recordRaw, _ := json.Marshal(jobRecord{InputHash: inputHash, State: webJobStateCompleted, Response: responseRaw, SettledAt: s.now().UTC().Format(time.RFC3339Nano)})
 		next := baseStoredBytes + int64(len(recordRaw))
 		if next == target {
+			ctx, cancel := commitContext()
 			err := s.store.CompareAndSwapJob(ctx, scope, eventID, expectedETag, recordRaw)
+			cancel()
 			if err == nil {
 				response.Usage.StoredBytes = target
 				s.metrics.ObserveCacheBytes(int64(len(recordRaw)))
@@ -524,7 +557,9 @@ func (s *Service) persistJob(ctx context.Context, scope Scope, eventID, inputHas
 	candidate.Usage.StoredBytes = target
 	responseRaw, _ := protojson.MarshalOptions{UseProtoNames: true}.Marshal(candidate)
 	recordRaw, _ := json.Marshal(jobRecord{InputHash: inputHash, State: webJobStateCompleted, Response: responseRaw, SettledAt: s.now().UTC().Format(time.RFC3339Nano)})
+	ctx, cancel := commitContext()
 	err := s.store.CompareAndSwapJob(ctx, scope, eventID, expectedETag, recordRaw)
+	cancel()
 	if err == nil {
 		response.Usage.StoredBytes = target
 		s.metrics.ObserveCacheBytes(int64(len(recordRaw)))

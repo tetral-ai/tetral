@@ -24,15 +24,16 @@ type keyState struct {
 const BackendRequestTimeout = 30 * time.Second
 
 type JinaBackend struct {
-	client         *http.Client
-	searchEndpoint string
-	readerEndpoint string
-	now            func() time.Time
-	mu             sync.Mutex
-	keys           []keyState
-	next           int
-	metrics        *Metrics
-	logger         *slog.Logger
+	client             *http.Client
+	searchEndpoint     string
+	readerEndpoint     string
+	now                func() time.Time
+	maxAttemptsPerCall int
+	mu                 sync.Mutex
+	keys               []keyState
+	next               int
+	metrics            *Metrics
+	logger             *slog.Logger
 }
 
 func (b *JinaBackend) WithMetrics(metrics *Metrics) *JinaBackend {
@@ -67,8 +68,20 @@ func NewJinaBackend(client *http.Client, searchEndpoint, readerEndpoint string, 
 	for _, key := range keys {
 		states = append(states, keyState{value: key})
 	}
-	return &JinaBackend{client: client, searchEndpoint: searchEndpoint, readerEndpoint: readerEndpoint, keys: states, now: now}
+	return &JinaBackend{
+		client:             client,
+		searchEndpoint:     searchEndpoint,
+		readerEndpoint:     readerEndpoint,
+		now:                now,
+		maxAttemptsPerCall: len(states),
+		keys:               states,
+	}
 }
+
+// MaxAttemptsPerCall reports the construction-fixed upper bound for one
+// logical provider call. Key health changes which keys are currently usable,
+// but never shortens the bound used by subsequently created durable claims.
+func (b *JinaBackend) MaxAttemptsPerCall() int { return b.maxAttemptsPerCall }
 
 type searchResponse struct {
 	Code int `json:"code"`

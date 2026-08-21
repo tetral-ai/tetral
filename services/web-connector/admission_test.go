@@ -82,7 +82,7 @@ func TestBindingAdmissionRejectsEveryTamperedClaimBeforeBlobOrBackendAccess(t *t
 
 func TestBindingAdmissionAcceptsMatchingClaimsBeforeHarmlessExecution(t *testing.T) {
 	t.Parallel()
-	nowValue := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	nowValue := time.Now().UTC()
 	now := func() time.Time { return nowValue }
 	key := []byte("binding-verifier-key-with-at-least-32-bytes")
 	objects := blob.NewFakeBlobStore()

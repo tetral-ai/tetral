@@ -97,6 +97,7 @@ type BackendOutcome struct {
 }
 
 type Backend interface {
+	MaxAttemptsPerCall() int
 	Search(context.Context, string, []string) ([]SearchHit, BackendOutcome)
 	Fetch(context.Context, string) (Page, BackendOutcome)
 }

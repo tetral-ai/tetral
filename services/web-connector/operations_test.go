@@ -602,13 +602,23 @@ func TestExpiredFirstExecutionClaimSettlesUnknownWithoutSecondBackendCall(t *tes
 	}
 }
 
-func TestMaximumWebCallClaimSurvivesThroughBoundaryCommitAndExactReplay(t *testing.T) {
-	objects := blob.NewFakeBlobStore()
-	backend := &fakeBackend{}
-	clock := &webJobFakeClock{now: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)}
+func TestMaximumWebCallWithThreeKeyJinaRotationRemainsOwnedUntilExactReplay(t *testing.T) {
+	clock := newProviderAttemptClock(time.Now().UTC())
+	transport := &sequentialJinaRotationTransport{clock: clock}
+	backend := NewJinaBackend(
+		&http.Client{Transport: transport},
+		"https://search.test/",
+		"https://reader.test/",
+		[]string{"one", "two", "three"},
+		clock.Now,
+	)
+	objects := &gatedCASBlobStore{
+		BlobStore: blob.NewFakeBlobStore(),
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
 	key := []byte("binding-verifier-key-with-at-least-32-bytes")
 	service := NewService(objects, backend, NewBindingVerifier(key, clock.Now), NewMetrics(), clock.Now, zeroRandom)
-	service.waitForJobPoll = clock.Wait
 	scope := Scope{"ws", "ses", "thr"}
 	input := maximumWebCallInput()
 	request := &providergatewayv1.RunWebRequest{
@@ -616,43 +626,223 @@ func TestMaximumWebCallClaimSurvivesThroughBoundaryCommitAndExactReplay(t *testi
 		ToolUseEventId: "event-maximum-claim", BindingId: "bind", BindingGeneration: 1,
 		Input: input,
 	}
-	request.RuntimeBindingToken = signRequest(request, "runtime-pod", clock.Now().Add(time.Hour), key)
+	started := clock.Now()
+	request.RuntimeBindingToken = signRequest(request, "runtime-pod", started.Add(2*time.Hour), key)
 	if validation := validateSemanticEnvelope(request); validation != "" || !validStructuralRequest(request) {
 		t.Fatalf("maximum request validation = %q/%t", validation, validStructuralRequest(request))
 	}
-	inputHash := CanonicalInputHash(canonicalInput(input))
-	claim, replay, err := service.claimJob(context.Background(), scope, request.GetToolUseEventId(), inputHash, "search", clock.Now())
-	if err != nil || claim == nil || replay != nil {
-		t.Fatalf("initial claim = %#v/%+v/%v", claim, replay, err)
-	}
+	winnerResult := make(chan *providergatewayv1.RunWebResponse, 1)
+	winnerError := make(chan error, 1)
+	go func() {
+		response, err := service.RunWeb(testContext(), request)
+		winnerResult <- response
+		winnerError <- err
+	}()
+	<-objects.started
 
-	clock.now = clock.now.Add(16*time.Minute + 30*time.Second - time.Nanosecond)
-	waiterContext, cancelWaiter := context.WithCancel(testContext())
-	clock.cancel = cancelWaiter
-	waiterResponse, waitErr := service.RunWeb(waiterContext, request)
-	if waitErr != nil || waiterResponse.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR {
-		t.Fatalf("pre-deadline waiter = %+v/%v", waiterResponse, waitErr)
+	if transport.Calls() != maxOperations*maxSearchDomains*3 {
+		t.Fatalf("provider attempts = %d; want %d", transport.Calls(), maxOperations*maxSearchDomains*3)
 	}
-	if backend.calls != 0 {
-		t.Fatalf("pre-deadline waiter executed backend %d times", backend.calls)
+	wantDuration := time.Duration(maxOperations*maxSearchDomains*3)*BackendRequestTimeout + webJobResultCommitMargin
+	if elapsed := clock.Now().Sub(started); elapsed != wantDuration-webJobResultCommitMargin {
+		t.Fatalf("maximum execution elapsed = %s; want %s", elapsed, wantDuration-webJobResultCommitMargin)
 	}
 	raw, etag, err := service.store.GetJobVersion(context.Background(), scope, request.GetToolUseEventId())
 	record, parseErr := parseJobRecord(raw)
-	if err != nil || parseErr != nil || etag != claim.ETag || record.State != webJobStateInFlight {
-		t.Fatalf("pre-deadline claim = %q/%q/%v/%v", etag, record.State, err, parseErr)
+	claimExpiry, expiryErr := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt)
+	if err != nil || parseErr != nil || expiryErr != nil || record.State != webJobStateInFlight || !claimExpiry.Equal(started.Add(wantDuration)) {
+		t.Fatalf("maximum claim = %q/%q/%v/%v/%v; want expiry %s", etag, record.State, err, parseErr, expiryErr, started.Add(wantDuration))
+	}
+	if deadline := objects.Deadline(); !deadline.Equal(claimExpiry) {
+		t.Fatalf("winner CAS deadline = %s; want stored expiry %s", deadline, claimExpiry)
 	}
 
+	clock.Set(claimExpiry.Add(-time.Nanosecond))
+	waits := 0
+	service.waitForJobPoll = func(context.Context, time.Duration) error {
+		waits++
+		return context.Canceled
+	}
+	waiterResponse, waitErr := service.RunWeb(testContext(), request)
+	if waitErr != nil || waiterResponse.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR || waits != 1 {
+		t.Fatalf("pre-expiry waiter = %+v/%v waits=%d", waiterResponse, waitErr, waits)
+	}
+	raw, currentETag, err := service.store.GetJobVersion(context.Background(), scope, request.GetToolUseEventId())
+	record, parseErr = parseJobRecord(raw)
+	if err != nil || parseErr != nil || currentETag != etag || record.State != webJobStateInFlight || objects.Calls() != 1 {
+		t.Fatalf("pre-expiry ownership = %q/%q/%d/%v/%v; want original in-flight claim", currentETag, record.State, objects.Calls(), err, parseErr)
+	}
+
+	close(objects.release)
+	winner := <-winnerResult
+	if err := <-winnerError; err != nil || winner.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED {
+		t.Fatalf("maximum-shape winner = %+v/%v", winner, err)
+	}
+	replayed, err := service.RunWeb(testContext(), request)
+	if err != nil || replayed.String() != winner.String() || transport.Calls() != maxOperations*maxSearchDomains*3 {
+		t.Fatalf("exact replay = %+v/%v calls=%d; want %s", replayed, err, transport.Calls(), winner)
+	}
+}
+
+func TestWebClaimExpiryIsImmutableAndEqualityTransfersSettlementOwnership(t *testing.T) {
+	objects := blob.NewFakeBlobStore()
+	clock := &webJobFakeClock{now: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)}
+	service := NewService(objects, &fakeBackend{}, nil, NewMetrics(), clock.Now, zeroRandom)
+	service.jobClaimDuration = time.Second
+	service.waitForJobPoll = clock.Wait
+	scope := Scope{"ws", "ses", "thr"}
+	inputHash := CanonicalInputHash(canonicalInput(maximumWebCallInput()))
+	started := clock.Now()
+	claim, _, err := service.claimJob(context.Background(), scope, "event-immutable-expiry", inputHash, "search", started)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clock.now = started.Add(400 * time.Millisecond)
+	waiterContext, cancelWaiter := context.WithCancel(context.Background())
+	clock.cancel = cancelWaiter
+	_, _, err = service.claimJob(waiterContext, scope, "event-immutable-expiry", inputHash, "search", started)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-expiry observation = %v; want cancellation", err)
+	}
+	raw, _, err := service.store.GetJobVersion(context.Background(), scope, "event-immutable-expiry")
+	record, parseErr := parseJobRecord(raw)
+	if err != nil || parseErr != nil || record.LeaseExpiresAt != claim.ExpiresAt.Format(time.RFC3339Nano) {
+		t.Fatalf("stored immutable expiry = %q/%v/%v; want %s", record.LeaseExpiresAt, err, parseErr, claim.ExpiresAt.Format(time.RFC3339Nano))
+	}
+
+	clock.now = claim.ExpiresAt
 	winner := &providergatewayv1.RunWebResponse{
 		Status:     providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED,
-		ResultText: "boundary winner",
+		ResultText: "late winner",
 		Usage:      &providergatewayv1.WebUsage{Operation: "search"},
 	}
-	if err := service.persistJob(context.Background(), scope, request.GetToolUseEventId(), inputHash, claim.ETag, winner); err != nil {
-		t.Fatalf("boundary winner commit: %v", err)
+	if err := service.persistClaimedJob(context.Background(), scope, "event-immutable-expiry", inputHash, claim, winner); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("winner commit at expiry = %v; want deadline exceeded", err)
 	}
-	_, duplicate, err := service.claimJob(context.Background(), scope, request.GetToolUseEventId(), inputHash, "search", clock.Now())
-	if err != nil || duplicate == nil || duplicate.String() != winner.String() {
-		t.Fatalf("boundary duplicate = %+v/%v; want %s", duplicate, err, winner)
+	waitsAtExpiry := len(clock.waits)
+	nowAtExpiry := clock.Now()
+	_, settled, err := service.claimJob(context.Background(), scope, "event-immutable-expiry", inputHash, "search", started)
+	if err != nil || settled.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR {
+		t.Fatalf("equality settlement = %+v/%v", settled, err)
+	}
+	if len(clock.waits) != waitsAtExpiry || !clock.Now().Equal(nowAtExpiry) {
+		t.Fatalf("equality settlement polled/advanced: waits %d->%d, now %s->%s", waitsAtExpiry, len(clock.waits), nowAtExpiry, clock.Now())
+	}
+}
+
+func TestWinnerCASBlockedAcrossClaimExpiryCannotOverwriteAbandonedSettlement(t *testing.T) {
+	objects := &blockingCASBlobStore{
+		BlobStore: blob.NewFakeBlobStore(),
+		started:   make(chan struct{}),
+	}
+	service := NewService(objects, &fakeBackend{}, nil, NewMetrics(), time.Now, zeroRandom)
+	service.jobClaimDuration = 50 * time.Millisecond
+	service.jobCommitMargin = 5 * time.Second
+	scope := Scope{"ws", "ses", "thr"}
+	inputHash := CanonicalInputHash(canonicalInput(maximumWebCallInput()))
+	claim, _, err := service.claimJob(context.Background(), scope, "event-cross-expiry-cas", inputHash, "search", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner := &providergatewayv1.RunWebResponse{
+		Status:     providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED,
+		ResultText: "winner must not cross expiry",
+		Usage:      &providergatewayv1.WebUsage{Operation: "search"},
+	}
+	commitResult := make(chan error, 1)
+	commitContext, cancelCommit := context.WithCancel(context.Background())
+	defer cancelCommit()
+	go func() {
+		commitResult <- service.persistClaimedJob(commitContext, scope, "event-cross-expiry-cas", inputHash, claim, winner)
+	}()
+	<-objects.started
+	if deadline := objects.Deadline(); !deadline.Equal(claim.ExpiresAt) {
+		cancelCommit()
+		<-commitResult
+		t.Fatalf("cross-expiry CAS deadline = %s; want stored expiry %s", deadline, claim.ExpiresAt)
+	}
+	if err := <-commitResult; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cross-expiry winner commit = %v; want deadline exceeded", err)
+	}
+	_, settled, err := service.claimJob(context.Background(), scope, "event-cross-expiry-cas", inputHash, "search", time.Now())
+	if err != nil || settled.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR || settled.GetResultText() != "web backend temporarily unavailable" {
+		t.Fatalf("abandoned settlement = %+v/%v", settled, err)
+	}
+	_, replay, err := service.claimJob(context.Background(), scope, "event-cross-expiry-cas", inputHash, "search", time.Now())
+	if err != nil || replay.String() != settled.String() || strings.Contains(replay.GetResultText(), "winner") {
+		t.Fatalf("settled replay = %+v/%v; want exact abandoned result", replay, err)
+	}
+}
+
+func TestWinnerCASIsBoundedByResultCommitMargin(t *testing.T) {
+	objects := &blockingCASBlobStore{
+		BlobStore: blob.NewFakeBlobStore(),
+		started:   make(chan struct{}),
+	}
+	service := NewService(objects, &fakeBackend{}, nil, NewMetrics(), time.Now, zeroRandom)
+	service.jobClaimDuration = time.Second
+	service.jobCommitMargin = 25 * time.Millisecond
+	scope := Scope{"ws", "ses", "thr"}
+	inputHash := CanonicalInputHash(canonicalInput(maximumWebCallInput()))
+	claim, _, err := service.claimJob(context.Background(), scope, "event-commit-margin", inputHash, "search", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner := &providergatewayv1.RunWebResponse{
+		Status: providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED,
+		Usage:  &providergatewayv1.WebUsage{Operation: "search"},
+	}
+	commitResult := make(chan error, 1)
+	go func() {
+		commitResult <- service.persistClaimedJob(context.Background(), scope, "event-commit-margin", inputHash, claim, winner)
+	}()
+	<-objects.started
+	if err := <-commitResult; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("commit-margin result = %v; want deadline exceeded", err)
+	}
+	if !time.Now().Before(claim.ExpiresAt) {
+		t.Fatalf("claim expired before commit margin proved its independent bound")
+	}
+	raw, _, err := service.store.GetJobVersion(context.Background(), scope, "event-commit-margin")
+	record, parseErr := parseJobRecord(raw)
+	if err != nil || parseErr != nil || record.State != webJobStateInFlight {
+		t.Fatalf("post-margin claim = %q/%v/%v; want in flight", record.State, err, parseErr)
+	}
+}
+
+func TestWinnerCASPreservesParentCancellationAndEarlierDeadline(t *testing.T) {
+	objects := &observingCASBlobStore{BlobStore: blob.NewFakeBlobStore(), err: errors.New("stop after observing commit context")}
+	service := NewService(objects, &fakeBackend{}, nil, NewMetrics(), time.Now, zeroRandom)
+	scope := Scope{"ws", "ses", "thr"}
+	inputHash := CanonicalInputHash(canonicalInput(maximumWebCallInput()))
+	response := &providergatewayv1.RunWebResponse{
+		Status: providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED,
+		Usage:  &providergatewayv1.WebUsage{Operation: "search"},
+	}
+
+	cancelledClaim, _, err := service.claimJob(context.Background(), scope, "event-cancelled-parent-cas", inputHash, "search", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := service.persistClaimedJob(cancelledContext, scope, "event-cancelled-parent-cas", inputHash, cancelledClaim, response); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled-parent commit = %v; want context canceled", err)
+	}
+
+	deadlineClaim, _, err := service.claimJob(context.Background(), scope, "event-earlier-parent-cas", inputHash, "search", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentDeadline := time.Now().Add(250 * time.Millisecond)
+	deadlineContext, cancelDeadline := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancelDeadline()
+	if err := service.persistClaimedJob(deadlineContext, scope, "event-earlier-parent-cas", inputHash, deadlineClaim, response); !errors.Is(err, objects.err) {
+		t.Fatalf("earlier-parent commit = %v; want observer error", err)
+	}
+	if !objects.deadline.Equal(parentDeadline) {
+		t.Fatalf("winner CAS deadline = %s; want parent deadline %s", objects.deadline, parentDeadline)
 	}
 }
 
@@ -678,7 +868,7 @@ func TestWebClaimWaitUsesBoundedBackoffThenSettlesAbandonedIdentity(t *testing.T
 	if len(clock.waits) < len(wantPrefix) {
 		t.Fatalf("polls = %v; want prefix %v", clock.waits, wantPrefix)
 	}
-	remaining := webJobClaimDuration
+	remaining := webJobClaimDuration(1)
 	for index, wait := range clock.waits {
 		if index < len(wantPrefix) && wait != wantPrefix[index] {
 			t.Fatalf("poll %d = %s; want %s", index, wait, wantPrefix[index])
@@ -688,7 +878,7 @@ func TestWebClaimWaitUsesBoundedBackoffThenSettlesAbandonedIdentity(t *testing.T
 		}
 		remaining -= wait
 	}
-	if remaining != 0 || !clock.Now().Equal(started.Add(webJobClaimDuration)) {
+	if remaining != 0 || !clock.Now().Equal(started.Add(webJobClaimDuration(1))) {
 		t.Fatalf("polling stopped with remaining=%s now=%s", remaining, clock.Now())
 	}
 
@@ -1113,6 +1303,8 @@ type sequenceSearchBackend struct {
 	calls   int
 }
 
+func (*sequenceSearchBackend) MaxAttemptsPerCall() int { return 1 }
+
 func (backend *sequenceSearchBackend) Search(context.Context, string, []string) ([]SearchHit, BackendOutcome) {
 	result := backend.results[backend.calls]
 	backend.calls++
@@ -1128,6 +1320,8 @@ type sequenceFetchBackend struct {
 	outcomes []BackendOutcome
 	next     int
 }
+
+func (*sequenceFetchBackend) MaxAttemptsPerCall() int { return 1 }
 
 func (b *sequenceFetchBackend) Search(context.Context, string, []string) ([]SearchHit, BackendOutcome) {
 	panic("unexpected search")
@@ -1148,6 +1342,146 @@ type metadataReadFailureBlobStore struct {
 type jobFailureBlobStore struct {
 	blob.BlobStore
 	mode string
+}
+
+type blockingCASBlobStore struct {
+	blob.BlobStore
+	started  chan struct{}
+	once     sync.Once
+	deadline time.Time
+}
+
+func (s *blockingCASBlobStore) CompareAndSwap(ctx context.Context, key, expectedETag string, body io.Reader, size int64) error {
+	blocked := false
+	s.once.Do(func() {
+		blocked = true
+		s.deadline, _ = ctx.Deadline()
+		close(s.started)
+	})
+	if blocked {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return s.BlobStore.(compareAndSwapBlobStore).CompareAndSwap(ctx, key, expectedETag, body, size)
+}
+
+func (s *blockingCASBlobStore) Deadline() time.Time { return s.deadline }
+
+type gatedCASBlobStore struct {
+	blob.BlobStore
+	started  chan struct{}
+	release  chan struct{}
+	mu       sync.Mutex
+	calls    int
+	deadline time.Time
+}
+
+func (s *gatedCASBlobStore) CompareAndSwap(ctx context.Context, key, expectedETag string, body io.Reader, size int64) error {
+	s.mu.Lock()
+	s.calls++
+	first := s.calls == 1
+	if first {
+		s.deadline, _ = ctx.Deadline()
+	}
+	s.mu.Unlock()
+	if first {
+		close(s.started)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.BlobStore.(compareAndSwapBlobStore).CompareAndSwap(ctx, key, expectedETag, body, size)
+}
+
+func (s *gatedCASBlobStore) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *gatedCASBlobStore) Deadline() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deadline
+}
+
+type providerAttemptClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newProviderAttemptClock(now time.Time) *providerAttemptClock {
+	return &providerAttemptClock{now: now}
+}
+
+func (c *providerAttemptClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *providerAttemptClock) Advance(duration time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(duration)
+}
+
+func (c *providerAttemptClock) Set(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
+}
+
+type sequentialJinaRotationTransport struct {
+	clock *providerAttemptClock
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *sequentialJinaRotationTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	expectedKey := []string{"one", "two", "three"}[t.calls%3]
+	actualKey := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+	if actualKey != expectedKey {
+		return nil, fmt.Errorf("provider key %q at attempt %d; want %q", actualKey, t.calls, expectedKey)
+	}
+	t.calls++
+	t.clock.Advance(BackendRequestTimeout)
+	statusCode := http.StatusTooManyRequests
+	body := ""
+	if actualKey == "three" {
+		statusCode = http.StatusOK
+		body = `{"code":200,"data":[],"meta":{"usage":{"tokens":0}}}`
+	}
+	return &http.Response{
+		StatusCode: statusCode,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    request,
+	}, nil
+}
+
+func (t *sequentialJinaRotationTransport) Calls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+type observingCASBlobStore struct {
+	blob.BlobStore
+	deadline time.Time
+	err      error
+}
+
+func (s *observingCASBlobStore) CompareAndSwap(ctx context.Context, _ string, _ string, _ io.Reader, _ int64) error {
+	s.deadline, _ = ctx.Deadline()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.err
 }
 
 func (s *jobFailureBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -1201,6 +1535,8 @@ func (b *blockingSearchBackend) Search(ctx context.Context, _ string, _ []string
 	}
 	return []SearchHit{{URL: "https://example.com/", Title: "Example"}}, BackendOutcome{Kind: BackendSuccess, Requests: 1}
 }
+
+func (*blockingSearchBackend) MaxAttemptsPerCall() int { return 1 }
 func (b *blockingSearchBackend) Fetch(context.Context, string) (Page, BackendOutcome) {
 	panic("unexpected fetch")
 }
@@ -1211,6 +1547,8 @@ func (b *concurrentBackend) Search(context.Context, string, []string) ([]SearchH
 	b.mu.Unlock()
 	return nil, BackendOutcome{Kind: BackendSuccess, Requests: 1}
 }
+
+func (*concurrentBackend) MaxAttemptsPerCall() int { return 1 }
 func (b *concurrentBackend) Fetch(context.Context, string) (Page, BackendOutcome) {
 	b.mu.Lock()
 	b.calls++
@@ -1220,7 +1558,8 @@ func (b *concurrentBackend) Fetch(context.Context, string) (Page, BackendOutcome
 func zeroRandom(dst []byte) (int, error) { clear(dst); return len(dst), nil }
 func testService(objects blob.BlobStore, backend Backend) (*Service, []byte, func() time.Time) {
 	key := []byte("binding-verifier-key-with-at-least-32-bytes")
-	now := func() time.Time { return time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC) }
+	nowValue := time.Now().UTC()
+	now := func() time.Time { return nowValue }
 	return NewService(objects, backend, NewBindingVerifier(key, now), NewMetrics(), now, nil), key, now
 }
 func testRequest(input *providergatewayv1.WebToolInput, event string, key []byte, now func() time.Time) *providergatewayv1.RunWebRequest {

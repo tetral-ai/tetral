@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/blob"
 )
 
 func TestJinaBackendUsesClosedHeadersAndCommittedReaderFixture(t *testing.T) {
@@ -131,6 +133,53 @@ func TestJinaBackendUnauthorizedKeyRemainsDisabledForBackendLifetime(t *testing.
 	want = []string{"one", "two", "two", "one", "two"}
 	if fmt.Sprint(keys) != fmt.Sprint(want) {
 		t.Fatalf("keys after restart=%v want=%v", keys, want)
+	}
+}
+
+func TestJinaBackendAttemptBoundRemainsConstructionFixedAfterKeysBecomeDeadOrCooling(t *testing.T) {
+	fixture := loadRecordedFixture(t, "reader-success.json")
+	clock := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	calls := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		calls[key]++
+		switch key {
+		case "dead":
+			w.WriteHeader(http.StatusUnauthorized)
+		case "cooling":
+			w.WriteHeader(http.StatusTooManyRequests)
+		default:
+			w.WriteHeader(fixture.Status)
+			_, _ = w.Write(fixture.Response)
+		}
+	}))
+	defer server.Close()
+	backend := NewJinaBackend(server.Client(), server.URL, server.URL, []string{"dead", "cooling", "healthy"}, func() time.Time { return clock })
+	if backend.MaxAttemptsPerCall() != 3 {
+		t.Fatalf("initial attempt bound = %d; want 3", backend.MaxAttemptsPerCall())
+	}
+	if _, outcome := backend.Fetch(context.Background(), "https://example.com/"); outcome.Kind != BackendSuccess {
+		t.Fatalf("rotating fetch outcome = %+v", outcome)
+	}
+	if calls["dead"] != 1 || calls["cooling"] != 1 || calls["healthy"] != 1 {
+		t.Fatalf("rotation calls = %#v; want one attempt per configured key", calls)
+	}
+	if _, outcome := backend.Fetch(context.Background(), "https://example.com/"); outcome.Kind != BackendSuccess {
+		t.Fatalf("post-health-change fetch outcome = %+v", outcome)
+	}
+	if backend.MaxAttemptsPerCall() != 3 || calls["dead"] != 1 || calls["cooling"] != 1 || calls["healthy"] != 2 {
+		t.Fatalf("stable attempt bound/calls = %d/%#v", backend.MaxAttemptsPerCall(), calls)
+	}
+
+	service := NewService(blob.NewFakeBlobStore(), backend, nil, NewMetrics(), func() time.Time { return clock }, zeroRandom)
+	wantDuration := time.Duration(maxOperations*maxSearchDomains*3)*BackendRequestTimeout + webJobResultCommitMargin
+	if service.jobClaimDuration != wantDuration {
+		t.Fatalf("three-key claim duration = %s; want %s", service.jobClaimDuration, wantDuration)
+	}
+	inputHash := CanonicalInputHash(canonicalInput(maximumWebCallInput()))
+	claim, replay, err := service.claimJob(context.Background(), Scope{"ws", "ses", "thr"}, "event-post-health-change", inputHash, "search", clock)
+	if err != nil || replay != nil || claim == nil || !claim.ExpiresAt.Equal(clock.Add(wantDuration)) {
+		t.Fatalf("post-health-change claim = %#v/%+v/%v; want expiry %s", claim, replay, err, clock.Add(wantDuration))
 	}
 }
 
