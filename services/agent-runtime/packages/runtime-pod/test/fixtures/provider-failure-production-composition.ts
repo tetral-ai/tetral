@@ -32,7 +32,7 @@ import { RuntimeControlService } from "../../src/runtime-service.js";
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) {
-	throw new Error("provider timeout production composition input is required");
+	throw new Error("provider failure production composition input is required");
 }
 const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bridgeAddress: string;
@@ -47,7 +47,9 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly closePath: string;
 	readonly scenario?:
 		| "semantic_timeout"
-		| "platform_billing"
+		| "platform_billing_pre_progress"
+		| "platform_billing_post_progress"
+		| "platform_billing_exhausted"
 		| "statusless_transport"
 		| "invalid_byok";
 };
@@ -75,7 +77,17 @@ const healthyPlatformKey = {
 	keyId: "pfk_provider_failure_healthy",
 	key: "sk-provider-failure-healthy",
 };
-const platformPool = new PlatformKeyPool([badPlatformKey], { random: () => 0 });
+const platformKeySelections: string[] = [];
+const platformKeyQuarantines: string[] = [];
+const platformPool = new PlatformKeyPool(
+	scenario === "platform_billing_pre_progress" || scenario === "platform_billing_post_progress"
+		? [badPlatformKey, healthyPlatformKey]
+		: [badPlatformKey],
+	{
+		random: () => 0,
+		onQuarantine: (event) => platformKeyQuarantines.push(event.keyId),
+	},
+);
 let sessionCredentialHealthy = false;
 const encryptSessionAuth = async (token: string): Promise<Uint8Array> =>
 	await encryptAES256GCM(
@@ -104,6 +116,8 @@ const writeRuntimeState = async (): Promise<void> => {
 			providerInvocations,
 			finishIdleInvocations,
 			finishIdleResult,
+			platformKeySelections,
+			platformKeyQuarantines,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|sk-provider-failure|sk-byok/i.test(
 					JSON.stringify(gatewayLogs),
@@ -122,9 +136,6 @@ const writer = {
 		const result = await bridgeWriter.finishIdle(envelope);
 		finishIdleResult = result.ok ? result.type : result.error.code;
 		if (result.ok) {
-			if (scenario === "platform_billing" && finishIdleInvocations === 2) {
-				platformPool.replaceKeys([badPlatformKey, healthyPlatformKey]);
-			}
 			if (scenario === "invalid_byok" && finishIdleInvocations === 1) {
 				sessionCredentialHealthy = true;
 			}
@@ -213,22 +224,34 @@ const providerClientRegistry = new ProviderClientRegistry({
 		providerInvocations += 1;
 		void writeRuntimeState();
 		const apiKey = (request.model as { readonly apiKey?: string }).apiKey;
-		if (scenario === "platform_billing" && apiKey === badPlatformKey.key) {
-			return streamTextResult([
-				{
-					type: "error",
-					error: {
-						statusCode: 400,
-						data: {
-							error: {
-								type: "invalid_request_error",
-								message:
-									"Your credit balance is too low. private-billing-canary",
-							},
+		if (apiKey === badPlatformKey.key && scenario.startsWith("platform_billing_")) {
+			platformKeySelections.push(badPlatformKey.keyId);
+			const error = {
+				type: "error" as const,
+				error: {
+					statusCode: 400,
+					data: {
+						error: {
+							type: "invalid_request_error",
+							message:
+								"Your credit balance is too low. private-billing-canary",
 						},
 					},
 				},
+			};
+			if (scenario === "platform_billing_post_progress") {
+				return streamTextResult([
+					{ type: "text-start", id: "partial" },
+					{ type: "text-delta", id: "partial", text: "committed partial" },
+					error,
+				]);
+			}
+			return streamTextResult([
+				error,
 			]);
+		}
+		if (apiKey === healthyPlatformKey.key && scenario.startsWith("platform_billing_")) {
+			platformKeySelections.push(healthyPlatformKey.keyId);
 		}
 		if (scenario === "statusless_transport" && providerInvocations <= 2) {
 			return streamTextResult([
@@ -424,6 +447,8 @@ try {
 			providerInvocations,
 			finishIdleInvocations,
 			finishIdleResult,
+			platformKeySelections,
+			platformKeyQuarantines,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|sk-provider-failure|sk-byok/i.test(
 					JSON.stringify(gatewayLogs),

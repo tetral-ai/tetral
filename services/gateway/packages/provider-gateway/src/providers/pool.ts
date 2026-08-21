@@ -242,7 +242,11 @@ export class PlatformKeyPool {
       this.quarantined.add(keyId);
       const key = this.findKey(keyId);
       if (key !== undefined) {
-        this.onQuarantine?.({ keyId, providerId: key.providerId, providerError: classification.providerError });
+        try {
+          this.onQuarantine?.({ keyId, providerId: key.providerId, providerError: classification.providerError });
+        } catch {
+          // Quarantine is authoritative for this process; observability is best-effort.
+        }
       }
     }
   }
@@ -307,9 +311,10 @@ export class PlatformKeyPool {
 
 /**
  * Classifies a provider attempt into a redacted Runtime-facing error and a
- * candidate platform-key action. Orchestration applies that action only to a
- * platform-owned attempt that has emitted no downstream event; session-owned
- * and post-event failures use the normalized error without changing key state.
+ * candidate platform-key action. Orchestration records the action for every
+ * platform-owned attempt so later turns avoid a proven-bad key, but switches
+ * credentials within the current turn only before its first downstream event.
+ * Session-owned failures use only the normalized error.
  */
 export function classifyProviderFailure(
   providerId: GatewayCatalogProviderId,

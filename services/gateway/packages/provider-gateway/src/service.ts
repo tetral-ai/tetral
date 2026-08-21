@@ -382,7 +382,9 @@ export class ProviderGatewayServiceShell {
     //   |                           |            | exclude this key for the turn              | fail-fast or    |
     //   |                           |            |                                            | max attempts    |
     //   | emitted == false          | session    | one attempt only; forward provider-error | no              |
-    //   | emitted == true (any src) | any        | no switch, no retry; forward terminal;    | no              |
+    //   | emitted == true (platform)| platform   | record key failure; no switch or retry;    | no              |
+    //   |                           |            | forward terminal; Runtime owns recovery   |                 |
+    //   | emitted == true (session) | session    | no switch or retry; forward terminal;      | no              |
     //   |                           |            | Runtime owns recovery                     |                 |
     //
     // ProviderOpenFragmentTracker validates only this attempt. A nominal finish or
@@ -494,7 +496,7 @@ export class ProviderGatewayServiceShell {
           );
           return;
         }
-        if (resolvedCredential?.source !== "platform" || emitted) {
+        if (resolvedCredential?.source !== "platform") {
           recordFailureOrigin(providerKeyFailure.origin);
           yield providerErrorEvent(
             providerKeyFailure.classification.action === "quarantine"
@@ -505,6 +507,15 @@ export class ProviderGatewayServiceShell {
         }
         const platformKeyId = resolvedCredential.platformKey.keyId;
         this.options.credentialResolver?.recordPlatformFailure(platformKeyId, providerKeyFailure.classification);
+        if (emitted) {
+          recordFailureOrigin(providerKeyFailure.origin);
+          yield providerErrorEvent(
+            providerKeyFailure.classification.action === "quarantine"
+              ? platformCredentialPoolUnavailableError(providerKeyFailure.classification.providerError.statusCode)
+              : providerKeyFailure.classification.providerError,
+          );
+          return;
+        }
         attemptedPlatformKeyIds.add(platformKeyId);
         platformAttempts += 1;
         lastPlatformProviderError = providerKeyFailure.classification.providerError;

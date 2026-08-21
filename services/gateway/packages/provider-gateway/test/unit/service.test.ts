@@ -15,7 +15,7 @@ import { BridgeAPIAttachmentResolver } from "../../src/attachments.js";
 import { ProviderCredentialResolver } from "../../src/providers/credentials.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { encryptAES256GCM } from "../../src/providers/crypto.js";
-import { classifyProviderFailure, ProviderKeyFailureError } from "../../src/providers/pool.js";
+import { classifyProviderFailure, PlatformKeyPool, ProviderKeyFailureError } from "../../src/providers/pool.js";
 import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
@@ -874,7 +874,7 @@ describe("ProviderGatewayServiceShell", () => {
     expect(JSON.stringify(logs)).not.toContain("statusless-private-canary");
   });
 
-  test("T-POOL-4 does not switch platform keys after a downstream event has been emitted", async () => {
+  test("T-POOL-4 quarantines a failed key after progress without switching the current turn", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({
       ...base,
@@ -882,32 +882,68 @@ describe("ProviderGatewayServiceShell", () => {
     });
     const attempts: string[] = [];
     const logs: unknown[] = [];
-    const pool = new RecordingPlatformCredentialPool(["pfk_1", "pfk_2"]);
+    let quarantineAlerts = 0;
+    const pool = new PlatformKeyPool([
+      { keyId: "pfk_1", providerId: "anthropic", key: "sk-pfk_1", weight: 1, priority: 0, cacheScope: "test" },
+      { keyId: "pfk_2", providerId: "anthropic", key: "sk-pfk_2", weight: 1, priority: 0, cacheScope: "test" },
+    ], {
+      random: () => 0,
+      onQuarantine: () => {
+        quarantineAlerts += 1;
+        throw new Error("logger unavailable");
+      },
+    });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
       logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
-      credentialResolver: platformCredentialResolver(pool),
+      credentialResolver: platformCredentialResolver({
+        select: async (providerId, options) => pool.select(providerId, options),
+        recordFailure: (keyId, classification) => pool.recordFailure(keyId, classification),
+      }),
       providerStreamer: {
         stream: async function* (input) {
-          attempts.push(input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing");
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          throw new ProviderKeyFailureError(retryableProviderFailure());
+          const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
+          attempts.push(keyID);
+          if (keyID === "pfk_1") {
+            yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            throw new ProviderKeyFailureError({
+              action: "quarantine",
+              providerError: {
+                code: "provider_key_unavailable",
+                message: "private-post-progress-canary",
+                retryable: false,
+                fatal: true,
+                statusCode: 401,
+              },
+            });
+          }
+          yield finishEvent();
         },
       },
     });
 
-    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+    const failed = await collectEvents(service.streamProviderRequest(request, metadata()));
 
     expect(attempts).toEqual(["pfk_1"]);
-    expect(pool.recordedFailures).toEqual([]);
-    expect(events).toHaveLength(2);
-    expect(events[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
-    expect(events[1]?.providerError?.error).toMatchObject({
-      code: "provider_stream_error",
-      retryable: true,
+    expect(quarantineAlerts).toBe(1);
+    expect(pool.isQuarantined("pfk_1")).toBe(true);
+    expect(failed).toHaveLength(2);
+    expect(failed[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
+    expect(failed[1]?.providerError?.error).toMatchObject({
+      code: "provider_unavailable",
+      message: "Provider is unavailable.",
+      retryable: false,
     });
+    expect(JSON.stringify(failed)).not.toContain("private-post-progress-canary");
+
+    const nextTurn = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(attempts).toEqual(["pfk_1", "pfk_2"]);
+    expect(quarantineAlerts).toBe(1);
+    expect(nextTurn.map((event) => event.type)).toEqual([
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    ]);
   });
 
-  test("midstream platform credential rejection is sanitized without pool mutation", async () => {
+  test("midstream platform credential rejection is sanitized and quarantined for later turns", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
     const pool = new RecordingPlatformCredentialPool(["pfk_midstream", "pfk_unused"]);
@@ -932,7 +968,12 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(pool.recordedFailures).toEqual([]);
+    expect(pool.recordedFailures).toEqual([
+      expect.objectContaining({
+        keyId: "pfk_midstream",
+        classification: expect.objectContaining({ action: "quarantine" }),
+      }),
+    ]);
     expect(events.at(-1)?.providerError?.error).toMatchObject({
       code: "provider_unavailable",
       message: "Provider is unavailable.",

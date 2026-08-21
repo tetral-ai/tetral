@@ -83,7 +83,7 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 
 	appendMessage("idem_provider_timeout_first", "survive semantic timeout exhaustion")
 	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
-	waitForProviderTimeoutFacts(t, admin, sessionID, 2, "rescheduling", process)
+	waitForProviderFailureFacts(t, admin, sessionID, 2, "rescheduling", process)
 	select {
 	case <-firstCapturePending:
 	case <-time.After(10 * time.Second):
@@ -93,7 +93,7 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 	appendMessage("idem_provider_timeout_second", "continue after the failed turn")
 	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
 	close(releaseFirstCapture)
-	waitForProviderTimeoutFacts(t, admin, sessionID, 3, "idle", process)
+	waitForProviderFailureFacts(t, admin, sessionID, 3, "idle", process)
 	result := process.close(t)
 	if captureErr := <-capturesSettled; captureErr != nil {
 		t.Fatalf("settle provider timeout output captures: %v", captureErr)
@@ -133,10 +133,14 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 		wantRequestEnds   int
 		wantReschedules   int
 		wantErrorEnds     int
+		wantAssistants    int
+		wantKeySelections []string
 	}{
-		{name: "platform billing", scenario: "platform_billing", wantProviderCalls: 2, wantTurns: 3, wantRequestEnds: 3, wantErrorEnds: 2},
-		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2},
-		{name: "invalid BYOK", scenario: "invalid_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1},
+		{name: "platform billing before progress", scenario: "platform_billing_pre_progress", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 2, wantAssistants: 2, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy", "pfk_provider_failure_healthy"}},
+		{name: "platform billing after progress", scenario: "platform_billing_post_progress", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy"}},
+		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}},
+		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2, wantAssistants: 1},
+		{name: "invalid BYOK", scenario: "invalid_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -202,15 +206,15 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			case <-time.After(10 * time.Second):
 				t.Fatalf("%s closeout did not create output capture custody: %s", testCase.scenario, process.output.String())
 			}
+			close(releaseFirstCapture)
+			firstTurnEnds := 1
+			if testCase.scenario == "statusless_transport" {
+				firstTurnEnds = 2
+			}
+			waitForProviderFailureFacts(t, admin, sessionID, firstTurnEnds, "idle", process)
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
 			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
-			close(releaseFirstCapture)
-			if testCase.wantTurns == 3 {
-				waitForProviderTimeoutFacts(t, admin, sessionID, 2, "idle", process)
-				appendMessage("idem_provider_failure_third_"+suffix, "continue after platform capacity is restored")
-				deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
-			}
-			waitForProviderTimeoutFacts(t, admin, sessionID, testCase.wantRequestEnds, "idle", process)
+			waitForProviderFailureFacts(t, admin, sessionID, testCase.wantRequestEnds, "idle", process)
 			result := process.close(t)
 			if captureErr := <-capturesSettled; captureErr != nil {
 				t.Fatalf("settle %s output captures: %v", testCase.scenario, captureErr)
@@ -219,6 +223,12 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				t.Fatalf("%s provider/FinishIdle/log result = %d/%d/%s/%v; want %d/%d/committed/false",
 					testCase.scenario, result.ProviderInvocations, result.FinishIdleInvocations, result.FinishIdleResult, result.SensitiveLogLeak,
 					testCase.wantProviderCalls, testCase.wantTurns)
+			}
+			if !slices.Equal(result.PlatformKeySelections, testCase.wantKeySelections) {
+				t.Fatalf("%s platform key selections = %v; want %v", testCase.scenario, result.PlatformKeySelections, testCase.wantKeySelections)
+			}
+			if strings.HasPrefix(testCase.scenario, "platform_billing_") && !slices.Equal(result.PlatformKeyQuarantines, []string{"pfk_provider_failure_bad"}) {
+				t.Fatalf("%s platform key quarantines = %v; want one bad-key quarantine", testCase.scenario, result.PlatformKeyQuarantines)
 			}
 
 			var starts, ends, reschedules, errorEnds, users, assistants int
@@ -235,10 +245,10 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				t.Fatalf("read %s durable provider failure facts: %v", testCase.scenario, err)
 			}
 			if starts != testCase.wantRequestEnds || ends != testCase.wantRequestEnds || reschedules != testCase.wantReschedules ||
-				errorEnds != testCase.wantErrorEnds || users != testCase.wantTurns || assistants != 1 {
-				t.Fatalf("%s starts/ends/reschedules/errors/users/assistants = %d/%d/%d/%d/%d/%d; want %d/%d/%d/%d/%d/1",
+				errorEnds != testCase.wantErrorEnds || users != testCase.wantTurns || assistants != testCase.wantAssistants {
+				t.Fatalf("%s starts/ends/reschedules/errors/users/assistants = %d/%d/%d/%d/%d/%d; want %d/%d/%d/%d/%d/%d",
 					testCase.scenario, starts, ends, reschedules, errorEnds, users, assistants,
-					testCase.wantRequestEnds, testCase.wantRequestEnds, testCase.wantReschedules, testCase.wantErrorEnds, testCase.wantTurns)
+					testCase.wantRequestEnds, testCase.wantRequestEnds, testCase.wantReschedules, testCase.wantErrorEnds, testCase.wantTurns, testCase.wantAssistants)
 			}
 			if strings.Contains(durablePayloads, "private-billing-canary") || strings.Contains(durablePayloads, "statusless-private-canary") || strings.Contains(durablePayloads, "private-byok-canary") {
 				t.Fatalf("%s durable facts leaked provider-private detail", testCase.scenario)
@@ -247,7 +257,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 	}
 }
 
-type providerTimeoutRuntimeProcess struct {
+type providerFailureRuntimeProcess struct {
 	command   *exec.Cmd
 	output    bytes.Buffer
 	port      int
@@ -255,15 +265,15 @@ type providerTimeoutRuntimeProcess struct {
 	closePath string
 }
 
-func startProviderTimeoutRuntime(t *testing.T, bridgeAddress, sessionID, threadID, bindingID, podUID string) *providerTimeoutRuntimeProcess {
+func startProviderTimeoutRuntime(t *testing.T, bridgeAddress, sessionID, threadID, bindingID, podUID string) *providerFailureRuntimeProcess {
 	return startProviderFailureRuntime(t, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_timeout")
 }
 
-func startProviderFailureRuntime(t *testing.T, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerTimeoutRuntimeProcess {
+func startProviderFailureRuntime(t *testing.T, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerFailureRuntimeProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
-	process := &providerTimeoutRuntimeProcess{
+	process := &providerFailureRuntimeProcess{
 		statePath: filepath.Join(tempDir, "state.json"),
 		closePath: filepath.Join(tempDir, "close"),
 	}
@@ -274,18 +284,18 @@ func startProviderFailureRuntime(t *testing.T, bridgeAddress, sessionID, threadI
 		"readyPath": readyPath, "statePath": process.statePath, "closePath": process.closePath, "scenario": scenario,
 	})
 	if err != nil {
-		t.Fatalf("encode provider timeout composition: %v", err)
+		t.Fatalf("encode provider failure composition: %v", err)
 	}
 	inputPath := filepath.Join(tempDir, "input.json")
 	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write provider timeout composition: %v", err)
+		t.Fatalf("write provider failure composition: %v", err)
 	}
-	process.command = exec.Command("bun", "packages/runtime-pod/test/fixtures/provider-timeout-production-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	process.command = exec.Command("bun", "packages/runtime-pod/test/fixtures/provider-failure-production-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
 	process.command.Dir = "../agent-runtime"
 	process.command.Stdout = &process.output
 	process.command.Stderr = &process.output
 	if err := process.command.Start(); err != nil {
-		t.Fatalf("start provider timeout composition: %v", err)
+		t.Fatalf("start provider failure composition: %v", err)
 	}
 	t.Cleanup(func() {
 		if process.command.ProcessState == nil {
@@ -305,11 +315,11 @@ func startProviderFailureRuntime(t *testing.T, bridgeAddress, sessionID, threadI
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("provider timeout composition did not become ready: %s", process.output.String())
+	t.Fatalf("provider failure composition did not become ready: %s", process.output.String())
 	return nil
 }
 
-func waitForProviderTimeoutFacts(t *testing.T, admin *sql.DB, sessionID string, wantEnds int, wantThreadStatus string, process *providerTimeoutRuntimeProcess) {
+func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, wantEnds int, wantThreadStatus string, process *providerFailureRuntimeProcess) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -342,31 +352,35 @@ func waitForProviderTimeoutFacts(t *testing.T, admin *sql.DB, sessionID string, 
 		  FROM session_messages WHERE workspace_id='default' AND session_id=$1),'[]')`, sessionID).
 		Scan(&starts, &ends, &reschedules, &statusValue, &providerAttempts, &endPayloads, &inboxFacts, &runningEvents, &userMessages, &messageFacts)
 	state, _ := os.ReadFile(process.statePath)
-	t.Fatalf("provider timeout facts starts/ends/reschedules/status/attempts/runs/users/state=%d/%d/%d/%s/%d/%d/%d/%s; want ends=%d status=%s; payloads=%s inbox=%s messages=%s process=%s",
+	t.Fatalf("provider failure facts starts/ends/reschedules/status/attempts/runs/users/state=%d/%d/%d/%s/%d/%d/%d/%s; want ends=%d status=%s; payloads=%s inbox=%s messages=%s process=%s",
 		starts, ends, reschedules, statusValue, providerAttempts, runningEvents, userMessages, state, wantEnds, wantThreadStatus, endPayloads, inboxFacts, messageFacts, process.output.String())
 }
 
-func (p *providerTimeoutRuntimeProcess) close(t *testing.T) struct {
-	ProviderInvocations   int    `json:"providerInvocations"`
-	FinishIdleInvocations int    `json:"finishIdleInvocations"`
-	FinishIdleResult      string `json:"finishIdleResult"`
-	SensitiveLogLeak      bool   `json:"sensitiveLogLeak"`
+func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
+	ProviderInvocations    int      `json:"providerInvocations"`
+	FinishIdleInvocations  int      `json:"finishIdleInvocations"`
+	FinishIdleResult       string   `json:"finishIdleResult"`
+	SensitiveLogLeak       bool     `json:"sensitiveLogLeak"`
+	PlatformKeySelections  []string `json:"platformKeySelections"`
+	PlatformKeyQuarantines []string `json:"platformKeyQuarantines"`
 } {
 	t.Helper()
 	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
-		t.Fatalf("close provider timeout composition: %v", err)
+		t.Fatalf("close provider failure composition: %v", err)
 	}
 	if err := p.command.Wait(); err != nil {
-		t.Fatalf("wait provider timeout composition: %v: %s", err, p.output.String())
+		t.Fatalf("wait provider failure composition: %v: %s", err, p.output.String())
 	}
 	var result struct {
-		ProviderInvocations   int    `json:"providerInvocations"`
-		FinishIdleInvocations int    `json:"finishIdleInvocations"`
-		FinishIdleResult      string `json:"finishIdleResult"`
-		SensitiveLogLeak      bool   `json:"sensitiveLogLeak"`
+		ProviderInvocations    int      `json:"providerInvocations"`
+		FinishIdleInvocations  int      `json:"finishIdleInvocations"`
+		FinishIdleResult       string   `json:"finishIdleResult"`
+		SensitiveLogLeak       bool     `json:"sensitiveLogLeak"`
+		PlatformKeySelections  []string `json:"platformKeySelections"`
+		PlatformKeyQuarantines []string `json:"platformKeyQuarantines"`
 	}
 	if err := json.Unmarshal(p.output.Bytes(), &result); err != nil {
-		t.Fatalf("decode provider timeout composition: %v: %s", err, p.output.String())
+		t.Fatalf("decode provider failure composition: %v: %s", err, p.output.String())
 	}
 	return result
 }
