@@ -137,7 +137,10 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		const loaded = await loader.loadThreadContext(threadScope());
 
 		expect(bridge.loadContextRequests).toEqual([
-			{ scope: expect.objectContaining({ sessionThreadId: "thrd_1" }) },
+			{
+				scope: expect.objectContaining({ sessionThreadId: "thrd_1" }),
+				recoveryLeaseRef: undefined,
+			},
 		]);
 		expect(loaded.contextEntries).toEqual([
 			{

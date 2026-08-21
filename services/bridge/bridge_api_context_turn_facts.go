@@ -107,19 +107,55 @@ var bridgeLoadContextTurnEventTypes = []string{
 	"session.thread_status_terminated",
 }
 
-// Retained historical turn facts are selected only through Runtime-declared
-// Request End identities. The current durable attempt and pending Tool route
-// identities are the only additional roots. This query deliberately has no
-// per-Message lookup and never derives retention from is_error or event age.
-const loadContextTurnEventsSQL = `WITH current_turn AS MATERIALIZED (
-		SELECT sequence
+// Provider Messages select their own compacted/retained window. This query is
+// the independent Active Turn read: every row is reached through a current
+// lifecycle boundary or a direct Request/Tool identity already selected by an
+// owning durable relation.
+const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
+		SELECT event_id, sequence
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
 		   AND session_thread_id = $3
 		   AND type IN ('session.status_running', 'session.thread_status_running')
-		   AND $5 <> ''
-		   AND event_id = $5
+		   AND $4 <> ''
+		   AND event_id = $4
+		 ORDER BY sequence DESC
+		 LIMIT 1
+	), current_running AS MATERIALIZED (
+		SELECT event_id, sequence
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type IN ('session.status_running', 'session.thread_status_running')
+		   AND sequence >= COALESCE((SELECT sequence FROM turn_root), 9223372036854775807)
+		 ORDER BY sequence DESC
+		 LIMIT 1
+	), previous_lifecycle AS MATERIALIZED (
+		SELECT event_id, sequence
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type IN (
+		     'session.status_running', 'session.thread_status_running',
+		     'session.status_rescheduled', 'session.thread_status_rescheduled',
+		     'session.status_idle', 'session.thread_status_idle',
+		     'session.status_terminated', 'session.thread_status_terminated'
+		   )
+		   AND sequence < COALESCE((SELECT sequence FROM current_running), 0)
+		 ORDER BY sequence DESC
+		 LIMIT 1
+	), current_reschedule AS MATERIALIZED (
+		SELECT event_id, model_request_id
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
+		   AND model_request_id IS NOT NULL
+		   AND sequence >= COALESCE((SELECT sequence FROM turn_root), 9223372036854775807)
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	),
@@ -130,7 +166,6 @@ const loadContextTurnEventsSQL = `WITH current_turn AS MATERIALIZED (
 		   AND request_start.session_id = $2
 		   AND request_start.session_thread_id = $3
 		   AND request_start.type = 'span.model_request_start'
-		   AND request_start.sequence >= $4
 		   AND request_start.model_request_id IS NOT NULL
 		   AND NOT EXISTS (
 		     SELECT 1 FROM session_events request_end
@@ -143,11 +178,11 @@ const loadContextTurnEventsSQL = `WITH current_turn AS MATERIALIZED (
 		 ORDER BY request_start.sequence DESC
 		 LIMIT 1
 	),
-	pending_requests AS MATERIALIZED (
-		SELECT jsonb_array_elements_text($6::jsonb) AS model_request_id
+	selected_request_input AS MATERIALIZED (
+		SELECT jsonb_array_elements_text($5::jsonb) AS model_request_id
 	),
 	pending_tools AS MATERIALIZED (
-		SELECT jsonb_array_elements_text($7::jsonb) AS event_id
+		SELECT jsonb_array_elements_text($6::jsonb) AS event_id
 	),
 	pending_interrupts AS MATERIALIZED (
 		SELECT jsonb_array_elements_text(inbox.event_ids_json::jsonb) AS event_id
@@ -165,39 +200,21 @@ const loadContextTurnEventsSQL = `WITH current_turn AS MATERIALIZED (
 		   AND session_id = $2
 		   AND session_thread_id = $3
 		   AND type = 'span.model_request_end'
-		   AND sequence >= $4
 		   AND model_request_id IS NOT NULL
-		   AND (
-		     payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}' IS NOT NULL
-		     OR CASE
-		          WHEN jsonb_typeof(payload_json::jsonb #> '{provider_context_retention,tool_use_event_ids}') = 'array'
-		          THEN jsonb_array_length(payload_json::jsonb #> '{provider_context_retention,tool_use_event_ids}') > 0
-		          ELSE false
-		        END
-		     OR CASE
-		          WHEN jsonb_typeof(payload_json::jsonb #> '{provider_context_retention,repair_event_ids}') = 'array'
-		          THEN jsonb_array_length(payload_json::jsonb #> '{provider_context_retention,repair_event_ids}') > 0
-		          ELSE false
-		        END
-		     OR (
-		       payload_json::jsonb #>> '{provider_context_retention,disposition}' = 'rescheduled'
-		       AND EXISTS (
-		         SELECT 1 FROM session_turn_retries retries
-		          WHERE retries.workspace_id = session_events.workspace_id
-		            AND retries.session_id = session_events.session_id
-		            AND retries.session_thread_id = session_events.session_thread_id
-		            AND (retries.provider_attempts > 0 OR retries.compaction_attempts > 0)
-		       )
-		     )
-		     OR model_request_id IN (SELECT model_request_id FROM pending_requests)
+		   AND model_request_id IN (
+		     SELECT model_request_id FROM selected_request_input
+		     UNION SELECT model_request_id FROM open_request
+		     UNION SELECT model_request_id FROM current_reschedule
 		   )
 	),
 	retained_requests AS MATERIALIZED (
 		SELECT model_request_id FROM retained_ends
 		UNION
-		SELECT model_request_id FROM pending_requests
+		SELECT model_request_id FROM selected_request_input
 		UNION
 		SELECT model_request_id FROM open_request
+		UNION
+		SELECT model_request_id FROM current_reschedule
 	),
 	retained_tools AS MATERIALIZED (
 		SELECT jsonb_array_elements_text(CASE
@@ -242,15 +259,12 @@ const loadContextTurnEventsSQL = `WITH current_turn AS MATERIALIZED (
 	     'session.thread_status_terminated'
 	   )
 	   AND (
-	     sequence >= COALESCE(
-	       (SELECT sequence FROM current_turn),
-	       (SELECT sequence FROM open_request),
-	       9223372036854775807
-	     )
-	     OR ($5 <> '' AND event_id = $5)
+	     event_id IN (SELECT event_id FROM turn_root)
+	     OR event_id IN (SELECT event_id FROM current_running)
+	     OR event_id IN (SELECT event_id FROM previous_lifecycle)
+	     OR event_id IN (SELECT event_id FROM current_reschedule)
 	     OR event_id IN (SELECT event_id FROM retained_ends)
 	     OR (type = 'span.model_request_start' AND model_request_id IN (SELECT model_request_id FROM retained_requests))
-	     OR (type IN ('session.status_rescheduled', 'session.thread_status_rescheduled') AND model_request_id IN (SELECT model_request_id FROM retained_requests))
 	     OR (type IN ('agent.tool_use', 'agent.mcp_tool_use') AND event_id IN (SELECT event_id FROM retained_tools))
 	     OR (type IN ('agent.tool_result', 'agent.mcp_tool_result') AND COALESCE(
 	          payload_json::jsonb ->> 'tool_use_event_id',
@@ -279,24 +293,34 @@ func loadThreadTurnFactsTx(
 		Events:          make([]bridgeLoadContextTurnEvent, 0),
 		InternalRepairs: make([]bridgeLoadContextRepairFact, 0),
 	}
-	compactionFloor, err := loadContextCompactionEventFloorTx(ctx, tx, scope, messages)
-	if err != nil {
-		return facts, err
-	}
 	durableTurnEventID := ""
 	if durableTurnID != nil {
 		durableTurnEventID = *durableTurnID
 	}
-	pendingModelRequestIDsJSON, _ := json.Marshal(pendingModelRequestIDs)
-	pendingToolUseEventIDsJSON, _ := json.Marshal(pendingToolUseEventIDs)
+	selectedModelRequestIDs := append(make([]string, 0, len(pendingModelRequestIDs)+len(messages)), pendingModelRequestIDs...)
+	seenModelRequests := make(map[string]struct{}, len(selectedModelRequestIDs))
+	for _, modelRequestID := range selectedModelRequestIDs {
+		seenModelRequests[modelRequestID] = struct{}{}
+	}
+	for _, message := range messages {
+		if message.ModelRequestID == nil || *message.ModelRequestID == "" {
+			continue
+		}
+		if _, exists := seenModelRequests[*message.ModelRequestID]; exists {
+			continue
+		}
+		seenModelRequests[*message.ModelRequestID] = struct{}{}
+		selectedModelRequestIDs = append(selectedModelRequestIDs, *message.ModelRequestID)
+	}
+	selectedModelRequestIDsJSON, _ := json.Marshal(selectedModelRequestIDs)
+	pendingToolUseEventIDsJSON, _ := json.Marshal(append([]string{}, pendingToolUseEventIDs...))
 	rows, err := tx.Query(ctx,
 		loadContextTurnEventsSQL,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		compactionFloor,
 		durableTurnEventID,
-		string(pendingModelRequestIDsJSON),
+		string(selectedModelRequestIDsJSON),
 		string(pendingToolUseEventIDsJSON),
 	)
 	if err != nil {
@@ -383,49 +407,6 @@ func includeChildInterruptTurnFact(payloadJSON string) (bool, error) {
 	default:
 		return false, status.Error(codes.FailedPrecondition, "child interrupt disposition is malformed")
 	}
-}
-
-func loadContextCompactionEventFloorTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	messages []bridgeLoadContextMessageDescriptor,
-) (int64, error) {
-	var compactionFloor int64
-	for _, message := range messages {
-		if message.Kind != "compaction" {
-			continue
-		}
-		if message.SourceEventID == nil || *message.SourceEventID == "" {
-			return 0, status.Error(codes.FailedPrecondition, "compaction message has no source event identity")
-		}
-		var sequence int64
-		err := tx.QueryRow(ctx,
-			`SELECT request_start.sequence
-			   FROM session_events AS compacted
-			   JOIN session_events AS request_start
-			     ON request_start.workspace_id = compacted.workspace_id
-			    AND request_start.session_id = compacted.session_id
-			    AND request_start.session_thread_id = compacted.session_thread_id
-			    AND request_start.model_request_id = compacted.model_request_id
-			    AND request_start.type = 'span.model_request_start'
-			  WHERE compacted.workspace_id = $1
-			    AND compacted.session_id = $2
-			    AND compacted.session_thread_id = $3
-			    AND compacted.event_id = $4
-			    AND compacted.type = 'agent.thread_context_compacted'`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *message.SourceEventID,
-		).Scan(&sequence)
-		if dbconnect.IsNoRows(err) {
-			return 0, status.Error(codes.FailedPrecondition, "compaction message has no Request Start")
-		}
-		if err != nil {
-			return 0, err
-		}
-		compactionFloor = sequence
-		break
-	}
-	return compactionFloor, nil
 }
 
 func bridgeRepairFactFromTurnEvent(

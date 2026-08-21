@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -129,6 +130,21 @@ func TestPostgreSQLRuntimeTerminationReceiptOwnsReplayAfterUnbinding(t *testing.
 		t.Fatalf("seed claimed cleanup custody: %v", err)
 	}
 	runtimeWriteID := running.GetCommitted().GetEventId()
+	recoveryQueue := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtime))
+	recoveryEnqueue, err := queue.NewRuntimeRecoveryEnqueueRequest(
+		workspace.DefaultID,
+		fixture.sessionID,
+		fixture.threadID,
+		"evt_recovery_queued_before_termination",
+		time.Date(2026, 1, 1, 0, 32, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("build queued recovery before termination: %v", err)
+	}
+	recoveryJob, err := recoveryQueue.Enqueue(context.Background(), recoveryEnqueue)
+	if err != nil {
+		t.Fatalf("enqueue recovery before termination: %v", err)
+	}
 	request := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: runtimeWriteID,
 		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`,
@@ -212,6 +228,14 @@ func TestPostgreSQLRuntimeTerminationReceiptOwnsReplayAfterUnbinding(t *testing.
 	}
 	if inboxStatus != "cancelled" || queueStatus != "cancelled" {
 		t.Fatalf("queued termination custody = Inbox %q Queue %q; want cancelled/cancelled", inboxStatus, queueStatus)
+	}
+	var recoveryQueueStatus string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1`, recoveryJob.ID).Scan(&recoveryQueueStatus); err != nil {
+		t.Fatalf("read queued recovery after termination: %v", err)
+	}
+	if recoveryQueueStatus != queue.StatusCancelled {
+		t.Fatalf("queued recovery after termination = %q; want cancelled", recoveryQueueStatus)
 	}
 	if _, err := fixture.store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("LoadContext after termination error = %v; want FailedPrecondition", err)

@@ -194,12 +194,19 @@ describe("RuntimeControlService method-specific ingress", () => {
 			bindingGeneration: 4,
 			targetPodUid: "uid-a",
 			sourceEventId: "evt_tool_recovery",
+			recoveryLeaseRef: {
+				jobId: "job_recovery",
+				leaseToken: "lease_recovery",
+				partitionKey: "session:default:sesn_recovery",
+				dedupeKey: "runtime_recovery:default:sesn_recovery:evt_tool_recovery",
+			},
 		};
 		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ accepted: {} });
 		expect(fixture.host.recoveries).toEqual([{
 			workspaceId: "default", sessionId: "sesn_recovery", sessionThreadId: "thr_recovery",
 			bindingId: "bind_recovery", bindingGeneration: 4, targetPodUid: "uid-a",
 			sourceEventId: "evt_tool_recovery",
+			recoveryLeaseRef: request.recoveryLeaseRef!,
 		}]);
 		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ duplicate: {} });
 	});

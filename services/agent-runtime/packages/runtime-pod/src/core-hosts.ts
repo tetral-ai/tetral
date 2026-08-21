@@ -222,9 +222,10 @@ export async function buildRuntimeCoreHosts(
 			? {
 					loadThreadContext: async (
 						command: RuntimeThreadAddressState,
+						loadOptions,
 					): Promise<RuntimeThreadPreloadState> => {
 						const context =
-							await options.contextLoader.loadThreadContext!(command);
+							await options.contextLoader.loadThreadContext!(command, loadOptions);
 						const pendingAgentMail: Array<
 							Extract<
 								RuntimeAcceptedInputState,
@@ -381,7 +382,10 @@ export async function buildRuntimeCoreHosts(
 		commandRunHost: {
 			handleRecoverThread: async (command) => {
 				const result = await Effect.runPromise(
-					host.handleEnsureThreadInstalled(command, { startPendingWork: true }),
+					host.handleEnsureThreadInstalled(command, {
+						startPendingWork: true,
+						loadOptions: { recovery: command.recoveryLeaseRef },
+					}),
 				);
 				return result.ok
 					? { ok: true, sessionId: result.sessionId, applied: result.applied }

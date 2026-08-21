@@ -168,6 +168,14 @@ message RuntimeScope {
 
 message LoadContextRequest {
   RuntimeScope scope = 1;
+  RecoveryLeaseRef recovery_lease_ref = 2;
+}
+
+message RecoveryLeaseRef {
+  string job_id = 1;
+  string lease_token = 2;
+  string partition_key = 3;
+  string dedupe_key = 4;
 }
 
 message LoadContextResponse {

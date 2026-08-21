@@ -160,6 +160,12 @@ export interface RuntimeCleanupCommand extends RuntimeSessionScope {
 
 export interface RuntimeRecoveryCommand extends RuntimeThreadScope {
 	readonly sourceEventId: string;
+	readonly recoveryLeaseRef: {
+		readonly jobId: string;
+		readonly leaseToken: string;
+		readonly partitionKey: string;
+		readonly dedupeKey: string;
+	};
 }
 
 export interface RuntimeSessionRunHost {
@@ -465,7 +471,11 @@ export class RuntimeControlService {
 			operation: "RecoverThread",
 			operationId: request.sourceEventId,
 			dedupeKey: `recovery:${request.sessionThreadId}:${request.sourceEventId}`,
-			identity: () => stableIdentity(request),
+			identity: () =>
+				stableIdentity({
+					...request,
+					recoveryLeaseRef: undefined,
+				}),
 			validate: validateRecoverThreadRequest,
 			selectedPodRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH, true),
 			bindingRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_BINDING_MISMATCH, true),
@@ -480,6 +490,12 @@ export class RuntimeControlService {
 				const result = await handler.call(this.options.runHost, {
 					...scope,
 					sourceEventId: request.sourceEventId,
+					recoveryLeaseRef: {
+						jobId: request.recoveryLeaseRef!.jobId,
+						leaseToken: request.recoveryLeaseRef!.leaseToken,
+						partitionKey: request.recoveryLeaseRef!.partitionKey,
+						dedupeKey: request.recoveryLeaseRef!.dedupeKey,
+					},
 				});
 				if (!result.ok) {
 					if (result.reason === "context_load_failed") {

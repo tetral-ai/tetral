@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -33,6 +34,12 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.load_context", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
+		}
+		if request.GetRecoveryLeaseRef() != nil {
+			phase = "recovery_authority"
+			if err := verifyRuntimeRecoveryLoadAuthorityTx(ctx, tx, request.GetScope(), request.GetRecoveryLeaseRef()); err != nil {
+				return err
+			}
 		}
 		phase = "thread_validation"
 		if err := verifyRuntimeThreadScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -64,6 +71,54 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 		return nil, err
 	}
 	return response, nil
+}
+
+func verifyRuntimeRecoveryLoadAuthorityTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	ref *bridgev1.RecoveryLeaseRef,
+) error {
+	if ref.GetJobId() == "" || ref.GetLeaseToken() == "" || ref.GetPartitionKey() == "" || ref.GetDedupeKey() == "" ||
+		ref.GetPartitionKey() != queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()) {
+		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
+	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+		WorkspaceID: workspace.ID(scope.GetWorkspaceId()),
+		JobID:       ref.GetJobId(), LeaseToken: ref.GetLeaseToken(), Kind: queue.KindRuntimeRecovery,
+		PartitionKey: ref.GetPartitionKey(), DedupeKey: ref.GetDedupeKey(),
+	})
+	if err != nil {
+		return err
+	}
+	if !live {
+		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+	}
+	var payloadJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+		    AND kind=$4 AND partition_key=$5 AND dedupe_key=$6 AND status='leased'`,
+		scope.GetWorkspaceId(), ref.GetJobId(), ref.GetLeaseToken(), queue.KindRuntimeRecovery,
+		ref.GetPartitionKey(), ref.GetDedupeKey(),
+	).Scan(&payloadJSON); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+		}
+		return err
+	}
+	var payload struct {
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		SourceEventID   string `json:"source_event_id"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.SessionID != scope.GetSessionId() ||
+		payload.SessionThreadID != scope.GetSessionThreadId() || payload.SourceEventID == "" ||
+		ref.GetDedupeKey() != queue.FormatRuntimeRecoveryDedupeKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), payload.SourceEventID) {
+		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
+	return nil
 }
 
 func logRuntimeContextLoadRejected(logger *slog.Logger, scope *bridgev1.RuntimeScope, phase string, rejection error) {
@@ -124,11 +179,7 @@ type bridgeLoadContextPayload struct {
 }
 
 type bridgeLoadContextMessageDescriptor struct {
-	Kind            string
-	MessageID       string
-	MessageSequence int64
-	SourceEventID   *string
-	ModelRequestID  *string
+	ModelRequestID *string
 }
 
 type bridgeRuntimeContextEntry struct {
@@ -313,10 +364,8 @@ func loadThreadContextJSONTx(
 			SELECT jsonb_array_elements_text($4::jsonb) AS model_request_id
 		)
 			SELECT m.kind,
-			       m.message_id,
 			       m.sequence,
 			       m.data_json,
-			       m.source_event_id,
 			       m.model_request_id,
 			       CASE
 			         WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
@@ -380,18 +429,14 @@ func loadThreadContextJSONTx(
 	messageDescriptors := make([]bridgeLoadContextMessageDescriptor, 0)
 	for rows.Next() {
 		var kind string
-		var messageID string
 		var sequence int64
 		var raw string
-		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
 		var contextState string
 		if err := rows.Scan(
 			&kind,
-			&messageID,
 			&sequence,
 			&raw,
-			&sourceEventID,
 			&modelRequestID,
 			&contextState,
 		); err != nil {
@@ -423,16 +468,9 @@ func loadThreadContextJSONTx(
 		default:
 			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
 		}
-		descriptor := bridgeLoadContextMessageDescriptor{
-			Kind:            kind,
-			MessageID:       messageID,
-			MessageSequence: sequence,
-		}
+		descriptor := bridgeLoadContextMessageDescriptor{}
 		if modelRequestID.Valid {
 			descriptor.ModelRequestID = &modelRequestID.String
-		}
-		if sourceEventID.Valid {
-			descriptor.SourceEventID = &sourceEventID.String
 		}
 		messageDescriptors = append(messageDescriptors, descriptor)
 	}

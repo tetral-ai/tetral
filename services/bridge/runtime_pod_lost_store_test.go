@@ -28,6 +28,8 @@ import (
 type settlingRecoveryCommandClient struct {
 	*RuntimePodCommandClient
 	beforeRecover func(*agentruntimev1.RecoverThreadRequest) error
+	response      *agentruntimev1.RecoverThreadResponse
+	err           error
 }
 
 func (c *settlingRecoveryCommandClient) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
@@ -36,7 +38,8 @@ func (c *settlingRecoveryCommandClient) RecoverThread(ctx context.Context, targe
 			return nil, err
 		}
 	}
-	return c.RuntimePodCommandClient.RecoverThread(ctx, target, request)
+	c.response, c.err = c.RuntimePodCommandClient.RecoverThread(ctx, target, request)
+	return c.response, c.err
 }
 
 func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) {
@@ -756,11 +759,45 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			); err != nil {
 				t.Fatalf("seed pending approval: %v", err)
 			}
+			var assistantSequence int64
+			if err := admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
+				WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+				sessionID, threadID, modelRequestID,
+			).Scan(&assistantSequence); err != nil {
+				t.Fatalf("read pending approval Assistant sequence: %v", err)
+			}
+			if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+				visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+			) VALUES
+			('default',$1,$2,$4,3,'span.model_request_end',
+			 jsonb_build_object(
+			   'model_request_start_id',$5::text,'is_error',false,
+			   'provider_context_retention',jsonb_build_object(
+			     'disposition','completed','assistant_message_sequence',$6::bigint,
+			     'tool_use_event_ids',jsonb_build_array($3::text),'repair_event_ids',jsonb_build_array()
+			   )
+			 )::text,'internal',false,$7,'{}',now(),now()),
+			('default',$1,$2,$8,4,'session.status_idle',
+			 '{"stop_reason":{"type":"requires_action"}}','internal',false,NULL,'{}',now(),now()),
+			('default',$1,$2,$9,5,'session.status_running',
+			 '{"type":"session.status_running"}','internal',false,NULL,'{}',now(),now())`,
+				sessionID, threadID, toolUseEventID,
+				"evt_pod_loss_approval_end_"+suffix,
+				"evt_pod_loss_approval_start_"+suffix,
+				assistantSequence,
+				modelRequestID,
+				"evt_pod_loss_approval_idle_"+suffix,
+				"evt_pod_loss_approval_running_"+suffix,
+			); err != nil {
+				t.Fatalf("seed completed requires-action approval journey: %v", err)
+			}
 
 			apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-pod-loss-approval-key!!")
-			if _, err := runRuntimePodLostRepairTransaction(
-				context.Background(), runtime, sessionID, binding,
+			deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 0)
+			if err := deliveryStore.repairLostRuntimeBinding(
+				context.Background(), workspace.DefaultID.String(), sessionID, binding,
 				time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
 			); err != nil {
 				t.Fatalf("repair pending approval after pod loss: %v", err)
@@ -789,7 +826,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				PodUID: "pod-recovery-" + suffix, PodIP: "127.0.0.1",
 			}
 			runtimeProcess := startProviderRecoveryRuntime(t, bridgeAddress, sessionID, threadID, replacement.PodUID, time.Date(2026, 1, 1, 0, 5, 1, 0, time.UTC))
-			deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runtimeProcess.port)
+			deliveryStore.RuntimeGRPCPort = runtimeProcess.port
 			deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
 			}}
@@ -819,16 +856,25 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			if err != nil || !active {
 				t.Fatalf("deliver Runtime recovery job = active:%t err:%v; want one accepted delivery", active, err)
 			}
+			if sender.err != nil || (sender.response.GetAccepted() == nil && sender.response.GetDuplicate() == nil) {
+				var queueStatus, sessionStatus, runtimeStatus, sourceType string
+				var lastErrorKind sql.NullString
+				if readErr := admin.QueryRowContext(context.Background(), `SELECT
+					(SELECT status FROM queue_jobs WHERE workspace_id='default' AND kind=$2 AND partition_key=$3),
+					(SELECT last_error_kind FROM queue_jobs WHERE workspace_id='default' AND kind=$2 AND partition_key=$3),
+					(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+					(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+					(SELECT type FROM session_events WHERE workspace_id='default' AND session_id=$1 AND event_id=$4)`,
+					sessionID, queue.KindRuntimeRecovery, queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID), toolUseEventID,
+				).Scan(&queueStatus, &lastErrorKind, &sessionStatus, &runtimeStatus, &sourceType); readErr != nil {
+					t.Fatalf("read rejected Runtime recovery facts: %v", readErr)
+				}
+				t.Fatalf("Runtime recovery response = %#v/%v Queue=%s error=%v Session=%s Runtime=%s source=%s; want accepted or duplicate", sender.response, sender.err, queueStatus, lastErrorKind, sessionStatus, runtimeStatus, sourceType)
+			}
 			preloaded := runtimeProcess.recoveryResult(t)
 			if preloaded.Command.SourceEventID != toolUseEventID || preloaded.Command.TargetPodUID != replacement.PodUID {
 				t.Fatalf("Runtime recovery command = %#v; want exact Tool root and resolver-owned replacement", preloaded.Command)
 			}
-			loadScope := bridgeAPIScope(
-				sessionID, threadID, preloaded.Command.BindingID,
-				preloaded.Command.BindingGeneration, preloaded.Command.TargetPodUID,
-			)
-			runtimeProcess.close(t)
-
 			var resultCount int
 			var resultEventID string
 			var resultPayload string
@@ -844,7 +890,8 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				t.Fatalf("read approval pod-loss result: %v", err)
 			}
 			if resultCount != testCase.wantResultCountAtWake || strings.Contains(resultPayload, `"reason":"runtime_pod_lost"`) {
-				t.Fatalf("approval pod-loss result = %d/%s; want %d terminal settlement Results and no synthetic repair Result", resultCount, resultPayload, testCase.wantResultCountAtWake)
+				t.Fatalf("approval pod-loss result = %d/%s; want %d terminal settlement Results and no synthetic repair Result; preload=%s",
+					resultCount, resultPayload, testCase.wantResultCountAtWake, preloaded.LastSnapshot)
 			}
 			var pendingStatus string
 			var pendingResultEventID sql.NullString
@@ -874,41 +921,18 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			).Scan(&requestEndCount, &requestEndIsError); err != nil {
 				t.Fatalf("read approval Request End: %v", err)
 			}
-			if requestEndCount != 1 || !requestEndIsError {
-				t.Fatalf("approval Request End count/error = %d/%v; want one pod-loss closeout", requestEndCount, requestEndIsError)
+			if requestEndCount != 1 || requestEndIsError {
+				t.Fatalf("approval Request End count/error = %d/%v; want one completed pre-approval request", requestEndCount, requestEndIsError)
 			}
 
-			loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: loadScope})
-			if err != nil {
-				t.Fatalf("LoadContext after approval pod loss: %v", err)
+			snapshot := string(preloaded.LastSnapshot)
+			wantUnsettledOwner := testCase.wantPendingAtWake == 1
+			if strings.Contains(snapshot, `"hasUnsettledToolOwner":true`) != wantUnsettledOwner ||
+				(wantUnsettledOwner && (!strings.Contains(snapshot, `"contextKind":"assistant"`) ||
+					!strings.Contains(snapshot, `"modelToolCallId":"tool-call-pod-loss-approval-`+suffix+`"`))) {
+				t.Fatalf("replacement Runtime checkpoint = %s; want unsettled owner %t with exact Assistant Tool Call", snapshot, wantUnsettledOwner)
 			}
-			var payload bridgeLoadContextPayload
-			if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
-				t.Fatalf("decode approval pod-loss context: %v", err)
-			}
-			if len(payload.PendingToolUses) != testCase.wantPendingAtWake {
-				t.Fatalf("approval pod-loss pending context = %+v; want %d live approval routes", payload.PendingToolUses, testCase.wantPendingAtWake)
-			}
-			if !testCase.settleBeforeWake {
-				var assistantOwner bool
-				for _, entry := range payload.ContextEntries {
-					assistantOwner = assistantOwner || entry.ContextKind == "assistant"
-				}
-				if !assistantOwner {
-					t.Fatalf("cold recovery context = %#v; want Assistant owner for the nonterminal Tool route", payload.ContextEntries)
-				}
-				settle(loadScope)
-				reloaded, reloadErr := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: loadScope})
-				if reloadErr != nil {
-					t.Fatalf("LoadContext after post-wake settlement: %v", reloadErr)
-				}
-				if err := json.Unmarshal([]byte(reloaded.GetContextJson()), &payload); err != nil {
-					t.Fatalf("decode settled recovery context: %v", err)
-				}
-				if len(payload.PendingToolUses) != 0 {
-					t.Fatalf("settled recovery context = %+v; want terminal Tool route", payload.PendingToolUses)
-				}
-			}
+			runtimeProcess.close(t)
 		})
 	}
 }

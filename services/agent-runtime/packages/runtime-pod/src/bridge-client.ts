@@ -13,6 +13,7 @@ import { credentials, status } from "@grpc/grpc-js";
 import type {
 	AcceptedInputCommitResult,
 	ContextLoader,
+	RuntimeContextLoadOptions,
 	RuntimeLoadedAgentMail,
 	RuntimeLoadedPendingToolUse,
 } from "@tetral/agent-runtime-core/src/context/context-loader.js";
@@ -820,7 +821,10 @@ export class BridgeAPIContextLoader implements ContextLoader {
 	}
 
 	/** Loads and validates the complete cold-start projection for the supplied thread command. */
-	async loadThreadContext(command: RuntimeThreadAddressState): Promise<{
+	async loadThreadContext(
+		command: RuntimeThreadAddressState,
+		options?: RuntimeContextLoadOptions,
+	): Promise<{
 		readonly contextEntries: readonly RuntimeContextEntry[];
 		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
 		readonly turnFacts: ThreadTurnLoadFacts;
@@ -841,7 +845,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			| undefined;
 		readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
 	}> {
-		return await this.loadContext(command);
+		return await this.loadContext(command, options);
 	}
 
 	/** Reads target-owned durable mail without mutating sender or Inbox state. */
@@ -1016,7 +1020,10 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		};
 	}
 
-	private async loadContext(input: RuntimeThreadAddressState): Promise<{
+	private async loadContext(
+		input: RuntimeThreadAddressState,
+		options?: RuntimeContextLoadOptions,
+	): Promise<{
 		readonly contextEntries: readonly RuntimeContextEntry[];
 		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
 		readonly turnFacts: ThreadTurnLoadFacts;
@@ -1042,6 +1049,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			this.client,
 			{
 				scope: bridgeScope(input),
+				recoveryLeaseRef: options?.recovery,
 			},
 			metadata,
 		);

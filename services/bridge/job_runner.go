@@ -582,11 +582,14 @@ func runtimeDeliveryRequiresFinalization(job RuntimeJob, result RuntimeDeliveryR
 		}
 		return !result.Retryable || runtimeJobFinalAttempt(job)
 	}
+	if job.Kind == queue.KindRuntimeRecovery {
+		return runtimeJobFinalAttempt(job)
+	}
 	return isMCPManifestRuntimeJob(job) && runtimeJobFinalAttempt(job)
 }
 
 func runtimeJobFinalAttempt(job RuntimeJob) bool {
-	return (job.Kind == queue.KindRuntimeInput || isMCPManifestRuntimeJob(job)) &&
+	return (job.Kind == queue.KindRuntimeInput || job.Kind == queue.KindRuntimeRecovery || isMCPManifestRuntimeJob(job)) &&
 		job.MaxAttempts > 0 &&
 		job.AttemptCount >= job.MaxAttempts
 }

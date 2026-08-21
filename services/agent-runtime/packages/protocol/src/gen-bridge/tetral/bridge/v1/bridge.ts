@@ -427,6 +427,14 @@ export interface RuntimeScope {
 
 export interface LoadContextRequest {
   scope: RuntimeScope | undefined;
+  recoveryLeaseRef: RecoveryLeaseRef | undefined;
+}
+
+export interface RecoveryLeaseRef {
+  jobId: string;
+  leaseToken: string;
+  partitionKey: string;
+  dedupeKey: string;
 }
 
 export interface LoadContextResponse {
@@ -2730,13 +2738,16 @@ export const RuntimeScope: MessageFns<RuntimeScope> = {
 };
 
 function createBaseLoadContextRequest(): LoadContextRequest {
-  return { scope: undefined };
+  return { scope: undefined, recoveryLeaseRef: undefined };
 }
 
 export const LoadContextRequest: MessageFns<LoadContextRequest> = {
   encode(message: LoadContextRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.scope !== undefined) {
       RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.recoveryLeaseRef !== undefined) {
+      RecoveryLeaseRef.encode(message.recoveryLeaseRef, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -2756,6 +2767,14 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
           message.scope = RuntimeScope.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.recoveryLeaseRef = RecoveryLeaseRef.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2766,13 +2785,23 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
   },
 
   fromJSON(object: any): LoadContextRequest {
-    return { scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined };
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      recoveryLeaseRef: isSet(object.recoveryLeaseRef)
+        ? RecoveryLeaseRef.fromJSON(object.recoveryLeaseRef)
+        : isSet(object.recovery_lease_ref)
+        ? RecoveryLeaseRef.fromJSON(object.recovery_lease_ref)
+        : undefined,
+    };
   },
 
   toJSON(message: LoadContextRequest): unknown {
     const obj: any = {};
     if (message.scope !== undefined) {
       obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.recoveryLeaseRef !== undefined) {
+      obj.recoveryLeaseRef = RecoveryLeaseRef.toJSON(message.recoveryLeaseRef);
     }
     return obj;
   },
@@ -2785,6 +2814,133 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     message.scope = (object.scope !== undefined && object.scope !== null)
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
+    message.recoveryLeaseRef = (object.recoveryLeaseRef !== undefined && object.recoveryLeaseRef !== null)
+      ? RecoveryLeaseRef.fromPartial(object.recoveryLeaseRef)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRecoveryLeaseRef(): RecoveryLeaseRef {
+  return { jobId: "", leaseToken: "", partitionKey: "", dedupeKey: "" };
+}
+
+export const RecoveryLeaseRef: MessageFns<RecoveryLeaseRef> = {
+  encode(message: RecoveryLeaseRef, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.jobId !== "") {
+      writer.uint32(10).string(message.jobId);
+    }
+    if (message.leaseToken !== "") {
+      writer.uint32(18).string(message.leaseToken);
+    }
+    if (message.partitionKey !== "") {
+      writer.uint32(26).string(message.partitionKey);
+    }
+    if (message.dedupeKey !== "") {
+      writer.uint32(34).string(message.dedupeKey);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RecoveryLeaseRef {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRecoveryLeaseRef();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.jobId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.leaseToken = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.partitionKey = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.dedupeKey = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RecoveryLeaseRef {
+    return {
+      jobId: isSet(object.jobId)
+        ? globalThis.String(object.jobId)
+        : isSet(object.job_id)
+        ? globalThis.String(object.job_id)
+        : "",
+      leaseToken: isSet(object.leaseToken)
+        ? globalThis.String(object.leaseToken)
+        : isSet(object.lease_token)
+        ? globalThis.String(object.lease_token)
+        : "",
+      partitionKey: isSet(object.partitionKey)
+        ? globalThis.String(object.partitionKey)
+        : isSet(object.partition_key)
+        ? globalThis.String(object.partition_key)
+        : "",
+      dedupeKey: isSet(object.dedupeKey)
+        ? globalThis.String(object.dedupeKey)
+        : isSet(object.dedupe_key)
+        ? globalThis.String(object.dedupe_key)
+        : "",
+    };
+  },
+
+  toJSON(message: RecoveryLeaseRef): unknown {
+    const obj: any = {};
+    if (message.jobId !== "") {
+      obj.jobId = message.jobId;
+    }
+    if (message.leaseToken !== "") {
+      obj.leaseToken = message.leaseToken;
+    }
+    if (message.partitionKey !== "") {
+      obj.partitionKey = message.partitionKey;
+    }
+    if (message.dedupeKey !== "") {
+      obj.dedupeKey = message.dedupeKey;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RecoveryLeaseRef>, I>>(base?: I): RecoveryLeaseRef {
+    return RecoveryLeaseRef.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RecoveryLeaseRef>, I>>(object: I): RecoveryLeaseRef {
+    const message = createBaseRecoveryLeaseRef();
+    message.jobId = object.jobId ?? "";
+    message.leaseToken = object.leaseToken ?? "";
+    message.partitionKey = object.partitionKey ?? "";
+    message.dedupeKey = object.dedupeKey ?? "";
     return message;
   },
 };

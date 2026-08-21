@@ -25,6 +25,14 @@ message RecoverThreadRequest {
   string source_event_id = 7;
   reserved 8;
   reserved "recovery_kind";
+  RecoveryLeaseRef recovery_lease_ref = 9;
+}
+
+message RecoveryLeaseRef {
+  string job_id = 1;
+  string lease_token = 2;
+  string partition_key = 3;
+  string dedupe_key = 4;
 }
 
 message RecoverThreadResponse {

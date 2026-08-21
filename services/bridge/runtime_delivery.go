@@ -42,6 +42,10 @@ type RuntimeDeliveryStore interface {
 	PrepareRuntimeInputRejection(context.Context, RuntimeJob, RuntimeDeliveryResult) (bool, error)
 }
 
+type RuntimeRecoveryActivationStore interface {
+	ActivateRuntimeRecovery(context.Context, RuntimeJob) (RuntimeCommandPlan, error)
+}
+
 type RuntimeInterruptDeliveryAuthorityStore interface {
 	InterruptDeliveryAuthority(context.Context, RuntimeJob) (RuntimeInterruptDeliveryAuthority, error)
 }
@@ -119,6 +123,7 @@ type RuntimeCommandPlan struct {
 	SettledAccepted       bool
 	QueueLeaseSettled     bool
 	CleanupTargetGone     bool
+	RecoveryPrepared      bool
 	Target                RuntimePodTarget
 	AttemptedBinding      RuntimeAttemptedBinding
 	AcceptInput           *agentruntimev1.AcceptInputRequest
@@ -445,6 +450,26 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		}
 		return finalizer.FinalizeRuntimeCleanup(ctx, job)
 	}
+	if plan.RecoveryPrepared {
+		activator, ok := d.Store.(RuntimeRecoveryActivationStore)
+		if !ok || activator == nil {
+			return RuntimeDeliveryResult{
+				Status: RuntimeDeliveryRejected, Retryable: true,
+				ErrorKind: "runtime_recovery_authority_unavailable", ErrorMessage: "runtime recovery authority is unavailable",
+			}, nil
+		}
+		plan, err = activator.ActivateRuntimeRecovery(ctx, job)
+		if err != nil {
+			return runtimeDeliveryResultFromPrepareError(err), nil
+		}
+		if plan.StaleAccepted || plan.DeliveryAuthorityLost {
+			resultStatus := RuntimeDeliveryDuplicate
+			if plan.DeliveryAuthorityLost {
+				resultStatus = RuntimeDeliveryAuthorityLost
+			}
+			return RuntimeDeliveryResult{Status: resultStatus, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
+		}
+	}
 	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" {
 		authorizer, ok := d.Store.(RuntimeInterruptDeliveryAuthorityStore)
 		if !ok || authorizer == nil {
@@ -690,7 +715,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 			return nil
 		}
 		if job.Kind == queue.KindRuntimeRecovery {
-			recoveryPlan, err := s.prepareRuntimeRecoveryCommandTx(ctx, tx, job, port, now)
+			recoveryPlan, err := s.prepareRuntimeRecoveryCommandTx(ctx, tx, job)
 			if err != nil {
 				return err
 			}
@@ -1078,6 +1103,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 	if isMCPManifestRuntimeJob(job) {
 		return s.finalizeMCPManifestDelivery(ctx, job, result)
 	}
+	if job.Kind == queue.KindRuntimeRecovery {
+		return s.finalizeRuntimeRecoveryDelivery(ctx, job, result)
+	}
 	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" || job.RuntimeInputID == "" ||
 		((job.InputKind == "interrupt_control" || result.Status == RuntimeDeliveryBarrierStale) && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) {
 		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime delivery finalization identity is incomplete", retryable: false}
@@ -1214,6 +1242,110 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 		return result, nil
 	}
 	return finalized, nil
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
+	ctx context.Context,
+	job RuntimeJob,
+	result RuntimeDeliveryResult,
+) (RuntimeDeliveryResult, error) {
+	if job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" ||
+		job.RecoverySourceEventID == "" || job.JobID == "" || job.LeaseToken == "" ||
+		job.PartitionKey == "" || job.DedupeKey == "" || result.Status != RuntimeDeliveryRejected ||
+		!runtimeJobFinalAttempt(job) {
+		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery finalization identity is incomplete", retryable: false}
+	}
+	now := storage.Now()
+	if s.Clock != nil {
+		now = s.Clock().UTC()
+	}
+	finalized := RuntimeDeliveryResult{}
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_runtime_recovery", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+			WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+			Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+		})
+		if err != nil {
+			return err
+		}
+		if !active {
+			finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+			return nil
+		}
+		var sessionStatus string
+		if err := tx.QueryRow(ctx,
+			`SELECT status FROM sessions WHERE workspace_id=$1 AND id=$2`,
+			job.WorkspaceID, job.SessionID,
+		).Scan(&sessionStatus); err != nil {
+			return err
+		}
+		if sessionStatus == "terminated" {
+			updated, err := tx.Exec(ctx,
+				`UPDATE queue_jobs
+				    SET status='cancelled', cancelled_at=$4,
+				        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+				        updated_at=$4
+				  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+				    AND kind=$5 AND partition_key=$6 AND dedupe_key=$7 AND status='leased'`,
+				job.WorkspaceID, job.JobID, job.LeaseToken, now, job.Kind, job.PartitionKey, job.DedupeKey,
+			)
+			if err != nil {
+				return err
+			}
+			if !rowsAffected(updated) {
+				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+				return nil
+			}
+			finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
+			return nil
+		}
+		var bindingID, podUID sql.NullString
+		var bindingGeneration sql.NullInt64
+		err = tx.QueryRow(ctx,
+			`SELECT binding_id, binding_generation, agent_runtime_pod_uid
+			   FROM session_runtime_bindings
+			  WHERE workspace_id=$1 AND session_id=$2
+			  FOR UPDATE`,
+			job.WorkspaceID, job.SessionID,
+		).Scan(&bindingID, &bindingGeneration, &podUID)
+		if err != nil && !dbconnect.IsNoRows(err) {
+			return err
+		}
+		scope := &bridgev1.RuntimeScope{
+			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
+			Binding: &bridgev1.RuntimeBindingRef{
+				BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, TargetPodUid: podUID.String,
+			},
+		}
+		threadScope, err := lockThreadMutationRowTx(ctx, tx, scope)
+		if err != nil {
+			return err
+		}
+		failure := runtimeTerminationFailure{
+			Type: "runtime", Code: "runtime_recovery_exhausted",
+			Message: "The session runtime could not complete the request.",
+			Reason:  "runtime_recovery_exhausted", Retryable: false,
+		}
+		failure.RetryStatus.Type = "terminal"
+		failureJSON, err := marshalBridgeJSON(failure)
+		if err != nil {
+			return err
+		}
+		runtimeWriteID := stableRuntimeID("runtime_recovery_exhausted", job.WorkspaceID, job.SessionID, job.RecoverySourceEventID)
+		if _, _, err := settleRuntimeTerminationTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now); err != nil {
+			return err
+		}
+		finalized = RuntimeDeliveryResult{
+			Status: RuntimeDeliveryRejected, Retryable: false,
+			ErrorKind: "runtime_delivery_exhausted", ErrorMessage: "runtime delivery attempts are exhausted",
+			QueueLeaseSettled: true,
+		}
+		return nil
+	})
+	return finalized, err
 }
 
 func finalizeInterruptDeliveryExhaustionTx(
@@ -2535,22 +2667,46 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 	return plan, nil
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
+func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (RuntimeCommandPlan, error) {
+	active, terminal, err := validateRuntimeRecoveryAuthorityTx(ctx, tx, job)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if terminal {
+		return RuntimeCommandPlan{StaleAccepted: true}, nil
+	}
+	if !active {
+		return RuntimeCommandPlan{DeliveryAuthorityLost: true}, nil
+	}
+	return RuntimeCommandPlan{RecoveryPrepared: true}, nil
+}
+
+func validateRuntimeRecoveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (active bool, terminal bool, resultErr error) {
 	if job.RecoverySourceEventID == "" || job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery identity is incomplete", retryable: false}
+		return false, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery identity is incomplete", retryable: false}
 	}
 	if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
-		return RuntimeCommandPlan{}, err
+		return false, false, err
+	}
+	var sessionStatus string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM sessions WHERE workspace_id=$1 AND id=$2`,
+		job.WorkspaceID, job.SessionID,
+	).Scan(&sessionStatus); err != nil {
+		return false, false, err
+	}
+	if sessionStatus == "terminated" {
+		return false, true, nil
 	}
 	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
 		WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
 		PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
 	})
 	if err != nil {
-		return RuntimeCommandPlan{}, err
+		return false, false, err
 	}
 	if !live {
-		return RuntimeCommandPlan{DeliveryAuthorityLost: true}, nil
+		return false, false, nil
 	}
 	var sourceThreadID, sourceType string
 	if err := tx.QueryRow(ctx,
@@ -2558,42 +2714,78 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx con
 		  WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3 FOR UPDATE`,
 		job.WorkspaceID, job.SessionID, job.RecoverySourceEventID,
 	).Scan(&sourceThreadID, &sourceType); dbconnect.IsNoRows(err) {
-		return RuntimeCommandPlan{StaleAccepted: true}, nil
+		return false, true, nil
 	} else if err != nil {
-		return RuntimeCommandPlan{}, err
+		return false, false, err
 	}
 	if sourceThreadID != job.SessionThreadID ||
 		(sourceType != "agent.tool_use" && sourceType != "agent.mcp_tool_use" &&
 			sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled") {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery source is invalid", retryable: false}
+		return false, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery source is invalid", retryable: false}
 	}
-	binding, err := s.resolveRuntimeTarget(ctx, tx, job)
-	if err != nil {
-		return RuntimeCommandPlan{}, err
+	return true, false, nil
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) ActivateRuntimeRecovery(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
+	if s == nil || s.Client == nil {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
-	result, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
+	port := s.RuntimeGRPCPort
+	if port <= 0 {
+		port = defaultAgentRuntimeGRPCPort
+	}
+	now := storage.Now()
+	if s.Clock != nil {
+		now = s.Clock().UTC()
+	}
+	var plan RuntimeCommandPlan
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.activate_runtime_recovery", func(tx *dbconnect.Tx) error {
+		active, terminal, err := validateRuntimeRecoveryAuthorityTx(ctx, tx, job)
+		if err != nil {
+			return err
+		}
+		if terminal {
+			plan = RuntimeCommandPlan{StaleAccepted: true}
+			return nil
+		}
+		if !active {
+			plan = RuntimeCommandPlan{DeliveryAuthorityLost: true}
+			return nil
+		}
+		binding, err := s.resolveRuntimeTarget(ctx, tx, job)
+		if err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx,
+			`UPDATE session_runtime_status
 		    SET status='running', binding_id=$3, binding_generation=$4,
 		        running_since=COALESCE(running_since,$5), idle_since=NULL,
 		        cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL, cleanup_job_id=NULL, updated_at=$5
 		  WHERE workspace_id=$1 AND session_id=$2`,
-		job.WorkspaceID, job.SessionID, binding.BindingID, binding.BindingGeneration, now,
-	)
-	if err != nil {
-		return RuntimeCommandPlan{}, err
-	}
-	if !rowsAffected(result) {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_binding_unavailable", message: "runtime residency is unavailable", retryable: true}
-	}
-	return RuntimeCommandPlan{
-		Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP, Port: port},
-		AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID},
-		RecoverThread: &agentruntimev1.RecoverThreadRequest{
-			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
-			BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
-			SourceEventId: job.RecoverySourceEventID,
-		},
-	}, nil
+			job.WorkspaceID, job.SessionID, binding.BindingID, binding.BindingGeneration, now,
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(result) {
+			return runtimeDeliveryPrepareError{kind: "runtime_binding_unavailable", message: "runtime residency is unavailable", retryable: true}
+		}
+		plan = RuntimeCommandPlan{
+			Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP, Port: port},
+			AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID},
+			RecoverThread: &agentruntimev1.RecoverThreadRequest{
+				WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
+				BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
+				SourceEventId: job.RecoverySourceEventID,
+				RecoveryLeaseRef: &agentruntimev1.RecoveryLeaseRef{
+					JobId: job.JobID, LeaseToken: job.LeaseToken,
+					PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+				},
+			},
+		}
+		return nil
+	})
+	return plan, err
 }
 
 func runtimeGenerationFromInputID(runtimeInputID string) (int64, error) {

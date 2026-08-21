@@ -39,6 +39,7 @@ import {
 	Semaphore,
 } from "effect";
 import type { RuntimeContextEntry } from "../contracts/runtime.js";
+import type { RuntimeContextLoadOptions } from "../context/context-loader.js";
 import {
 	ContextLoaderErrorSchema,
 	normalizeRuntimeFailure,
@@ -351,6 +352,7 @@ export interface Interface {
 		options?: {
 			readonly requirePendingApprovalToolJobs?: boolean | undefined;
 			readonly startPendingWork?: boolean | undefined;
+			readonly loadOptions?: RuntimeContextLoadOptions | undefined;
 		},
 	) => Effect.Effect<ThreadLifecycleResult>;
 	readonly interruptReviewerExecution: (
@@ -402,6 +404,7 @@ export interface LayerOptions {
 	) => Promise<string>;
 	readonly loadThreadContext?: (
 		command: RuntimeThreadAddressState,
+		loadOptions?: RuntimeContextLoadOptions,
 	) => Promise<RuntimeThreadPreloadState>;
 	readonly closeoutMonotonicMs?: (() => number) | undefined;
 	readonly closeoutSleep?:
@@ -521,6 +524,7 @@ interface ThreadInstallation {
 	readonly cleanup: Deferred.Deferred<void>;
 	fiber: Fiber.Fiber<void, never> | undefined;
 	startPendingWork: boolean;
+	readonly loadOptions: RuntimeContextLoadOptions | undefined;
 }
 
 interface SessionEntry {
@@ -2532,6 +2536,7 @@ export function layer(
 				command: RuntimeThreadAddressState,
 				metadata: RuntimeAcceptedThreadMetadataState = {},
 				startPendingWork = false,
+				loadOptions?: RuntimeContextLoadOptions,
 			) =>
 				Effect.gen(function* () {
 					const failedResult = {
@@ -2616,6 +2621,7 @@ export function layer(
 						cleanup: cleanupDeferred,
 						fiber: undefined,
 						startPendingWork,
+						loadOptions,
 					};
 					threadResult.threadEntry.installation = installation;
 					const install = Effect.uninterruptibleMask((restore) =>
@@ -2624,7 +2630,11 @@ export function layer(
 							const installExit = yield* restore(
 								Effect.gen(function* () {
 									const context = yield* Effect.tryPromise({
-										try: () => options.loadThreadContext!(command),
+										try: () =>
+											options.loadThreadContext!(
+												command,
+												installation.loadOptions,
+											),
 										catch: (error) => error,
 									});
 									if (
@@ -2726,6 +2736,7 @@ export function layer(
 				installOptions: {
 					readonly requirePendingApprovalToolJobs?: boolean | undefined;
 					readonly startPendingWork?: boolean | undefined;
+					readonly loadOptions?: RuntimeContextLoadOptions | undefined;
 				} = {},
 			): Effect.Effect<ThreadLifecycleResult> =>
 				Effect.gen(function* () {
@@ -2733,6 +2744,7 @@ export function layer(
 						command,
 						{},
 						installOptions.startPendingWork === true,
+						installOptions.loadOptions,
 					);
 					if (prepared.threadResult === undefined) {
 						return prepared.failedResult;

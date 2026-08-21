@@ -9,6 +9,8 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -544,6 +546,21 @@ func cancelRuntimeTerminationInputsTx(
 		now,
 		includeQueued,
 	).Scan(&transitions.accepted, &transitions.parked)
+	if err != nil || !sessionWide {
+		return transitions, err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status='cancelled', cancelled_at=$3,
+		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		        updated_at=$3
+		  WHERE workspace_id=$1 AND kind=$4 AND partition_key=$2
+		    AND status IN ('pending','leased')`,
+		scope.GetWorkspaceId(),
+		queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()),
+		now,
+		queue.KindRuntimeRecovery,
+	)
 	return transitions, err
 }
 

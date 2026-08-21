@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -397,6 +398,7 @@ type providerRescheduleRecoveryComposition struct {
 	ExecutorInvocations int             `json:"executorInvocations"`
 	WaitedMS            []int64         `json:"waitedMs"`
 	ProviderContext     json.RawMessage `json:"providerContext"`
+	RecoveredTurnEvents []string        `json:"recoveredTurnEventIds"`
 	PreloadResult       json.RawMessage `json:"preloadResult"`
 	LastSnapshot        json.RawMessage `json:"lastSnapshot"`
 	TerminationResults  json.RawMessage `json:"terminationResults"`
@@ -423,6 +425,26 @@ type providerRecoveryTokenSource struct{}
 
 func (providerRecoveryTokenSource) Token(context.Context) (string, error) {
 	return "provider-recovery-composition-token", nil
+}
+
+type responseLosingRecoveryCommandClient struct {
+	*RuntimePodCommandClient
+	loseFirst bool
+	requests  []*agentruntimev1.RecoverThreadRequest
+}
+
+func (c *responseLosingRecoveryCommandClient) RecoverThread(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.RecoverThreadRequest,
+) (*agentruntimev1.RecoverThreadResponse, error) {
+	c.requests = append(c.requests, request)
+	response, err := c.RuntimePodCommandClient.RecoverThread(ctx, target, request)
+	if err == nil && c.loseFirst {
+		c.loseFirst = false
+		return nil, errors.New("injected lost recovery response")
+	}
+	return response, err
 }
 
 func startProviderRecoveryRuntime(t *testing.T, bridgeAddress, sessionID, threadID, podUID string, now time.Time) *providerRecoveryProcess {
@@ -643,13 +665,15 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID       = "sesn_provider_reschedule_recovery"
-		threadID        = "sthr_provider_reschedule_recovery"
-		oldBindingID    = "bind_provider_reschedule_old"
-		oldPodUID       = "pod_provider_reschedule_old"
-		newPodUID       = "pod_provider_reschedule_new"
-		modelRequestID  = "mreq_provider_reschedule_original"
-		modelToolCallID = "call_provider_reschedule_original"
+		sessionID         = "sesn_provider_reschedule_recovery"
+		threadID          = "sthr_provider_reschedule_recovery"
+		oldBindingID      = "bind_provider_reschedule_old"
+		oldPodUID         = "pod_provider_reschedule_old"
+		newPodUID         = "pod_provider_reschedule_new"
+		historicalID      = "mreq_provider_reschedule_historical"
+		historicalRetryID = "mreq_provider_reschedule_historical_retry"
+		modelRequestID    = "mreq_provider_reschedule_original"
+		modelToolCallID   = "call_provider_reschedule_original"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_provider_reschedule_user", "sevt_provider_reschedule_user", 1)
@@ -658,6 +682,30 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND sequence=1`, sessionID, threadID); err != nil {
 		t.Fatalf("seed provider reschedule user context: %v", err)
 	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
+		visibility,session_visible,model_request_id,projection_json,created_at,updated_at
+	)
+	SELECT 'default',$1,$2,'evt_provider_reschedule_audit_start_'||item,item*2-1,
+	       'span.model_request_start','{}','internal',false,'mreq_provider_reschedule_audit_'||item,
+	       jsonb_build_object('context_through_message_sequence',1,'request_kind','agent_provider_request')::text,
+	       clock_timestamp(),clock_timestamp()
+	  FROM generate_series(1,500) item
+	UNION ALL
+	SELECT 'default',$1,$2,'evt_provider_reschedule_audit_end_'||item,item*2,
+	       'span.model_request_end',
+	       jsonb_build_object(
+	         'model_request_start_id','evt_provider_reschedule_audit_start_'||item,
+	         'is_error',true,'error_kind','gateway_stream_error',
+	         'provider_context_retention',jsonb_build_object(
+	           'disposition','failed','tool_use_event_ids',jsonb_build_array(),'repair_event_ids',jsonb_build_array()
+	         )
+	       )::text,
+	       'internal',false,'mreq_provider_reschedule_audit_'||item,'{}',
+	       clock_timestamp(),clock_timestamp()
+	  FROM generate_series(1,500) item`, sessionID, threadID); err != nil {
+		t.Fatalf("seed provider reschedule audit history: %v", err)
+	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
 	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
@@ -665,6 +713,36 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	acceptedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return acceptedAt }
 	oldScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, oldScope, "evt_provider_reschedule_historical_turn")
+	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_provider_reschedule_historical_start", historicalID, requestKindAgentProviderRequest, 1)
+	historical, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: oldScope, RuntimeWriteId: "rwrite_provider_reschedule_historical_end", ModelRequestId: historicalID,
+		FinishReason: "error", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "rescheduled"},
+		IsError:                  true, ErrorKind: "gateway_stream_error",
+		Reschedule: &bridgev1.RequestEndReschedule{
+			Attempt: 1, Deadline: acceptedAt.Add(time.Second).Format(time.RFC3339Nano), BackoffMs: 1_000,
+		},
+	})
+	if err != nil || historical.GetCommitted().GetRescheduled() == nil {
+		t.Fatalf("commit historical provider reschedule: response=%#v err=%v", historical, err)
+	}
+	historicalEndEventID := historical.GetCommitted().GetRequestEndEventId()
+	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_provider_reschedule_historical_retry_start", historicalRetryID, requestKindAgentProviderRequest, 1)
+	historicalRetry, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: oldScope, RuntimeWriteId: "rwrite_provider_reschedule_historical_retry_end", ModelRequestId: historicalRetryID,
+		FinishReason: "stop", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
+	})
+	if err != nil || historicalRetry.GetCommitted() == nil {
+		t.Fatalf("complete historical provider retry: response=%#v err=%v", historicalRetry, err)
+	}
+	historicalRetryEndEventID := historicalRetry.GetCommitted().GetRequestEndEventId()
+	if idle, err := finishIdleWithStagedCaptureForTest(t, admin, store, &bridgev1.FinishIdleRequest{
+		Scope: oldScope, DurableTurnId: "evt_provider_reschedule_historical_turn", StopReasonJson: `{"type":"end_turn"}`,
+	}); err != nil || idle.GetCommitted() == nil {
+		t.Fatalf("close historical provider retry: response=%#v err=%v", idle, err)
+	}
 	seedBridgeAPIOpenDurableTurn(t, admin, oldScope, "evt_provider_reschedule_durable_turn")
 	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_provider_reschedule_start", modelRequestID, requestKindAgentProviderRequest, 1)
 
@@ -711,6 +789,37 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
 		sessionID, threadID, modelRequestID); err != nil {
 		t.Fatalf("seed uncommitted sibling Tool fragment: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events`); err != nil {
+		t.Fatalf("analyze provider reschedule history: %v", err)
+	}
+	var planJSON string
+	if err := admin.QueryRowContext(
+		context.Background(),
+		"EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) "+loadContextTurnEventsSQL,
+		"default", sessionID, threadID, "evt_provider_reschedule_durable_turn",
+		`["`+modelRequestID+`"]`, `["`+toolUse.GetCommitted().GetEventId()+`"]`,
+	).Scan(&planJSON); err != nil {
+		t.Fatalf("EXPLAIN current provider reschedule selection: %v", err)
+	}
+	var planDocuments []struct {
+		Plan map[string]any `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(planJSON), &planDocuments); err != nil || len(planDocuments) != 1 {
+		t.Fatalf("decode provider reschedule plan: err=%v plan=%s", err, planJSON)
+	}
+	var sessionEventIndex bool
+	walkPostgreSQLPlan(planDocuments[0].Plan, func(node map[string]any) {
+		relation, _ := node["Relation Name"].(string)
+		index, _ := node["Index Name"].(string)
+		if relation == "session_events" && index != "" {
+			sessionEventIndex = true
+		}
+	})
+	selectedRows, _ := planDocuments[0].Plan["Actual Rows"].(float64)
+	if !sessionEventIndex || selectedRows > 8 {
+		t.Fatalf("provider reschedule plan index:%t selected:%.0f; want bounded current facts\n%s",
+			sessionEventIndex, selectedRows, planJSON)
 	}
 
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
@@ -768,14 +877,17 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
 	}}
+	sender := &responseLosingRecoveryCommandClient{
+		RuntimePodCommandClient: NewRuntimePodCommandClient(providerRecoveryTokenSource{}), loseFirst: true,
+	}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(providerRecoveryTokenSource{})},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    JobRunnerConfig{LeaseOwner: "provider-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	active, err := runner.RunOnceWithActivity(context.Background())
 	if err != nil || !active {
-		t.Fatalf("deliver provider reschedule recovery = active:%t err:%v", active, err)
+		t.Fatalf("deliver provider reschedule recovery with lost response = active:%t err:%v", active, err)
 	}
 	preloaded := runtimeProcess.recoveryResult(t)
 	if preloaded.Command.SourceEventID != rescheduleEventID || preloaded.Command.TargetPodUID != newPodUID {
@@ -786,8 +898,51 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		!strings.Contains(string(preloaded.LastSnapshot), `"observed":true`) ||
 		!strings.Contains(string(preloaded.LastSnapshot), `"hasUnsettledToolOwner":true`) ||
 		strings.Contains(string(preloaded.LastSnapshot), "discarded partial text") ||
-		strings.Contains(string(preloaded.LastSnapshot), "call_uncommitted_fragment") {
+		strings.Contains(string(preloaded.LastSnapshot), "call_uncommitted_fragment") ||
+		strings.Contains(string(preloaded.LastSnapshot), historicalID) ||
+		strings.Contains(string(preloaded.LastSnapshot), historicalRetryID) ||
+		slices.Contains(preloaded.RecoveredTurnEvents, historicalEndEventID) ||
+		slices.Contains(preloaded.RecoveredTurnEvents, historicalRetryEndEventID) {
 		t.Fatalf("replacement Runtime nonterminal preload = %+v snapshot=%s", preloaded, preloaded.LastSnapshot)
+	}
+	var recoveryJobID, recoveryQueueStatus, recoveredBindingID string
+	var recoveredBindingGeneration int64
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT id FROM queue_jobs WHERE workspace_id='default' AND partition_key=$2 AND kind=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND partition_key=$2 AND kind=$3),
+		(SELECT binding_id FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		(SELECT binding_generation FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`,
+		sessionID, queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID), queue.KindRuntimeRecovery,
+	).Scan(&recoveryJobID, &recoveryQueueStatus, &recoveredBindingID, &recoveredBindingGeneration); err != nil {
+		t.Fatalf("read response-lost recovery owner: %v", err)
+	}
+	if recoveryQueueStatus != queue.StatusPending || recoveredBindingID != preloaded.Command.BindingID || recoveredBindingGeneration != preloaded.Command.BindingGeneration {
+		t.Fatalf("response-lost recovery = Queue %s binding %s/%d; want pending and %s/%d",
+			recoveryQueueStatus, recoveredBindingID, recoveredBindingGeneration,
+			preloaded.Command.BindingID, preloaded.Command.BindingGeneration)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, recoveryJobID); err != nil {
+		t.Fatalf("make response-lost recovery replay available: %v", err)
+	}
+	active, err = runner.RunOnceWithActivity(context.Background())
+	if err != nil || !active {
+		t.Fatalf("replay response-lost recovery = active:%t err:%v", active, err)
+	}
+	if len(sender.requests) != 2 ||
+		sender.requests[0].GetRecoveryLeaseRef().GetJobId() != sender.requests[1].GetRecoveryLeaseRef().GetJobId() ||
+		sender.requests[0].GetRecoveryLeaseRef().GetLeaseToken() == sender.requests[1].GetRecoveryLeaseRef().GetLeaseToken() ||
+		sender.requests[0].GetBindingId() != sender.requests[1].GetBindingId() ||
+		sender.requests[0].GetBindingGeneration() != sender.requests[1].GetBindingGeneration() {
+		t.Fatalf("response-lost recovery requests = %#v; want one durable job, renewed lease, and one binding generation", sender.requests)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1`, recoveryJobID).Scan(&recoveryQueueStatus); err != nil {
+		t.Fatalf("read replayed recovery Queue status: %v", err)
+	}
+	if recoveryQueueStatus != queue.StatusAcknowledged {
+		t.Fatalf("replayed recovery Queue status = %q; want acked", recoveryQueueStatus)
 	}
 	runtimeProcess.close(t)
 	newBindingID := preloaded.Command.BindingID
@@ -837,7 +992,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		Scan(&starts, &ends, &toolUses, &toolResults); err != nil {
 		t.Fatalf("read provider reschedule recovery census: %v", err)
 	}
-	if starts != 2 || ends != 2 || toolUses != 1 || toolResults != 1 {
+	if starts != 504 || ends != 504 || toolUses != 1 || toolResults != 1 {
 		t.Fatalf("provider reschedule recovery census starts/ends/tools/results = %d/%d/%d/%d", starts, ends, toolUses, toolResults)
 	}
 }
@@ -848,7 +1003,6 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		sessionID      = "sesn_subagent_reschedule_recovery"
 		threadID       = "sthr_subagent_reschedule_recovery"
 		oldBindingID   = "bind_subagent_reschedule_old"
-		newBindingID   = "bind_subagent_reschedule_new"
 		newPodUID      = "pod_subagent_reschedule_new"
 		modelRequestID = "mreq_subagent_reschedule_cold"
 		taskName       = "recovery-worker"
@@ -918,21 +1072,6 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	if sessionStatus != "rescheduling" || threadStatus != "rescheduling" || providerAttempts != priorProviderAttempts+1 {
 		t.Fatalf("repaired reschedule ownership session/thread/attempts = %s/%s/%d", sessionStatus, threadStatus, providerAttempts)
 	}
-	if result, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
-		SET binding_id=$2, binding_generation=2, agent_runtime_pod_uid=$3, updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID, newPodUID); err != nil {
-		t.Fatalf("install replacement subagent Runtime binding: %v", err)
-	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
-		t.Fatalf("replacement subagent Runtime binding rows = %d err=%v", rows, rowsErr)
-	}
-	if result, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
-		SET status='running', binding_id=$2, binding_generation=2, running_since=clock_timestamp(),
-		    idle_since=NULL, updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
-		t.Fatalf("activate replacement subagent Runtime residency: %v", err)
-	} else if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
-		t.Fatalf("replacement subagent Runtime residency rows = %d err=%v", rows, rowsErr)
-	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for subagent reschedule recovery: %v", err)
@@ -944,6 +1083,39 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		server.Stop()
 		_ = listener.Close()
 	})
+	var rescheduleEventID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='session.status_rescheduled' ORDER BY sequence DESC LIMIT 1`, sessionID, threadID).Scan(&rescheduleEventID); err != nil {
+		t.Fatalf("read subagent reschedule recovery root: %v", err)
+	}
+	runtimeProcess := startProviderRecoveryRuntime(t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond))
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), runtimeProcess.port)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-subagent-reschedule-new",
+			PodUID: newPodUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(providerRecoveryTokenSource{})},
+		Config:    JobRunnerConfig{LeaseOwner: "subagent-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	for delivery := 0; delivery < 2; delivery++ {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		if runErr != nil || !active {
+			t.Fatalf("deliver queued child input and subagent reschedule recovery step %d = active:%t err:%v", delivery+1, active, runErr)
+		}
+	}
+	preloaded := runtimeProcess.recoveryResult(t)
+	if preloaded.Command.SourceEventID != rescheduleEventID || preloaded.Command.TargetPodUID != newPodUID || preloaded.ResultType != "preloaded" {
+		t.Fatalf("subagent recovery preload = %+v; want exact Queue-owned recovery", preloaded)
+	}
+	runtimeProcess.close(t)
+	newBindingID := preloaded.Command.BindingID
+	newBindingGeneration := preloaded.Command.BindingGeneration
 	captureSettled := make(chan error, 1)
 	go func() {
 		captureSettled <- settleOutputCaptureGenerationForTest(admin, sessionID, durableTurnID, 1, "staged")
@@ -951,7 +1123,7 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
 		"bridgeAddress": listener.Addr().String(),
 		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": 2, "targetPodUid": newPodUID,
+		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
 		"now": acceptedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
 	})
 	if err := <-captureSettled; err != nil {

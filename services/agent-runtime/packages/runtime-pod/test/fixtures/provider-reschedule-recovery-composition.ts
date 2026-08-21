@@ -62,6 +62,7 @@ const bridgeOptions = {
 const loader = new BridgeAPIContextLoader(bridgeOptions);
 const providerRequests: LLMRequest[] = [];
 const waitedMs: number[] = [];
+let recoveredTurnEventIds: string[] = [];
 let providerInvocations = 0;
 let executorInvocations = 0;
 let nextID = 0;
@@ -70,7 +71,11 @@ const hosts = await buildRuntimeCoreHosts({
 	maxLocalSessions: 1,
 	now: () => input.now,
 	contextLoader: {
-		loadThreadContext: loader.loadThreadContext.bind(loader),
+		loadThreadContext: async (thread, options) => {
+			const loaded = await loader.loadThreadContext(thread, options);
+			recoveredTurnEventIds = loaded.turnFacts.events.map((event) => event.eventId);
+			return loaded;
+		},
 		refreshRuntimeBindingToken: async (identity) => identity.runtimeBindingToken,
 	},
 	threadLoop: {
@@ -110,8 +115,18 @@ const hosts = await buildRuntimeCoreHosts({
 		},
 		runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
 		runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
-		runTool: () => {
+		runTool: async (request) => {
 					executorInvocations += 1;
+					if (input.serveRecovery === true) {
+						await new Promise<void>((resolve) => {
+							if (request.abortSignal.aborted) {
+								resolve();
+								return;
+							}
+							request.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+						});
+						return { type: "cancelled" };
+					}
 					return {
 						type: "completed",
 						output: { text: "unexpected replay", truncated: false },
@@ -151,6 +166,7 @@ if (input.serveRecovery === true) {
 					resultType: "preloaded",
 					providerInvocations,
 					executorInvocations,
+					recoveredTurnEventIds,
 					preloadResult: result,
 					lastSnapshot: snapshot,
 					command: recoveryCommand,
