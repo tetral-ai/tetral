@@ -102,6 +102,7 @@ describe("Gateway platform key pool", () => {
 
     const deadKey = classifyProviderFailure("anthropic", { statusCode: 401, body: { error: { type: "authentication_error" } } });
     pool.recordFailure("pfk_dead", deadKey);
+    pool.recordFailure("pfk_dead", deadKey);
 
     expect(deadKey).toMatchObject({ action: "quarantine", providerError: { retryable: false } });
     expect(quarantineEvents).toEqual([

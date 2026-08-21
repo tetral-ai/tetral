@@ -239,6 +239,9 @@ export class PlatformKeyPool {
       this.coolingUntilMs.set(keyId, this.now() + clampCooldown(classification.cooldownMs));
     }
     if (classification.action === "quarantine") {
+      if (this.quarantined.has(keyId)) {
+        return;
+      }
       this.quarantined.add(keyId);
       const key = this.findKey(keyId);
       if (key !== undefined) {

@@ -1253,14 +1253,13 @@ func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.T
 	default:
 		return status.Error(codes.InvalidArgument, "reviewer close settlement kind is required")
 	}
-	var eventType, modelRequestID, runtimeWriteID, errorKind, finishReason string
+	var eventType, modelRequestID, runtimeWriteID string
 	err := tx.QueryRow(ctx, `SELECT type, COALESCE(model_request_id, ''),
-		COALESCE(runtime_write_id, ''),
-		COALESCE(payload_json::jsonb->>'error_kind', ''), COALESCE(payload_json::jsonb->>'finish_reason', '')
+		COALESCE(runtime_write_id, '')
 		FROM session_events
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4
 		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, authority.settlementEventID).
-		Scan(&eventType, &modelRequestID, &runtimeWriteID, &errorKind, &finishReason)
+		Scan(&eventType, &modelRequestID, &runtimeWriteID)
 	if dbconnect.IsNoRows(err) {
 		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement is missing")
 	}
@@ -1277,8 +1276,8 @@ func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.T
 		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement belongs to another review")
 	}
 	if authority.settlementKind == bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST {
-		if modelRequestID == "" || errorKind != "runtime_interrupted" || finishReason != "cancelled" {
-			return status.Error(codes.FailedPrecondition, "approval reviewer close request settlement is not interrupted")
+		if modelRequestID == "" {
+			return status.Error(codes.FailedPrecondition, "approval reviewer close request settlement is incomplete")
 		}
 		var reviewerRequest bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (

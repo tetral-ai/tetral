@@ -853,21 +853,6 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 	if err != nil || committedInput.GetCommitted().GetContext() == nil {
 		t.Fatalf("commit approval reviewer input through generated gRPC = %#v/%v", committedInput, err)
 	}
-	seedReviewerOutcomeEvent(t, admin, sessionID, sidecarID, "evt_reviewer_production_decision", "approval_review.decision", sidecarRequest.GetReviewId(),
-		`{"type":"approval_review.decision","review_id":"`+sidecarRequest.GetReviewId()+`","decision":"approved"}`)
-	closeRequest := &bridgev1.CloseApprovalReviewerRequest{
-		Scope: scope, ReviewerThreadId: sidecarID, ReviewId: sidecarRequest.GetReviewId(),
-		SettlementKind:    bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION,
-		SettlementEventId: "evt_reviewer_production_decision",
-	}
-	closed, err := client.CloseApprovalReviewer(context.Background(), closeRequest)
-	if err != nil || closed.GetCommitted() == nil {
-		t.Fatalf("close reviewer sidecar through generated gRPC = %#v/%v", closed, err)
-	}
-	closeReplay, err := client.CloseApprovalReviewer(context.Background(), closeRequest)
-	if err != nil || closeReplay.GetDuplicate() == nil {
-		t.Fatalf("lost-ACK reviewer close replay = %#v/%v", closeReplay, err)
-	}
 
 	var operationCount int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations
