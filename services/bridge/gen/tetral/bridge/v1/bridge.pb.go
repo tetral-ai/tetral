@@ -388,6 +388,58 @@ func (RuntimeToolEventKind) EnumDescriptor() ([]byte, []int) {
 	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{6}
 }
 
+type ApprovalReviewerCloseSettlementKind int32
+
+const (
+	ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED         ApprovalReviewerCloseSettlementKind = 0
+	ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION            ApprovalReviewerCloseSettlementKind = 1
+	ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE             ApprovalReviewerCloseSettlementKind = 2
+	ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST ApprovalReviewerCloseSettlementKind = 3
+)
+
+// Enum value maps for ApprovalReviewerCloseSettlementKind.
+var (
+	ApprovalReviewerCloseSettlementKind_name = map[int32]string{
+		0: "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED",
+		1: "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION",
+		2: "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE",
+		3: "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST",
+	}
+	ApprovalReviewerCloseSettlementKind_value = map[string]int32{
+		"APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED":         0,
+		"APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION":            1,
+		"APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE":             2,
+		"APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST": 3,
+	}
+)
+
+func (x ApprovalReviewerCloseSettlementKind) Enum() *ApprovalReviewerCloseSettlementKind {
+	p := new(ApprovalReviewerCloseSettlementKind)
+	*p = x
+	return p
+}
+
+func (x ApprovalReviewerCloseSettlementKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ApprovalReviewerCloseSettlementKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_tetral_bridge_v1_bridge_proto_enumTypes[7].Descriptor()
+}
+
+func (ApprovalReviewerCloseSettlementKind) Type() protoreflect.EnumType {
+	return &file_tetral_bridge_v1_bridge_proto_enumTypes[7]
+}
+
+func (x ApprovalReviewerCloseSettlementKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ApprovalReviewerCloseSettlementKind.Descriptor instead.
+func (ApprovalReviewerCloseSettlementKind) EnumDescriptor() ([]byte, []int) {
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{7}
+}
+
 type RuntimeContextDelta struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Parts         []*RuntimeContextPart  `protobuf:"bytes,1,rep,name=parts,proto3" json:"parts,omitempty"`
@@ -10017,12 +10069,14 @@ func (*CloseChildControlStale) Descriptor() ([]byte, []int) {
 }
 
 type CloseApprovalReviewerRequest struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Scope            *RuntimeScope          `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
-	ReviewerThreadId string                 `protobuf:"bytes,2,opt,name=reviewer_thread_id,json=reviewerThreadId,proto3" json:"reviewer_thread_id,omitempty"`
-	ReviewId         string                 `protobuf:"bytes,3,opt,name=review_id,json=reviewId,proto3" json:"review_id,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state             protoimpl.MessageState              `protogen:"open.v1"`
+	Scope             *RuntimeScope                       `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	ReviewerThreadId  string                              `protobuf:"bytes,2,opt,name=reviewer_thread_id,json=reviewerThreadId,proto3" json:"reviewer_thread_id,omitempty"`
+	ReviewId          string                              `protobuf:"bytes,3,opt,name=review_id,json=reviewId,proto3" json:"review_id,omitempty"`
+	SettlementKind    ApprovalReviewerCloseSettlementKind `protobuf:"varint,4,opt,name=settlement_kind,json=settlementKind,proto3,enum=tetral.bridge.v1.ApprovalReviewerCloseSettlementKind" json:"settlement_kind,omitempty"`
+	SettlementEventId string                              `protobuf:"bytes,5,opt,name=settlement_event_id,json=settlementEventId,proto3" json:"settlement_event_id,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *CloseApprovalReviewerRequest) Reset() {
@@ -10072,6 +10126,20 @@ func (x *CloseApprovalReviewerRequest) GetReviewerThreadId() string {
 func (x *CloseApprovalReviewerRequest) GetReviewId() string {
 	if x != nil {
 		return x.ReviewId
+	}
+	return ""
+}
+
+func (x *CloseApprovalReviewerRequest) GetSettlementKind() ApprovalReviewerCloseSettlementKind {
+	if x != nil {
+		return x.SettlementKind
+	}
+	return ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED
+}
+
+func (x *CloseApprovalReviewerRequest) GetSettlementEventId() string {
+	if x != nil {
+		return x.SettlementEventId
 	}
 	return ""
 }
@@ -13017,11 +13085,13 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\bchildren\x18\x01 \x03(\v2&.tetral.bridge.v1.ChildLifecycleResultR\bchildren\"`\n" +
 	"\x1aCloseChildControlDuplicate\x12B\n" +
 	"\bchildren\x18\x01 \x03(\v2&.tetral.bridge.v1.ChildLifecycleResultR\bchildren\"\x18\n" +
-	"\x16CloseChildControlStale\"\x9f\x01\n" +
+	"\x16CloseChildControlStale\"\xaf\x02\n" +
 	"\x1cCloseApprovalReviewerRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12,\n" +
 	"\x12reviewer_thread_id\x18\x02 \x01(\tR\x10reviewerThreadId\x12\x1b\n" +
-	"\treview_id\x18\x03 \x01(\tR\breviewId\"\x94\x02\n" +
+	"\treview_id\x18\x03 \x01(\tR\breviewId\x12^\n" +
+	"\x0fsettlement_kind\x18\x04 \x01(\x0e25.tetral.bridge.v1.ApprovalReviewerCloseSettlementKindR\x0esettlementKind\x12.\n" +
+	"\x13settlement_event_id\x18\x05 \x01(\tR\x11settlementEventId\"\x94\x02\n" +
 	"\x1dCloseApprovalReviewerResponse\x12P\n" +
 	"\tcommitted\x18\x01 \x01(\v20.tetral.bridge.v1.CloseApprovalReviewerCommittedH\x00R\tcommitted\x12P\n" +
 	"\tduplicate\x18\x02 \x01(\v20.tetral.bridge.v1.CloseApprovalReviewerDuplicateH\x00R\tduplicate\x12D\n" +
@@ -13185,7 +13255,12 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x14RuntimeToolEventKind\x12'\n" +
 	"#RUNTIME_TOOL_EVENT_KIND_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cRUNTIME_TOOL_EVENT_KIND_TOOL\x10\x01\x12\x1f\n" +
-	"\x1bRUNTIME_TOOL_EVENT_KIND_MCP\x10\x022\x9c\"\n" +
+	"\x1bRUNTIME_TOOL_EVENT_KIND_MCP\x10\x02*\x8a\x02\n" +
+	"#ApprovalReviewerCloseSettlementKind\x127\n" +
+	"3APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED\x10\x00\x124\n" +
+	"0APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION\x10\x01\x123\n" +
+	"/APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE\x10\x02\x12?\n" +
+	";APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST\x10\x032\x9c\"\n" +
 	"\x19AgentRuntimeBridgeService\x12Z\n" +
 	"\vLoadContext\x12$.tetral.bridge.v1.LoadContextRequest\x1a%.tetral.bridge.v1.LoadContextResponse\x12\x87\x01\n" +
 	"\x1aRefreshRuntimeBindingToken\x123.tetral.bridge.v1.RefreshRuntimeBindingTokenRequest\x1a4.tetral.bridge.v1.RefreshRuntimeBindingTokenResponse\x12]\n" +
@@ -13239,7 +13314,7 @@ func file_tetral_bridge_v1_bridge_proto_rawDescGZIP() []byte {
 	return file_tetral_bridge_v1_bridge_proto_rawDescData
 }
 
-var file_tetral_bridge_v1_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_tetral_bridge_v1_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
 var file_tetral_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 202)
 var file_tetral_bridge_v1_bridge_proto_goTypes = []any{
 	(ChildLifecycleDisposition)(0),                   // 0: tetral.bridge.v1.ChildLifecycleDisposition
@@ -13249,477 +13324,479 @@ var file_tetral_bridge_v1_bridge_proto_goTypes = []any{
 	(TaskNotificationRejectionReason)(0),             // 4: tetral.bridge.v1.TaskNotificationRejectionReason
 	(FileAttachmentRejectionReason)(0),               // 5: tetral.bridge.v1.FileAttachmentRejectionReason
 	(RuntimeToolEventKind)(0),                        // 6: tetral.bridge.v1.RuntimeToolEventKind
-	(*RuntimeContextDelta)(nil),                      // 7: tetral.bridge.v1.RuntimeContextDelta
-	(*RuntimeContextPart)(nil),                       // 8: tetral.bridge.v1.RuntimeContextPart
-	(*RuntimeContextText)(nil),                       // 9: tetral.bridge.v1.RuntimeContextText
-	(*RuntimeContextReasoning)(nil),                  // 10: tetral.bridge.v1.RuntimeContextReasoning
-	(*RuntimeContextToolCall)(nil),                   // 11: tetral.bridge.v1.RuntimeContextToolCall
-	(*RuntimeContextToolResult)(nil),                 // 12: tetral.bridge.v1.RuntimeContextToolResult
-	(*RuntimeContextToolCompleted)(nil),              // 13: tetral.bridge.v1.RuntimeContextToolCompleted
-	(*RuntimeContextToolError)(nil),                  // 14: tetral.bridge.v1.RuntimeContextToolError
-	(*RuntimeContextToolCancelled)(nil),              // 15: tetral.bridge.v1.RuntimeContextToolCancelled
-	(*RuntimeToolSettlement)(nil),                    // 16: tetral.bridge.v1.RuntimeToolSettlement
-	(*RuntimeToolCompleted)(nil),                     // 17: tetral.bridge.v1.RuntimeToolCompleted
-	(*RuntimeToolError)(nil),                         // 18: tetral.bridge.v1.RuntimeToolError
-	(*RuntimeToolCancelled)(nil),                     // 19: tetral.bridge.v1.RuntimeToolCancelled
-	(*PrefixConsumptionDraft)(nil),                   // 20: tetral.bridge.v1.PrefixConsumptionDraft
-	(*RuntimeBindingRef)(nil),                        // 21: tetral.bridge.v1.RuntimeBindingRef
-	(*RuntimeScope)(nil),                             // 22: tetral.bridge.v1.RuntimeScope
-	(*LoadContextRequest)(nil),                       // 23: tetral.bridge.v1.LoadContextRequest
-	(*RecoveryLeaseRef)(nil),                         // 24: tetral.bridge.v1.RecoveryLeaseRef
-	(*LoadContextResponse)(nil),                      // 25: tetral.bridge.v1.LoadContextResponse
-	(*RefreshRuntimeBindingTokenRequest)(nil),        // 26: tetral.bridge.v1.RefreshRuntimeBindingTokenRequest
-	(*RefreshRuntimeBindingTokenResponse)(nil),       // 27: tetral.bridge.v1.RefreshRuntimeBindingTokenResponse
-	(*CommitInputsRequest)(nil),                      // 28: tetral.bridge.v1.CommitInputsRequest
-	(*InterruptLeaseRef)(nil),                        // 29: tetral.bridge.v1.InterruptLeaseRef
-	(*CommitInputsResponse)(nil),                     // 30: tetral.bridge.v1.CommitInputsResponse
-	(*CommitInputsBarrierStale)(nil),                 // 31: tetral.bridge.v1.CommitInputsBarrierStale
-	(*RuntimeInterruptToolFailed)(nil),               // 32: tetral.bridge.v1.RuntimeInterruptToolFailed
-	(*RuntimeInterruptToolCancelled)(nil),            // 33: tetral.bridge.v1.RuntimeInterruptToolCancelled
-	(*RuntimeInterruptToolResult)(nil),               // 34: tetral.bridge.v1.RuntimeInterruptToolResult
-	(*CommitInputsContextApplication)(nil),           // 35: tetral.bridge.v1.CommitInputsContextApplication
-	(*CommitInputsInterruptApplication)(nil),         // 36: tetral.bridge.v1.CommitInputsInterruptApplication
-	(*CommitInputsCommitted)(nil),                    // 37: tetral.bridge.v1.CommitInputsCommitted
-	(*CommitInputsStale)(nil),                        // 38: tetral.bridge.v1.CommitInputsStale
-	(*CommitTaskNotificationResultRequest)(nil),      // 39: tetral.bridge.v1.CommitTaskNotificationResultRequest
-	(*CommitTaskNotificationResultResponse)(nil),     // 40: tetral.bridge.v1.CommitTaskNotificationResultResponse
-	(*CommitTaskNotificationResultCommitted)(nil),    // 41: tetral.bridge.v1.CommitTaskNotificationResultCommitted
-	(*CommitTaskNotificationResultStale)(nil),        // 42: tetral.bridge.v1.CommitTaskNotificationResultStale
-	(*CommitTaskNotificationResultBarrierStale)(nil), // 43: tetral.bridge.v1.CommitTaskNotificationResultBarrierStale
-	(*CommitTaskNotificationResultParked)(nil),       // 44: tetral.bridge.v1.CommitTaskNotificationResultParked
-	(*CommitTaskNotificationResultRejected)(nil),     // 45: tetral.bridge.v1.CommitTaskNotificationResultRejected
-	(*McpManifestChangedRequest)(nil),                // 46: tetral.bridge.v1.McpManifestChangedRequest
-	(*McpManifestChangedResponse)(nil),               // 47: tetral.bridge.v1.McpManifestChangedResponse
-	(*McpManifestCommitted)(nil),                     // 48: tetral.bridge.v1.McpManifestCommitted
-	(*McpManifestDuplicate)(nil),                     // 49: tetral.bridge.v1.McpManifestDuplicate
-	(*ClaimMcpToolResultRequest)(nil),                // 50: tetral.bridge.v1.ClaimMcpToolResultRequest
-	(*ClaimMcpToolResultResponse)(nil),               // 51: tetral.bridge.v1.ClaimMcpToolResultResponse
-	(*McpToolClaimAcquired)(nil),                     // 52: tetral.bridge.v1.McpToolClaimAcquired
-	(*McpToolAlreadyCompleted)(nil),                  // 53: tetral.bridge.v1.McpToolAlreadyCompleted
-	(*McpToolClaimInFlight)(nil),                     // 54: tetral.bridge.v1.McpToolClaimInFlight
-	(*McpToolClaimStale)(nil),                        // 55: tetral.bridge.v1.McpToolClaimStale
-	(*CommitMcpToolResultRequest)(nil),               // 56: tetral.bridge.v1.CommitMcpToolResultRequest
-	(*McpInlineMedia)(nil),                           // 57: tetral.bridge.v1.McpInlineMedia
-	(*CommitMcpToolResultResponse)(nil),              // 58: tetral.bridge.v1.CommitMcpToolResultResponse
-	(*McpToolCommitCommitted)(nil),                   // 59: tetral.bridge.v1.McpToolCommitCommitted
-	(*McpToolCommitDuplicate)(nil),                   // 60: tetral.bridge.v1.McpToolCommitDuplicate
-	(*McpToolCommitStale)(nil),                       // 61: tetral.bridge.v1.McpToolCommitStale
-	(*RelinquishMcpToolResultRequest)(nil),           // 62: tetral.bridge.v1.RelinquishMcpToolResultRequest
-	(*RelinquishMcpToolResultResponse)(nil),          // 63: tetral.bridge.v1.RelinquishMcpToolResultResponse
-	(*McpToolRelinquishRelinquished)(nil),            // 64: tetral.bridge.v1.McpToolRelinquishRelinquished
-	(*McpToolRelinquishDuplicate)(nil),               // 65: tetral.bridge.v1.McpToolRelinquishDuplicate
-	(*McpToolRelinquishStale)(nil),                   // 66: tetral.bridge.v1.McpToolRelinquishStale
-	(*CommitInternalToolRepairRequest)(nil),          // 67: tetral.bridge.v1.CommitInternalToolRepairRequest
-	(*CommitInternalToolRepairResponse)(nil),         // 68: tetral.bridge.v1.CommitInternalToolRepairResponse
-	(*CommitInternalToolRepairCommitted)(nil),        // 69: tetral.bridge.v1.CommitInternalToolRepairCommitted
-	(*CommitInternalToolRepairDuplicate)(nil),        // 70: tetral.bridge.v1.CommitInternalToolRepairDuplicate
-	(*CommitInternalToolRepairStale)(nil),            // 71: tetral.bridge.v1.CommitInternalToolRepairStale
-	(*CommitRuntimeTerminationRequest)(nil),          // 72: tetral.bridge.v1.CommitRuntimeTerminationRequest
-	(*CommitRuntimeTerminationResponse)(nil),         // 73: tetral.bridge.v1.CommitRuntimeTerminationResponse
-	(*RuntimeTerminationCommitted)(nil),              // 74: tetral.bridge.v1.RuntimeTerminationCommitted
-	(*RuntimeTerminationDuplicate)(nil),              // 75: tetral.bridge.v1.RuntimeTerminationDuplicate
-	(*RuntimeTerminationStale)(nil),                  // 76: tetral.bridge.v1.RuntimeTerminationStale
-	(*TransientAttachmentRef)(nil),                   // 77: tetral.bridge.v1.TransientAttachmentRef
-	(*ResolveTransientAttachmentRequest)(nil),        // 78: tetral.bridge.v1.ResolveTransientAttachmentRequest
-	(*ResolvedTransientAttachment)(nil),              // 79: tetral.bridge.v1.ResolvedTransientAttachment
-	(*TransientAttachmentUnavailable)(nil),           // 80: tetral.bridge.v1.TransientAttachmentUnavailable
-	(*ResolveTransientAttachmentResponse)(nil),       // 81: tetral.bridge.v1.ResolveTransientAttachmentResponse
-	(*FileAttachmentPair)(nil),                       // 82: tetral.bridge.v1.FileAttachmentPair
-	(*ResolveFileAttachmentMetadataRequest)(nil),     // 83: tetral.bridge.v1.ResolveFileAttachmentMetadataRequest
-	(*FileAttachmentMetadata)(nil),                   // 84: tetral.bridge.v1.FileAttachmentMetadata
-	(*FileAttachmentRejection)(nil),                  // 85: tetral.bridge.v1.FileAttachmentRejection
-	(*FileAttachmentMetadataResult)(nil),             // 86: tetral.bridge.v1.FileAttachmentMetadataResult
-	(*ResolveFileAttachmentMetadataResponse)(nil),    // 87: tetral.bridge.v1.ResolveFileAttachmentMetadataResponse
-	(*ReadFileAttachmentChunkRequest)(nil),           // 88: tetral.bridge.v1.ReadFileAttachmentChunkRequest
-	(*ReadFileAttachmentChunkResponse)(nil),          // 89: tetral.bridge.v1.ReadFileAttachmentChunkResponse
-	(*WriteEventRequest)(nil),                        // 90: tetral.bridge.v1.WriteEventRequest
-	(*RuntimeToolDeclaration)(nil),                   // 91: tetral.bridge.v1.RuntimeToolDeclaration
-	(*ServerToolUseUsage)(nil),                       // 92: tetral.bridge.v1.ServerToolUseUsage
-	(*WriteEventResponse)(nil),                       // 93: tetral.bridge.v1.WriteEventResponse
-	(*WriteEventCommitted)(nil),                      // 94: tetral.bridge.v1.WriteEventCommitted
-	(*WriteEventDuplicate)(nil),                      // 95: tetral.bridge.v1.WriteEventDuplicate
-	(*WriteEventStale)(nil),                          // 96: tetral.bridge.v1.WriteEventStale
-	(*SettleToolResultRequest)(nil),                  // 97: tetral.bridge.v1.SettleToolResultRequest
-	(*SettleToolResultResponse)(nil),                 // 98: tetral.bridge.v1.SettleToolResultResponse
-	(*ToolResultCommitted)(nil),                      // 99: tetral.bridge.v1.ToolResultCommitted
-	(*ToolResultDuplicate)(nil),                      // 100: tetral.bridge.v1.ToolResultDuplicate
-	(*ToolResultStale)(nil),                          // 101: tetral.bridge.v1.ToolResultStale
-	(*WriteRequestEndRequest)(nil),                   // 102: tetral.bridge.v1.WriteRequestEndRequest
-	(*ProviderContextRetention)(nil),                 // 103: tetral.bridge.v1.ProviderContextRetention
-	(*RequestEndInterruptSettlement)(nil),            // 104: tetral.bridge.v1.RequestEndInterruptSettlement
-	(*WriteRequestEndResponse)(nil),                  // 105: tetral.bridge.v1.WriteRequestEndResponse
-	(*WriteRequestEndCommitted)(nil),                 // 106: tetral.bridge.v1.WriteRequestEndCommitted
-	(*WriteRequestEndDuplicate)(nil),                 // 107: tetral.bridge.v1.WriteRequestEndDuplicate
-	(*WriteRequestEndStale)(nil),                     // 108: tetral.bridge.v1.WriteRequestEndStale
-	(*RequestEndOrdinary)(nil),                       // 109: tetral.bridge.v1.RequestEndOrdinary
-	(*RequestEndRescheduled)(nil),                    // 110: tetral.bridge.v1.RequestEndRescheduled
-	(*RequestEndCompacted)(nil),                      // 111: tetral.bridge.v1.RequestEndCompacted
-	(*RequestEndReschedule)(nil),                     // 112: tetral.bridge.v1.RequestEndReschedule
-	(*FinishIdleRequest)(nil),                        // 113: tetral.bridge.v1.FinishIdleRequest
-	(*FinishIdleResponse)(nil),                       // 114: tetral.bridge.v1.FinishIdleResponse
-	(*FinishIdleCommitted)(nil),                      // 115: tetral.bridge.v1.FinishIdleCommitted
-	(*FinishIdleDuplicate)(nil),                      // 116: tetral.bridge.v1.FinishIdleDuplicate
-	(*FinishIdleStale)(nil),                          // 117: tetral.bridge.v1.FinishIdleStale
-	(*CreateSubagentThreadRequest)(nil),              // 118: tetral.bridge.v1.CreateSubagentThreadRequest
-	(*CreateSubagentThreadResponse)(nil),             // 119: tetral.bridge.v1.CreateSubagentThreadResponse
-	(*CreateSubagentThreadCommitted)(nil),            // 120: tetral.bridge.v1.CreateSubagentThreadCommitted
-	(*CreateSubagentThreadDuplicate)(nil),            // 121: tetral.bridge.v1.CreateSubagentThreadDuplicate
-	(*EnsureApprovalReviewerTrunkRequest)(nil),       // 122: tetral.bridge.v1.EnsureApprovalReviewerTrunkRequest
-	(*EnsureApprovalReviewerTrunkResponse)(nil),      // 123: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse
-	(*EnsureApprovalReviewerTrunkCommitted)(nil),     // 124: tetral.bridge.v1.EnsureApprovalReviewerTrunkCommitted
-	(*EnsureApprovalReviewerTrunkDuplicate)(nil),     // 125: tetral.bridge.v1.EnsureApprovalReviewerTrunkDuplicate
-	(*EnsureApprovalReviewerTrunkStale)(nil),         // 126: tetral.bridge.v1.EnsureApprovalReviewerTrunkStale
-	(*EnsureApprovalReviewerSidecarRequest)(nil),     // 127: tetral.bridge.v1.EnsureApprovalReviewerSidecarRequest
-	(*EnsureApprovalReviewerSidecarResponse)(nil),    // 128: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse
-	(*EnsureApprovalReviewerSidecarCommitted)(nil),   // 129: tetral.bridge.v1.EnsureApprovalReviewerSidecarCommitted
-	(*EnsureApprovalReviewerSidecarDuplicate)(nil),   // 130: tetral.bridge.v1.EnsureApprovalReviewerSidecarDuplicate
-	(*EnsureApprovalReviewerSidecarStale)(nil),       // 131: tetral.bridge.v1.EnsureApprovalReviewerSidecarStale
-	(*AdmitApprovalReviewInputRequest)(nil),          // 132: tetral.bridge.v1.AdmitApprovalReviewInputRequest
-	(*AdmitApprovalReviewInputResponse)(nil),         // 133: tetral.bridge.v1.AdmitApprovalReviewInputResponse
-	(*AdmitApprovalReviewInputCommitted)(nil),        // 134: tetral.bridge.v1.AdmitApprovalReviewInputCommitted
-	(*AdmitApprovalReviewInputDuplicate)(nil),        // 135: tetral.bridge.v1.AdmitApprovalReviewInputDuplicate
-	(*AdmitApprovalReviewInputStale)(nil),            // 136: tetral.bridge.v1.AdmitApprovalReviewInputStale
-	(*ResolveChildThreadRequest)(nil),                // 137: tetral.bridge.v1.ResolveChildThreadRequest
-	(*ResolveChildThreadResponse)(nil),               // 138: tetral.bridge.v1.ResolveChildThreadResponse
-	(*ResolveChildThreadResolved)(nil),               // 139: tetral.bridge.v1.ResolveChildThreadResolved
-	(*ListChildThreadsRequest)(nil),                  // 140: tetral.bridge.v1.ListChildThreadsRequest
-	(*ListChildThreadsResponse)(nil),                 // 141: tetral.bridge.v1.ListChildThreadsResponse
-	(*ListChildThreadsCompleted)(nil),                // 142: tetral.bridge.v1.ListChildThreadsCompleted
-	(*ChildThreadFact)(nil),                          // 143: tetral.bridge.v1.ChildThreadFact
-	(*DeliverInterAgentMailRequest)(nil),             // 144: tetral.bridge.v1.DeliverInterAgentMailRequest
-	(*DeliverInterAgentMailResponse)(nil),            // 145: tetral.bridge.v1.DeliverInterAgentMailResponse
-	(*DeliverInterAgentMailCommitted)(nil),           // 146: tetral.bridge.v1.DeliverInterAgentMailCommitted
-	(*DeliverInterAgentMailDuplicate)(nil),           // 147: tetral.bridge.v1.DeliverInterAgentMailDuplicate
-	(*ReadAgentMailRequest)(nil),                     // 148: tetral.bridge.v1.ReadAgentMailRequest
-	(*ReadAgentMailResponse)(nil),                    // 149: tetral.bridge.v1.ReadAgentMailResponse
-	(*ReadAgentMailFound)(nil),                       // 150: tetral.bridge.v1.ReadAgentMailFound
-	(*ReadAgentMailEmpty)(nil),                       // 151: tetral.bridge.v1.ReadAgentMailEmpty
-	(*ChildInterruptTarget)(nil),                     // 152: tetral.bridge.v1.ChildInterruptTarget
-	(*AdmitChildInterruptRequest)(nil),               // 153: tetral.bridge.v1.AdmitChildInterruptRequest
-	(*AdmitChildInterruptResponse)(nil),              // 154: tetral.bridge.v1.AdmitChildInterruptResponse
-	(*AdmitChildInterruptCommitted)(nil),             // 155: tetral.bridge.v1.AdmitChildInterruptCommitted
-	(*AdmitChildInterruptDuplicate)(nil),             // 156: tetral.bridge.v1.AdmitChildInterruptDuplicate
-	(*AwaitChildInterruptRequest)(nil),               // 157: tetral.bridge.v1.AwaitChildInterruptRequest
-	(*ChildInterruptTargetOutcome)(nil),              // 158: tetral.bridge.v1.ChildInterruptTargetOutcome
-	(*AwaitChildInterruptResponse)(nil),              // 159: tetral.bridge.v1.AwaitChildInterruptResponse
-	(*AwaitChildInterruptCompleted)(nil),             // 160: tetral.bridge.v1.AwaitChildInterruptCompleted
-	(*CloseChildControlRequest)(nil),                 // 161: tetral.bridge.v1.CloseChildControlRequest
-	(*CloseChildControlResponse)(nil),                // 162: tetral.bridge.v1.CloseChildControlResponse
-	(*CloseChildControlCommitted)(nil),               // 163: tetral.bridge.v1.CloseChildControlCommitted
-	(*CloseChildControlDuplicate)(nil),               // 164: tetral.bridge.v1.CloseChildControlDuplicate
-	(*CloseChildControlStale)(nil),                   // 165: tetral.bridge.v1.CloseChildControlStale
-	(*CloseApprovalReviewerRequest)(nil),             // 166: tetral.bridge.v1.CloseApprovalReviewerRequest
-	(*CloseApprovalReviewerResponse)(nil),            // 167: tetral.bridge.v1.CloseApprovalReviewerResponse
-	(*CloseApprovalReviewerCommitted)(nil),           // 168: tetral.bridge.v1.CloseApprovalReviewerCommitted
-	(*CloseApprovalReviewerDuplicate)(nil),           // 169: tetral.bridge.v1.CloseApprovalReviewerDuplicate
-	(*CloseApprovalReviewerStale)(nil),               // 170: tetral.bridge.v1.CloseApprovalReviewerStale
-	(*ChildLifecycleResult)(nil),                     // 171: tetral.bridge.v1.ChildLifecycleResult
-	(*MarkChildThreadActiveRequest)(nil),             // 172: tetral.bridge.v1.MarkChildThreadActiveRequest
-	(*MarkChildThreadActiveResponse)(nil),            // 173: tetral.bridge.v1.MarkChildThreadActiveResponse
-	(*MarkChildThreadActiveCommitted)(nil),           // 174: tetral.bridge.v1.MarkChildThreadActiveCommitted
-	(*MarkChildThreadActiveDuplicate)(nil),           // 175: tetral.bridge.v1.MarkChildThreadActiveDuplicate
-	(*MarkChildThreadActiveStale)(nil),               // 176: tetral.bridge.v1.MarkChildThreadActiveStale
-	(*AcceptSandboxExecutionRequest)(nil),            // 177: tetral.bridge.v1.AcceptSandboxExecutionRequest
-	(*AcceptSandboxExecutionResponse)(nil),           // 178: tetral.bridge.v1.AcceptSandboxExecutionResponse
-	(*SandboxExecutionCommitted)(nil),                // 179: tetral.bridge.v1.SandboxExecutionCommitted
-	(*SandboxExecutionDuplicate)(nil),                // 180: tetral.bridge.v1.SandboxExecutionDuplicate
-	(*SandboxExecutionStale)(nil),                    // 181: tetral.bridge.v1.SandboxExecutionStale
-	(*AwaitSandboxExecutionRequest)(nil),             // 182: tetral.bridge.v1.AwaitSandboxExecutionRequest
-	(*AwaitSandboxExecutionResponse)(nil),            // 183: tetral.bridge.v1.AwaitSandboxExecutionResponse
-	(*SandboxExecutionCompleted)(nil),                // 184: tetral.bridge.v1.SandboxExecutionCompleted
-	(*SandboxExecutionAwaitStale)(nil),               // 185: tetral.bridge.v1.SandboxExecutionAwaitStale
-	(*ReadCommandResultRequest)(nil),                 // 186: tetral.bridge.v1.ReadCommandResultRequest
-	(*ReadCommandResultResponse)(nil),                // 187: tetral.bridge.v1.ReadCommandResultResponse
-	(*CommandReadCompleted)(nil),                     // 188: tetral.bridge.v1.CommandReadCompleted
-	(*CommandReadStale)(nil),                         // 189: tetral.bridge.v1.CommandReadStale
-	(*SendCommandInputRequest)(nil),                  // 190: tetral.bridge.v1.SendCommandInputRequest
-	(*SendCommandInputResponse)(nil),                 // 191: tetral.bridge.v1.SendCommandInputResponse
-	(*CommandInputCommitted)(nil),                    // 192: tetral.bridge.v1.CommandInputCommitted
-	(*CommandInputDuplicate)(nil),                    // 193: tetral.bridge.v1.CommandInputDuplicate
-	(*CommandInputStale)(nil),                        // 194: tetral.bridge.v1.CommandInputStale
-	(*CancelCommandRequest)(nil),                     // 195: tetral.bridge.v1.CancelCommandRequest
-	(*CancelCommandResponse)(nil),                    // 196: tetral.bridge.v1.CancelCommandResponse
-	(*CommandCancelCommitted)(nil),                   // 197: tetral.bridge.v1.CommandCancelCommitted
-	(*CommandCancelDuplicate)(nil),                   // 198: tetral.bridge.v1.CommandCancelDuplicate
-	(*CommandCancelStale)(nil),                       // 199: tetral.bridge.v1.CommandCancelStale
-	(*AuthorizeWebToolExecutionRequest)(nil),         // 200: tetral.bridge.v1.AuthorizeWebToolExecutionRequest
-	(*AuthorizeWebToolExecutionResponse)(nil),        // 201: tetral.bridge.v1.AuthorizeWebToolExecutionResponse
-	(*WebToolExecutionAuthorized)(nil),               // 202: tetral.bridge.v1.WebToolExecutionAuthorized
-	(*WebToolExecutionStale)(nil),                    // 203: tetral.bridge.v1.WebToolExecutionStale
-	(*RunMemoryRequest)(nil),                         // 204: tetral.bridge.v1.RunMemoryRequest
-	(*RunMemoryResponse)(nil),                        // 205: tetral.bridge.v1.RunMemoryResponse
-	(*MemoryRunCommitted)(nil),                       // 206: tetral.bridge.v1.MemoryRunCommitted
-	(*MemoryRunDuplicate)(nil),                       // 207: tetral.bridge.v1.MemoryRunDuplicate
-	(*MemoryRunStale)(nil),                           // 208: tetral.bridge.v1.MemoryRunStale
+	(ApprovalReviewerCloseSettlementKind)(0),         // 7: tetral.bridge.v1.ApprovalReviewerCloseSettlementKind
+	(*RuntimeContextDelta)(nil),                      // 8: tetral.bridge.v1.RuntimeContextDelta
+	(*RuntimeContextPart)(nil),                       // 9: tetral.bridge.v1.RuntimeContextPart
+	(*RuntimeContextText)(nil),                       // 10: tetral.bridge.v1.RuntimeContextText
+	(*RuntimeContextReasoning)(nil),                  // 11: tetral.bridge.v1.RuntimeContextReasoning
+	(*RuntimeContextToolCall)(nil),                   // 12: tetral.bridge.v1.RuntimeContextToolCall
+	(*RuntimeContextToolResult)(nil),                 // 13: tetral.bridge.v1.RuntimeContextToolResult
+	(*RuntimeContextToolCompleted)(nil),              // 14: tetral.bridge.v1.RuntimeContextToolCompleted
+	(*RuntimeContextToolError)(nil),                  // 15: tetral.bridge.v1.RuntimeContextToolError
+	(*RuntimeContextToolCancelled)(nil),              // 16: tetral.bridge.v1.RuntimeContextToolCancelled
+	(*RuntimeToolSettlement)(nil),                    // 17: tetral.bridge.v1.RuntimeToolSettlement
+	(*RuntimeToolCompleted)(nil),                     // 18: tetral.bridge.v1.RuntimeToolCompleted
+	(*RuntimeToolError)(nil),                         // 19: tetral.bridge.v1.RuntimeToolError
+	(*RuntimeToolCancelled)(nil),                     // 20: tetral.bridge.v1.RuntimeToolCancelled
+	(*PrefixConsumptionDraft)(nil),                   // 21: tetral.bridge.v1.PrefixConsumptionDraft
+	(*RuntimeBindingRef)(nil),                        // 22: tetral.bridge.v1.RuntimeBindingRef
+	(*RuntimeScope)(nil),                             // 23: tetral.bridge.v1.RuntimeScope
+	(*LoadContextRequest)(nil),                       // 24: tetral.bridge.v1.LoadContextRequest
+	(*RecoveryLeaseRef)(nil),                         // 25: tetral.bridge.v1.RecoveryLeaseRef
+	(*LoadContextResponse)(nil),                      // 26: tetral.bridge.v1.LoadContextResponse
+	(*RefreshRuntimeBindingTokenRequest)(nil),        // 27: tetral.bridge.v1.RefreshRuntimeBindingTokenRequest
+	(*RefreshRuntimeBindingTokenResponse)(nil),       // 28: tetral.bridge.v1.RefreshRuntimeBindingTokenResponse
+	(*CommitInputsRequest)(nil),                      // 29: tetral.bridge.v1.CommitInputsRequest
+	(*InterruptLeaseRef)(nil),                        // 30: tetral.bridge.v1.InterruptLeaseRef
+	(*CommitInputsResponse)(nil),                     // 31: tetral.bridge.v1.CommitInputsResponse
+	(*CommitInputsBarrierStale)(nil),                 // 32: tetral.bridge.v1.CommitInputsBarrierStale
+	(*RuntimeInterruptToolFailed)(nil),               // 33: tetral.bridge.v1.RuntimeInterruptToolFailed
+	(*RuntimeInterruptToolCancelled)(nil),            // 34: tetral.bridge.v1.RuntimeInterruptToolCancelled
+	(*RuntimeInterruptToolResult)(nil),               // 35: tetral.bridge.v1.RuntimeInterruptToolResult
+	(*CommitInputsContextApplication)(nil),           // 36: tetral.bridge.v1.CommitInputsContextApplication
+	(*CommitInputsInterruptApplication)(nil),         // 37: tetral.bridge.v1.CommitInputsInterruptApplication
+	(*CommitInputsCommitted)(nil),                    // 38: tetral.bridge.v1.CommitInputsCommitted
+	(*CommitInputsStale)(nil),                        // 39: tetral.bridge.v1.CommitInputsStale
+	(*CommitTaskNotificationResultRequest)(nil),      // 40: tetral.bridge.v1.CommitTaskNotificationResultRequest
+	(*CommitTaskNotificationResultResponse)(nil),     // 41: tetral.bridge.v1.CommitTaskNotificationResultResponse
+	(*CommitTaskNotificationResultCommitted)(nil),    // 42: tetral.bridge.v1.CommitTaskNotificationResultCommitted
+	(*CommitTaskNotificationResultStale)(nil),        // 43: tetral.bridge.v1.CommitTaskNotificationResultStale
+	(*CommitTaskNotificationResultBarrierStale)(nil), // 44: tetral.bridge.v1.CommitTaskNotificationResultBarrierStale
+	(*CommitTaskNotificationResultParked)(nil),       // 45: tetral.bridge.v1.CommitTaskNotificationResultParked
+	(*CommitTaskNotificationResultRejected)(nil),     // 46: tetral.bridge.v1.CommitTaskNotificationResultRejected
+	(*McpManifestChangedRequest)(nil),                // 47: tetral.bridge.v1.McpManifestChangedRequest
+	(*McpManifestChangedResponse)(nil),               // 48: tetral.bridge.v1.McpManifestChangedResponse
+	(*McpManifestCommitted)(nil),                     // 49: tetral.bridge.v1.McpManifestCommitted
+	(*McpManifestDuplicate)(nil),                     // 50: tetral.bridge.v1.McpManifestDuplicate
+	(*ClaimMcpToolResultRequest)(nil),                // 51: tetral.bridge.v1.ClaimMcpToolResultRequest
+	(*ClaimMcpToolResultResponse)(nil),               // 52: tetral.bridge.v1.ClaimMcpToolResultResponse
+	(*McpToolClaimAcquired)(nil),                     // 53: tetral.bridge.v1.McpToolClaimAcquired
+	(*McpToolAlreadyCompleted)(nil),                  // 54: tetral.bridge.v1.McpToolAlreadyCompleted
+	(*McpToolClaimInFlight)(nil),                     // 55: tetral.bridge.v1.McpToolClaimInFlight
+	(*McpToolClaimStale)(nil),                        // 56: tetral.bridge.v1.McpToolClaimStale
+	(*CommitMcpToolResultRequest)(nil),               // 57: tetral.bridge.v1.CommitMcpToolResultRequest
+	(*McpInlineMedia)(nil),                           // 58: tetral.bridge.v1.McpInlineMedia
+	(*CommitMcpToolResultResponse)(nil),              // 59: tetral.bridge.v1.CommitMcpToolResultResponse
+	(*McpToolCommitCommitted)(nil),                   // 60: tetral.bridge.v1.McpToolCommitCommitted
+	(*McpToolCommitDuplicate)(nil),                   // 61: tetral.bridge.v1.McpToolCommitDuplicate
+	(*McpToolCommitStale)(nil),                       // 62: tetral.bridge.v1.McpToolCommitStale
+	(*RelinquishMcpToolResultRequest)(nil),           // 63: tetral.bridge.v1.RelinquishMcpToolResultRequest
+	(*RelinquishMcpToolResultResponse)(nil),          // 64: tetral.bridge.v1.RelinquishMcpToolResultResponse
+	(*McpToolRelinquishRelinquished)(nil),            // 65: tetral.bridge.v1.McpToolRelinquishRelinquished
+	(*McpToolRelinquishDuplicate)(nil),               // 66: tetral.bridge.v1.McpToolRelinquishDuplicate
+	(*McpToolRelinquishStale)(nil),                   // 67: tetral.bridge.v1.McpToolRelinquishStale
+	(*CommitInternalToolRepairRequest)(nil),          // 68: tetral.bridge.v1.CommitInternalToolRepairRequest
+	(*CommitInternalToolRepairResponse)(nil),         // 69: tetral.bridge.v1.CommitInternalToolRepairResponse
+	(*CommitInternalToolRepairCommitted)(nil),        // 70: tetral.bridge.v1.CommitInternalToolRepairCommitted
+	(*CommitInternalToolRepairDuplicate)(nil),        // 71: tetral.bridge.v1.CommitInternalToolRepairDuplicate
+	(*CommitInternalToolRepairStale)(nil),            // 72: tetral.bridge.v1.CommitInternalToolRepairStale
+	(*CommitRuntimeTerminationRequest)(nil),          // 73: tetral.bridge.v1.CommitRuntimeTerminationRequest
+	(*CommitRuntimeTerminationResponse)(nil),         // 74: tetral.bridge.v1.CommitRuntimeTerminationResponse
+	(*RuntimeTerminationCommitted)(nil),              // 75: tetral.bridge.v1.RuntimeTerminationCommitted
+	(*RuntimeTerminationDuplicate)(nil),              // 76: tetral.bridge.v1.RuntimeTerminationDuplicate
+	(*RuntimeTerminationStale)(nil),                  // 77: tetral.bridge.v1.RuntimeTerminationStale
+	(*TransientAttachmentRef)(nil),                   // 78: tetral.bridge.v1.TransientAttachmentRef
+	(*ResolveTransientAttachmentRequest)(nil),        // 79: tetral.bridge.v1.ResolveTransientAttachmentRequest
+	(*ResolvedTransientAttachment)(nil),              // 80: tetral.bridge.v1.ResolvedTransientAttachment
+	(*TransientAttachmentUnavailable)(nil),           // 81: tetral.bridge.v1.TransientAttachmentUnavailable
+	(*ResolveTransientAttachmentResponse)(nil),       // 82: tetral.bridge.v1.ResolveTransientAttachmentResponse
+	(*FileAttachmentPair)(nil),                       // 83: tetral.bridge.v1.FileAttachmentPair
+	(*ResolveFileAttachmentMetadataRequest)(nil),     // 84: tetral.bridge.v1.ResolveFileAttachmentMetadataRequest
+	(*FileAttachmentMetadata)(nil),                   // 85: tetral.bridge.v1.FileAttachmentMetadata
+	(*FileAttachmentRejection)(nil),                  // 86: tetral.bridge.v1.FileAttachmentRejection
+	(*FileAttachmentMetadataResult)(nil),             // 87: tetral.bridge.v1.FileAttachmentMetadataResult
+	(*ResolveFileAttachmentMetadataResponse)(nil),    // 88: tetral.bridge.v1.ResolveFileAttachmentMetadataResponse
+	(*ReadFileAttachmentChunkRequest)(nil),           // 89: tetral.bridge.v1.ReadFileAttachmentChunkRequest
+	(*ReadFileAttachmentChunkResponse)(nil),          // 90: tetral.bridge.v1.ReadFileAttachmentChunkResponse
+	(*WriteEventRequest)(nil),                        // 91: tetral.bridge.v1.WriteEventRequest
+	(*RuntimeToolDeclaration)(nil),                   // 92: tetral.bridge.v1.RuntimeToolDeclaration
+	(*ServerToolUseUsage)(nil),                       // 93: tetral.bridge.v1.ServerToolUseUsage
+	(*WriteEventResponse)(nil),                       // 94: tetral.bridge.v1.WriteEventResponse
+	(*WriteEventCommitted)(nil),                      // 95: tetral.bridge.v1.WriteEventCommitted
+	(*WriteEventDuplicate)(nil),                      // 96: tetral.bridge.v1.WriteEventDuplicate
+	(*WriteEventStale)(nil),                          // 97: tetral.bridge.v1.WriteEventStale
+	(*SettleToolResultRequest)(nil),                  // 98: tetral.bridge.v1.SettleToolResultRequest
+	(*SettleToolResultResponse)(nil),                 // 99: tetral.bridge.v1.SettleToolResultResponse
+	(*ToolResultCommitted)(nil),                      // 100: tetral.bridge.v1.ToolResultCommitted
+	(*ToolResultDuplicate)(nil),                      // 101: tetral.bridge.v1.ToolResultDuplicate
+	(*ToolResultStale)(nil),                          // 102: tetral.bridge.v1.ToolResultStale
+	(*WriteRequestEndRequest)(nil),                   // 103: tetral.bridge.v1.WriteRequestEndRequest
+	(*ProviderContextRetention)(nil),                 // 104: tetral.bridge.v1.ProviderContextRetention
+	(*RequestEndInterruptSettlement)(nil),            // 105: tetral.bridge.v1.RequestEndInterruptSettlement
+	(*WriteRequestEndResponse)(nil),                  // 106: tetral.bridge.v1.WriteRequestEndResponse
+	(*WriteRequestEndCommitted)(nil),                 // 107: tetral.bridge.v1.WriteRequestEndCommitted
+	(*WriteRequestEndDuplicate)(nil),                 // 108: tetral.bridge.v1.WriteRequestEndDuplicate
+	(*WriteRequestEndStale)(nil),                     // 109: tetral.bridge.v1.WriteRequestEndStale
+	(*RequestEndOrdinary)(nil),                       // 110: tetral.bridge.v1.RequestEndOrdinary
+	(*RequestEndRescheduled)(nil),                    // 111: tetral.bridge.v1.RequestEndRescheduled
+	(*RequestEndCompacted)(nil),                      // 112: tetral.bridge.v1.RequestEndCompacted
+	(*RequestEndReschedule)(nil),                     // 113: tetral.bridge.v1.RequestEndReschedule
+	(*FinishIdleRequest)(nil),                        // 114: tetral.bridge.v1.FinishIdleRequest
+	(*FinishIdleResponse)(nil),                       // 115: tetral.bridge.v1.FinishIdleResponse
+	(*FinishIdleCommitted)(nil),                      // 116: tetral.bridge.v1.FinishIdleCommitted
+	(*FinishIdleDuplicate)(nil),                      // 117: tetral.bridge.v1.FinishIdleDuplicate
+	(*FinishIdleStale)(nil),                          // 118: tetral.bridge.v1.FinishIdleStale
+	(*CreateSubagentThreadRequest)(nil),              // 119: tetral.bridge.v1.CreateSubagentThreadRequest
+	(*CreateSubagentThreadResponse)(nil),             // 120: tetral.bridge.v1.CreateSubagentThreadResponse
+	(*CreateSubagentThreadCommitted)(nil),            // 121: tetral.bridge.v1.CreateSubagentThreadCommitted
+	(*CreateSubagentThreadDuplicate)(nil),            // 122: tetral.bridge.v1.CreateSubagentThreadDuplicate
+	(*EnsureApprovalReviewerTrunkRequest)(nil),       // 123: tetral.bridge.v1.EnsureApprovalReviewerTrunkRequest
+	(*EnsureApprovalReviewerTrunkResponse)(nil),      // 124: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse
+	(*EnsureApprovalReviewerTrunkCommitted)(nil),     // 125: tetral.bridge.v1.EnsureApprovalReviewerTrunkCommitted
+	(*EnsureApprovalReviewerTrunkDuplicate)(nil),     // 126: tetral.bridge.v1.EnsureApprovalReviewerTrunkDuplicate
+	(*EnsureApprovalReviewerTrunkStale)(nil),         // 127: tetral.bridge.v1.EnsureApprovalReviewerTrunkStale
+	(*EnsureApprovalReviewerSidecarRequest)(nil),     // 128: tetral.bridge.v1.EnsureApprovalReviewerSidecarRequest
+	(*EnsureApprovalReviewerSidecarResponse)(nil),    // 129: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse
+	(*EnsureApprovalReviewerSidecarCommitted)(nil),   // 130: tetral.bridge.v1.EnsureApprovalReviewerSidecarCommitted
+	(*EnsureApprovalReviewerSidecarDuplicate)(nil),   // 131: tetral.bridge.v1.EnsureApprovalReviewerSidecarDuplicate
+	(*EnsureApprovalReviewerSidecarStale)(nil),       // 132: tetral.bridge.v1.EnsureApprovalReviewerSidecarStale
+	(*AdmitApprovalReviewInputRequest)(nil),          // 133: tetral.bridge.v1.AdmitApprovalReviewInputRequest
+	(*AdmitApprovalReviewInputResponse)(nil),         // 134: tetral.bridge.v1.AdmitApprovalReviewInputResponse
+	(*AdmitApprovalReviewInputCommitted)(nil),        // 135: tetral.bridge.v1.AdmitApprovalReviewInputCommitted
+	(*AdmitApprovalReviewInputDuplicate)(nil),        // 136: tetral.bridge.v1.AdmitApprovalReviewInputDuplicate
+	(*AdmitApprovalReviewInputStale)(nil),            // 137: tetral.bridge.v1.AdmitApprovalReviewInputStale
+	(*ResolveChildThreadRequest)(nil),                // 138: tetral.bridge.v1.ResolveChildThreadRequest
+	(*ResolveChildThreadResponse)(nil),               // 139: tetral.bridge.v1.ResolveChildThreadResponse
+	(*ResolveChildThreadResolved)(nil),               // 140: tetral.bridge.v1.ResolveChildThreadResolved
+	(*ListChildThreadsRequest)(nil),                  // 141: tetral.bridge.v1.ListChildThreadsRequest
+	(*ListChildThreadsResponse)(nil),                 // 142: tetral.bridge.v1.ListChildThreadsResponse
+	(*ListChildThreadsCompleted)(nil),                // 143: tetral.bridge.v1.ListChildThreadsCompleted
+	(*ChildThreadFact)(nil),                          // 144: tetral.bridge.v1.ChildThreadFact
+	(*DeliverInterAgentMailRequest)(nil),             // 145: tetral.bridge.v1.DeliverInterAgentMailRequest
+	(*DeliverInterAgentMailResponse)(nil),            // 146: tetral.bridge.v1.DeliverInterAgentMailResponse
+	(*DeliverInterAgentMailCommitted)(nil),           // 147: tetral.bridge.v1.DeliverInterAgentMailCommitted
+	(*DeliverInterAgentMailDuplicate)(nil),           // 148: tetral.bridge.v1.DeliverInterAgentMailDuplicate
+	(*ReadAgentMailRequest)(nil),                     // 149: tetral.bridge.v1.ReadAgentMailRequest
+	(*ReadAgentMailResponse)(nil),                    // 150: tetral.bridge.v1.ReadAgentMailResponse
+	(*ReadAgentMailFound)(nil),                       // 151: tetral.bridge.v1.ReadAgentMailFound
+	(*ReadAgentMailEmpty)(nil),                       // 152: tetral.bridge.v1.ReadAgentMailEmpty
+	(*ChildInterruptTarget)(nil),                     // 153: tetral.bridge.v1.ChildInterruptTarget
+	(*AdmitChildInterruptRequest)(nil),               // 154: tetral.bridge.v1.AdmitChildInterruptRequest
+	(*AdmitChildInterruptResponse)(nil),              // 155: tetral.bridge.v1.AdmitChildInterruptResponse
+	(*AdmitChildInterruptCommitted)(nil),             // 156: tetral.bridge.v1.AdmitChildInterruptCommitted
+	(*AdmitChildInterruptDuplicate)(nil),             // 157: tetral.bridge.v1.AdmitChildInterruptDuplicate
+	(*AwaitChildInterruptRequest)(nil),               // 158: tetral.bridge.v1.AwaitChildInterruptRequest
+	(*ChildInterruptTargetOutcome)(nil),              // 159: tetral.bridge.v1.ChildInterruptTargetOutcome
+	(*AwaitChildInterruptResponse)(nil),              // 160: tetral.bridge.v1.AwaitChildInterruptResponse
+	(*AwaitChildInterruptCompleted)(nil),             // 161: tetral.bridge.v1.AwaitChildInterruptCompleted
+	(*CloseChildControlRequest)(nil),                 // 162: tetral.bridge.v1.CloseChildControlRequest
+	(*CloseChildControlResponse)(nil),                // 163: tetral.bridge.v1.CloseChildControlResponse
+	(*CloseChildControlCommitted)(nil),               // 164: tetral.bridge.v1.CloseChildControlCommitted
+	(*CloseChildControlDuplicate)(nil),               // 165: tetral.bridge.v1.CloseChildControlDuplicate
+	(*CloseChildControlStale)(nil),                   // 166: tetral.bridge.v1.CloseChildControlStale
+	(*CloseApprovalReviewerRequest)(nil),             // 167: tetral.bridge.v1.CloseApprovalReviewerRequest
+	(*CloseApprovalReviewerResponse)(nil),            // 168: tetral.bridge.v1.CloseApprovalReviewerResponse
+	(*CloseApprovalReviewerCommitted)(nil),           // 169: tetral.bridge.v1.CloseApprovalReviewerCommitted
+	(*CloseApprovalReviewerDuplicate)(nil),           // 170: tetral.bridge.v1.CloseApprovalReviewerDuplicate
+	(*CloseApprovalReviewerStale)(nil),               // 171: tetral.bridge.v1.CloseApprovalReviewerStale
+	(*ChildLifecycleResult)(nil),                     // 172: tetral.bridge.v1.ChildLifecycleResult
+	(*MarkChildThreadActiveRequest)(nil),             // 173: tetral.bridge.v1.MarkChildThreadActiveRequest
+	(*MarkChildThreadActiveResponse)(nil),            // 174: tetral.bridge.v1.MarkChildThreadActiveResponse
+	(*MarkChildThreadActiveCommitted)(nil),           // 175: tetral.bridge.v1.MarkChildThreadActiveCommitted
+	(*MarkChildThreadActiveDuplicate)(nil),           // 176: tetral.bridge.v1.MarkChildThreadActiveDuplicate
+	(*MarkChildThreadActiveStale)(nil),               // 177: tetral.bridge.v1.MarkChildThreadActiveStale
+	(*AcceptSandboxExecutionRequest)(nil),            // 178: tetral.bridge.v1.AcceptSandboxExecutionRequest
+	(*AcceptSandboxExecutionResponse)(nil),           // 179: tetral.bridge.v1.AcceptSandboxExecutionResponse
+	(*SandboxExecutionCommitted)(nil),                // 180: tetral.bridge.v1.SandboxExecutionCommitted
+	(*SandboxExecutionDuplicate)(nil),                // 181: tetral.bridge.v1.SandboxExecutionDuplicate
+	(*SandboxExecutionStale)(nil),                    // 182: tetral.bridge.v1.SandboxExecutionStale
+	(*AwaitSandboxExecutionRequest)(nil),             // 183: tetral.bridge.v1.AwaitSandboxExecutionRequest
+	(*AwaitSandboxExecutionResponse)(nil),            // 184: tetral.bridge.v1.AwaitSandboxExecutionResponse
+	(*SandboxExecutionCompleted)(nil),                // 185: tetral.bridge.v1.SandboxExecutionCompleted
+	(*SandboxExecutionAwaitStale)(nil),               // 186: tetral.bridge.v1.SandboxExecutionAwaitStale
+	(*ReadCommandResultRequest)(nil),                 // 187: tetral.bridge.v1.ReadCommandResultRequest
+	(*ReadCommandResultResponse)(nil),                // 188: tetral.bridge.v1.ReadCommandResultResponse
+	(*CommandReadCompleted)(nil),                     // 189: tetral.bridge.v1.CommandReadCompleted
+	(*CommandReadStale)(nil),                         // 190: tetral.bridge.v1.CommandReadStale
+	(*SendCommandInputRequest)(nil),                  // 191: tetral.bridge.v1.SendCommandInputRequest
+	(*SendCommandInputResponse)(nil),                 // 192: tetral.bridge.v1.SendCommandInputResponse
+	(*CommandInputCommitted)(nil),                    // 193: tetral.bridge.v1.CommandInputCommitted
+	(*CommandInputDuplicate)(nil),                    // 194: tetral.bridge.v1.CommandInputDuplicate
+	(*CommandInputStale)(nil),                        // 195: tetral.bridge.v1.CommandInputStale
+	(*CancelCommandRequest)(nil),                     // 196: tetral.bridge.v1.CancelCommandRequest
+	(*CancelCommandResponse)(nil),                    // 197: tetral.bridge.v1.CancelCommandResponse
+	(*CommandCancelCommitted)(nil),                   // 198: tetral.bridge.v1.CommandCancelCommitted
+	(*CommandCancelDuplicate)(nil),                   // 199: tetral.bridge.v1.CommandCancelDuplicate
+	(*CommandCancelStale)(nil),                       // 200: tetral.bridge.v1.CommandCancelStale
+	(*AuthorizeWebToolExecutionRequest)(nil),         // 201: tetral.bridge.v1.AuthorizeWebToolExecutionRequest
+	(*AuthorizeWebToolExecutionResponse)(nil),        // 202: tetral.bridge.v1.AuthorizeWebToolExecutionResponse
+	(*WebToolExecutionAuthorized)(nil),               // 203: tetral.bridge.v1.WebToolExecutionAuthorized
+	(*WebToolExecutionStale)(nil),                    // 204: tetral.bridge.v1.WebToolExecutionStale
+	(*RunMemoryRequest)(nil),                         // 205: tetral.bridge.v1.RunMemoryRequest
+	(*RunMemoryResponse)(nil),                        // 206: tetral.bridge.v1.RunMemoryResponse
+	(*MemoryRunCommitted)(nil),                       // 207: tetral.bridge.v1.MemoryRunCommitted
+	(*MemoryRunDuplicate)(nil),                       // 208: tetral.bridge.v1.MemoryRunDuplicate
+	(*MemoryRunStale)(nil),                           // 209: tetral.bridge.v1.MemoryRunStale
 }
 var file_tetral_bridge_v1_bridge_proto_depIdxs = []int32{
-	8,   // 0: tetral.bridge.v1.RuntimeContextDelta.parts:type_name -> tetral.bridge.v1.RuntimeContextPart
-	9,   // 1: tetral.bridge.v1.RuntimeContextPart.text:type_name -> tetral.bridge.v1.RuntimeContextText
-	10,  // 2: tetral.bridge.v1.RuntimeContextPart.reasoning:type_name -> tetral.bridge.v1.RuntimeContextReasoning
-	11,  // 3: tetral.bridge.v1.RuntimeContextPart.tool_call:type_name -> tetral.bridge.v1.RuntimeContextToolCall
-	12,  // 4: tetral.bridge.v1.RuntimeContextPart.tool_result:type_name -> tetral.bridge.v1.RuntimeContextToolResult
-	13,  // 5: tetral.bridge.v1.RuntimeContextToolResult.completed:type_name -> tetral.bridge.v1.RuntimeContextToolCompleted
-	14,  // 6: tetral.bridge.v1.RuntimeContextToolResult.error:type_name -> tetral.bridge.v1.RuntimeContextToolError
-	15,  // 7: tetral.bridge.v1.RuntimeContextToolResult.cancelled:type_name -> tetral.bridge.v1.RuntimeContextToolCancelled
-	17,  // 8: tetral.bridge.v1.RuntimeToolSettlement.completed:type_name -> tetral.bridge.v1.RuntimeToolCompleted
-	18,  // 9: tetral.bridge.v1.RuntimeToolSettlement.error:type_name -> tetral.bridge.v1.RuntimeToolError
-	19,  // 10: tetral.bridge.v1.RuntimeToolSettlement.cancelled:type_name -> tetral.bridge.v1.RuntimeToolCancelled
-	92,  // 11: tetral.bridge.v1.RuntimeToolCompleted.server_tool_use:type_name -> tetral.bridge.v1.ServerToolUseUsage
-	92,  // 12: tetral.bridge.v1.RuntimeToolError.server_tool_use:type_name -> tetral.bridge.v1.ServerToolUseUsage
-	21,  // 13: tetral.bridge.v1.RuntimeScope.binding:type_name -> tetral.bridge.v1.RuntimeBindingRef
-	22,  // 14: tetral.bridge.v1.LoadContextRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	24,  // 15: tetral.bridge.v1.LoadContextRequest.recovery_lease_ref:type_name -> tetral.bridge.v1.RecoveryLeaseRef
-	22,  // 16: tetral.bridge.v1.RefreshRuntimeBindingTokenRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	22,  // 17: tetral.bridge.v1.CommitInputsRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	29,  // 18: tetral.bridge.v1.CommitInputsRequest.interrupt_lease_ref:type_name -> tetral.bridge.v1.InterruptLeaseRef
-	37,  // 19: tetral.bridge.v1.CommitInputsResponse.committed:type_name -> tetral.bridge.v1.CommitInputsCommitted
-	38,  // 20: tetral.bridge.v1.CommitInputsResponse.stale:type_name -> tetral.bridge.v1.CommitInputsStale
-	31,  // 21: tetral.bridge.v1.CommitInputsResponse.barrier_stale:type_name -> tetral.bridge.v1.CommitInputsBarrierStale
-	32,  // 22: tetral.bridge.v1.RuntimeInterruptToolResult.error:type_name -> tetral.bridge.v1.RuntimeInterruptToolFailed
-	33,  // 23: tetral.bridge.v1.RuntimeInterruptToolResult.cancelled:type_name -> tetral.bridge.v1.RuntimeInterruptToolCancelled
-	34,  // 24: tetral.bridge.v1.CommitInputsInterruptApplication.interrupt_tool_results:type_name -> tetral.bridge.v1.RuntimeInterruptToolResult
-	35,  // 25: tetral.bridge.v1.CommitInputsCommitted.context:type_name -> tetral.bridge.v1.CommitInputsContextApplication
-	36,  // 26: tetral.bridge.v1.CommitInputsCommitted.interrupt:type_name -> tetral.bridge.v1.CommitInputsInterruptApplication
-	22,  // 27: tetral.bridge.v1.CommitTaskNotificationResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	41,  // 28: tetral.bridge.v1.CommitTaskNotificationResultResponse.committed:type_name -> tetral.bridge.v1.CommitTaskNotificationResultCommitted
-	42,  // 29: tetral.bridge.v1.CommitTaskNotificationResultResponse.stale:type_name -> tetral.bridge.v1.CommitTaskNotificationResultStale
-	44,  // 30: tetral.bridge.v1.CommitTaskNotificationResultResponse.parked:type_name -> tetral.bridge.v1.CommitTaskNotificationResultParked
-	45,  // 31: tetral.bridge.v1.CommitTaskNotificationResultResponse.rejected:type_name -> tetral.bridge.v1.CommitTaskNotificationResultRejected
-	43,  // 32: tetral.bridge.v1.CommitTaskNotificationResultResponse.barrier_stale:type_name -> tetral.bridge.v1.CommitTaskNotificationResultBarrierStale
+	9,   // 0: tetral.bridge.v1.RuntimeContextDelta.parts:type_name -> tetral.bridge.v1.RuntimeContextPart
+	10,  // 1: tetral.bridge.v1.RuntimeContextPart.text:type_name -> tetral.bridge.v1.RuntimeContextText
+	11,  // 2: tetral.bridge.v1.RuntimeContextPart.reasoning:type_name -> tetral.bridge.v1.RuntimeContextReasoning
+	12,  // 3: tetral.bridge.v1.RuntimeContextPart.tool_call:type_name -> tetral.bridge.v1.RuntimeContextToolCall
+	13,  // 4: tetral.bridge.v1.RuntimeContextPart.tool_result:type_name -> tetral.bridge.v1.RuntimeContextToolResult
+	14,  // 5: tetral.bridge.v1.RuntimeContextToolResult.completed:type_name -> tetral.bridge.v1.RuntimeContextToolCompleted
+	15,  // 6: tetral.bridge.v1.RuntimeContextToolResult.error:type_name -> tetral.bridge.v1.RuntimeContextToolError
+	16,  // 7: tetral.bridge.v1.RuntimeContextToolResult.cancelled:type_name -> tetral.bridge.v1.RuntimeContextToolCancelled
+	18,  // 8: tetral.bridge.v1.RuntimeToolSettlement.completed:type_name -> tetral.bridge.v1.RuntimeToolCompleted
+	19,  // 9: tetral.bridge.v1.RuntimeToolSettlement.error:type_name -> tetral.bridge.v1.RuntimeToolError
+	20,  // 10: tetral.bridge.v1.RuntimeToolSettlement.cancelled:type_name -> tetral.bridge.v1.RuntimeToolCancelled
+	93,  // 11: tetral.bridge.v1.RuntimeToolCompleted.server_tool_use:type_name -> tetral.bridge.v1.ServerToolUseUsage
+	93,  // 12: tetral.bridge.v1.RuntimeToolError.server_tool_use:type_name -> tetral.bridge.v1.ServerToolUseUsage
+	22,  // 13: tetral.bridge.v1.RuntimeScope.binding:type_name -> tetral.bridge.v1.RuntimeBindingRef
+	23,  // 14: tetral.bridge.v1.LoadContextRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	25,  // 15: tetral.bridge.v1.LoadContextRequest.recovery_lease_ref:type_name -> tetral.bridge.v1.RecoveryLeaseRef
+	23,  // 16: tetral.bridge.v1.RefreshRuntimeBindingTokenRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	23,  // 17: tetral.bridge.v1.CommitInputsRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	30,  // 18: tetral.bridge.v1.CommitInputsRequest.interrupt_lease_ref:type_name -> tetral.bridge.v1.InterruptLeaseRef
+	38,  // 19: tetral.bridge.v1.CommitInputsResponse.committed:type_name -> tetral.bridge.v1.CommitInputsCommitted
+	39,  // 20: tetral.bridge.v1.CommitInputsResponse.stale:type_name -> tetral.bridge.v1.CommitInputsStale
+	32,  // 21: tetral.bridge.v1.CommitInputsResponse.barrier_stale:type_name -> tetral.bridge.v1.CommitInputsBarrierStale
+	33,  // 22: tetral.bridge.v1.RuntimeInterruptToolResult.error:type_name -> tetral.bridge.v1.RuntimeInterruptToolFailed
+	34,  // 23: tetral.bridge.v1.RuntimeInterruptToolResult.cancelled:type_name -> tetral.bridge.v1.RuntimeInterruptToolCancelled
+	35,  // 24: tetral.bridge.v1.CommitInputsInterruptApplication.interrupt_tool_results:type_name -> tetral.bridge.v1.RuntimeInterruptToolResult
+	36,  // 25: tetral.bridge.v1.CommitInputsCommitted.context:type_name -> tetral.bridge.v1.CommitInputsContextApplication
+	37,  // 26: tetral.bridge.v1.CommitInputsCommitted.interrupt:type_name -> tetral.bridge.v1.CommitInputsInterruptApplication
+	23,  // 27: tetral.bridge.v1.CommitTaskNotificationResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	42,  // 28: tetral.bridge.v1.CommitTaskNotificationResultResponse.committed:type_name -> tetral.bridge.v1.CommitTaskNotificationResultCommitted
+	43,  // 29: tetral.bridge.v1.CommitTaskNotificationResultResponse.stale:type_name -> tetral.bridge.v1.CommitTaskNotificationResultStale
+	45,  // 30: tetral.bridge.v1.CommitTaskNotificationResultResponse.parked:type_name -> tetral.bridge.v1.CommitTaskNotificationResultParked
+	46,  // 31: tetral.bridge.v1.CommitTaskNotificationResultResponse.rejected:type_name -> tetral.bridge.v1.CommitTaskNotificationResultRejected
+	44,  // 32: tetral.bridge.v1.CommitTaskNotificationResultResponse.barrier_stale:type_name -> tetral.bridge.v1.CommitTaskNotificationResultBarrierStale
 	4,   // 33: tetral.bridge.v1.CommitTaskNotificationResultRejected.reason:type_name -> tetral.bridge.v1.TaskNotificationRejectionReason
-	48,  // 34: tetral.bridge.v1.McpManifestChangedResponse.committed:type_name -> tetral.bridge.v1.McpManifestCommitted
-	49,  // 35: tetral.bridge.v1.McpManifestChangedResponse.duplicate:type_name -> tetral.bridge.v1.McpManifestDuplicate
-	22,  // 36: tetral.bridge.v1.ClaimMcpToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	52,  // 37: tetral.bridge.v1.ClaimMcpToolResultResponse.acquired:type_name -> tetral.bridge.v1.McpToolClaimAcquired
-	53,  // 38: tetral.bridge.v1.ClaimMcpToolResultResponse.already_completed:type_name -> tetral.bridge.v1.McpToolAlreadyCompleted
-	54,  // 39: tetral.bridge.v1.ClaimMcpToolResultResponse.in_flight:type_name -> tetral.bridge.v1.McpToolClaimInFlight
-	55,  // 40: tetral.bridge.v1.ClaimMcpToolResultResponse.stale:type_name -> tetral.bridge.v1.McpToolClaimStale
-	22,  // 41: tetral.bridge.v1.CommitMcpToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	57,  // 42: tetral.bridge.v1.CommitMcpToolResultRequest.inline_media:type_name -> tetral.bridge.v1.McpInlineMedia
-	59,  // 43: tetral.bridge.v1.CommitMcpToolResultResponse.committed:type_name -> tetral.bridge.v1.McpToolCommitCommitted
-	60,  // 44: tetral.bridge.v1.CommitMcpToolResultResponse.duplicate:type_name -> tetral.bridge.v1.McpToolCommitDuplicate
-	61,  // 45: tetral.bridge.v1.CommitMcpToolResultResponse.stale:type_name -> tetral.bridge.v1.McpToolCommitStale
-	22,  // 46: tetral.bridge.v1.RelinquishMcpToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	64,  // 47: tetral.bridge.v1.RelinquishMcpToolResultResponse.relinquished:type_name -> tetral.bridge.v1.McpToolRelinquishRelinquished
-	65,  // 48: tetral.bridge.v1.RelinquishMcpToolResultResponse.duplicate:type_name -> tetral.bridge.v1.McpToolRelinquishDuplicate
-	66,  // 49: tetral.bridge.v1.RelinquishMcpToolResultResponse.stale:type_name -> tetral.bridge.v1.McpToolRelinquishStale
-	22,  // 50: tetral.bridge.v1.CommitInternalToolRepairRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	18,  // 51: tetral.bridge.v1.CommitInternalToolRepairRequest.error:type_name -> tetral.bridge.v1.RuntimeToolError
-	69,  // 52: tetral.bridge.v1.CommitInternalToolRepairResponse.committed:type_name -> tetral.bridge.v1.CommitInternalToolRepairCommitted
-	70,  // 53: tetral.bridge.v1.CommitInternalToolRepairResponse.duplicate:type_name -> tetral.bridge.v1.CommitInternalToolRepairDuplicate
-	71,  // 54: tetral.bridge.v1.CommitInternalToolRepairResponse.stale:type_name -> tetral.bridge.v1.CommitInternalToolRepairStale
-	22,  // 55: tetral.bridge.v1.CommitRuntimeTerminationRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	74,  // 56: tetral.bridge.v1.CommitRuntimeTerminationResponse.committed:type_name -> tetral.bridge.v1.RuntimeTerminationCommitted
-	75,  // 57: tetral.bridge.v1.CommitRuntimeTerminationResponse.duplicate:type_name -> tetral.bridge.v1.RuntimeTerminationDuplicate
-	76,  // 58: tetral.bridge.v1.CommitRuntimeTerminationResponse.stale:type_name -> tetral.bridge.v1.RuntimeTerminationStale
-	22,  // 59: tetral.bridge.v1.ResolveTransientAttachmentRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	79,  // 60: tetral.bridge.v1.ResolveTransientAttachmentResponse.resolved:type_name -> tetral.bridge.v1.ResolvedTransientAttachment
-	80,  // 61: tetral.bridge.v1.ResolveTransientAttachmentResponse.unavailable:type_name -> tetral.bridge.v1.TransientAttachmentUnavailable
-	22,  // 62: tetral.bridge.v1.ResolveFileAttachmentMetadataRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	82,  // 63: tetral.bridge.v1.ResolveFileAttachmentMetadataRequest.attachments:type_name -> tetral.bridge.v1.FileAttachmentPair
-	82,  // 64: tetral.bridge.v1.FileAttachmentMetadata.attachment:type_name -> tetral.bridge.v1.FileAttachmentPair
-	82,  // 65: tetral.bridge.v1.FileAttachmentRejection.attachment:type_name -> tetral.bridge.v1.FileAttachmentPair
+	49,  // 34: tetral.bridge.v1.McpManifestChangedResponse.committed:type_name -> tetral.bridge.v1.McpManifestCommitted
+	50,  // 35: tetral.bridge.v1.McpManifestChangedResponse.duplicate:type_name -> tetral.bridge.v1.McpManifestDuplicate
+	23,  // 36: tetral.bridge.v1.ClaimMcpToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	53,  // 37: tetral.bridge.v1.ClaimMcpToolResultResponse.acquired:type_name -> tetral.bridge.v1.McpToolClaimAcquired
+	54,  // 38: tetral.bridge.v1.ClaimMcpToolResultResponse.already_completed:type_name -> tetral.bridge.v1.McpToolAlreadyCompleted
+	55,  // 39: tetral.bridge.v1.ClaimMcpToolResultResponse.in_flight:type_name -> tetral.bridge.v1.McpToolClaimInFlight
+	56,  // 40: tetral.bridge.v1.ClaimMcpToolResultResponse.stale:type_name -> tetral.bridge.v1.McpToolClaimStale
+	23,  // 41: tetral.bridge.v1.CommitMcpToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	58,  // 42: tetral.bridge.v1.CommitMcpToolResultRequest.inline_media:type_name -> tetral.bridge.v1.McpInlineMedia
+	60,  // 43: tetral.bridge.v1.CommitMcpToolResultResponse.committed:type_name -> tetral.bridge.v1.McpToolCommitCommitted
+	61,  // 44: tetral.bridge.v1.CommitMcpToolResultResponse.duplicate:type_name -> tetral.bridge.v1.McpToolCommitDuplicate
+	62,  // 45: tetral.bridge.v1.CommitMcpToolResultResponse.stale:type_name -> tetral.bridge.v1.McpToolCommitStale
+	23,  // 46: tetral.bridge.v1.RelinquishMcpToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	65,  // 47: tetral.bridge.v1.RelinquishMcpToolResultResponse.relinquished:type_name -> tetral.bridge.v1.McpToolRelinquishRelinquished
+	66,  // 48: tetral.bridge.v1.RelinquishMcpToolResultResponse.duplicate:type_name -> tetral.bridge.v1.McpToolRelinquishDuplicate
+	67,  // 49: tetral.bridge.v1.RelinquishMcpToolResultResponse.stale:type_name -> tetral.bridge.v1.McpToolRelinquishStale
+	23,  // 50: tetral.bridge.v1.CommitInternalToolRepairRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	19,  // 51: tetral.bridge.v1.CommitInternalToolRepairRequest.error:type_name -> tetral.bridge.v1.RuntimeToolError
+	70,  // 52: tetral.bridge.v1.CommitInternalToolRepairResponse.committed:type_name -> tetral.bridge.v1.CommitInternalToolRepairCommitted
+	71,  // 53: tetral.bridge.v1.CommitInternalToolRepairResponse.duplicate:type_name -> tetral.bridge.v1.CommitInternalToolRepairDuplicate
+	72,  // 54: tetral.bridge.v1.CommitInternalToolRepairResponse.stale:type_name -> tetral.bridge.v1.CommitInternalToolRepairStale
+	23,  // 55: tetral.bridge.v1.CommitRuntimeTerminationRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	75,  // 56: tetral.bridge.v1.CommitRuntimeTerminationResponse.committed:type_name -> tetral.bridge.v1.RuntimeTerminationCommitted
+	76,  // 57: tetral.bridge.v1.CommitRuntimeTerminationResponse.duplicate:type_name -> tetral.bridge.v1.RuntimeTerminationDuplicate
+	77,  // 58: tetral.bridge.v1.CommitRuntimeTerminationResponse.stale:type_name -> tetral.bridge.v1.RuntimeTerminationStale
+	23,  // 59: tetral.bridge.v1.ResolveTransientAttachmentRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	80,  // 60: tetral.bridge.v1.ResolveTransientAttachmentResponse.resolved:type_name -> tetral.bridge.v1.ResolvedTransientAttachment
+	81,  // 61: tetral.bridge.v1.ResolveTransientAttachmentResponse.unavailable:type_name -> tetral.bridge.v1.TransientAttachmentUnavailable
+	23,  // 62: tetral.bridge.v1.ResolveFileAttachmentMetadataRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	83,  // 63: tetral.bridge.v1.ResolveFileAttachmentMetadataRequest.attachments:type_name -> tetral.bridge.v1.FileAttachmentPair
+	83,  // 64: tetral.bridge.v1.FileAttachmentMetadata.attachment:type_name -> tetral.bridge.v1.FileAttachmentPair
+	83,  // 65: tetral.bridge.v1.FileAttachmentRejection.attachment:type_name -> tetral.bridge.v1.FileAttachmentPair
 	5,   // 66: tetral.bridge.v1.FileAttachmentRejection.reason:type_name -> tetral.bridge.v1.FileAttachmentRejectionReason
-	84,  // 67: tetral.bridge.v1.FileAttachmentMetadataResult.metadata:type_name -> tetral.bridge.v1.FileAttachmentMetadata
-	85,  // 68: tetral.bridge.v1.FileAttachmentMetadataResult.rejected:type_name -> tetral.bridge.v1.FileAttachmentRejection
-	86,  // 69: tetral.bridge.v1.ResolveFileAttachmentMetadataResponse.attachments:type_name -> tetral.bridge.v1.FileAttachmentMetadataResult
-	22,  // 70: tetral.bridge.v1.ReadFileAttachmentChunkRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	82,  // 71: tetral.bridge.v1.ReadFileAttachmentChunkRequest.attachment:type_name -> tetral.bridge.v1.FileAttachmentPair
-	85,  // 72: tetral.bridge.v1.ReadFileAttachmentChunkResponse.rejected:type_name -> tetral.bridge.v1.FileAttachmentRejection
-	22,  // 73: tetral.bridge.v1.WriteEventRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	7,   // 74: tetral.bridge.v1.WriteEventRequest.assistant_context_delta:type_name -> tetral.bridge.v1.RuntimeContextDelta
-	82,  // 75: tetral.bridge.v1.WriteEventRequest.consumed_file_attachments:type_name -> tetral.bridge.v1.FileAttachmentPair
-	91,  // 76: tetral.bridge.v1.WriteEventRequest.tool_declaration:type_name -> tetral.bridge.v1.RuntimeToolDeclaration
+	85,  // 67: tetral.bridge.v1.FileAttachmentMetadataResult.metadata:type_name -> tetral.bridge.v1.FileAttachmentMetadata
+	86,  // 68: tetral.bridge.v1.FileAttachmentMetadataResult.rejected:type_name -> tetral.bridge.v1.FileAttachmentRejection
+	87,  // 69: tetral.bridge.v1.ResolveFileAttachmentMetadataResponse.attachments:type_name -> tetral.bridge.v1.FileAttachmentMetadataResult
+	23,  // 70: tetral.bridge.v1.ReadFileAttachmentChunkRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	83,  // 71: tetral.bridge.v1.ReadFileAttachmentChunkRequest.attachment:type_name -> tetral.bridge.v1.FileAttachmentPair
+	86,  // 72: tetral.bridge.v1.ReadFileAttachmentChunkResponse.rejected:type_name -> tetral.bridge.v1.FileAttachmentRejection
+	23,  // 73: tetral.bridge.v1.WriteEventRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	8,   // 74: tetral.bridge.v1.WriteEventRequest.assistant_context_delta:type_name -> tetral.bridge.v1.RuntimeContextDelta
+	83,  // 75: tetral.bridge.v1.WriteEventRequest.consumed_file_attachments:type_name -> tetral.bridge.v1.FileAttachmentPair
+	92,  // 76: tetral.bridge.v1.WriteEventRequest.tool_declaration:type_name -> tetral.bridge.v1.RuntimeToolDeclaration
 	6,   // 77: tetral.bridge.v1.RuntimeToolDeclaration.event_kind:type_name -> tetral.bridge.v1.RuntimeToolEventKind
-	10,  // 78: tetral.bridge.v1.RuntimeToolDeclaration.leading_reasoning:type_name -> tetral.bridge.v1.RuntimeContextReasoning
-	94,  // 79: tetral.bridge.v1.WriteEventResponse.committed:type_name -> tetral.bridge.v1.WriteEventCommitted
-	95,  // 80: tetral.bridge.v1.WriteEventResponse.duplicate:type_name -> tetral.bridge.v1.WriteEventDuplicate
-	96,  // 81: tetral.bridge.v1.WriteEventResponse.stale:type_name -> tetral.bridge.v1.WriteEventStale
-	22,  // 82: tetral.bridge.v1.SettleToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	16,  // 83: tetral.bridge.v1.SettleToolResultRequest.settlement:type_name -> tetral.bridge.v1.RuntimeToolSettlement
-	99,  // 84: tetral.bridge.v1.SettleToolResultResponse.committed:type_name -> tetral.bridge.v1.ToolResultCommitted
-	100, // 85: tetral.bridge.v1.SettleToolResultResponse.duplicate:type_name -> tetral.bridge.v1.ToolResultDuplicate
-	101, // 86: tetral.bridge.v1.SettleToolResultResponse.stale:type_name -> tetral.bridge.v1.ToolResultStale
-	22,  // 87: tetral.bridge.v1.WriteRequestEndRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	112, // 88: tetral.bridge.v1.WriteRequestEndRequest.reschedule:type_name -> tetral.bridge.v1.RequestEndReschedule
-	7,   // 89: tetral.bridge.v1.WriteRequestEndRequest.trailing_context_delta:type_name -> tetral.bridge.v1.RuntimeContextDelta
-	20,  // 90: tetral.bridge.v1.WriteRequestEndRequest.prefix_consumption:type_name -> tetral.bridge.v1.PrefixConsumptionDraft
-	104, // 91: tetral.bridge.v1.WriteRequestEndRequest.interrupt_settlement:type_name -> tetral.bridge.v1.RequestEndInterruptSettlement
-	7,   // 92: tetral.bridge.v1.WriteRequestEndRequest.compaction_context:type_name -> tetral.bridge.v1.RuntimeContextDelta
-	103, // 93: tetral.bridge.v1.WriteRequestEndRequest.provider_context_retention:type_name -> tetral.bridge.v1.ProviderContextRetention
-	29,  // 94: tetral.bridge.v1.RequestEndInterruptSettlement.interrupt_lease_ref:type_name -> tetral.bridge.v1.InterruptLeaseRef
-	106, // 95: tetral.bridge.v1.WriteRequestEndResponse.committed:type_name -> tetral.bridge.v1.WriteRequestEndCommitted
-	107, // 96: tetral.bridge.v1.WriteRequestEndResponse.duplicate:type_name -> tetral.bridge.v1.WriteRequestEndDuplicate
-	108, // 97: tetral.bridge.v1.WriteRequestEndResponse.stale:type_name -> tetral.bridge.v1.WriteRequestEndStale
-	109, // 98: tetral.bridge.v1.WriteRequestEndCommitted.ordinary:type_name -> tetral.bridge.v1.RequestEndOrdinary
-	110, // 99: tetral.bridge.v1.WriteRequestEndCommitted.rescheduled:type_name -> tetral.bridge.v1.RequestEndRescheduled
-	111, // 100: tetral.bridge.v1.WriteRequestEndCommitted.compacted:type_name -> tetral.bridge.v1.RequestEndCompacted
-	34,  // 101: tetral.bridge.v1.WriteRequestEndCommitted.interrupt_tool_results:type_name -> tetral.bridge.v1.RuntimeInterruptToolResult
-	109, // 102: tetral.bridge.v1.WriteRequestEndDuplicate.ordinary:type_name -> tetral.bridge.v1.RequestEndOrdinary
-	110, // 103: tetral.bridge.v1.WriteRequestEndDuplicate.rescheduled:type_name -> tetral.bridge.v1.RequestEndRescheduled
-	111, // 104: tetral.bridge.v1.WriteRequestEndDuplicate.compacted:type_name -> tetral.bridge.v1.RequestEndCompacted
-	34,  // 105: tetral.bridge.v1.WriteRequestEndDuplicate.interrupt_tool_results:type_name -> tetral.bridge.v1.RuntimeInterruptToolResult
-	22,  // 106: tetral.bridge.v1.FinishIdleRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	115, // 107: tetral.bridge.v1.FinishIdleResponse.committed:type_name -> tetral.bridge.v1.FinishIdleCommitted
-	116, // 108: tetral.bridge.v1.FinishIdleResponse.duplicate:type_name -> tetral.bridge.v1.FinishIdleDuplicate
-	117, // 109: tetral.bridge.v1.FinishIdleResponse.stale:type_name -> tetral.bridge.v1.FinishIdleStale
-	22,  // 110: tetral.bridge.v1.CreateSubagentThreadRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	120, // 111: tetral.bridge.v1.CreateSubagentThreadResponse.committed:type_name -> tetral.bridge.v1.CreateSubagentThreadCommitted
-	121, // 112: tetral.bridge.v1.CreateSubagentThreadResponse.duplicate:type_name -> tetral.bridge.v1.CreateSubagentThreadDuplicate
-	22,  // 113: tetral.bridge.v1.EnsureApprovalReviewerTrunkRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	124, // 114: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse.committed:type_name -> tetral.bridge.v1.EnsureApprovalReviewerTrunkCommitted
-	125, // 115: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse.duplicate:type_name -> tetral.bridge.v1.EnsureApprovalReviewerTrunkDuplicate
-	126, // 116: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse.stale:type_name -> tetral.bridge.v1.EnsureApprovalReviewerTrunkStale
-	22,  // 117: tetral.bridge.v1.EnsureApprovalReviewerSidecarRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	129, // 118: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse.committed:type_name -> tetral.bridge.v1.EnsureApprovalReviewerSidecarCommitted
-	130, // 119: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse.duplicate:type_name -> tetral.bridge.v1.EnsureApprovalReviewerSidecarDuplicate
-	131, // 120: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse.stale:type_name -> tetral.bridge.v1.EnsureApprovalReviewerSidecarStale
-	22,  // 121: tetral.bridge.v1.AdmitApprovalReviewInputRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	134, // 122: tetral.bridge.v1.AdmitApprovalReviewInputResponse.committed:type_name -> tetral.bridge.v1.AdmitApprovalReviewInputCommitted
-	135, // 123: tetral.bridge.v1.AdmitApprovalReviewInputResponse.duplicate:type_name -> tetral.bridge.v1.AdmitApprovalReviewInputDuplicate
-	136, // 124: tetral.bridge.v1.AdmitApprovalReviewInputResponse.stale:type_name -> tetral.bridge.v1.AdmitApprovalReviewInputStale
-	22,  // 125: tetral.bridge.v1.ResolveChildThreadRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	139, // 126: tetral.bridge.v1.ResolveChildThreadResponse.resolved:type_name -> tetral.bridge.v1.ResolveChildThreadResolved
-	143, // 127: tetral.bridge.v1.ResolveChildThreadResolved.child:type_name -> tetral.bridge.v1.ChildThreadFact
-	22,  // 128: tetral.bridge.v1.ListChildThreadsRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	142, // 129: tetral.bridge.v1.ListChildThreadsResponse.completed:type_name -> tetral.bridge.v1.ListChildThreadsCompleted
-	143, // 130: tetral.bridge.v1.ListChildThreadsCompleted.children:type_name -> tetral.bridge.v1.ChildThreadFact
-	22,  // 131: tetral.bridge.v1.DeliverInterAgentMailRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	146, // 132: tetral.bridge.v1.DeliverInterAgentMailResponse.committed:type_name -> tetral.bridge.v1.DeliverInterAgentMailCommitted
-	147, // 133: tetral.bridge.v1.DeliverInterAgentMailResponse.duplicate:type_name -> tetral.bridge.v1.DeliverInterAgentMailDuplicate
-	22,  // 134: tetral.bridge.v1.ReadAgentMailRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	150, // 135: tetral.bridge.v1.ReadAgentMailResponse.found:type_name -> tetral.bridge.v1.ReadAgentMailFound
-	151, // 136: tetral.bridge.v1.ReadAgentMailResponse.empty:type_name -> tetral.bridge.v1.ReadAgentMailEmpty
+	11,  // 78: tetral.bridge.v1.RuntimeToolDeclaration.leading_reasoning:type_name -> tetral.bridge.v1.RuntimeContextReasoning
+	95,  // 79: tetral.bridge.v1.WriteEventResponse.committed:type_name -> tetral.bridge.v1.WriteEventCommitted
+	96,  // 80: tetral.bridge.v1.WriteEventResponse.duplicate:type_name -> tetral.bridge.v1.WriteEventDuplicate
+	97,  // 81: tetral.bridge.v1.WriteEventResponse.stale:type_name -> tetral.bridge.v1.WriteEventStale
+	23,  // 82: tetral.bridge.v1.SettleToolResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	17,  // 83: tetral.bridge.v1.SettleToolResultRequest.settlement:type_name -> tetral.bridge.v1.RuntimeToolSettlement
+	100, // 84: tetral.bridge.v1.SettleToolResultResponse.committed:type_name -> tetral.bridge.v1.ToolResultCommitted
+	101, // 85: tetral.bridge.v1.SettleToolResultResponse.duplicate:type_name -> tetral.bridge.v1.ToolResultDuplicate
+	102, // 86: tetral.bridge.v1.SettleToolResultResponse.stale:type_name -> tetral.bridge.v1.ToolResultStale
+	23,  // 87: tetral.bridge.v1.WriteRequestEndRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	113, // 88: tetral.bridge.v1.WriteRequestEndRequest.reschedule:type_name -> tetral.bridge.v1.RequestEndReschedule
+	8,   // 89: tetral.bridge.v1.WriteRequestEndRequest.trailing_context_delta:type_name -> tetral.bridge.v1.RuntimeContextDelta
+	21,  // 90: tetral.bridge.v1.WriteRequestEndRequest.prefix_consumption:type_name -> tetral.bridge.v1.PrefixConsumptionDraft
+	105, // 91: tetral.bridge.v1.WriteRequestEndRequest.interrupt_settlement:type_name -> tetral.bridge.v1.RequestEndInterruptSettlement
+	8,   // 92: tetral.bridge.v1.WriteRequestEndRequest.compaction_context:type_name -> tetral.bridge.v1.RuntimeContextDelta
+	104, // 93: tetral.bridge.v1.WriteRequestEndRequest.provider_context_retention:type_name -> tetral.bridge.v1.ProviderContextRetention
+	30,  // 94: tetral.bridge.v1.RequestEndInterruptSettlement.interrupt_lease_ref:type_name -> tetral.bridge.v1.InterruptLeaseRef
+	107, // 95: tetral.bridge.v1.WriteRequestEndResponse.committed:type_name -> tetral.bridge.v1.WriteRequestEndCommitted
+	108, // 96: tetral.bridge.v1.WriteRequestEndResponse.duplicate:type_name -> tetral.bridge.v1.WriteRequestEndDuplicate
+	109, // 97: tetral.bridge.v1.WriteRequestEndResponse.stale:type_name -> tetral.bridge.v1.WriteRequestEndStale
+	110, // 98: tetral.bridge.v1.WriteRequestEndCommitted.ordinary:type_name -> tetral.bridge.v1.RequestEndOrdinary
+	111, // 99: tetral.bridge.v1.WriteRequestEndCommitted.rescheduled:type_name -> tetral.bridge.v1.RequestEndRescheduled
+	112, // 100: tetral.bridge.v1.WriteRequestEndCommitted.compacted:type_name -> tetral.bridge.v1.RequestEndCompacted
+	35,  // 101: tetral.bridge.v1.WriteRequestEndCommitted.interrupt_tool_results:type_name -> tetral.bridge.v1.RuntimeInterruptToolResult
+	110, // 102: tetral.bridge.v1.WriteRequestEndDuplicate.ordinary:type_name -> tetral.bridge.v1.RequestEndOrdinary
+	111, // 103: tetral.bridge.v1.WriteRequestEndDuplicate.rescheduled:type_name -> tetral.bridge.v1.RequestEndRescheduled
+	112, // 104: tetral.bridge.v1.WriteRequestEndDuplicate.compacted:type_name -> tetral.bridge.v1.RequestEndCompacted
+	35,  // 105: tetral.bridge.v1.WriteRequestEndDuplicate.interrupt_tool_results:type_name -> tetral.bridge.v1.RuntimeInterruptToolResult
+	23,  // 106: tetral.bridge.v1.FinishIdleRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	116, // 107: tetral.bridge.v1.FinishIdleResponse.committed:type_name -> tetral.bridge.v1.FinishIdleCommitted
+	117, // 108: tetral.bridge.v1.FinishIdleResponse.duplicate:type_name -> tetral.bridge.v1.FinishIdleDuplicate
+	118, // 109: tetral.bridge.v1.FinishIdleResponse.stale:type_name -> tetral.bridge.v1.FinishIdleStale
+	23,  // 110: tetral.bridge.v1.CreateSubagentThreadRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	121, // 111: tetral.bridge.v1.CreateSubagentThreadResponse.committed:type_name -> tetral.bridge.v1.CreateSubagentThreadCommitted
+	122, // 112: tetral.bridge.v1.CreateSubagentThreadResponse.duplicate:type_name -> tetral.bridge.v1.CreateSubagentThreadDuplicate
+	23,  // 113: tetral.bridge.v1.EnsureApprovalReviewerTrunkRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	125, // 114: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse.committed:type_name -> tetral.bridge.v1.EnsureApprovalReviewerTrunkCommitted
+	126, // 115: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse.duplicate:type_name -> tetral.bridge.v1.EnsureApprovalReviewerTrunkDuplicate
+	127, // 116: tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse.stale:type_name -> tetral.bridge.v1.EnsureApprovalReviewerTrunkStale
+	23,  // 117: tetral.bridge.v1.EnsureApprovalReviewerSidecarRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	130, // 118: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse.committed:type_name -> tetral.bridge.v1.EnsureApprovalReviewerSidecarCommitted
+	131, // 119: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse.duplicate:type_name -> tetral.bridge.v1.EnsureApprovalReviewerSidecarDuplicate
+	132, // 120: tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse.stale:type_name -> tetral.bridge.v1.EnsureApprovalReviewerSidecarStale
+	23,  // 121: tetral.bridge.v1.AdmitApprovalReviewInputRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	135, // 122: tetral.bridge.v1.AdmitApprovalReviewInputResponse.committed:type_name -> tetral.bridge.v1.AdmitApprovalReviewInputCommitted
+	136, // 123: tetral.bridge.v1.AdmitApprovalReviewInputResponse.duplicate:type_name -> tetral.bridge.v1.AdmitApprovalReviewInputDuplicate
+	137, // 124: tetral.bridge.v1.AdmitApprovalReviewInputResponse.stale:type_name -> tetral.bridge.v1.AdmitApprovalReviewInputStale
+	23,  // 125: tetral.bridge.v1.ResolveChildThreadRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	140, // 126: tetral.bridge.v1.ResolveChildThreadResponse.resolved:type_name -> tetral.bridge.v1.ResolveChildThreadResolved
+	144, // 127: tetral.bridge.v1.ResolveChildThreadResolved.child:type_name -> tetral.bridge.v1.ChildThreadFact
+	23,  // 128: tetral.bridge.v1.ListChildThreadsRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	143, // 129: tetral.bridge.v1.ListChildThreadsResponse.completed:type_name -> tetral.bridge.v1.ListChildThreadsCompleted
+	144, // 130: tetral.bridge.v1.ListChildThreadsCompleted.children:type_name -> tetral.bridge.v1.ChildThreadFact
+	23,  // 131: tetral.bridge.v1.DeliverInterAgentMailRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	147, // 132: tetral.bridge.v1.DeliverInterAgentMailResponse.committed:type_name -> tetral.bridge.v1.DeliverInterAgentMailCommitted
+	148, // 133: tetral.bridge.v1.DeliverInterAgentMailResponse.duplicate:type_name -> tetral.bridge.v1.DeliverInterAgentMailDuplicate
+	23,  // 134: tetral.bridge.v1.ReadAgentMailRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	151, // 135: tetral.bridge.v1.ReadAgentMailResponse.found:type_name -> tetral.bridge.v1.ReadAgentMailFound
+	152, // 136: tetral.bridge.v1.ReadAgentMailResponse.empty:type_name -> tetral.bridge.v1.ReadAgentMailEmpty
 	2,   // 137: tetral.bridge.v1.ChildInterruptTarget.disposition:type_name -> tetral.bridge.v1.ChildInterruptDisposition
-	22,  // 138: tetral.bridge.v1.AdmitChildInterruptRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	23,  // 138: tetral.bridge.v1.AdmitChildInterruptRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
 	1,   // 139: tetral.bridge.v1.AdmitChildInterruptRequest.action:type_name -> tetral.bridge.v1.ChildControlAction
-	155, // 140: tetral.bridge.v1.AdmitChildInterruptResponse.committed:type_name -> tetral.bridge.v1.AdmitChildInterruptCommitted
-	156, // 141: tetral.bridge.v1.AdmitChildInterruptResponse.duplicate:type_name -> tetral.bridge.v1.AdmitChildInterruptDuplicate
-	22,  // 142: tetral.bridge.v1.AwaitChildInterruptRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	156, // 140: tetral.bridge.v1.AdmitChildInterruptResponse.committed:type_name -> tetral.bridge.v1.AdmitChildInterruptCommitted
+	157, // 141: tetral.bridge.v1.AdmitChildInterruptResponse.duplicate:type_name -> tetral.bridge.v1.AdmitChildInterruptDuplicate
+	23,  // 142: tetral.bridge.v1.AwaitChildInterruptRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
 	3,   // 143: tetral.bridge.v1.ChildInterruptTargetOutcome.outcome:type_name -> tetral.bridge.v1.ChildInterruptOutcome
-	160, // 144: tetral.bridge.v1.AwaitChildInterruptResponse.completed:type_name -> tetral.bridge.v1.AwaitChildInterruptCompleted
-	158, // 145: tetral.bridge.v1.AwaitChildInterruptCompleted.targets:type_name -> tetral.bridge.v1.ChildInterruptTargetOutcome
-	22,  // 146: tetral.bridge.v1.CloseChildControlRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	163, // 147: tetral.bridge.v1.CloseChildControlResponse.committed:type_name -> tetral.bridge.v1.CloseChildControlCommitted
-	164, // 148: tetral.bridge.v1.CloseChildControlResponse.duplicate:type_name -> tetral.bridge.v1.CloseChildControlDuplicate
-	165, // 149: tetral.bridge.v1.CloseChildControlResponse.stale:type_name -> tetral.bridge.v1.CloseChildControlStale
-	171, // 150: tetral.bridge.v1.CloseChildControlCommitted.children:type_name -> tetral.bridge.v1.ChildLifecycleResult
-	171, // 151: tetral.bridge.v1.CloseChildControlDuplicate.children:type_name -> tetral.bridge.v1.ChildLifecycleResult
-	22,  // 152: tetral.bridge.v1.CloseApprovalReviewerRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	168, // 153: tetral.bridge.v1.CloseApprovalReviewerResponse.committed:type_name -> tetral.bridge.v1.CloseApprovalReviewerCommitted
-	169, // 154: tetral.bridge.v1.CloseApprovalReviewerResponse.duplicate:type_name -> tetral.bridge.v1.CloseApprovalReviewerDuplicate
-	170, // 155: tetral.bridge.v1.CloseApprovalReviewerResponse.stale:type_name -> tetral.bridge.v1.CloseApprovalReviewerStale
-	0,   // 156: tetral.bridge.v1.ChildLifecycleResult.disposition:type_name -> tetral.bridge.v1.ChildLifecycleDisposition
-	22,  // 157: tetral.bridge.v1.MarkChildThreadActiveRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	174, // 158: tetral.bridge.v1.MarkChildThreadActiveResponse.committed:type_name -> tetral.bridge.v1.MarkChildThreadActiveCommitted
-	175, // 159: tetral.bridge.v1.MarkChildThreadActiveResponse.duplicate:type_name -> tetral.bridge.v1.MarkChildThreadActiveDuplicate
-	176, // 160: tetral.bridge.v1.MarkChildThreadActiveResponse.stale:type_name -> tetral.bridge.v1.MarkChildThreadActiveStale
-	0,   // 161: tetral.bridge.v1.MarkChildThreadActiveCommitted.disposition:type_name -> tetral.bridge.v1.ChildLifecycleDisposition
-	0,   // 162: tetral.bridge.v1.MarkChildThreadActiveDuplicate.disposition:type_name -> tetral.bridge.v1.ChildLifecycleDisposition
-	22,  // 163: tetral.bridge.v1.AcceptSandboxExecutionRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	179, // 164: tetral.bridge.v1.AcceptSandboxExecutionResponse.committed:type_name -> tetral.bridge.v1.SandboxExecutionCommitted
-	180, // 165: tetral.bridge.v1.AcceptSandboxExecutionResponse.duplicate:type_name -> tetral.bridge.v1.SandboxExecutionDuplicate
-	181, // 166: tetral.bridge.v1.AcceptSandboxExecutionResponse.stale:type_name -> tetral.bridge.v1.SandboxExecutionStale
-	22,  // 167: tetral.bridge.v1.AwaitSandboxExecutionRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	184, // 168: tetral.bridge.v1.AwaitSandboxExecutionResponse.completed:type_name -> tetral.bridge.v1.SandboxExecutionCompleted
-	185, // 169: tetral.bridge.v1.AwaitSandboxExecutionResponse.stale:type_name -> tetral.bridge.v1.SandboxExecutionAwaitStale
-	22,  // 170: tetral.bridge.v1.ReadCommandResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	188, // 171: tetral.bridge.v1.ReadCommandResultResponse.completed:type_name -> tetral.bridge.v1.CommandReadCompleted
-	189, // 172: tetral.bridge.v1.ReadCommandResultResponse.stale:type_name -> tetral.bridge.v1.CommandReadStale
-	22,  // 173: tetral.bridge.v1.SendCommandInputRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	192, // 174: tetral.bridge.v1.SendCommandInputResponse.committed:type_name -> tetral.bridge.v1.CommandInputCommitted
-	193, // 175: tetral.bridge.v1.SendCommandInputResponse.duplicate:type_name -> tetral.bridge.v1.CommandInputDuplicate
-	194, // 176: tetral.bridge.v1.SendCommandInputResponse.stale:type_name -> tetral.bridge.v1.CommandInputStale
-	22,  // 177: tetral.bridge.v1.CancelCommandRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	197, // 178: tetral.bridge.v1.CancelCommandResponse.committed:type_name -> tetral.bridge.v1.CommandCancelCommitted
-	198, // 179: tetral.bridge.v1.CancelCommandResponse.duplicate:type_name -> tetral.bridge.v1.CommandCancelDuplicate
-	199, // 180: tetral.bridge.v1.CancelCommandResponse.stale:type_name -> tetral.bridge.v1.CommandCancelStale
-	22,  // 181: tetral.bridge.v1.AuthorizeWebToolExecutionRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	202, // 182: tetral.bridge.v1.AuthorizeWebToolExecutionResponse.authorized:type_name -> tetral.bridge.v1.WebToolExecutionAuthorized
-	203, // 183: tetral.bridge.v1.AuthorizeWebToolExecutionResponse.stale:type_name -> tetral.bridge.v1.WebToolExecutionStale
-	22,  // 184: tetral.bridge.v1.RunMemoryRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	206, // 185: tetral.bridge.v1.RunMemoryResponse.committed:type_name -> tetral.bridge.v1.MemoryRunCommitted
-	207, // 186: tetral.bridge.v1.RunMemoryResponse.duplicate:type_name -> tetral.bridge.v1.MemoryRunDuplicate
-	208, // 187: tetral.bridge.v1.RunMemoryResponse.stale:type_name -> tetral.bridge.v1.MemoryRunStale
-	23,  // 188: tetral.bridge.v1.AgentRuntimeBridgeService.LoadContext:input_type -> tetral.bridge.v1.LoadContextRequest
-	26,  // 189: tetral.bridge.v1.AgentRuntimeBridgeService.RefreshRuntimeBindingToken:input_type -> tetral.bridge.v1.RefreshRuntimeBindingTokenRequest
-	28,  // 190: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInputs:input_type -> tetral.bridge.v1.CommitInputsRequest
-	39,  // 191: tetral.bridge.v1.AgentRuntimeBridgeService.CommitTaskNotificationResult:input_type -> tetral.bridge.v1.CommitTaskNotificationResultRequest
-	90,  // 192: tetral.bridge.v1.AgentRuntimeBridgeService.WriteEvent:input_type -> tetral.bridge.v1.WriteEventRequest
-	97,  // 193: tetral.bridge.v1.AgentRuntimeBridgeService.SettleToolResult:input_type -> tetral.bridge.v1.SettleToolResultRequest
-	102, // 194: tetral.bridge.v1.AgentRuntimeBridgeService.WriteRequestEnd:input_type -> tetral.bridge.v1.WriteRequestEndRequest
-	113, // 195: tetral.bridge.v1.AgentRuntimeBridgeService.FinishIdle:input_type -> tetral.bridge.v1.FinishIdleRequest
-	118, // 196: tetral.bridge.v1.AgentRuntimeBridgeService.CreateSubagentThread:input_type -> tetral.bridge.v1.CreateSubagentThreadRequest
-	122, // 197: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerTrunk:input_type -> tetral.bridge.v1.EnsureApprovalReviewerTrunkRequest
-	127, // 198: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerSidecar:input_type -> tetral.bridge.v1.EnsureApprovalReviewerSidecarRequest
-	132, // 199: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitApprovalReviewInput:input_type -> tetral.bridge.v1.AdmitApprovalReviewInputRequest
-	137, // 200: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveChildThread:input_type -> tetral.bridge.v1.ResolveChildThreadRequest
-	140, // 201: tetral.bridge.v1.AgentRuntimeBridgeService.ListChildThreads:input_type -> tetral.bridge.v1.ListChildThreadsRequest
-	144, // 202: tetral.bridge.v1.AgentRuntimeBridgeService.DeliverInterAgentMail:input_type -> tetral.bridge.v1.DeliverInterAgentMailRequest
-	148, // 203: tetral.bridge.v1.AgentRuntimeBridgeService.ReadAgentMail:input_type -> tetral.bridge.v1.ReadAgentMailRequest
-	153, // 204: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitChildInterrupt:input_type -> tetral.bridge.v1.AdmitChildInterruptRequest
-	157, // 205: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitChildInterrupt:input_type -> tetral.bridge.v1.AwaitChildInterruptRequest
-	161, // 206: tetral.bridge.v1.AgentRuntimeBridgeService.CloseChildControl:input_type -> tetral.bridge.v1.CloseChildControlRequest
-	166, // 207: tetral.bridge.v1.AgentRuntimeBridgeService.CloseApprovalReviewer:input_type -> tetral.bridge.v1.CloseApprovalReviewerRequest
-	172, // 208: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadActive:input_type -> tetral.bridge.v1.MarkChildThreadActiveRequest
-	177, // 209: tetral.bridge.v1.AgentRuntimeBridgeService.AcceptSandboxExecution:input_type -> tetral.bridge.v1.AcceptSandboxExecutionRequest
-	182, // 210: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitSandboxExecution:input_type -> tetral.bridge.v1.AwaitSandboxExecutionRequest
-	186, // 211: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:input_type -> tetral.bridge.v1.ReadCommandResultRequest
-	190, // 212: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:input_type -> tetral.bridge.v1.SendCommandInputRequest
-	195, // 213: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:input_type -> tetral.bridge.v1.CancelCommandRequest
-	200, // 214: tetral.bridge.v1.AgentRuntimeBridgeService.AuthorizeWebToolExecution:input_type -> tetral.bridge.v1.AuthorizeWebToolExecutionRequest
-	204, // 215: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:input_type -> tetral.bridge.v1.RunMemoryRequest
-	78,  // 216: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:input_type -> tetral.bridge.v1.ResolveTransientAttachmentRequest
-	83,  // 217: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:input_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataRequest
-	88,  // 218: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:input_type -> tetral.bridge.v1.ReadFileAttachmentChunkRequest
-	46,  // 219: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:input_type -> tetral.bridge.v1.McpManifestChangedRequest
-	50,  // 220: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:input_type -> tetral.bridge.v1.ClaimMcpToolResultRequest
-	56,  // 221: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:input_type -> tetral.bridge.v1.CommitMcpToolResultRequest
-	62,  // 222: tetral.bridge.v1.AgentRuntimeBridgeService.RelinquishMcpToolResult:input_type -> tetral.bridge.v1.RelinquishMcpToolResultRequest
-	67,  // 223: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:input_type -> tetral.bridge.v1.CommitInternalToolRepairRequest
-	72,  // 224: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:input_type -> tetral.bridge.v1.CommitRuntimeTerminationRequest
-	25,  // 225: tetral.bridge.v1.AgentRuntimeBridgeService.LoadContext:output_type -> tetral.bridge.v1.LoadContextResponse
-	27,  // 226: tetral.bridge.v1.AgentRuntimeBridgeService.RefreshRuntimeBindingToken:output_type -> tetral.bridge.v1.RefreshRuntimeBindingTokenResponse
-	30,  // 227: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInputs:output_type -> tetral.bridge.v1.CommitInputsResponse
-	40,  // 228: tetral.bridge.v1.AgentRuntimeBridgeService.CommitTaskNotificationResult:output_type -> tetral.bridge.v1.CommitTaskNotificationResultResponse
-	93,  // 229: tetral.bridge.v1.AgentRuntimeBridgeService.WriteEvent:output_type -> tetral.bridge.v1.WriteEventResponse
-	98,  // 230: tetral.bridge.v1.AgentRuntimeBridgeService.SettleToolResult:output_type -> tetral.bridge.v1.SettleToolResultResponse
-	105, // 231: tetral.bridge.v1.AgentRuntimeBridgeService.WriteRequestEnd:output_type -> tetral.bridge.v1.WriteRequestEndResponse
-	114, // 232: tetral.bridge.v1.AgentRuntimeBridgeService.FinishIdle:output_type -> tetral.bridge.v1.FinishIdleResponse
-	119, // 233: tetral.bridge.v1.AgentRuntimeBridgeService.CreateSubagentThread:output_type -> tetral.bridge.v1.CreateSubagentThreadResponse
-	123, // 234: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerTrunk:output_type -> tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse
-	128, // 235: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerSidecar:output_type -> tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse
-	133, // 236: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitApprovalReviewInput:output_type -> tetral.bridge.v1.AdmitApprovalReviewInputResponse
-	138, // 237: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveChildThread:output_type -> tetral.bridge.v1.ResolveChildThreadResponse
-	141, // 238: tetral.bridge.v1.AgentRuntimeBridgeService.ListChildThreads:output_type -> tetral.bridge.v1.ListChildThreadsResponse
-	145, // 239: tetral.bridge.v1.AgentRuntimeBridgeService.DeliverInterAgentMail:output_type -> tetral.bridge.v1.DeliverInterAgentMailResponse
-	149, // 240: tetral.bridge.v1.AgentRuntimeBridgeService.ReadAgentMail:output_type -> tetral.bridge.v1.ReadAgentMailResponse
-	154, // 241: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitChildInterrupt:output_type -> tetral.bridge.v1.AdmitChildInterruptResponse
-	159, // 242: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitChildInterrupt:output_type -> tetral.bridge.v1.AwaitChildInterruptResponse
-	162, // 243: tetral.bridge.v1.AgentRuntimeBridgeService.CloseChildControl:output_type -> tetral.bridge.v1.CloseChildControlResponse
-	167, // 244: tetral.bridge.v1.AgentRuntimeBridgeService.CloseApprovalReviewer:output_type -> tetral.bridge.v1.CloseApprovalReviewerResponse
-	173, // 245: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadActive:output_type -> tetral.bridge.v1.MarkChildThreadActiveResponse
-	178, // 246: tetral.bridge.v1.AgentRuntimeBridgeService.AcceptSandboxExecution:output_type -> tetral.bridge.v1.AcceptSandboxExecutionResponse
-	183, // 247: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitSandboxExecution:output_type -> tetral.bridge.v1.AwaitSandboxExecutionResponse
-	187, // 248: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:output_type -> tetral.bridge.v1.ReadCommandResultResponse
-	191, // 249: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:output_type -> tetral.bridge.v1.SendCommandInputResponse
-	196, // 250: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:output_type -> tetral.bridge.v1.CancelCommandResponse
-	201, // 251: tetral.bridge.v1.AgentRuntimeBridgeService.AuthorizeWebToolExecution:output_type -> tetral.bridge.v1.AuthorizeWebToolExecutionResponse
-	205, // 252: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:output_type -> tetral.bridge.v1.RunMemoryResponse
-	81,  // 253: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:output_type -> tetral.bridge.v1.ResolveTransientAttachmentResponse
-	87,  // 254: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:output_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataResponse
-	89,  // 255: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:output_type -> tetral.bridge.v1.ReadFileAttachmentChunkResponse
-	47,  // 256: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:output_type -> tetral.bridge.v1.McpManifestChangedResponse
-	51,  // 257: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:output_type -> tetral.bridge.v1.ClaimMcpToolResultResponse
-	58,  // 258: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:output_type -> tetral.bridge.v1.CommitMcpToolResultResponse
-	63,  // 259: tetral.bridge.v1.AgentRuntimeBridgeService.RelinquishMcpToolResult:output_type -> tetral.bridge.v1.RelinquishMcpToolResultResponse
-	68,  // 260: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:output_type -> tetral.bridge.v1.CommitInternalToolRepairResponse
-	73,  // 261: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:output_type -> tetral.bridge.v1.CommitRuntimeTerminationResponse
-	225, // [225:262] is the sub-list for method output_type
-	188, // [188:225] is the sub-list for method input_type
-	188, // [188:188] is the sub-list for extension type_name
-	188, // [188:188] is the sub-list for extension extendee
-	0,   // [0:188] is the sub-list for field type_name
+	161, // 144: tetral.bridge.v1.AwaitChildInterruptResponse.completed:type_name -> tetral.bridge.v1.AwaitChildInterruptCompleted
+	159, // 145: tetral.bridge.v1.AwaitChildInterruptCompleted.targets:type_name -> tetral.bridge.v1.ChildInterruptTargetOutcome
+	23,  // 146: tetral.bridge.v1.CloseChildControlRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	164, // 147: tetral.bridge.v1.CloseChildControlResponse.committed:type_name -> tetral.bridge.v1.CloseChildControlCommitted
+	165, // 148: tetral.bridge.v1.CloseChildControlResponse.duplicate:type_name -> tetral.bridge.v1.CloseChildControlDuplicate
+	166, // 149: tetral.bridge.v1.CloseChildControlResponse.stale:type_name -> tetral.bridge.v1.CloseChildControlStale
+	172, // 150: tetral.bridge.v1.CloseChildControlCommitted.children:type_name -> tetral.bridge.v1.ChildLifecycleResult
+	172, // 151: tetral.bridge.v1.CloseChildControlDuplicate.children:type_name -> tetral.bridge.v1.ChildLifecycleResult
+	23,  // 152: tetral.bridge.v1.CloseApprovalReviewerRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	7,   // 153: tetral.bridge.v1.CloseApprovalReviewerRequest.settlement_kind:type_name -> tetral.bridge.v1.ApprovalReviewerCloseSettlementKind
+	169, // 154: tetral.bridge.v1.CloseApprovalReviewerResponse.committed:type_name -> tetral.bridge.v1.CloseApprovalReviewerCommitted
+	170, // 155: tetral.bridge.v1.CloseApprovalReviewerResponse.duplicate:type_name -> tetral.bridge.v1.CloseApprovalReviewerDuplicate
+	171, // 156: tetral.bridge.v1.CloseApprovalReviewerResponse.stale:type_name -> tetral.bridge.v1.CloseApprovalReviewerStale
+	0,   // 157: tetral.bridge.v1.ChildLifecycleResult.disposition:type_name -> tetral.bridge.v1.ChildLifecycleDisposition
+	23,  // 158: tetral.bridge.v1.MarkChildThreadActiveRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	175, // 159: tetral.bridge.v1.MarkChildThreadActiveResponse.committed:type_name -> tetral.bridge.v1.MarkChildThreadActiveCommitted
+	176, // 160: tetral.bridge.v1.MarkChildThreadActiveResponse.duplicate:type_name -> tetral.bridge.v1.MarkChildThreadActiveDuplicate
+	177, // 161: tetral.bridge.v1.MarkChildThreadActiveResponse.stale:type_name -> tetral.bridge.v1.MarkChildThreadActiveStale
+	0,   // 162: tetral.bridge.v1.MarkChildThreadActiveCommitted.disposition:type_name -> tetral.bridge.v1.ChildLifecycleDisposition
+	0,   // 163: tetral.bridge.v1.MarkChildThreadActiveDuplicate.disposition:type_name -> tetral.bridge.v1.ChildLifecycleDisposition
+	23,  // 164: tetral.bridge.v1.AcceptSandboxExecutionRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	180, // 165: tetral.bridge.v1.AcceptSandboxExecutionResponse.committed:type_name -> tetral.bridge.v1.SandboxExecutionCommitted
+	181, // 166: tetral.bridge.v1.AcceptSandboxExecutionResponse.duplicate:type_name -> tetral.bridge.v1.SandboxExecutionDuplicate
+	182, // 167: tetral.bridge.v1.AcceptSandboxExecutionResponse.stale:type_name -> tetral.bridge.v1.SandboxExecutionStale
+	23,  // 168: tetral.bridge.v1.AwaitSandboxExecutionRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	185, // 169: tetral.bridge.v1.AwaitSandboxExecutionResponse.completed:type_name -> tetral.bridge.v1.SandboxExecutionCompleted
+	186, // 170: tetral.bridge.v1.AwaitSandboxExecutionResponse.stale:type_name -> tetral.bridge.v1.SandboxExecutionAwaitStale
+	23,  // 171: tetral.bridge.v1.ReadCommandResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	189, // 172: tetral.bridge.v1.ReadCommandResultResponse.completed:type_name -> tetral.bridge.v1.CommandReadCompleted
+	190, // 173: tetral.bridge.v1.ReadCommandResultResponse.stale:type_name -> tetral.bridge.v1.CommandReadStale
+	23,  // 174: tetral.bridge.v1.SendCommandInputRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	193, // 175: tetral.bridge.v1.SendCommandInputResponse.committed:type_name -> tetral.bridge.v1.CommandInputCommitted
+	194, // 176: tetral.bridge.v1.SendCommandInputResponse.duplicate:type_name -> tetral.bridge.v1.CommandInputDuplicate
+	195, // 177: tetral.bridge.v1.SendCommandInputResponse.stale:type_name -> tetral.bridge.v1.CommandInputStale
+	23,  // 178: tetral.bridge.v1.CancelCommandRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	198, // 179: tetral.bridge.v1.CancelCommandResponse.committed:type_name -> tetral.bridge.v1.CommandCancelCommitted
+	199, // 180: tetral.bridge.v1.CancelCommandResponse.duplicate:type_name -> tetral.bridge.v1.CommandCancelDuplicate
+	200, // 181: tetral.bridge.v1.CancelCommandResponse.stale:type_name -> tetral.bridge.v1.CommandCancelStale
+	23,  // 182: tetral.bridge.v1.AuthorizeWebToolExecutionRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	203, // 183: tetral.bridge.v1.AuthorizeWebToolExecutionResponse.authorized:type_name -> tetral.bridge.v1.WebToolExecutionAuthorized
+	204, // 184: tetral.bridge.v1.AuthorizeWebToolExecutionResponse.stale:type_name -> tetral.bridge.v1.WebToolExecutionStale
+	23,  // 185: tetral.bridge.v1.RunMemoryRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	207, // 186: tetral.bridge.v1.RunMemoryResponse.committed:type_name -> tetral.bridge.v1.MemoryRunCommitted
+	208, // 187: tetral.bridge.v1.RunMemoryResponse.duplicate:type_name -> tetral.bridge.v1.MemoryRunDuplicate
+	209, // 188: tetral.bridge.v1.RunMemoryResponse.stale:type_name -> tetral.bridge.v1.MemoryRunStale
+	24,  // 189: tetral.bridge.v1.AgentRuntimeBridgeService.LoadContext:input_type -> tetral.bridge.v1.LoadContextRequest
+	27,  // 190: tetral.bridge.v1.AgentRuntimeBridgeService.RefreshRuntimeBindingToken:input_type -> tetral.bridge.v1.RefreshRuntimeBindingTokenRequest
+	29,  // 191: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInputs:input_type -> tetral.bridge.v1.CommitInputsRequest
+	40,  // 192: tetral.bridge.v1.AgentRuntimeBridgeService.CommitTaskNotificationResult:input_type -> tetral.bridge.v1.CommitTaskNotificationResultRequest
+	91,  // 193: tetral.bridge.v1.AgentRuntimeBridgeService.WriteEvent:input_type -> tetral.bridge.v1.WriteEventRequest
+	98,  // 194: tetral.bridge.v1.AgentRuntimeBridgeService.SettleToolResult:input_type -> tetral.bridge.v1.SettleToolResultRequest
+	103, // 195: tetral.bridge.v1.AgentRuntimeBridgeService.WriteRequestEnd:input_type -> tetral.bridge.v1.WriteRequestEndRequest
+	114, // 196: tetral.bridge.v1.AgentRuntimeBridgeService.FinishIdle:input_type -> tetral.bridge.v1.FinishIdleRequest
+	119, // 197: tetral.bridge.v1.AgentRuntimeBridgeService.CreateSubagentThread:input_type -> tetral.bridge.v1.CreateSubagentThreadRequest
+	123, // 198: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerTrunk:input_type -> tetral.bridge.v1.EnsureApprovalReviewerTrunkRequest
+	128, // 199: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerSidecar:input_type -> tetral.bridge.v1.EnsureApprovalReviewerSidecarRequest
+	133, // 200: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitApprovalReviewInput:input_type -> tetral.bridge.v1.AdmitApprovalReviewInputRequest
+	138, // 201: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveChildThread:input_type -> tetral.bridge.v1.ResolveChildThreadRequest
+	141, // 202: tetral.bridge.v1.AgentRuntimeBridgeService.ListChildThreads:input_type -> tetral.bridge.v1.ListChildThreadsRequest
+	145, // 203: tetral.bridge.v1.AgentRuntimeBridgeService.DeliverInterAgentMail:input_type -> tetral.bridge.v1.DeliverInterAgentMailRequest
+	149, // 204: tetral.bridge.v1.AgentRuntimeBridgeService.ReadAgentMail:input_type -> tetral.bridge.v1.ReadAgentMailRequest
+	154, // 205: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitChildInterrupt:input_type -> tetral.bridge.v1.AdmitChildInterruptRequest
+	158, // 206: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitChildInterrupt:input_type -> tetral.bridge.v1.AwaitChildInterruptRequest
+	162, // 207: tetral.bridge.v1.AgentRuntimeBridgeService.CloseChildControl:input_type -> tetral.bridge.v1.CloseChildControlRequest
+	167, // 208: tetral.bridge.v1.AgentRuntimeBridgeService.CloseApprovalReviewer:input_type -> tetral.bridge.v1.CloseApprovalReviewerRequest
+	173, // 209: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadActive:input_type -> tetral.bridge.v1.MarkChildThreadActiveRequest
+	178, // 210: tetral.bridge.v1.AgentRuntimeBridgeService.AcceptSandboxExecution:input_type -> tetral.bridge.v1.AcceptSandboxExecutionRequest
+	183, // 211: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitSandboxExecution:input_type -> tetral.bridge.v1.AwaitSandboxExecutionRequest
+	187, // 212: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:input_type -> tetral.bridge.v1.ReadCommandResultRequest
+	191, // 213: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:input_type -> tetral.bridge.v1.SendCommandInputRequest
+	196, // 214: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:input_type -> tetral.bridge.v1.CancelCommandRequest
+	201, // 215: tetral.bridge.v1.AgentRuntimeBridgeService.AuthorizeWebToolExecution:input_type -> tetral.bridge.v1.AuthorizeWebToolExecutionRequest
+	205, // 216: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:input_type -> tetral.bridge.v1.RunMemoryRequest
+	79,  // 217: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:input_type -> tetral.bridge.v1.ResolveTransientAttachmentRequest
+	84,  // 218: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:input_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataRequest
+	89,  // 219: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:input_type -> tetral.bridge.v1.ReadFileAttachmentChunkRequest
+	47,  // 220: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:input_type -> tetral.bridge.v1.McpManifestChangedRequest
+	51,  // 221: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:input_type -> tetral.bridge.v1.ClaimMcpToolResultRequest
+	57,  // 222: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:input_type -> tetral.bridge.v1.CommitMcpToolResultRequest
+	63,  // 223: tetral.bridge.v1.AgentRuntimeBridgeService.RelinquishMcpToolResult:input_type -> tetral.bridge.v1.RelinquishMcpToolResultRequest
+	68,  // 224: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:input_type -> tetral.bridge.v1.CommitInternalToolRepairRequest
+	73,  // 225: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:input_type -> tetral.bridge.v1.CommitRuntimeTerminationRequest
+	26,  // 226: tetral.bridge.v1.AgentRuntimeBridgeService.LoadContext:output_type -> tetral.bridge.v1.LoadContextResponse
+	28,  // 227: tetral.bridge.v1.AgentRuntimeBridgeService.RefreshRuntimeBindingToken:output_type -> tetral.bridge.v1.RefreshRuntimeBindingTokenResponse
+	31,  // 228: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInputs:output_type -> tetral.bridge.v1.CommitInputsResponse
+	41,  // 229: tetral.bridge.v1.AgentRuntimeBridgeService.CommitTaskNotificationResult:output_type -> tetral.bridge.v1.CommitTaskNotificationResultResponse
+	94,  // 230: tetral.bridge.v1.AgentRuntimeBridgeService.WriteEvent:output_type -> tetral.bridge.v1.WriteEventResponse
+	99,  // 231: tetral.bridge.v1.AgentRuntimeBridgeService.SettleToolResult:output_type -> tetral.bridge.v1.SettleToolResultResponse
+	106, // 232: tetral.bridge.v1.AgentRuntimeBridgeService.WriteRequestEnd:output_type -> tetral.bridge.v1.WriteRequestEndResponse
+	115, // 233: tetral.bridge.v1.AgentRuntimeBridgeService.FinishIdle:output_type -> tetral.bridge.v1.FinishIdleResponse
+	120, // 234: tetral.bridge.v1.AgentRuntimeBridgeService.CreateSubagentThread:output_type -> tetral.bridge.v1.CreateSubagentThreadResponse
+	124, // 235: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerTrunk:output_type -> tetral.bridge.v1.EnsureApprovalReviewerTrunkResponse
+	129, // 236: tetral.bridge.v1.AgentRuntimeBridgeService.EnsureApprovalReviewerSidecar:output_type -> tetral.bridge.v1.EnsureApprovalReviewerSidecarResponse
+	134, // 237: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitApprovalReviewInput:output_type -> tetral.bridge.v1.AdmitApprovalReviewInputResponse
+	139, // 238: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveChildThread:output_type -> tetral.bridge.v1.ResolveChildThreadResponse
+	142, // 239: tetral.bridge.v1.AgentRuntimeBridgeService.ListChildThreads:output_type -> tetral.bridge.v1.ListChildThreadsResponse
+	146, // 240: tetral.bridge.v1.AgentRuntimeBridgeService.DeliverInterAgentMail:output_type -> tetral.bridge.v1.DeliverInterAgentMailResponse
+	150, // 241: tetral.bridge.v1.AgentRuntimeBridgeService.ReadAgentMail:output_type -> tetral.bridge.v1.ReadAgentMailResponse
+	155, // 242: tetral.bridge.v1.AgentRuntimeBridgeService.AdmitChildInterrupt:output_type -> tetral.bridge.v1.AdmitChildInterruptResponse
+	160, // 243: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitChildInterrupt:output_type -> tetral.bridge.v1.AwaitChildInterruptResponse
+	163, // 244: tetral.bridge.v1.AgentRuntimeBridgeService.CloseChildControl:output_type -> tetral.bridge.v1.CloseChildControlResponse
+	168, // 245: tetral.bridge.v1.AgentRuntimeBridgeService.CloseApprovalReviewer:output_type -> tetral.bridge.v1.CloseApprovalReviewerResponse
+	174, // 246: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadActive:output_type -> tetral.bridge.v1.MarkChildThreadActiveResponse
+	179, // 247: tetral.bridge.v1.AgentRuntimeBridgeService.AcceptSandboxExecution:output_type -> tetral.bridge.v1.AcceptSandboxExecutionResponse
+	184, // 248: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitSandboxExecution:output_type -> tetral.bridge.v1.AwaitSandboxExecutionResponse
+	188, // 249: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:output_type -> tetral.bridge.v1.ReadCommandResultResponse
+	192, // 250: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:output_type -> tetral.bridge.v1.SendCommandInputResponse
+	197, // 251: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:output_type -> tetral.bridge.v1.CancelCommandResponse
+	202, // 252: tetral.bridge.v1.AgentRuntimeBridgeService.AuthorizeWebToolExecution:output_type -> tetral.bridge.v1.AuthorizeWebToolExecutionResponse
+	206, // 253: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:output_type -> tetral.bridge.v1.RunMemoryResponse
+	82,  // 254: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:output_type -> tetral.bridge.v1.ResolveTransientAttachmentResponse
+	88,  // 255: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:output_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataResponse
+	90,  // 256: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:output_type -> tetral.bridge.v1.ReadFileAttachmentChunkResponse
+	48,  // 257: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:output_type -> tetral.bridge.v1.McpManifestChangedResponse
+	52,  // 258: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:output_type -> tetral.bridge.v1.ClaimMcpToolResultResponse
+	59,  // 259: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:output_type -> tetral.bridge.v1.CommitMcpToolResultResponse
+	64,  // 260: tetral.bridge.v1.AgentRuntimeBridgeService.RelinquishMcpToolResult:output_type -> tetral.bridge.v1.RelinquishMcpToolResultResponse
+	69,  // 261: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:output_type -> tetral.bridge.v1.CommitInternalToolRepairResponse
+	74,  // 262: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:output_type -> tetral.bridge.v1.CommitRuntimeTerminationResponse
+	226, // [226:263] is the sub-list for method output_type
+	189, // [189:226] is the sub-list for method input_type
+	189, // [189:189] is the sub-list for extension type_name
+	189, // [189:189] is the sub-list for extension extendee
+	0,   // [0:189] is the sub-list for field type_name
 }
 
 func init() { file_tetral_bridge_v1_bridge_proto_init() }
@@ -13940,7 +14017,7 @@ func file_tetral_bridge_v1_bridge_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tetral_bridge_v1_bridge_proto_rawDesc), len(file_tetral_bridge_v1_bridge_proto_rawDesc)),
-			NumEnums:      7,
+			NumEnums:      8,
 			NumMessages:   202,
 			NumExtensions: 0,
 			NumServices:   1,

@@ -100,10 +100,12 @@ import type {
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
 	AgentRuntimeBridgeServiceClient,
+	ApprovalReviewerCloseSettlementKind,
 	RuntimeToolEventKind,
 	WriteEventRequest as WriteEventRequestMessage,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
+	ApprovalReviewerThreadClose,
 	ApprovalReviewerThreadCreation,
 	RuntimeApprovalReviewerThreadCreator,
 } from "./approval-reviewer.js";
@@ -620,7 +622,7 @@ export class BridgeAPIApprovalReviewerThreadCreator
 	}
 
 	/** Closes the reviewer child thread and releases local scope only after Bridge acknowledges it. */
-	async closeApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
+	async closeApprovalReviewerThread(input: ApprovalReviewerThreadClose) {
 		let metadata: Metadata;
 		try {
 			metadata = await this.metadataFactory({
@@ -632,22 +634,36 @@ export class BridgeAPIApprovalReviewerThreadCreator
 				message: "approval reviewer thread credential is unavailable",
 			};
 		}
+		const request = {
+			scope: approvalReviewerParentScope(input),
+			reviewerThreadId: input.reviewerThreadId,
+			reviewId: input.reviewId,
+			settlementKind:
+				input.settlement.type === "decision"
+					? ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION
+					: input.settlement.type === "failure"
+						? ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE
+						: ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST,
+			settlementEventId: input.settlement.eventId,
+		};
 		let response: CloseApprovalReviewerResponse;
 		try {
-			response = await closeApprovalReviewer(
-				this.client,
-				{
-					scope: approvalReviewerParentScope(input),
-					reviewerThreadId: input.reviewerThreadId ?? "",
-					reviewId: input.reviewId,
-				},
-				metadata,
-			);
-		} catch {
-			return {
-				ok: false as const,
-				message: "approval reviewer thread close is unavailable",
-			};
+			response = await closeApprovalReviewer(this.client, request, metadata);
+		} catch (error) {
+			if (!bridgeDeclarationTransportUnknown(error)) {
+				return {
+					ok: false as const,
+					message: "approval reviewer thread close is unavailable",
+				};
+			}
+			try {
+				response = await closeApprovalReviewer(this.client, request, metadata);
+			} catch {
+				return {
+					ok: false as const,
+					message: "approval reviewer thread close is unavailable",
+				};
+			}
 		}
 		if (
 			!exactlyOneDefined(response.committed, response.duplicate, response.stale)

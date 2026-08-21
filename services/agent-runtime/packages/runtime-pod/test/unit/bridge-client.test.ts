@@ -15,6 +15,7 @@ import type {
 	CommitInternalToolRepairRequest,
 	CommitRuntimeTerminationRequest,
 	CommitTaskNotificationResultRequest,
+	CloseApprovalReviewerRequest,
 	FinishIdleRequest,
 	LoadContextRequest,
 	ReadAgentMailRequest,
@@ -29,7 +30,10 @@ import {
 	BridgeAPIEventWriter,
 	BridgeAPIInternalToolRepairCommitter,
 } from "../../src/bridge-client.js";
-import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
+import type {
+	ApprovalReviewerThreadClose,
+	ApprovalReviewerThreadCreation,
+} from "../../src/approval-reviewer.js";
 import type {
 	RuntimePodLogger,
 	RuntimePodLogRecord,
@@ -128,6 +132,54 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			message: "approval reviewer input admission is unavailable",
 		});
 		expect(bridge.approvalAdmissionRequests).toHaveLength(1);
+	});
+
+	test("replays an ambiguous Reviewer close with the exact settlement authority", async () => {
+		const bridge = new TypedBridge();
+		bridge.approvalCloseFailures.push(
+			Object.assign(new Error("close ACK lost"), { code: status.UNKNOWN }),
+		);
+		bridge.approvalCloseResponse = { duplicate: {} };
+		const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+		const close: ApprovalReviewerThreadClose = {
+			request: threadScope() as ApprovalReviewerThreadClose["request"],
+			reviewId: "arvw_lost_close_ack",
+			isTrunk: false,
+			reviewerThreadId: "thrd_reviewer",
+			settlement: { type: "failure", eventId: "evt_reviewer_failure" },
+		};
+
+		await expect(creator.closeApprovalReviewerThread(close)).resolves.toEqual({
+			ok: true,
+		});
+		expect(bridge.approvalCloseRequests).toHaveLength(2);
+		expect(bridge.approvalCloseRequests[1]).toEqual(
+			bridge.approvalCloseRequests[0],
+		);
+	});
+
+	test("does not replay a definitive Reviewer close rejection", async () => {
+		const bridge = new TypedBridge();
+		bridge.approvalCloseFailures.push(
+			Object.assign(new Error("invalid close"), {
+				code: status.INVALID_ARGUMENT,
+			}),
+		);
+		const creator = new BridgeAPIApprovalReviewerThreadCreator(options(bridge));
+
+		await expect(
+			creator.closeApprovalReviewerThread({
+				request: threadScope() as ApprovalReviewerThreadClose["request"],
+				reviewId: "arvw_invalid_close",
+				isTrunk: false,
+				reviewerThreadId: "thrd_reviewer",
+				settlement: { type: "decision", eventId: "evt_reviewer_decision" },
+			}),
+		).resolves.toEqual({
+			ok: false,
+			message: "approval reviewer thread close is unavailable",
+		});
+		expect(bridge.approvalCloseRequests).toHaveLength(1);
 	});
 
 	test("loads sealed context and the open Request draft as direct durable facts", async () => {
@@ -1139,6 +1191,8 @@ class TypedBridge {
 	readonly approvalAdmissionRequests: unknown[] = [];
 	readonly approvalAdmissionFailures: Array<Error & { readonly code?: number }> =
 		[];
+	readonly approvalCloseRequests: CloseApprovalReviewerRequest[] = [];
+	readonly approvalCloseFailures: Array<Error & { readonly code?: number }> = [];
 	readonly loadContextRequests: LoadContextRequest[] = [];
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
@@ -1188,6 +1242,7 @@ class TypedBridge {
 	approvalAdmissionResponse: unknown = {
 		committed: { runtimeInputId: "rin_reviewer" },
 	};
+	approvalCloseResponse: unknown = { committed: {} };
 
 	client(): AgentRuntimeBridgeServiceClient {
 		return {
@@ -1207,7 +1262,7 @@ class TypedBridge {
 				callback(null, this.approvalEnsureResponse);
 				return grpcCall();
 			},
-			admitApprovalReviewInput: (
+				admitApprovalReviewInput: (
 				request: unknown,
 				_metadata: Metadata,
 				callback: Callback,
@@ -1218,9 +1273,23 @@ class TypedBridge {
 					callback(failure, undefined);
 					return grpcCall();
 				}
-				callback(null, this.approvalAdmissionResponse);
-				return grpcCall();
-			},
+					callback(null, this.approvalAdmissionResponse);
+					return grpcCall();
+				},
+				closeApprovalReviewer: (
+					request: CloseApprovalReviewerRequest,
+					_metadata: Metadata,
+					callback: Callback,
+				) => {
+					this.approvalCloseRequests.push(request);
+					const failure = this.approvalCloseFailures.shift();
+					if (failure !== undefined) {
+						callback(failure, undefined);
+						return grpcCall();
+					}
+					callback(null, this.approvalCloseResponse);
+					return grpcCall();
+				},
 			loadContext: (
 				request: LoadContextRequest,
 				_metadata: Metadata,

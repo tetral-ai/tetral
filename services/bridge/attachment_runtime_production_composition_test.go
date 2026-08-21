@@ -291,10 +291,11 @@ func startAttachmentRecoveryRuntime(t *testing.T, bridgeAddress, mode, sessionID
 }
 
 func (p *attachmentRecoveryProcess) providerStart(t *testing.T) struct {
-	ProviderInvocations    int   `json:"providerInvocations"`
-	GatewayRequests        int   `json:"gatewayRequests"`
-	AttachmentCount        int   `json:"attachmentCount"`
-	LoweredAttachmentBytes int64 `json:"loweredAttachmentBytes"`
+	ProviderInvocations    int             `json:"providerInvocations"`
+	GatewayRequests        int             `json:"gatewayRequests"`
+	AttachmentCount        int             `json:"attachmentCount"`
+	LoweredAttachmentBytes int64           `json:"loweredAttachmentBytes"`
+	ProviderRequest        json.RawMessage `json:"providerRequest"`
 } {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -302,10 +303,11 @@ func (p *attachmentRecoveryProcess) providerStart(t *testing.T) struct {
 		raw, err := os.ReadFile(p.providerStartedPath)
 		if err == nil {
 			var started struct {
-				ProviderInvocations    int   `json:"providerInvocations"`
-				GatewayRequests        int   `json:"gatewayRequests"`
-				AttachmentCount        int   `json:"attachmentCount"`
-				LoweredAttachmentBytes int64 `json:"loweredAttachmentBytes"`
+				ProviderInvocations    int             `json:"providerInvocations"`
+				GatewayRequests        int             `json:"gatewayRequests"`
+				AttachmentCount        int             `json:"attachmentCount"`
+				LoweredAttachmentBytes int64           `json:"loweredAttachmentBytes"`
+				ProviderRequest        json.RawMessage `json:"providerRequest"`
 			}
 			if json.Unmarshal(raw, &started) == nil {
 				return started
@@ -317,10 +319,11 @@ func (p *attachmentRecoveryProcess) providerStart(t *testing.T) struct {
 	inspected, _ := os.ReadFile(p.inspectResultPath)
 	t.Fatalf("Provider invocation did not start: accept=%s inspect=%s output=%s", accept, inspected, p.output.String())
 	return struct {
-		ProviderInvocations    int   `json:"providerInvocations"`
-		GatewayRequests        int   `json:"gatewayRequests"`
-		AttachmentCount        int   `json:"attachmentCount"`
-		LoweredAttachmentBytes int64 `json:"loweredAttachmentBytes"`
+		ProviderInvocations    int             `json:"providerInvocations"`
+		GatewayRequests        int             `json:"gatewayRequests"`
+		AttachmentCount        int             `json:"attachmentCount"`
+		LoweredAttachmentBytes int64           `json:"loweredAttachmentBytes"`
+		ProviderRequest        json.RawMessage `json:"providerRequest"`
 	}{}
 }
 

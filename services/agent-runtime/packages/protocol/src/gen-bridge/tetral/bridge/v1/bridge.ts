@@ -342,6 +342,51 @@ export function runtimeToolEventKindToJSON(object: RuntimeToolEventKind): string
   }
 }
 
+export enum ApprovalReviewerCloseSettlementKind {
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED = 0,
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION = 1,
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE = 2,
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function approvalReviewerCloseSettlementKindFromJSON(object: any): ApprovalReviewerCloseSettlementKind {
+  switch (object) {
+    case 0:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED;
+    case 1:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION;
+    case 2:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE;
+    case 3:
+    case "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST":
+      return ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ApprovalReviewerCloseSettlementKind.UNRECOGNIZED;
+  }
+}
+
+export function approvalReviewerCloseSettlementKindToJSON(object: ApprovalReviewerCloseSettlementKind): string {
+  switch (object) {
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED";
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION";
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE";
+    case ApprovalReviewerCloseSettlementKind.APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST:
+      return "APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST";
+    case ApprovalReviewerCloseSettlementKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface RuntimeContextDelta {
   parts: RuntimeContextPart[];
 }
@@ -1165,6 +1210,8 @@ export interface CloseApprovalReviewerRequest {
   scope: RuntimeScope | undefined;
   reviewerThreadId: string;
   reviewId: string;
+  settlementKind: ApprovalReviewerCloseSettlementKind;
+  settlementEventId: string;
 }
 
 export interface CloseApprovalReviewerResponse {
@@ -15102,7 +15149,7 @@ export const CloseChildControlStale: MessageFns<CloseChildControlStale> = {
 };
 
 function createBaseCloseApprovalReviewerRequest(): CloseApprovalReviewerRequest {
-  return { scope: undefined, reviewerThreadId: "", reviewId: "" };
+  return { scope: undefined, reviewerThreadId: "", reviewId: "", settlementKind: 0, settlementEventId: "" };
 }
 
 export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerRequest> = {
@@ -15115,6 +15162,12 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
     }
     if (message.reviewId !== "") {
       writer.uint32(26).string(message.reviewId);
+    }
+    if (message.settlementKind !== 0) {
+      writer.uint32(32).int32(message.settlementKind);
+    }
+    if (message.settlementEventId !== "") {
+      writer.uint32(42).string(message.settlementEventId);
     }
     return writer;
   },
@@ -15150,6 +15203,22 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
           message.reviewId = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.settlementKind = reader.int32() as any;
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.settlementEventId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -15172,6 +15241,16 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
         : isSet(object.review_id)
         ? globalThis.String(object.review_id)
         : "",
+      settlementKind: isSet(object.settlementKind)
+        ? approvalReviewerCloseSettlementKindFromJSON(object.settlementKind)
+        : isSet(object.settlement_kind)
+        ? approvalReviewerCloseSettlementKindFromJSON(object.settlement_kind)
+        : 0,
+      settlementEventId: isSet(object.settlementEventId)
+        ? globalThis.String(object.settlementEventId)
+        : isSet(object.settlement_event_id)
+        ? globalThis.String(object.settlement_event_id)
+        : "",
     };
   },
 
@@ -15186,6 +15265,12 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
     if (message.reviewId !== "") {
       obj.reviewId = message.reviewId;
     }
+    if (message.settlementKind !== 0) {
+      obj.settlementKind = approvalReviewerCloseSettlementKindToJSON(message.settlementKind);
+    }
+    if (message.settlementEventId !== "") {
+      obj.settlementEventId = message.settlementEventId;
+    }
     return obj;
   },
 
@@ -15199,6 +15284,8 @@ export const CloseApprovalReviewerRequest: MessageFns<CloseApprovalReviewerReque
       : undefined;
     message.reviewerThreadId = object.reviewerThreadId ?? "";
     message.reviewId = object.reviewId ?? "";
+    message.settlementKind = object.settlementKind ?? 0;
+    message.settlementEventId = object.settlementEventId ?? "";
     return message;
   },
 };

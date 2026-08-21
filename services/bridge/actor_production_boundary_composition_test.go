@@ -66,6 +66,7 @@ type subagentProductionCompositionResult struct {
 	ResultType          string            `json:"resultType"`
 	ProviderInvocations int               `json:"providerInvocations"`
 	ProviderContexts    []json.RawMessage `json:"providerContexts"`
+	BridgeAddress       string            `json:"-"`
 }
 
 func contextEntrySequences(entries []bridgeRuntimeContextEntry) []int64 {
@@ -120,6 +121,7 @@ func runSubagentProductionComposition(
 	if err := json.Unmarshal(output, &result); err != nil {
 		t.Fatalf("decode subagent ToolRunner composition: %v: %s", err, output)
 	}
+	result.BridgeAddress = listener.Addr().String()
 	return result
 }
 
@@ -193,19 +195,8 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 	if err := json.Unmarshal([]byte(prefixEntries), &persistedPrefix); err != nil {
 		t.Fatalf("decode persisted subagent prefix: %v", err)
 	}
-	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: scopeForThread(bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), childID),
-	})
-	if err != nil {
-		t.Fatalf("cold-load exact subagent prefix: %v", err)
-	}
-	var cold bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &cold); err != nil {
-		t.Fatalf("decode cold subagent context: %v", err)
-	}
-	if cold.ThreadContextPrefix == nil || !slices.Equal(contextEntrySequences(persistedPrefix), []int64{1}) ||
-		!slices.Equal(contextEntrySequences(cold.ThreadContextPrefix.Entries), []int64{1}) {
-		t.Fatalf("all prefix persisted/cold = %v/%#v", contextEntrySequences(persistedPrefix), cold.ThreadContextPrefix)
+	if !slices.Equal(contextEntrySequences(persistedPrefix), []int64{1}) {
+		t.Fatalf("persisted subagent prefix sequences = %v; want [1]", contextEntrySequences(persistedPrefix))
 	}
 	canonicalPublicInput, err := canonicalRunToolJSON(publicInput)
 	if err != nil {
@@ -213,6 +204,39 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 	}
 	if canonicalPublicInput != `{"agent_type":"worker","fork_turns":"all","prompt":"complete the delegated task","task_name":"production-worker"}` {
 		t.Fatalf("subagent public provider input = %s", publicInput)
+	}
+
+	coldRuntime := startAttachmentRecoveryRuntime(t, result.BridgeAddress, "complete", sessionID, childID, bindingID, 1, podUID)
+	deliverAttachmentRuntimeInput(t, runtime, admin, coldRuntime.port, sessionID, podUID)
+	providerStart := coldRuntime.providerStart(t)
+	providerWire := string(providerStart.ProviderRequest)
+	prefixOffset := strings.Index(providerWire, "start a worker")
+	openingOffset := strings.Index(providerWire, "complete the delegated task")
+	if providerStart.ProviderInvocations != 1 || providerStart.GatewayRequests != 1 || prefixOffset < 0 || openingOffset <= prefixOffset {
+		t.Fatalf("cold child Provider request = invocations:%d gateway:%d prefix/opening:%d/%d wire:%s",
+			providerStart.ProviderInvocations, providerStart.GatewayRequests, prefixOffset, openingOffset, providerWire)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var childEnds int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'`, sessionID, childID).Scan(&childEnds); err == nil && childEnds == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	coldRuntime.kill(t)
+	var childEnds int
+	var inboxStatus, queueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND input_kind='agent_mail'),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1 AND payload_json::jsonb->>'session_thread_id'=$2)`, sessionID, childID).
+		Scan(&childEnds, &inboxStatus, &queueStatus); err != nil {
+		t.Fatalf("read cold child delivery settlement: %v", err)
+	}
+	if childEnds != 1 || inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged {
+		t.Fatalf("cold child settlement ends/Inbox/Queue = %d/%s/%s; want 1/committed/acknowledged", childEnds, inboxStatus, queueStatus)
 	}
 }
 
@@ -829,17 +853,18 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 	if err != nil || committedInput.GetCommitted().GetContext() == nil {
 		t.Fatalf("commit approval reviewer input through generated gRPC = %#v/%v", committedInput, err)
 	}
-	seedActorSourceEvent(t, admin, sessionID, sidecarID, "evt_reviewer_production_decision", "approval_review.decision",
+	seedReviewerOutcomeEvent(t, admin, sessionID, sidecarID, "evt_reviewer_production_decision", "approval_review.decision", sidecarRequest.GetReviewId(),
 		`{"type":"approval_review.decision","review_id":"`+sidecarRequest.GetReviewId()+`","decision":"approved"}`)
-	closed, err := client.CloseApprovalReviewer(context.Background(), &bridgev1.CloseApprovalReviewerRequest{
+	closeRequest := &bridgev1.CloseApprovalReviewerRequest{
 		Scope: scope, ReviewerThreadId: sidecarID, ReviewId: sidecarRequest.GetReviewId(),
-	})
+		SettlementKind:    bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION,
+		SettlementEventId: "evt_reviewer_production_decision",
+	}
+	closed, err := client.CloseApprovalReviewer(context.Background(), closeRequest)
 	if err != nil || closed.GetCommitted() == nil {
 		t.Fatalf("close reviewer sidecar through generated gRPC = %#v/%v", closed, err)
 	}
-	closeReplay, err := client.CloseApprovalReviewer(context.Background(), &bridgev1.CloseApprovalReviewerRequest{
-		Scope: scope, ReviewerThreadId: sidecarID, ReviewId: sidecarRequest.GetReviewId(),
-	})
+	closeReplay, err := client.CloseApprovalReviewer(context.Background(), closeRequest)
 	if err != nil || closeReplay.GetDuplicate() == nil {
 		t.Fatalf("lost-ACK reviewer close replay = %#v/%v", closeReplay, err)
 	}

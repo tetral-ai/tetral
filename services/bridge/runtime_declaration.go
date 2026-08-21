@@ -308,15 +308,22 @@ func childLifecycleDeclarationDigest(
 	childThreadID string,
 	sourceKind string,
 	sourceCommandID string,
+	settlementKind string,
+	settlementEventID string,
 ) (string, error) {
-	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+	declaration := map[string]any{
 		"action":            action,
 		"child_thread_id":   childThreadID,
 		"operation_kind":    operationKind,
 		"session_thread_id": sessionThreadID,
 		"source_command_id": sourceCommandID,
 		"source_kind":       sourceKind,
-	})
+	}
+	if settlementKind != "" || settlementEventID != "" {
+		declaration["settlement_kind"] = settlementKind
+		declaration["settlement_event_id"] = settlementEventID
+	}
+	raw, err := marshalRuntimeDeclarationObject(declaration)
 	if err != nil {
 		return "", err
 	}

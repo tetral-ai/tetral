@@ -5287,6 +5287,102 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("child close fences failed-closeout continuation before and after its decision", async () => {
+		for (const closeOrdering of ["before_continuation", "after_continuation"] as const) {
+			let closeoutStartedResolve: () => void = () => {};
+			let closeoutReleaseResolve: () => void = () => {};
+			const closeoutStarted = new Promise<void>((resolve) => {
+				closeoutStartedResolve = resolve;
+			});
+			const closeoutRelease = new Promise<void>((resolve) => {
+				closeoutReleaseResolve = resolve;
+			});
+			const threadLoop = makeControlledCrashThreadLoop("die", {
+				closeFailedRun: () =>
+					Effect.promise(async () => {
+						closeoutStartedResolve();
+						await closeoutRelease;
+						return {
+							type: "landed" as const,
+							disposition: "continuation" as const,
+						};
+					}),
+			});
+			const sessionId = `sesn_child_closeout_${closeOrdering}`;
+			const childId = `thrd_child_closeout_${closeOrdering}`;
+
+			await withSessionManager(
+				sessionManagerLayer(threadLoop),
+				async (manager) => {
+					expect(
+						await Effect.runPromise(
+							manager.preloadThread({
+								...threadControl(sessionId, "rin_preload", childId),
+								runtimeBindingToken: "runtime-binding-token",
+								contextEntries: [],
+								thread: {
+									parentThreadId: `thrd_${sessionId}`,
+									role: "subagent",
+									visibility: "public",
+									taskName: "closing-child",
+									agentType: "worker",
+									status: "idle",
+								},
+							}),
+						),
+					).toMatchObject({ ok: true, applied: true });
+					expect(
+						await Effect.runPromise(
+							manager.acceptInput(
+								acceptedInput(sessionId, "rin_initial", childId),
+							),
+						),
+					).toMatchObject({ ok: true, started: true });
+					await waitForCrashRuns(threadLoop, 1);
+					expect(
+						await Effect.runPromise(
+							manager.acceptInput(
+								acceptedInput(sessionId, "rin_follower", childId),
+							),
+						),
+					).toMatchObject({ ok: true, started: false });
+
+					threadLoop.runs[0]?.releaseCrash();
+					await closeoutStarted;
+					let closePromise: Promise<SessionManager.ThreadLifecycleResult>;
+					if (closeOrdering === "before_continuation") {
+						closePromise = Effect.runPromise(
+							manager.markThreadClosed(
+								threadControl(sessionId, "rin_close", childId),
+							),
+						);
+						await Promise.resolve();
+						closeoutReleaseResolve();
+					} else {
+						closeoutReleaseResolve();
+						await waitForCrashRuns(threadLoop, 2);
+						closePromise = Effect.runPromise(
+							manager.markThreadClosed(
+								threadControl(sessionId, "rin_close", childId),
+							),
+						);
+					}
+					expect(await closePromise).toMatchObject({ ok: true, applied: true });
+					expect(threadLoop.runs).toHaveLength(
+						closeOrdering === "before_continuation" ? 1 : 2,
+					);
+					expect(
+						await Effect.runPromise(
+							manager.inspectThread(
+								threadControl(sessionId, "rin_inspect", childId),
+							),
+						),
+					).toMatchObject({ observed: false });
+				},
+			);
+		}
+	});
+
 	test("durable failed-closeout disposition owns every accepted follower family", async () => {
 		for (const disposition of ["continuation", "terminal"] as const) {
 			for (const inputKind of [
@@ -6300,6 +6396,7 @@ describe("SessionManager", () => {
 		const sessionId = "sesn_close_tree";
 		const childId = "thrd_close_tree_child";
 		const grandchildId = "thrd_close_tree_grandchild";
+		const siblingId = "thrd_close_tree_sibling";
 
 		await withSessionManager(layer, async (manager) => {
 			const threads = [
@@ -6323,6 +6420,18 @@ describe("SessionManager", () => {
 						role: "subagent" as const,
 						visibility: "public" as const,
 						taskName: "grandchild",
+						agentType: "worker" as const,
+						status: "idle" as const,
+					},
+					},
+				{
+					id: siblingId,
+					runtimeInputId: "rin_close_tree_sibling",
+					metadata: {
+						parentThreadId: "thrd_close_tree_main",
+						role: "subagent" as const,
+						visibility: "public" as const,
+						taskName: "sibling",
 						agentType: "worker" as const,
 						status: "idle" as const,
 					},
@@ -6354,7 +6463,7 @@ describe("SessionManager", () => {
 					started: true,
 				});
 			}
-			await waitForCondition(() => runs.length === 2, "child subtree runs");
+			await waitForCondition(() => runs.length === 3, "child and sibling runs");
 
 			expect(
 				await Effect.runPromise(
@@ -6394,6 +6503,17 @@ describe("SessionManager", () => {
 			expect(interruptedThreadIds.sort()).toEqual(
 				[childId, grandchildId].sort(),
 			);
+			expect(
+				await Effect.runPromise(
+					manager.inspectThread(
+						threadControl(
+							sessionId,
+							"rin_close_tree_sibling_inspect",
+							siblingId,
+						),
+					),
+				),
+			).toMatchObject({ observed: true, status: "running" });
 		});
 	});
 

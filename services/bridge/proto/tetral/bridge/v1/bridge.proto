@@ -955,6 +955,14 @@ message CloseApprovalReviewerRequest {
   RuntimeScope scope = 1;
   string reviewer_thread_id = 2;
   string review_id = 3;
+  ApprovalReviewerCloseSettlementKind settlement_kind = 4;
+  string settlement_event_id = 5;
+}
+enum ApprovalReviewerCloseSettlementKind {
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_UNSPECIFIED = 0;
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION = 1;
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE = 2;
+  APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST = 3;
 }
 message CloseApprovalReviewerResponse {
   oneof outcome {

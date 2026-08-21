@@ -584,7 +584,7 @@ func (s *PostgreSQLBridgeAPIStore) CloseChildControl(ctx context.Context, reques
 		return nil, err
 	}
 	phase = "durable_transaction"
-	result, err := s.closeChildLifecycle(ctx, request.GetScope(), childThreadID, "tool_use", request.GetControlOperationId(), bridgeOpCloseChildControl)
+	result, err := s.closeChildLifecycle(ctx, request.GetScope(), childThreadID, "tool_use", request.GetControlOperationId(), bridgeOpCloseChildControl, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -605,8 +605,12 @@ func (s *PostgreSQLBridgeAPIStore) CloseApprovalReviewer(ctx context.Context, re
 	if request.GetScope() == nil || !validActorIdentity(request.GetReviewerThreadId()) || !validActorIdentity(request.GetReviewId()) {
 		return nil, status.Error(codes.InvalidArgument, "reviewer close identities are required")
 	}
+	authority, err := parseApprovalReviewerCloseAuthority(request)
+	if err != nil {
+		return nil, err
+	}
 	phase = "durable_transaction"
-	result, err := s.closeChildLifecycle(ctx, request.GetScope(), request.GetReviewerThreadId(), "approval_review", request.GetReviewId(), bridgeOpCloseApprovalReviewer)
+	result, err := s.closeChildLifecycle(ctx, request.GetScope(), request.GetReviewerThreadId(), "approval_review", request.GetReviewId(), bridgeOpCloseApprovalReviewer, &authority)
 	if err != nil {
 		return nil, err
 	}
@@ -632,6 +636,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 	sourceKind string,
 	sourceCommandID string,
 	operationKind string,
+	reviewerCloseAuthority *approvalReviewerCloseAuthority,
 ) (*closeChildLifecycleResult, error) {
 	now := s.now()
 	command, err := parseChildLifecycleCommand(
@@ -642,6 +647,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		sourceCommandID,
 		operationKind,
 		"close",
+		reviewerCloseAuthority,
 	)
 	if err != nil {
 		return nil, err
@@ -890,7 +896,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		var err error
 		command, err = parseChildLifecycleCommand(
 			request.GetScope(), childThreadID, now, "tool_use", request.GetSourceToolUseEventId(),
-			bridgeOpMarkChildThreadActive, "resume",
+			bridgeOpMarkChildThreadActive, "resume", nil,
 		)
 		if err != nil {
 			return err
@@ -1069,6 +1075,29 @@ type childLifecycleCommand struct {
 	requestedAt         string
 	requestedTime       time.Time
 	declarationDigest   string
+	reviewerClose       *approvalReviewerCloseAuthority
+}
+
+type approvalReviewerCloseAuthority struct {
+	settlementKind    bridgev1.ApprovalReviewerCloseSettlementKind
+	settlementEventID string
+}
+
+func parseApprovalReviewerCloseAuthority(request *bridgev1.CloseApprovalReviewerRequest) (approvalReviewerCloseAuthority, error) {
+	switch request.GetSettlementKind() {
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION,
+		bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE,
+		bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST:
+	default:
+		return approvalReviewerCloseAuthority{}, status.Error(codes.InvalidArgument, "reviewer close settlement kind is required")
+	}
+	if !validActorIdentity(request.GetSettlementEventId()) {
+		return approvalReviewerCloseAuthority{}, status.Error(codes.InvalidArgument, "reviewer close settlement event is required")
+	}
+	return approvalReviewerCloseAuthority{
+		settlementKind:    request.GetSettlementKind(),
+		settlementEventID: request.GetSettlementEventId(),
+	}, nil
 }
 
 func parseChildLifecycleCommand(
@@ -1079,6 +1108,7 @@ func parseChildLifecycleCommand(
 	sourceCommandID string,
 	operationKind string,
 	action string,
+	reviewerCloseAuthority *approvalReviewerCloseAuthority,
 ) (childLifecycleCommand, error) {
 	requestedAt := requestedTime.UTC().Format(time.RFC3339Nano)
 	if sourceKind != "tool_use" && sourceKind != "approval_review" {
@@ -1101,6 +1131,12 @@ func parseChildLifecycleCommand(
 	if operationID == "" {
 		operationID = stableRuntimeID(operationIDParts...)
 	}
+	settlementKind := ""
+	settlementEventID := ""
+	if reviewerCloseAuthority != nil {
+		settlementKind = reviewerCloseAuthority.settlementKind.String()
+		settlementEventID = reviewerCloseAuthority.settlementEventID
+	}
 	declarationDigest, err := childLifecycleDeclarationDigest(
 		operationKind,
 		action,
@@ -1108,6 +1144,8 @@ func parseChildLifecycleCommand(
 		childThreadID,
 		sourceKind,
 		sourceCommandID,
+		settlementKind,
+		settlementEventID,
 	)
 	if err != nil {
 		return childLifecycleCommand{}, err
@@ -1121,6 +1159,7 @@ func parseChildLifecycleCommand(
 		requestedAt:         requestedAt,
 		requestedTime:       requestedTime.UTC(),
 		declarationDigest:   declarationDigest,
+		reviewerClose:       reviewerCloseAuthority,
 	}, nil
 }
 
@@ -1163,7 +1202,10 @@ func validateChildLifecycleSourceTx(
 			return status.Error(codes.FailedPrecondition, "child lifecycle reviewer source does not match the durable reviewer thread")
 		}
 		if command.action == "close" {
-			return validateSettledApprovalReviewerCloseTx(ctx, tx, scope, childThreadID, command.sourceCommandID)
+			if command.reviewerClose == nil {
+				return status.Error(codes.InvalidArgument, "reviewer close settlement authority is required")
+			}
+			return validateSettledApprovalReviewerCloseTx(ctx, tx, scope, childThreadID, command.sourceCommandID, *command.reviewerClose)
 		}
 		return nil
 	}
@@ -1199,36 +1241,56 @@ func validateChildLifecycleSourceTx(
 	return nil
 }
 
-func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID, reviewID string) error {
-	var outcomeCount int
-	err := tx.QueryRow(ctx, `SELECT COUNT(*)
-		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		 AND type IN ('approval_review.decision','approval_review.failure')
-		 AND payload_json::jsonb->>'review_id'=$4`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, reviewID).Scan(&outcomeCount)
+func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID, reviewID string, authority approvalReviewerCloseAuthority) error {
+	expectedType := ""
+	switch authority.settlementKind {
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION:
+		expectedType = "approval_review.decision"
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE:
+		expectedType = "approval_review.failure"
+	case bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST:
+		expectedType = "span.model_request_end"
+	default:
+		return status.Error(codes.InvalidArgument, "reviewer close settlement kind is required")
+	}
+	var eventType, modelRequestID, runtimeWriteID, errorKind, finishReason string
+	err := tx.QueryRow(ctx, `SELECT type, COALESCE(model_request_id, ''),
+		COALESCE(runtime_write_id, ''),
+		COALESCE(payload_json::jsonb->>'error_kind', ''), COALESCE(payload_json::jsonb->>'finish_reason', '')
+		FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND event_id=$4
+		FOR SHARE`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, authority.settlementEventID).
+		Scan(&eventType, &modelRequestID, &runtimeWriteID, &errorKind, &finishReason)
+	if dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement is missing")
+	}
 	if err != nil {
 		return err
 	}
-	if outcomeCount > 1 {
-		return status.Error(codes.FailedPrecondition, "approval reviewer close found competing durable outcomes")
+	if eventType != expectedType {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement type conflicts")
 	}
-	outcomeSettled := outcomeCount == 1
-	var cancelledRequestSettled bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1
-		  FROM session_events end_event
-		 WHERE end_event.workspace_id=$1
-		   AND end_event.session_id=$2
-		   AND end_event.session_thread_id=$3
-		   AND end_event.type='span.model_request_end'
-		   AND end_event.payload_json::jsonb->>'request_kind'='approval_reviewer'
-		   AND end_event.payload_json::jsonb->>'error_kind'='runtime_interrupted'
-		   AND end_event.payload_json::jsonb->>'finish_reason'='cancelled')`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID).Scan(&cancelledRequestSettled)
-	if err != nil {
-		return err
+	if authority.settlementKind == bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_DECISION && runtimeWriteID != "rwrite_"+reviewID+"_decision" {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement belongs to another review")
 	}
-	if !outcomeSettled && !cancelledRequestSettled {
-		return status.Error(codes.FailedPrecondition, "approval reviewer close requires a durable outcome or cancelled request")
+	if authority.settlementKind == bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_FAILURE && runtimeWriteID != "rwrite_"+reviewID+"_failure" {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close settlement belongs to another review")
+	}
+	if authority.settlementKind == bridgev1.ApprovalReviewerCloseSettlementKind_APPROVAL_REVIEWER_CLOSE_SETTLEMENT_KIND_INTERRUPTED_REQUEST {
+		if modelRequestID == "" || errorKind != "runtime_interrupted" || finishReason != "cancelled" {
+			return status.Error(codes.FailedPrecondition, "approval reviewer close request settlement is not interrupted")
+		}
+		var reviewerRequest bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM request_usage_details
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			AND model_request_id=$4 AND request_kind='approval_reviewer')`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, modelRequestID).Scan(&reviewerRequest); err != nil {
+			return err
+		}
+		if !reviewerRequest {
+			return status.Error(codes.FailedPrecondition, "approval reviewer close request settlement is unrelated")
+		}
 	}
 	var unfinished bool
 	err = tx.QueryRow(ctx, `SELECT
