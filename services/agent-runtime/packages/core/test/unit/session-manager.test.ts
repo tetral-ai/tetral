@@ -3058,7 +3058,7 @@ describe("SessionManager", () => {
 		);
 	});
 
-	test("recovery joining another installation rechecks its exact lease after publication", async () => {
+	test("recovery joining another installation fences a reclaimed installer before publication", async () => {
 		const threadLoop = makeControlledThreadLoop();
 		const command = threadControl("sesn_recovery_install_join");
 		let reportFirstLoad = (): void => undefined;
@@ -3076,6 +3076,10 @@ describe("SessionManager", () => {
 			dedupeKey:
 				"runtime_recovery:wksp_test:sesn_recovery_install_join:evt_recovery_install_join",
 		};
+		const oldRecovery = {
+			...recovery,
+			leaseToken: "lease_reclaimed_recovery",
+		};
 		const observedRecoveries: Array<typeof recovery | undefined> = [];
 		await withSessionManager(
 			sessionManagerLayer(threadLoop, {
@@ -3088,14 +3092,30 @@ describe("SessionManager", () => {
 					return {
 						...loadCommand,
 						runtimeBindingToken: "runtime-binding-token-recovery-install-join",
-						contextEntries: [],
+						contextEntries: [
+							RuntimeContextEntrySchema.parse({
+								messageSequence: 1,
+								contextKind: "user",
+								parts: [
+									{
+										type: "text",
+										text:
+											loadOptions?.recovery?.leaseToken === recovery.leaseToken
+												? "current recovery context"
+												: "reclaimed recovery context",
+									},
+								],
+							}),
+						],
 						thread: { role: "main", visibility: "public", status: "idle" },
 					};
 				},
 			}),
 			async (manager) => {
-				const unrelatedInstall = Effect.runPromise(
-					manager.ensureThreadInstalled(command),
+				const reclaimedInstall = Effect.runPromise(
+					manager.ensureThreadInstalled(command, {
+						loadOptions: { recovery: oldRecovery },
+					}),
 				);
 				await firstLoadStarted;
 				const currentRecovery = Effect.runPromise(
@@ -3105,15 +3125,26 @@ describe("SessionManager", () => {
 					}),
 				);
 				releaseFirstLoad();
-				await expect(unrelatedInstall).resolves.toMatchObject({
-					ok: true,
-					applied: true,
+				await expect(reclaimedInstall).resolves.toMatchObject({
+					ok: false,
+					reason: "context_load_failed",
 				});
 				await expect(currentRecovery).resolves.toMatchObject({
 					ok: true,
-					applied: false,
+					applied: true,
 				});
-				expect(observedRecoveries).toEqual([undefined, recovery]);
+				expect(observedRecoveries).toEqual([oldRecovery, recovery]);
+				await expect(
+					Effect.runPromise(manager.inspectThread(command)),
+				).resolves.toMatchObject({
+					ok: true,
+					observed: true,
+					entries: [
+						expect.objectContaining({
+							parts: [{ type: "text", text: "current recovery context" }],
+						}),
+					],
+				});
 			},
 		);
 	});

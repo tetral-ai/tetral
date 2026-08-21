@@ -525,7 +525,22 @@ interface ThreadInstallation {
 	readonly cleanup: Deferred.Deferred<void>;
 	fiber: Fiber.Fiber<void, never> | undefined;
 	startPendingWork: boolean;
+	superseded: boolean;
 	readonly loadOptions: RuntimeContextLoadOptions | undefined;
+}
+
+function recoveryAuthoritiesEqual(
+	left: RuntimeContextLoadOptions["recovery"],
+	right: RuntimeContextLoadOptions["recovery"],
+): boolean {
+	return (
+		left !== undefined &&
+		right !== undefined &&
+		left.jobId === right.jobId &&
+		left.leaseToken === right.leaseToken &&
+		left.partitionKey === right.partitionKey &&
+		left.dedupeKey === right.dedupeKey
+	);
 }
 
 interface SessionEntry {
@@ -2302,9 +2317,10 @@ export function layer(
 				command: RuntimeThreadPreloadState,
 				initializeSharedState?: boolean,
 				startPendingWork = true,
+				canPublish: () => boolean = () => true,
 			): Effect.Effect<ThreadLifecycleResult> =>
 				Effect.gen(function* () {
-					if (admissionClosed) {
+					if (admissionClosed || !canPublish()) {
 						return {
 							ok: false,
 							sessionId: command.sessionId,
@@ -2385,8 +2401,12 @@ export function layer(
 						...(command.mcpManifests ?? []),
 					];
 					if (shouldInitializeSharedState) {
-						yield* threadResult.sessionEntry.controlGate.withPermit(
+						const installedSharedState =
+							yield* threadResult.sessionEntry.controlGate.withPermit(
 							Effect.sync(() => {
+								if (!canPublish()) {
+									return false;
+								}
 								for (const patch of observedSharedPatches) {
 									const disposition =
 										threadResult.sessionEntry.configuration.apply(patch);
@@ -2419,8 +2439,17 @@ export function layer(
 								}
 								threadResult.sessionEntry.sharedStateStatus = "ready";
 								threadResult.sessionEntry.completeSharedStateReady(true);
+								return true;
 							}),
 						);
+						if (!installedSharedState) {
+							return {
+								ok: false,
+								sessionId: command.sessionId,
+								sessionThreadId: command.sessionThreadId,
+								reason: "context_load_failed",
+							};
+						}
 					} else {
 						const sharedStateReady = yield* Effect.promise(
 							() => threadResult.sessionEntry.sharedStateReady,
@@ -2526,6 +2555,7 @@ export function layer(
 							Effect.sync(() => {
 								if (
 									admissionClosed ||
+									!canPublish() ||
 									threadResult.sessionEntry.threads.get(
 										command.sessionThreadId,
 									) !== threadResult.threadEntry
@@ -2633,11 +2663,23 @@ export function layer(
 						} as const;
 					}
 					if (threadResult.threadEntry.installation !== undefined) {
-						threadResult.threadEntry.installation.startPendingWork ||= startPendingWork;
+						const installation = threadResult.threadEntry.installation;
+						const incomingRecovery = loadOptions?.recovery;
+						if (
+							incomingRecovery !== undefined &&
+							!recoveryAuthoritiesEqual(
+								installation.loadOptions?.recovery,
+								incomingRecovery,
+							)
+						) {
+							installation.superseded = true;
+						} else {
+							installation.startPendingWork ||= startPendingWork;
+						}
 						return {
 							threadResult,
 							failedResult,
-							installation: threadResult.threadEntry.installation,
+							installation,
 							createdInstallation: false,
 						} as const;
 					}
@@ -2655,6 +2697,7 @@ export function layer(
 						cleanup: cleanupDeferred,
 						fiber: undefined,
 						startPendingWork,
+						superseded: false,
 						loadOptions,
 					};
 					threadResult.threadEntry.installation = installation;
@@ -2673,17 +2716,40 @@ export function layer(
 									});
 									if (
 										admissionClosed ||
+										installation.superseded ||
 										threadResult.sessionEntry.threads.get(
 											command.sessionThreadId,
 										) !== threadResult.threadEntry
 									) {
 										return failedResult;
 									}
-									return yield* preloadThread(
+									const preloadResult = yield* preloadThread(
 										context,
 										initializeSharedState,
-										installation.startPendingWork,
+										false,
+										() => !installation.superseded,
 									);
+									if (!preloadResult.ok) {
+										return preloadResult;
+									}
+									if (installation.superseded) {
+										return failedResult;
+									}
+									if (
+										installation.startPendingWork &&
+										(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
+											undefined ||
+											ThreadLoop.threadTurnActionNeedsRun(
+												threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
+													.action,
+											))
+									) {
+										yield* startThreadRun(
+											threadResult.sessionEntry,
+											threadResult.threadEntry,
+										).pipe(Effect.asVoid);
+									}
+									return preloadResult;
 								}),
 							).pipe(Effect.exit);
 							const loadFailure = Exit.isFailure(installExit)
@@ -2703,6 +2769,7 @@ export function layer(
 									};
 							if (!result.ok) {
 								if (
+									!installation.superseded &&
 									initializeSharedState &&
 									threadResult.sessionEntry.sharedStateStatus === "initializing"
 								) {
