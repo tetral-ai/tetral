@@ -3180,6 +3180,188 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("thread close admits behind prior work without retaining the Session gate", async () => {
+		const sessionId = "sesn_close_command_order";
+		const mainThreadId = `thrd_${sessionId}`;
+		const siblingThreadId = "thrd_close_command_sibling";
+		const toolUseEventId = "sevt_close_command_tool";
+		let reportCommitStarted = (): void => undefined;
+		let releaseCommit = (): void => undefined;
+		const commitStarted = new Promise<void>((resolve) => {
+			reportCommitStarted = resolve;
+		});
+		const commitGate = new Promise<void>((resolve) => {
+			releaseCommit = resolve;
+		});
+		const threadLoop = makeControlledThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.startTestRunThroughAcceptedInput(sessionId),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForRuns(threadLoop, 1);
+				const session = threadLoop.runs[0]?.session;
+				expect(session).toBeDefined();
+				threadLoop.runs[0]?.release();
+				await waitForThreadIdle(manager, sessionId, mainThreadId);
+				session?.state.installThreadTurn(
+					{
+						pendingInputContextSequences: [],
+						request: {
+							modelRequestId: "mreq_close_command_order",
+							requestStartEventId: "sevt_close_command_request",
+							requestKind: "agent_provider_request",
+							contextThroughMessageSequence: 0,
+							toolMembers: [
+								{
+									memberKind: "public_tool_use",
+									modelToolCallId: "call_close_command_tool",
+									toolUseEventId,
+									toolName: "Write",
+								},
+							],
+						},
+					},
+					{
+						routes: [
+							{
+								toolUseEventId,
+								disposition: "requires_user_action",
+							},
+						],
+					},
+				);
+				session?.state.recordPendingApprovalToolJob({
+					toolUseEventId,
+					modelRequestId: "mreq_close_command_order",
+					source: { providerId: "fake", modelId: "fake-chat" },
+					assistantMessageSequence: pendingApprovalAssistantEntry(
+						sessionId,
+						toolUseEventId,
+					).messageSequence,
+					toolPart: pendingApprovalToolPart(sessionId, toolUseEventId),
+					entry: {} as never,
+					job: {
+						id: "mreq_close_command_order:call_close_command_tool",
+						modelOrder: 0,
+						toolUseEventId,
+						modelToolCallId: "call_close_command_tool",
+						kind: "builtin",
+						name: "Write",
+						route: { kind: "gateway", operation: "RunWeb" },
+						input: { file_path: "close-order.txt" },
+						runPolicy: { mode: "parallel_safe", conflictKeys: null },
+						gateState: "waiting_approval",
+						approvalSource: "user",
+					},
+				});
+				expect(
+					await Effect.runPromise(
+						manager.preloadThread({
+							...threadControl(
+								sessionId,
+								"rin_close_order_sibling_preload",
+								siblingThreadId,
+							),
+							runtimeBindingToken: "runtime-binding-token-close-order",
+							contextEntries: [],
+							thread: {
+								parentThreadId: mainThreadId,
+								role: "subagent",
+								visibility: "public",
+								status: "idle",
+							},
+						}),
+					),
+				).toMatchObject({ ok: true, applied: true });
+
+				const confirmationAheadOfClose = Effect.runPromise(
+					manager.resolveToolConfirmation(
+						sessionId,
+						{
+							...threadControl(sessionId),
+							runtimeInputId: "rin_close_order_confirmation",
+							toolUseEventId,
+							decision: "allow",
+						},
+						async (declaration) => {
+							reportCommitStarted();
+							await commitGate;
+							return buildRuntimeControlCommitResult(
+								"tool_confirmation",
+								declaration,
+							);
+						},
+					),
+				);
+				await commitStarted;
+				const mainClose = Effect.runPromise(
+					manager.markThreadClosed(
+						threadControl(
+							sessionId,
+							"rin_close_order_main_close",
+							mainThreadId,
+						),
+					),
+				);
+				await waitForCondition(async () => {
+					const snapshot = await Effect.runPromise(
+						manager.inspectThread(
+							threadControl(
+								sessionId,
+								"rin_close_order_main_inspect",
+								mainThreadId,
+							),
+						),
+					);
+					return (
+						snapshot.ok &&
+						"observed" in snapshot &&
+						snapshot.observed &&
+						snapshot.status === "closed_for_runtime"
+					);
+				}, "main close admission");
+				await expect(
+					Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(
+								sessionId,
+								"rin_close_order_late",
+								mainThreadId,
+							),
+						),
+					),
+				).resolves.toMatchObject({ ok: false, reason: "thread_busy" });
+
+				const siblingClose = Effect.runPromise(
+					manager.markThreadClosed(
+						threadControl(
+							sessionId,
+							"rin_close_order_sibling_close",
+							siblingThreadId,
+						),
+					),
+				);
+				await expect(siblingClose).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				releaseCommit();
+				await expect(confirmationAheadOfClose).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+				await expect(mainClose).resolves.toMatchObject({
+					ok: true,
+					applied: true,
+				});
+			},
+		);
+	});
+
 	test("manifest update observation follows the effective generation and skips nonresident ACKs", async () => {
 		const manifestUpdates: SessionManager.RuntimeMCPManifestUpdateEvent[] = [];
 		const threadLoop = makeControlledThreadLoop();

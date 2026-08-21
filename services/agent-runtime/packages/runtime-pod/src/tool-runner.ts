@@ -183,9 +183,21 @@ type SendCommandInputResult =
 	| { readonly type: "stale" };
 
 type CancelCommandResult =
-	| { readonly type: "committed" }
-	| { readonly type: "duplicate" }
+	| { readonly type: "committed"; readonly resultJson: string }
+	| { readonly type: "duplicate"; readonly resultJson: string }
 	| { readonly type: "stale" };
+
+const SandboxBackgroundCommandMaxAttempts = 5;
+const SandboxBackgroundProviderTimeoutMs = 45_000;
+const SandboxBackgroundQueueRetryCapMs = 60_000;
+const SandboxBackgroundResultCommitMarginMs = 30_000;
+// This is an observation bound, not a retry budget. It covers the Sandbox
+// runner's existing attempts, provider timeout, capped Queue backoff, and the
+// final durable-result commit margin before Runtime gives up observing it.
+const SandboxBackgroundCommandObservationTimeoutMs =
+	SandboxBackgroundCommandMaxAttempts * SandboxBackgroundProviderTimeoutMs +
+	(SandboxBackgroundCommandMaxAttempts - 1) * SandboxBackgroundQueueRetryCapMs +
+	SandboxBackgroundResultCommitMarginMs;
 
 type AuthorizeWebToolExecutionResult =
 	| { readonly type: "authorized" }
@@ -605,6 +617,9 @@ export class RuntimePodToolRunner {
 				return resultJsonToExecutionResult(request, result.resultJson);
 			} catch (error) {
 				if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+					if (request.backgroundCancellationIntent?.() !== "user_interrupt") {
+						return { type: "stale_custody" };
+					}
 					return await this.cancelJoinedBackgroundCommand(
 						request,
 						scope,
@@ -657,12 +672,13 @@ export class RuntimePodToolRunner {
 						this.bridgeClient,
 						durableRequest,
 						await this.metadata(),
+						SandboxBackgroundCommandObservationTimeoutMs,
 					),
 				);
 				if (result.type === "stale") {
 					return { type: "stale_custody" };
 				}
-				return toolCancelled(request, "Command task was cancelled.");
+				return resultJsonToExecutionResult(request, result.resultJson);
 			} catch (error) {
 				if (error instanceof BridgeToolResultContractError) {
 					return toolFailure(
@@ -2484,10 +2500,16 @@ function parseCancelCommandResult(
 		throw new BridgeToolResultContractError("CancelCommand");
 	}
 	if (response.committed !== undefined) {
-		return { type: "committed" };
+		return {
+			type: "committed",
+			resultJson: response.committed.resultJson,
+		};
 	}
 	if (response.duplicate !== undefined) {
-		return { type: "duplicate" };
+		return {
+			type: "duplicate",
+			resultJson: response.duplicate.resultJson,
+		};
 	}
 	return { type: "stale" };
 }
@@ -2615,9 +2637,10 @@ function cancelCommand(
 	client: Pick<AgentRuntimeBridgeServiceClient, "cancelCommand">,
 	request: CancelCommandRequest,
 	metadata: Metadata,
+	timeoutMs: number,
 ): Promise<CancelCommandResponse> {
 	const options: CallOptions = {
-		deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+		deadline: Date.now() + timeoutMs,
 	};
 	return new Promise((resolve, reject) => {
 		try {

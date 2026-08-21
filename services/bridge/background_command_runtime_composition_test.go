@@ -28,6 +28,18 @@ import (
 )
 
 func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
+	t.Run("cancelled result survives a long lost ACK replay", func(t *testing.T) {
+		runPostgreSQLRuntimeAbortBackgroundCommand(t, false, false, 3100*time.Millisecond)
+	})
+	t.Run("natural completion wins the cancellation race", func(t *testing.T) {
+		runPostgreSQLRuntimeAbortBackgroundCommand(t, true, false, 0)
+	})
+	t.Run("shutdown hands durable work to a replacement Runtime", func(t *testing.T) {
+		runPostgreSQLRuntimeAbortBackgroundCommand(t, false, true, 0)
+	})
+}
+
+func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion bool, custodyHandoff bool, replayDelay time.Duration) {
 	bunPath, err := exec.LookPath("bun")
 	if err != nil {
 		t.Fatalf("background command composition requires bun: %v", err)
@@ -52,7 +64,7 @@ func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	store := NewPostgreSQLBridgeAPIStore(client)
 	store.RuntimeBindingTokenHMACKey = []byte("background-abort-composition-key")
-	bridge := &backgroundAbortBridgeServer{store: store}
+	bridge := &backgroundAbortBridgeServer{store: store, replayDelay: replayDelay}
 	_, bridgeAddress := startSandboxProductionBoundaryBridgeClient(t, bridge, podUID)
 	tokenPath := filepath.Join(t.TempDir(), "runtime-token")
 	if err := os.WriteFile(tokenPath, []byte("sandbox-production-runtime-token\n"), 0o600); err != nil {
@@ -61,7 +73,10 @@ func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
 
 	queueStore := queue.NewPostgreSQLStore(client)
 	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
-	provider := &backgroundAbortProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}, taskID: taskID}
+	provider := &backgroundAbortProvider{
+		bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{},
+		taskID:                         taskID, naturalCompletion: naturalCompletion,
+	}
 	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{sandboxdriver.DaytonaProviderName: provider})
 	if err != nil {
 		t.Fatalf("create background composition provider registry: %v", err)
@@ -171,13 +186,17 @@ func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
 	}
 	abortPath := filepath.Join(t.TempDir(), "abort")
 	controlInputPath := filepath.Join(t.TempDir(), "background-control.json")
-	controlInput, err := json.Marshal(map[string]any{
+	controlInputValue := map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "abortPath": abortPath,
 		"workspaceId": workspaceID, "sessionId": sessionID, "sessionThreadId": threadID,
 		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
 		"runtimeBindingToken": runtimeBindingToken, "modelRequestId": controlRequestID,
 		"modelToolCallId": "call_background_abort_control", "taskId": taskID,
-	})
+	}
+	if custodyHandoff {
+		controlInputValue["mode"] = "custody_handoff"
+	}
+	controlInput, err := json.Marshal(controlInputValue)
 	if err != nil {
 		t.Fatalf("marshal background control composition: %v", err)
 	}
@@ -202,6 +221,76 @@ func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
 	}
 	if err := os.WriteFile(abortPath, []byte("abort\n"), 0o600); err != nil {
 		t.Fatalf("release Runtime abort: %v", err)
+	}
+	if custodyHandoff {
+		if err := <-controlCommand; err != nil {
+			t.Fatalf("run background handoff Runtime: %v\nstdout=%s\nstderr=%s", err, controlStdout.String(), controlStderr.String())
+		}
+		var handoffResult struct {
+			ToolUseEventID string `json:"toolUseEventId"`
+			Result         struct {
+				Type string `json:"type"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(controlStdout.Bytes(), &handoffResult); err != nil ||
+			handoffResult.ToolUseEventID != controlToolUseEventID || handoffResult.Result.Type != "stale_custody" {
+			t.Fatalf("background handoff Runtime result = %s/%v", controlStdout.String(), err)
+		}
+		var cancelRows int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
+			WHERE workspace_id=$1 AND session_id=$2 AND background_operation_kind='cancel'`, workspaceID, sessionID).Scan(&cancelRows); err != nil || cancelRows != 0 {
+			t.Fatalf("shutdown cancellation rows = %d/%v; want zero", cancelRows, err)
+		}
+		controlInputValue["mode"] = "rejoin"
+		replacementInput, err := json.Marshal(controlInputValue)
+		if err != nil {
+			t.Fatalf("marshal replacement background control: %v", err)
+		}
+		replacementInputPath := filepath.Join(t.TempDir(), "background-replacement.json")
+		if err := os.WriteFile(replacementInputPath, replacementInput, 0o600); err != nil {
+			t.Fatalf("write replacement background control: %v", err)
+		}
+		replacementCommand, replacementStdout, replacementStderr := startBunComposition(t, runtimeRoot, bunPath,
+			"packages/runtime-pod/test/fixtures/background-command-abort-composition.ts", replacementInputPath)
+		provider.pollCompletes.Store(true)
+		backgroundRunner := &tetralsandbox.SandboxBackgroundCommandJobRunner{
+			Queue: tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
+			Store: tetralsandbox.NewPostgreSQLSandboxBackgroundCommandStore(client), Providers: registry,
+			Config: tetralsandbox.SandboxBackgroundRunnerConfig{
+				WorkspaceID: workspaceID, LeaseOwner: "background-handoff-owner", MaxJobs: 1,
+				LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+			},
+		}
+		if active, runErr := backgroundRunner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
+			t.Fatalf("run handed-off background command = %t/%v", active, runErr)
+		}
+		if err := <-replacementCommand; err != nil {
+			t.Fatalf("run replacement background Runtime: %v\nstdout=%s\nstderr=%s", err, replacementStdout.String(), replacementStderr.String())
+		}
+		var replacementResult struct {
+			ToolUseEventID string `json:"toolUseEventId"`
+			Result         struct {
+				Type string `json:"type"`
+			} `json:"result"`
+			Settlement struct {
+				Type string `json:"type"`
+			} `json:"settlement"`
+		}
+		if err := json.Unmarshal(replacementStdout.Bytes(), &replacementResult); err != nil ||
+			replacementResult.ToolUseEventID != controlToolUseEventID || replacementResult.Result.Type != "completed" ||
+			replacementResult.Settlement.Type != "committed" {
+			t.Fatalf("replacement background Runtime result = %s/%v", replacementStdout.String(), err)
+		}
+		var taskStatus string
+		if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_background_tasks
+			WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3`, workspaceID, sessionID, taskID).Scan(&taskStatus); err != nil || taskStatus != "completed" {
+			t.Fatalf("handed-off background task = %q/%v; want completed", taskStatus, err)
+		}
+		cancelRequests, _ := bridge.cancelTrace()
+		if len(cancelRequests) != 0 || provider.cancelCalls.Load() != 0 || provider.pollCalls.Load() != 2 {
+			t.Fatalf("handoff provider poll/cancel and Bridge cancel = %d/%d/%d; want 2/0/0", provider.pollCalls.Load(), provider.cancelCalls.Load(), len(cancelRequests))
+		}
+		return
 	}
 
 	var cancelCount int
@@ -251,8 +340,12 @@ func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
 			Type string `json:"type"`
 		} `json:"settlement"`
 	}
+	wantResultType := "cancelled"
+	if naturalCompletion {
+		wantResultType = "completed"
+	}
 	if err := json.Unmarshal(controlStdout.Bytes(), &controlResult); err != nil || controlResult.ToolUseEventID != controlToolUseEventID ||
-		controlResult.Result.Type != "cancelled" || controlResult.Settlement.Type != "committed" {
+		controlResult.Result.Type != wantResultType || controlResult.Settlement.Type != "committed" {
 		t.Fatalf("background abort Runtime result = %s/%v", controlStdout.String(), err)
 	}
 	if provider.pollCalls.Load() != 2 || provider.cancelCalls.Load() != 1 {
@@ -271,8 +364,12 @@ func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
 		WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3`, workspaceID, sessionID, taskID).Scan(&taskStatus); err != nil {
 		t.Fatalf("read cancelled background task: %v", err)
 	}
-	if cancelState != "terminal" || taskStatus != "cancelled" {
-		t.Fatalf("durable background cancel/task = %q/%q; want terminal/cancelled", cancelState, taskStatus)
+	wantTaskStatus := "cancelled"
+	if naturalCompletion {
+		wantTaskStatus = "completed"
+	}
+	if cancelState != "terminal" || taskStatus != wantTaskStatus {
+		t.Fatalf("durable background cancel/task = %q/%q; want terminal/%s", cancelState, taskStatus, wantTaskStatus)
 	}
 }
 
@@ -304,6 +401,7 @@ type backgroundAbortBridgeServer struct {
 	mu               sync.Mutex
 	cancelRequests   []*bridgev1.CancelCommandRequest
 	cancelACKDropped bool
+	replayDelay      time.Duration
 }
 
 func (s *backgroundAbortBridgeServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
@@ -331,10 +429,21 @@ func (s *backgroundAbortBridgeServer) CancelCommand(ctx context.Context, request
 		return nil, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.cancelACKDropped {
 		s.cancelACKDropped = true
+		s.mu.Unlock()
 		return nil, status.Error(codes.Unknown, "background cancellation acknowledgement unavailable")
+	}
+	delay := s.replayDelay
+	s.mu.Unlock()
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 	return response, nil
 }
@@ -351,10 +460,12 @@ func (s *backgroundAbortBridgeServer) cancelTrace() ([]*bridgev1.CancelCommandRe
 
 type backgroundAbortProvider struct {
 	*bridgeMemoryProjectionProvider
-	taskID       string
-	executeCalls atomic.Int32
-	pollCalls    atomic.Int32
-	cancelCalls  atomic.Int32
+	taskID            string
+	naturalCompletion bool
+	executeCalls      atomic.Int32
+	pollCalls         atomic.Int32
+	cancelCalls       atomic.Int32
+	pollCompletes     atomic.Bool
 }
 
 func (p *backgroundAbortProvider) ExecuteTool(_ context.Context, _ tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
@@ -370,6 +481,11 @@ func (p *backgroundAbortProvider) ExecuteTool(_ context.Context, _ tetralsandbox
 
 func (p *backgroundAbortProvider) PollBackground(context.Context, sandboxdriver.CommandReference) tetralsandbox.ProviderOutcome[sandboxdriver.CommandResult] {
 	p.pollCalls.Add(1)
+	if p.pollCompletes.Load() {
+		return tetralsandbox.ProviderOutcome[sandboxdriver.CommandResult]{Value: sandboxdriver.CommandResult{
+			ResultJSON: `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`, TerminalStatus: "completed",
+		}}
+	}
 	return tetralsandbox.ProviderOutcome[sandboxdriver.CommandResult]{Value: sandboxdriver.CommandResult{
 		ResultJSON: `{"status":"running","result":{"task_id":"` + p.taskID + `"}}`,
 	}}
@@ -383,6 +499,11 @@ func (p *backgroundAbortProvider) CancelBackground(_ context.Context, request sa
 	p.cancelCalls.Add(1)
 	if request.Task.TaskID != p.taskID || request.Reason != "runtime_interrupted" {
 		return tetralsandbox.ProviderOutcome[sandboxdriver.CommandResult]{Disposition: tetralsandbox.ProviderTerminal, ErrorKind: "cancel_identity_mismatch", SafeMessage: "cancel identity mismatch"}
+	}
+	if p.naturalCompletion {
+		return tetralsandbox.ProviderOutcome[sandboxdriver.CommandResult]{Value: sandboxdriver.CommandResult{
+			ResultJSON: `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`, TerminalStatus: "completed",
+		}}
 	}
 	return tetralsandbox.ProviderOutcome[sandboxdriver.CommandResult]{Value: sandboxdriver.CommandResult{
 		ResultJSON: `{"status":"cancelled","result":{"cancelled":true}}`, TerminalStatus: "cancelled",

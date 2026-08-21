@@ -1427,14 +1427,15 @@ describe("RuntimePodToolRunner", () => {
 		const runner = makeRunner({ bridge });
 		const abortController = new AbortController();
 
-		const resultPromise = runner.runTool(
-			toolRequest(
+		const resultPromise = runner.runTool({
+			...toolRequest(
 				"write_stdin",
 				{ session_id: "task_1", chars: "" },
 				"sevt_tool_poll",
 				abortController.signal,
 			),
-		);
+			backgroundCancellationIntent: () => "user_interrupt",
+		});
 		await waitForCondition(
 			() => bridge.readCommandResultRequests.length === 1,
 			"read command request",
@@ -1463,14 +1464,15 @@ describe("RuntimePodToolRunner", () => {
 		const sleep = new ControlledSleep();
 		const runner = makeRunner({ bridge, sleep: sleep.sleep });
 		const abortController = new AbortController();
-		const resultPromise = runner.runTool(
-			toolRequest(
+		const resultPromise = runner.runTool({
+			...toolRequest(
 				"write_stdin",
 				{ session_id: "task_1", chars: "" },
 				"sevt_tool_poll_replay",
 				abortController.signal,
 			),
-		);
+			backgroundCancellationIntent: () => "user_interrupt",
+		});
 		await waitForCondition(
 			() => bridge.readCommandResultRequests.length === 1,
 			"read command request",
@@ -1488,6 +1490,78 @@ describe("RuntimePodToolRunner", () => {
 		expect(bridge.cancelCommandRequests[1]).toEqual(
 			bridge.cancelCommandRequests[0],
 		);
+	});
+
+	test.each(["runtime shutdown", "local fiber abort"])(
+		"hands off a joined command without durable cancellation on %s",
+		async () => {
+			const bridge = new RecordingBridgeClient();
+			bridge.deferReadCommandResult = true;
+			const abortController = new AbortController();
+			const resultPromise = makeRunner({ bridge }).runTool(
+				toolRequest(
+					"write_stdin",
+					{ session_id: "task_1", chars: "" },
+					"sevt_tool_poll_handoff",
+					abortController.signal,
+				),
+			);
+			await waitForCondition(
+				() => bridge.readCommandResultRequests.length === 1,
+				"joined background read",
+			);
+			abortController.abort();
+
+			await expect(resultPromise).resolves.toEqual({ type: "stale_custody" });
+			expect(bridge.cancelCommandRequests).toHaveLength(0);
+		},
+	);
+
+	test("hands off server-originated command cancellation without writing a cancel", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.readCommandResultErrors.push(
+			Object.assign(new Error("server cancelled"), {
+				code: GrpcStatus.CANCELLED,
+			}),
+		);
+		const result = await makeRunner({ bridge }).runTool(
+			toolRequest("write_stdin", { session_id: "task_1", chars: "" }),
+		);
+
+		expect(result).toEqual({ type: "stale_custody" });
+		expect(bridge.cancelCommandRequests).toHaveLength(0);
+	});
+
+	test("returns a natural completion that wins the cancellation race", async () => {
+		const bridge = new RecordingBridgeClient();
+		bridge.deferReadCommandResult = true;
+		bridge.cancelCommandResponses.push({
+			committed: {
+				resultJson:
+					'{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}',
+			},
+		});
+		const abortController = new AbortController();
+		const resultPromise = makeRunner({ bridge }).runTool({
+			...toolRequest(
+				"write_stdin",
+				{ session_id: "task_1", chars: "" },
+				"sevt_tool_poll_completion_wins",
+				abortController.signal,
+			),
+			backgroundCancellationIntent: () => "user_interrupt",
+		});
+		await waitForCondition(
+			() => bridge.readCommandResultRequests.length === 1,
+			"joined background read",
+		);
+		abortController.abort();
+
+		await expect(resultPromise).resolves.toMatchObject({
+			type: "completed",
+			output: { text: expect.stringContaining("done") },
+		});
+		expect(bridge.cancelCommandRequests).toHaveLength(1);
 	});
 
 	test.each([
@@ -4407,6 +4481,7 @@ class RecordingBridgeClient {
 	readonly readCommandResultResponses: ReadCommandResultResponse[] = [];
 	readonly cancelCommandRequests: CancelCommandRequest[] = [];
 	readonly cancelCommandErrors: Error[] = [];
+	readonly cancelCommandResponses: unknown[] = [];
 	readonly authorizeWebToolExecutionRequests: AuthorizeWebToolExecutionRequest[] =
 		[];
 	authorizeWebToolExecutionResponse: AuthorizeWebToolExecutionResponse = {
@@ -4672,9 +4747,12 @@ class RecordingBridgeClient {
 			callback(error, undefined);
 			return grpcCall();
 		}
-		callback(null, {
-			committed: { resultJson: '{"status":"cancelled"}' },
-		});
+		callback(
+			null,
+			this.cancelCommandResponses.shift() ?? {
+				committed: { resultJson: '{"status":"cancelled"}' },
+			},
+		);
 		return grpcCall();
 	}
 

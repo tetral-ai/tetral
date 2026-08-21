@@ -1421,7 +1421,11 @@ export function layer(
 								if (
 									prepared.threadResult.sessionEntry.threads.get(
 										command.sessionThreadId,
-									) !== prepared.threadResult.threadEntry
+									) !== prepared.threadResult.threadEntry ||
+									prepared.threadResult.threadEntry.status ===
+										"closed_for_runtime" ||
+									prepared.threadResult.threadEntry.status === "failed" ||
+									prepared.threadResult.threadEntry.status === "terminated"
 								) {
 									return Option.none();
 								}
@@ -3040,24 +3044,46 @@ export function layer(
 							applied: false,
 						};
 					}
-					const runSlot = yield* sessionEntry.controlGate.withPermit(
-						submitThreadCommand(
-							threadEntry,
-							Effect.sync(() => {
-								threadEntry.runtimeThread.updateIdentity(
-									controlIdentity(command),
-								);
-								threadEntry.bridgeScope = command;
-								threadEntry.status = "closed_for_runtime";
-								const capturedRunSlot = threadEntry.runSlot;
-								if (capturedRunSlot !== undefined) {
-									capturedRunSlot.stopping = true;
-									threadEntry.runtimeThread.state.beginCooperativeCancel();
-								}
-								return capturedRunSlot;
-							}),
-							undefined,
-						),
+					const queued = yield* sessionEntry.controlGate.withPermit(
+						Effect.gen(function* () {
+							if (
+								sessionEntry.threads.get(command.sessionThreadId) !==
+									threadEntry ||
+								threadEntry.status === "closed_for_runtime" ||
+								threadEntry.status === "failed" ||
+								threadEntry.status === "terminated"
+							) {
+								return Option.none<Effect.Effect<ThreadRunSlot | undefined>>();
+							}
+							threadEntry.status = "closed_for_runtime";
+							return yield* threadEntry.commandChannel
+								.enqueue(
+									Effect.sync(() => {
+										threadEntry.runtimeThread.updateIdentity(
+											controlIdentity(command),
+										);
+										threadEntry.bridgeScope = command;
+										const capturedRunSlot = threadEntry.runSlot;
+										if (capturedRunSlot !== undefined) {
+											capturedRunSlot.stopping = true;
+											threadEntry.runtimeThread.state.beginCooperativeCancel();
+										}
+										return capturedRunSlot;
+									}),
+								)
+								.pipe(Effect.option);
+						}),
+					);
+					if (Option.isNone(queued)) {
+						return {
+							ok: true,
+							sessionId: command.sessionId,
+							sessionThreadId: command.sessionThreadId,
+							applied: false,
+						};
+					}
+					const runSlot = yield* queued.value.pipe(
+						Effect.catchCause(() => Effect.succeed(undefined)),
 					);
 					let requestedRunExitOutcome: RunExitOutcome | undefined;
 					if (runSlot?.ownerFiber !== undefined) {

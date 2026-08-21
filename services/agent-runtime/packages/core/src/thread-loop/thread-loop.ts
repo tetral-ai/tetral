@@ -4553,6 +4553,10 @@ function resumeRecoveredToolJobEffect(
 				entry: pending.entry,
 				input: pending.job.input,
 				retainedContextEntries: session.state.contextManager.entries(),
+				backgroundCancellationIntent: () =>
+					session.state.userInterruptRequested()
+						? "user_interrupt"
+						: "custody_handoff",
 				...(currentModel !== undefined ? { currentModel } : {}),
 			};
 			let executionResult: RuntimeToolExecutionResult;
@@ -5192,6 +5196,10 @@ function coordinateRuntimeToolJobEffect(
 				entry,
 				input: job.input,
 				retainedContextEntries: session.state.contextManager.entries(),
+				backgroundCancellationIntent: () =>
+					session.state.userInterruptRequested()
+						? "user_interrupt"
+						: "custody_handoff",
 				...(session.state.currentModel() !== undefined
 					? { currentModel: session.state.currentModel() }
 					: {}),

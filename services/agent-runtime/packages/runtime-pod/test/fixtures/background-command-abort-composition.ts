@@ -37,6 +37,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
 	readonly taskId: string;
+	readonly mode?: "user_interrupt" | "custody_handoff" | "rejoin";
 };
 
 const writer = new BridgeAPIEventWriter({
@@ -137,6 +138,10 @@ const request: RuntimeToolExecutionRequest = {
 	entry,
 	input: job.input,
 	retainedContextEntries: [],
+	backgroundCancellationIntent: () =>
+		input.mode === "user_interrupt" || input.mode === undefined
+			? "user_interrupt"
+			: "custody_handoff",
 	abortSignal: abort.signal,
 };
 const runner = new RuntimePodToolRunner({
@@ -147,32 +152,41 @@ const runner = new RuntimePodToolRunner({
 	sleep: async () => undefined,
 });
 const resultPromise = runner.runTool(request);
-for (;;) {
-	try {
-		await access(input.abortPath);
-		break;
-	} catch {
-		await Bun.sleep(10);
+if (input.mode !== "rejoin") {
+	for (;;) {
+		try {
+			await access(input.abortPath);
+			break;
+		} catch {
+			await Bun.sleep(10);
+		}
 	}
+	abort.abort();
 }
-abort.abort();
 const result = await resultPromise;
 if (result.type === "stale_custody") {
-	throw new Error("background cancellation lost durable custody");
+	process.stdout.write(
+		JSON.stringify({ toolUseEventId: committed.toolUseEventId, result }),
+	);
+} else {
+	const settlement = await writer.settleToolResult({
+		workspaceId: input.workspaceId,
+		sessionId: input.sessionId,
+		sessionThreadId: input.sessionThreadId,
+		bindingId: input.bindingId,
+		bindingGeneration: input.bindingGeneration,
+		targetPodUid: input.targetPodUid,
+		settlement: {
+			toolUseEventId: committed.toolUseEventId,
+			outcome: runtimeToolSettlement(result),
+		},
+	});
+	if (!settlement.ok) throw settlement.error;
+	process.stdout.write(
+		JSON.stringify({
+			toolUseEventId: committed.toolUseEventId,
+			result,
+			settlement: settlement.result,
+		}),
+	);
 }
-const settlement = await writer.settleToolResult({
-	workspaceId: input.workspaceId,
-	sessionId: input.sessionId,
-	sessionThreadId: input.sessionThreadId,
-	bindingId: input.bindingId,
-	bindingGeneration: input.bindingGeneration,
-	targetPodUid: input.targetPodUid,
-	settlement: {
-		toolUseEventId: committed.toolUseEventId,
-		outcome: runtimeToolSettlement(result),
-	},
-});
-if (!settlement.ok) throw settlement.error;
-process.stdout.write(
-	JSON.stringify({ toolUseEventId: committed.toolUseEventId, result, settlement: settlement.result }),
-);

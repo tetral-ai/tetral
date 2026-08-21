@@ -112,6 +112,9 @@ export interface RuntimeToolExecutionRequest {
 				readonly modelId: string;
 		  }
 		| undefined;
+	readonly backgroundCancellationIntent?:
+		| (() => "user_interrupt" | "custody_handoff")
+		| undefined;
 	readonly abortSignal: AbortSignal;
 }
 
