@@ -15,6 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -26,10 +31,6 @@ import (
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 )
 
 type closedThreadResumeCompositionResult struct {
@@ -1407,16 +1408,6 @@ func newSubagentRuntimeQueueRunner(
 		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
 		Config:    JobRunnerConfig{LeaseOwner: "subagent-custody-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-}
-
-func bindingIDForSession(t *testing.T, admin *sql.DB, sessionID string) string {
-	t.Helper()
-	var bindingID string
-	if err := admin.QueryRowContext(context.Background(), `SELECT binding_id FROM session_runtime_bindings
-		WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&bindingID); err != nil {
-		t.Fatalf("read Runtime binding: %v", err)
-	}
-	return bindingID
 }
 
 func waitForQueueJobAvailable(t *testing.T, admin *sql.DB, jobID string) {
