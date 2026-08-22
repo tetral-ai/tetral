@@ -558,7 +558,7 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope, compactionFloor)
+	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
 	}
@@ -697,38 +697,39 @@ func loadThreadMetadataForContextTx(
 	return thread, nil
 }
 
-const loadOpenDurableTurnIDSQL = `WITH latest_close AS MATERIALIZED (
-		SELECT sequence
+const loadOpenDurableTurnIDSQL = `WITH latest_running AS MATERIALIZED (
+		SELECT event_id, sequence
 		  FROM session_events
 		 WHERE workspace_id=$1
 		   AND session_id=$2
 		   AND session_thread_id=$3
-		   AND sequence >= $4
-		   AND type IN (
-		     'session.status_idle',
-		     'session.thread_status_idle',
-		     'session.status_terminated',
-		     'session.thread_status_terminated'
-		   )
+		   AND type IN ('session.status_running', 'session.thread_status_running')
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	)
-	SELECT event_id
-	  FROM session_events
-	 WHERE workspace_id=$1
-	   AND session_id=$2
-	   AND session_thread_id=$3
-	   AND type IN ('session.status_running', 'session.thread_status_running')
-	   AND sequence >= $4
-	   AND sequence > COALESCE((SELECT sequence FROM latest_close), $4 - 1)
-	 ORDER BY session_events.sequence ASC
-	 LIMIT 1`
+	SELECT running.event_id
+	  FROM latest_running running
+	 WHERE NOT EXISTS (
+	       SELECT 1
+	         FROM session_events closeout
+	        WHERE closeout.workspace_id=$1
+	          AND closeout.session_id=$2
+	          AND closeout.session_thread_id=$3
+	          AND closeout.type IN (
+	            'session.status_idle',
+	            'session.thread_status_idle',
+	            'session.status_terminated',
+	            'session.thread_status_terminated'
+	          )
+	          AND closeout.sequence > (SELECT sequence FROM latest_running)
+	        ORDER BY closeout.sequence ASC
+	        LIMIT 1
+	      )`
 
 func loadOpenDurableTurnIDTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	compactionFloor int64,
 ) (*string, error) {
 	var durableTurnID string
 	err := tx.QueryRow(ctx,
@@ -736,7 +737,6 @@ func loadOpenDurableTurnIDTx(
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		compactionFloor,
 	).Scan(&durableTurnID)
 	if dbconnect.IsNoRows(err) {
 		return nil, nil

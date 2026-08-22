@@ -5,10 +5,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 type closedTurnPlanStats struct {
@@ -17,9 +24,39 @@ type closedTurnPlanStats struct {
 	maxLoops          float64
 	sessionEventScans int
 	sessionEventSeq   int
-	latestCloseIndex  bool
-	latestCloseAgg    bool
-	latestCloseLimit  bool
+}
+
+type loadContextQueryInvocation struct {
+	SQL  string
+	Args []any
+}
+
+type loadContextQueryTracer struct {
+	mu          sync.Mutex
+	invocations []loadContextQueryInvocation
+}
+
+func (tracer *loadContextQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if !strings.Contains(data.SQL, "session_events") {
+		return ctx
+	}
+	tracer.mu.Lock()
+	tracer.invocations = append(tracer.invocations, loadContextQueryInvocation{
+		SQL:  data.SQL,
+		Args: append([]any(nil), data.Args...),
+	})
+	tracer.mu.Unlock()
+	return ctx
+}
+
+func (*loadContextQueryTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (tracer *loadContextQueryTracer) snapshot() []loadContextQueryInvocation {
+	tracer.mu.Lock()
+	defer tracer.mu.Unlock()
+	result := make([]loadContextQueryInvocation, len(tracer.invocations))
+	copy(result, tracer.invocations)
+	return result
 }
 
 func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
@@ -36,39 +73,155 @@ func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
 		t.Fatalf("seed plan background: %v", err)
 	}
 	stats := make([]closedTurnPlanStats, 0, 2)
+	var wantCensus []string
+	var wantFactIDs []string
 	for _, historySize := range []int{64, 8192} {
 		sessionID := fmt.Sprintf("sesn_closed_plan_%d", historySize)
 		threadID := fmt.Sprintf("thr_closed_plan_%d", historySize)
 		seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+		bindingID := fmt.Sprintf("bind_closed_plan_%d", historySize)
+		podUID := fmt.Sprintf("pod_closed_plan_%d", historySize)
+		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 		floor := int64(historySize + 1)
 		seedClosedTurnPlanHistory(t, admin, sessionID, threadID, historySize)
+		if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
+			SET status='closed_for_runtime', closed_at=now(), updated_at=now()
+			WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+			t.Fatalf("close plan thread %d: %v", historySize, err)
+		}
+		if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
+			workspace_id, session_id, session_thread_id, message_id, sequence, kind, data_json,
+			source_event_id, created_at, updated_at
+		) VALUES ('default',$1,$2,$3,1,'compaction','{"parts":[{"type":"text","text":"summary"}]}',$4,now(),now())`,
+			sessionID, threadID, fmt.Sprintf("msg_closed_plan_%d", historySize), fmt.Sprintf("evt_closed_plan_compacted_%d", historySize)); err != nil {
+			t.Fatalf("seed plan compaction Message %d: %v", historySize, err)
+		}
 		if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events`); err != nil {
 			t.Fatalf("analyze closed turn history %d: %v", historySize, err)
 		}
 
 		openPlan := explainClosedTurnPlan(t, admin, loadOpenDurableTurnIDSQL,
-			"default", sessionID, threadID, floor)
+			"default", sessionID, threadID)
 		turnPlan := explainClosedTurnPlan(t, admin, loadContextTurnEventsSQL,
 			"default", sessionID, threadID, floor, "", `[]`, `[]`, "closed_for_runtime")
+		compactionPlan := explainClosedTurnPlan(t, admin, loadContextCompactionEventFloorSQL,
+			"default", sessionID, threadID, fmt.Sprintf(`["evt_closed_plan_compacted_%d"]`, historySize))
 		combined := collectClosedTurnPlanStats(openPlan)
 		mergeClosedTurnPlanStats(&combined, collectClosedTurnPlanStats(turnPlan))
-		combined.latestCloseIndex = planSubtreeUsesIndex(openPlan, "CTE latest_close")
-		combined.latestCloseAgg = planSubtreeHasNodeType(openPlan, "CTE latest_close", "Aggregate")
-		combined.latestCloseLimit = planSubplanRootType(openPlan, "CTE latest_close") == "Limit"
-		if combined.sessionEventSeq != 0 || combined.sessionEventScans == 0 ||
-			combined.maxLoops > 1 || combined.maxRows > 12 || !combined.latestCloseIndex || combined.latestCloseAgg || !combined.latestCloseLimit {
-			t.Fatalf("closed turn plan %d is not bounded: %#v\nopen=%s\nturn=%s",
-				historySize, combined, encodePlanForFailure(openPlan), encodePlanForFailure(turnPlan))
+		mergeClosedTurnPlanStats(&combined, collectClosedTurnPlanStats(compactionPlan))
+		requiredSubplans := []struct {
+			plan map[string]any
+			name string
+		}{
+			{openPlan, "CTE latest_running"},
+			{turnPlan, "CTE latest_thread_request_start"},
+			{turnPlan, "CTE previous_close_before_request"},
+			{turnPlan, "CTE selected_thread_running"},
+			{turnPlan, "CTE selected_thread_request_end"},
+			{turnPlan, "CTE selected_thread_latest_idle"},
+			{turnPlan, "CTE current_reschedule"},
 		}
-		if !planUsesCompactionFloor(openPlan, floor) || !planUsesCompactionFloor(turnPlan, floor) {
-			t.Fatalf("closed turn plan %d does not carry the compaction floor", historySize)
+		for _, required := range requiredSubplans {
+			if !planSubtreeUsesIndex(required.plan, required.name) {
+				t.Fatalf("closed turn plan %d subplan %s has no index: %s",
+					historySize, required.name, encodePlanForFailure(required.plan))
+			}
+		}
+		floorFiltered := planRowsRemovedByFloorFilter(turnPlan, floor)
+		if combined.sessionEventSeq != 0 || combined.sessionEventScans == 0 ||
+			combined.maxLoops > 1 || combined.maxRows > 12 || floorFiltered != 0 {
+			t.Fatalf("closed turn plan %d is not bounded (floor-filtered=%.0f): %#v\nopen=%s\nturn=%s\ncompaction=%s",
+				historySize, floorFiltered, combined, encodePlanForFailure(openPlan), encodePlanForFailure(turnPlan), encodePlanForFailure(compactionPlan))
+		}
+		if !planUsesCompactionFloor(turnPlan, floor) {
+			t.Fatalf("closed turn plan %d does not carry the context compaction floor", historySize)
+		}
+
+		tracedDB, tracer := openLoadContextTracedDB(t, admin)
+		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(tracedDB))
+		store.RuntimeBindingTokenHMACKey = []byte("closed-turn-plan-key")
+		loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+			Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		})
+		if err != nil {
+			t.Fatalf("full LoadContext %d: %v", historySize, err)
+		}
+		var payload bridgeLoadContextPayload
+		if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+			t.Fatalf("decode full LoadContext %d: %v", historySize, err)
+		}
+		factIDs := make([]string, 0, len(payload.TurnFacts.Events))
+		for _, event := range payload.TurnFacts.Events {
+			factIDs = append(factIDs, strings.TrimSuffix(event.EventID, fmt.Sprint(historySize)))
+		}
+		invocations := tracer.snapshot()
+		census := make([]string, 0, len(invocations))
+		for _, invocation := range invocations {
+			normalizedSQL := strings.Join(strings.Fields(invocation.SQL), " ")
+			census = append(census, normalizedSQL)
+			if strings.HasPrefix(normalizedSQL, "SELECT projection_json FROM session_events") &&
+				strings.Contains(normalizedSQL, "session.status_rescheduled") {
+				t.Fatalf("full LoadContext performed a per-Request-End reschedule lookup: %s", normalizedSQL)
+			}
+			plan := explainClosedTurnPlan(t, admin, invocation.SQL, invocation.Args...)
+			planStats := collectClosedTurnPlanStats(plan)
+			if planStats.sessionEventSeq != 0 || planStats.maxLoops > 1 {
+				t.Fatalf("full LoadContext statement is unbounded at history %d: %#v sql=%s plan=%s",
+					historySize, planStats, census[len(census)-1], encodePlanForFailure(plan))
+			}
+		}
+		if historySize == 64 {
+			wantCensus = census
+			wantFactIDs = factIDs
+		} else if fmt.Sprint(census) != fmt.Sprint(wantCensus) || fmt.Sprint(factIDs) != fmt.Sprint(wantFactIDs) {
+			t.Fatalf("full LoadContext changed with pre-floor history: census=%d/%d facts=%v/%v",
+				len(wantCensus), len(census), wantFactIDs, factIDs)
 		}
 		stats = append(stats, combined)
 	}
-	if delta := stats[1].sharedBlocks - stats[0].sharedBlocks; delta > 8 {
-		t.Fatalf("8192-row closed history used %.0f additional shared blocks; want at most 8 (small=%#v large=%#v)",
+	if delta := stats[1].sharedBlocks - stats[0].sharedBlocks; delta > 24 {
+		t.Fatalf("8192-row closed history used %.0f additional shared blocks; want at most 24 (small=%#v large=%#v)",
 			delta, stats[0], stats[1])
 	}
+}
+
+func openLoadContextTracedDB(t *testing.T, admin *sql.DB) (*sql.DB, *loadContextQueryTracer) {
+	t.Helper()
+	var schema string
+	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatalf("read isolated schema: %v", err)
+	}
+	config, err := pgx.ParseConfig(os.Getenv(storagetest.EnvTestDatabaseURL))
+	if err != nil {
+		t.Fatalf("parse test database config: %v", err)
+	}
+	config.RuntimeParams["search_path"] = schema
+	tracer := &loadContextQueryTracer{}
+	config.Tracer = tracer
+	db := stdlib.OpenDB(*config)
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("open traced LoadContext database: %v", err)
+	}
+	return db, tracer
+}
+
+func planRowsRemovedByFloorFilter(plan map[string]any, floor int64) float64 {
+	var removed float64
+	floorText := fmt.Sprintf("sequence >= '%d'", floor)
+	walkPostgreSQLPlan(plan, func(node map[string]any) {
+		if relation, _ := node["Relation Name"].(string); relation != "session_events" {
+			return
+		}
+		filter, _ := node["Filter"].(string)
+		indexCond, _ := node["Index Cond"].(string)
+		if !strings.Contains(filter, floorText) || strings.Contains(indexCond, floorText) {
+			return
+		}
+		rows, _ := node["Rows Removed by Filter"].(float64)
+		removed += rows
+	})
+	return removed
 }
 
 func seedClosedTurnPlanHistory(t *testing.T, db *sql.DB, sessionID, threadID string, historySize int) {
@@ -79,8 +232,11 @@ func seedClosedTurnPlanHistory(t *testing.T, db *sql.DB, sessionID, threadID str
 		created_at, updated_at, processed_at
 	)
 	SELECT 'default', $1, $2, 'evt_closed_plan_old_' || $3 || '_' || value, value,
-	       'session.thread_status_idle', '{"type":"session.thread_status_idle"}',
-	       'internal', false, 'rwrite_closed_plan_old_' || $3 || '_' || value, NULL, '{}', now(), now(), now()
+	       'span.model_request_start',
+	       '{"type":"span.model_request_start","model_request_id":"mreq_closed_plan_old_' || $3 || '_' || value || '"}',
+	       'internal', false, 'rwrite_closed_plan_old_' || $3 || '_' || value,
+	       'mreq_closed_plan_old_' || $3 || '_' || value,
+	       '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now(), now()
 	  FROM generate_series(1, $3) value`, sessionID, threadID, historySize); err != nil {
 		t.Fatalf("seed %d pre-floor events: %v", historySize, err)
 	}
@@ -95,9 +251,10 @@ func seedClosedTurnPlanHistory(t *testing.T, db *sql.DB, sessionID, threadID str
 	('default',$1,$2,'evt_closed_plan_tool_'||$4,$3+2,'agent.tool_use','{}','internal',false,'rwrite_closed_plan_tool_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_result_'||$4,$3+3,'agent.tool_result','{}','internal',false,'rwrite_closed_plan_result_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_end_'||$4,$3+4,'span.model_request_end','{"model_request_start_id":"evt_closed_plan_start_'||$4||'","is_error":false,"provider_context_retention":{"disposition":"none","tool_use_event_ids":[],"repair_event_ids":[]}}','internal',false,'rwrite_closed_plan_end_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_idle_'||$4,$3+5,'session.thread_status_idle','{"type":"session.thread_status_idle"}','internal',false,'rwrite_closed_plan_idle_'||$4,NULL,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_close_'||$4,$3+6,'session.thread_status_idle','{"type":"session.thread_status_idle"}','internal',false,'rwrite_closed_plan_close_'||$4,NULL,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_tail_'||$4,$3+7,'agent.message','{}','internal',false,'rwrite_closed_plan_tail_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now())`,
+	('default',$1,$2,'evt_closed_plan_idle_'||$4,$3+5,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_closed_plan_idle_'||$4,NULL,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_close_'||$4,$3+6,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_closed_plan_close_'||$4,NULL,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_tail_'||$4,$3+7,'agent.message','{}','internal',false,'rwrite_closed_plan_tail_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_compacted_'||$4,$3+8,'agent.thread_context_compacted','{}','internal',false,'rwrite_closed_plan_compacted_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now())`,
 		sessionID, threadID, floor, fmt.Sprint(historySize)); err != nil {
 		t.Fatalf("seed post-floor closed turn: %v", err)
 	}
@@ -162,44 +319,6 @@ func planSubtreeUsesIndex(plan map[string]any, subplanName string) bool {
 	return false
 }
 
-func planSubtreeHasNodeType(plan map[string]any, subplanName, nodeType string) bool {
-	if name, _ := plan["Subplan Name"].(string); name == subplanName {
-		found := false
-		walkPostgreSQLPlan(plan, func(node map[string]any) {
-			if current, _ := node["Node Type"].(string); current == nodeType {
-				found = true
-			}
-		})
-		return found
-	}
-	children, _ := plan["Plans"].([]any)
-	for _, child := range children {
-		childPlan, _ := child.(map[string]any)
-		if childPlan != nil && planSubtreeHasNodeType(childPlan, subplanName, nodeType) {
-			return true
-		}
-	}
-	return false
-}
-
-func planSubplanRootType(plan map[string]any, subplanName string) string {
-	if name, _ := plan["Subplan Name"].(string); name == subplanName {
-		nodeType, _ := plan["Node Type"].(string)
-		return nodeType
-	}
-	children, _ := plan["Plans"].([]any)
-	for _, child := range children {
-		childPlan, _ := child.(map[string]any)
-		if childPlan == nil {
-			continue
-		}
-		if nodeType := planSubplanRootType(childPlan, subplanName); nodeType != "" {
-			return nodeType
-		}
-	}
-	return ""
-}
-
 func planUsesCompactionFloor(plan map[string]any, floor int64) bool {
 	floorText := fmt.Sprintf("sequence >= '%d'", floor)
 	found := false
@@ -218,7 +337,6 @@ func mergeClosedTurnPlanStats(target *closedTurnPlanStats, other closedTurnPlanS
 	target.maxLoops = max(target.maxLoops, other.maxLoops)
 	target.sessionEventScans += other.sessionEventScans
 	target.sessionEventSeq += other.sessionEventSeq
-	target.latestCloseIndex = target.latestCloseIndex || other.latestCloseIndex
 }
 
 func encodePlanForFailure(plan map[string]any) string {

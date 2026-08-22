@@ -85,7 +85,7 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 		case "terminated", "failed", "archived", "closed_for_runtime":
 			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime thread is already terminal"))
 		}
-		openTurn, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope(), 0)
+		openTurn, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}

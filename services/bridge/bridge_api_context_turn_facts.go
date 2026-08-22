@@ -111,7 +111,7 @@ var bridgeLoadContextTurnEventTypes = []string{
 // the independent Turn read: every row is reached through a bounded lifecycle
 // boundary or a direct Request/Tool identity selected by its durable relation.
 const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
-		SELECT event_id, sequence
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
@@ -119,20 +119,6 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND type IN ('session.status_running', 'session.thread_status_running')
 		   AND $5 <> ''
 		   AND event_id = $5
-		   AND sequence >= $4
-		 ORDER BY sequence DESC
-		 LIMIT 1
-	), current_running AS MATERIALIZED (
-		SELECT event_id, sequence
-		  FROM session_events
-		 WHERE workspace_id = $1
-		   AND session_id = $2
-		   AND session_thread_id = $3
-		   AND type IN ('session.status_running', 'session.thread_status_running')
-		   AND sequence >= $4
-		   AND sequence >= COALESCE((SELECT sequence FROM turn_root), 9223372036854775807)
-		 ORDER BY sequence DESC
-		 LIMIT 1
 	), previous_lifecycle AS MATERIALIZED (
 		SELECT event_id, sequence, type, runtime_write_id
 		  FROM session_events
@@ -146,7 +132,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		     'session.status_terminated', 'session.thread_status_terminated'
 		   )
 		   AND sequence >= $4
-		   AND sequence < COALESCE((SELECT sequence FROM current_running), 0)
+		   AND sequence < COALESCE((SELECT sequence FROM turn_root), 0)
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	), current_reschedule AS MATERIALIZED (
@@ -185,7 +171,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND sequence >= $4
 		 ORDER BY sequence DESC
 		 LIMIT 1
-	), latest_close_before_request AS MATERIALIZED (
+	), previous_close_before_request AS MATERIALIZED (
 		SELECT sequence
 		  FROM session_events
 		 WHERE workspace_id = $1
@@ -195,20 +181,18 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		     'session.status_idle', 'session.thread_status_idle',
 		     'session.status_terminated', 'session.thread_status_terminated'
 		   )
-		   AND sequence >= $4
 		   AND sequence < COALESCE((SELECT sequence FROM latest_thread_request_start), $4)
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	), selected_thread_running AS MATERIALIZED (
-		SELECT event_id, sequence
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
 		   AND session_thread_id = $3
 		   AND type IN ('session.status_running', 'session.thread_status_running')
-		   AND sequence >= $4
 		   AND sequence < COALESCE((SELECT sequence FROM latest_thread_request_start), $4)
-		   AND sequence > COALESCE((SELECT sequence FROM latest_close_before_request), $4 - 1)
+		   AND sequence > COALESCE((SELECT sequence FROM previous_close_before_request), 0)
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	), selected_thread_request_end AS MATERIALIZED (
@@ -220,11 +204,10 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND request_end.session_thread_id = $3
 		   AND request_end.type = 'span.model_request_end'
 		   AND request_end.model_request_id = request_start.model_request_id
-		   AND request_end.sequence >= $4
 		   AND request_end.sequence > request_start.sequence
 		 ORDER BY request_end.sequence ASC
 		 LIMIT 1
-	), selected_thread_idles AS MATERIALIZED (
+	), selected_thread_latest_idle AS MATERIALIZED (
 		SELECT idle.event_id, idle.sequence
 		  FROM selected_thread_request_end request_end
 		  JOIN session_events idle
@@ -232,10 +215,9 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND idle.session_id = $2
 		   AND idle.session_thread_id = $3
 		   AND idle.type IN ('session.status_idle', 'session.thread_status_idle')
-		   AND idle.sequence >= $4
 		   AND idle.sequence > request_end.sequence
-		 ORDER BY idle.sequence ASC
-		 LIMIT 2
+		 ORDER BY idle.sequence DESC
+		 LIMIT 1
 	),
 	open_request AS MATERIALIZED (
 		SELECT request_start.sequence, request_start.model_request_id
@@ -298,6 +280,26 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		UNION
 		SELECT model_request_id FROM current_reschedule
 	),
+	request_reschedules AS MATERIALIZED (
+		SELECT DISTINCT ON (model_request_id) model_request_id, projection_json
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
+		   AND model_request_id IN (SELECT model_request_id FROM retained_requests)
+		 ORDER BY model_request_id, sequence DESC
+	),
+	request_end_receipts AS MATERIALIZED (
+		SELECT idempotency_key AS model_request_id, receipt_json
+		  FROM session_bridge_operations
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND operation = 'write_request_end'
+		   AND source_kind = 'model_request'
+		   AND idempotency_key IN (SELECT model_request_id FROM request_reschedules)
+	),
 	retained_tools AS MATERIALIZED (
 		SELECT jsonb_array_elements_text(CASE
 		         WHEN jsonb_typeof(payload #> '{provider_context_retention,tool_use_event_ids}') = 'array'
@@ -315,57 +317,72 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		         ELSE '[]'::jsonb
 		       END) AS event_id
 		  FROM retained_ends
+	),
+	post_floor_turn_events AS MATERIALIZED (
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND sequence >= $4
+		   AND type IN (
+		     'session.status_running', 'session.thread_status_running',
+		     'span.model_request_start', 'span.model_request_end',
+		     'agent.tool_use', 'agent.mcp_tool_use',
+		     'agent.tool_result', 'agent.mcp_tool_result',
+		     'user.interrupt', 'agent.thread_interrupt_requested',
+		     'session.error',
+		     'session.status_rescheduled', 'session.thread_status_rescheduled',
+		     'session.status_idle', 'session.thread_status_idle',
+		     'session.status_terminated', 'session.thread_status_terminated'
+		   )
+	),
+	selected_events AS MATERIALIZED (
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		  FROM post_floor_turn_events event
+		 WHERE (
+		     event.event_id IN (SELECT event_id FROM turn_root)
+		     OR event.event_id IN (SELECT event_id FROM previous_lifecycle)
+		     OR event.event_id IN (SELECT event_id FROM current_reschedule)
+		     OR event.event_id IN (SELECT event_id FROM terminal_failure)
+		     OR event.event_id IN (SELECT event_id FROM latest_thread_request_start)
+		     OR event.event_id IN (SELECT event_id FROM selected_thread_running)
+		     OR event.event_id IN (SELECT event_id FROM selected_thread_request_end)
+		     OR event.event_id IN (SELECT event_id FROM selected_thread_latest_idle)
+		     OR event.event_id IN (SELECT event_id FROM retained_ends)
+		     OR (event.type = 'span.model_request_start' AND event.model_request_id IN (SELECT model_request_id FROM retained_requests))
+		     OR (event.type IN ('agent.tool_use', 'agent.mcp_tool_use') AND event.event_id IN (SELECT event_id FROM retained_tools))
+		     OR (event.type IN ('agent.tool_result', 'agent.mcp_tool_result') AND COALESCE(
+		          event.payload_json::jsonb ->> 'tool_use_event_id',
+		          event.payload_json::jsonb ->> 'tool_use_id',
+		          event.payload_json::jsonb ->> 'mcp_tool_use_id'
+		        ) IN (SELECT event_id FROM retained_tools))
+		     OR (event.type = 'agent.tool_result'
+		         AND event.model_request_id IN (SELECT model_request_id FROM retained_requests)
+		         AND event.payload_json::jsonb ? 'repair_kind')
+		     OR (event.type = 'agent.tool_result' AND event.event_id IN (SELECT event_id FROM retained_repairs))
+		     OR (event.type IN ('user.interrupt', 'agent.thread_interrupt_requested') AND event.event_id IN (SELECT event_id FROM pending_interrupts))
+		   )
+		UNION
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		  FROM turn_root
+		 WHERE sequence < $4
+		UNION
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		  FROM selected_thread_running
+		 WHERE sequence < $4
 	)
-	SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
-	  FROM session_events event
-	 WHERE workspace_id = $1
-	   AND session_id = $2
-	   AND session_thread_id = $3
-	   AND sequence >= $4
-	   AND type IN (
-	     'session.status_running',
-	     'session.thread_status_running',
-	     'span.model_request_start',
-	     'span.model_request_end',
-	     'agent.tool_use',
-	     'agent.mcp_tool_use',
-	     'agent.tool_result',
-	     'agent.mcp_tool_result',
-	     'user.interrupt',
-	     'agent.thread_interrupt_requested',
-	     'session.error',
-	     'session.status_rescheduled',
-	     'session.thread_status_rescheduled',
-	     'session.status_idle',
-	     'session.thread_status_idle',
-	     'session.status_terminated',
-	     'session.thread_status_terminated'
-	   )
-	   AND (
-	     event_id IN (SELECT event_id FROM turn_root)
-	     OR event_id IN (SELECT event_id FROM current_running)
-	     OR event_id IN (SELECT event_id FROM previous_lifecycle)
-	     OR event_id IN (SELECT event_id FROM current_reschedule)
-	     OR event_id IN (SELECT event_id FROM terminal_failure)
-	     OR event_id IN (SELECT event_id FROM latest_thread_request_start)
-	     OR event_id IN (SELECT event_id FROM selected_thread_running)
-	     OR event_id IN (SELECT event_id FROM selected_thread_request_end)
-	     OR event_id IN (SELECT event_id FROM selected_thread_idles)
-	     OR event_id IN (SELECT event_id FROM retained_ends)
-	     OR (type = 'span.model_request_start' AND model_request_id IN (SELECT model_request_id FROM retained_requests))
-	     OR (type IN ('agent.tool_use', 'agent.mcp_tool_use') AND event_id IN (SELECT event_id FROM retained_tools))
-	     OR (type IN ('agent.tool_result', 'agent.mcp_tool_result') AND COALESCE(
-	          payload_json::jsonb ->> 'tool_use_event_id',
-	          payload_json::jsonb ->> 'tool_use_id',
-	          payload_json::jsonb ->> 'mcp_tool_use_id'
-	        ) IN (SELECT event_id FROM retained_tools))
-	     OR (type = 'agent.tool_result'
-	         AND model_request_id IN (SELECT model_request_id FROM retained_requests)
-	         AND payload_json::jsonb ? 'repair_kind')
-	     OR (type = 'agent.tool_result' AND event_id IN (SELECT event_id FROM retained_repairs))
-	     OR (type IN ('user.interrupt', 'agent.thread_interrupt_requested') AND event_id IN (SELECT event_id FROM pending_interrupts))
-	   )
-	 ORDER BY sequence ASC`
+	SELECT event.event_id, event.sequence, event.type, event.model_request_id,
+	       event.payload_json, event.projection_json, event.runtime_write_id,
+	       COALESCE(reschedule.projection_json, ''), COALESCE(receipt.receipt_json, '')
+	  FROM selected_events event
+	  LEFT JOIN request_reschedules reschedule
+	    ON event.type = 'span.model_request_end'
+	   AND reschedule.model_request_id = event.model_request_id
+	  LEFT JOIN request_end_receipts receipt
+	    ON event.type = 'span.model_request_end'
+	   AND receipt.model_request_id = event.model_request_id
+	 ORDER BY event.sequence ASC`
 
 // loadThreadTurnFactsTx projects only facts with independent durable identity.
 // Runtime relates public Tools through their Tool Use references and internal
@@ -429,11 +446,23 @@ func loadThreadTurnFactsTx(
 		payloadJSON    string
 		projectionJSON string
 		runtimeWriteID sql.NullString
+		rescheduleJSON string
+		endReceiptJSON string
 	}
 	rawEvents := make([]rawTurnEvent, 0)
 	for rows.Next() {
 		var raw rawTurnEvent
-		if err := rows.Scan(&raw.eventID, &raw.eventSequence, &raw.eventType, &raw.modelRequestID, &raw.payloadJSON, &raw.projectionJSON, &raw.runtimeWriteID); err != nil {
+		if err := rows.Scan(
+			&raw.eventID,
+			&raw.eventSequence,
+			&raw.eventType,
+			&raw.modelRequestID,
+			&raw.payloadJSON,
+			&raw.projectionJSON,
+			&raw.runtimeWriteID,
+			&raw.rescheduleJSON,
+			&raw.endReceiptJSON,
+		); err != nil {
 			return facts, err
 		}
 		rawEvents = append(rawEvents, raw)
@@ -444,11 +473,24 @@ func loadThreadTurnFactsTx(
 	if err := rows.Close(); err != nil {
 		return facts, err
 	}
+	requestKinds := make(map[string]string)
+	for _, raw := range rawEvents {
+		if raw.eventType != "span.model_request_start" || !raw.modelRequestID.Valid {
+			continue
+		}
+		var projection struct {
+			RequestKind string `json:"request_kind"`
+		}
+		if json.Unmarshal([]byte(raw.projectionJSON), &projection) == nil && projection.RequestKind != "" {
+			requestKinds[raw.modelRequestID.String] = projection.RequestKind
+		}
+	}
 	seenRepairKeys := make(map[string]struct{})
 	for _, raw := range rawEvents {
 		event, err := bridgeTurnEventFact(
 			ctx, tx, scope, raw.eventID, raw.eventSequence, raw.eventType, raw.modelRequestID,
 			raw.payloadJSON, raw.projectionJSON, raw.runtimeWriteID,
+			requestKinds[raw.modelRequestID.String], raw.rescheduleJSON, raw.endReceiptJSON,
 		)
 		if err != nil {
 			return facts, err
@@ -481,7 +523,7 @@ func loadContextCompactionEventFloorTx(
 	scope *bridgev1.RuntimeScope,
 	messages []bridgeLoadContextMessageDescriptor,
 ) (int64, error) {
-	var compactionFloor int64
+	compactionSourceEventIDs := make([]string, 0)
 	for _, message := range messages {
 		if message.Kind != "compaction" {
 			continue
@@ -489,33 +531,65 @@ func loadContextCompactionEventFloorTx(
 		if message.SourceEventID == nil || *message.SourceEventID == "" {
 			return 0, status.Error(codes.FailedPrecondition, "compaction message has no source event identity")
 		}
+		compactionSourceEventIDs = append(compactionSourceEventIDs, *message.SourceEventID)
+	}
+	if len(compactionSourceEventIDs) == 0 {
+		return 0, nil
+	}
+	sourceEventIDsJSON, _ := json.Marshal(compactionSourceEventIDs)
+	rows, err := tx.Query(ctx,
+		loadContextCompactionEventFloorSQL,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), string(sourceEventIDsJSON),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var compactionFloor int64
+	loaded := 0
+	for rows.Next() {
+		var eventID string
 		var sequence int64
-		err := tx.QueryRow(ctx,
-			`SELECT request_start.sequence
-			   FROM session_events compacted
-			   JOIN session_events request_start
-			     ON request_start.workspace_id = compacted.workspace_id
-			    AND request_start.session_id = compacted.session_id
-			    AND request_start.session_thread_id = compacted.session_thread_id
-			    AND request_start.model_request_id = compacted.model_request_id
-			    AND request_start.type = 'span.model_request_start'
-			  WHERE compacted.workspace_id = $1
-			    AND compacted.session_id = $2
-			    AND compacted.session_thread_id = $3
-			    AND compacted.event_id = $4
-			    AND compacted.type = 'agent.thread_context_compacted'`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *message.SourceEventID,
-		).Scan(&sequence)
-		if dbconnect.IsNoRows(err) {
-			return 0, status.Error(codes.FailedPrecondition, "compaction message has no Request Start")
-		}
-		if err != nil {
+		if err := rows.Scan(&eventID, &sequence); err != nil {
 			return 0, err
 		}
-		compactionFloor = sequence
+		loaded++
+		compactionFloor = max(compactionFloor, sequence)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if loaded != len(compactionSourceEventIDs) {
+		return 0, status.Error(codes.FailedPrecondition, "compaction message has no Request Start")
 	}
 	return compactionFloor, nil
 }
+
+const loadContextCompactionEventFloorSQL = `WITH source_events AS MATERIALIZED (
+			SELECT jsonb_array_elements_text($4::jsonb) AS event_id
+		)
+		SELECT compacted.event_id, request_start.sequence
+		  FROM source_events source
+		  JOIN LATERAL (
+		    SELECT event_id, model_request_id
+		      FROM session_events
+		     WHERE workspace_id = $1
+		       AND session_id = $2
+		       AND session_thread_id = $3
+		       AND event_id = source.event_id
+		       AND type = 'agent.thread_context_compacted'
+		     LIMIT 1
+		  ) compacted ON true
+		  JOIN LATERAL (
+		    SELECT sequence
+		      FROM session_events
+		     WHERE workspace_id = $1
+		       AND session_id = $2
+		       AND session_thread_id = $3
+		       AND model_request_id = compacted.model_request_id
+		       AND type = 'span.model_request_start'
+		     LIMIT 1
+		  ) request_start ON true`
 
 func bridgeRepairFactFromTurnEvent(
 	eventID string,
@@ -562,6 +636,9 @@ func bridgeTurnEventFact(
 	payloadJSON string,
 	projectionJSON string,
 	runtimeWriteID sql.NullString,
+	requestKind string,
+	rescheduleProjectionJSON string,
+	requestEndReceiptJSON string,
 ) (bridgeLoadContextTurnEvent, error) {
 	event := bridgeLoadContextTurnEvent{EventID: eventID, EventSequence: eventSequence, Type: eventType}
 	if modelRequestID.Valid {
@@ -605,7 +682,11 @@ func bridgeTurnEventFact(
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.RequestStartEventID == "" || payload.IsError == nil || payload.ProviderContextRetention.Disposition == "" {
 			return event, status.Error(codes.FailedPrecondition, "request end projection is malformed")
 		}
-		reschedule, err := loadContextRequestEndRescheduleTx(ctx, tx, scope, modelRequestID.String)
+		reschedule, err := decodeContextRequestEndReschedule(
+			requestKind,
+			rescheduleProjectionJSON,
+			requestEndReceiptJSON,
+		)
 		if err != nil {
 			return event, err
 		}
@@ -695,25 +776,16 @@ func bridgeTurnEventTypeAllowed(eventType string) bool {
 	return false
 }
 
-func loadContextRequestEndRescheduleTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, modelRequestID string) (*bridgeLoadContextRequestReschedule, error) {
-	var rescheduleProjectionJSON string
-	err := tx.QueryRow(ctx,
-		`SELECT projection_json
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
-		  ORDER BY sequence DESC
-		  LIMIT 1`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&rescheduleProjectionJSON)
-	if dbconnect.IsNoRows(err) {
+func decodeContextRequestEndReschedule(
+	requestKind string,
+	rescheduleProjectionJSON string,
+	requestEndReceiptJSON string,
+) (*bridgeLoadContextRequestReschedule, error) {
+	if rescheduleProjectionJSON == "" && requestEndReceiptJSON == "" {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
+	if requestKind == "" || rescheduleProjectionJSON == "" || requestEndReceiptJSON == "" {
+		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end has incomplete direct facts")
 	}
 	var projection struct {
 		Attempt            int64  `json:"attempt"`
@@ -726,41 +798,9 @@ func loadContextRequestEndRescheduleTx(ctx context.Context, tx *dbconnect.Tx, sc
 		projection.ProviderAttempts < 0 || projection.CompactionAttempts < 0 {
 		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end projection is malformed")
 	}
-	var receiptJSON string
-	err = tx.QueryRow(ctx,
-		`SELECT receipt_json
-		   FROM session_bridge_operations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND operation = 'write_request_end'
-		    AND source_kind = 'model_request'
-		    AND idempotency_key = $4`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&receiptJSON)
-	if dbconnect.IsNoRows(err) {
-		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end has no durable receipt")
-	}
-	if err != nil {
-		return nil, err
-	}
-	facts, err := unmarshalRequestEndReplay(receiptJSON)
+	facts, err := unmarshalRequestEndReplay(requestEndReceiptJSON)
 	if err != nil || facts.Disposition != "rescheduled" || facts.EffectiveDeadline == "" {
 		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end receipt is malformed")
-	}
-	var requestKind string
-	err = tx.QueryRow(ctx,
-		`SELECT projection_json::jsonb ->> 'request_kind'
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND type = 'span.model_request_start'`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&requestKind)
-	if err != nil {
-		return nil, err
 	}
 	attempt := projection.ProviderAttempts
 	if requestKind == requestKindCompactionSummary {
