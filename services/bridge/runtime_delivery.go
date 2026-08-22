@@ -1792,7 +1792,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 	var result RuntimeDeliveryResult
 	var found bool
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.replay_runtime_delivery_finalization", func(tx *dbconnect.Tx) error {
-		if job.InputKind == "interrupt_control" {
+		switch job.InputKind {
+		case "interrupt_control":
 			if job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" || job.SequenceTo <= 0 {
 				return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "interrupt delivery replay identity is incomplete", retryable: false}
 			}
@@ -1820,7 +1821,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 				found = true
 				return nil
 			}
-		} else if job.InputKind == "agent_mail" {
+		case "agent_mail":
 			if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 				return err
 			}
