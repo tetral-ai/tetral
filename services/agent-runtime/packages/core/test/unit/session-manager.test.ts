@@ -5387,6 +5387,64 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("cleanup rejects reservation-only opening custody", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const sessionId = "sesn_cleanup_opening_reservation";
+		const threadId = "thrd_cleanup_opening_reservation";
+		const thread: RuntimeAcceptedThreadMetadataState = {
+			role: "main",
+			visibility: "public",
+			agentType: "general",
+			status: "idle",
+		};
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionId, "rin_cleanup_opening_initial", threadId),
+						),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForRuns(threadLoop, 1);
+				const session = threadLoop.runs[0]!.session;
+				threadLoop.runs[0]!.release({ type: "completed", modelMessageCount: 1 });
+				await waitForThreadIdle(manager, sessionId, threadId);
+
+				const mail = agentMailInput(
+					sessionId,
+					"agent_mail:delivery_cleanup_opening",
+					threadId,
+					"thrd_cleanup_opening_child",
+					thread,
+				);
+				expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
+				session.state.acknowledgeAcceptedInput(mail.runtimeInputId, true);
+				expect(session.state.acceptedInputCount()).toBe(0);
+				expect(session.state.hasAcceptedInputCustody()).toBe(true);
+				expect(
+					await Effect.runPromise(
+						manager.cleanupSession(
+							sessionId,
+							cleanupControl(sessionId, "cleanup_opening_reserved"),
+						),
+					),
+				).toEqual({ ok: false, sessionId, reason: "session_busy" });
+
+				session.state.completeRequestOpening();
+				expect(
+					await Effect.runPromise(
+						manager.cleanupSession(
+							sessionId,
+							cleanupControl(sessionId, "cleanup_opening_settled"),
+						),
+					),
+				).toEqual({ ok: true, sessionId, cleaned: true });
+			},
+		);
+	});
+
 	test("cleanup rejects an admitted task while its owning run has not settled it", async () => {
 		const threadLoop = makeControlledThreadLoop();
 		const sessionId = "sesn_cleanup_receipt_awaiting";
@@ -6576,6 +6634,56 @@ describe("SessionManager", () => {
 				observed: false,
 			});
 		});
+	});
+
+	test("shutdown does not resolve reservation-only opening custody", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const sessionId = "sesn_shutdown_opening_reservation";
+		const threadId = "thrd_shutdown_opening_reservation";
+		const thread: RuntimeAcceptedThreadMetadataState = {
+			role: "main",
+			visibility: "public",
+			agentType: "general",
+			status: "idle",
+		};
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionId, "rin_shutdown_opening_initial", threadId),
+						),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForRuns(threadLoop, 1);
+				const session = threadLoop.runs[0]!.session;
+				threadLoop.runs[0]!.release({ type: "completed", modelMessageCount: 1 });
+				await waitForThreadIdle(manager, sessionId, threadId);
+
+				const mail = agentMailInput(
+					sessionId,
+					"agent_mail:delivery_shutdown_opening",
+					threadId,
+					"thrd_shutdown_opening_child",
+					thread,
+				);
+				expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
+				const opening = session.state.requestOpeningSettlement(mail.runtimeInputId);
+				session.state.acknowledgeAcceptedInput(mail.runtimeInputId, true);
+				let settled = false;
+				void opening.then(() => {
+					settled = true;
+				});
+
+				await Effect.runPromise(manager.shutdownActiveRuns());
+				await Promise.resolve();
+				expect(settled).toBe(false);
+				expect(
+					await Effect.runPromise(manager.inspectThread(threadControl(sessionId))),
+				).toMatchObject({ observed: false });
+			},
+		);
 	});
 
 	test("shutdown during a failed-run observation window releases after that window reports timeout", async () => {

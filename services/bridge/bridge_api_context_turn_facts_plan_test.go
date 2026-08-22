@@ -73,6 +73,7 @@ func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
 		t.Fatalf("seed plan background: %v", err)
 	}
 	stats := make([]closedTurnPlanStats, 0, 2)
+	var wantStatementStats []closedTurnPlanStats
 	var wantCensus []string
 	var wantFactIDs []string
 	for _, historySize := range []int{64, 8192} {
@@ -110,33 +111,32 @@ func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
 		mergeClosedTurnPlanStats(&combined, collectClosedTurnPlanStats(turnPlan))
 		mergeClosedTurnPlanStats(&combined, collectClosedTurnPlanStats(compactionPlan))
 		requiredSubplans := []struct {
-			plan map[string]any
-			name string
+			plan            map[string]any
+			name            string
+			requiredIndexes []string
+			requireFloor    bool
 		}{
-			{openPlan, "CTE latest_running"},
-			{turnPlan, "CTE latest_thread_request_start"},
-			{turnPlan, "CTE previous_close_before_request"},
-			{turnPlan, "CTE selected_thread_running"},
-			{turnPlan, "CTE selected_thread_request_end"},
-			{turnPlan, "CTE selected_thread_latest_idle"},
-			{turnPlan, "CTE current_reschedule"},
+			{openPlan, "CTE latest_running", []string{"idx_session_events_thread_running_sequence"}, false},
+			{turnPlan, "CTE latest_thread_request_start", []string{"idx_session_events_thread_type_sequence", "idx_session_events_thread_request_type"}, true},
+			{turnPlan, "CTE previous_close_before_request", []string{"idx_session_events_thread_close_sequence"}, false},
+			{turnPlan, "CTE selected_thread_running", []string{"idx_session_events_thread_running_sequence"}, false},
+			{turnPlan, "CTE selected_thread_request_end", []string{"idx_session_events_thread_type_sequence", "idx_session_events_thread_request_type"}, false},
+			{turnPlan, "CTE selected_thread_latest_idle", []string{"idx_session_events_thread_close_sequence"}, false},
+			{turnPlan, "CTE current_reschedule", []string{"idx_session_events_thread_type_sequence", "idx_session_events_thread_request_type"}, false},
 		}
 		for _, required := range requiredSubplans {
-			if !planSubtreeUsesIndex(required.plan, required.name) {
-				t.Fatalf("closed turn plan %d subplan %s has no index: %s",
-					historySize, required.name, encodePlanForFailure(required.plan))
-			}
+			assertNamedSessionEventPlanBound(t, required.plan, required.name,
+				required.requiredIndexes, required.requireFloor, floor)
 		}
+		assertSessionEventPlanBound(t, compactionPlan, "compaction", 4, 1)
+		assertPlanUsesIndexes(t, compactionPlan, "compaction",
+			"idx_session_events_thread_type_sequence", "idx_session_events_thread_request_type")
 		floorFiltered := planRowsRemovedByFloorFilter(turnPlan, floor)
 		if combined.sessionEventSeq != 0 || combined.sessionEventScans == 0 ||
 			combined.maxLoops > 1 || combined.maxRows > 12 || floorFiltered != 0 {
 			t.Fatalf("closed turn plan %d is not bounded (floor-filtered=%.0f): %#v\nopen=%s\nturn=%s\ncompaction=%s",
 				historySize, floorFiltered, combined, encodePlanForFailure(openPlan), encodePlanForFailure(turnPlan), encodePlanForFailure(compactionPlan))
 		}
-		if !planUsesCompactionFloor(turnPlan, floor) {
-			t.Fatalf("closed turn plan %d does not carry the context compaction floor", historySize)
-		}
-
 		tracedDB, tracer := openLoadContextTracedDB(t, admin)
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(tracedDB))
 		store.RuntimeBindingTokenHMACKey = []byte("closed-turn-plan-key")
@@ -156,6 +156,7 @@ func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
 		}
 		invocations := tracer.snapshot()
 		census := make([]string, 0, len(invocations))
+		statementStats := make([]closedTurnPlanStats, 0, len(invocations))
 		for _, invocation := range invocations {
 			normalizedSQL := strings.Join(strings.Fields(invocation.SQL), " ")
 			census = append(census, normalizedSQL)
@@ -165,17 +166,29 @@ func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
 			}
 			plan := explainClosedTurnPlan(t, admin, invocation.SQL, invocation.Args...)
 			planStats := collectClosedTurnPlanStats(plan)
-			if planStats.sessionEventSeq != 0 || planStats.maxLoops > 1 {
+			if planStats.sessionEventSeq != 0 || planStats.maxLoops > 1 || planStats.maxRows > 12 {
 				t.Fatalf("full LoadContext statement is unbounded at history %d: %#v sql=%s plan=%s",
 					historySize, planStats, census[len(census)-1], encodePlanForFailure(plan))
 			}
+			statementStats = append(statementStats, planStats)
 		}
 		if historySize == 64 {
 			wantCensus = census
 			wantFactIDs = factIDs
+			wantStatementStats = statementStats
 		} else if fmt.Sprint(census) != fmt.Sprint(wantCensus) || fmt.Sprint(factIDs) != fmt.Sprint(wantFactIDs) {
 			t.Fatalf("full LoadContext changed with pre-floor history: census=%d/%d facts=%v/%v",
 				len(wantCensus), len(census), wantFactIDs, factIDs)
+		} else {
+			for index, statement := range statementStats {
+				baseline := wantStatementStats[index]
+				if statement.sessionEventScans != baseline.sessionEventScans ||
+					statement.maxRows != baseline.maxRows || statement.maxLoops != baseline.maxLoops ||
+					statement.sharedBlocks-baseline.sharedBlocks > 24 {
+					t.Fatalf("full LoadContext statement %d grew with pre-floor history: small=%#v large=%#v sql=%s",
+						index, baseline, statement, census[index])
+				}
+			}
 		}
 		stats = append(stats, combined)
 	}
@@ -299,32 +312,124 @@ func collectClosedTurnPlanStats(plan map[string]any) closedTurnPlanStats {
 	return stats
 }
 
-func planSubtreeUsesIndex(plan map[string]any, subplanName string) bool {
+func findNamedPlan(plan map[string]any, subplanName string) map[string]any {
 	if name, _ := plan["Subplan Name"].(string); name == subplanName {
-		found := false
-		walkPostgreSQLPlan(plan, func(node map[string]any) {
-			if indexName, _ := node["Index Name"].(string); indexName != "" {
-				found = true
-			}
-		})
-		return found
+		return plan
 	}
 	children, _ := plan["Plans"].([]any)
 	for _, child := range children {
 		childPlan, _ := child.(map[string]any)
-		if childPlan != nil && planSubtreeUsesIndex(childPlan, subplanName) {
-			return true
+		if childPlan == nil {
+			continue
+		}
+		if found := findNamedPlan(childPlan, subplanName); found != nil {
+			return found
 		}
 	}
-	return false
+	return nil
 }
 
-func planUsesCompactionFloor(plan map[string]any, floor int64) bool {
+func assertNamedSessionEventPlanBound(
+	t *testing.T,
+	plan map[string]any,
+	subplanName string,
+	requiredIndexes []string,
+	requireFloor bool,
+	floor int64,
+) {
+	t.Helper()
+	subplan := findNamedPlan(plan, subplanName)
+	if subplan == nil {
+		t.Fatalf("missing owning subplan %s: %s", subplanName, encodePlanForFailure(plan))
+	}
+	assertSessionEventPlanBound(t, subplan, subplanName, 12, 1)
+	assertPlanUsesAnyIndex(t, subplan, subplanName, requiredIndexes...)
+	if requireFloor && !planUsesFloor(subplan, floor) {
+		t.Fatalf("owning subplan %s does not apply compaction floor %d: %s",
+			subplanName, floor, encodePlanForFailure(subplan))
+	}
+}
+
+func assertSessionEventPlanBound(
+	t *testing.T,
+	plan map[string]any,
+	owner string,
+	maxRows float64,
+	maxLoops float64,
+) {
+	t.Helper()
+	scans := 0
+	walkPostgreSQLPlan(plan, func(node map[string]any) {
+		if relation, _ := node["Relation Name"].(string); relation != "session_events" {
+			return
+		}
+		scans++
+		if !planHasIndex(node) {
+			t.Fatalf("owner %s has a session_events scan without its own index: %s",
+				owner, encodePlanForFailure(node))
+		}
+		rows, _ := node["Actual Rows"].(float64)
+		loops, _ := node["Actual Loops"].(float64)
+		if rows > maxRows || loops > maxLoops {
+			t.Fatalf("owner %s scan exceeded bound rows=%.0f/%.0f loops=%.0f/%.0f: %s",
+				owner, rows, maxRows, loops, maxLoops, encodePlanForFailure(node))
+		}
+	})
+	if scans == 0 {
+		t.Fatalf("owner %s has no session_events scan: %s", owner, encodePlanForFailure(plan))
+	}
+}
+
+func planHasIndex(plan map[string]any) bool {
+	found := false
+	walkPostgreSQLPlan(plan, func(node map[string]any) {
+		if indexName, _ := node["Index Name"].(string); indexName != "" {
+			found = true
+		}
+	})
+	return found
+}
+
+func assertPlanUsesIndexes(t *testing.T, plan map[string]any, owner string, required ...string) {
+	t.Helper()
+	seen := make(map[string]bool, len(required))
+	walkPostgreSQLPlan(plan, func(node map[string]any) {
+		if indexName, _ := node["Index Name"].(string); indexName != "" {
+			seen[indexName] = true
+		}
+	})
+	for _, indexName := range required {
+		if !seen[indexName] {
+			t.Fatalf("owner %s does not use required index %s: %s",
+				owner, indexName, encodePlanForFailure(plan))
+		}
+	}
+}
+
+func assertPlanUsesAnyIndex(t *testing.T, plan map[string]any, owner string, required ...string) {
+	t.Helper()
+	seen := make(map[string]bool, len(required))
+	walkPostgreSQLPlan(plan, func(node map[string]any) {
+		if indexName, _ := node["Index Name"].(string); indexName != "" {
+			seen[indexName] = true
+		}
+	})
+	for _, indexName := range required {
+		if seen[indexName] {
+			return
+		}
+	}
+	t.Fatalf("owner %s does not use any required index %v: %s",
+		owner, required, encodePlanForFailure(plan))
+}
+
+func planUsesFloor(plan map[string]any, floor int64) bool {
 	floorText := fmt.Sprintf("sequence >= '%d'", floor)
 	found := false
 	walkPostgreSQLPlan(plan, func(node map[string]any) {
-		condition, _ := node["Index Cond"].(string)
-		if strings.Contains(condition, floorText) {
+		indexCondition, _ := node["Index Cond"].(string)
+		filter, _ := node["Filter"].(string)
+		if strings.Contains(indexCondition, floorText) && !strings.Contains(filter, floorText) {
 			found = true
 		}
 	})
