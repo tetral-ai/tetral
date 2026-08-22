@@ -185,15 +185,13 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND sequence >= $4
 		 ORDER BY sequence DESC
 		 LIMIT 1
-	), latest_lifecycle_before_request AS MATERIALIZED (
-		SELECT event_id, sequence, type
+	), latest_close_before_request AS MATERIALIZED (
+		SELECT sequence
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
 		   AND session_thread_id = $3
 		   AND type IN (
-		     'session.status_running', 'session.thread_status_running',
-		     'session.status_rescheduled', 'session.thread_status_rescheduled',
 		     'session.status_idle', 'session.thread_status_idle',
 		     'session.status_terminated', 'session.thread_status_terminated'
 		   )
@@ -203,8 +201,16 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		 LIMIT 1
 	), selected_thread_running AS MATERIALIZED (
 		SELECT event_id, sequence
-		  FROM latest_lifecycle_before_request
-		 WHERE type IN ('session.status_running', 'session.thread_status_running')
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type IN ('session.status_running', 'session.thread_status_running')
+		   AND sequence >= $4
+		   AND sequence < COALESCE((SELECT sequence FROM latest_thread_request_start), $4)
+		   AND sequence > COALESCE((SELECT sequence FROM latest_close_before_request), $4 - 1)
+		 ORDER BY sequence DESC
+		 LIMIT 1
 	), selected_thread_request_end AS MATERIALIZED (
 		SELECT request_end.event_id, request_end.sequence, request_end.model_request_id
 		  FROM latest_thread_request_start request_start
