@@ -380,6 +380,14 @@ export class ThreadProcessor {
 	#activeInputView: ThreadActiveInputView;
 	#acceptedInputs: RuntimeAcceptedInputState[] = [];
 	#requestOpeningInputIds = new Set<string>();
+	// Agent-mail ingress keeps its command-level duplicate join alive until the
+	// private opening reservation resolves. At Request Start the durable witness
+	// takes over; a typed custody handoff resolves the same waiter terminally.
+	#requestOpeningSettlements: {
+		readonly runtimeInputId: string;
+		readonly promise: Promise<void>;
+		readonly resolve: () => void;
+	}[] = [];
 	#committingAcceptedInputId: string | undefined;
 	#acceptedInputBlockedUntilRunExit = false;
 
@@ -494,8 +502,28 @@ export class ThreadProcessor {
 			return "duplicate";
 		}
 		this.#acceptedInputs.push(state);
+		if (state.kind === "inter_agent_message") {
+			let resolve!: () => void;
+			const promise = new Promise<void>((settled) => {
+				resolve = settled;
+			});
+			this.#requestOpeningSettlements.push({
+				runtimeInputId: state.runtimeInputId,
+				promise,
+				resolve,
+			});
+		}
 		this.refreshDecision();
 		return "applied";
+	}
+
+	requestOpeningSettlement(runtimeInputId: string): Promise<void> {
+		return (
+			this.#requestOpeningSettlements.find(
+				(settlement) => settlement.runtimeInputId === runtimeInputId,
+			)?.promise ??
+			Promise.resolve()
+		);
 	}
 
 	peekAcceptedInput(): RuntimeAcceptedInputState | undefined {
@@ -512,6 +540,8 @@ export class ThreadProcessor {
 	): void {
 		if (reserveRequestOpening) {
 			this.#requestOpeningInputIds.add(runtimeInputId);
+		} else {
+			this.settleRequestOpening(runtimeInputId);
 		}
 		if (this.#acceptedInputs[0]?.runtimeInputId === runtimeInputId) {
 			this.#acceptedInputs.shift();
@@ -524,6 +554,9 @@ export class ThreadProcessor {
 	}
 
 	completeRequestOpening(): void {
+		for (const runtimeInputId of this.#requestOpeningInputIds) {
+			this.settleRequestOpening(runtimeInputId);
+		}
 		this.#requestOpeningInputIds.clear();
 	}
 
@@ -574,10 +607,25 @@ export class ThreadProcessor {
 	}
 
 	clearAcceptedInputs(): void {
+		for (const settlement of this.#requestOpeningSettlements) {
+			settlement.resolve();
+		}
 		this.#acceptedInputs = [];
 		this.#requestOpeningInputIds.clear();
+		this.#requestOpeningSettlements = [];
 		this.#committingAcceptedInputId = undefined;
 		this.refreshDecision();
+	}
+
+	private settleRequestOpening(runtimeInputId: string): void {
+		const settlement = this.#requestOpeningSettlements.find(
+			(candidate) => candidate.runtimeInputId === runtimeInputId,
+		);
+		if (settlement === undefined) return;
+		this.#requestOpeningSettlements = this.#requestOpeningSettlements.filter(
+			(candidate) => candidate !== settlement,
+		);
+		settlement.resolve();
 	}
 
 	private acceptedInputIds(): readonly string[] {
@@ -736,6 +784,11 @@ export class ThreadState {
 	acceptedInputSnapshot(): readonly RuntimeAcceptedInputState[] {
 		this.threadTurnReduction();
 		return this.#threadProcessor!.acceptedInputSnapshot();
+	}
+
+	requestOpeningSettlement(runtimeInputId: string): Promise<void> {
+		this.threadTurnReduction();
+		return this.#threadProcessor!.requestOpeningSettlement(runtimeInputId);
 	}
 
 	acknowledgeAcceptedInput(

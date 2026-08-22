@@ -2870,12 +2870,16 @@ describe("SessionManager", () => {
 				"thrd_busy_agent_mail_child",
 				thread,
 			);
-			expect(await Effect.runPromise(manager.acceptInput(mail))).toEqual({
+			const acceptedMail = await Effect.runPromise(manager.acceptInput(mail));
+			expect(acceptedMail).toMatchObject({
 				ok: true,
 				sessionId: sessionID,
 				created: false,
 				started: false,
 			});
+			expect(
+				acceptedMail.ok ? acceptedMail.requestOpeningSettled : undefined,
+			).toBeInstanceOf(Promise);
 			threadLoop.runs[0]?.release({ type: "completed", modelMessageCount: 1 });
 			await waitForRuns(threadLoop, 2);
 			threadLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });

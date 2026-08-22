@@ -1992,7 +1992,7 @@ describe("ThreadState", () => {
 		);
 	});
 
-	test("agent-mail delivery identity remains reserved until Request Start", () => {
+	test("agent-mail delivery identity remains reserved until Request Start", async () => {
 		const state = new ThreadState("sesn_agent_mail_dedup");
 		const mail = {
 			workspaceId: "wksp_agent_mail",
@@ -2014,9 +2014,19 @@ describe("ThreadState", () => {
 			"conflict",
 		);
 		state.acknowledgeAcceptedInput(mail.runtimeInputId, true);
+		let settled = false;
+		const requestOpeningSettled = state
+			.requestOpeningSettlement(mail.runtimeInputId)
+			.then(() => {
+				settled = true;
+			});
 		expect(state.peekAcceptedInput()).toBeUndefined();
 		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+		await Promise.resolve();
+		expect(settled).toBe(false);
 		state.completeRequestOpening();
+		await requestOpeningSettled;
+		expect(settled).toBe(true);
 		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
 		expect(
 			state.enqueueAcceptedInput({ ...mail, deliveryId: "delivery_new" }),

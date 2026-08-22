@@ -180,6 +180,7 @@ export type AcceptInputResult =
 			readonly created: boolean;
 			readonly started: boolean;
 			readonly duplicate?: true | undefined;
+			readonly requestOpeningSettled?: Promise<void> | undefined;
 			readonly reviewerExecutionToken?: ReviewerExecutionToken | undefined;
 	  }
 	| {
@@ -1526,6 +1527,12 @@ export function layer(
 									reason: "control_conflict",
 								} as const;
 							}
+							const requestOpeningSettled =
+								command.kind === "inter_agent_message"
+									? threadResult.threadEntry.runtimeThread.state.requestOpeningSettlement(
+											command.runtimeInputId,
+										)
+									: undefined;
 							if (accepted === "duplicate") {
 								if (command.kind === "approval_review") {
 									return {
@@ -1555,6 +1562,9 @@ export function layer(
 									created: threadResult.sessionCreated,
 									started,
 									duplicate: true,
+									...(requestOpeningSettled === undefined
+										? {}
+										: { requestOpeningSettled }),
 								} as const;
 							}
 							threadResult.threadEntry.bridgeScope = command;
@@ -1565,6 +1575,9 @@ export function layer(
 									sessionId,
 									created: threadResult.sessionCreated,
 									started: false,
+									...(requestOpeningSettled === undefined
+										? {}
+										: { requestOpeningSettled }),
 								} as const;
 							}
 							const started = yield* startThreadRun(
@@ -1593,6 +1606,9 @@ export function layer(
 								sessionId,
 								created: threadResult.sessionCreated,
 								started,
+								...(requestOpeningSettled === undefined
+									? {}
+									: { requestOpeningSettled }),
 								...(reviewerExecutionToken === undefined
 									? {}
 									: { reviewerExecutionToken }),

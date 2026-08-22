@@ -492,6 +492,10 @@ export async function buildRuntimeCoreHosts(
 								: {}),
 						} as const;
 					}
+					// Do not let ingress forget the same-ID operation before either the
+					// durable Request Start witness or a typed terminal custody outcome can
+					// answer a later Queue owner mechanically.
+					await result.requestOpeningSettled;
 					return {
 						ok: true,
 						sessionId: command.sessionId,
