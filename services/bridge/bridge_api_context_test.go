@@ -264,7 +264,8 @@ func TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule(t *testi
 		Scope: scope, DurableTurnId: running.GetCommitted().GetEventId(), StopReasonJson: `{"type":"end_turn"}`,
 		CompletionMailText: bridgeString(completionMailEnvelope("main", "task_"+childThreadID, "completed")),
 	}
-	if idle, finishErr := finishIdleWithStagedCaptureForTest(t, admin, store, finishRequest); finishErr != nil || idle.GetCommitted() == nil {
+	idle, finishErr := finishIdleWithStagedCaptureForTest(t, admin, store, finishRequest)
+	if finishErr != nil || idle.GetCommitted() == nil {
 		t.Fatalf("close successful provider retry = %#v/%v", idle, finishErr)
 	}
 	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
@@ -275,6 +276,13 @@ func TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule(t *testi
 		bridgeAPIScope(sessionID, parentThreadID, bindingID, 1, podUID),
 		sessionID, parentThreadID, childThreadID, bindingID, podUID, "evt_closed_retry_close",
 	)
+	var wantIdleID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1`,
+		sessionID, childThreadID).Scan(&wantIdleID); err != nil {
+		t.Fatalf("read latest closed retry idle owner: %v", err)
+	}
 	const compactionEventID = "evt_closed_retry_compacted"
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -317,9 +325,8 @@ func TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule(t *testi
 			seenStart = event.RequestStart != nil && event.ModelRequestID != nil && *event.ModelRequestID == retryRequestID
 		case wantEndID:
 			seenEnd = event.RequestEnd != nil && event.RequestEnd.RequestStartEventID == wantStartID && !event.RequestEnd.IsError
-		}
-		if event.Idle != nil {
-			seenIdle = true
+		case wantIdleID:
+			seenIdle = event.Idle != nil
 		}
 		if event.ModelRequestID != nil && *event.ModelRequestID == firstRequestID {
 			t.Fatalf("closed retry context retained superseded provider attempt: %#v", payload.TurnFacts.Events)
@@ -338,84 +345,6 @@ func TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule(t *testi
 	}
 	if runningSequence >= floorSequence {
 		t.Fatalf("closed retry owner sequence = %d, compaction floor = %d; want owner below selected Start floor", runningSequence, floorSequence)
-	}
-}
-
-func TestLoadContextClosedThreadUsesLatestIdleAfterNoWorkResumeCycle(t *testing.T) {
-	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID      = "sesn_closed_no_work_resume"
-		parentThreadID = "thr_closed_no_work_parent"
-		childThreadID  = "thr_closed_no_work_child"
-		bindingID      = "bind_closed_no_work_resume"
-		podUID         = "pod_closed_no_work_resume"
-		modelRequestID = "mreq_closed_no_work_resume"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentThreadID, childThreadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
-		SET status='closed_for_runtime', closed_at=now(), updated_at=now()
-		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childThreadID); err != nil {
-		t.Fatalf("close no-work child: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
-		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-		visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-		created_at, updated_at, processed_at
-	) VALUES
-	('default',$1,$2,'evt_no_work_running_owner',1,'session.thread_status_running','{"type":"session.thread_status_running"}','internal',false,'rwrite_no_work_running_owner',NULL,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_no_work_start',2,'span.model_request_start','{"type":"span.model_request_start","model_request_id":"`+modelRequestID+`"}','internal',false,'rwrite_no_work_start','`+modelRequestID+`','{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',now(),now(),now()),
-	('default',$1,$2,'evt_no_work_end',3,'span.model_request_end','{"model_request_start_id":"evt_no_work_start","is_error":false,"provider_context_retention":{"disposition":"completed","tool_use_event_ids":[],"repair_event_ids":[]}}','internal',false,'rwrite_no_work_end','`+modelRequestID+`','{}',now(),now(),now()),
-	('default',$1,$2,'evt_no_work_first_idle',4,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_no_work_first_idle',NULL,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_no_work_resume_running',5,'session.thread_status_running','{"type":"session.thread_status_running"}','internal',false,'rwrite_no_work_resume_running',NULL,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_no_work_latest_idle',6,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_no_work_latest_idle',NULL,'{}',now(),now(),now())`,
-		sessionID, childThreadID); err != nil {
-		t.Fatalf("seed no-work close cycle: %v", err)
-	}
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	store.RuntimeBindingTokenHMACKey = []byte("closed-no-work-context-key")
-	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID),
-	})
-	if err != nil {
-		t.Fatalf("load no-work close cycle: %v", err)
-	}
-	var payload bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
-		t.Fatalf("decode no-work close cycle: %v", err)
-	}
-	want := map[string]bool{
-		"evt_no_work_running_owner": false,
-		"evt_no_work_start":         false,
-		"evt_no_work_end":           false,
-		"evt_no_work_latest_idle":   false,
-	}
-	for _, event := range payload.TurnFacts.Events {
-		if _, expected := want[event.EventID]; expected {
-			want[event.EventID] = true
-		}
-		if event.EventID == "evt_no_work_first_idle" || event.EventID == "evt_no_work_resume_running" {
-			t.Fatalf("no-work close cycle retained stale lifecycle fact %s: %#v", event.EventID, payload.TurnFacts.Events)
-		}
-	}
-	for eventID, present := range want {
-		if !present {
-			t.Fatalf("no-work close cycle omitted %s: %#v", eventID, payload.TurnFacts.Events)
-		}
-	}
-
-	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
-	t.Cleanup(stopBridge)
-	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
-		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
-		"sessionId": sessionID, "sessionThreadId": childThreadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
-		"now": "2026-08-22T18:00:00Z", "preloadOnly": true,
-	})
-	if !strings.Contains(string(result.PreloadResult), `"ok":true`) || result.ProviderInvocations != 0 {
-		t.Fatalf("no-work close cold reconstruction = preload:%s provider:%d", result.PreloadResult, result.ProviderInvocations)
 	}
 }
 

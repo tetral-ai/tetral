@@ -680,22 +680,29 @@ func TestSubagentOpeningInputPodLossAfterCommitColdStartsOriginalCustodyOnce(t *
 	case <-time.After(10 * time.Second):
 		t.Fatal("payload-free RecoverThread did not return before Request Start committed")
 	}
-	var liveLeaseToken string
+	var liveLeaseToken, inboxBindingID, inboxPodUID string
+	var inboxBindingGeneration int64
 	var leaseBefore, leaseAfter time.Time
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
-		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
-		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$2),
-		(SELECT leased_until FROM queue_jobs WHERE workspace_id='default' AND id=$2),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start')`,
+			(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+			(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+			(SELECT leased_until FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start'),
+			(SELECT binding_id FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+			(SELECT binding_generation FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+			(SELECT target_pod_uid FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1)`,
 		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID,
-	).Scan(&inboxStatus, &queueStatus, &liveLeaseToken, &leaseBefore, &starts); err != nil {
+	).Scan(&inboxStatus, &queueStatus, &liveLeaseToken, &leaseBefore, &starts,
+		&inboxBindingID, &inboxBindingGeneration, &inboxPodUID); err != nil {
 		t.Fatalf("read recovery response custody: %v", err)
 	}
 	if inboxStatus != "committed" || queueStatus != queue.StatusLeased || starts != 0 ||
+		inboxBindingID != fixture.bindingID || inboxBindingGeneration != 2 || inboxPodUID != replacementPodUID ||
 		recoveryRequest.GetSourceEventId() == "" || recoveryRequest.GetRecoveryLeaseRef().GetJobId() != fixture.jobID ||
 		recoveryRequest.GetRecoveryLeaseRef().GetLeaseToken() != liveLeaseToken {
-		t.Fatalf("recovery response custody = Inbox:%s Queue:%s starts:%d request:%#v", inboxStatus, queueStatus, starts, recoveryRequest)
+		t.Fatalf("recovery response custody = Inbox:%s Queue:%s binding:%s/%d/%s starts:%d request:%#v",
+			inboxStatus, queueStatus, inboxBindingID, inboxBindingGeneration, inboxPodUID, starts, recoveryRequest)
 	}
 	time.Sleep(250 * time.Millisecond)
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT leased_until FROM queue_jobs
@@ -790,6 +797,107 @@ func TestSubagentOpeningInputPodLossAfterCommitColdStartsOriginalCustodyOnce(t *
 		starts != 2 || durableAssistantOutputs != 1 || !strings.Contains(string(laterExecution.Request), "execute once after recovered child Resume") {
 		t.Fatalf("post-Resume execution = Provider:%d Inbox:%s Queue:%s starts:%d outputs:%d wire:%s",
 			laterExecution.ProviderRequests, laterInbox, laterQueue, starts, durableAssistantOutputs, laterExecution.Request)
+	}
+}
+
+func TestSubagentOpeningInputPodLossAfterCommitReplacementRejectionSettlesExactCustody(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "pod_loss_replacement_rejection")
+	client := dbconnect.NewClientForTesting(fixture.runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "opening-rejection-original", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != fixture.jobID {
+		t.Fatalf("lease original opening custody = %#v/%v", leased, err)
+	}
+	originalJob, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatalf("decode original opening job: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: fixture.podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	originalPlan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), originalJob)
+	if err != nil || originalPlan.AcceptAgentMail == nil {
+		t.Fatalf("prepare original opening input = %#v/%v", originalPlan, err)
+	}
+	recoveryBindingID := originalPlan.AttemptedBinding.BindingID
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("opening-replacement-rejection-key")
+	if committed, commitErr := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: bridgeAPIScope(fixture.sessionID, fixture.childID, originalPlan.AttemptedBinding.BindingID,
+			originalPlan.AttemptedBinding.Generation, originalPlan.AttemptedBinding.TargetPodUID),
+		RuntimeInputId: fixture.runtimeInputID,
+	}); commitErr != nil || committed.GetCommitted() == nil {
+		t.Fatalf("commit opening input before Pod loss = %#v/%v", committed, commitErr)
+	}
+	if retried, retryErr := queueStore.Retry(context.Background(), queue.RetryRequest{
+		WorkspaceID: workspace.DefaultID, JobID: fixture.jobID, LeaseToken: originalJob.LeaseToken,
+		ErrorKind: "runtime_transport_unavailable", ErrorMessage: "original Runtime pod disappeared", Now: time.Now().UTC(),
+	}); retryErr != nil || !retried {
+		t.Fatalf("release original opening lease after Pod loss = %t/%v", retried, retryErr)
+	}
+	statusResult, statusErr := fixture.admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='running',binding_id=$2,binding_generation=1,updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, fixture.sessionID, recoveryBindingID)
+	if statusErr != nil || !rowsAffected(statusResult) {
+		t.Fatalf("mark original Runtime as running before Pod-loss sweep: %v", statusErr)
+	}
+	repairStore := runtimePodLossSweepStore(fixture.runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if repaired, repairErr := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); repairErr != nil || repaired != 1 {
+		t.Fatalf("repair committed opening input = %d/%v", repaired, repairErr)
+	}
+
+	const replacementPodUID = "pod_open_pod_loss_replacement_rejection"
+	seedBridgeAPIRuntimeBinding(t, fixture.admin, "default", fixture.sessionID, recoveryBindingID, 2, replacementPodUID)
+	rejectingSender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{
+		Status: RuntimeDeliveryRejected, Retryable: true,
+		ErrorKind: "runtime_rejected_input", ErrorMessage: "replacement Runtime rejected recovery",
+	}}
+	runner := newSubagentRuntimeQueueRunner(
+		t, fixture.runtimeDB, fixture.admin, 9090, fixture.sessionID, replacementPodUID, nil, rejectingSender,
+	)
+	var attemptCount, maxAttempts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT attempt_count,max_attempts FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1`, fixture.jobID).Scan(&attemptCount, &maxAttempts); err != nil {
+		t.Fatalf("read repaired opening attempt budget: %v", err)
+	}
+	for attempt := attemptCount; attempt < maxAttempts; attempt++ {
+		waitForQueueJobAvailable(t, fixture.admin, fixture.jobID)
+		if active, runErr := runner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
+			t.Fatalf("run replacement rejection %d = active:%t err:%v", attempt+1, active, runErr)
+		}
+	}
+	var inboxStatus, queueStatus, childStatus, inboxBindingID, inboxPodUID string
+	var inboxBindingGeneration int64
+	var messages, starts, failures int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$3 AND id=$4),
+		(SELECT binding_id FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT binding_generation FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT target_pod_uid FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND kind='user'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='session.thread_status_terminated')`,
+		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID,
+	).Scan(&inboxStatus, &queueStatus, &childStatus, &inboxBindingID, &inboxBindingGeneration, &inboxPodUID,
+		&messages, &starts, &failures); err != nil {
+		t.Fatalf("read replacement rejection settlement: %v", err)
+	}
+	if inboxStatus != "dead_lettered" || queueStatus != queue.StatusDeadLettered || childStatus != "failed" ||
+		inboxBindingID != recoveryBindingID || inboxBindingGeneration != 2 || inboxPodUID != replacementPodUID ||
+		messages != 1 || starts != 0 || failures != 1 || len(rejectingSender.requests) != maxAttempts-attemptCount {
+		t.Fatalf("replacement rejection = Inbox:%s Queue:%s child:%s binding:%s/%d/%s Messages:%d starts:%d failures:%d Runtime:%d",
+			inboxStatus, queueStatus, childStatus, inboxBindingID, inboxBindingGeneration, inboxPodUID,
+			messages, starts, failures, len(rejectingSender.requests))
 	}
 }
 
@@ -1514,6 +1622,13 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 		t.Fatalf("read pre-compaction boundary: %v", err)
 	}
 	compactionRequestID := "mreq_post_compaction_resume"
+	compactionRunning, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: childScope, RuntimeWriteId: "rwrite_post_compaction_running",
+		EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`,
+	})
+	if err != nil || compactionRunning.GetCommitted() == nil {
+		t.Fatalf("open compaction durable turn = %#v/%v", compactionRunning, err)
+	}
 	compactionStart := seedBridgeAPIRequestStart(t, store, childScope,
 		"rwrite_post_compaction_start", compactionRequestID, requestKindCompactionSummary, messageBoundary)
 	compactionBoundary := messageBoundary
@@ -1533,12 +1648,26 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 	if err != nil || compactionEnd.GetCommitted() == nil {
 		t.Fatalf("commit compaction before close = %#v/%v", compactionEnd, err)
 	}
+	compactionIdle, err := finishIdleWithStagedCaptureForTest(t, fixture.admin, store, &bridgev1.FinishIdleRequest{
+		Scope: childScope, DurableTurnId: compactionRunning.GetCommitted().GetEventId(),
+		StopReasonJson: `{"type":"end_turn"}`,
+	})
+	if err != nil || compactionIdle.GetCommitted() == nil {
+		t.Fatalf("close compaction durable turn = %#v/%v", compactionIdle, err)
+	}
 
 	client := startActorProductionBridge(t, fixture.runtimeDB)
 	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
 		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
 		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
 		"evt_close_after_compaction")
+	var latestClosedIdleID string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1`,
+		fixture.sessionID, fixture.childID).Scan(&latestClosedIdleID); err != nil {
+		t.Fatalf("read latest post-compaction idle owner: %v", err)
+	}
 	resumeSourceID := "evt_resume_after_compaction"
 	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
 	resumed := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
@@ -1547,24 +1676,128 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, resumed)
+	compactionRunningID := compactionRunning.GetCommitted().GetEventId()
 	compactionStartID := compactionStart.GetCommitted().GetEventId()
+	compactionEndID := compactionEnd.GetCommitted().GetRequestEndEventId()
+	compactionIdleID := latestClosedIdleID
+	seenCompactionRunning := false
 	seenCompactionStart := false
 	seenCompactionEnd := false
+	seenCompactionIdle := false
 	for _, event := range resumed.TurnFacts.Events {
 		if event.EventID == preCompactionStartID {
 			t.Fatalf("pre-compaction Request became active after cold Resume: %#v", resumed.TurnFacts.Events)
+		}
+		if event.EventID == compactionRunningID && event.Type == "session.thread_status_running" {
+			seenCompactionRunning = true
 		}
 		if event.EventID == compactionStartID && event.RequestStart != nil &&
 			event.RequestStart.ContextThroughMessageSequence == messageBoundary {
 			seenCompactionStart = true
 		}
-		if event.RequestEnd != nil && event.RequestEnd.RequestStartEventID == compactionStartID {
+		if event.EventID == compactionEndID && event.RequestEnd != nil && event.RequestEnd.RequestStartEventID == compactionStartID {
 			seenCompactionEnd = true
 		}
+		if event.EventID == compactionIdleID && event.Idle != nil {
+			seenCompactionIdle = true
+		}
 	}
-	if !seenCompactionStart || !seenCompactionEnd || len(resumed.ContextEntries) != 1 || resumed.ContextEntries[0].ContextKind != "compaction" {
-		t.Fatalf("post-compaction cold facts = start:%t end:%t context:%#v facts:%#v",
-			seenCompactionStart, seenCompactionEnd, resumed.ContextEntries, resumed.TurnFacts.Events)
+	if !seenCompactionRunning || !seenCompactionStart || !seenCompactionEnd || !seenCompactionIdle ||
+		len(resumed.ContextEntries) != 1 || resumed.ContextEntries[0].ContextKind != "compaction" {
+		t.Fatalf("post-compaction cold facts = running:%t start:%t end:%t idle:%t context:%#v facts:%#v",
+			seenCompactionRunning, seenCompactionStart, seenCompactionEnd, seenCompactionIdle,
+			resumed.ContextEntries, resumed.TurnFacts.Events)
+	}
+}
+
+func TestSubagentNoWorkCloseResumeCyclePreservesCompletedRequest(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "no_work_close_resume")
+	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
+	runtimeProcess := startAttachmentRecoveryRuntime(
+		t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID,
+		fixture.bindingID, 1, fixture.podUID,
+	)
+	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID)
+	if execution := runtimeProcess.providerStart(t); execution.ProviderInvocations != 1 {
+		t.Fatalf("no-work cycle opening Provider invocations = %d; want 1", execution.ProviderInvocations)
+	}
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	runtimeProcess.kill(t)
+
+	actorClient := startActorProductionBridge(t, fixture.runtimeDB)
+	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	closeChildThroughProductionInterrupt(
+		t, fixture.runtimeDB, fixture.admin, actorClient, fixture.bridgeAddress, parentScope,
+		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
+		"evt_no_work_close_first",
+	)
+	var runningID, requestStartID, requestEndID, firstIdleID string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='session.thread_status_running' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1)`,
+		fixture.sessionID, fixture.childID,
+	).Scan(&runningID, &requestStartID, &requestEndID, &firstIdleID); err != nil {
+		t.Fatalf("read first closed lifecycle: %v", err)
+	}
+	firstResumeSourceID := "evt_no_work_resume_first"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, firstResumeSourceID)
+	first := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-no_work_close_resume", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": firstResumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, first)
+
+	closeChildThroughProductionInterrupt(
+		t, fixture.runtimeDB, fixture.admin, actorClient, fixture.bridgeAddress, parentScope,
+		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
+		"evt_no_work_close_second",
+	)
+	var secondIdleID string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1`,
+		fixture.sessionID, fixture.childID).Scan(&secondIdleID); err != nil {
+		t.Fatalf("read second closed idle owner: %v", err)
+	}
+	secondResumeSourceID := "evt_no_work_resume_second"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, secondResumeSourceID)
+	second := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-no_work_close_resume", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": secondResumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, second)
+
+	for _, sample := range []struct {
+		name   string
+		result closedThreadResumeCompositionResult
+		idleID string
+	}{{name: "first", result: first, idleID: firstIdleID}, {name: "second", result: second, idleID: secondIdleID}} {
+		want := map[string]bool{runningID: false, requestStartID: false, requestEndID: false, sample.idleID: false}
+		for _, event := range sample.result.TurnFacts.Events {
+			if _, expected := want[event.EventID]; expected {
+				want[event.EventID] = true
+			}
+		}
+		for eventID, present := range want {
+			if !present {
+				t.Fatalf("%s no-work Resume omitted completed lifecycle Event %s: %#v", sample.name, eventID, sample.result.TurnFacts.Events)
+			}
+		}
+	}
+	var starts, ends int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end')`,
+		fixture.sessionID, fixture.childID,
+	).Scan(&starts, &ends); err != nil {
+		t.Fatalf("read no-work cycle request cardinality: %v", err)
+	}
+	if starts != 1 || ends != 1 {
+		t.Fatalf("no-work close/Resume created request work = starts:%d ends:%d; want 1/1", starts, ends)
 	}
 }
 
@@ -1967,20 +2200,6 @@ func TestSubagentOpeningInputLeaseTakeoverAfterFenceConvergesSameIDOnce(t *testi
 	if err != nil || len(current) != 1 || current[0].ID != fixture.jobID || current[0].LeaseToken == staleLease {
 		t.Fatalf("install post-fence current lease = %#v/%v", current, err)
 	}
-	close(blockingSender.release)
-	select {
-	case <-finished:
-	case <-time.After(10 * time.Second):
-		t.Fatal("stale post-fence owner did not return")
-	}
-	var queueStatus, currentLease string
-	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT status,lease_token FROM queue_jobs
-		WHERE workspace_id='default' AND id=$1`, fixture.jobID).Scan(&queueStatus, &currentLease); err != nil {
-		t.Fatalf("read post-fence current authority: %v", err)
-	}
-	if queueStatus != queue.StatusLeased || currentLease != current[0].LeaseToken {
-		t.Fatalf("stale post-fence owner changed Queue = %s/%s; want leased/%s", queueStatus, currentLease, current[0].LeaseToken)
-	}
 	currentJob, err := DecodeRuntimeJob(queueJobProto(current[0]))
 	if err != nil {
 		t.Fatalf("decode post-fence current job: %v", err)
@@ -1988,13 +2207,28 @@ func TestSubagentOpeningInputLeaseTakeoverAfterFenceConvergesSameIDOnce(t *testi
 	direct := runner.Deliverer.(RuntimePodDirectDeliverer)
 	result, err := (RuntimePodDirectDeliverer{Store: direct.Store, Sender: blockingSender.RuntimeCommandSender}).DeliverRuntimeJob(context.Background(), currentJob)
 	if err != nil || (result.Status != RuntimeDeliveryAccepted && result.Status != RuntimeDeliveryDuplicate) {
-		t.Fatalf("replay post-fence current job = %#v/%v", result, err)
+		t.Fatalf("current owner before stale transport = %#v/%v", result, err)
 	}
 	if err := (&JobRunner{Queue: baseQueue}).applyRuntimeDeliveryResult(context.Background(), currentJob, result); err != nil {
-		t.Fatalf("settle post-fence current Queue lease: %v", err)
+		t.Fatalf("settle current owner before stale transport: %v", err)
 	}
 	started := runtimeProcess.providerStart(t)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	close(blockingSender.release)
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stale post-fence owner did not return")
+	}
+	var queueStatus string
+	var currentLease sql.NullString
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT status,lease_token FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1`, fixture.jobID).Scan(&queueStatus, &currentLease); err != nil {
+		t.Fatalf("read post-fence current authority: %v", err)
+	}
+	if queueStatus != queue.StatusAcknowledged || currentLease.Valid {
+		t.Fatalf("stale post-fence owner changed Queue = %s/%v; want acknowledged with no lease", queueStatus, currentLease)
+	}
 	runtimeProcess.kill(t)
 	var messages, starts int
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
@@ -2750,7 +2984,11 @@ func (s *blockingAgentMailSender) AcceptAgentMail(ctx context.Context, target Ru
 	s.calls++
 	close(s.entered)
 	<-s.release
-	return s.RuntimeCommandSender.AcceptAgentMail(ctx, target, request)
+	return &agentruntimev1.AcceptAgentMailResponse{
+		Outcome: &agentruntimev1.AcceptAgentMailResponse_Duplicate{
+			Duplicate: &agentruntimev1.AcceptAgentMailDuplicate{},
+		},
+	}, nil
 }
 
 func (s *blockingAgentMailSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {

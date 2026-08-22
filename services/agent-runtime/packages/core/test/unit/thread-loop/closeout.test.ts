@@ -221,6 +221,75 @@ describe("ThreadLoop", () => {
 		});
 		expect(session.state.acceptedInputSnapshot()).toEqual([unresolved]);
 	});
+	test("failed-run closeout leaves reservation-only opening custody to its Queue owner", async () => {
+		const session = new ThreadRuntime({
+			workspaceId: "wksp_failed_opening_reservation",
+			sessionId: "sesn_failed_opening_reservation",
+			sessionThreadId: "thrd_failed_opening_reservation",
+			threadRole: "subagent",
+			bindingId: "bind_failed_opening_reservation",
+			bindingGeneration: 1,
+			targetPodUid: "pod_failed_opening_reservation",
+			runtimeBindingToken: "token_failed_opening_reservation",
+		});
+		session.state.installThreadTurn(
+			{
+				executionRunId: "evt_failed_opening_reservation_running",
+				pendingInputContextSequences: [],
+			},
+			{ routes: [] },
+		);
+		const opening = {
+			workspaceId: session.identity.workspaceId,
+			sessionId: session.identity.sessionId,
+			sessionThreadId: session.identity.sessionThreadId,
+			bindingId: session.identity.bindingId,
+			bindingGeneration: session.identity.bindingGeneration,
+			targetPodUid: session.identity.targetPodUid,
+			runtimeInputId: "agent_mail:delivery_failed_opening_reservation",
+			kind: "inter_agent_message",
+			deliveryId: "delivery_failed_opening_reservation",
+			content: "open the child",
+		} satisfies RuntimeAcceptedInputState;
+		session.state.enqueueAcceptedInput(opening);
+		session.state.acknowledgeAcceptedInput(opening.runtimeInputId, true);
+		let terminationCalls = 0;
+		const baseWriter = writerFrom((envelope) => ({
+			ok: true,
+			eventId: `bridge-${envelope.writeId}`,
+			type: "committed",
+		}));
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).closeFailedRun(
+					session,
+					new Error("failed before Request Start"),
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(
+						new RecordingContextLoader([], { type: "empty" }),
+						{
+							writer: {
+								...baseWriter,
+								commitRuntimeTermination: async (envelope) => {
+									terminationCalls += 1;
+									return await baseWriter.commitRuntimeTermination!(envelope);
+								},
+							},
+							runtime: { ...threadLoopRuntime(), sleep: sleepUntilAborted },
+						},
+					),
+				),
+			),
+		);
+
+		expect(result).toMatchObject({ type: "unrepairable" });
+		expect(terminationCalls).toBe(0);
+		expect(session.state.acceptedInputCount()).toBe(0);
+		expect(session.state.hasAcceptedInputCustody()).toBe(true);
+	});
 	test("failed-run closeout observes one in-flight step across timeout windows and memoizes success", async () => {
 		const errorResult = deferred<SessionEventWriterAppendResult>();
 		let errorCalls = 0;

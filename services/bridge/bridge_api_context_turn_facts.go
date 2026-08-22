@@ -318,51 +318,72 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		       END) AS event_id
 		  FROM retained_ends
 	),
-	post_floor_turn_events AS MATERIALIZED (
-		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+	retained_tool_requests AS MATERIALIZED (
+		SELECT DISTINCT model_request_id
 		  FROM session_events
 		 WHERE workspace_id = $1
 		   AND session_id = $2
 		   AND session_thread_id = $3
-		   AND sequence >= $4
-		   AND type IN (
-		     'session.status_running', 'session.thread_status_running',
-		     'span.model_request_start', 'span.model_request_end',
-		     'agent.tool_use', 'agent.mcp_tool_use',
-		     'agent.tool_result', 'agent.mcp_tool_result',
-		     'user.interrupt', 'agent.thread_interrupt_requested',
-		     'session.error',
-		     'session.status_rescheduled', 'session.thread_status_rescheduled',
-		     'session.status_idle', 'session.thread_status_idle',
-		     'session.status_terminated', 'session.thread_status_terminated'
-		   )
+		   AND event_id IN (SELECT event_id FROM retained_tools)
+		   AND model_request_id IS NOT NULL
+	),
+	selected_event_ids AS MATERIALIZED (
+		SELECT event_id FROM turn_root
+		UNION SELECT event_id FROM previous_lifecycle
+		UNION SELECT event_id FROM current_reschedule
+		UNION SELECT event_id FROM terminal_failure
+		UNION SELECT event_id FROM latest_thread_request_start
+		UNION SELECT event_id FROM selected_thread_running
+		UNION SELECT event_id FROM selected_thread_request_end
+		UNION SELECT event_id FROM selected_thread_latest_idle
+		UNION SELECT event_id FROM retained_ends
+		UNION SELECT event_id FROM retained_tools
+		UNION SELECT event_id FROM retained_repairs
+		UNION SELECT event_id FROM pending_interrupts
 	),
 	selected_events AS MATERIALIZED (
 		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
-		  FROM post_floor_turn_events event
-		 WHERE (
-		     event.event_id IN (SELECT event_id FROM turn_root)
-		     OR event.event_id IN (SELECT event_id FROM previous_lifecycle)
-		     OR event.event_id IN (SELECT event_id FROM current_reschedule)
-		     OR event.event_id IN (SELECT event_id FROM terminal_failure)
-		     OR event.event_id IN (SELECT event_id FROM latest_thread_request_start)
-		     OR event.event_id IN (SELECT event_id FROM selected_thread_running)
-		     OR event.event_id IN (SELECT event_id FROM selected_thread_request_end)
-		     OR event.event_id IN (SELECT event_id FROM selected_thread_latest_idle)
-		     OR event.event_id IN (SELECT event_id FROM retained_ends)
-		     OR (event.type = 'span.model_request_start' AND event.model_request_id IN (SELECT model_request_id FROM retained_requests))
-		     OR (event.type IN ('agent.tool_use', 'agent.mcp_tool_use') AND event.event_id IN (SELECT event_id FROM retained_tools))
-		     OR (event.type IN ('agent.tool_result', 'agent.mcp_tool_result') AND COALESCE(
-		          event.payload_json::jsonb ->> 'tool_use_event_id',
-		          event.payload_json::jsonb ->> 'tool_use_id',
-		          event.payload_json::jsonb ->> 'mcp_tool_use_id'
-		        ) IN (SELECT event_id FROM retained_tools))
-		     OR (event.type = 'agent.tool_result'
-		         AND event.model_request_id IN (SELECT model_request_id FROM retained_requests)
-		         AND event.payload_json::jsonb ? 'repair_kind')
-		     OR (event.type = 'agent.tool_result' AND event.event_id IN (SELECT event_id FROM retained_repairs))
-		     OR (event.type IN ('user.interrupt', 'agent.thread_interrupt_requested') AND event.event_id IN (SELECT event_id FROM pending_interrupts))
-		   )
+		  FROM session_events event
+		 WHERE event.workspace_id = $1
+		   AND event.session_id = $2
+		   AND event.session_thread_id = $3
+		   AND event.event_id = ANY (ARRAY(SELECT event_id FROM selected_event_ids))
+		UNION
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		  FROM session_events event
+		 WHERE event.workspace_id = $1
+		   AND event.session_id = $2
+		   AND event.session_thread_id = $3
+		   AND event.sequence >= $4
+		   AND event.type = 'span.model_request_start'
+		   AND EXISTS (SELECT 1 FROM retained_requests)
+		   AND event.model_request_id IN (SELECT model_request_id FROM retained_requests)
+		UNION
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		  FROM session_events event
+		 WHERE event.workspace_id = $1
+		   AND event.session_id = $2
+		   AND event.session_thread_id = $3
+		   AND event.sequence >= $4
+		   AND event.type IN ('agent.tool_result', 'agent.mcp_tool_result')
+		   AND EXISTS (SELECT 1 FROM retained_tool_requests)
+		   AND event.model_request_id IN (SELECT model_request_id FROM retained_tool_requests)
+		   AND COALESCE(
+		         event.payload_json::jsonb ->> 'tool_use_event_id',
+		         event.payload_json::jsonb ->> 'tool_use_id',
+		         event.payload_json::jsonb ->> 'mcp_tool_use_id'
+		       ) IN (SELECT event_id FROM retained_tools)
+		UNION
+		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
+		  FROM session_events event
+		 WHERE event.workspace_id = $1
+		   AND event.session_id = $2
+		   AND event.session_thread_id = $3
+		   AND event.sequence >= $4
+		   AND event.type = 'agent.tool_result'
+		   AND EXISTS (SELECT 1 FROM retained_requests)
+		   AND event.model_request_id IN (SELECT model_request_id FROM retained_requests)
+		   AND event.payload_json::jsonb ? 'repair_kind'
 		UNION
 		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
 		  FROM turn_root

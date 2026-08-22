@@ -59,7 +59,7 @@ func (tracer *loadContextQueryTracer) snapshot() []loadContextQueryInvocation {
 	return result
 }
 
-func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
+func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_closed_plan_background", "thr_closed_plan_background")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
@@ -85,6 +85,7 @@ func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 		floor := int64(historySize + 1)
 		seedClosedTurnPlanHistory(t, admin, sessionID, threadID, historySize)
+		seedClosedTurnPostFloorNoise(t, admin, sessionID, threadID, floor, historySize)
 		if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
 			SET status='closed_for_runtime', closed_at=now(), updated_at=now()
 			WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
@@ -185,7 +186,7 @@ func TestClosedTurnFactPlansStayBoundedAboveCompactionFloor(t *testing.T) {
 				if statement.sessionEventScans != baseline.sessionEventScans ||
 					statement.maxRows != baseline.maxRows || statement.maxLoops != baseline.maxLoops ||
 					statement.sharedBlocks-baseline.sharedBlocks > 24 {
-					t.Fatalf("full LoadContext statement %d grew with pre-floor history: small=%#v large=%#v sql=%s",
+					t.Fatalf("full LoadContext statement %d grew with retained history: small=%#v large=%#v sql=%s",
 						index, baseline, statement, census[index])
 				}
 			}
@@ -270,6 +271,25 @@ func seedClosedTurnPlanHistory(t *testing.T, db *sql.DB, sessionID, threadID str
 	('default',$1,$2,'evt_closed_plan_compacted_'||$4,$3+8,'agent.thread_context_compacted','{}','internal',false,'rwrite_closed_plan_compacted_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now())`,
 		sessionID, threadID, floor, fmt.Sprint(historySize)); err != nil {
 		t.Fatalf("seed post-floor closed turn: %v", err)
+	}
+}
+
+func seedClosedTurnPostFloorNoise(t *testing.T, db *sql.DB, sessionID, threadID string, floor int64, historySize int) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+		visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+		created_at, updated_at, processed_at
+	)
+	SELECT 'default', $1, $2, 'evt_closed_plan_noise_' || $4 || '_' || value,
+	       $3 + 100 + value, 'agent.tool_result',
+	       '{"type":"agent.tool_result","tool_use_id":"evt_unrelated_tool_' || $4 || '_' || value || '","content":[]}',
+	       'internal', false, 'rwrite_closed_plan_noise_' || $4 || '_' || value,
+	       'mreq_closed_plan_noise_' || $4 || '_' || value,
+	       '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
+	       now(), now(), now()
+	  FROM generate_series(1, $4) value`, sessionID, threadID, floor, historySize); err != nil {
+		t.Fatalf("seed %d post-floor irrelevant events: %v", historySize, err)
 	}
 }
 

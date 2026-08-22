@@ -2052,6 +2052,79 @@ describe("ThreadState", () => {
 		expect(state.hasAcceptedInputCustody()).toBe(false);
 	});
 
+	test("ordinary subagent mail does not reserve opening custody after durable commit", async () => {
+		const session = new ThreadRuntime({
+			workspaceId: "wksp_ordinary_subagent_mail",
+			sessionId: "sesn_ordinary_subagent_mail",
+			sessionThreadId: "thrd_ordinary_subagent_mail",
+			threadRole: "subagent",
+			bindingId: "bind_ordinary_subagent_mail",
+			bindingGeneration: 1,
+			targetPodUid: "pod_ordinary_subagent_mail",
+			runtimeBindingToken: "token_ordinary_subagent_mail",
+		});
+		session.state.contextManager.appendEntry(
+			userMessage("msg_opening_subagent_mail", 1, "opening input"),
+		);
+		session.state.markPersistentContextLoaded();
+		session.state.installThreadTurn(
+			{
+				pendingInputContextSequences: [],
+				idleCloseout: {
+					eventId: "sevt_ordinary_subagent_mail_idle",
+					stopReason: "end_turn",
+				},
+			},
+			{ routes: [] },
+		);
+		const mail = {
+			workspaceId: session.identity.workspaceId,
+			sessionId: session.sessionId,
+			sessionThreadId: session.identity.sessionThreadId,
+			bindingId: session.identity.bindingId,
+			bindingGeneration: session.identity.bindingGeneration,
+			targetPodUid: session.identity.targetPodUid,
+			runtimeInputId: "agent_mail:delivery_ordinary_subagent_mail",
+			kind: "inter_agent_message",
+			deliveryId: "delivery_ordinary_subagent_mail",
+			content: "ordinary follow-up",
+		} satisfies RuntimeAcceptedInputState;
+		expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
+		const appended: string[] = [];
+		const loader = new QueuedContextLoader([], [], [
+			{
+				type: "committed",
+				assignedContextSequences: [2],
+				pendingAttachments: [],
+				interruptToolResults: [],
+			},
+		]);
+
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						installLoaderState: false,
+						writer: failingEventWriter(
+							appended,
+							(event) => event.type === "span.model_request_start",
+						),
+					}),
+				),
+			),
+		);
+
+		expect(result).toMatchObject({ type: "failed" });
+		expect(loader.commitCalls).toHaveLength(1);
+		expect(session.state.acceptedInputCount()).toBe(0);
+		expect(session.state.hasAcceptedInputCustody()).toBe(false);
+	});
+
 	test("does not reopen a request for an already resident committed mail", async () => {
 		const session = new ThreadRuntime("sesn_agent_mail_resident_replay");
 		session.state.contextManager.appendEntry(

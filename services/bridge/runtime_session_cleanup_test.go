@@ -66,6 +66,16 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	}); err != nil {
 		t.Fatalf("settle cleanup-expired Tool: %v", err)
 	}
+	var resultModelRequestID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT model_request_id
+		FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='agent.tool_result'`, sessionID, threadID).Scan(&resultModelRequestID); err != nil {
+		t.Fatalf("read cleanup Tool result request identity: %v", err)
+	}
+	if resultModelRequestID != modelRequestID {
+		t.Fatalf("cleanup Tool result model request = %q; want %q", resultModelRequestID, modelRequestID)
+	}
 	var messageCount int
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*), max(data_json)

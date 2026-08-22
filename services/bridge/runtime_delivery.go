@@ -2565,9 +2565,6 @@ func finalizeOpeningAgentMailFailureTx(
 		return RuntimeDeliveryResult{}, err
 	}
 	runtimeWriteID := stableRuntimeID("opening_agent_mail_exhausted", job.WorkspaceID, job.SessionID, job.RuntimeInputID)
-	if _, _, err := settleRuntimeTerminationTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now); err != nil {
-		return RuntimeDeliveryResult{}, err
-	}
 	inboxResult, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='dead_lettered',updated_at=$4
 		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
 		  AND status IN ('queued','delivering','accepted','committed')`,
@@ -2577,6 +2574,9 @@ func finalizeOpeningAgentMailFailureTx(
 	}
 	if !rowsAffected(inboxResult) {
 		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_terminal_missing", message: "opening input finalization lost Inbox custody", retryable: true}
+	}
+	if _, _, err := settleRuntimeTerminationTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now); err != nil {
+		return RuntimeDeliveryResult{}, err
 	}
 	deadLettered, err := tx.Exec(ctx, `UPDATE queue_jobs
 		SET status='dead_lettered',dead_lettered_at=$4,last_error_kind='runtime_delivery_exhausted',
@@ -3642,14 +3642,14 @@ func insertPendingToolTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, sc
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $11)`,
+			visibility, session_visible, model_request_id, projection_json, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $12)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		eventID,
 		sequence,
-		eventType, payloadJSON, visibility, sessionVisible, projectionJSON, now,
+		eventType, payloadJSON, visibility, sessionVisible, wait.ModelRequestID, projectionJSON, now,
 	); err != nil {
 		return "", err
 	}
@@ -3764,6 +3764,18 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 		binding, err := s.resolveRuntimeTarget(ctx, tx, job)
 		if err != nil {
 			return RuntimeCommandPlan{}, err
+		}
+		rebound, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+			SET binding_id=$5,binding_generation=$6,target_pod_uid=$7,updated_at=$8
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			  AND runtime_input_id=$4 AND input_kind='agent_mail' AND status='committed'`,
+			job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID,
+			binding.BindingID, binding.BindingGeneration, binding.PodUID, now)
+		if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		if !rowsAffected(rebound) {
+			return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_missing", message: "committed agent mail lost recovery custody", retryable: true}
 		}
 		return RuntimeCommandPlan{
 			Target: RuntimePodTarget{

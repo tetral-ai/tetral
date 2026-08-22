@@ -1246,9 +1246,15 @@ function runThreadLoopEffect(
 								(acceptedInput.kind === "messages" ||
 									acceptedInput.kind === "approval_review" ||
 									acceptedInput.kind === "inter_agent_message");
+							const reservesRequestOpening =
+								acceptedInput.kind === "inter_agent_message" &&
+								session.identity.threadRole === "subagent" &&
+								newlyResidentContextEntries.some(
+									(entry) => entry.messageSequence === 1,
+								);
 							session.state.acknowledgeAcceptedInput(
 								acceptedInput.runtimeInputId,
-								makesRequestReady,
+								reservesRequestOpening,
 							);
 							if (makesRequestReady) {
 								session.state.applyThreadTurnFact({

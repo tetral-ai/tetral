@@ -363,6 +363,18 @@ export async function closeFailedRunDurably(
 		// Queue custody, so failed-run recovery reuses the open durable turn and
 		// the existing termination transaction until its typed result lands.
 		if (session.state.hasAcceptedInputCustody()) {
+			// A committed opening Message is owned by its Queue delivery until Request
+			// Start consumes it. Runtime termination owns only inputs still accepted in
+			// this Pod; it must not terminalize reservation-only durable custody.
+			if (session.state.acceptedInputCount() === 0) {
+				return {
+					type: "unrepairable",
+					error: normalizeSessionEventWriterError({
+						code: "unrepairable",
+						sessionId: session.sessionId,
+					}),
+				};
+			}
 			const durableTurnId = closeout.durableTurnId;
 			if (durableTurnId === undefined) {
 				const checkpoint = session.state.threadTurnReduction().checkpoint;
