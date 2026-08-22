@@ -481,9 +481,9 @@ func TestSubagentOpeningInputPodLossBeforeCommitReturnsOriginalCustodyThenExecut
 		t, bridgeAddress, "complete", fixture.sessionID, fixture.childID,
 		fixture.bindingID, 1, fixture.podUID,
 	)
-	lostResponse := &lostAgentMailResponseSender{RuntimeCommandSender: NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
 	lostRunner := newSubagentRuntimeQueueRunner(
-		t, fixture.runtimeDB, fixture.admin, lostRuntime.port, fixture.sessionID, fixture.podUID, nil, lostResponse,
+		t, fixture.runtimeDB, fixture.admin, lostRuntime.port, fixture.sessionID, fixture.podUID,
+		nil, NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}),
 	)
 	type runnerResult struct {
 		active bool
@@ -584,9 +584,9 @@ func TestSubagentOpeningInputPodLossAfterCommitColdStartsOriginalCustodyOnce(t *
 		t, bridgeAddress, "complete", fixture.sessionID, fixture.childID,
 		fixture.bindingID, 1, fixture.podUID,
 	)
-	lostResponse := &lostAgentMailResponseSender{RuntimeCommandSender: NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
 	lostRunner := newSubagentRuntimeQueueRunner(
-		t, fixture.runtimeDB, fixture.admin, lostRuntime.port, fixture.sessionID, fixture.podUID, nil, lostResponse,
+		t, fixture.runtimeDB, fixture.admin, lostRuntime.port, fixture.sessionID, fixture.podUID,
+		nil, NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}),
 	)
 	type runnerResult struct {
 		active bool
@@ -730,6 +730,66 @@ func TestSubagentOpeningInputPodLossAfterCommitColdStartsOriginalCustodyOnce(t *
 		started.ProviderInvocations != 1 || countedSender.agentMailCalls != 0 || countedSender.recoveryCalls != 1 {
 		t.Fatalf("post-Commit replacement convergence = Inbox:%s Queue:%s Messages:%d starts:%d providers:%d mail:%d recovery:%d",
 			inboxStatus, queueStatus, messages, starts, started.ProviderInvocations, countedSender.agentMailCalls, countedSender.recoveryCalls)
+	}
+	var durableAssistantOutputs int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND kind='assistant'`,
+		fixture.sessionID, fixture.childID).Scan(&durableAssistantOutputs); err != nil {
+		t.Fatalf("read replacement durable output: %v", err)
+	}
+	if durableAssistantOutputs != 1 {
+		t.Fatalf("replacement durable Assistant outputs = %d; want 1", durableAssistantOutputs)
+	}
+
+	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
+	actorClient := startActorProductionBridge(t, fixture.runtimeDB)
+	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 2, replacementPodUID)
+	closeChildThroughProductionInterrupt(
+		t, fixture.runtimeDB, fixture.admin, actorClient, replacementBridgeAddress, parentScope,
+		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, replacementPodUID,
+		"evt_close_recovered_opening",
+	)
+	resumeSourceID := "evt_resume_recovered_opening"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
+	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-pod_loss_after_commit", "bindingId": fixture.bindingID,
+		"bindingGeneration": 2, "targetPodUid": replacementPodUID, "sourceToolUseEventId": resumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, resumed)
+
+	laterSourceID := "evt_after_recovered_opening_resume"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
+	laterDeliveryID := agentMailDeliveryID(laterSourceID, fixture.childID)
+	if delivered, err := actorClient.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: parentScope, DeliveryId: laterDeliveryID, TargetThreadId: fixture.childID,
+		SourceToolUseEventId: laterSourceID, Content: "execute once after recovered child Resume",
+	}); err != nil || delivered.GetCommitted() == nil {
+		t.Fatalf("deliver input after recovered child Resume = %#v/%v", delivered, err)
+	}
+	laterRuntimeInputID := "agent_mail:" + laterDeliveryID
+	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port,
+		fixture.sessionID, replacementPodUID, laterRuntimeInputID, resumedRuntime.acceptResultPath)
+	laterExecution := resumedRuntime.providerStart(t, fixture.admin, fixture.sessionID, fixture.childID)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 2)
+	resumedRuntime.close(t)
+	var laterInbox, laterQueue string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND kind='assistant')`,
+		laterRuntimeInputID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, laterRuntimeInputID),
+		fixture.sessionID, fixture.childID,
+	).Scan(&laterInbox, &laterQueue, &starts, &durableAssistantOutputs); err != nil {
+		t.Fatalf("read post-Resume execution convergence: %v", err)
+	}
+	if laterExecution.ProviderRequests != 1 || laterInbox != "accepted" || laterQueue != queue.StatusAcknowledged ||
+		starts != 2 || durableAssistantOutputs != 1 || !strings.Contains(string(laterExecution.Request), "execute once after recovered child Resume") {
+		t.Fatalf("post-Resume execution = Provider:%d Inbox:%s Queue:%s starts:%d outputs:%d wire:%s",
+			laterExecution.ProviderRequests, laterInbox, laterQueue, starts, durableAssistantOutputs, laterExecution.Request)
 	}
 }
 
@@ -941,78 +1001,134 @@ func TestSubagentOpeningInputDefersBehindUnrelatedSessionInterruptThenExecutesOn
 	}
 }
 
-func TestSubagentOpeningInputResponseAndAckLossReplayExecutionWitness(t *testing.T) {
-	for _, test := range []struct {
-		name         string
-		dropResponse bool
-		observeAck   bool
-	}{
-		{name: "Runtime response lost before accepted stamp", dropResponse: true},
-		{name: "execution witness settles Queue without an external ACK", observeAck: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newOpeningRuntimeFixture(t, "loss_"+stableRuntimeID("case", test.name))
-			runtimeProcess := startAttachmentRecoveryRuntime(
-				t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID,
-				fixture.bindingID, 1, fixture.podUID,
-			)
-			baseSender := RuntimeCommandSender(NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}))
-			if test.dropResponse {
-				baseSender = &lostAgentMailResponseSender{RuntimeCommandSender: baseSender}
-			}
-			queueClient := QueueClient(nil)
-			var ackObserver *lostAckQueueClient
-			if test.observeAck {
-				ackObserver = &lostAckQueueClient{QueueClient: tetralqueue.NewServer(
-					queue.NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(fixture.runtimeDB), queue.RetryPolicy{
-						BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
-					}), nil,
-				)}
-				queueClient = ackObserver
-			}
-			runner := newSubagentRuntimeQueueRunner(
-				t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
-				queueClient, baseSender,
-			)
-			active, firstErr := runner.RunOnceWithActivity(context.Background())
-			if !active || firstErr != nil {
-				t.Fatalf("first loss-cut run = active:%t err:%v", active, firstErr)
-			}
-			started := runtimeProcess.providerStart(t)
-			waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+func TestSubagentOpeningInputTransportLossBeforeRequestStartReclaimsAndExecutesOnce(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "transport_loss_before_start")
+	client := dbconnect.NewClientForTesting(fixture.runtimeDB)
+	baseBridge := NewPostgreSQLBridgeAPIStore(client)
+	baseBridge.RuntimeBindingTokenHMACKey = []byte("opening-transport-loss-key")
+	barrierBridge := &requestStartBarrierBridgeStore{
+		BridgeAPIStore: baseBridge, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, barrierBridge)
+	defer stopBridge()
+	runtimeProcess := startAttachmentRecoveryRuntime(
+		t, bridgeAddress, "complete", fixture.sessionID, fixture.childID,
+		fixture.bindingID, 1, fixture.podUID,
+	)
+	runner := newSubagentRuntimeQueueRunner(
+		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
+		nil, nil,
+	)
+	runner.Config.LeaseDuration = 250 * time.Millisecond
+	runner.Config.HeartbeatInterval = time.Hour
+	deliveryContext, cancelDelivery := context.WithCancel(context.Background())
+	type deliveryResult struct {
+		active bool
+		err    error
+	}
+	finished := make(chan deliveryResult, 1)
+	go func() {
+		active, err := runner.RunOnceWithActivity(deliveryContext)
+		finished <- deliveryResult{active: active, err: err}
+	}()
+	select {
+	case <-barrierBridge.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("opening delivery did not reach the pre-Start transport cut")
+	}
+	cancelDelivery()
+	select {
+	case result := <-finished:
+		if !result.active {
+			t.Fatalf("cancelled opening delivery reported no activity: %v", result.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled opening transport did not return")
+	}
+	close(barrierBridge.release)
 
-			if test.dropResponse {
-				waitForQueueJobAvailable(t, fixture.admin, fixture.jobID)
-				runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID)
-			}
-			if ackObserver != nil && ackObserver.dropped {
-				t.Fatal("execution witness settlement called the external Queue ACK path")
-			}
-			runtimeProcess.kill(t)
+	var inboxStatus, queueStatus string
+	var messages, starts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND kind='user'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start')`,
+		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID,
+	).Scan(&inboxStatus, &queueStatus, &messages, &starts); err != nil {
+		t.Fatalf("read pre-Start transport-loss custody: %v", err)
+	}
+	if inboxStatus != "committed" || queueStatus != queue.StatusLeased || messages != 1 || starts != 0 {
+		t.Fatalf("pre-Start transport-loss custody = Inbox:%s Queue:%s Messages:%d starts:%d",
+			inboxStatus, queueStatus, messages, starts)
+	}
 
-			var inboxStatus, queueStatus string
-			var attempts, messages, starts int
-			if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
-				(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
-				(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
-				(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$2),
-				(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND kind='user'),
-				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start')`,
-				fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID).Scan(
-				&inboxStatus, &queueStatus, &attempts, &messages, &starts,
-			); err != nil {
-				t.Fatalf("read loss-cut convergence: %v", err)
-			}
-			wantAttempts := 1
-			if test.dropResponse {
-				wantAttempts = 2
-			}
-			if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != wantAttempts ||
-				messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
-				t.Fatalf("loss-cut convergence = Inbox:%s Queue:%s attempts:%d Messages:%d starts:%d providers:%d",
-					inboxStatus, queueStatus, attempts, messages, starts, started.ProviderInvocations)
-			}
-		})
+	time.Sleep(300 * time.Millisecond)
+	queueStore := queue.NewPostgreSQLStore(client)
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim naturally expired opening transport = %d/%v", reclaimed, err)
+	}
+	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, runtimeProcess.port,
+		fixture.sessionID, fixture.podUID)
+	started := runtimeProcess.providerStart(t)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	runtimeProcess.kill(t)
+	var attempts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND kind='user'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start')`,
+		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID,
+	).Scan(&inboxStatus, &queueStatus, &attempts, &messages, &starts); err != nil {
+		t.Fatalf("read transport-loss convergence: %v", err)
+	}
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != 2 ||
+		messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
+		t.Fatalf("transport-loss convergence = Inbox:%s Queue:%s attempts:%d Messages:%d starts:%d providers:%d",
+			inboxStatus, queueStatus, attempts, messages, starts, started.ProviderInvocations)
+	}
+}
+
+func TestSubagentOpeningInputExecutionWitnessSettlesWithoutExternalAck(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "execution_witness_no_external_ack")
+	runtimeProcess := startAttachmentRecoveryRuntime(
+		t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID,
+		fixture.bindingID, 1, fixture.podUID,
+	)
+	ackObserver := &lostAckQueueClient{QueueClient: tetralqueue.NewServer(
+		queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtimeDB)), nil,
+	)}
+	runner := newSubagentRuntimeQueueRunner(
+		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
+		ackObserver, nil,
+	)
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("execution witness delivery = active:%t err:%v", active, err)
+	}
+	started := runtimeProcess.providerStart(t)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	runtimeProcess.kill(t)
+	if ackObserver.dropped {
+		t.Fatal("execution witness settlement called the external Queue ACK path")
+	}
+	var inboxStatus, queueStatus string
+	var messages, starts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND kind='user'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start')`,
+		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID,
+	).Scan(&inboxStatus, &queueStatus, &messages, &starts); err != nil {
+		t.Fatalf("read execution-witness settlement: %v", err)
+	}
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
+		t.Fatalf("execution-witness settlement = Inbox:%s Queue:%s Messages:%d starts:%d providers:%d",
+			inboxStatus, queueStatus, messages, starts, started.ProviderInvocations)
 	}
 }
 
@@ -1622,19 +1738,37 @@ func TestSubagentOpeningInputCloseBeforeRequestStartCancelsExactCustody(t *testi
 		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, fixture.sessionID, siblingID); err != nil {
 		t.Fatalf("name close-before-start sibling: %v", err)
 	}
-	seedCompletionMailSentAt(t, fixture.admin, fixture.sessionID, siblingID, parentID, siblingDeliveryID, 100, "2026-08-22T00:00:00Z")
 	siblingRuntimeInputID := completionRuntimeInputID(siblingDeliveryID)
-	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
-		WHERE workspace_id='default' AND dedupe_key=$1`,
-		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, siblingRuntimeInputID)); err != nil {
-		t.Fatalf("delay sibling control mail: %v", err)
-	}
-	closeChildThroughProductionInterrupt(
-		t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
-		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
-		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
-		"evt_close_before_opening_start",
+	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	closeSourceID := "evt_close_before_opening_start"
+	controlID := admitChildCloseThroughProduction(
+		t, fixture.admin, client, parentScope, fixture.sessionID, parentID, fixture.childID, closeSourceID,
 	)
+	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
+		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, fixture.childID,
+		fixture.bindingID, 1, fixture.podUID,
+	)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtimeDB))
+	queueWithSiblingBirth := &birthInterruptAfterLeaseQueueClient{
+		QueueClient: tetralqueue.NewServer(queueStore, nil),
+		birth: func(context.Context) error {
+			seedCompletionMailSentAt(t, fixture.admin, fixture.sessionID, siblingID, parentID,
+				siblingDeliveryID, 100, "2026-08-22T00:00:00Z")
+			return nil
+		},
+	}
+	interruptRunner := newSubagentRuntimeQueueRunner(
+		t, fixture.runtimeDB, fixture.admin, interruptRuntime.port, fixture.sessionID, fixture.podUID,
+		queueWithSiblingBirth, nil,
+	)
+	if active, err := interruptRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("close child while sibling becomes eligible = active:%t err:%v", active, err)
+	}
+	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release close-before-start Runtime: %v", err)
+	}
+	interruptRuntime.wait(t)
+	settleChildCloseThroughProduction(t, client, parentScope, controlID, closeSourceID)
 
 	var inboxStatus, queueStatus, childStatus, siblingInbox, siblingQueue, siblingStatus string
 	var messages, events, starts int
@@ -1699,18 +1833,26 @@ func TestSubagentOpeningInputCloseBeforeRequestStartCancelsExactCustody(t *testi
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 	resumedRuntime.close(t)
 	var laterSequence int64
-	var finalStarts int
+	var finalStarts, siblingStarts int
+	var finalSiblingInbox, finalSiblingQueue string
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT sequence FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
 		 AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start')`,
-		fixture.sessionID, fixture.childID, laterRuntimeInputID).Scan(&laterSequence, &finalStarts); err != nil {
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$4),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$5),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$6 AND type='span.model_request_start')`,
+		fixture.sessionID, fixture.childID, laterRuntimeInputID, siblingRuntimeInputID,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, siblingRuntimeInputID), siblingID,
+	).Scan(&laterSequence, &finalStarts, &finalSiblingInbox, &finalSiblingQueue, &siblingStarts); err != nil {
 		t.Fatalf("read later CLOSE-won execution: %v", err)
 	}
 	providerWire := string(laterStart.Request)
-	if laterStart.ProviderRequests != 1 || laterSequence != 2 || finalStarts != 1 ||
+	if laterStart.ProviderRequests != 2 || laterSequence != 2 || finalStarts != 1 ||
+		finalSiblingInbox != "accepted" || finalSiblingQueue != queue.StatusAcknowledged || siblingStarts != 1 ||
 		strings.Contains(providerWire, "execute this input once") || !strings.Contains(providerWire, "execute only the later resumed input") {
-		t.Fatalf("later CLOSE-won execution = providers:%d sequence:%d starts:%d wire:%s", laterStart.ProviderRequests, laterSequence, finalStarts, providerWire)
+		t.Fatalf("later CLOSE-won execution = providers:%d sequence:%d starts:%d sibling:%s/%s/%d wire:%s",
+			laterStart.ProviderRequests, laterSequence, finalStarts, finalSiblingInbox, finalSiblingQueue, siblingStarts, providerWire)
 	}
 }
 
@@ -2296,11 +2438,6 @@ func settleChildCloseThroughProduction(
 	}
 }
 
-type lostAgentMailResponseSender struct {
-	RuntimeCommandSender
-	dropped bool
-}
-
 type lostResponseAfterRequestStartSender struct {
 	RuntimeCommandSender
 	admin              *sql.DB
@@ -2326,19 +2463,6 @@ func (s *lostResponseAfterRequestStartSender) AcceptAgentMail(ctx context.Contex
 }
 
 func (s *lostResponseAfterRequestStartSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
-	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
-}
-
-func (s *lostAgentMailResponseSender) AcceptAgentMail(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
-	response, err := s.RuntimeCommandSender.AcceptAgentMail(ctx, target, request)
-	if err == nil && !s.dropped {
-		s.dropped = true
-		return nil, status.Error(codes.Unavailable, "fixture transport response lost")
-	}
-	return response, err
-}
-
-func (s *lostAgentMailResponseSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
 	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
 }
 
