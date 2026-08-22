@@ -2039,6 +2039,19 @@ describe("ThreadState", () => {
 		).toBe("conflict");
 	});
 
+	test("ordinary accepted input does not acquire agent-mail opening custody", () => {
+		const state = new ThreadState("sesn_ordinary_opening_custody");
+		const input = acceptedInput(
+			"rin_ordinary_opening_custody",
+			"sesn_ordinary_opening_custody",
+		);
+
+		expect(state.enqueueAcceptedInput(input)).toBe("applied");
+		state.acknowledgeAcceptedInput(input.runtimeInputId, true);
+		expect(state.acceptedInputCount()).toBe(0);
+		expect(state.hasAcceptedInputCustody()).toBe(false);
+	});
+
 	test("does not reopen a request for an already resident committed mail", async () => {
 		const session = new ThreadRuntime("sesn_agent_mail_resident_replay");
 		session.state.contextManager.appendEntry(

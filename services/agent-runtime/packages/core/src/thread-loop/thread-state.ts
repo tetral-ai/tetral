@@ -538,7 +538,10 @@ export class ThreadProcessor {
 		runtimeInputId: string,
 		reserveRequestOpening = false,
 	): void {
-		if (reserveRequestOpening) {
+		const ownsRequestOpening = this.#requestOpeningSettlements.some(
+			(settlement) => settlement.runtimeInputId === runtimeInputId,
+		);
+		if (reserveRequestOpening && ownsRequestOpening) {
 			this.#requestOpeningInputIds.add(runtimeInputId);
 		} else {
 			this.settleRequestOpening(runtimeInputId);
