@@ -346,10 +346,6 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
-	if err != nil {
-		return "", err
-	}
 	threadContextPrefix, err := loadThreadContextPrefixTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
@@ -502,6 +498,14 @@ func loadThreadContextJSONTx(
 	if err := rows.Close(); err != nil {
 		return "", err
 	}
+	compactionFloor, err := loadContextCompactionEventFloorTx(ctx, tx, scope, messageDescriptors)
+	if err != nil {
+		return "", err
+	}
+	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope, compactionFloor)
+	if err != nil {
+		return "", err
+	}
 	turnFacts, err := loadThreadTurnFactsTx(
 		ctx,
 		tx,
@@ -511,6 +515,7 @@ func loadThreadContextJSONTx(
 		pendingModelRequestIDs,
 		pendingToolUseEventIDs,
 		thread.Status,
+		compactionFloor,
 	)
 	if err != nil {
 		return "", err
@@ -636,38 +641,46 @@ func loadThreadMetadataForContextTx(
 	return thread, nil
 }
 
+const loadOpenDurableTurnIDSQL = `WITH latest_close AS MATERIALIZED (
+		SELECT sequence
+		  FROM session_events
+		 WHERE workspace_id=$1
+		   AND session_id=$2
+		   AND session_thread_id=$3
+		   AND sequence >= $4
+		   AND type IN (
+		     'session.status_idle',
+		     'session.thread_status_idle',
+		     'session.status_terminated',
+		     'session.thread_status_terminated'
+		   )
+		 ORDER BY sequence DESC
+		 LIMIT 1
+	)
+	SELECT event_id
+	  FROM session_events
+	 WHERE workspace_id=$1
+	   AND session_id=$2
+	   AND session_thread_id=$3
+	   AND type IN ('session.status_running', 'session.thread_status_running')
+	   AND sequence >= $4
+	   AND sequence > COALESCE((SELECT sequence FROM latest_close), $4 - 1)
+	 ORDER BY session_events.sequence ASC
+	 LIMIT 1`
+
 func loadOpenDurableTurnIDTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
+	compactionFloor int64,
 ) (*string, error) {
 	var durableTurnID string
 	err := tx.QueryRow(ctx,
-		`WITH latest_close AS (
-			SELECT COALESCE(MAX(sequence), 0) AS sequence
-			  FROM session_events
-			 WHERE workspace_id=$1
-			   AND session_id=$2
-			   AND session_thread_id=$3
-			   AND type IN (
-			     'session.status_idle',
-			     'session.thread_status_idle',
-			     'session.status_terminated',
-			     'session.thread_status_terminated'
-			   )
-		)
-		SELECT event_id
-		  FROM session_events, latest_close
-		 WHERE workspace_id=$1
-		   AND session_id=$2
-		   AND session_thread_id=$3
-		   AND type IN ('session.status_running', 'session.thread_status_running')
-		   AND session_events.sequence > latest_close.sequence
-		 ORDER BY session_events.sequence ASC
-		 LIMIT 1`,
+		loadOpenDurableTurnIDSQL,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
+		compactionFloor,
 	).Scan(&durableTurnID)
 	if dbconnect.IsNoRows(err) {
 		return nil, nil

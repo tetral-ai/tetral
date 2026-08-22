@@ -108,9 +108,8 @@ var bridgeLoadContextTurnEventTypes = []string{
 }
 
 // Provider Messages select their own compacted/retained window. This query is
-// the independent Turn read: every row is reached through a current lifecycle
-// boundary, the exact latest closed lifecycle relation, or a direct
-// Request/Tool identity already selected by an owning durable relation.
+// the independent Turn read: every row is reached through a bounded lifecycle
+// boundary or a direct Request/Tool identity selected by its durable relation.
 const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		SELECT event_id, sequence
 		  FROM session_events
@@ -120,6 +119,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND type IN ('session.status_running', 'session.thread_status_running')
 		   AND $5 <> ''
 		   AND event_id = $5
+		   AND sequence >= $4
 		 ORDER BY sequence DESC
 		 LIMIT 1
 	), current_running AS MATERIALIZED (
@@ -129,6 +129,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND session_id = $2
 		   AND session_thread_id = $3
 		   AND type IN ('session.status_running', 'session.thread_status_running')
+		   AND sequence >= $4
 		   AND sequence >= COALESCE((SELECT sequence FROM turn_root), 9223372036854775807)
 		 ORDER BY sequence DESC
 		 LIMIT 1
@@ -144,6 +145,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		     'session.status_idle', 'session.thread_status_idle',
 		     'session.status_terminated', 'session.thread_status_terminated'
 		   )
+		   AND sequence >= $4
 		   AND sequence < COALESCE((SELECT sequence FROM current_running), 0)
 		 ORDER BY sequence DESC
 		 LIMIT 1
@@ -155,6 +157,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND session_thread_id = $3
 		   AND type IN ('session.status_rescheduled', 'session.thread_status_rescheduled')
 		   AND model_request_id IS NOT NULL
+		   AND sequence >= $4
 		   AND sequence >= COALESCE((SELECT sequence FROM turn_root), 9223372036854775807)
 		 ORDER BY sequence DESC
 		 LIMIT 1
@@ -166,93 +169,67 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND failure.session_id = $2
 		   AND failure.session_thread_id = $3
 		   AND failure.type = 'session.error'
+		   AND failure.sequence >= $4
 		   AND closeout.type IN ('session.status_terminated', 'session.thread_status_terminated')
 		   AND closeout.runtime_write_id IS NOT NULL
 		   AND failure.runtime_write_id = closeout.runtime_write_id || ':error'
-	), closed_checkpoint_close AS MATERIALIZED (
-		SELECT closeout.event_id, closeout.sequence, closeout.runtime_write_id
-		  FROM session_events closeout
-		 WHERE closeout.workspace_id = $1
-		   AND closeout.session_id = $2
-		   AND closeout.session_thread_id = $3
+	), latest_thread_request_start AS MATERIALIZED (
+		SELECT event_id, sequence, model_request_id
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
 		   AND $8 = 'closed_for_runtime'
-		   AND closeout.type IN ('session.status_idle', 'session.thread_status_idle')
-		   AND closeout.runtime_write_id IS NOT NULL
-		   AND closeout.payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'
-		 ORDER BY closeout.sequence DESC
+		   AND type = 'span.model_request_start'
+		   AND model_request_id IS NOT NULL
+		   AND sequence >= $4
+		 ORDER BY sequence DESC
 		 LIMIT 1
-	), closed_checkpoint_previous_close AS MATERIALIZED (
-		SELECT COALESCE(MAX(previous.sequence), 0) AS sequence
-		  FROM closed_checkpoint_close closeout
-		  JOIN session_events previous
-		    ON previous.workspace_id = $1
-		   AND previous.session_id = $2
-		   AND previous.session_thread_id = $3
-		   AND previous.type IN ('session.status_idle', 'session.thread_status_idle')
-		   AND previous.payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'
-		   AND previous.sequence < closeout.sequence
-	), closed_checkpoint_turn_idle AS MATERIALIZED (
-		SELECT idle.event_id, idle.sequence
-		  FROM closed_checkpoint_close closeout
-		  JOIN session_events idle
-		    ON idle.workspace_id = $1
-		   AND idle.session_id = $2
-		   AND idle.session_thread_id = $3
-		   AND idle.type IN ('session.status_idle', 'session.thread_status_idle')
-		   AND idle.payload_json::jsonb #>> '{stop_reason,type}' <> 'closed_for_runtime'
-		   AND idle.sequence > COALESCE((SELECT sequence FROM closed_checkpoint_previous_close), 0)
-		   AND idle.sequence < closeout.sequence
-		 ORDER BY idle.sequence DESC
+	), latest_lifecycle_before_request AS MATERIALIZED (
+		SELECT event_id, sequence, type
+		  FROM session_events
+		 WHERE workspace_id = $1
+		   AND session_id = $2
+		   AND session_thread_id = $3
+		   AND type IN (
+		     'session.status_running', 'session.thread_status_running',
+		     'session.status_rescheduled', 'session.thread_status_rescheduled',
+		     'session.status_idle', 'session.thread_status_idle',
+		     'session.status_terminated', 'session.thread_status_terminated'
+		   )
+		   AND sequence >= $4
+		   AND sequence < COALESCE((SELECT sequence FROM latest_thread_request_start), $4)
+		 ORDER BY sequence DESC
 		 LIMIT 1
-	), closed_checkpoint_run_bound AS MATERIALIZED (
-		SELECT COALESCE(
-		         (SELECT sequence FROM closed_checkpoint_turn_idle),
-		         (SELECT sequence FROM closed_checkpoint_close)
-		       ) AS sequence
-	), closed_checkpoint_running AS MATERIALIZED (
-		SELECT running.event_id, running.sequence
-		  FROM closed_checkpoint_close closeout
-		  JOIN closed_checkpoint_run_bound run_bound ON TRUE
-		  JOIN session_events running
-		    ON running.workspace_id = $1
-		   AND running.session_id = $2
-		   AND running.session_thread_id = $3
-		   AND running.type IN ('session.status_running', 'session.thread_status_running')
-		   AND running.sequence > COALESCE((SELECT sequence FROM closed_checkpoint_previous_close), 0)
-		   AND running.sequence < run_bound.sequence
-		 ORDER BY running.sequence DESC
-		 LIMIT 1
-	), closed_checkpoint_request_start AS MATERIALIZED (
-		SELECT request_start.event_id, request_start.sequence, request_start.model_request_id
-		  FROM closed_checkpoint_close closeout
-		  JOIN closed_checkpoint_run_bound run_bound ON TRUE
-		  JOIN closed_checkpoint_running running ON TRUE
-		  JOIN session_events request_start
-		    ON request_start.workspace_id = $1
-		   AND request_start.session_id = $2
-		   AND request_start.session_thread_id = $3
-		   AND request_start.type = 'span.model_request_start'
-		   AND request_start.model_request_id IS NOT NULL
-		   AND request_start.sequence > running.sequence
-		   AND request_start.sequence < run_bound.sequence
-		   AND request_start.sequence >= $4
-		 ORDER BY request_start.sequence DESC
-		 LIMIT 1
-	), closed_checkpoint_request_end AS MATERIALIZED (
-		SELECT request_end.event_id, request_end.model_request_id
-		  FROM closed_checkpoint_close closeout
-		  JOIN closed_checkpoint_run_bound run_bound ON TRUE
-		  JOIN closed_checkpoint_request_start request_start ON TRUE
+	), selected_thread_running AS MATERIALIZED (
+		SELECT event_id, sequence
+		  FROM latest_lifecycle_before_request
+		 WHERE type IN ('session.status_running', 'session.thread_status_running')
+	), selected_thread_request_end AS MATERIALIZED (
+		SELECT request_end.event_id, request_end.sequence, request_end.model_request_id
+		  FROM latest_thread_request_start request_start
 		  JOIN session_events request_end
 		    ON request_end.workspace_id = $1
 		   AND request_end.session_id = $2
 		   AND request_end.session_thread_id = $3
 		   AND request_end.type = 'span.model_request_end'
 		   AND request_end.model_request_id = request_start.model_request_id
+		   AND request_end.sequence >= $4
 		   AND request_end.sequence > request_start.sequence
-		   AND request_end.sequence < run_bound.sequence
-		 ORDER BY request_end.sequence DESC
+		 ORDER BY request_end.sequence ASC
 		 LIMIT 1
+	), selected_thread_idles AS MATERIALIZED (
+		SELECT idle.event_id, idle.sequence
+		  FROM selected_thread_request_end request_end
+		  JOIN session_events idle
+		    ON idle.workspace_id = $1
+		   AND idle.session_id = $2
+		   AND idle.session_thread_id = $3
+		   AND idle.type IN ('session.status_idle', 'session.thread_status_idle')
+		   AND idle.sequence >= $4
+		   AND idle.sequence > request_end.sequence
+		 ORDER BY idle.sequence ASC
+		 LIMIT 2
 	),
 	open_request AS MATERIALIZED (
 		SELECT request_start.sequence, request_start.model_request_id
@@ -270,6 +247,8 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		        AND request_end.session_thread_id = request_start.session_thread_id
 		        AND request_end.model_request_id = request_start.model_request_id
 		        AND request_end.type = 'span.model_request_end'
+		        AND request_end.sequence >= $4
+		        AND request_end.sequence > request_start.sequence
 		   )
 		 ORDER BY request_start.sequence DESC
 		 LIMIT 1
@@ -297,6 +276,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND session_thread_id = $3
 		   AND type = 'span.model_request_end'
 		   AND model_request_id IS NOT NULL
+		   AND sequence >= $4
 		   AND model_request_id IN (
 		     SELECT model_request_id FROM selected_request_input
 		     UNION SELECT model_request_id FROM open_request
@@ -335,6 +315,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 	 WHERE workspace_id = $1
 	   AND session_id = $2
 	   AND session_thread_id = $3
+	   AND sequence >= $4
 	   AND type IN (
 	     'session.status_running',
 	     'session.thread_status_running',
@@ -360,12 +341,10 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 	     OR event_id IN (SELECT event_id FROM previous_lifecycle)
 	     OR event_id IN (SELECT event_id FROM current_reschedule)
 	     OR event_id IN (SELECT event_id FROM terminal_failure)
-	     OR (event_id IN (SELECT event_id FROM closed_checkpoint_close)
-	         AND EXISTS (SELECT 1 FROM closed_checkpoint_running))
-	     OR event_id IN (SELECT event_id FROM closed_checkpoint_turn_idle)
-	     OR event_id IN (SELECT event_id FROM closed_checkpoint_running)
-	     OR event_id IN (SELECT event_id FROM closed_checkpoint_request_start)
-	     OR event_id IN (SELECT event_id FROM closed_checkpoint_request_end)
+	     OR event_id IN (SELECT event_id FROM latest_thread_request_start)
+	     OR event_id IN (SELECT event_id FROM selected_thread_running)
+	     OR event_id IN (SELECT event_id FROM selected_thread_request_end)
+	     OR event_id IN (SELECT event_id FROM selected_thread_idles)
 	     OR event_id IN (SELECT event_id FROM retained_ends)
 	     OR (type = 'span.model_request_start' AND model_request_id IN (SELECT model_request_id FROM retained_requests))
 	     OR (type IN ('agent.tool_use', 'agent.mcp_tool_use') AND event_id IN (SELECT event_id FROM retained_tools))
@@ -395,14 +374,11 @@ func loadThreadTurnFactsTx(
 	pendingModelRequestIDs []string,
 	pendingToolUseEventIDs []string,
 	threadStatus string,
+	compactionFloor int64,
 ) (bridgeLoadContextTurnFacts, error) {
 	facts := bridgeLoadContextTurnFacts{
 		Events:          make([]bridgeLoadContextTurnEvent, 0),
 		InternalRepairs: make([]bridgeLoadContextRepairFact, 0),
-	}
-	compactionFloor, err := loadContextCompactionEventFloorTx(ctx, tx, scope, messages)
-	if err != nil {
-		return facts, err
 	}
 	durableTurnEventID := ""
 	if durableTurnID != nil {
@@ -464,15 +440,6 @@ func loadThreadTurnFactsTx(
 	}
 	seenRepairKeys := make(map[string]struct{})
 	for _, raw := range rawEvents {
-		if raw.eventType == childInterruptRequestedEventType {
-			include, err := includeChildInterruptTurnFact(raw.payloadJSON)
-			if err != nil {
-				return facts, err
-			}
-			if !include {
-				continue
-			}
-		}
 		event, err := bridgeTurnEventFact(
 			ctx, tx, scope, raw.eventID, raw.eventSequence, raw.eventType, raw.modelRequestID,
 			raw.payloadJSON, raw.projectionJSON, raw.runtimeWriteID,
@@ -542,26 +509,6 @@ func loadContextCompactionEventFloorTx(
 		compactionFloor = sequence
 	}
 	return compactionFloor, nil
-}
-
-// Child-control admission stores its complete durable census as events, but
-// only pending_control is Runtime work. Cold projection validates the closed
-// disposition set before omitting terminal census evidence from the hot turn.
-func includeChildInterruptTurnFact(payloadJSON string) (bool, error) {
-	var payload struct {
-		Disposition string `json:"disposition"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return false, status.Error(codes.FailedPrecondition, "child interrupt disposition is malformed")
-	}
-	switch payload.Disposition {
-	case "pending_control":
-		return true, nil
-	case "already_closed", "preserved_failed", "preserved_terminated":
-		return false, nil
-	default:
-		return false, status.Error(codes.FailedPrecondition, "child interrupt disposition is malformed")
-	}
 }
 
 func bridgeRepairFactFromTurnEvent(

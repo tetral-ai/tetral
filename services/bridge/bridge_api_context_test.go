@@ -139,7 +139,7 @@ func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) 
 	}
 }
 
-func TestLoadContextColdParserKeepsTerminalFailureAboveCompactionFloor(t *testing.T) {
+func TestLoadContextColdParserOmitsTerminalFailureBelowCompactionFloor(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_terminal_context"
@@ -202,8 +202,8 @@ func TestLoadContextColdParserKeepsTerminalFailureAboveCompactionFloor(t *testin
 	}
 	turnEvents := string(turnEventsJSON)
 	if !strings.Contains(turnEvents, "evt_terminal_running") ||
-		!strings.Contains(turnEvents, "evt_terminal_error") ||
-		!strings.Contains(turnEvents, "evt_terminal_close") ||
+		strings.Contains(turnEvents, "evt_terminal_error") ||
+		strings.Contains(turnEvents, "evt_terminal_close") ||
 		strings.Contains(turnEvents, "evt_terminal_old_open") ||
 		!strings.Contains(string(result.PreloadResult), `"ok":true`) {
 		t.Fatalf("terminal cold parse = events %s preload %s", turnEvents, result.PreloadResult)

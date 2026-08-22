@@ -1158,7 +1158,91 @@ func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *te
 		}
 	}
 	if latestFactID != latestStartID {
-		t.Fatalf("latest closed checkpoint rooted Request Start %s; want latest run %s", latestFactID, latestStartID)
+		t.Fatalf("latest closed run rooted Request Start %s; want latest run %s", latestFactID, latestStartID)
+	}
+}
+
+func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "post_compaction_resume")
+	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
+	runtimeProcess := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
+	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID, fixture.runtimeInputID)
+	if execution := runtimeProcess.providerStart(t); execution.ProviderInvocations != 1 {
+		t.Fatalf("pre-compaction Provider invocations = %d; want 1", execution.ProviderInvocations)
+	}
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	runtimeProcess.kill(t)
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(fixture.runtimeDB))
+	store.RuntimeBindingTokenHMACKey = []byte("subagent-opening-composition-key")
+	childScope := bridgeAPIScope(fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
+	var messageBoundary int64
+	var preCompactionStartID string
+	var parentBoundaryEventID string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT COALESCE(MAX(sequence),0) FROM session_messages
+		 WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2),
+		(SELECT event_id FROM session_events
+		 WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'
+		 ORDER BY sequence DESC LIMIT 1),
+		(SELECT parent_boundary_event_id FROM session_thread_context_prefixes
+		 WHERE workspace_id='default' AND session_id=$1 AND child_thread_id=$2)`, fixture.sessionID, fixture.childID).Scan(
+		&messageBoundary, &preCompactionStartID, &parentBoundaryEventID,
+	); err != nil {
+		t.Fatalf("read pre-compaction boundary: %v", err)
+	}
+	compactionRequestID := "mreq_post_compaction_resume"
+	compactionStart := seedBridgeAPIRequestStart(t, store, childScope,
+		"rwrite_post_compaction_start", compactionRequestID, requestKindCompactionSummary, messageBoundary)
+	compactionBoundary := messageBoundary
+	compactionEnd, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: childScope, RuntimeWriteId: "rwrite_post_compaction_end", ModelRequestId: compactionRequestID,
+		FinishReason: "end_turn", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "compacted", ToolUseEventIds: []string{}, RepairEventIds: []string{},
+		},
+		PrefixConsumption: &bridgev1.PrefixConsumptionDraft{
+			ChildThreadId: fixture.childID, ParentBoundaryEventId: parentBoundaryEventID,
+		},
+		CompactionContext:               bridgeTextContextDeltaForTest("opening request completed before this retained summary"),
+		CompactedThroughMessageSequence: &compactionBoundary,
+		CompactionEventPayloadJson:      `{"type":"agent.thread_context_compacted"}`,
+	})
+	if err != nil || compactionEnd.GetCommitted() == nil {
+		t.Fatalf("commit compaction before close = %#v/%v", compactionEnd, err)
+	}
+
+	client := startActorProductionBridge(t, fixture.runtimeDB)
+	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
+		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
+		"evt_close_after_compaction")
+	resumeSourceID := "evt_resume_after_compaction"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
+	resumed := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-post_compaction_resume", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, resumed)
+	compactionStartID := compactionStart.GetCommitted().GetEventId()
+	seenCompactionStart := false
+	seenCompactionEnd := false
+	for _, event := range resumed.TurnFacts.Events {
+		if event.EventID == preCompactionStartID {
+			t.Fatalf("pre-compaction Request became active after cold Resume: %#v", resumed.TurnFacts.Events)
+		}
+		if event.EventID == compactionStartID && event.RequestStart != nil &&
+			event.RequestStart.ContextThroughMessageSequence == messageBoundary {
+			seenCompactionStart = true
+		}
+		if event.RequestEnd != nil && event.RequestEnd.RequestStartEventID == compactionStartID {
+			seenCompactionEnd = true
+		}
+	}
+	if !seenCompactionStart || !seenCompactionEnd || len(resumed.ContextEntries) != 1 || resumed.ContextEntries[0].ContextKind != "compaction" {
+		t.Fatalf("post-compaction cold facts = start:%t end:%t context:%#v facts:%#v",
+			seenCompactionStart, seenCompactionEnd, resumed.ContextEntries, resumed.TurnFacts.Events)
 	}
 }
 

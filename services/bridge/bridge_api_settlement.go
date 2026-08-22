@@ -953,7 +953,7 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		if err != nil {
 			return err
 		}
-		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope(), 0)
 		if err != nil {
 			return err
 		}
@@ -1226,7 +1226,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope(), 0)
 		if err != nil {
 			return err
 		}

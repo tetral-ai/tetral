@@ -1685,7 +1685,7 @@ func finalizeInterruptDeliveryTerminalTx(
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
-	turnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
+	turnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope, 0)
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
