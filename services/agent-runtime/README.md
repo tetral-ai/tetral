@@ -363,8 +363,12 @@ Invariants a replacement must preserve:
   replay receipt carries only the child identity needed by Runtime.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → committed input
-  result. Pod-loss reconciliation hands an accepted input back to the existing
-  queue job or creates one replacement only after exact Runtime custody is lost.
+  result. An opening delivery keeps its Runtime input identity reserved after
+  `CommitInputs` removes it from Reducer acceptance, releasing that private hot
+  reservation only when Request Start commits or typed terminal custody wins.
+  Pod-loss reconciliation returns opening agent mail to its original Queue job;
+  other accepted inputs may create one replacement only after exact Runtime
+  custody is lost.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
 - Completion return rides the same durable wake rail: the child

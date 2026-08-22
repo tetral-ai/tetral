@@ -406,6 +406,13 @@ and active lifecycle facts directly from durable rows.
   connector's credential, reconnect, and list budgets while bounding the
   single-threaded Job Runner sweep to 180 seconds per stalled workspace; it
   abandons the Bridge wait but does not cancel connector work.
+- **Opening agent-mail custody.** An unrelated Session interrupt that wins
+  before opening-input commit returns the exact Inbox and Queue job to queued /
+  pending custody and refunds the lease attempt; it does not cancel the child
+  input. Retry preparation never downgrades committed materialization. The
+  final pre-send fence revalidates the exact live lease and settles a matching
+  durable Request Start before transport. Proven pod loss reuses the opening
+  input identity and original Queue job on both sides of `CommitInputs`.
 - **Conformance.** `job_runner_test.go`, `runtime_delivery_test.go`,
   `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go`,
   `completion_mail_test.go`, `completion_mail_delivery_test.go`,

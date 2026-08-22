@@ -327,6 +327,17 @@ type CancelLeasedRuntimeInputRequest struct {
 	Now            time.Time
 }
 
+// DeferLeasedRuntimeInputRequest identifies one exact live delivery that an
+// active Session interrupt barrier must return to Queue custody without
+// consuming an attempt.
+type DeferLeasedRuntimeInputRequest struct {
+	Lease          ExactLeaseRequest
+	SessionID      string
+	RuntimeInputID string
+	InputKind      string
+	Now            time.Time
+}
+
 // InterruptFenceRequest binds cancellation of message notifications to the
 // exact live interrupt lease that owns the fence.
 type InterruptFenceRequest struct {

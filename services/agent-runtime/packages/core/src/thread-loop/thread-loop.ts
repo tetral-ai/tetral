@@ -1233,9 +1233,6 @@ function runThreadLoopEffect(
 							session.state.addPendingAttachments(
 								declaration.result.pendingAttachments,
 							);
-							session.state.acknowledgeAcceptedInput(
-								acceptedInput.runtimeInputId,
-							);
 							session.state.setProviderOutputSchemaJson(
 								acceptedInput.kind === "approval_review"
 									? acceptedInput.outputSchemaJson
@@ -1250,6 +1247,10 @@ function runThreadLoopEffect(
 								(acceptedInput.kind === "messages" ||
 									acceptedInput.kind === "approval_review" ||
 									acceptedInput.kind === "inter_agent_message");
+							session.state.acknowledgeAcceptedInput(
+								acceptedInput.runtimeInputId,
+								makesRequestReady,
+							);
 							if (makesRequestReady) {
 								session.state.applyThreadTurnFact({
 									fact: "inputs_committed",
@@ -3344,6 +3345,7 @@ function coordinateProviderTurnEffect(
 			session.state.clearAfterCustodyHandoff();
 			return providerTurnInterruptedWithDiscard();
 		}
+		session.state.completeRequestOpening();
 		const requestStartReduction = session.state.applyThreadTurnFact({
 			fact: "request_started",
 			eventId: spanStartAppend.eventId,

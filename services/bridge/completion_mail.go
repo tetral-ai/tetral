@@ -595,7 +595,8 @@ func claimAgentMailInboxDeliveryTx(
 		return err
 	}
 	result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
-		SET event_ids_json=$5,sequence_from=$6,sequence_to=$6,status='delivering',
+		SET event_ids_json=$5,sequence_from=$6,sequence_to=$6,
+		    status=CASE WHEN status='committed' THEN 'committed' ELSE 'delivering' END,
 		    binding_id=$7,binding_generation=$8,target_pod_uid=$9,updated_at=$10
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND runtime_input_id=$4
 		  AND input_kind='agent_mail'
@@ -606,8 +607,7 @@ func claimAgentMailInboxDeliveryTx(
 		    ))
 		    OR (status='delivering' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6
 		        AND binding_id=$7 AND binding_generation=$8 AND target_pod_uid=$9)
-		    OR (status='committed' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6
-		        AND binding_id=$7 AND binding_generation=$8 AND target_pod_uid=$9)
+		    OR (status='committed' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6)
 		  )`,
 		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID,
 		string(eventIDsJSON), job.SequenceFrom, binding.BindingID, binding.BindingGeneration,

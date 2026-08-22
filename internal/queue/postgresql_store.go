@@ -1394,6 +1394,68 @@ func CancelLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, re
 	return true, nil
 }
 
+// DeferLeasedRuntimeInputCustodyTx atomically returns one barrier-blocked
+// delivery to its existing Inbox and Queue owners. This is not a retry: no
+// Runtime execution crossed the CommitInputs barrier, so the lease attempt is
+// refunded and the original job is immediately eligible when ordering permits it.
+func DeferLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, request DeferLeasedRuntimeInputRequest) (bool, error) {
+	if request.Lease.Kind != KindRuntimeInput || request.SessionID == "" || request.RuntimeInputID == "" || request.InputKind == "" {
+		return false, &ValidationError{Message: "complete barrier deferral runtime input identity is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	active, err := AssertExactLeaseTx(ctx, tx, request.Lease)
+	if err != nil || !active {
+		return active, err
+	}
+	var payloadSessionID, payloadRuntimeInputID, payloadInputKind string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json::jsonb ->> 'session_id',
+		        payload_json::jsonb ->> 'runtime_input_id',
+		        payload_json::jsonb ->> 'input_kind'
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID,
+	).Scan(&payloadSessionID, &payloadRuntimeInputID, &payloadInputKind); err != nil {
+		return false, err
+	}
+	if payloadSessionID != request.SessionID || payloadRuntimeInputID != request.RuntimeInputID || payloadInputKind != request.InputKind {
+		return false, &IntegrityError{Message: "barrier deferral Queue payload does not match Inbox custody"}
+	}
+	var inboxRows, queueRows int
+	err = tx.QueryRow(ctx,
+		`WITH deferred_inbox AS (
+		   UPDATE session_runtime_inbox
+		      SET status='queued', binding_id=NULL, binding_generation=NULL,
+		          target_pod_uid=NULL, updated_at=$4
+		    WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		      AND input_kind=$5 AND status IN ('queued','delivering')
+		  RETURNING runtime_input_id
+		), deferred_queue AS (
+		   UPDATE queue_jobs
+		      SET status='pending', available_at=$4, attempt_count=attempt_count-1,
+		          lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		          last_error_kind=NULL, last_error_message=NULL, updated_at=$4
+		    WHERE workspace_id=$1 AND id=$6 AND lease_token=$7
+		      AND status='leased' AND leased_until > clock_timestamp()
+		      AND attempt_count > 0
+		  RETURNING id
+		)
+		SELECT (SELECT count(*) FROM deferred_inbox),
+		       (SELECT count(*) FROM deferred_queue)`,
+		string(request.Lease.WorkspaceID), request.SessionID, request.RuntimeInputID,
+		request.Now.UTC(), request.InputKind, request.Lease.JobID, request.Lease.LeaseToken,
+	).Scan(&inboxRows, &queueRows)
+	if err != nil {
+		return false, err
+	}
+	if inboxRows != 1 || queueRows != 1 {
+		return false, &IntegrityError{Message: "barrier deferral Queue and Inbox custody diverged"}
+	}
+	return true, nil
+}
+
 func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (bool, error) {
 	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
 		return false, err

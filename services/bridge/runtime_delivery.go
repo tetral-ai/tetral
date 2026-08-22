@@ -50,6 +50,15 @@ type RuntimeInterruptDeliveryAuthorityStore interface {
 	InterruptDeliveryAuthority(context.Context, RuntimeJob) (RuntimeInterruptDeliveryAuthority, error)
 }
 
+type RuntimeInputDeliveryAuthorityStore interface {
+	RuntimeInputDeliveryAuthority(context.Context, RuntimeJob) (RuntimeInputDeliveryAuthority, error)
+}
+
+type RuntimeInputDeliveryAuthority struct {
+	Active            bool
+	QueueLeaseSettled bool
+}
+
 type RuntimeInterruptDeliveryAuthority struct {
 	Active            bool
 	QueueLeaseSettled bool
@@ -508,6 +517,23 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 			ErrorMessage: "runtime command request is missing",
 		}, nil
 	}
+	if job.Kind == queue.KindRuntimeInput && job.InputKind == "agent_mail" {
+		authorizer, ok := d.Store.(RuntimeInputDeliveryAuthorityStore)
+		if !ok || authorizer == nil {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_input_authority_unavailable", ErrorMessage: "runtime input delivery authority is unavailable"}, nil
+		}
+		authority, err := authorizer.RuntimeInputDeliveryAuthority(ctx, job)
+		if err != nil {
+			return runtimeDeliveryResultFromPrepareError(err), nil
+		}
+		if !authority.Active {
+			status := RuntimeDeliveryAuthorityLost
+			if authority.QueueLeaseSettled {
+				status = RuntimeDeliveryDuplicate
+			}
+			return RuntimeDeliveryResult{Status: status, QueueLeaseSettled: authority.QueueLeaseSettled}, nil
+		}
+	}
 	result, err := plan.send(ctx, d.Sender)
 	if err != nil {
 		result, deliveryErr := runtimeDeliveryResultFromSendError(err)
@@ -569,6 +595,47 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return finalizer.FinalizeRuntimeCleanup(ctx, job)
 	}
 	return result, nil
+}
+
+// RuntimeInputDeliveryAuthority is the final exact-lease fence immediately
+// before an agent-mail command crosses the Runtime transport boundary.
+func (s *PostgreSQLRuntimeDeliveryStore) RuntimeInputDeliveryAuthority(ctx context.Context, job RuntimeJob) (RuntimeInputDeliveryAuthority, error) {
+	if s == nil || s.Client == nil {
+		return RuntimeInputDeliveryAuthority{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
+	}
+	if job.Kind != queue.KindRuntimeInput || job.InputKind != "agent_mail" || job.WorkspaceID == "" || job.SessionID == "" ||
+		job.RuntimeInputID == "" || job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" {
+		return RuntimeInputDeliveryAuthority{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail delivery authority is incomplete", retryable: false}
+	}
+	workspaceID := workspace.ID(job.WorkspaceID)
+	if job.PartitionKey != queue.FormatSessionPartitionKey(workspaceID, job.SessionID) ||
+		job.DedupeKey != queue.FormatRuntimeInputDedupeKey(workspaceID, job.SessionID, job.RuntimeInputID) {
+		return RuntimeInputDeliveryAuthority{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail delivery authority binding is invalid", retryable: false}
+	}
+	authority := RuntimeInputDeliveryAuthority{}
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.authorize_runtime_input_delivery", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+			WorkspaceID: workspaceID, JobID: job.JobID, LeaseToken: job.LeaseToken,
+			Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+		})
+		if err != nil || !active {
+			return err
+		}
+		replayed, found, err := replayAgentMailDeliveryFinalizationTx(ctx, tx, job)
+		if err != nil {
+			return err
+		}
+		if found {
+			authority.QueueLeaseSettled = replayed.QueueLeaseSettled
+			return nil
+		}
+		authority.Active = true
+		return nil
+	})
+	return authority, err
 }
 
 func runtimeDeliveryResultWithAttemptedBinding(
@@ -1145,7 +1212,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			return nil
 		}
 		if result.Status == RuntimeDeliveryBarrierStale {
-			active, err := queue.CancelLeasedRuntimeInputCustodyTx(ctx, tx, queue.CancelLeasedRuntimeInputRequest{
+			active, err := queue.DeferLeasedRuntimeInputCustodyTx(ctx, tx, queue.DeferLeasedRuntimeInputRequest{
 				Lease: queue.ExactLeaseRequest{
 					WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
 					Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
@@ -1752,6 +1819,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 				result = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
 				found = true
 				return nil
+			}
+		} else if job.InputKind == "agent_mail" {
+			if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+				return err
 			}
 		}
 		var err error
@@ -2409,18 +2480,22 @@ func finalizeOpeningAgentMailFailureTx(
 	if _, _, err := settleRuntimeTerminationTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now); err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='dead_lettered',updated_at=$4
+	inboxResult, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='dead_lettered',updated_at=$4
 		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
-		  AND status IN ('delivering','accepted','committed','cancelled')`,
-		job.WorkspaceID, job.SessionID, job.RuntimeInputID, now); err != nil {
+		  AND status IN ('queued','delivering','accepted','committed')`,
+		job.WorkspaceID, job.SessionID, job.RuntimeInputID, now)
+	if err != nil {
 		return RuntimeDeliveryResult{}, err
+	}
+	if !rowsAffected(inboxResult) {
+		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_terminal_missing", message: "opening input finalization lost Inbox custody", retryable: true}
 	}
 	deadLettered, err := tx.Exec(ctx, `UPDATE queue_jobs
 		SET status='dead_lettered',dead_lettered_at=$4,last_error_kind='runtime_delivery_exhausted',
 		    last_error_message='sub-agent opening input exhausted before execution',
 		    lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,updated_at=$4
 		WHERE workspace_id=$1 AND id=$2 AND kind=$5 AND partition_key=$6 AND dedupe_key=$7
-		  AND ((status='leased' AND lease_token=$3) OR status='cancelled')`,
+		  AND status='leased' AND lease_token=$3 AND leased_until > clock_timestamp()`,
 		job.WorkspaceID, job.JobID, job.LeaseToken, now, job.Kind, job.PartitionKey, job.DedupeKey)
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
@@ -2470,7 +2545,7 @@ func settleAgentMailDeliveryExhaustionTx(
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND runtime_input_id = $3
-		    AND status IN ('queued', 'delivering', 'accepted')`,
+		    AND status IN ('queued', 'delivering', 'accepted', 'committed')`,
 		job.WorkspaceID,
 		job.SessionID,
 		job.RuntimeInputID,
@@ -4344,6 +4419,9 @@ func (e runtimeDeliveryPrepareError) Error() string {
 }
 
 func runtimeDeliveryResultFromPrepareError(err error) RuntimeDeliveryResult {
+	if isSessionInterruptBarrierStaleError(err) {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
+	}
 	var prepareErr runtimeDeliveryPrepareError
 	if errors.As(err, &prepareErr) {
 		return RuntimeDeliveryResult{

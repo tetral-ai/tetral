@@ -379,6 +379,7 @@ export class ThreadProcessor {
 	#toolRoutes: ThreadToolRouteView;
 	#activeInputView: ThreadActiveInputView;
 	#acceptedInputs: RuntimeAcceptedInputState[] = [];
+	#requestOpeningInputIds = new Set<string>();
 	#committingAcceptedInputId: string | undefined;
 	#acceptedInputBlockedUntilRunExit = false;
 
@@ -489,6 +490,9 @@ export class ThreadProcessor {
 		if (existing !== undefined) {
 			return sameAcceptedInput(existing, state) ? "duplicate" : "conflict";
 		}
+		if (this.#requestOpeningInputIds.has(state.runtimeInputId)) {
+			return "duplicate";
+		}
 		this.#acceptedInputs.push(state);
 		this.refreshDecision();
 		return "applied";
@@ -502,7 +506,13 @@ export class ThreadProcessor {
 		return [...this.#acceptedInputs];
 	}
 
-	acknowledgeAcceptedInput(runtimeInputId: string): void {
+	acknowledgeAcceptedInput(
+		runtimeInputId: string,
+		reserveRequestOpening = false,
+	): void {
+		if (reserveRequestOpening) {
+			this.#requestOpeningInputIds.add(runtimeInputId);
+		}
 		if (this.#acceptedInputs[0]?.runtimeInputId === runtimeInputId) {
 			this.#acceptedInputs.shift();
 		} else {
@@ -511,6 +521,10 @@ export class ThreadProcessor {
 			);
 		}
 		this.refreshDecision();
+	}
+
+	completeRequestOpening(): void {
+		this.#requestOpeningInputIds.clear();
 	}
 
 	discardApprovalReview(reviewId: string): void {
@@ -561,6 +575,7 @@ export class ThreadProcessor {
 
 	clearAcceptedInputs(): void {
 		this.#acceptedInputs = [];
+		this.#requestOpeningInputIds.clear();
 		this.#committingAcceptedInputId = undefined;
 		this.refreshDecision();
 	}
@@ -723,9 +738,20 @@ export class ThreadState {
 		return this.#threadProcessor!.acceptedInputSnapshot();
 	}
 
-	acknowledgeAcceptedInput(runtimeInputId: string): void {
+	acknowledgeAcceptedInput(
+		runtimeInputId: string,
+		reserveRequestOpening = false,
+	): void {
 		this.threadTurnReduction();
-		this.#threadProcessor!.acknowledgeAcceptedInput(runtimeInputId);
+		this.#threadProcessor!.acknowledgeAcceptedInput(
+			runtimeInputId,
+			reserveRequestOpening,
+		);
+	}
+
+	completeRequestOpening(): void {
+		this.threadTurnReduction();
+		this.#threadProcessor!.completeRequestOpening();
 	}
 
 	discardQueuedApprovalReview(reviewId: string): void {

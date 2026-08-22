@@ -1992,7 +1992,7 @@ describe("ThreadState", () => {
 		);
 	});
 
-	test("agent-mail delivery identity deduplicates only while its active consumer owns it", () => {
+	test("agent-mail delivery identity remains reserved until Request Start", () => {
 		const state = new ThreadState("sesn_agent_mail_dedup");
 		const mail = {
 			workspaceId: "wksp_agent_mail",
@@ -2013,8 +2013,10 @@ describe("ThreadState", () => {
 		expect(state.enqueueAcceptedInput({ ...mail, bindingGeneration: 2 })).toBe(
 			"conflict",
 		);
-		state.acknowledgeAcceptedInput(mail.runtimeInputId);
+		state.acknowledgeAcceptedInput(mail.runtimeInputId, true);
 		expect(state.peekAcceptedInput()).toBeUndefined();
+		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+		state.completeRequestOpening();
 		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
 		expect(
 			state.enqueueAcceptedInput({ ...mail, deliveryId: "delivery_new" }),
