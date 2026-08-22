@@ -2546,7 +2546,7 @@ func settleAgentMailDeliveryExhaustionTx(
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND runtime_input_id = $3
-		    AND status IN ('queued', 'delivering', 'accepted', 'committed')`,
+		    AND status IN ('queued', 'delivering', 'accepted')`,
 		job.WorkspaceID,
 		job.SessionID,
 		job.RuntimeInputID,
