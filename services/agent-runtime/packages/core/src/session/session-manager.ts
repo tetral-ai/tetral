@@ -1252,7 +1252,7 @@ export function layer(
 						);
 						if (
 							closeout === "unrepairable" &&
-							threadEntry.runtimeThread.state.acceptedInputCount() > 0
+							threadEntry.runtimeThread.state.hasAcceptedInputCustody()
 						) {
 							// No successful input commit can release the accepted fact. Retain the
 							// completed run slot as a loud custody fence until Pod shutdown
@@ -1331,7 +1331,7 @@ export function layer(
 							| undefined = exit.value.closeoutDisposition;
 						if (
 							closeout === undefined &&
-							threadEntry.runtimeThread.state.acceptedInputCount() > 0 &&
+							threadEntry.runtimeThread.state.hasAcceptedInputCustody() &&
 							exit.value.releaseSession?.reason !== "terminated"
 						) {
 							closeout = yield* settleFailedRunCloseout(
@@ -2313,7 +2313,7 @@ export function layer(
 								if (
 									threadEntry.installationState !== "ready" ||
 									threadEntry.runSlot !== undefined ||
-									threadEntry.runtimeThread.state.acceptedInputCount() > 0 ||
+									threadEntry.runtimeThread.state.hasAcceptedInputCustody() ||
 									threadEntry.commandChannel.busy()
 								) {
 									return {

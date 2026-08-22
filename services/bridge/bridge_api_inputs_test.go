@@ -557,17 +557,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	if plan.AcceptAgentMail.GetContent() != content || plan.AcceptAgentMail.GetDeliveryId() != deliveryID {
 		t.Fatalf("prepared inter-agent command = %#v; want exact stored mail content and delivery identity", plan.AcceptAgentMail)
 	}
-	if _, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, plan.AttemptedBinding); err != nil {
-		t.Fatalf("MarkRuntimeInputAccepted inter-agent delivery: %v", err)
-	}
-	if acknowledged, err := queueStore.Ack(context.Background(), queue.AckRequest{
-		WorkspaceID: workspace.ID("default"),
-		JobID:       leased[0].ID,
-		LeaseToken:  leased[0].LeaseToken,
-		Now:         now.Add(3 * time.Second),
-	}); err != nil || !acknowledged {
-		t.Fatalf("ACK resolved inter-agent wake = %v/%v; want true/nil", acknowledged, err)
-	}
 	request := &bridgev1.CommitInputsRequest{
 		Scope: childScope, RuntimeInputId: runtimeInputID,
 	}
@@ -585,6 +574,29 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}
 	if replay.GetCommitted() == nil {
 		t.Fatalf("inter-agent replay outcome = %#v; want committed", replay)
+	}
+	var committedInbox, leasedQueue string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2)`,
+		runtimeInputID, leased[0].ID).Scan(&committedInbox, &leasedQueue); err != nil {
+		t.Fatalf("read materialized inter-agent custody: %v", err)
+	}
+	if committedInbox != "committed" || leasedQueue != queue.StatusLeased {
+		t.Fatalf("materialized inter-agent custody = Inbox:%s Queue:%s; want committed/leased", committedInbox, leasedQueue)
+	}
+	messageBoundary := int64(1)
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: childScope, RuntimeWriteId: "rwrite_bridge_inter_agent_start",
+		ModelRequestId: "mreq_bridge_inter_agent_start", EventType: "span.model_request_start",
+		PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"mreq_bridge_inter_agent_start"}`,
+		ContextThroughMessageSequence: &messageBoundary, RequestKind: requestKindAgentProviderRequest,
+	}); err != nil {
+		t.Fatalf("commit inter-agent Request Start witness: %v", err)
+	}
+	settled, found, err := deliveryStore.ReplayRuntimeDeliveryFinalization(context.Background(), job)
+	if err != nil || !found || !settled.QueueLeaseSettled {
+		t.Fatalf("settle inter-agent execution custody = %#v/%t/%v", settled, found, err)
 	}
 	loadResponse, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope: childScope,

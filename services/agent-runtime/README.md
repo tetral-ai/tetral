@@ -90,7 +90,7 @@ actions around the six states rather than extra top-level states.
 
 | Loop state | Owner | Durable boundary |
 | --- | --- | --- |
-| `idle` | ThreadRun owner fiber | `CommitInputs` ACK makes a request eligible |
+| `idle` | ThreadRun owner fiber | `CommitInputs` installs pending context; Request Start witnesses opening-input execution |
 | `ready_to_request` | ThreadRun owner fiber | pure hot decision point |
 | `request_open` | provider-request scope | Tool Use ACKs and then `WriteRequestEnd` ACK |
 | `request_sealed` | ThreadRun owner fiber | typed seal reconciliation |
@@ -367,9 +367,10 @@ Invariants a replacement must preserve:
   `CommitInputs` removes it from Reducer acceptance, releasing that private hot
   reservation and the joined Runtime command reply only when Request Start
   commits or typed terminal custody wins.
-  Pod-loss reconciliation returns opening agent mail to its original Queue job;
-  other accepted inputs may create one replacement only after exact Runtime
-  custody is lost.
+  Pod-loss reconciliation cold-loads committed opening context without
+  replaying the mail payload; Bridge retains the original Queue lease until it
+  observes Request Start or typed terminal custody. Other accepted inputs may
+  create one replacement only after exact Runtime custody is lost.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
 - Completion return rides the same durable wake rail: the child

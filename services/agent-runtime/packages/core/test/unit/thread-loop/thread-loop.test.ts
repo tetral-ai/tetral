@@ -2021,16 +2021,86 @@ describe("ThreadState", () => {
 				settled = true;
 			});
 		expect(state.peekAcceptedInput()).toBeUndefined();
+		expect(state.hasAcceptedInputCustody()).toBe(true);
 		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
 		await Promise.resolve();
 		expect(settled).toBe(false);
+		state.clear();
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
 		state.completeRequestOpening();
 		await requestOpeningSettled;
 		expect(settled).toBe(true);
+		expect(state.hasAcceptedInputCustody()).toBe(false);
 		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
 		expect(
 			state.enqueueAcceptedInput({ ...mail, deliveryId: "delivery_new" }),
 		).toBe("conflict");
+	});
+
+	test("does not reopen a request for an already resident committed mail", async () => {
+		const session = new ThreadRuntime("sesn_agent_mail_resident_replay");
+		session.state.contextManager.appendEntry(
+			userMessage("msg_agent_mail_resident", 1, "already resident"),
+		);
+		session.state.markPersistentContextLoaded();
+		session.state.installThreadTurn(
+			{
+				pendingInputContextSequences: [],
+				idleCloseout: {
+					eventId: "sevt_agent_mail_resident_idle",
+					stopReason: "end_turn",
+				},
+			},
+			{ routes: [] },
+		);
+		const mail = {
+			workspaceId: "wksp_agent_mail_resident_replay",
+			sessionId: "sesn_agent_mail_resident_replay",
+			sessionThreadId: "thrd_agent_mail_resident_replay",
+			bindingId: "bind_agent_mail_resident_replay",
+			bindingGeneration: 1,
+			targetPodUid: "pod_agent_mail_resident_replay",
+			runtimeInputId: "agent_mail:delivery_resident_replay",
+			kind: "inter_agent_message",
+			deliveryId: "delivery_resident_replay",
+			content: "already resident",
+		} satisfies RuntimeAcceptedInputState;
+		expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
+		const loader = new QueuedContextLoader(
+			[],
+			[],
+			[
+				{
+					type: "committed",
+					assignedContextSequences: [1],
+					pendingAttachments: [],
+					interruptToolResults: [],
+				},
+			],
+		);
+		const requests: LLMRequest[] = [];
+
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						installLoaderState: false,
+						onStream: (request) => requests.push(request),
+					}),
+				),
+			),
+		);
+
+		expect(result).toMatchObject({ type: "completed" });
+		expect(requests).toEqual([]);
+		expect(session.state.hasAcceptedInputCustody()).toBe(false);
 	});
 
 	test("interrupt fence preserves queued stamped completion mail", () => {

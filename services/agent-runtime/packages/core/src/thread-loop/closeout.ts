@@ -362,7 +362,7 @@ export async function closeFailedRunDurably(
 		// legal same-Pod release boundary. FinishIdle cannot disposition Inbox or
 		// Queue custody, so failed-run recovery reuses the open durable turn and
 		// the existing termination transaction until its typed result lands.
-		if (session.state.acceptedInputCount() > 0) {
+		if (session.state.hasAcceptedInputCustody()) {
 			const durableTurnId = closeout.durableTurnId;
 			if (durableTurnId === undefined) {
 				const checkpoint = session.state.threadTurnReduction().checkpoint;

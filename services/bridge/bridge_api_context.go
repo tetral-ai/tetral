@@ -83,9 +83,27 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 		ref.GetPartitionKey() != queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()) {
 		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
 	}
+	var jobKind, payloadJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT kind, payload_json
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+		    AND partition_key=$4 AND dedupe_key=$5 AND status='leased'
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), ref.GetJobId(), ref.GetLeaseToken(),
+		ref.GetPartitionKey(), ref.GetDedupeKey(),
+	).Scan(&jobKind, &payloadJSON); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+		}
+		return err
+	}
+	if jobKind != queue.KindRuntimeRecovery && jobKind != queue.KindRuntimeInput {
+		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
 	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
 		WorkspaceID: workspace.ID(scope.GetWorkspaceId()),
-		JobID:       ref.GetJobId(), LeaseToken: ref.GetLeaseToken(), Kind: queue.KindRuntimeRecovery,
+		JobID:       ref.GetJobId(), LeaseToken: ref.GetLeaseToken(), Kind: jobKind,
 		PartitionKey: ref.GetPartitionKey(), DedupeKey: ref.GetDedupeKey(),
 	})
 	if err != nil {
@@ -94,19 +112,8 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 	if !live {
 		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
 	}
-	var payloadJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT payload_json
-		   FROM queue_jobs
-		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
-		    AND kind=$4 AND partition_key=$5 AND dedupe_key=$6 AND status='leased'`,
-		scope.GetWorkspaceId(), ref.GetJobId(), ref.GetLeaseToken(), queue.KindRuntimeRecovery,
-		ref.GetPartitionKey(), ref.GetDedupeKey(),
-	).Scan(&payloadJSON); err != nil {
-		if dbconnect.IsNoRows(err) {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
-		}
-		return err
+	if jobKind == queue.KindRuntimeInput {
+		return verifyCommittedAgentMailRecoveryAuthorityTx(ctx, tx, scope, ref, payloadJSON)
 	}
 	var payload struct {
 		SessionID       string `json:"session_id"`
@@ -117,6 +124,55 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 		payload.SessionThreadID != scope.GetSessionThreadId() || payload.SourceEventID == "" ||
 		ref.GetDedupeKey() != queue.FormatRuntimeRecoveryDedupeKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), payload.SourceEventID) {
 		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
+	return nil
+}
+
+func verifyCommittedAgentMailRecoveryAuthorityTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	ref *bridgev1.RecoveryLeaseRef,
+	payloadJSON string,
+) error {
+	var payload struct {
+		WorkspaceID     string   `json:"workspace_id"`
+		SessionID       string   `json:"session_id"`
+		SessionThreadID string   `json:"session_thread_id"`
+		RuntimeInputID  string   `json:"runtime_input_id"`
+		InputKind       string   `json:"input_kind"`
+		EventIDs        []string `json:"event_ids"`
+		SequenceFrom    int64    `json:"sequence_from"`
+		SequenceTo      int64    `json:"sequence_to"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil ||
+		payload.WorkspaceID != scope.GetWorkspaceId() || payload.SessionID != scope.GetSessionId() ||
+		payload.SessionThreadID != scope.GetSessionThreadId() || payload.RuntimeInputID == "" ||
+		payload.InputKind != "agent_mail" || len(payload.EventIDs) != 0 ||
+		payload.SequenceFrom != 0 || payload.SequenceTo != 0 ||
+		ref.GetDedupeKey() != queue.FormatRuntimeInputDedupeKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), payload.RuntimeInputID) {
+		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
+	job := RuntimeJob{
+		JobID: ref.GetJobId(), LeaseToken: ref.GetLeaseToken(), Kind: queue.KindRuntimeInput,
+		PartitionKey: ref.GetPartitionKey(), DedupeKey: ref.GetDedupeKey(),
+		WorkspaceID: payload.WorkspaceID, SessionID: payload.SessionID,
+		SessionThreadID: payload.SessionThreadID, RuntimeInputID: payload.RuntimeInputID,
+		InputKind: payload.InputKind,
+	}
+	inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
+	if err != nil {
+		return err
+	}
+	if inbox.status != "committed" {
+		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+	}
+	witnessed, err := agentMailRequestStartWitnessTx(ctx, tx, job, inbox)
+	if err != nil {
+		return err
+	}
+	if witnessed {
+		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
 	}
 	return nil
 }

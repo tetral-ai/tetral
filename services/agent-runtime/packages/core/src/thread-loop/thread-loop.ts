@@ -1241,8 +1241,7 @@ function runThreadLoopEffect(
 							const makesRequestReady =
 								(contextEntries.length > 0 ||
 									declaration.result.pendingAttachments.length > 0) &&
-								(declaration.result.type === "committed" ||
-									newlyResidentContextEntries.length > 0 ||
+								(newlyResidentContextEntries.length > 0 ||
 									resumesPendingInput) &&
 								(acceptedInput.kind === "messages" ||
 									acceptedInput.kind === "approval_review" ||

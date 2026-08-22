@@ -23,6 +23,7 @@ import (
 	internalgrpc "github.com/tetral-ai/tetral/internal/internalgrpc"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
+	"github.com/tetral-ai/tetral/internal/pollbackoff"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -116,7 +117,10 @@ type RuntimeRecoveryCommandSender interface {
 }
 
 const (
-	initialMCPManifestListTimeout = 180 * time.Second
+	initialMCPManifestListTimeout       = 180 * time.Second
+	runtimeInputExecutionWitnessTimeout = 30 * time.Second
+	runtimeInputExecutionWitnessPollMin = 25 * time.Millisecond
+	runtimeInputExecutionWitnessPollMax = 250 * time.Millisecond
 	// The production closeout proof measures command admission, Tool Fiber
 	// cancellation/join, durable-operation drain, Tool Result and Request End
 	// persistence, and receipt return together. Thirty seconds is the one
@@ -573,6 +577,14 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		}
 		return replayed, nil
 	}
+	if job.Kind == queue.KindRuntimeInput && job.InputKind == "agent_mail" &&
+		(result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
+		replayed, waitErr := d.awaitAgentMailExecutionWitness(ctx, job)
+		if waitErr != nil {
+			return runtimeDeliveryResultWithAttemptedBinding(runtimeDeliveryResultFromPrepareError(waitErr), plan.AttemptedBinding), nil
+		}
+		return replayed, nil
+	}
 	if job.Kind == queue.KindRuntimeInput && (result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
 		queueLeaseSettled, err := d.Store.MarkRuntimeInputAccepted(ctx, job, plan.AttemptedBinding)
 		if err != nil {
@@ -595,6 +607,37 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return finalizer.FinalizeRuntimeCleanup(ctx, job)
 	}
 	return result, nil
+}
+
+func (d RuntimePodDirectDeliverer) awaitAgentMailExecutionWitness(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	replayer, ok := d.Store.(RuntimeDeliveryFinalizationReplayer)
+	if !ok || replayer == nil {
+		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "runtime_input_execution_witness_unavailable", message: "runtime input execution witness is unavailable", retryable: true}
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, runtimeInputExecutionWitnessTimeout)
+	defer cancel()
+	backoff := pollbackoff.New(runtimeInputExecutionWitnessPollMin, runtimeInputExecutionWitnessPollMax)
+	for {
+		replayed, found, err := replayer.ReplayRuntimeDeliveryFinalization(waitCtx, job)
+		if err != nil {
+			return RuntimeDeliveryResult{}, err
+		}
+		if found {
+			return replayed, nil
+		}
+		timer := time.NewTimer(backoff.Next(false))
+		select {
+		case <-waitCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "runtime_input_execution_pending", message: "runtime input execution witness is not committed", retryable: true}
+		case <-timer.C:
+		}
+	}
 }
 
 // RuntimeInputDeliveryAuthority is the final exact-lease fence immediately
@@ -1002,11 +1045,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 	if job.Kind != queue.KindRuntimeInput {
 		return false, nil
 	}
+	if job.InputKind == "agent_mail" {
+		return false, runtimeDeliveryPrepareError{kind: "runtime_input_execution_witness_required", message: "agent mail requires a durable execution witness", retryable: true}
+	}
 	if s == nil || s.Client == nil {
 		return false, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
 	if job.WorkspaceID == "" || job.SessionID == "" || job.RuntimeInputID == "" ||
-		(job.InputKind == "agent_mail" && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) ||
 		attempt.BindingID == "" || attempt.Generation <= 0 || attempt.TargetPodUID == "" {
 		return false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime job identity is incomplete", retryable: false}
 	}
@@ -1018,18 +1063,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.mark_runtime_input_accepted", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
-		}
-		if job.InputKind == "agent_mail" {
-			active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
-				WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
-				Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
-			})
-			if err != nil {
-				return err
-			}
-			if !active {
-				return runtimeDeliveryPrepareError{kind: "runtime_queue_lease_stale", message: "runtime input queue lease is stale", retryable: true}
-			}
 		}
 		if job.InputKind == "task_notification" {
 			closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, job.WorkspaceID, job.SessionID, job.SessionThreadID)
@@ -1048,7 +1081,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_inbox
 			    SET status = CASE
-						WHEN input_kind = 'agent_mail' OR status <> 'committed' THEN 'accepted'
+						WHEN status <> 'committed' THEN 'accepted'
 			            ELSE status
 			        END,
 			        updated_at = $4
@@ -1825,6 +1858,18 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 			if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 				return err
 			}
+			active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+				WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+				Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+			})
+			if err != nil {
+				return err
+			}
+			if !active {
+				result = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+				found = true
+				return nil
+			}
 		}
 		var err error
 		result, found, err = replayRuntimeDeliveryFinalizationTx(ctx, tx, job)
@@ -2175,6 +2220,10 @@ func validateAgentMailFinalizationIdentityTx(ctx context.Context, tx *dbconnect.
 	if deliveryID == "" || deliveryID == job.RuntimeInputID {
 		return invalidRuntimeFinalizationIdentity("agent mail runtime input id is invalid")
 	}
+	if inbox.status == "committed" {
+		_, err := committedAgentMailSourceEventTx(ctx, tx, job, inbox)
+		return err
+	}
 	envelope, err := loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID, deliveryID)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
@@ -2207,6 +2256,44 @@ func validateAgentMailFinalizationIdentityTx(ctx context.Context, tx *dbconnect.
 		return invalidRuntimeFinalizationIdentity("agent mail received event conflicts with durable envelope")
 	}
 	return err
+}
+
+func committedAgentMailSourceEventTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	inbox lockedRuntimeInboxFinalization,
+) (string, error) {
+	deliveryID := strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")
+	if deliveryID == "" || deliveryID == job.RuntimeInputID || len(inbox.eventIDs) != 1 ||
+		!inbox.sequenceFrom.Valid || !inbox.sequenceTo.Valid || inbox.sequenceFrom.Int64 != inbox.sequenceTo.Int64 {
+		return "", invalidRuntimeFinalizationIdentity("committed agent mail identity is invalid")
+	}
+	sourceEventID := inbox.eventIDs[0]
+	var eventSequence, messageSequence int64
+	err := tx.QueryRow(ctx, `SELECT event.sequence, message.sequence
+		FROM session_events event
+		JOIN session_messages message
+		  ON message.workspace_id=event.workspace_id
+		 AND message.session_id=event.session_id
+		 AND message.session_thread_id=event.session_thread_id
+		 AND message.source_event_id=event.event_id
+		WHERE event.workspace_id=$1 AND event.session_id=$2 AND event.session_thread_id=$3
+		  AND event.event_id=$4 AND event.type='agent.thread_message_received'
+		  AND event.payload_json::jsonb ->> 'delivery_id'=$5
+		FOR UPDATE OF event, message`,
+		job.WorkspaceID, job.SessionID, job.SessionThreadID, sourceEventID, deliveryID,
+	).Scan(&eventSequence, &messageSequence)
+	if dbconnect.IsNoRows(err) {
+		return "", invalidRuntimeFinalizationIdentity("committed agent mail Message relation is missing")
+	}
+	if err != nil {
+		return "", err
+	}
+	if eventSequence != inbox.sequenceFrom.Int64 || messageSequence <= 0 {
+		return "", invalidRuntimeFinalizationIdentity("committed agent mail relation conflicts with Inbox custody")
+	}
+	return sourceEventID, nil
 }
 
 func validateTaskNotificationFinalizationIdentityTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) error {
@@ -3649,6 +3736,54 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 	if !active {
 		return RuntimeCommandPlan{StaleAccepted: true, DeliveryAuthorityLost: true}, nil
 	}
+	var inboxStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND runtime_input_id=$4 AND input_kind='agent_mail'
+		FOR UPDATE`, job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID).Scan(&inboxStatus); dbconnect.IsNoRows(err) {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_missing", message: "agent mail has no producer custody", retryable: false}
+	} else if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if inboxStatus == "committed" {
+		inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
+		if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		settled, err := settleAgentMailExecutionCustodyTx(ctx, tx, job, inbox, now)
+		if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		if settled {
+			return RuntimeCommandPlan{SettledAccepted: true, QueueLeaseSettled: true}, nil
+		}
+		sourceEventID, err := committedAgentMailSourceEventTx(ctx, tx, job, inbox)
+		if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		binding, err := s.resolveRuntimeTarget(ctx, tx, job)
+		if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		return RuntimeCommandPlan{
+			Target: RuntimePodTarget{
+				Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID,
+				PodIP: binding.PodIP, Port: port,
+			},
+			AttemptedBinding: RuntimeAttemptedBinding{
+				BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID,
+			},
+			RecoverThread: &agentruntimev1.RecoverThreadRequest{
+				WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
+				BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
+				SourceEventId: sourceEventID,
+				RecoveryLeaseRef: &agentruntimev1.RecoveryLeaseRef{
+					JobId: job.JobID, LeaseToken: job.LeaseToken,
+					PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+				},
+			},
+		}, nil
+	}
 	binding, err := s.resolveRuntimeTarget(ctx, tx, job)
 	if err != nil {
 		return RuntimeCommandPlan{}, err
@@ -4243,7 +4378,8 @@ func allRuntimeInputEventsProcessedTx(ctx context.Context, tx *dbconnect.Tx, job
 //	status         meaning                                writer
 //	queued         source fact and Queue custody committed  input producer
 //	delivering     existing custody bound before send       this claim
-//	accepted       pod acknowledged the command             MarkRuntimeInputAccepted
+//	accepted       execution custody durably witnessed       MarkRuntimeInputAccepted,
+//	                                                          agent-mail Request Start settlement
 //	committed      inputs durably committed                 CommitInputs, the
 //	                                                         task_notification commit
 //	                                                         (CommitTaskNotificationResult)

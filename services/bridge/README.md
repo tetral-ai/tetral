@@ -410,9 +410,13 @@ and active lifecycle facts directly from durable rows.
   before opening-input commit returns the exact Inbox and Queue job to queued /
   pending custody and refunds the lease attempt; it does not cancel the child
   input. Retry preparation never downgrades committed materialization. The
-  final pre-send fence revalidates the exact live lease and settles a matching
-  durable Request Start before transport. Proven pod loss reuses the opening
-  input identity and original Queue job on both sides of `CommitInputs`.
+  final pre-send fence revalidates the exact live lease and settles an existing
+  durable Request Start before transport. A committed opening without that
+  witness uses payload-free `RecoverThread`; its original Queue lease remains
+  heartbeated until the matching Request Start or typed terminal settlement
+  atomically closes Inbox and Queue custody. The recovery response itself is
+  not ACK authority. Proven pod loss reuses the opening input identity and
+  original Queue job on both sides of `CommitInputs`.
 - **Conformance.** `job_runner_test.go`, `runtime_delivery_test.go`,
   `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go`,
   `completion_mail_test.go`, `completion_mail_delivery_test.go`,

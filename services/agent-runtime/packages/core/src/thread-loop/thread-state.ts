@@ -606,6 +606,12 @@ export class ThreadProcessor {
 		return this.#acceptedInputs.length;
 	}
 
+	hasAcceptedInputCustody(): boolean {
+		return (
+			this.#acceptedInputs.length > 0 || this.#requestOpeningInputIds.size > 0
+		);
+	}
+
 	clearAcceptedInputs(): void {
 		for (const settlement of this.#requestOpeningSettlements) {
 			settlement.resolve();
@@ -834,6 +840,11 @@ export class ThreadState {
 	acceptedInputCount(): number {
 		this.threadTurnReduction();
 		return this.#threadProcessor!.acceptedInputCount();
+	}
+
+	hasAcceptedInputCustody(): boolean {
+		this.threadTurnReduction();
+		return this.#threadProcessor!.hasAcceptedInputCustody();
 	}
 
 	resolveToolConfirmation(
@@ -1264,7 +1275,7 @@ export class ThreadState {
 		// Generic failure cleanup cannot erase an accepted Runtime input. The
 		// Session owner must first land an exact stale/close/termination result;
 		// only that durable custody handoff may use clearAfterCustodyHandoff.
-		if (this.acceptedInputCount() > 0) {
+		if (this.hasAcceptedInputCustody()) {
 			return;
 		}
 		const activeLifecycle = this.#threadProcessor;

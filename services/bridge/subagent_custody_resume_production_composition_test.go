@@ -638,25 +638,84 @@ func TestSubagentOpeningInputPodLossAfterCommitColdStartsOriginalCustodyOnce(t *
 
 	const replacementPodUID = "pod_open_pod_loss_after_commit_replacement"
 	seedBridgeAPIRuntimeBinding(t, fixture.admin, "default", fixture.sessionID, fixture.bindingID, 2, replacementPodUID)
+	replacementBridgeStore := &requestStartBarrierBridgeStore{
+		BridgeAPIStore: baseBridge,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	replacementBridgeAddress, stopReplacementBridge := serveAttachmentCompositionBridge(t, replacementBridgeStore)
+	defer stopReplacementBridge()
 	replacementRuntime := startAttachmentRecoveryRuntime(
-		t, bridgeAddress, "complete", fixture.sessionID, fixture.childID,
+		t, replacementBridgeAddress, "complete", fixture.sessionID, fixture.childID,
 		fixture.bindingID, 2, replacementPodUID,
 	)
-	lostStartResponse := &lostResponseAfterRequestStartSender{
-		RuntimeCommandSender: NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}),
-		admin:                fixture.admin, sessionID: fixture.sessionID, childID: fixture.childID,
+	countedSender := &countingAgentMailSender{RuntimeCommandSender: NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	recoverySender := &recoveryResponseObservingSender{
+		RuntimeCommandSender: countedSender,
+		responded:            make(chan *agentruntimev1.RecoverThreadRequest, 1),
 	}
 	replacementRunner := newSubagentRuntimeQueueRunner(
 		t, fixture.runtimeDB, fixture.admin, replacementRuntime.port, fixture.sessionID, replacementPodUID,
-		nil, lostStartResponse,
+		nil, recoverySender,
 	)
-	if active, err := replacementRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("drop post-Commit replacement response after Request Start = active:%t err:%v", active, err)
+	replacementRunner.Config.LeaseDuration = time.Second
+	replacementRunner.Config.HeartbeatInterval = 100 * time.Millisecond
+	type replacementResult struct {
+		active bool
+		err    error
+	}
+	replacementFinished := make(chan replacementResult, 1)
+	go func() {
+		active, runErr := replacementRunner.RunOnceWithActivity(context.Background())
+		replacementFinished <- replacementResult{active: active, err: runErr}
+	}()
+	select {
+	case <-replacementBridgeStore.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("replacement Runtime did not reach the Request Start persistence boundary")
+	}
+	var recoveryRequest *agentruntimev1.RecoverThreadRequest
+	select {
+	case recoveryRequest = <-recoverySender.responded:
+	case <-time.After(10 * time.Second):
+		t.Fatal("payload-free RecoverThread did not return before Request Start committed")
+	}
+	var liveLeaseToken string
+	var leaseBefore, leaseAfter time.Time
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT leased_until FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start')`,
+		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID,
+	).Scan(&inboxStatus, &queueStatus, &liveLeaseToken, &leaseBefore, &starts); err != nil {
+		t.Fatalf("read recovery response custody: %v", err)
+	}
+	if inboxStatus != "committed" || queueStatus != queue.StatusLeased || starts != 0 ||
+		recoveryRequest.GetSourceEventId() == "" || recoveryRequest.GetRecoveryLeaseRef().GetJobId() != fixture.jobID ||
+		recoveryRequest.GetRecoveryLeaseRef().GetLeaseToken() != liveLeaseToken {
+		t.Fatalf("recovery response custody = Inbox:%s Queue:%s starts:%d request:%#v", inboxStatus, queueStatus, starts, recoveryRequest)
+	}
+	time.Sleep(250 * time.Millisecond)
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT leased_until FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1 AND status='leased' AND lease_token=$2`, fixture.jobID, liveLeaseToken).Scan(&leaseAfter); err != nil {
+		t.Fatalf("read heartbeated recovery lease: %v", err)
+	}
+	if !leaseAfter.After(leaseBefore) {
+		t.Fatalf("recovery lease heartbeat did not advance: before=%s after=%s", leaseBefore, leaseAfter)
+	}
+	close(replacementBridgeStore.release)
+	select {
+	case result := <-replacementFinished:
+		if result.err != nil || !result.active {
+			t.Fatalf("recover post-Commit opening input = active:%t err:%v", result.active, result.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("replacement Queue owner did not settle after Request Start")
 	}
 	started := replacementRuntime.providerStart(t)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
-	waitForQueueJobAvailable(t, fixture.admin, fixture.jobID)
-	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, replacementRuntime.port, fixture.sessionID, replacementPodUID)
 	replacementRuntime.kill(t)
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
@@ -667,9 +726,133 @@ func TestSubagentOpeningInputPodLossAfterCommitColdStartsOriginalCustodyOnce(t *
 	).Scan(&inboxStatus, &queueStatus, &messages, &starts); err != nil {
 		t.Fatalf("read post-Commit replacement convergence: %v", err)
 	}
-	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
-		t.Fatalf("post-Commit replacement convergence = Inbox:%s Queue:%s Messages:%d starts:%d providers:%d",
-			inboxStatus, queueStatus, messages, starts, started.ProviderInvocations)
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || messages != 1 || starts != 1 ||
+		started.ProviderInvocations != 1 || countedSender.agentMailCalls != 0 || countedSender.recoveryCalls != 1 {
+		t.Fatalf("post-Commit replacement convergence = Inbox:%s Queue:%s Messages:%d starts:%d providers:%d mail:%d recovery:%d",
+			inboxStatus, queueStatus, messages, starts, started.ProviderInvocations, countedSender.agentMailCalls, countedSender.recoveryCalls)
+	}
+}
+
+func TestSubagentOpeningRecoveryLeaseTakeoverBeforeRequestStartFencesOldWorker(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "recovery_lease_takeover_before_start")
+	client := dbconnect.NewClientForTesting(fixture.runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "opening-recovery-stale", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != fixture.jobID {
+		t.Fatalf("lease opening recovery custody = %#v/%v", leased, err)
+	}
+	staleJob, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatalf("decode stale opening recovery job: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: fixture.podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	initialPlan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), staleJob)
+	if err != nil || initialPlan.AcceptAgentMail == nil {
+		t.Fatalf("prepare initial opening delivery = %#v/%v", initialPlan, err)
+	}
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("opening-recovery-takeover-key")
+	if committed, err := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: bridgeAPIScope(fixture.sessionID, fixture.childID, initialPlan.AttemptedBinding.BindingID,
+			initialPlan.AttemptedBinding.Generation, initialPlan.AttemptedBinding.TargetPodUID),
+		RuntimeInputId: fixture.runtimeInputID,
+	}); err != nil || committed.GetCommitted() == nil {
+		t.Fatalf("materialize opening recovery input = %#v/%v", committed, err)
+	}
+	baseSender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	responseSender := &recoveryResponseObservingSender{
+		RuntimeCommandSender: baseSender,
+		responded:            make(chan *agentruntimev1.RecoverThreadRequest, 1),
+	}
+	type deliveryResult struct {
+		result RuntimeDeliveryResult
+		err    error
+	}
+	staleFinished := make(chan deliveryResult, 1)
+	go func() {
+		result, deliverErr := (RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseSender}).DeliverRuntimeJob(context.Background(), staleJob)
+		staleFinished <- deliveryResult{result: result, err: deliverErr}
+	}()
+	select {
+	case request := <-responseSender.responded:
+		if request.GetRecoveryLeaseRef().GetLeaseToken() != staleJob.LeaseToken || request.GetSourceEventId() == "" {
+			t.Fatalf("stale recovery request = %#v", request)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stale recovery worker did not receive a payload-free recovery response")
+	}
+	var inboxStatus, queueStatus string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2)`,
+		fixture.runtimeInputID, fixture.jobID).Scan(&inboxStatus, &queueStatus); err != nil {
+		t.Fatalf("read pre-takeover recovery custody: %v", err)
+	}
+	if inboxStatus != "committed" || queueStatus != queue.StatusLeased {
+		t.Fatalf("pre-takeover recovery custody = Inbox:%s Queue:%s", inboxStatus, queueStatus)
+	}
+	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1 AND lease_token=$2`, fixture.jobID, staleJob.LeaseToken); err != nil {
+		t.Fatalf("expire stale recovery lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{WorkspaceID: workspace.DefaultID}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim stale recovery lease = %d/%v", reclaimed, err)
+	}
+	current, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "opening-recovery-current", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(current) != 1 || current[0].ID != fixture.jobID || current[0].LeaseToken == staleJob.LeaseToken {
+		t.Fatalf("lease current opening recovery custody = %#v/%v", current, err)
+	}
+	select {
+	case finished := <-staleFinished:
+		if finished.err != nil || finished.result.Status != RuntimeDeliveryAuthorityLost {
+			t.Fatalf("stale recovery result = %#v/%v", finished.result, finished.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stale recovery worker did not observe lease takeover")
+	}
+	messageBoundary := int64(1)
+	if _, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: bridgeAPIScope(fixture.sessionID, fixture.childID, initialPlan.AttemptedBinding.BindingID,
+			initialPlan.AttemptedBinding.Generation, initialPlan.AttemptedBinding.TargetPodUID),
+		RuntimeWriteId: "rwrite_opening_recovery_takeover_start", ModelRequestId: "mreq_opening_recovery_takeover_start",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_opening_recovery_takeover_start"}`,
+		ContextThroughMessageSequence: &messageBoundary, RequestKind: requestKindAgentProviderRequest,
+	}); err != nil {
+		t.Fatalf("commit takeover Request Start witness: %v", err)
+	}
+	currentJob, err := DecodeRuntimeJob(queueJobProto(current[0]))
+	if err != nil {
+		t.Fatalf("decode current opening recovery job: %v", err)
+	}
+	currentResult, err := (RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseSender}).DeliverRuntimeJob(context.Background(), currentJob)
+	if err != nil || (currentResult.Status != RuntimeDeliveryAccepted && currentResult.Status != RuntimeDeliveryDuplicate) || !currentResult.QueueLeaseSettled {
+		t.Fatalf("current recovery settlement = %#v/%v", currentResult, err)
+	}
+	var starts, messages int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start')`,
+		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID,
+	).Scan(&inboxStatus, &queueStatus, &messages, &starts); err != nil {
+		t.Fatalf("read takeover recovery convergence: %v", err)
+	}
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || messages != 1 || starts != 1 || len(baseSender.requests) != 1 {
+		t.Fatalf("takeover recovery convergence = Inbox:%s Queue:%s Messages:%d starts:%d Runtime:%d",
+			inboxStatus, queueStatus, messages, starts, len(baseSender.requests))
 	}
 }
 
@@ -762,10 +945,10 @@ func TestSubagentOpeningInputResponseAndAckLossReplayExecutionWitness(t *testing
 	for _, test := range []struct {
 		name         string
 		dropResponse bool
-		dropAck      bool
+		observeAck   bool
 	}{
 		{name: "Runtime response lost before accepted stamp", dropResponse: true},
-		{name: "Queue ACK lost after accepted stamp", dropAck: true},
+		{name: "execution witness settles Queue without an external ACK", observeAck: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newOpeningRuntimeFixture(t, "loss_"+stableRuntimeID("case", test.name))
@@ -778,38 +961,33 @@ func TestSubagentOpeningInputResponseAndAckLossReplayExecutionWitness(t *testing
 				baseSender = &lostAgentMailResponseSender{RuntimeCommandSender: baseSender}
 			}
 			queueClient := QueueClient(nil)
-			if test.dropAck {
-				queueClient = &lostAckQueueClient{QueueClient: tetralqueue.NewServer(
+			var ackObserver *lostAckQueueClient
+			if test.observeAck {
+				ackObserver = &lostAckQueueClient{QueueClient: tetralqueue.NewServer(
 					queue.NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(fixture.runtimeDB), queue.RetryPolicy{
 						BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
 					}), nil,
 				)}
+				queueClient = ackObserver
 			}
 			runner := newSubagentRuntimeQueueRunner(
 				t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
 				queueClient, baseSender,
 			)
 			active, firstErr := runner.RunOnceWithActivity(context.Background())
-			if !active || (test.dropResponse && firstErr != nil) || (test.dropAck && firstErr == nil) {
+			if !active || firstErr != nil {
 				t.Fatalf("first loss-cut run = active:%t err:%v", active, firstErr)
 			}
 			started := runtimeProcess.providerStart(t)
 			waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 
-			if test.dropAck {
-				if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs
-					SET leased_until=clock_timestamp()-interval '1 second'
-					WHERE workspace_id='default' AND id=$1`, fixture.jobID); err != nil {
-					t.Fatalf("expire lost-ACK lease: %v", err)
-				}
-				queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtimeDB))
-				if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{WorkspaceID: workspace.DefaultID}); err != nil || reclaimed != 1 {
-					t.Fatalf("reclaim lost-ACK lease = %d/%v", reclaimed, err)
-				}
-			} else {
+			if test.dropResponse {
 				waitForQueueJobAvailable(t, fixture.admin, fixture.jobID)
+				runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID)
 			}
-			runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID)
+			if ackObserver != nil && ackObserver.dropped {
+				t.Fatal("execution witness settlement called the external Queue ACK path")
+			}
 			runtimeProcess.kill(t)
 
 			var inboxStatus, queueStatus string
@@ -825,7 +1003,11 @@ func TestSubagentOpeningInputResponseAndAckLossReplayExecutionWitness(t *testing
 			); err != nil {
 				t.Fatalf("read loss-cut convergence: %v", err)
 			}
-			if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != 2 ||
+			wantAttempts := 1
+			if test.dropResponse {
+				wantAttempts = 2
+			}
+			if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != wantAttempts ||
 				messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
 				t.Fatalf("loss-cut convergence = Inbox:%s Queue:%s attempts:%d Messages:%d starts:%d providers:%d",
 					inboxStatus, queueStatus, attempts, messages, starts, started.ProviderInvocations)
@@ -2143,6 +2325,10 @@ func (s *lostResponseAfterRequestStartSender) AcceptAgentMail(ctx context.Contex
 	return nil, status.Error(codes.DeadlineExceeded, "fixture Request Start barrier was not reached")
 }
 
+func (s *lostResponseAfterRequestStartSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
+}
+
 func (s *lostAgentMailResponseSender) AcceptAgentMail(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
 	response, err := s.RuntimeCommandSender.AcceptAgentMail(ctx, target, request)
 	if err == nil && !s.dropped {
@@ -2150,6 +2336,10 @@ func (s *lostAgentMailResponseSender) AcceptAgentMail(ctx context.Context, targe
 		return nil, status.Error(codes.Unavailable, "fixture transport response lost")
 	}
 	return response, err
+}
+
+func (s *lostAgentMailResponseSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
 }
 
 type lostAckQueueClient struct {
@@ -2177,7 +2367,7 @@ type requestStartAfterAgentMailPreparationStore struct {
 
 func (s *requestStartAfterAgentMailPreparationStore) PrepareRuntimeCommand(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
 	plan, err := s.PostgreSQLRuntimeDeliveryStore.PrepareRuntimeCommand(ctx, job)
-	if err != nil || job.InputKind != "agent_mail" || plan.AcceptAgentMail == nil {
+	if err != nil || job.InputKind != "agent_mail" || (plan.AcceptAgentMail == nil && plan.RecoverThread == nil) {
 		return plan, err
 	}
 	s.once.Do(func() {
@@ -2206,6 +2396,38 @@ type firstRequestStartPodLossCutStore struct {
 	mu      sync.Mutex
 	cut     bool
 	entered chan struct{}
+}
+
+type requestStartBarrierBridgeStore struct {
+	BridgeAPIStore
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *requestStartBarrierBridgeStore) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
+	if request.GetEventType() == "span.model_request_start" {
+		s.once.Do(func() { close(s.entered) })
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.BridgeAPIStore.WriteEvent(ctx, request)
+}
+
+type recoveryResponseObservingSender struct {
+	RuntimeCommandSender
+	responded chan *agentruntimev1.RecoverThreadRequest
+}
+
+func (s *recoveryResponseObservingSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	response, err := recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
+	if err == nil {
+		s.responded <- request
+	}
+	return response, err
 }
 
 func (s *firstRequestStartPodLossCutStore) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
@@ -2361,7 +2583,9 @@ func (c *retryObservingQueueClient) Retry(ctx context.Context, request *queuev1.
 
 type countingAgentMailSender struct {
 	RuntimeCommandSender
-	agentMailCalls int
+	agentMailCalls  int
+	recoveryCalls   int
+	recoveryRequest *agentruntimev1.RecoverThreadRequest
 }
 
 type blockingAgentMailSender struct {
@@ -2376,9 +2600,26 @@ type failingAgentMailSender struct {
 	calls int
 }
 
+func recoverThreadThroughSender(
+	ctx context.Context,
+	sender RuntimeCommandSender,
+	target RuntimePodTarget,
+	request *agentruntimev1.RecoverThreadRequest,
+) (*agentruntimev1.RecoverThreadResponse, error) {
+	recoverySender, ok := sender.(RuntimeRecoveryCommandSender)
+	if !ok {
+		return nil, status.Error(codes.Unavailable, "fixture Runtime recovery sender is unavailable")
+	}
+	return recoverySender.RecoverThread(ctx, target, request)
+}
+
 func (s *failingAgentMailSender) AcceptAgentMail(context.Context, RuntimePodTarget, *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
 	s.calls++
 	return nil, status.Error(codes.Unavailable, "fixture transport must be fenced by the Request Start witness")
+}
+
+func (s *failingAgentMailSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
 }
 
 func (s *blockingAgentMailSender) AcceptAgentMail(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
@@ -2388,9 +2629,19 @@ func (s *blockingAgentMailSender) AcceptAgentMail(ctx context.Context, target Ru
 	return s.RuntimeCommandSender.AcceptAgentMail(ctx, target, request)
 }
 
+func (s *blockingAgentMailSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
+}
+
 func (s *countingAgentMailSender) AcceptAgentMail(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
 	s.agentMailCalls++
 	return s.RuntimeCommandSender.AcceptAgentMail(ctx, target, request)
+}
+
+func (s *countingAgentMailSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
+	s.recoveryCalls++
+	s.recoveryRequest = request
+	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
 }
 
 func (c *lostAckQueueClient) Ack(ctx context.Context, request *queuev1.AckRequest) (*queuev1.TransitionResponse, error) {
