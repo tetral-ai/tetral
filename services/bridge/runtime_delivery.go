@@ -1120,7 +1120,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 		return s.finalizeRuntimeRecoveryDelivery(ctx, job, result)
 	}
 	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" || job.RuntimeInputID == "" ||
-		((job.InputKind == "interrupt_control" || result.Status == RuntimeDeliveryBarrierStale) && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) {
+		((job.InputKind == "interrupt_control" || job.InputKind == "agent_mail" || result.Status == RuntimeDeliveryBarrierStale) &&
+			(job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) {
 		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime delivery finalization identity is incomplete", retryable: false}
 	}
 	if result.Status != RuntimeDeliveryRejected && result.Status != RuntimeDeliveryBarrierStale {
@@ -1209,10 +1210,32 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 				finalized, err = finalizeOpeningAgentMailFailureTx(ctx, tx, job, now)
 				return err
 			}
+			active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+				WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+				Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+			})
+			if err != nil {
+				return err
+			}
+			if !active {
+				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+				return nil
+			}
 			if err := settleAgentMailDeliveryExhaustionTx(ctx, tx, job, now); err != nil {
 				return err
 			}
+			deadLettered, err := queue.DeadLetterTx(ctx, tx, queue.DeadLetterRequest{
+				WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+				ErrorKind: "runtime_delivery_exhausted", ErrorMessage: "runtime delivery attempts are exhausted", Now: now,
+			})
+			if err != nil {
+				return err
+			}
+			if !deadLettered {
+				return runtimeDeliveryPrepareError{kind: "runtime_queue_lease_stale", message: "agent mail finalization lost Queue custody", retryable: true}
+			}
 			finalized = runtimeDeliveryExhaustedResult()
+			finalized.QueueLeaseSettled = true
 			return nil
 		}
 		if job.InputKind == "task_notification" {
@@ -1696,6 +1719,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" || job.RuntimeInputID == "" {
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime delivery replay identity is incomplete", retryable: false}
 	}
+	if job.InputKind == "agent_mail" && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "") {
+		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail delivery replay identity is incomplete", retryable: false}
+	}
 	var result RuntimeDeliveryResult
 	var found bool
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.replay_runtime_delivery_finalization", func(tx *dbconnect.Tx) error {
@@ -2178,7 +2204,8 @@ func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx
 	}
 	switch inbox.status {
 	case "dead_lettered":
-		return runtimeDeliveryExhaustedResult(), true, nil
+		result, err := settleDeadLetteredAgentMailQueueTx(ctx, tx, job, storage.Now())
+		return result, true, err
 	case "cancelled":
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}, true, nil
 	case "accepted", "committed":
@@ -2195,6 +2222,56 @@ func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx
 	default:
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 	}
+}
+
+// A dead-lettered Inbox is the durable agent-mail finalization receipt. Replay
+// either observes the exact Queue row already terminal or settles its exact
+// current lease in this same transaction. A reclaimed token has no authority
+// to change either owner.
+func settleDeadLetteredAgentMailQueueTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	now time.Time,
+) (RuntimeDeliveryResult, error) {
+	active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+		WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+		Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+	})
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if active {
+		deadLettered, err := queue.DeadLetterTx(ctx, tx, queue.DeadLetterRequest{
+			WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+			ErrorKind: "runtime_delivery_exhausted", ErrorMessage: "runtime delivery attempts are exhausted", Now: now,
+		})
+		if err != nil {
+			return RuntimeDeliveryResult{}, err
+		}
+		if !deadLettered {
+			return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "runtime_queue_lease_stale", message: "agent mail replay lost Queue custody", retryable: true}
+		}
+		result := runtimeDeliveryExhaustedResult()
+		result.QueueLeaseSettled = true
+		return result, nil
+	}
+	var queueStatus string
+	err = tx.QueryRow(ctx, `SELECT status FROM queue_jobs
+		WHERE workspace_id=$1 AND id=$2 AND kind=$3 AND partition_key=$4 AND dedupe_key=$5
+		FOR UPDATE`, job.WorkspaceID, job.JobID, job.Kind, job.PartitionKey, job.DedupeKey).Scan(&queueStatus)
+	if dbconnect.IsNoRows(err) {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}, nil
+	}
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if queueStatus != queue.StatusDeadLettered {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}, nil
+	}
+	result := runtimeDeliveryExhaustedResult()
+	result.QueueLeaseSettled = true
+	return result, nil
 }
 
 // Agent-mail materialization is not execution custody. A reclaimed lease may
@@ -3508,7 +3585,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 	if envelope.TargetThreadID != job.SessionThreadID {
 		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail queue target does not match the stored envelope", retryable: false}
 	}
-	admitted, err := admitAgentMailDeliveryTx(
+	_, err = admitAgentMailDeliveryTx(
 		ctx,
 		tx,
 		runtimeScopeForDeliveryJob(job, binding),
@@ -3518,9 +3595,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 	)
 	if err != nil {
 		return RuntimeCommandPlan{}, err
-	}
-	if admitted.Terminal {
-		return RuntimeCommandPlan{StaleAccepted: true}, nil
 	}
 	return RuntimeCommandPlan{
 		Target: RuntimePodTarget{

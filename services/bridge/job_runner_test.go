@@ -491,8 +491,8 @@ func TestJobRunnerAgentMailNPlusOneFinalizesWithoutRuntimeOrRetry(t *testing.T) 
 	}{
 		{
 			name:      "success terminalizes through finalizer",
-			finalized: RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted"},
-			wantSteps: []string{"replay:qjob_agent_mail", "finalize:qjob_agent_mail", "dead:qjob_agent_mail"},
+			finalized: RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted", QueueLeaseSettled: true},
+			wantSteps: []string{"replay:qjob_agent_mail", "finalize:qjob_agent_mail"},
 		},
 		{
 			name:        "transaction failure leaves exact lease for reclaim",

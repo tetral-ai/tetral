@@ -1747,7 +1747,58 @@ func (s *PostgreSQLQueueStore) DeadLetter(ctx context.Context, request DeadLette
 	if request.Now.IsZero() {
 		request.Now = storage.Now()
 	}
-	return s.fencedTerminalUpdate(ctx, request.WorkspaceID, request.JobID, request.LeaseToken, StatusDeadLettered, "dead_lettered_at", request.ErrorKind, request.ErrorMessage, request.Now.UTC())
+	if s == nil || s.client == nil {
+		return false, &ValidationError{Message: "queue store is required"}
+	}
+	var updated bool
+	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.dead_lettered", func(tx *dbconnect.Tx) error {
+		var err error
+		updated, err = DeadLetterTx(ctx, tx, request)
+		return err
+	})
+	return updated, err
+}
+
+// DeadLetterTx terminalizes one live lease inside a caller-owned business
+// transaction. Business state that depends on exhaustion must use this helper
+// so its durable settlement and release of Queue custody commit together.
+func DeadLetterTx(ctx context.Context, tx queueMutationTransaction, request DeadLetterRequest) (bool, error) {
+	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
+		return false, err
+	}
+	if tx == nil {
+		return false, &ValidationError{Message: "queue transaction is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status = 'dead_lettered',
+		        dead_lettered_at = $4,
+		        lease_token = NULL,
+		        leased_by = NULL,
+		        leased_at = NULL,
+		        leased_until = NULL,
+		        last_error_kind = $5,
+		        last_error_message = $6,
+		        updated_at = $4
+		  WHERE workspace_id = $1
+		    AND id = $2
+		    AND lease_token = $3
+		    AND status = 'leased'
+		    AND leased_until > clock_timestamp()`,
+		string(request.WorkspaceID),
+		request.JobID,
+		request.LeaseToken,
+		request.Now.UTC(),
+		nullableString(request.ErrorKind),
+		nullableString(request.ErrorMessage),
+	)
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected(result), nil
 }
 
 // ReplaceMalformedRuntimeInputCustody atomically retires a lease-fenced
@@ -1963,47 +2014,6 @@ func (s *PostgreSQLQueueStore) Cancel(ctx context.Context, request CancelRequest
 		return 0, err
 	}
 	return cancelled, nil
-}
-
-func (s *PostgreSQLQueueStore) fencedTerminalUpdate(ctx context.Context, workspaceID workspace.ID, jobID string, leaseToken string, status string, timestampColumn string, errorKind string, errorMessage string, now time.Time) (bool, error) {
-	if s == nil || s.client == nil {
-		return false, &ValidationError{Message: "queue store is required"}
-	}
-	query := `UPDATE queue_jobs
-	    SET status = '` + status + `',
-	        ` + timestampColumn + ` = $4,
-	        lease_token = NULL,
-	        leased_by = NULL,
-	        leased_at = NULL,
-	        leased_until = NULL,
-	        last_error_kind = $5,
-	        last_error_message = $6,
-	        updated_at = $4
-	  WHERE workspace_id = $1
-	    AND id = $2
-	    AND lease_token = $3
-	    AND status = 'leased'
-	    AND leased_until > clock_timestamp()`
-	var updated bool
-	if err := s.client.WithWorkspaceTx(ctx, string(workspaceID), "queue."+status, func(tx *dbconnect.Tx) error {
-		result, err := tx.Exec(ctx,
-			query,
-			string(workspaceID),
-			jobID,
-			leaseToken,
-			now,
-			nullableString(errorKind),
-			nullableString(errorMessage),
-		)
-		if err != nil {
-			return err
-		}
-		updated = rowsAffected(result)
-		return nil
-	}); err != nil {
-		return false, err
-	}
-	return updated, nil
 }
 
 func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {

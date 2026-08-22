@@ -1152,6 +1152,241 @@ func TestOrdinaryAgentMailNPlusOneFinalizesWithoutFailingChild(t *testing.T) {
 	}
 }
 
+func TestOrdinaryAgentMailNPlusOneLeaseTakeoverFencesStaleFinalizer(t *testing.T) {
+	fixture := prepareOrdinaryAgentMailNPlusOnePending(t, "ordinary_takeover")
+	oldLease := leaseOrdinaryAgentMailFinalizer(t, fixture.queueStore, fixture.jobID, "ordinary-stale-finalizer")
+	oldJob, err := DecodeRuntimeJob(queueJobProto(oldLease))
+	if err != nil {
+		t.Fatalf("decode stale ordinary finalizer lease: %v", err)
+	}
+	observer := &agentMailFinalizationQueueObserver{QueueClient: tetralqueue.NewServer(fixture.queueStore, nil)}
+	blocked := &blockingAgentMailFinalizer{
+		RuntimePodDirectDeliverer: fixture.direct,
+		entered:                   make(chan RuntimeJob, 1),
+		release:                   make(chan struct{}),
+	}
+	runner := &JobRunner{Queue: observer, Deliverer: blocked}
+	finished := make(chan error, 1)
+	go func() {
+		finished <- runner.processRuntimeJob(context.Background(), queueJobProto(oldLease), JobRunnerConfig{
+			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour,
+		})
+	}()
+	planned := <-blocked.entered
+	if planned.JobID != oldJob.JobID || planned.LeaseToken != oldJob.LeaseToken || !runtimeJobAgentMailFinalizationOnly(planned) {
+		t.Fatalf("stale ordinary finalizer plan = %#v; want exact N+1 lease", planned)
+	}
+	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1 AND lease_token=$2`, fixture.jobID, oldJob.LeaseToken); err != nil {
+		t.Fatalf("expire stale ordinary finalizer lease: %v", err)
+	}
+	if reclaimed, err := fixture.queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim stale ordinary finalizer lease = %d/%v; want one", reclaimed, err)
+	}
+	currentLease := leaseOrdinaryAgentMailFinalizer(t, fixture.queueStore, fixture.jobID, "ordinary-current-finalizer")
+	if currentLease.LeaseToken == oldJob.LeaseToken || currentLease.AttemptCount != fixture.maxAttempts+1 {
+		t.Fatalf("ordinary finalizer takeover = tokenChanged:%t attempts:%d; want true/%d",
+			currentLease.LeaseToken != oldJob.LeaseToken, currentLease.AttemptCount, fixture.maxAttempts+1)
+	}
+	currentJob, err := DecodeRuntimeJob(queueJobProto(currentLease))
+	if err != nil {
+		t.Fatalf("decode current ordinary finalizer lease: %v", err)
+	}
+	before := readOrdinaryAgentMailFinalizationState(t, fixture.admin, currentJob)
+	close(blocked.release)
+	if err := <-finished; err != nil {
+		t.Fatalf("stale ordinary finalizer returned error: %v", err)
+	}
+	if blocked.result.Status != RuntimeDeliveryAuthorityLost || blocked.result.QueueLeaseSettled || blocked.err != nil {
+		t.Fatalf("stale ordinary finalizer result = %#v/%v; want authority lost", blocked.result, blocked.err)
+	}
+	after := readOrdinaryAgentMailFinalizationState(t, fixture.admin, currentJob)
+	if after != before || observer.deadLetterCalls != 0 || observer.retryCalls != 0 || fixture.sender.agentMailCalls != 0 {
+		t.Fatalf("stale ordinary finalizer mutated custody: before=%+v after=%+v QueueDeadLetter=%d QueueRetry=%d Runtime=%d",
+			before, after, observer.deadLetterCalls, observer.retryCalls, fixture.sender.agentMailCalls)
+	}
+	if err := runner.processRuntimeJob(context.Background(), queueJobProto(currentLease), JobRunnerConfig{
+		LeaseDuration: time.Minute, HeartbeatInterval: time.Hour,
+	}); err != nil {
+		t.Fatalf("current ordinary finalizer: %v", err)
+	}
+	assertOrdinaryAgentMailFinalizationSettled(t, fixture, currentJob, observer)
+}
+
+func TestOrdinaryAgentMailNPlusOneResponseLossReplaysOneTerminalSettlement(t *testing.T) {
+	fixture := prepareOrdinaryAgentMailNPlusOnePending(t, "ordinary_response_loss")
+	lease := leaseOrdinaryAgentMailFinalizer(t, fixture.queueStore, fixture.jobID, "ordinary-response-loss-finalizer")
+	job, err := DecodeRuntimeJob(queueJobProto(lease))
+	if err != nil {
+		t.Fatalf("decode ordinary response-loss lease: %v", err)
+	}
+	observer := &agentMailFinalizationQueueObserver{QueueClient: tetralqueue.NewServer(fixture.queueStore, nil)}
+	lost := &lostAgentMailFinalizationResponse{RuntimePodDirectDeliverer: fixture.direct}
+	runner := &JobRunner{Queue: observer, Deliverer: lost}
+	if err := runner.processRuntimeJob(context.Background(), queueJobProto(lease), JobRunnerConfig{
+		LeaseDuration: time.Minute, HeartbeatInterval: time.Hour,
+	}); !errors.Is(err, errSyntheticAgentMailFinalizationResponseLoss) {
+		t.Fatalf("ordinary finalizer response loss = %v; want synthetic post-commit loss", err)
+	}
+	if !lost.committed.QueueLeaseSettled || lost.committed.Status != RuntimeDeliveryRejected || lost.calls != 1 {
+		t.Fatalf("ordinary finalizer committed result = %#v calls:%d", lost.committed, lost.calls)
+	}
+	assertOrdinaryAgentMailFinalizationSettled(t, fixture, job, observer)
+	beforeReplay := readOrdinaryAgentMailFinalizationState(t, fixture.admin, job)
+	replayRunner := &JobRunner{Queue: observer, Deliverer: fixture.direct}
+	if err := replayRunner.processRuntimeJob(context.Background(), queueJobProto(lease), JobRunnerConfig{
+		LeaseDuration: time.Minute, HeartbeatInterval: time.Hour,
+	}); err != nil {
+		t.Fatalf("replay lost ordinary finalizer response: %v", err)
+	}
+	afterReplay := readOrdinaryAgentMailFinalizationState(t, fixture.admin, job)
+	if afterReplay != beforeReplay || observer.deadLetterCalls != 0 || observer.retryCalls != 0 || fixture.sender.agentMailCalls != 0 {
+		t.Fatalf("ordinary finalizer replay duplicated settlement: before=%+v after=%+v QueueDeadLetter=%d QueueRetry=%d Runtime=%d",
+			beforeReplay, afterReplay, observer.deadLetterCalls, observer.retryCalls, fixture.sender.agentMailCalls)
+	}
+}
+
+type ordinaryAgentMailFinalizationFixture struct {
+	openingRuntimeFixture
+	runtimeInputID string
+	jobID          string
+	maxAttempts    int
+	queueStore     *queue.PostgreSQLQueueStore
+	direct         RuntimePodDirectDeliverer
+	sender         *countingAgentMailSender
+}
+
+func prepareOrdinaryAgentMailNPlusOnePending(t *testing.T, suffix string) ordinaryAgentMailFinalizationFixture {
+	t.Helper()
+	fixture := newOpeningRuntimeFixture(t, suffix)
+	acceptingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
+	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, acceptingRuntime.port, fixture.sessionID, fixture.podUID)
+	if execution := acceptingRuntime.providerStart(t); execution.ProviderInvocations != 1 {
+		t.Fatalf("ordinary finalizer opening Provider calls = %d; want 1", execution.ProviderInvocations)
+	}
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	acceptingRuntime.kill(t)
+
+	connection, err := grpc.NewClient(fixture.bridgeAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial ordinary finalizer Bridge: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	client := bridgev1.NewAgentRuntimeBridgeServiceClient(connection)
+	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
+	sourceID := "evt_" + suffix + "_mail"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, sourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, sourceID)
+	deliveryID := agentMailDeliveryID(sourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope:      bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		DeliveryId: deliveryID, TargetThreadId: fixture.childID, SourceToolUseEventId: sourceID,
+		Content: "ordinary follow-up finalization ownership proof",
+	}); err != nil || delivered.GetCommitted() == nil {
+		t.Fatalf("deliver ordinary finalizer mail = %#v/%v", delivered, err)
+	}
+	runtimeInputID := "agent_mail:" + deliveryID
+	var jobID string
+	var maxAttempts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT id,max_attempts FROM queue_jobs
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, runtimeInputID)).Scan(&jobID, &maxAttempts); err != nil {
+		t.Fatalf("read ordinary finalizer Queue custody: %v", err)
+	}
+	rejectingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID, true)
+	for attempt := 1; attempt < maxAttempts; attempt++ {
+		if attempt > 1 {
+			waitForQueueJobAvailable(t, fixture.admin, jobID)
+		}
+		runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID)
+	}
+	waitForQueueJobAvailable(t, fixture.admin, jobID)
+	finalRuntimeRunner := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID, nil, nil)
+	finalRuntimeRunner.Deliverer = &finalizationCutDeliverer{
+		RuntimePodDirectDeliverer: finalRuntimeRunner.Deliverer.(RuntimePodDirectDeliverer), failBeforeCommit: true,
+	}
+	if active, err := finalRuntimeRunner.RunOnceWithActivity(context.Background()); !active || err == nil {
+		t.Fatalf("ordinary final Runtime opportunity cut = active:%t err:%v", active, err)
+	}
+	if reason, providers, raw := readAgentMailAdmission(t, rejectingRuntime); reason != "local_session_capacity_exceeded" || providers != 0 {
+		t.Fatalf("ordinary finalizer rejection boundary = %q/%d/%s", reason, providers, raw)
+	}
+	rejectingRuntime.kill(t)
+	expireAndReclaimQueueJob(t, fixture.runtimeDB, fixture.admin, jobID)
+	clientForStore := dbconnect.NewClientForTesting(fixture.runtimeDB)
+	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(clientForStore, queue.RetryPolicy{
+		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
+	})
+	sender := &countingAgentMailSender{RuntimeCommandSender: NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	preparedRunner := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID, nil, sender)
+	return ordinaryAgentMailFinalizationFixture{
+		openingRuntimeFixture: fixture, runtimeInputID: runtimeInputID, jobID: jobID, maxAttempts: maxAttempts,
+		queueStore: queueStore, direct: preparedRunner.Deliverer.(RuntimePodDirectDeliverer), sender: sender,
+	}
+}
+
+func leaseOrdinaryAgentMailFinalizer(t *testing.T, store *queue.PostgreSQLQueueStore, jobID, owner string) *queue.Job {
+	t.Helper()
+	leased, err := store.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: owner,
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != jobID {
+		t.Fatalf("lease ordinary N+1 finalizer = %#v/%v; want %s", leased, err, jobID)
+	}
+	return leased[0]
+}
+
+type ordinaryAgentMailFinalizationState struct {
+	inboxStatus, inboxUpdated, queueStatus, queueToken, queueError, queueUpdated, childStatus string
+	receivedProcessed                                                                         bool
+	attempts, exhaustionEvents                                                                int
+}
+
+func readOrdinaryAgentMailFinalizationState(t *testing.T, admin *sql.DB, job RuntimeJob) ordinaryAgentMailFinalizationState {
+	t.Helper()
+	var state ordinaryAgentMailFinalizationState
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT updated_at::text FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT processed_at IS NOT NULL FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND event_id=$4),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$5),
+		(SELECT COALESCE(lease_token,'') FROM queue_jobs WHERE workspace_id='default' AND id=$5),
+		(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$5),
+		(SELECT COALESCE(last_error_kind,'') FROM queue_jobs WHERE workspace_id='default' AND id=$5),
+		(SELECT updated_at::text FROM queue_jobs WHERE workspace_id='default' AND id=$5),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND event_id=$6),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$3)`,
+		job.SessionID, job.RuntimeInputID, job.SessionThreadID, stableRuntimeID("agent_mail_received_event", job.WorkspaceID, job.SessionID, job.SessionThreadID, strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")),
+		job.JobID, runtimeDeliveryExhaustionEventID(job)).Scan(
+		&state.inboxStatus, &state.inboxUpdated, &state.receivedProcessed,
+		&state.queueStatus, &state.queueToken, &state.attempts, &state.queueError, &state.queueUpdated,
+		&state.exhaustionEvents, &state.childStatus,
+	); err != nil {
+		t.Fatalf("read ordinary finalization state: %v", err)
+	}
+	return state
+}
+
+func assertOrdinaryAgentMailFinalizationSettled(
+	t *testing.T,
+	fixture ordinaryAgentMailFinalizationFixture,
+	job RuntimeJob,
+	observer *agentMailFinalizationQueueObserver,
+) {
+	t.Helper()
+	state := readOrdinaryAgentMailFinalizationState(t, fixture.admin, job)
+	if state.inboxStatus != "dead_lettered" || !state.receivedProcessed || state.queueStatus != queue.StatusDeadLettered ||
+		state.queueToken != "" || state.attempts != fixture.maxAttempts+1 || state.queueError != "runtime_delivery_exhausted" ||
+		state.exhaustionEvents != 1 || state.childStatus == "failed" || state.childStatus == "terminated" ||
+		state.childStatus == "closed_for_runtime" || observer.deadLetterCalls != 0 || observer.retryCalls != 0 || fixture.sender.agentMailCalls != 0 {
+		t.Fatalf("ordinary atomic finalization = %+v QueueDeadLetter=%d QueueRetry=%d Runtime=%d",
+			state, observer.deadLetterCalls, observer.retryCalls, fixture.sender.agentMailCalls)
+	}
+}
+
 type openingRuntimeFixture struct {
 	runtimeDB, admin              *sql.DB
 	bridgeAddress                 string
@@ -1303,6 +1538,55 @@ func (d *finalizationCutDeliverer) FinalizeRuntimeDelivery(ctx context.Context, 
 		return RuntimeDeliveryResult{}, errors.New("fixture finalizer crashed before transaction commit")
 	}
 	return d.RuntimePodDirectDeliverer.FinalizeRuntimeDelivery(ctx, job, result)
+}
+
+type blockingAgentMailFinalizer struct {
+	RuntimePodDirectDeliverer
+	entered chan RuntimeJob
+	release chan struct{}
+	result  RuntimeDeliveryResult
+	err     error
+}
+
+func (d *blockingAgentMailFinalizer) FinalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	d.entered <- job
+	<-d.release
+	d.result, d.err = d.RuntimePodDirectDeliverer.FinalizeRuntimeDelivery(ctx, job, result)
+	return d.result, d.err
+}
+
+var errSyntheticAgentMailFinalizationResponseLoss = errors.New("synthetic agent-mail finalization response loss")
+
+type lostAgentMailFinalizationResponse struct {
+	RuntimePodDirectDeliverer
+	committed RuntimeDeliveryResult
+	calls     int
+}
+
+func (d *lostAgentMailFinalizationResponse) FinalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	d.calls++
+	committed, err := d.RuntimePodDirectDeliverer.FinalizeRuntimeDelivery(ctx, job, result)
+	if err != nil {
+		return committed, err
+	}
+	d.committed = committed
+	return RuntimeDeliveryResult{}, errSyntheticAgentMailFinalizationResponseLoss
+}
+
+type agentMailFinalizationQueueObserver struct {
+	QueueClient
+	deadLetterCalls int
+	retryCalls      int
+}
+
+func (c *agentMailFinalizationQueueObserver) DeadLetter(ctx context.Context, request *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error) {
+	c.deadLetterCalls++
+	return c.QueueClient.DeadLetter(ctx, request)
+}
+
+func (c *agentMailFinalizationQueueObserver) Retry(ctx context.Context, request *queuev1.RetryRequest) (*queuev1.TransitionResponse, error) {
+	c.retryCalls++
+	return c.QueueClient.Retry(ctx, request)
 }
 
 type retryObservingQueueClient struct {

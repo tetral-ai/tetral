@@ -41,7 +41,6 @@ type admittedAgentMailDelivery struct {
 	Envelope         storedAgentMailEnvelope
 	ReceivedEventID  string
 	ReceivedSequence int64
-	Terminal         bool
 }
 
 func agentMailDeliveryID(sourceToolUseEventID string, targetThreadID string) string {
@@ -539,11 +538,10 @@ func admitAgentMailDeliveryTx(
 	if normalizeJSONForCompare(json.RawMessage(receivedPayloadJSON)) != normalizeJSONForCompare(json.RawMessage(eventPayloadJSON)) {
 		return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery replay conflicts with the admitted source")
 	}
-	terminal := false
-	if !terminal && !threadReceivableTx(threadScope) {
+	if !threadReceivableTx(threadScope) {
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 	}
-	if !terminal && inboxStatus == "accepted" {
+	if inboxStatus == "accepted" {
 		var inboxEventIDs []string
 		if err := json.Unmarshal([]byte(inboxEventIDsJSON), &inboxEventIDs); err != nil ||
 			len(inboxEventIDs) != 1 || inboxEventIDs[0] != receivedEventID ||
@@ -575,7 +573,6 @@ func admitAgentMailDeliveryTx(
 		Envelope:         envelope,
 		ReceivedEventID:  receivedEventID,
 		ReceivedSequence: receivedSequence,
-		Terminal:         terminal,
 	}, nil
 }
 
