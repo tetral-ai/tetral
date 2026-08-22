@@ -544,7 +544,7 @@ func loadContextCompactionEventFloorTx(
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var compactionFloor int64
 	loaded := 0
 	for rows.Next() {
