@@ -829,7 +829,7 @@ func settleChildCloseRuntimeInputsTx(
 			PodUID: scope.GetBinding().GetTargetPodUid(),
 		}
 		for _, input := range inputs {
-			consumedOpening := false
+			consumedAgentMail := false
 			if input.inputKind == "agent_mail" {
 				job := RuntimeJob{
 					WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: targetID,
@@ -842,15 +842,13 @@ func settleChildCloseRuntimeInputsTx(
 				if input.status == "committed" && !opening {
 					continue
 				}
-				if opening {
-					inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
-					if err != nil {
-						return childCloseCustodyTransitions{}, err
-					}
-					consumedOpening, err = agentMailRequestStartWitnessTx(ctx, tx, job, inbox)
-					if err != nil {
-						return childCloseCustodyTransitions{}, err
-					}
+				inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
+				if err != nil {
+					return childCloseCustodyTransitions{}, err
+				}
+				consumedAgentMail, err = agentMailRequestStartWitnessTx(ctx, tx, job, inbox)
+				if err != nil {
+					return childCloseCustodyTransitions{}, err
 				}
 			}
 			if _, err := tx.Exec(ctx, `UPDATE queue_jobs
@@ -873,7 +871,7 @@ func settleChildCloseRuntimeInputsTx(
 				transitions.parked++
 				continue
 			}
-			if consumedOpening {
+			if consumedAgentMail {
 				result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='committed',updated_at=$4
 					WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
 					  AND status IN ('delivering','accepted','committed')`,
@@ -882,7 +880,7 @@ func settleChildCloseRuntimeInputsTx(
 					return childCloseCustodyTransitions{}, err
 				}
 				if !rowsAffected(result) {
-					return childCloseCustodyTransitions{}, status.Error(codes.Aborted, "consumed opening Inbox authority changed during child close")
+					return childCloseCustodyTransitions{}, status.Error(codes.Aborted, "consumed agent mail Inbox authority changed during child close")
 				}
 				continue
 			}

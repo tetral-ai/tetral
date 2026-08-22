@@ -178,6 +178,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND $8 = 'closed_for_runtime'
 		   AND closeout.type IN ('session.status_idle', 'session.thread_status_idle')
 		   AND closeout.runtime_write_id IS NOT NULL
+		   AND closeout.payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'
 		 ORDER BY closeout.sequence DESC
 		 LIMIT 1
 	), closed_checkpoint_previous_close AS MATERIALIZED (
@@ -187,26 +188,44 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		    ON previous.workspace_id = $1
 		   AND previous.session_id = $2
 		   AND previous.session_thread_id = $3
-		   AND previous.type IN (
-		     'session.status_idle', 'session.thread_status_idle',
-		     'session.status_terminated', 'session.thread_status_terminated'
-		   )
+		   AND previous.type IN ('session.status_idle', 'session.thread_status_idle')
+		   AND previous.payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'
 		   AND previous.sequence < closeout.sequence
+	), closed_checkpoint_turn_idle AS MATERIALIZED (
+		SELECT idle.event_id, idle.sequence
+		  FROM closed_checkpoint_close closeout
+		  JOIN session_events idle
+		    ON idle.workspace_id = $1
+		   AND idle.session_id = $2
+		   AND idle.session_thread_id = $3
+		   AND idle.type IN ('session.status_idle', 'session.thread_status_idle')
+		   AND idle.payload_json::jsonb #>> '{stop_reason,type}' <> 'closed_for_runtime'
+		   AND idle.sequence > COALESCE((SELECT sequence FROM closed_checkpoint_previous_close), 0)
+		   AND idle.sequence < closeout.sequence
+		 ORDER BY idle.sequence DESC
+		 LIMIT 1
+	), closed_checkpoint_run_bound AS MATERIALIZED (
+		SELECT COALESCE(
+		         (SELECT sequence FROM closed_checkpoint_turn_idle),
+		         (SELECT sequence FROM closed_checkpoint_close)
+		       ) AS sequence
 	), closed_checkpoint_running AS MATERIALIZED (
 		SELECT running.event_id, running.sequence
 		  FROM closed_checkpoint_close closeout
+		  JOIN closed_checkpoint_run_bound run_bound ON TRUE
 		  JOIN session_events running
 		    ON running.workspace_id = $1
 		   AND running.session_id = $2
 		   AND running.session_thread_id = $3
 		   AND running.type IN ('session.status_running', 'session.thread_status_running')
 		   AND running.sequence > COALESCE((SELECT sequence FROM closed_checkpoint_previous_close), 0)
-		   AND running.sequence < closeout.sequence
+		   AND running.sequence < run_bound.sequence
 		 ORDER BY running.sequence DESC
 		 LIMIT 1
 	), closed_checkpoint_request_start AS MATERIALIZED (
 		SELECT request_start.event_id, request_start.sequence, request_start.model_request_id
 		  FROM closed_checkpoint_close closeout
+		  JOIN closed_checkpoint_run_bound run_bound ON TRUE
 		  JOIN closed_checkpoint_running running ON TRUE
 		  JOIN session_events request_start
 		    ON request_start.workspace_id = $1
@@ -215,13 +234,14 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND request_start.type = 'span.model_request_start'
 		   AND request_start.model_request_id IS NOT NULL
 		   AND request_start.sequence > running.sequence
-		   AND request_start.sequence < closeout.sequence
+		   AND request_start.sequence < run_bound.sequence
 		   AND request_start.sequence >= $4
 		 ORDER BY request_start.sequence DESC
 		 LIMIT 1
 	), closed_checkpoint_request_end AS MATERIALIZED (
 		SELECT request_end.event_id, request_end.model_request_id
 		  FROM closed_checkpoint_close closeout
+		  JOIN closed_checkpoint_run_bound run_bound ON TRUE
 		  JOIN closed_checkpoint_request_start request_start ON TRUE
 		  JOIN session_events request_end
 		    ON request_end.workspace_id = $1
@@ -230,7 +250,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND request_end.type = 'span.model_request_end'
 		   AND request_end.model_request_id = request_start.model_request_id
 		   AND request_end.sequence > request_start.sequence
-		   AND request_end.sequence < closeout.sequence
+		   AND request_end.sequence < run_bound.sequence
 		 ORDER BY request_end.sequence DESC
 		 LIMIT 1
 	),
@@ -342,6 +362,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 	     OR event_id IN (SELECT event_id FROM terminal_failure)
 	     OR (event_id IN (SELECT event_id FROM closed_checkpoint_close)
 	         AND EXISTS (SELECT 1 FROM closed_checkpoint_running))
+	     OR event_id IN (SELECT event_id FROM closed_checkpoint_turn_idle)
 	     OR event_id IN (SELECT event_id FROM closed_checkpoint_running)
 	     OR event_id IN (SELECT event_id FROM closed_checkpoint_request_start)
 	     OR event_id IN (SELECT event_id FROM closed_checkpoint_request_end)

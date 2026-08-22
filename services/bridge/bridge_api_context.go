@@ -365,29 +365,9 @@ func loadThreadContextJSONTx(
 		), pending_requests AS (
 			SELECT jsonb_array_elements_text($4::jsonb) AS model_request_id
 		), cancelled_message_sources AS MATERIALIZED (
-			SELECT received.event_id AS source_event_id
+			SELECT event_identity.source_event_id
 			  FROM session_runtime_inbox inbox
 			 CROSS JOIN LATERAL jsonb_array_elements_text(inbox.event_ids_json::jsonb) event_identity(source_event_id)
-			  JOIN session_events received
-			    ON received.workspace_id = inbox.workspace_id
-			   AND received.session_id = inbox.session_id
-			   AND received.session_thread_id = inbox.session_thread_id
-			   AND received.event_id = event_identity.source_event_id
-			   AND received.type = 'agent.thread_message_received'
-			  JOIN session_threads child
-			    ON child.workspace_id = inbox.workspace_id
-			   AND child.session_id = inbox.session_id
-			   AND child.id = inbox.session_thread_id
-			   AND child.role = 'subagent'
-			  JOIN session_bridge_operations birth
-			    ON birth.workspace_id = child.workspace_id
-			   AND birth.session_id = child.session_id
-			   AND birth.session_thread_id = child.parent_thread_id
-			   AND birth.operation = 'create_child_thread'
-			   AND birth.source_kind = 'subagent_spawn'
-			   AND birth.ack_status = 'committed'
-			   AND birth.idempotency_key = received.payload_json::jsonb ->> 'source_tool_use_event_id'
-			   AND birth.result_json::jsonb ->> 'child_thread_id' = child.id
 			 WHERE inbox.workspace_id = $1
 			   AND inbox.session_id = $2
 			   AND inbox.session_thread_id = $3

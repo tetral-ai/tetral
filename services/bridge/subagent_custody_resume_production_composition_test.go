@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -24,6 +25,7 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -651,6 +653,8 @@ func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *te
 	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, executingRuntime.port, fixture.sessionID, fixture.podUID, secondRuntimeInputID)
 	firstExecution := executingRuntime.providerStart(t)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
+	waitForThreadIdleEvents(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 	executingRuntime.kill(t)
 	if firstExecution.ProviderInvocations != 1 {
 		t.Fatalf("rehearsal Provider invocations = %d; want 1", firstExecution.ProviderInvocations)
@@ -659,7 +663,7 @@ func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *te
 	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
 		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
 		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID, "evt_executed_close_after_start")
-	var openingInbox, openingQueue, secondInbox, secondQueue, childStatus, startID, endID, runningID, closeID string
+	var openingInbox, openingQueue, secondInbox, secondQueue, childStatus, startID, endID, runningID, turnIdleID, closeID string
 	var startBoundary, messages, starts int
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
@@ -673,15 +677,16 @@ func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *te
 		(SELECT (projection_json::jsonb->>'context_through_message_sequence')::int FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_start' ORDER BY sequence DESC LIMIT 1),
 		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_end' ORDER BY sequence DESC LIMIT 1),
 		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_running' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_idle' AND payload_json::jsonb #>> '{stop_reason,type}' <> 'closed_for_runtime' ORDER BY sequence DESC LIMIT 1),
 		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1)`,
 		fixture.runtimeInputID, fixture.jobID, secondRuntimeInputID,
 		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, secondRuntimeInputID), fixture.sessionID, fixture.childID).Scan(
 		&openingInbox, &openingQueue, &secondInbox, &secondQueue, &childStatus, &messages, &starts,
-		&startID, &startBoundary, &endID, &runningID, &closeID,
+		&startID, &startBoundary, &endID, &runningID, &turnIdleID, &closeID,
 	); err != nil {
 		t.Fatalf("read Request-Start-won close facts: %v", err)
 	}
-	if openingInbox != "committed" || openingQueue != queue.StatusCancelled || secondInbox != "cancelled" || secondQueue != queue.StatusAcknowledged ||
+	if openingInbox != "committed" || openingQueue != queue.StatusCancelled || secondInbox != "committed" || secondQueue != queue.StatusAcknowledged ||
 		childStatus != "closed_for_runtime" || messages != 2 || starts != 1 || startBoundary != 2 {
 		t.Fatalf("Request-Start-won close = opening:%s/%s second:%s/%s child:%s messages:%d starts:%d boundary:%d",
 			openingInbox, openingQueue, secondInbox, secondQueue, childStatus, messages, starts, startBoundary)
@@ -697,7 +702,7 @@ func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *te
 	if got := contextEntrySequences(resumed.ContextEntries); !slices.Equal(got, []int64{1, 2, 3}) {
 		t.Fatalf("Request-Start-won historical context sequences = %v; want consumed users [1 2] and retained Assistant [3]", got)
 	}
-	wantFacts := map[string]bool{runningID: false, startID: false, endID: false, closeID: false}
+	wantFacts := map[string]bool{runningID: false, startID: false, endID: false, turnIdleID: false, closeID: false}
 	for _, event := range resumed.TurnFacts.Events {
 		if _, expected := wantFacts[event.EventID]; expected {
 			wantFacts[event.EventID] = true
@@ -1453,6 +1458,54 @@ func waitForThreadRequestEnds(t *testing.T, admin *sql.DB, sessionID, threadID s
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("Thread %s did not reach %d Request Ends", threadID, want)
+}
+
+func runSubagentOutputCaptureOnce(t *testing.T, runtimeDB *sql.DB) {
+	t.Helper()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build Subagent output-capture provider registry: %v", err)
+	}
+	runner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB)), nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(dbconnect.NewClientForTesting(runtimeDB)),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "subagent-resume-output-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		if runErr != nil {
+			t.Fatalf("run Subagent output-capture owner: %v", runErr)
+		}
+		if active {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("Subagent Runtime did not enqueue output capture")
+}
+
+func waitForThreadIdleEvents(t *testing.T, admin *sql.DB, sessionID, threadID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			  AND type='session.thread_status_idle' AND payload_json::jsonb #>> '{stop_reason,type}' <> 'closed_for_runtime'`,
+			sessionID, threadID).Scan(&count); err == nil && count >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("Thread %s did not reach %d ordinary idle Events", threadID, want)
 }
 
 func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID, runtimeInputID string, diagnosticPaths ...string) {
