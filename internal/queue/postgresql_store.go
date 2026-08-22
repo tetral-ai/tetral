@@ -651,9 +651,10 @@ type leaseCandidateRow struct {
 
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
 	leasedAt := request.Now
-	// A reclaimed interrupt at its attempt ceiling is leased only to recover
-	// JobRunner's receipt-or-Session-termination transaction. Its counter stays
-	// capped, so recovery cannot authorize another Runtime delivery attempt.
+	// Reclaimed terminal work uses a bounded marker rather than new delivery
+	// budget. Interrupts retain their existing N marker. Generic agent mail may
+	// advance once to N+1 so JobRunner can identify a finalization-only lease;
+	// every later reclaim remains clamped at that marker.
 	row := tx.QueryRow(ctx,
 		`UPDATE queue_jobs
 		    SET status = 'leased',
@@ -664,6 +665,9 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		        attempt_count = CASE
 		          WHEN $3 = 'runtime_input' AND $12 = 'interrupt_control'
 		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          THEN attempt_count
+		          WHEN $3 = 'runtime_input' AND $12 = 'agent_mail'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13) + 1
 		          THEN attempt_count
 		          ELSE attempt_count + 1
 		        END,

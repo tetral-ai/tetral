@@ -939,6 +939,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 		return false, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
 	if job.WorkspaceID == "" || job.SessionID == "" || job.RuntimeInputID == "" ||
+		(job.InputKind == "agent_mail" && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) ||
 		attempt.BindingID == "" || attempt.Generation <= 0 || attempt.TargetPodUID == "" {
 		return false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime job identity is incomplete", retryable: false}
 	}
@@ -950,6 +951,18 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.mark_runtime_input_accepted", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
+		}
+		if job.InputKind == "agent_mail" {
+			active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+				WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+				Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+			})
+			if err != nil {
+				return err
+			}
+			if !active {
+				return runtimeDeliveryPrepareError{kind: "runtime_queue_lease_stale", message: "runtime input queue lease is stale", retryable: true}
+			}
 		}
 		if job.InputKind == "task_notification" {
 			closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, job.WorkspaceID, job.SessionID, job.SessionThreadID)
@@ -968,8 +981,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_inbox
 			    SET status = CASE
-			            WHEN status = 'committed' THEN status
-			            ELSE 'accepted'
+						WHEN input_kind = 'agent_mail' OR status <> 'committed' THEN 'accepted'
+			            ELSE status
 			        END,
 			        updated_at = $4
 			  WHERE workspace_id = $1
@@ -1167,6 +1180,15 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			return err
 		}
 		if job.InputKind == "agent_mail" {
+			opening, err := isOpeningAgentMailTx(ctx, tx, job)
+			if err != nil {
+				return err
+			}
+			if opening && !runtimeJobFinalAttempt(job) {
+				finalized = result
+				finalized.Retryable = true
+				return nil
+			}
 			stale, err := agentMailRecipientTerminalTx(ctx, tx, job)
 			if err != nil {
 				return err
@@ -1182,6 +1204,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			if stale {
 				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
 				return nil
+			}
+			if opening {
+				finalized, err = finalizeOpeningAgentMailFailureTx(ctx, tx, job, now)
+				return err
 			}
 			if err := settleAgentMailDeliveryExhaustionTx(ctx, tx, job, now); err != nil {
 				return err
@@ -1938,10 +1964,23 @@ func validateRuntimeFinalizationBindingTx(
 			return invalidRuntimeFinalizationIdentity("queued runtime Inbox conflicts with attempted binding")
 		}
 	case "delivering", "accepted":
+		if runtimeJobAgentMailFinalizationOnly(job) && attemptedEmpty {
+			if !bindingID.Valid || bindingID.String == "" || !bindingGeneration.Valid || bindingGeneration.Int64 <= 0 ||
+				!targetPodUID.Valid || targetPodUID.String == "" {
+				return invalidRuntimeFinalizationIdentity("finalization-only runtime Inbox binding is incomplete")
+			}
+			break
+		}
 		if !attemptedComplete || !bindingID.Valid || bindingID.String != result.AttemptedBindingID ||
 			!bindingGeneration.Valid || bindingGeneration.Int64 != result.AttemptedBindingGeneration ||
 			!targetPodUID.Valid || targetPodUID.String != result.AttemptedTargetPodUID {
 			return invalidRuntimeFinalizationIdentity("runtime Inbox binding conflicts with delivery attempt")
+		}
+	case "committed":
+		if !attemptedEmpty && (!attemptedComplete || !bindingID.Valid || bindingID.String != result.AttemptedBindingID ||
+			!bindingGeneration.Valid || bindingGeneration.Int64 != result.AttemptedBindingGeneration ||
+			!targetPodUID.Valid || targetPodUID.String != result.AttemptedTargetPodUID) {
+			return invalidRuntimeFinalizationIdentity("committed runtime Inbox binding conflicts with delivery attempt")
 		}
 	}
 	return nil
@@ -2140,13 +2179,181 @@ func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx
 	switch inbox.status {
 	case "dead_lettered":
 		return runtimeDeliveryExhaustedResult(), true, nil
-	case "committed", "cancelled":
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
-	case "queued", "delivering", "accepted":
+	case "cancelled":
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}, true, nil
+	case "accepted", "committed":
+		settled, err := settleAgentMailExecutionCustodyTx(ctx, tx, job, inbox, storage.Now())
+		if err != nil {
+			return RuntimeDeliveryResult{}, false, err
+		}
+		if settled {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}, true, nil
+		}
+		return RuntimeDeliveryResult{}, false, nil
+	case "queued", "delivering":
 		return RuntimeDeliveryResult{}, false, nil
 	default:
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 	}
+}
+
+// Agent-mail materialization is not execution custody. A reclaimed lease may
+// settle only an accepted stamp or a real Request Start whose durable context
+// boundary includes the exact Message projected from this Inbox identity.
+func settleAgentMailExecutionCustodyTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	inbox lockedRuntimeInboxFinalization,
+	now time.Time,
+) (bool, error) {
+	if inbox.status == "accepted" {
+		return settleCurrentBindingAcceptedRuntimeInputTx(ctx, tx, job, now)
+	}
+	if inbox.status != "committed" || len(inbox.eventIDs) != 1 {
+		return false, nil
+	}
+	witnessed, err := agentMailRequestStartWitnessTx(ctx, tx, job, inbox)
+	if err != nil {
+		return false, err
+	}
+	if !witnessed {
+		return false, nil
+	}
+	updated, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+		SET status='accepted',updated_at=$4
+		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status='committed'`,
+		job.WorkspaceID, job.SessionID, job.RuntimeInputID, now)
+	if err != nil {
+		return false, err
+	}
+	if !rowsAffected(updated) {
+		return false, runtimeDeliveryPrepareError{kind: "runtime_inbox_accept_missing", message: "agent mail execution witness lost Inbox custody", retryable: true}
+	}
+	acked, err := queue.AckTx(ctx, tx, queue.AckRequest{
+		WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken, Now: now,
+	})
+	if err != nil {
+		return false, err
+	}
+	if !acked {
+		return false, runtimeDeliveryPrepareError{kind: "runtime_queue_lease_stale", message: "agent mail execution witness lost Queue custody", retryable: true}
+	}
+	return true, nil
+}
+
+func agentMailRequestStartWitnessTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	inbox lockedRuntimeInboxFinalization,
+) (bool, error) {
+	if len(inbox.eventIDs) != 1 {
+		return false, nil
+	}
+	var witnessed bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		  FROM session_messages message
+		  JOIN session_events request_start
+		    ON request_start.workspace_id=message.workspace_id
+		   AND request_start.session_id=message.session_id
+		   AND request_start.session_thread_id=message.session_thread_id
+		   AND request_start.type='span.model_request_start'
+		 WHERE message.workspace_id=$1 AND message.session_id=$2
+		   AND message.session_thread_id=$3 AND message.source_event_id=$4
+		   AND jsonb_typeof(request_start.projection_json::jsonb -> 'context_through_message_sequence')='number'
+		   AND (request_start.projection_json::jsonb ->> 'context_through_message_sequence')::bigint >= message.sequence
+	)`, job.WorkspaceID, job.SessionID, job.SessionThreadID, inbox.eventIDs[0]).Scan(&witnessed)
+	return witnessed, err
+}
+
+func isOpeningAgentMailTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
+	deliveryID := strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")
+	if deliveryID == "" || deliveryID == job.RuntimeInputID {
+		return false, invalidRuntimeFinalizationIdentity("agent mail runtime input id is invalid")
+	}
+	envelope, err := loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID, deliveryID)
+	if err != nil {
+		return false, err
+	}
+	var opening bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		  FROM session_threads child
+		  JOIN session_bridge_operations birth
+		    ON birth.workspace_id=child.workspace_id
+		   AND birth.session_id=child.session_id
+		   AND birth.session_thread_id=child.parent_thread_id
+		   AND birth.operation='create_child_thread'
+		   AND birth.source_kind='subagent_spawn'
+		   AND birth.ack_status='committed'
+		   AND birth.idempotency_key=$4
+		   AND birth.result_json::jsonb ->> 'child_thread_id'=child.id
+		 WHERE child.workspace_id=$1 AND child.session_id=$2 AND child.id=$3
+		   AND child.role='subagent' AND child.parent_thread_id=$5
+	)`, job.WorkspaceID, job.SessionID, job.SessionThreadID,
+		envelope.SourceToolUseEventID, envelope.SourceThreadID).Scan(&opening)
+	return opening, err
+}
+
+func finalizeOpeningAgentMailFailureTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	now time.Time,
+) (RuntimeDeliveryResult, error) {
+	active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+		WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+		Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+	})
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if !active {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}, nil
+	}
+	scope := bridgeSessionScope(job.WorkspaceID, job.SessionID, job.SessionThreadID)
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	failure := runtimeTerminationFailure{
+		Type: "runtime", Code: "runtime_persistence_exhausted",
+		Message: "The sub-agent opening input exhausted Runtime admission before execution began.",
+		Reason:  "runtime_input_commit_exhausted",
+	}
+	failure.RetryStatus.Type = "terminal"
+	failureJSON, err := marshalBridgeJSON(failure)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	runtimeWriteID := stableRuntimeID("opening_agent_mail_exhausted", job.WorkspaceID, job.SessionID, job.RuntimeInputID)
+	if _, _, err := settleRuntimeTerminationTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now); err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='dead_lettered',updated_at=$4
+		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		  AND status IN ('delivering','accepted','committed','cancelled')`,
+		job.WorkspaceID, job.SessionID, job.RuntimeInputID, now); err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	deadLettered, err := tx.Exec(ctx, `UPDATE queue_jobs
+		SET status='dead_lettered',dead_lettered_at=$4,last_error_kind='runtime_delivery_exhausted',
+		    last_error_message='sub-agent opening input exhausted before execution',
+		    lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,updated_at=$4
+		WHERE workspace_id=$1 AND id=$2 AND kind=$5 AND partition_key=$6 AND dedupe_key=$7
+		  AND ((status='leased' AND lease_token=$3) OR status='cancelled')`,
+		job.WorkspaceID, job.JobID, job.LeaseToken, now, job.Kind, job.PartitionKey, job.DedupeKey)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if !rowsAffected(deadLettered) {
+		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "runtime_queue_lease_stale", message: "opening input finalization lost Queue custody", retryable: true}
+	}
+	result := runtimeDeliveryExhaustedResult()
+	result.QueueLeaseSettled = true
+	return result, nil
 }
 
 func settleAgentMailDeliveryExhaustionTx(
@@ -3270,6 +3477,21 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 	}
 	if recipientStatus == "closed_for_runtime" || recipientStatus == "terminated" {
 		return RuntimeCommandPlan{StaleAccepted: true}, nil
+	}
+	if job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" ||
+		job.PartitionKey != queue.FormatSessionPartitionKey(workspace.ID(job.WorkspaceID), job.SessionID) ||
+		job.DedupeKey != queue.FormatRuntimeInputDedupeKey(workspace.ID(job.WorkspaceID), job.SessionID, job.RuntimeInputID) {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail Queue identity is incomplete", retryable: false}
+	}
+	active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+		WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+		Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+	})
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if !active {
+		return RuntimeCommandPlan{StaleAccepted: true, DeliveryAuthorityLost: true}, nil
 	}
 	binding, err := s.resolveRuntimeTarget(ctx, tx, job)
 	if err != nil {

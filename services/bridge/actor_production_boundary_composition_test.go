@@ -235,8 +235,8 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 		Scan(&childEnds, &inboxStatus, &queueStatus); err != nil {
 		t.Fatalf("read cold child delivery settlement: %v", err)
 	}
-	if childEnds != 1 || inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged {
-		t.Fatalf("cold child settlement ends/Inbox/Queue = %d/%s/%s; want 1/committed/acknowledged", childEnds, inboxStatus, queueStatus)
+	if childEnds != 1 || inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged {
+		t.Fatalf("cold child settlement ends/Inbox/Queue = %d/%s/%s; want 1/accepted/acknowledged", childEnds, inboxStatus, queueStatus)
 	}
 }
 

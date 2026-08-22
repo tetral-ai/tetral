@@ -768,6 +768,38 @@ func TestPostgreSQLStoreExpiredFinalInterruptLeaseReclaimsAsBarrier(t *testing.T
 	}
 }
 
+func TestPostgreSQLStoreExpiredFinalAgentMailLeaseUsesOneClampedFinalizationMarker(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_mail_marker")
+	sessionID := "sesn_mail_marker"
+	now := time.Date(2026, 7, 1, 12, 49, 0, 0, time.UTC)
+	job := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_mail_marker", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, sessionID, "agent_mail:delivery_marker"),
+		PayloadJSON:  []byte(`{"workspace_id":"ws_mail_marker","session_id":"sesn_mail_marker","session_thread_id":"thr_mail_marker","runtime_input_id":"agent_mail:delivery_marker","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"agent_mail"}`),
+		MaxAttempts:  1, Now: now,
+	})
+	first := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-runtime", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second)})
+	if first.ID != job.ID || first.AttemptCount != 1 {
+		t.Fatalf("final Runtime lease = %s/%d; want same job at N=1", first.ID, first.AttemptCount)
+	}
+	for reclaim := 0; reclaim < 2; reclaim++ {
+		if _, err := admin.ExecContext(ctx, `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+			WHERE workspace_id=$1 AND id=$2`, string(ws), job.ID); err != nil {
+			t.Fatalf("expire agent-mail lease %d: %v", reclaim, err)
+		}
+		if count, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws}); err != nil || count != 1 {
+			t.Fatalf("reclaim agent-mail lease %d = %d/%v; want 1/nil", reclaim, count, err)
+		}
+		leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-finalizer", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(time.Minute)})
+		if leased.ID != job.ID || leased.AttemptCount != 2 {
+			t.Fatalf("agent-mail finalization lease %d = %s/%d; want same job clamped at N+1=2", reclaim, leased.ID, leased.AttemptCount)
+		}
+	}
+}
+
 func TestPostgreSQLStoreDatabaseAssignsPartitionSequence(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ws := workspace.ID("ws_queue_partition_sequence")

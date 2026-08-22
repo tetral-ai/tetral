@@ -234,7 +234,7 @@ type attachmentRecoveryProcess struct {
 	closePath           string
 }
 
-func startAttachmentRecoveryRuntime(t *testing.T, bridgeAddress, mode, sessionID, threadID, bindingID string, generation int64, podUID string) *attachmentRecoveryProcess {
+func startAttachmentRecoveryRuntime(t *testing.T, bridgeAddress, mode, sessionID, threadID, bindingID string, generation int64, podUID string, rejectAdmissionAfterCommit ...bool) *attachmentRecoveryProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
@@ -245,6 +245,7 @@ func startAttachmentRecoveryRuntime(t *testing.T, bridgeAddress, mode, sessionID
 		closePath:           filepath.Join(tempDir, "close"),
 	}
 	inputPath := filepath.Join(tempDir, "input.json")
+	rejectAdmission := len(rejectAdmissionAfterCommit) == 1 && rejectAdmissionAfterCommit[0]
 	encoded, err := json.Marshal(map[string]any{
 		"mode": mode, "bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
@@ -252,6 +253,7 @@ func startAttachmentRecoveryRuntime(t *testing.T, bridgeAddress, mode, sessionID
 		"acceptResultPath":    process.acceptResultPath,
 		"inspectResultPath":   process.inspectResultPath,
 		"providerStartedPath": process.providerStartedPath, "closePath": process.closePath,
+		"rejectAdmissionAfterCommit": rejectAdmission,
 	})
 	if err != nil {
 		t.Fatalf("encode attachment Runtime composition: %v", err)

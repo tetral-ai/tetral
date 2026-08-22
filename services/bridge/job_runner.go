@@ -300,6 +300,29 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			r.logRuntimeJobAttempt(job, "none", "durable_replay")
 			return r.applyRuntimeDeliveryResult(ctx, job, replayed)
 		}
+		if runtimeJobAgentMailFinalizationOnly(job) {
+			finalized, finalizeErr := r.finalizeRuntimeDelivery(workCtx, job, RuntimeDeliveryResult{
+				Status:       RuntimeDeliveryRejected,
+				Retryable:    false,
+				ErrorKind:    "runtime_delivery_exhausted",
+				ErrorMessage: "runtime delivery attempts are exhausted",
+			})
+			heartbeatErr := stopHeartbeat()
+			if heartbeatErr != nil && !finalized.QueueLeaseSettled {
+				return heartbeatErr
+			}
+			if finalizeErr != nil {
+				if invalidRuntimeJobPayload(finalizeErr) {
+					return r.settleInvalidRuntimeJobPayload(ctx, job)
+				}
+				// This lease exists only to finish the already exhausted input.
+				// Leaving it leased on a transaction failure lets expiry reclaim the
+				// same clamped N+1 marker; generic Queue.Retry must not terminalize it.
+				return finalizeErr
+			}
+			r.logRuntimeJobAttempt(job, "none", runtimeJobFinalizationDisposition(finalized))
+			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
+		}
 		if job.InputKind == "interrupt_control" && runtimeJobFinalAttempt(job) {
 			finalized, finalizeErr := r.finalizeRuntimeDelivery(workCtx, job, RuntimeDeliveryResult{
 				Status:       RuntimeDeliveryRejected,
@@ -592,6 +615,11 @@ func runtimeJobFinalAttempt(job RuntimeJob) bool {
 	return (job.Kind == queue.KindRuntimeInput || job.Kind == queue.KindRuntimeRecovery || isMCPManifestRuntimeJob(job)) &&
 		job.MaxAttempts > 0 &&
 		job.AttemptCount >= job.MaxAttempts
+}
+
+func runtimeJobAgentMailFinalizationOnly(job RuntimeJob) bool {
+	return job.Kind == queue.KindRuntimeInput && job.InputKind == "agent_mail" &&
+		job.MaxAttempts > 0 && job.AttemptCount > job.MaxAttempts
 }
 
 func isMCPManifestRuntimeJob(job RuntimeJob) bool {

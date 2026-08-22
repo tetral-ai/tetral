@@ -449,7 +449,7 @@ func admitAgentMailDeliveryTx(
 		return admittedAgentMailDelivery{}, err
 	}
 	switch inboxStatus {
-	case "queued", "delivering", "accepted":
+	case "queued", "delivering", "accepted", "committed":
 	case "dead_lettered", "cancelled":
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery is terminal")
 	default:
@@ -474,10 +474,9 @@ func admitAgentMailDeliveryTx(
 		receivedEventID     string
 		receivedSequence    int64
 		receivedPayloadJSON string
-		processedAt         sql.NullTime
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT event_id, sequence, payload_json, processed_at
+		`SELECT event_id, sequence, payload_json
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -491,7 +490,7 @@ func admitAgentMailDeliveryTx(
 		targetScope.GetSessionId(),
 		targetScope.GetSessionThreadId(),
 		envelope.DeliveryID,
-	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON, &processedAt)
+	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON)
 	if dbconnect.IsNoRows(err) {
 		if closing, fenceErr := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId()); fenceErr != nil {
 			return admittedAgentMailDelivery{}, fenceErr
@@ -534,14 +533,13 @@ func admitAgentMailDeliveryTx(
 			return admittedAgentMailDelivery{}, err
 		}
 		receivedPayloadJSON = eventPayloadJSON
-		processedAt = sql.NullTime{}
 	} else if err != nil {
 		return admittedAgentMailDelivery{}, err
 	}
 	if normalizeJSONForCompare(json.RawMessage(receivedPayloadJSON)) != normalizeJSONForCompare(json.RawMessage(eventPayloadJSON)) {
 		return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery replay conflicts with the admitted source")
 	}
-	terminal := processedAt.Valid
+	terminal := false
 	if !terminal && !threadReceivableTx(threadScope) {
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 	}
@@ -557,7 +555,7 @@ func admitAgentMailDeliveryTx(
 			return admittedAgentMailDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "accepted agent mail custody conflicts with the current Runtime", retryable: false}
 		}
 	}
-	if !terminal && inboxStatus != "accepted" {
+	if inboxStatus != "accepted" {
 		job := RuntimeJob{
 			WorkspaceID:     targetScope.GetWorkspaceId(),
 			SessionID:       targetScope.GetSessionId(),
@@ -610,6 +608,8 @@ func claimAgentMailInboxDeliveryTx(
 		      OR (event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6)
 		    ))
 		    OR (status='delivering' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6
+		        AND binding_id=$7 AND binding_generation=$8 AND target_pod_uid=$9)
+		    OR (status='committed' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6
 		        AND binding_id=$7 AND binding_generation=$8 AND target_pod_uid=$9)
 		  )`,
 		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID,

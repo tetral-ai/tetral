@@ -171,6 +171,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return err
 		}
 		evidence.ThreadRole = threadScope.role
+		if threadScope.status == "closed_for_runtime" || threadScope.status == "failed" || threadScope.status == "terminated" {
+			return status.Error(codes.FailedPrecondition, "thread does not accept new Runtime events")
+		}
 		if assistantContextDelta != nil {
 			if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 				return err
