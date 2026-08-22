@@ -2518,6 +2518,7 @@ func settleAgentMailDeliveryExhaustionTx(
 	if err := insertRuntimeDeliveryExhaustionEventTx(ctx, tx, job, now); err != nil {
 		return err
 	}
+	finalizationOnly := runtimeJobAgentMailFinalizationOnly(job)
 	deliveryID := strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")
 	if deliveryID == "" || deliveryID == job.RuntimeInputID {
 		return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail runtime input id is invalid", retryable: false}
@@ -2546,11 +2547,13 @@ func settleAgentMailDeliveryExhaustionTx(
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND runtime_input_id = $3
-		    AND status IN ('queued', 'delivering', 'accepted')`,
+		    AND (status IN ('queued', 'delivering', 'accepted')
+		         OR (status = 'committed' AND $5))`,
 		job.WorkspaceID,
 		job.SessionID,
 		job.RuntimeInputID,
 		now,
+		finalizationOnly,
 	)
 	return err
 }
