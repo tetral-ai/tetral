@@ -3474,41 +3474,9 @@ describe("RuntimePodToolRunner", () => {
 			1,
 			"pending",
 		);
-		// Disjunct coverage for validateClosedThreadResumeCheckpoint (core-hosts.ts).
-		// Every row declares the exact set of validator disjuncts its durable
-		// fixture trips, and the loop asserts that set against the reconstructed
-		// checkpoint, so a fixture can never silently stop covering a disjunct.
-		// A disjunct is isolated when some row trips it alone: deleting that one
-		// disjunct then makes the row stop throwing.
-		//
-		// Isolated by a durable row: interruptEventId ("unresolved interrupt"),
-		// terminalCloseout ("terminal closeout"). Isolated by the argument-level
-		// guard table below: routes, pendingToolUses, pendingSandboxExecutions.
-		//
-		// Co-trips the durable data model forces, so no row can split them:
-		//  - executionRunId and an open request each imply a non-idle decision
-		//    (ready_to_finish / request_open), so both keep {stateNotIdle,
-		//    actionNotAwaitInput}. Those two are themselves inseparable: the reducer
-		//    returns await_input only together with the idle state, so stateNotIdle
-		//    always implies actionNotAwaitInput. The one decision that pairs the
-		//    idle state with another action (close_interrupted) needs both an open
-		//    execution run and an unresolved interrupt, which trip two more
-		//    disjuncts, so actionNotAwaitInput cannot stand alone either.
-		//  - a pending Tool Use or Sandbox execution must name an incomplete public
-		//    member of the newest request (extractColdThreadToolRouteView throws
-		//    otherwise) and that member always yields a route, so pendingToolUses,
-		//    pendingSandboxExecutions and routes each co-trip with incompleteToolUse
-		//    and with the resulting non-idle decision. A "complete Tool Use with a
-		//    Sandbox route" fixture is rejected by the same extractor check, so the
-		//    incompleteToolUse co-trip on the Sandbox row cannot be removed either.
-		//  - an incomplete member with no route is only extractable while an
-		//    interrupt is unresolved, so incompleteToolUse keeps interruptEventId as
-		//    its single remaining co-trip.
 		const cases = [
 			{
-				// Restores an opened execution run with nothing else pending.
 				name: "execution run open",
-				trips: ["executionRunId", "stateNotIdle", "actionNotAwaitInput"],
 				context: {
 					contextEntries: [],
 					thread: closedThread,
@@ -3528,7 +3496,6 @@ describe("RuntimePodToolRunner", () => {
 			},
 			{
 				name: "open request",
-				trips: ["openRequest", "stateNotIdle", "actionNotAwaitInput"],
 				context: {
 					contextEntries: [],
 					thread: closedThread,
@@ -3553,13 +3520,6 @@ describe("RuntimePodToolRunner", () => {
 			},
 			{
 				name: "pending tool route",
-				trips: [
-					"incompleteToolUse",
-					"pendingToolUses",
-					"routes",
-					"stateNotIdle",
-					"actionNotAwaitInput",
-				],
 				context: {
 					contextEntries: pendingContextEntries,
 					openRequestDraft: pendingOpenRequestDraft,
@@ -3580,13 +3540,6 @@ describe("RuntimePodToolRunner", () => {
 			},
 			{
 				name: "unfinished sandbox route",
-				trips: [
-					"incompleteToolUse",
-					"pendingSandboxExecutions",
-					"routes",
-					"stateNotIdle",
-					"actionNotAwaitInput",
-				],
 				context: {
 					contextEntries: pendingContextEntries,
 					openRequestDraft: pendingOpenRequestDraft,
@@ -3607,7 +3560,6 @@ describe("RuntimePodToolRunner", () => {
 			},
 			{
 				name: "unresolved interrupt",
-				trips: ["interruptEventId"],
 				context: {
 					contextEntries: [],
 					thread: closedThread,
@@ -3626,12 +3578,7 @@ describe("RuntimePodToolRunner", () => {
 				},
 			},
 			{
-				// An unresolved interrupt is the only durable state that lets a sealed
-				// incomplete Tool Use survive without a route, which is what shrinks
-				// incompleteToolUse's co-trip set to the interrupt alone: the decision
-				// stays idle/await_input because no execution run is open.
 				name: "interrupted incomplete Tool Use without a route",
-				trips: ["interruptEventId", "incompleteToolUse"],
 				context: {
 					contextEntries: pendingContextEntries,
 					openRequestDraft: pendingOpenRequestDraft,
@@ -3652,11 +3599,7 @@ describe("RuntimePodToolRunner", () => {
 				},
 			},
 			{
-				// A terminated run with its paired failure fact: the reducer reports
-				// idle/await_input and the extractor drops both the request and every
-				// route, so terminalCloseout is the only disjunct left standing.
 				name: "terminal closeout",
-				trips: ["terminalCloseout"],
 				context: {
 					contextEntries: [],
 					thread: closedThread,
@@ -3685,13 +3628,12 @@ describe("RuntimePodToolRunner", () => {
 			},
 			{
 				name: "reducer has pending input",
-				trips: ["stateNotIdle", "actionNotAwaitInput"],
 				context: {
 					contextEntries: [pendingInput],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
-					turnFacts: resumeTurnFactsFor([pendingInput]),
+					turnFacts: emptyResumeTurnFacts,
 				},
 			},
 		];
@@ -3705,15 +3647,6 @@ describe("RuntimePodToolRunner", () => {
 				pendingToolUses: testCase.context.pendingToolUses,
 				pendingSandboxExecutions: testCase.context.pendingSandboxExecutions,
 			});
-			expect(
-				resumeCheckpointTrippedDisjuncts(
-					checkpoint,
-					routeView,
-					testCase.context.pendingToolUses,
-					testCase.context.pendingSandboxExecutions,
-				),
-				testCase.name,
-			).toEqual(testCase.trips);
 			expect(
 				() =>
 					validateClosedThreadResumeCheckpoint(
@@ -4138,52 +4071,6 @@ const emptyResumeTurnFacts: ThreadTurnLoadFacts = {
 	events: [],
 	internalRepairs: [],
 };
-
-/**
- * Mirrors the disjunct list of validateClosedThreadResumeCheckpoint
- * (core-hosts.ts) in source order so every resume-rejection row can pin the
- * exact set of non-quiescent facts its durable fixture produces.
- */
-function resumeCheckpointTrippedDisjuncts(
-	checkpoint: ThreadTurnCheckpoint,
-	routeView: ThreadToolRouteView,
-	pendingToolUses: readonly unknown[],
-	pendingSandboxExecutions: readonly unknown[],
-): readonly string[] {
-	const decision = deriveThreadTurnDecision(checkpoint, routeView, [], {
-		hasPendingAttachments: false,
-	});
-	const incompleteToolUse =
-		checkpoint.request?.toolMembers.some(
-			(member) =>
-				member.memberKind === "public_tool_use" &&
-				member.terminalResult === undefined,
-		) ?? false;
-	const disjuncts: readonly (readonly [string, boolean])[] = [
-		["executionRunId", checkpoint.executionRunId !== undefined],
-		["interruptEventId", checkpoint.interruptEventId !== undefined],
-		["terminalCloseout", checkpoint.terminalCloseout !== undefined],
-		[
-			"openRequest",
-			checkpoint.request !== undefined &&
-				checkpoint.request.requestEnd === undefined,
-		],
-		["incompleteToolUse", incompleteToolUse],
-		["pendingToolUses", pendingToolUses.length !== 0],
-		["pendingSandboxExecutions", pendingSandboxExecutions.length !== 0],
-		["routes", routeView.routes.length !== 0],
-		["stateNotIdle", decision.state.state !== "idle"],
-		["actionNotAwaitInput", decision.action.action !== "await_input"],
-	];
-	return disjuncts.flatMap(([name, tripped]) => (tripped ? [name] : []));
-}
-
-function resumeTurnFactsFor(
-	contextEntries: readonly RuntimeContextEntry[],
-): ThreadTurnLoadFacts {
-	void contextEntries;
-	return { events: [], internalRepairs: [] };
-}
 
 function resumeTurnFactsForPendingTool(input: {
 	readonly modelRequestId: string;

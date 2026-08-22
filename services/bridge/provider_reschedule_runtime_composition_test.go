@@ -812,7 +812,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		context.Background(),
 		"EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) "+loadContextTurnEventsSQL,
 		"default", sessionID, threadID, int64(0), "evt_provider_reschedule_durable_turn",
-		`["`+modelRequestID+`"]`, `["`+toolUse.GetCommitted().GetEventId()+`"]`,
+		`["`+modelRequestID+`"]`, `["`+toolUse.GetCommitted().GetEventId()+`"]`, "running",
 	).Scan(&planJSON); err != nil {
 		t.Fatalf("EXPLAIN current provider reschedule selection: %v", err)
 	}

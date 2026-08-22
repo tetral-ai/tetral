@@ -1,11 +1,17 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +29,212 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
+
+type closedThreadResumeCompositionResult struct {
+	Raw    string `json:"-"`
+	Result struct {
+		Type string `json:"type"`
+	} `json:"result"`
+	Inspected struct {
+		OK       bool   `json:"ok"`
+		Observed bool   `json:"observed"`
+		Status   string `json:"status"`
+	} `json:"inspected"`
+	Checkpoint struct {
+		PendingInputSequences []int64 `json:"pendingInputContextSequences"`
+	} `json:"checkpoint"`
+	Decision struct {
+		State struct {
+			State string `json:"state"`
+		} `json:"state"`
+		Action struct {
+			Action string `json:"action"`
+		} `json:"action"`
+	} `json:"decision"`
+	ContextEntries   []bridgeRuntimeContextEntry `json:"contextEntries"`
+	TurnFacts        bridgeLoadContextTurnFacts  `json:"turnFacts"`
+	ProviderRequests int                         `json:"providerRequests"`
+	RuntimeEvents    int                         `json:"runtimeEvents"`
+}
+
+type closedThreadResumeRuntimeProcess struct {
+	command             *exec.Cmd
+	output              bytes.Buffer
+	port                int
+	acceptResultPath    string
+	providerStartedPath string
+	closePath           string
+}
+
+func runClosedThreadResumeProductionComposition(t *testing.T, runtime *sql.DB, input map[string]any) closedThreadResumeCompositionResult {
+	t.Helper()
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("closed-thread-resume-composition-key")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for closed Thread resume composition: %v", err)
+	}
+	server := grpc.NewServer()
+	RegisterBridgeAPI(server, store)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	input["address"] = listener.Addr().String()
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("encode closed Thread resume input: %v", err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "closed-thread-resume.json")
+	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
+		t.Fatalf("write closed Thread resume input: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/closed-thread-resume-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run closed Thread through Runtime resume owner: %v: %s", err, output)
+	}
+	var result closedThreadResumeCompositionResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode closed Thread resume result: %v: %s", err, output)
+	}
+	result.Raw = string(output)
+	return result
+}
+
+func startClosedThreadResumeProductionComposition(t *testing.T, runtime *sql.DB, input map[string]any) (*closedThreadResumeRuntimeProcess, closedThreadResumeCompositionResult) {
+	t.Helper()
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("closed-thread-resume-composition-key")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for serving closed Thread resume composition: %v", err)
+	}
+	server := grpc.NewServer()
+	RegisterBridgeAPI(server, store)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	tempDir := t.TempDir()
+	readyPath := filepath.Join(tempDir, "ready.json")
+	resumeResultPath := filepath.Join(tempDir, "resume-result.json")
+	acceptResultPath := filepath.Join(tempDir, "accept-result.json")
+	process := &closedThreadResumeRuntimeProcess{
+		acceptResultPath:    acceptResultPath,
+		providerStartedPath: filepath.Join(tempDir, "provider-started.json"),
+		closePath:           filepath.Join(tempDir, "close"),
+	}
+	input["address"] = listener.Addr().String()
+	input["readyPath"] = readyPath
+	input["resumeResultPath"] = resumeResultPath
+	input["acceptResultPath"] = acceptResultPath
+	input["providerStartedPath"] = process.providerStartedPath
+	input["closePath"] = process.closePath
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("encode serving closed Thread resume input: %v", err)
+	}
+	inputPath := filepath.Join(tempDir, "closed-thread-resume.json")
+	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
+		t.Fatalf("write serving closed Thread resume input: %v", err)
+	}
+	process.command = exec.Command("bun", "packages/runtime-pod/test/fixtures/closed-thread-resume-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	process.command.Dir = "../agent-runtime"
+	process.command.Stdout = &process.output
+	process.command.Stderr = &process.output
+	if err := process.command.Start(); err != nil {
+		t.Fatalf("start serving closed Thread resume composition: %v", err)
+	}
+	t.Cleanup(func() {
+		if process.command.ProcessState == nil {
+			_ = process.command.Process.Kill()
+			_ = process.command.Wait()
+		}
+	})
+	deadline := time.Now().Add(20 * time.Second)
+	var result closedThreadResumeCompositionResult
+	for time.Now().Before(deadline) {
+		readyJSON, readyErr := os.ReadFile(readyPath)
+		resumeJSON, resumeErr := os.ReadFile(resumeResultPath)
+		var ready struct {
+			Port int `json:"port"`
+		}
+		if readyErr == nil && resumeErr == nil && json.Unmarshal(readyJSON, &ready) == nil && ready.Port > 0 && json.Unmarshal(resumeJSON, &result) == nil {
+			process.port = ready.Port
+			result.Raw = string(resumeJSON)
+			return process, result
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("serving closed Thread resume composition did not become ready: %s", process.output.String())
+	return nil, closedThreadResumeCompositionResult{}
+}
+
+func (p *closedThreadResumeRuntimeProcess) providerStart(t *testing.T, admin *sql.DB, sessionID, threadID string) struct {
+	ProviderRequests int             `json:"providerRequests"`
+	Request          json.RawMessage `json:"request"`
+} {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(p.providerStartedPath)
+		if err == nil {
+			var started struct {
+				ProviderRequests int             `json:"providerRequests"`
+				Request          json.RawMessage `json:"request"`
+			}
+			if json.Unmarshal(raw, &started) == nil {
+				return started
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	accepted, _ := os.ReadFile(p.acceptResultPath)
+	var events string
+	_ = admin.QueryRowContext(context.Background(), `SELECT coalesce(string_agg(sequence::text || ':' || type || ':' || payload_json, ',' ORDER BY sequence),'')
+		FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, threadID).Scan(&events)
+	t.Fatalf("resumed Runtime Provider invocation did not start: accepted=%s events=%s output=%s", accepted, events, p.output.String())
+	return struct {
+		ProviderRequests int             `json:"providerRequests"`
+		Request          json.RawMessage `json:"request"`
+	}{}
+}
+
+func (p *closedThreadResumeRuntimeProcess) close(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release serving closed Thread resume composition: %v", err)
+	}
+	if err := p.command.Wait(); err != nil {
+		t.Fatalf("wait for serving closed Thread resume composition: %v: %s", err, p.output.String())
+	}
+}
+
+func assertQuiescentClosedThreadResume(t *testing.T, result closedThreadResumeCompositionResult) {
+	t.Helper()
+	if result.Result.Type != "completed" || !result.Inspected.OK || !result.Inspected.Observed ||
+		result.Inspected.Status != "idle" || len(result.Checkpoint.PendingInputSequences) != 0 ||
+		result.Decision.State.State != "idle" || result.Decision.Action.Action != "await_input" ||
+		result.ProviderRequests != 0 || result.RuntimeEvents != 0 {
+		t.Fatalf("closed Thread resume = %s; want completed idle/await_input with no pending input, Provider request, or Runtime write", result.Raw)
+	}
+}
+
+func seedChildResumeRoute(t *testing.T, admin *sql.DB, sessionID, parentID, sourceID string) {
+	t.Helper()
+	seedActorSourceEvent(t, admin, sessionID, parentID, sourceID, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"resume_agent","evaluated_permission":"allow"}`)
+	modelRequestID := "mreq_" + sourceID
+	modelToolCallID := "call_" + sourceID
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET visibility='public',session_visible=true,model_request_id=$3,projection_json=$4
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`,
+		sessionID, sourceID, modelRequestID, `{"model_tool_call_id":"`+modelToolCallID+`"}`); err != nil {
+		t.Fatalf("project resume source: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, modelRequestID, sourceID, modelToolCallID, "resume_agent")
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+}
 
 func TestSubagentOpeningInputRemainsOwnedAfterLocalAdmissionRejection(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -408,6 +620,289 @@ func TestSubagentOpeningInputFinalizerCrashUsesClampedNPlusOne(t *testing.T) {
 	}
 }
 
+func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "executed_close_resume")
+	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
+	rejectingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID, true)
+	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID)
+	reason, providers, raw := readAgentMailAdmission(t, rejectingRuntime)
+	if reason != "local_session_capacity_exceeded" || providers != 0 {
+		t.Fatalf("materialize opening before second input = %q/%d/%s", reason, providers, raw)
+	}
+	rejectingRuntime.kill(t)
+	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
+		WHERE workspace_id='default' AND id=$1 AND status='pending'`, fixture.jobID); err != nil {
+		t.Fatalf("hold opening retry while second input executes: %v", err)
+	}
+
+	client := startActorProductionBridge(t, fixture.runtimeDB)
+	secondSourceID := "evt_executed_close_second_mail"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, secondSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, secondSourceID)
+	secondDeliveryID := agentMailDeliveryID(secondSourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: secondDeliveryID,
+		TargetThreadId: fixture.childID, SourceToolUseEventId: secondSourceID, Content: "second message consumed with the opening history",
+	}); err != nil || delivered.GetCommitted() == nil {
+		t.Fatalf("deliver second rehearsal Message = %#v/%v", delivered, err)
+	}
+	secondRuntimeInputID := "agent_mail:" + secondDeliveryID
+	executingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
+	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, executingRuntime.port, fixture.sessionID, fixture.podUID, secondRuntimeInputID)
+	firstExecution := executingRuntime.providerStart(t)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	executingRuntime.kill(t)
+	if firstExecution.ProviderInvocations != 1 {
+		t.Fatalf("rehearsal Provider invocations = %d; want 1", firstExecution.ProviderInvocations)
+	}
+
+	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
+		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID, "evt_executed_close_after_start")
+	var openingInbox, openingQueue, secondInbox, secondQueue, childStatus, startID, endID, runningID, closeID string
+	var startBoundary, messages, starts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$5 AND id=$6),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND kind='user'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_start'),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_start' ORDER BY sequence DESC LIMIT 1),
+		(SELECT (projection_json::jsonb->>'context_through_message_sequence')::int FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_start' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_end' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_running' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1)`,
+		fixture.runtimeInputID, fixture.jobID, secondRuntimeInputID,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, secondRuntimeInputID), fixture.sessionID, fixture.childID).Scan(
+		&openingInbox, &openingQueue, &secondInbox, &secondQueue, &childStatus, &messages, &starts,
+		&startID, &startBoundary, &endID, &runningID, &closeID,
+	); err != nil {
+		t.Fatalf("read Request-Start-won close facts: %v", err)
+	}
+	if openingInbox != "committed" || openingQueue != queue.StatusCancelled || secondInbox != "cancelled" || secondQueue != queue.StatusAcknowledged ||
+		childStatus != "closed_for_runtime" || messages != 2 || starts != 1 || startBoundary != 2 {
+		t.Fatalf("Request-Start-won close = opening:%s/%s second:%s/%s child:%s messages:%d starts:%d boundary:%d",
+			openingInbox, openingQueue, secondInbox, secondQueue, childStatus, messages, starts, startBoundary)
+	}
+	resumeSourceID := "evt_resume_executed_closed_child"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
+	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-executed_close_resume", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, resumed)
+	if got := contextEntrySequences(resumed.ContextEntries); !slices.Equal(got, []int64{1, 2, 3}) {
+		t.Fatalf("Request-Start-won historical context sequences = %v; want consumed users [1 2] and retained Assistant [3]", got)
+	}
+	wantFacts := map[string]bool{runningID: false, startID: false, endID: false, closeID: false}
+	for _, event := range resumed.TurnFacts.Events {
+		if _, expected := wantFacts[event.EventID]; expected {
+			wantFacts[event.EventID] = true
+		}
+	}
+	for eventID, present := range wantFacts {
+		if !present {
+			t.Fatalf("closed LoadContext omitted exact latest-run Event %s: %#v", eventID, resumed.TurnFacts.Events)
+		}
+	}
+
+	laterSourceID := "evt_later_after_executed_resume"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
+	laterDeliveryID := agentMailDeliveryID(laterSourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: laterDeliveryID,
+		TargetThreadId: fixture.childID, SourceToolUseEventId: laterSourceID, Content: "one later input after historical cold resume",
+	}); err != nil || delivered.GetCommitted() == nil {
+		t.Fatalf("deliver later input after executed resume = %#v/%v", delivered, err)
+	}
+	laterRuntimeInputID := "agent_mail:" + laterDeliveryID
+	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port, fixture.sessionID, fixture.podUID, laterRuntimeInputID, resumedRuntime.acceptResultPath)
+	laterExecution := resumedRuntime.providerStart(t, fixture.admin, fixture.sessionID, fixture.childID)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 2)
+	resumedRuntime.close(t)
+	var laterSequence int64
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)`,
+		fixture.sessionID, fixture.childID, laterRuntimeInputID).Scan(&laterSequence); err != nil {
+		t.Fatalf("read later resumed Message sequence: %v", err)
+	}
+	if laterExecution.ProviderRequests != 1 || laterSequence != 4 || !strings.Contains(string(laterExecution.Request), "one later input after historical cold resume") {
+		t.Fatalf("later resumed execution = providers:%d sequence:%d wire:%s", laterExecution.ProviderRequests, laterSequence, laterExecution.Request)
+	}
+
+	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
+		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID, "evt_close_after_second_run")
+	var latestStartID string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'
+		ORDER BY sequence DESC LIMIT 1`, fixture.sessionID, fixture.childID).Scan(&latestStartID); err != nil {
+		t.Fatalf("read second-run Request Start: %v", err)
+	}
+	secondResumeSourceID := "evt_resume_latest_closed_run"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, secondResumeSourceID)
+	secondResume := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-executed_close_resume", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": secondResumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, secondResume)
+	latestBoundary := int64(0)
+	latestFactID := ""
+	for _, event := range secondResume.TurnFacts.Events {
+		if event.RequestStart != nil && event.EventSequence > latestBoundary {
+			latestBoundary = event.EventSequence
+			latestFactID = event.EventID
+		}
+	}
+	if latestFactID != latestStartID {
+		t.Fatalf("latest closed checkpoint rooted Request Start %s; want latest run %s", latestFactID, latestStartID)
+	}
+}
+
+func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "terminal_tool_resume")
+	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
+	executingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
+	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, executingRuntime.port, fixture.sessionID, fixture.podUID)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	executingRuntime.kill(t)
+
+	client := startActorProductionBridge(t, fixture.runtimeDB)
+	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
+		parentScope, fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
+		"evt_close_before_terminal_tool_resume")
+	resumeSourceID := "evt_resume_for_terminal_tool"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
+	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-terminal_tool_resume", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+		"providerScenario": "terminal-tool",
+	})
+	assertQuiescentClosedThreadResume(t, resumed)
+
+	laterSourceID := "evt_terminal_tool_after_resume"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
+	laterDeliveryID := agentMailDeliveryID(laterSourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: parentScope, DeliveryId: laterDeliveryID, TargetThreadId: fixture.childID,
+		SourceToolUseEventId: laterSourceID, Content: "produce and retain one terminal tool pair",
+	}); err != nil || delivered.GetCommitted() == nil {
+		t.Fatalf("deliver terminal-Tool input after Resume = %#v/%v", delivered, err)
+	}
+	runtimeInputID := "agent_mail:" + laterDeliveryID
+	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port, fixture.sessionID, fixture.podUID, runtimeInputID, resumedRuntime.acceptResultPath)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 2)
+	resumedRuntime.close(t)
+
+	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
+		parentScope, fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
+		"evt_close_after_terminal_tool")
+	var retainedAssistant, terminalResults int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		count(*) FILTER (WHERE data_json::jsonb::text LIKE '%call_closed_resume_terminal_tool%'),
+		count(*) FILTER (WHERE data_json::jsonb::text LIKE '%\"type\": \"tool_result\"%' OR data_json::jsonb::text LIKE '%\"type\":\"tool_result\"%')
+		FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND kind='assistant'`,
+		fixture.sessionID, fixture.childID).Scan(&retainedAssistant, &terminalResults); err != nil {
+		t.Fatalf("read retained Assistant terminal Tool pair: %v", err)
+	}
+	if retainedAssistant != 1 || terminalResults != 1 {
+		var messages string
+		var events string
+		_ = fixture.admin.QueryRowContext(context.Background(), `SELECT coalesce(string_agg(sequence::text || ':' || kind || ':' || data_json, E'\n' ORDER BY sequence),'')
+			FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
+			fixture.sessionID, fixture.childID).Scan(&messages)
+		_ = fixture.admin.QueryRowContext(context.Background(), `SELECT coalesce(string_agg(sequence::text || ':' || type || ':' || payload_json, E'\n' ORDER BY sequence),'')
+			FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
+			fixture.sessionID, fixture.childID).Scan(&events)
+		t.Fatalf("retained Assistant/terminal Tool result rows = %d/%d; want 1/1; messages=%s events=%s runtime=%s", retainedAssistant, terminalResults, messages, events, resumedRuntime.output.String())
+	}
+
+	finalResumeSourceID := "evt_resume_terminal_tool_history"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, finalResumeSourceID)
+	finalResume := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-terminal_tool_resume", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": finalResumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, finalResume)
+	retainedJSON, err := json.Marshal(finalResume.ContextEntries)
+	if err != nil {
+		t.Fatalf("encode retained terminal Tool context: %v", err)
+	}
+	if !bytes.Contains(retainedJSON, []byte("call_closed_resume_terminal_tool")) ||
+		!bytes.Contains(retainedJSON, []byte(`"type":"tool_result"`)) ||
+		!bytes.Contains(retainedJSON, []byte("checking the retained tool result")) {
+		t.Fatalf("cold Resume omitted retained Assistant terminal Tool pair: %s", retainedJSON)
+	}
+}
+
+func TestSubagentClosedResumeRejectsPostBoundaryMessageWithoutNewRequestStart(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "closed_post_boundary")
+	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
+	executingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
+	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, executingRuntime.port, fixture.sessionID, fixture.podUID)
+	if started := executingRuntime.providerStart(t); started.ProviderInvocations != 1 {
+		t.Fatalf("post-boundary control execution Provider calls = %d; want 1", started.ProviderInvocations)
+	}
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	executingRuntime.kill(t)
+
+	client := startActorProductionBridge(t, fixture.runtimeDB)
+	pendingSourceID := "evt_closed_post_boundary_mail"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, pendingSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, pendingSourceID)
+	pendingDeliveryID := agentMailDeliveryID(pendingSourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: pendingDeliveryID,
+		TargetThreadId: fixture.childID, SourceToolUseEventId: pendingSourceID, Content: "remain pending above the last Request Start boundary",
+	}); err != nil || delivered.GetCommitted() == nil {
+		t.Fatalf("deliver post-boundary Message = %#v/%v", delivered, err)
+	}
+	pendingRuntimeInputID := "agent_mail:" + pendingDeliveryID
+	rejectingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID, true)
+	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID)
+	reason, providers, raw := readAgentMailAdmission(t, rejectingRuntime)
+	if reason != "local_session_capacity_exceeded" || providers != 0 {
+		t.Fatalf("post-boundary materialization = %q/%d/%s", reason, providers, raw)
+	}
+	rejectingRuntime.kill(t)
+
+	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
+		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID, "evt_close_post_boundary")
+	resumeSourceID := "evt_resume_post_boundary"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
+	result := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-closed_post_boundary", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+	})
+	var pendingSequence int64
+	var childStatus, pendingInbox string
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT sequence FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		 AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3)`,
+		fixture.sessionID, fixture.childID, pendingRuntimeInputID).Scan(&pendingSequence, &childStatus, &pendingInbox); err != nil {
+		t.Fatalf("read rejected post-boundary Resume state: %v", err)
+	}
+	if result.Result.Type != "error" || !slices.Equal(result.Checkpoint.PendingInputSequences, []int64{pendingSequence}) ||
+		result.ProviderRequests != 0 || result.RuntimeEvents != 0 || childStatus != "closed_for_runtime" || pendingInbox != "committed" {
+		t.Fatalf("post-boundary Resume = result:%s pending:%v Provider:%d Runtime:%d child:%s Inbox:%s sequence:%d",
+			result.Raw, result.Checkpoint.PendingInputSequences, result.ProviderRequests, result.RuntimeEvents, childStatus, pendingInbox, pendingSequence)
+	}
+}
+
 func TestSubagentOpeningInputCloseBeforeRequestStartCancelsExactCustody(t *testing.T) {
 	fixture := newOpeningRuntimeFixture(t, "close_before_start")
 	runtimeProcess := startAttachmentRecoveryRuntime(
@@ -436,6 +931,10 @@ func TestSubagentOpeningInputCloseBeforeRequestStartCancelsExactCustody(t *testi
 	siblingID := "thr_close_before_start_sibling"
 	siblingDeliveryID := "delivery_close_before_start_sibling"
 	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, parentID, siblingID)
+	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE session_threads SET agent_type='worker',task_name='close-before-start-sibling'
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, fixture.sessionID, siblingID); err != nil {
+		t.Fatalf("name close-before-start sibling: %v", err)
+	}
 	seedCompletionMailSentAt(t, fixture.admin, fixture.sessionID, siblingID, parentID, siblingDeliveryID, 100, "2026-08-22T00:00:00Z")
 	siblingRuntimeInputID := completionRuntimeInputID(siblingDeliveryID)
 	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
@@ -483,6 +982,48 @@ func TestSubagentOpeningInputCloseBeforeRequestStartCancelsExactCustody(t *testi
 		ContextThroughMessageSequence: &messageBoundary, RequestKind: "agent_provider_request",
 	}); err == nil {
 		t.Fatal("late Request Start succeeded after CLOSE won opening custody")
+	}
+
+	resumeSourceID := "evt_resume_close_before_opening_start"
+	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
+	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
+		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-close_before_start", "bindingId": fixture.bindingID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+	})
+	assertQuiescentClosedThreadResume(t, resumed)
+	if len(resumed.ContextEntries) != 0 || len(resumed.TurnFacts.Events) != 0 {
+		t.Fatalf("CLOSE-won cold context = entries:%#v facts:%#v; want cancelled opening omitted without fabricated Turn", resumed.ContextEntries, resumed.TurnFacts)
+	}
+
+	laterSourceID := "evt_later_after_close_before_start"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
+	laterDeliveryID := agentMailDeliveryID(laterSourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: laterDeliveryID,
+		TargetThreadId: fixture.childID, SourceToolUseEventId: laterSourceID, Content: "execute only the later resumed input",
+	}); err != nil || delivered.GetCommitted() == nil {
+		t.Fatalf("deliver later input after CLOSE-won resume = %#v/%v", delivered, err)
+	}
+	laterRuntimeInputID := "agent_mail:" + laterDeliveryID
+	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port, fixture.sessionID, fixture.podUID, laterRuntimeInputID, resumedRuntime.acceptResultPath)
+	laterStart := resumedRuntime.providerStart(t, fixture.admin, fixture.sessionID, fixture.childID)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
+	resumedRuntime.close(t)
+	var laterSequence int64
+	var finalStarts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT sequence FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		 AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start')`,
+		fixture.sessionID, fixture.childID, laterRuntimeInputID).Scan(&laterSequence, &finalStarts); err != nil {
+		t.Fatalf("read later CLOSE-won execution: %v", err)
+	}
+	providerWire := string(laterStart.Request)
+	if laterStart.ProviderRequests != 1 || laterSequence != 2 || finalStarts != 1 ||
+		strings.Contains(providerWire, "execute this input once") || !strings.Contains(providerWire, "execute only the later resumed input") {
+		t.Fatalf("later CLOSE-won execution = providers:%d sequence:%d starts:%d wire:%s", laterStart.ProviderRequests, laterSequence, finalStarts, providerWire)
 	}
 }
 
@@ -694,6 +1235,11 @@ func closeChildThroughProductionInterrupt(
 		Scope: parentScope, ControlOperationId: controlID,
 	}); err != nil || len(closed.GetCommitted().GetChildren()) != 1 {
 		t.Fatalf("commit production child close = %#v/%v", closed, err)
+	}
+	if settled, err := client.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{
+		Scope: parentScope, Settlement: bridgeCompletedToolSettlementForTest(sourceID, "child closed"),
+	}); err != nil || settled.GetCommitted() == nil {
+		t.Fatalf("settle production child close Tool result = %#v/%v", settled, err)
 	}
 }
 
@@ -909,9 +1455,9 @@ func waitForThreadRequestEnds(t *testing.T, admin *sql.DB, sessionID, threadID s
 	t.Fatalf("Thread %s did not reach %d Request Ends", threadID, want)
 }
 
-func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID, runtimeInputID string) {
+func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID, runtimeInputID string, diagnosticPaths ...string) {
 	t.Helper()
-	for attempt := 0; attempt < 6; attempt++ {
+	for attempt := 0; attempt < 100; attempt++ {
 		var statusValue string
 		if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
 			WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID).Scan(&statusValue); err == nil && (statusValue == "accepted" || statusValue == "committed") {
@@ -921,9 +1467,24 @@ func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int,
 				return
 			}
 		}
-		runSubagentRuntimeQueueOnce(t, runtimeDB, admin, port, sessionID, podUID)
+		runner := newSubagentRuntimeQueueRunner(t, runtimeDB, admin, port, sessionID, podUID, nil, nil)
+		if _, err := runner.RunOnceWithActivity(context.Background()); err != nil {
+			t.Fatalf("run Queue while waiting for Runtime input %s: %v", runtimeInputID, err)
+		}
+		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("Runtime input %s did not settle", runtimeInputID)
+	var inboxStatus, queueStatus, errorKind, errorMessage string
+	_ = admin.QueryRowContext(context.Background(), `SELECT inbox.status,job.status,coalesce(job.last_error_kind,''),coalesce(job.last_error_message,'')
+		FROM session_runtime_inbox inbox JOIN queue_jobs job ON job.workspace_id=inbox.workspace_id
+		AND job.dedupe_key='runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		WHERE inbox.workspace_id='default' AND inbox.runtime_input_id=$1`, runtimeInputID).Scan(&inboxStatus, &queueStatus, &errorKind, &errorMessage)
+	diagnostic := ""
+	if len(diagnosticPaths) == 1 {
+		if raw, err := os.ReadFile(diagnosticPaths[0]); err == nil {
+			diagnostic = string(raw)
+		}
+	}
+	t.Fatalf("Runtime input %s did not settle: Inbox=%s Queue=%s error=%s/%s Runtime=%s", runtimeInputID, inboxStatus, queueStatus, errorKind, errorMessage, diagnostic)
 }
 
 func runQueueUntilInterruptSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID string) {

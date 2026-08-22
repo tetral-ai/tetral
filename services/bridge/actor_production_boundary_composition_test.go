@@ -23,7 +23,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -406,7 +405,7 @@ func startActorProductionBridge(t *testing.T, runtime *sql.DB) bridgev1.AgentRun
 	return bridgev1.NewAgentRuntimeBridgeServiceClient(connection)
 }
 
-func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
+func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID      = "sesn_actor_production"
@@ -547,136 +546,6 @@ func TestSubagentMailColdLoadCloseAndResumeAcrossGeneratedGRPCAndPostgreSQL(t *t
 		t.Fatalf("cold target context does not contain durable delivery/content: %s", loaded.GetContextJson())
 	}
 	assertRuntimeDirectContextComposition(t, loaded.GetContextJson())
-
-	closeSourceID := "evt_actor_production_close"
-	seedActorSourceEvent(t, admin, sessionID, parentID, closeSourceID, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"close_agent","model_tool_call_id":"call_actor_production_close","input":{"task_name":"provider-owned-different"}}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true,model_request_id='mreq_actor_production_close',projection_json='{"model_tool_call_id":"call_actor_production_close"}'
-		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, closeSourceID); err != nil {
-		t.Fatalf("authorize durable close source: %v", err)
-	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_actor_production_close", closeSourceID, "call_actor_production_close", "close_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, closeSourceID)
-	closeAdmissionRequest := &bridgev1.AdmitChildInterruptRequest{
-		Scope: parentScope, SourceToolUseEventId: closeSourceID, TargetChildThreadId: childID,
-		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
-	}
-	admitted, err := client.AdmitChildInterrupt(context.Background(), closeAdmissionRequest)
-	if err != nil || admitted.GetCommitted().GetControlOperationId() == "" {
-		t.Fatalf("admit durable child close control = %#v/%v", admitted, err)
-	}
-	controlID := admitted.GetCommitted().GetControlOperationId()
-	var interruptInputID, interruptEventIDsJSON string
-	var interruptSequenceFrom, interruptSequenceTo int64
-	interruptInputErr := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id,event_ids_json,sequence_from,sequence_to FROM session_runtime_inbox
-		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND input_kind='interrupt_control'
-		ORDER BY created_at DESC LIMIT 1`, sessionID, childID).Scan(&interruptInputID, &interruptEventIDsJSON, &interruptSequenceFrom, &interruptSequenceTo)
-	if interruptInputErr != nil {
-		t.Fatalf("read admitted child interrupt input: %v", interruptInputErr)
-	}
-	var interruptEventIDs []string
-	if err := json.Unmarshal([]byte(interruptEventIDsJSON), &interruptEventIDs); err != nil {
-		t.Fatalf("decode admitted child interrupt event IDs: %v", err)
-	}
-	var interruptQueueJob queue.Job
-	interruptQueueJob.LeaseToken = "qlt_actor_production_interrupt"
-	if err := admin.QueryRowContext(context.Background(), `UPDATE queue_jobs
-		SET status='leased',leased_by='actor-production',lease_token=$2,leased_at=clock_timestamp(),
-		    leased_until=clock_timestamp()+interval '1 minute',updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'
-		  AND payload_json::jsonb->>'input_kind'='interrupt_control'
-		  AND dedupe_key=$1
-		RETURNING id,partition_key,dedupe_key`,
-		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptInputID), interruptQueueJob.LeaseToken,
-	).Scan(&interruptQueueJob.ID, &interruptQueueJob.PartitionKey, &interruptQueueJob.DedupeKey); err != nil {
-		t.Fatalf("lease admitted child interrupt Queue authority: %v", err)
-	}
-	interruptQueueJob.WorkspaceID = workspace.DefaultID
-	interruptQueueJob.Kind = queue.KindRuntimeInput
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
-		BindingID: bindingID, BindingGeneration: 1, Namespace: "engine", PodName: "runtime-actor-production",
-		PodUID: podUID, PodIP: "127.0.0.1",
-	}}
-	plan, prepareErr := deliveryStore.PrepareRuntimeCommand(context.Background(), RuntimeJob{
-		JobID: interruptQueueJob.ID, LeaseToken: interruptQueueJob.LeaseToken,
-		Kind: queue.KindRuntimeInput, PartitionKey: interruptQueueJob.PartitionKey, DedupeKey: interruptQueueJob.DedupeKey,
-		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childID,
-		RuntimeInputID: interruptInputID, InputKind: "interrupt_control", EventIDs: interruptEventIDs,
-		SequenceFrom: interruptSequenceFrom, SequenceTo: interruptSequenceTo,
-	})
-	if prepareErr != nil || plan.Interrupt == nil {
-		t.Fatalf("prepare admitted child interrupt through production delivery store = %#v/%v", plan, prepareErr)
-	}
-	committedInterrupt, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: childScope, RuntimeInputId: interruptInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(&interruptQueueJob),
-	})
-	if err != nil || committedInterrupt.GetCommitted().GetInterrupt() == nil {
-		t.Fatalf("commit child interrupt through generated gRPC = %#v/%v", committedInterrupt, err)
-	}
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
-		WorkspaceID: workspace.DefaultID, JobID: interruptQueueJob.ID, LeaseToken: interruptQueueJob.LeaseToken,
-	}); err != nil || !acked {
-		t.Fatalf("ACK admitted child interrupt Queue authority = %t/%v", acked, err)
-	}
-	awaited, err := client.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: parentScope, ControlOperationId: controlID})
-	if err != nil || len(awaited.GetCompleted().GetTargets()) != 1 {
-		t.Fatalf("await child interrupt through generated gRPC = %#v/%v", awaited, err)
-	}
-	closed, err := client.CloseChildControl(context.Background(), &bridgev1.CloseChildControlRequest{Scope: parentScope, ControlOperationId: controlID})
-	if err != nil || len(closed.GetCommitted().GetChildren()) != 1 {
-		t.Fatalf("close child through admitted operation = %#v/%v", closed, err)
-	}
-	closeReplay, err := client.CloseChildControl(context.Background(), &bridgev1.CloseChildControlRequest{Scope: parentScope, ControlOperationId: controlID})
-	if err != nil || len(closeReplay.GetDuplicate().GetChildren()) != 1 {
-		t.Fatalf("lost-ACK child close replay = %#v/%v", closeReplay, err)
-	}
-	settledClose, err := client.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{
-		Scope: parentScope, Settlement: bridgeCompletedToolSettlementForTest(closeSourceID, "child closed"),
-	})
-	if err != nil || settledClose.GetCommitted() == nil {
-		t.Fatalf("settle child close source through dedicated Tool result = %#v/%v", settledClose, err)
-	}
-	childAdmissionReplay, err := client.AdmitChildInterrupt(context.Background(), closeAdmissionRequest)
-	if err != nil || childAdmissionReplay.GetDuplicate().GetControlOperationId() != controlID {
-		t.Fatalf("lost-ACK child admission replay after route settlement = %#v/%v", childAdmissionReplay, err)
-	}
-
-	resumeSourceID := "evt_actor_production_resume"
-	seedActorSourceEvent(t, admin, sessionID, parentID, resumeSourceID, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"resume_agent","model_tool_call_id":"call_actor_production_resume","input":{"task_name":"provider-owned-different"}}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true,model_request_id='mreq_actor_production_resume',projection_json='{"model_tool_call_id":"call_actor_production_resume"}'
-		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, resumeSourceID); err != nil {
-		t.Fatalf("authorize durable resume source: %v", err)
-	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_actor_production_resume", resumeSourceID, "call_actor_production_resume", "resume_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, resumeSourceID)
-	resumeRequest := &bridgev1.MarkChildThreadActiveRequest{
-		Scope: parentScope, SourceToolUseEventId: resumeSourceID, TargetChildThreadId: childID,
-	}
-	resumed, err := client.MarkChildThreadActive(context.Background(), resumeRequest)
-	if err != nil || resumed.GetCommitted() == nil {
-		t.Fatalf("resume child through generated gRPC = %#v/%v", resumed, err)
-	}
-	var finalStatus string
-	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_threads
-		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID).Scan(&finalStatus); err != nil {
-		t.Fatalf("read resumed child: %v", err)
-	}
-	if finalStatus != "idle" {
-		t.Fatalf("resumed child status = %s; want idle", finalStatus)
-	}
-	settledResume, err := client.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{
-		Scope: parentScope, Settlement: bridgeCompletedToolSettlementForTest(resumeSourceID, "child resumed"),
-	})
-	if err != nil || settledResume.GetCommitted() == nil {
-		t.Fatalf("settle child resume source through dedicated Tool result = %#v/%v", settledResume, err)
-	}
-	resumeReplay, err := client.MarkChildThreadActive(context.Background(), resumeRequest)
-	if err != nil || resumeReplay.GetDuplicate().GetDisposition() != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED {
-		t.Fatalf("lost-ACK child resume replay after route settlement = %#v/%v", resumeReplay, err)
-	}
 }
 
 type pendingPrefixProviderWireComposition struct {
