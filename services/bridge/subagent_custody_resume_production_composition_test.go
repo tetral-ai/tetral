@@ -1014,87 +1014,123 @@ func TestSubagentOpeningInputFinalizerCrashUsesClampedNPlusOne(t *testing.T) {
 	}
 }
 
-func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *testing.T) {
-	fixture := newOpeningRuntimeFixture(t, "executed_close_resume")
+func TestSubagentOpeningInputInterruptedCloseColdResumeAndLaterInputProductionComposition(t *testing.T) {
+	fixture := newOpeningRuntimeFixture(t, "opening_interrupted_resume")
 	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
-	rejectingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID, true)
-	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID)
-	reason, providers, raw := readAgentMailAdmission(t, rejectingRuntime)
-	if reason != "local_session_capacity_exceeded" || providers != 0 {
-		t.Fatalf("materialize opening before second input = %q/%d/%s", reason, providers, raw)
+	siblingID := "thr_opening_interrupted_sibling"
+	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, parentID, siblingID)
+	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE session_threads
+		SET agent_type='worker' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, fixture.sessionID, siblingID); err != nil {
+		t.Fatalf("complete sibling fixture: %v", err)
 	}
-	rejectingRuntime.kill(t)
-	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
-		WHERE workspace_id='default' AND id=$1 AND status='pending'`, fixture.jobID); err != nil {
-		t.Fatalf("hold opening retry while second input executes: %v", err)
-	}
-
 	client := startActorProductionBridge(t, fixture.runtimeDB)
-	secondSourceID := "evt_executed_close_second_mail"
-	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, secondSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, secondSourceID)
-	secondDeliveryID := agentMailDeliveryID(secondSourceID, fixture.childID)
-	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: secondDeliveryID,
-		TargetThreadId: fixture.childID, SourceToolUseEventId: secondSourceID, Content: "second message consumed with the opening history",
-	}); err != nil || delivered.GetCommitted() == nil {
-		t.Fatalf("deliver second rehearsal Message = %#v/%v", delivered, err)
+	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
+		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, fixture.childID,
+		fixture.bindingID, 1, fixture.podUID,
+	)
+	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, interruptRuntime.port,
+		fixture.sessionID, fixture.podUID, fixture.runtimeInputID, interruptPaths.acceptResult)
+	waitForCompositionFile(t, interruptPaths.toolStarted, "opening request Tool start", &interruptRuntime.output)
+
+	var openingMessageID, openingSourceEventID, openingInboxEventID, startID, modelRequestID, runningID, toolUseID string
+	var startBoundary int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT message_id FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND kind='user'),
+		(SELECT source_event_id FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND kind='user'),
+		(SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'),
+		(SELECT model_request_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'),
+		(SELECT (projection_json::jsonb->>'context_through_message_sequence')::int FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='session.thread_status_running' ORDER BY sequence DESC LIMIT 1),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.tool_use' ORDER BY sequence DESC LIMIT 1)`,
+		fixture.sessionID, fixture.childID, fixture.runtimeInputID).Scan(
+		&openingMessageID, &openingSourceEventID, &openingInboxEventID, &startID, &modelRequestID, &startBoundary, &runningID, &toolUseID,
+	); err != nil {
+		t.Fatalf("read in-flight opening identities: %v", err)
 	}
-	secondRuntimeInputID := "agent_mail:" + secondDeliveryID
-	executingRuntime := startAttachmentRecoveryRuntime(t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
-	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, executingRuntime.port, fixture.sessionID, fixture.podUID, secondRuntimeInputID)
-	firstExecution := executingRuntime.providerStart(t)
-	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
-	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
-	waitForThreadIdleEvents(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
-	executingRuntime.kill(t)
-	if firstExecution.ProviderInvocations != 1 {
-		t.Fatalf("rehearsal Provider invocations = %d; want 1", firstExecution.ProviderInvocations)
+	if openingMessageID == "" || openingSourceEventID == "" || openingSourceEventID != openingInboxEventID || startID == "" || modelRequestID == "" ||
+		toolUseID == "" || startBoundary != 1 {
+		t.Fatalf("opening identity chain = Message:%s source:%s Start:%s request:%s Tool:%s boundary:%d",
+			openingMessageID, openingSourceEventID, startID, modelRequestID, toolUseID, startBoundary)
 	}
 
-	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
-		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
-		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID, "evt_executed_close_after_start")
-	var openingInbox, openingQueue, secondInbox, secondQueue, childStatus, startID, endID, runningID, turnIdleID, closeID string
-	var startBoundary, messages, starts int
+	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	closeSourceID := "evt_close_inflight_opening"
+	controlID := admitChildCloseThroughProduction(t, fixture.admin, client, parentScope,
+		fixture.sessionID, parentID, fixture.childID, closeSourceID)
+	type interruptDeliveryResult struct {
+		active bool
+		err    error
+	}
+	interruptDelivery := make(chan interruptDeliveryResult, 1)
+	interruptRunner := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin,
+		interruptRuntime.port, fixture.sessionID, fixture.podUID, nil, nil)
+	go func() {
+		active, runErr := interruptRunner.RunOnceWithActivity(context.Background())
+		interruptDelivery <- interruptDeliveryResult{active: active, err: runErr}
+	}()
+	waitForCompositionFile(t, interruptPaths.operationCompleted, "interrupted opening Tool completion", &interruptRuntime.output)
+	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
+	select {
+	case delivered := <-interruptDelivery:
+		if delivered.err != nil || !delivered.active {
+			t.Fatalf("deliver opening interrupt = active:%t err:%v", delivered.active, delivered.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("opening interrupt did not settle after output capture: %s", interruptRuntime.output.String())
+	}
+	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release interrupted opening Runtime: %v", err)
+	}
+	interrupted := interruptRuntime.wait(t)
+	if interrupted.ProviderInvocations != 1 || interrupted.DurableOperationCompletions != 1 || len(interrupted.InterruptResult) == 0 {
+		t.Fatalf("opening interrupt Runtime = Provider:%d durable completions:%d result:%s",
+			interrupted.ProviderInvocations, interrupted.DurableOperationCompletions, interrupted.InterruptResult)
+	}
+	settleChildCloseThroughProduction(t, client, parentScope, controlID, closeSourceID)
+
+	var openingInbox, openingQueue, childStatus, siblingStatus, endID, endStartID, endDisposition, toolResultID, closeID string
+	var messages, starts, ends, toolResults, activeOpeningJobs int
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
-		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
-		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$5 AND id=$6),
-		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND kind='user'),
-		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_start'),
-		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_start' ORDER BY sequence DESC LIMIT 1),
-		(SELECT (projection_json::jsonb->>'context_through_message_sequence')::int FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_start' ORDER BY sequence DESC LIMIT 1),
-		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='span.model_request_end' ORDER BY sequence DESC LIMIT 1),
-		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_running' ORDER BY sequence DESC LIMIT 1),
-		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_idle' AND payload_json::jsonb #>> '{stop_reason,type}' <> 'closed_for_runtime' ORDER BY sequence DESC LIMIT 1),
-		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$5 AND session_thread_id=$6 AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1)`,
-		fixture.runtimeInputID, fixture.jobID, secondRuntimeInputID,
-		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, secondRuntimeInputID), fixture.sessionID, fixture.childID).Scan(
-		&openingInbox, &openingQueue, &secondInbox, &secondQueue, &childStatus, &messages, &starts,
-		&startID, &startBoundary, &endID, &runningID, &turnIdleID, &closeID,
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$3 AND id=$4),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$3 AND id=$5),
+		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND kind='user'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_end'),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_end'),
+		(SELECT payload_json::jsonb->>'model_request_start_id' FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_end'),
+		(SELECT payload_json::jsonb#>>'{provider_context_retention,disposition}' FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='span.model_request_end'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$6),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$6),
+		(SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$3 AND session_thread_id=$4 AND type='session.thread_status_idle' ORDER BY sequence DESC LIMIT 1),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND id=$2 AND status IN ('pending','leased'))`,
+		fixture.runtimeInputID, fixture.jobID, fixture.sessionID, fixture.childID, siblingID, toolUseID).Scan(
+		&openingInbox, &openingQueue, &childStatus, &siblingStatus, &messages, &starts, &ends,
+		&endID, &endStartID, &endDisposition, &toolResults, &toolResultID, &closeID, &activeOpeningJobs,
 	); err != nil {
-		t.Fatalf("read Request-Start-won close facts: %v", err)
+		t.Fatalf("read interrupted opening close facts: %v", err)
 	}
-	if openingInbox != "committed" || openingQueue != queue.StatusCancelled || secondInbox != "committed" || secondQueue != queue.StatusAcknowledged ||
-		childStatus != "closed_for_runtime" || messages != 2 || starts != 1 || startBoundary != 2 {
-		t.Fatalf("Request-Start-won close = opening:%s/%s second:%s/%s child:%s messages:%d starts:%d boundary:%d",
-			openingInbox, openingQueue, secondInbox, secondQueue, childStatus, messages, starts, startBoundary)
+	if openingInbox != "committed" || openingQueue != queue.StatusAcknowledged || childStatus != "closed_for_runtime" || siblingStatus != "idle" ||
+		messages != 1 || starts != 1 || ends != 1 || endStartID != startID || endDisposition != "interrupted" ||
+		toolResults != 1 || toolResultID == "" || closeID == "" || activeOpeningJobs != 0 {
+		t.Fatalf("interrupted opening close = Inbox:%s Queue:%s child:%s sibling:%s messages:%d starts:%d ends:%d End:%s/%s/%s ToolResult:%d/%s close:%s active:%d",
+			openingInbox, openingQueue, childStatus, siblingStatus, messages, starts, ends, endID, endStartID, endDisposition,
+			toolResults, toolResultID, closeID, activeOpeningJobs)
 	}
-	resumeSourceID := "evt_resume_executed_closed_child"
+
+	resumeSourceID := "evt_resume_interrupted_opening"
 	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, resumeSourceID)
 	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
-		"childThreadId": fixture.childID, "childTaskName": "worker-executed_close_resume", "bindingId": fixture.bindingID,
+		"childThreadId": fixture.childID, "childTaskName": "worker-opening_interrupted_resume", "bindingId": fixture.bindingID,
 		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, resumed)
-	if got := contextEntrySequences(resumed.ContextEntries); !slices.Equal(got, []int64{1, 2, 3}) {
-		t.Fatalf("Request-Start-won historical context sequences = %v; want consumed users [1 2] and retained Assistant [3]", got)
+	wantFacts := map[string]bool{
+		runningID: false, startID: false, endID: false, toolUseID: false, toolResultID: false, closeID: false,
 	}
-	wantFacts := map[string]bool{runningID: false, startID: false, endID: false, turnIdleID: false, closeID: false}
 	for _, event := range resumed.TurnFacts.Events {
 		if _, expected := wantFacts[event.EventID]; expected {
 			wantFacts[event.EventID] = true
@@ -1102,19 +1138,22 @@ func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *te
 	}
 	for eventID, present := range wantFacts {
 		if !present {
-			t.Fatalf("closed LoadContext omitted exact latest-run Event %s: %#v", eventID, resumed.TurnFacts.Events)
+			t.Fatalf("closed LoadContext omitted interrupted opening Event %s: %#v", eventID, resumed.TurnFacts.Events)
 		}
 	}
+	if resumed.ProviderRequests != 0 || resumed.RuntimeEvents != 0 {
+		t.Fatalf("cold Resume replayed historical opening work: Provider=%d Runtime=%d", resumed.ProviderRequests, resumed.RuntimeEvents)
+	}
 
-	laterSourceID := "evt_later_after_executed_resume"
+	laterSourceID := "evt_later_after_interrupted_resume"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
 	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
 	laterDeliveryID := agentMailDeliveryID(laterSourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: laterDeliveryID,
-		TargetThreadId: fixture.childID, SourceToolUseEventId: laterSourceID, Content: "one later input after historical cold resume",
+		TargetThreadId: fixture.childID, SourceToolUseEventId: laterSourceID, Content: "one later input after interrupted opening resume",
 	}); err != nil || delivered.GetCommitted() == nil {
-		t.Fatalf("deliver later input after executed resume = %#v/%v", delivered, err)
+		t.Fatalf("deliver later input after interrupted resume = %#v/%v", delivered, err)
 	}
 	laterRuntimeInputID := "agent_mail:" + laterDeliveryID
 	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port, fixture.sessionID, fixture.podUID, laterRuntimeInputID, resumedRuntime.acceptResultPath)
@@ -1122,43 +1161,28 @@ func TestSubagentExecutedCloseColdResumeAndLaterInputProductionComposition(t *te
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 2)
 	resumedRuntime.close(t)
 	var laterSequence int64
-	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
+	var laterMessageID, laterSourceEventID, finalSiblingStatus string
+	var finalStarts int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT sequence FROM session_messages
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
-		AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)`,
-		fixture.sessionID, fixture.childID, laterRuntimeInputID).Scan(&laterSequence); err != nil {
+		AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)),
+		(SELECT message_id FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)),
+		(SELECT source_event_id FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		AND source_event_id IN (SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM session_runtime_inbox WHERE runtime_input_id=$3)),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$4)`,
+		fixture.sessionID, fixture.childID, laterRuntimeInputID, siblingID).Scan(
+		&laterSequence, &laterMessageID, &laterSourceEventID, &finalStarts, &finalSiblingStatus,
+	); err != nil {
 		t.Fatalf("read later resumed Message sequence: %v", err)
 	}
-	if laterExecution.ProviderRequests != 1 || laterSequence != 4 || !strings.Contains(string(laterExecution.Request), "one later input after historical cold resume") {
-		t.Fatalf("later resumed execution = providers:%d sequence:%d wire:%s", laterExecution.ProviderRequests, laterSequence, laterExecution.Request)
-	}
-
-	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
-		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
-		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID, "evt_close_after_second_run")
-	var latestStartID string
-	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT event_id FROM session_events
-		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start'
-		ORDER BY sequence DESC LIMIT 1`, fixture.sessionID, fixture.childID).Scan(&latestStartID); err != nil {
-		t.Fatalf("read second-run Request Start: %v", err)
-	}
-	secondResumeSourceID := "evt_resume_latest_closed_run"
-	seedChildResumeRoute(t, fixture.admin, fixture.sessionID, parentID, secondResumeSourceID)
-	secondResume := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
-		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
-		"childThreadId": fixture.childID, "childTaskName": "worker-executed_close_resume", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": secondResumeSourceID,
-	})
-	assertQuiescentClosedThreadResume(t, secondResume)
-	latestBoundary := int64(0)
-	latestFactID := ""
-	for _, event := range secondResume.TurnFacts.Events {
-		if event.RequestStart != nil && event.EventSequence > latestBoundary {
-			latestBoundary = event.EventSequence
-			latestFactID = event.EventID
-		}
-	}
-	if latestFactID != latestStartID {
-		t.Fatalf("latest closed run rooted Request Start %s; want latest run %s", latestFactID, latestStartID)
+	if laterExecution.ProviderRequests != 1 || laterSequence <= 1 || laterMessageID == "" || laterSourceEventID == openingSourceEventID ||
+		finalStarts != 2 || finalSiblingStatus != "idle" ||
+		!strings.Contains(string(laterExecution.Request), "one later input after interrupted opening resume") {
+		t.Fatalf("later resumed execution = providers:%d sequence:%d Message:%s source:%s starts:%d sibling:%s wire:%s",
+			laterExecution.ProviderRequests, laterSequence, laterMessageID, laterSourceEventID, finalStarts, finalSiblingStatus, laterExecution.Request)
 	}
 }
 
@@ -2026,6 +2050,26 @@ func closeChildThroughProductionInterrupt(
 	sessionID, parentID, childID, bindingID, podUID, sourceID string,
 ) {
 	t.Helper()
+	controlID := admitChildCloseThroughProduction(t, admin, client, parentScope, sessionID, parentID, childID, sourceID)
+	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
+		t, t.TempDir(), bridgeAddress, sessionID, childID, bindingID, 1, podUID,
+	)
+	runQueueUntilInterruptSettled(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
+	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release child-close Runtime composition: %v", err)
+	}
+	interruptRuntime.wait(t)
+	settleChildCloseThroughProduction(t, client, parentScope, controlID, sourceID)
+}
+
+func admitChildCloseThroughProduction(
+	t *testing.T,
+	admin *sql.DB,
+	client bridgev1.AgentRuntimeBridgeServiceClient,
+	parentScope *bridgev1.RuntimeScope,
+	sessionID, parentID, childID, sourceID string,
+) string {
+	t.Helper()
 	seedActorSourceEvent(t, admin, sessionID, parentID, sourceID, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"close_agent","evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -2043,15 +2087,16 @@ func closeChildThroughProductionInterrupt(
 	if err != nil || admitted.GetCommitted().GetControlOperationId() == "" {
 		t.Fatalf("admit child close through Bridge gRPC = %#v/%v", admitted, err)
 	}
-	controlID := admitted.GetCommitted().GetControlOperationId()
-	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
-		t, t.TempDir(), bridgeAddress, sessionID, childID, bindingID, 1, podUID,
-	)
-	runQueueUntilInterruptSettled(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
-	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
-		t.Fatalf("release child-close Runtime composition: %v", err)
-	}
-	interruptRuntime.wait(t)
+	return admitted.GetCommitted().GetControlOperationId()
+}
+
+func settleChildCloseThroughProduction(
+	t *testing.T,
+	client bridgev1.AgentRuntimeBridgeServiceClient,
+	parentScope *bridgev1.RuntimeScope,
+	controlID, sourceID string,
+) {
+	t.Helper()
 	if awaited, err := client.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{
 		Scope: parentScope, ControlOperationId: controlID,
 	}); err != nil || len(awaited.GetCompleted().GetTargets()) != 1 {
@@ -2471,22 +2516,6 @@ func runSubagentOutputCaptureOnce(t *testing.T, runtimeDB *sql.DB) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("Subagent Runtime did not enqueue output capture")
-}
-
-func waitForThreadIdleEvents(t *testing.T, admin *sql.DB, sessionID, threadID string, want int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		var count int
-		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
-			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
-			  AND type='session.thread_status_idle' AND payload_json::jsonb #>> '{stop_reason,type}' <> 'closed_for_runtime'`,
-			sessionID, threadID).Scan(&count); err == nil && count >= want {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("Thread %s did not reach %d ordinary idle Events", threadID, want)
 }
 
 func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID, runtimeInputID string, diagnosticPaths ...string) {
