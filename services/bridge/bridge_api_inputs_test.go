@@ -585,14 +585,15 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	if committedInbox != "committed" || leasedQueue != queue.StatusLeased {
 		t.Fatalf("materialized inter-agent custody = Inbox:%s Queue:%s; want committed/leased", committedInbox, leasedQueue)
 	}
-	messageBoundary := int64(1)
-	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: childScope, RuntimeWriteId: "rwrite_bridge_inter_agent_start",
-		ModelRequestId: "mreq_bridge_inter_agent_start", EventType: "span.model_request_start",
-		PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"mreq_bridge_inter_agent_start"}`,
-		ContextThroughMessageSequence: &messageBoundary, RequestKind: requestKindAgentProviderRequest,
-	}); err != nil {
-		t.Fatalf("commit inter-agent Request Start witness: %v", err)
+	if settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, plan.AttemptedBinding); err != nil || settled {
+		t.Fatalf("mark inter-agent Runtime admission = settled:%t err:%v", settled, err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID).Scan(&committedInbox); err != nil {
+		t.Fatalf("read admitted inter-agent custody: %v", err)
+	}
+	if committedInbox != "accepted" {
+		t.Fatalf("admitted inter-agent Inbox status = %q; want accepted", committedInbox)
 	}
 	settled, found, err := deliveryStore.ReplayRuntimeDeliveryFinalization(context.Background(), job)
 	if err != nil || !found || !settled.QueueLeaseSettled {
