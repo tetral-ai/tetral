@@ -156,6 +156,10 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	if err := os.WriteFile(runtimeTokenPath, []byte("mcp-production-runtime-token\n"), 0o600); err != nil {
 		t.Fatalf("write Runtime composition token: %v", err)
 	}
+	var databaseSchema string
+	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&databaseSchema); err != nil {
+		t.Fatalf("read MCP composition database schema: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	command := exec.CommandContext(
@@ -173,6 +177,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		oauthFailureToolUseEventID,
 	) //nolint:gosec // fixed repository fixture and test-owned arguments.
 	command.Dir = gatewayRoot
+	command.Env = append(os.Environ(), "TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -228,6 +233,15 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 				Retryable bool   `json:"retryable"`
 			} `json:"error"`
 		} `json:"oauthFailure"`
+		OAuthProof struct {
+			IssuerRequests                   int      `json:"issuerRequests"`
+			SuccessTransportCount            int      `json:"successTransportCount"`
+			FailureTransportCount            int      `json:"failureTransportCount"`
+			DurableRotation                  bool     `json:"durableRotation"`
+			FailedRefreshPreservedCredential bool     `json:"failedRefreshPreservedCredential"`
+			RefreshOutcomes                  []string `json:"refreshOutcomes"`
+			LeakSurfacesClean                bool     `json:"leakSurfacesClean"`
+		} `json:"oauthProof"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("decode MCP Connector production composition: %v\nstdout=%s", err, stdout.String())
@@ -244,7 +258,12 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		result.Settlement.Type != "duplicate" ||
 		result.OAuthSuccess.Type != "completed" || result.OAuthSuccess.Output.Text != "oauth refreshed" ||
 		result.OAuthFailure.Type != "error" || result.OAuthFailure.Error.Retryable ||
-		result.OAuthFailure.Error.Message != "MCP authorization is unavailable. Reconnect the integration and try again." {
+		result.OAuthFailure.Error.Message != "MCP authorization is unavailable. Reconnect the integration and try again." ||
+		result.OAuthProof.IssuerRequests != 2 || result.OAuthProof.SuccessTransportCount != 1 ||
+		result.OAuthProof.FailureTransportCount != 0 || !result.OAuthProof.DurableRotation ||
+		!result.OAuthProof.FailedRefreshPreservedCredential || !result.OAuthProof.LeakSurfacesClean ||
+		len(result.OAuthProof.RefreshOutcomes) != 2 || result.OAuthProof.RefreshOutcomes[0] != "refreshed" ||
+		result.OAuthProof.RefreshOutcomes[1] != "failed" {
 		t.Fatalf("MCP Connector composition = %+v; want takeover, exact-claim cleanup/reacquisition, Runtime mapping, and settlement replay", result)
 	}
 
@@ -363,9 +382,22 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 			t.Fatalf("MCP OAuth provider composition omitted %q: %s", required, providerJSON)
 		}
 	}
+	var durablePublicSurfaces string
+	if err := admin.QueryRowContext(context.Background(), `
+		SELECT COALESCE(string_agg(surface, ''), '')
+		FROM (
+			SELECT payload_json AS surface FROM session_events WHERE workspace_id='default' AND session_id=$1
+			UNION ALL
+			SELECT data_json AS surface FROM session_messages WHERE workspace_id='default' AND session_id=$1
+			UNION ALL
+			SELECT result_json AS surface FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id=$1
+		) surfaces`, sessionID).Scan(&durablePublicSurfaces); err != nil {
+		t.Fatalf("read MCP OAuth durable public surfaces: %v", err)
+	}
+	publicSurfaces := bytes.Join([][]byte{stdout.Bytes(), []byte(loaded.GetContextJson()), []byte(finalLoaded.GetContextJson()), providerJSON, []byte(durablePublicSurfaces)}, nil)
 	for _, forbidden := range []string{"ACCESS_TOKEN_CANARY", "REFRESH_TOKEN_CANARY", "RAW_ISSUER_ERROR_CANARY"} {
-		if bytes.Contains(providerJSON, []byte(forbidden)) {
-			t.Fatalf("MCP OAuth provider composition exposed %q", forbidden)
+		if bytes.Contains(publicSurfaces, []byte(forbidden)) {
+			t.Fatalf("MCP OAuth public surfaces exposed %q", forbidden)
 		}
 	}
 }

@@ -447,6 +447,14 @@ func (d RuntimePodDirectDeliverer) FinalizeRuntimeCleanupExhaustion(ctx context.
 	return store.FinalizeRuntimeCleanupExhaustion(ctx, job, result)
 }
 
+func (d RuntimePodDirectDeliverer) RuntimeCleanupDeliveryAuthority(ctx context.Context, job RuntimeJob) (RuntimeCleanupDeliveryAuthority, error) {
+	store, ok := d.Store.(RuntimeCleanupDeliveryStore)
+	if !ok || store == nil {
+		return RuntimeCleanupDeliveryAuthority{}, errors.New("runtime cleanup authority store is unavailable")
+	}
+	return store.RuntimeCleanupDeliveryAuthority(ctx, job)
+}
+
 func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
 	if d.Store == nil {
 		return RuntimeDeliveryResult{

@@ -122,15 +122,15 @@ func TestPostgreSQLCleanupExhaustionReleasesMarkerAndAllowsFreshSweep(t *testing
 	if active, err := runner.RunOnceWithActivity(context.Background()); err == nil || !active {
 		t.Fatalf("run final cleanup with response loss = active:%t err:%v; want committed outcome with lost response", active, err)
 	}
-	var queueStatus, errorKind string
+	var queueStatus, errorKind, errorMessage string
 	var attempts int
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT status, attempt_count, last_error_kind FROM queue_jobs WHERE workspace_id='default' AND id=$1`, queueJobID,
-	).Scan(&queueStatus, &attempts, &errorKind); err != nil {
+		`SELECT status, attempt_count, last_error_kind, last_error_message FROM queue_jobs WHERE workspace_id='default' AND id=$1`, queueJobID,
+	).Scan(&queueStatus, &attempts, &errorKind, &errorMessage); err != nil {
 		t.Fatalf("read exhausted cleanup Queue state: %v", err)
 	}
-	if queueStatus != queue.StatusDeadLettered || attempts != 2 || errorKind != "runtime_cleanup_exhausted" {
-		t.Fatalf("exhausted cleanup Queue state = %s/%d/%s; want dead_lettered/2/runtime_cleanup_exhausted", queueStatus, attempts, errorKind)
+	if queueStatus != queue.StatusDeadLettered || attempts != 2 || errorKind != "cleanup_failed" || errorMessage != "runtime rejected operation" {
+		t.Fatalf("exhausted cleanup Queue state = %s/%d/%s/%s; want dead_lettered/2/cleanup_failed/runtime rejected operation", queueStatus, attempts, errorKind, errorMessage)
 	}
 	cleanupAfter := assertCleanupMarkersRearmed(t, admin, sessionID, true)
 	var bindings int
@@ -267,7 +267,7 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 		)
 		sender := &cleanupResponseBarrierSender{
 			RuntimeCommandSender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
-			entered:              make(chan struct{}), release: make(chan struct{}),
+			entered:              make(chan struct{}), release: make(chan struct{}), loseResponse: true,
 		}
 		runner.Deliverer = RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}
 		done := make(chan error, 1)
@@ -277,6 +277,9 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 		close(sender.release)
 		if err := <-done; err != nil {
 			t.Fatalf("old in-flight cleanup worker: %v", err)
+		}
+		if sender.lostResponses.Load() != 1 {
+			t.Fatalf("old in-flight cleanup worker lost %d responses; want one", sender.lostResponses.Load())
 		}
 		assertExactCleanupLease(t, admin, queueJobID, newLease.LeaseToken)
 		var bindings int
@@ -339,15 +342,21 @@ func (s *countingCleanupSender) CleanupSession(ctx context.Context, target Runti
 
 type cleanupResponseBarrierSender struct {
 	RuntimeCommandSender
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
+	entered       chan struct{}
+	release       chan struct{}
+	loseResponse  bool
+	lostResponses atomic.Int32
+	once          sync.Once
 }
 
 func (s *cleanupResponseBarrierSender) CleanupSession(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error) {
 	response, err := s.RuntimeCommandSender.CleanupSession(ctx, target, request)
 	s.once.Do(func() { close(s.entered) })
 	<-s.release
+	if err == nil && s.loseResponse {
+		s.lostResponses.Add(1)
+		return nil, context.DeadlineExceeded
+	}
 	return response, err
 }
 

@@ -133,7 +133,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RescheduleBusyRuntimeCleanup(ctx contex
 	return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted, QueueLeaseSettled: true}, nil
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanupExhaustion(ctx context.Context, job RuntimeJob, _ RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanupExhaustion(ctx context.Context, job RuntimeJob, deliveryResult RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
 	if s == nil || s.Client == nil {
 		return RuntimeDeliveryResult{}, errors.New("runtime cleanup exhaustion store is unavailable")
 	}
@@ -143,6 +143,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanupExhaustion(ctx co
 	lease, err := cleanupSessionExactLease(job)
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
+	}
+	errorKind := deliveryResult.ErrorKind
+	if errorKind == "" {
+		errorKind = "runtime_cleanup_exhausted"
+	}
+	errorMessage := deliveryResult.ErrorMessage
+	if errorMessage == "" {
+		errorMessage = "runtime cleanup attempts are exhausted"
 	}
 	now := storage.Now()
 	if s.Clock != nil {
@@ -173,7 +181,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanupExhaustion(ctx co
 		}
 		deadLettered, err := queue.DeadLetterTx(ctx, tx, queue.DeadLetterRequest{
 			WorkspaceID: lease.WorkspaceID, JobID: lease.JobID, LeaseToken: lease.LeaseToken,
-			ErrorKind: "runtime_cleanup_exhausted", ErrorMessage: "runtime cleanup attempts are exhausted", Now: now,
+			ErrorKind: errorKind, ErrorMessage: errorMessage, Now: now,
 		})
 		if err != nil {
 			return err
@@ -196,7 +204,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanupExhaustion(ctx co
 		}
 		outcome = RuntimeDeliveryResult{
 			Status: RuntimeDeliveryRejected, Retryable: false,
-			ErrorKind: "runtime_cleanup_exhausted", ErrorMessage: "runtime cleanup attempts are exhausted",
+			ErrorKind: errorKind, ErrorMessage: errorMessage,
 			QueueLeaseSettled: true,
 		}
 		return nil

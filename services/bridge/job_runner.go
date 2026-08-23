@@ -381,6 +381,21 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			AttemptedBindingGeneration: attemptedBindingGeneration,
 			AttemptedTargetPodUID:      attemptedTargetPodUID,
 		}
+		if job.Kind == queue.KindCleanupSession {
+			authorizer, ok := r.Deliverer.(interface {
+				RuntimeCleanupDeliveryAuthority(context.Context, RuntimeJob) (RuntimeCleanupDeliveryAuthority, error)
+			})
+			if !ok {
+				return errors.New("runtime cleanup delivery authority is required")
+			}
+			authority, authorityErr := authorizer.RuntimeCleanupDeliveryAuthority(ctx, job)
+			if authorityErr != nil {
+				return authorityErr
+			}
+			if !authority.Active {
+				return nil
+			}
+		}
 		if job.Kind == queue.KindRuntimeConfigUpdate && !isMCPManifestRuntimeJob(job) {
 			r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 			return r.deferRuntimeConfig(ctx, job)
