@@ -400,6 +400,19 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 			return r.deferRuntimeConfig(ctx, job)
 		}
+		// A cleanup transport failure does not prove whether the idempotent host
+		// effect completed. Keep the same capped Queue identity available for
+		// receipt/effect replay; only a typed Runtime rejection may exhaust it.
+		if job.Kind == queue.KindCleanupSession {
+			r.logRuntimeJobAttempt(job, preparationKind, "outcome_reconciliation")
+			return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+				WorkspaceId:  job.WorkspaceID,
+				JobId:        job.JobID,
+				LeaseToken:   job.LeaseToken,
+				ErrorKind:    result.ErrorKind,
+				ErrorMessage: result.ErrorMessage,
+			}))
+		}
 		if cleanupSessionFinalAttempt(job) {
 			finalized, err := r.finalizeRuntimeCleanupExhaustion(ctx, job, result)
 			if err != nil {

@@ -1352,10 +1352,26 @@ func TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases(t *testing.T) {
 		WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge-c",
 		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(2 * time.Second),
 	})
-	if currentLease.AttemptCount != 3 {
-		t.Fatalf("current lease attempt count = %d; want three acquisitions independent of two reclaims", currentLease.AttemptCount)
+	if currentLease.AttemptCount != 2 {
+		t.Fatalf("current lease attempt count = %d; want capped cleanup reconciliation marker", currentLease.AttemptCount)
 	}
-	if updated, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: expiring.ID, LeaseToken: currentLease.LeaseToken}); err != nil || !updated {
+	if updated, err := store.Retry(ctx, RetryRequest{
+		WorkspaceID: ws, JobID: expiring.ID, LeaseToken: currentLease.LeaseToken,
+		ErrorKind: "runtime_transport_error", Now: time.Now().UTC().Add(3 * time.Second),
+	}); err != nil || !updated {
+		t.Fatalf("Retry capped cleanup outcome = (%v,%v); want true,nil", updated, err)
+	}
+	if got := queueJobStatus(t, admin, ws, expiring.ID); got != StatusPending {
+		t.Fatalf("capped cleanup retry status = %s; want pending", got)
+	}
+	finalLease := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge-d",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(time.Minute),
+	})
+	if finalLease.AttemptCount != 2 {
+		t.Fatalf("replayed cleanup attempt count = %d; want capped marker 2", finalLease.AttemptCount)
+	}
+	if updated, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: expiring.ID, LeaseToken: finalLease.LeaseToken}); err != nil || !updated {
 		t.Fatalf("Ack current lease = (%v,%v); want eventual settlement", updated, err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -94,6 +95,68 @@ func TestPostgreSQLSuccessfulCleanupCompletesHostBeforeDurableFinalization(t *te
 	}
 	if bindings != 0 {
 		t.Fatalf("successful cleanup retained %d Runtime bindings; want zero", bindings)
+	}
+}
+
+func TestPostgreSQLFinalAttemptCleanupResponseLossReplaysSameHostOutcome(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const sessionID = "sesn_clean_final_loss"
+	const cleanupID = "clean_loss"
+	process := startCleanupComposition(t, "success", "pod_uid_"+sessionID)
+	_, _, runner, queueJobID := seedCleanupComposition(
+		t, runtimeDB, admin, process.port, sessionID, "thrd_clean_final_loss", cleanupID, 1,
+	)
+	lost := &cleanupLostResponseSender{
+		RuntimeCommandSender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
+	}
+	runner.Deliverer = RuntimePodDirectDeliverer{
+		Store:  runner.Deliverer.(RuntimePodDirectDeliverer).Store,
+		Sender: lost,
+	}
+
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("run final cleanup with lost response = active:%t err:%v", active, err)
+	}
+	var status string
+	var attempts int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status, attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$1`, queueJobID,
+	).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read outcome-unknown cleanup Queue state: %v", err)
+	}
+	if status != queue.StatusPending || attempts != 1 {
+		t.Fatalf("outcome-unknown cleanup Queue state = %s/%d; want pending/1", status, attempts)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND id=$1`, queueJobID,
+	); err != nil {
+		t.Fatalf("make cleanup replay ready: %v", err)
+	}
+
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("replay final cleanup outcome = active:%t err:%v", active, err)
+	}
+	var bindings int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status, attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$1`, queueJobID,
+	).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read replayed cleanup Queue state: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, sessionID,
+	).Scan(&bindings); err != nil {
+		t.Fatalf("read replayed cleanup binding: %v", err)
+	}
+	if status != queue.StatusAcknowledged || attempts != 1 || bindings != 0 {
+		t.Fatalf("replayed cleanup state = %s/%d bindings=%d; want acknowledged/1/0", status, attempts, bindings)
+	}
+	var effect struct {
+		HostInvocations int `json:"hostInvocations"`
+		HostEffects     int `json:"hostEffects"`
+	}
+	raw, err := os.ReadFile(process.effectPath)
+	if err != nil || json.Unmarshal(raw, &effect) != nil || effect.HostInvocations != 2 || effect.HostEffects != 1 {
+		t.Fatalf("replayed cleanup host effect = %s/%v; want two calls and one real SessionManager removal", raw, err)
 	}
 }
 
@@ -349,10 +412,23 @@ type cleanupResponseBarrierSender struct {
 	once          sync.Once
 }
 
-func (s *cleanupResponseBarrierSender) CleanupSession(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error) {
+type cleanupLostResponseSender struct {
+	RuntimeCommandSender
+	lost atomic.Bool
+}
+
+func (s *cleanupLostResponseSender) CleanupSession(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error) {
 	response, err := s.RuntimeCommandSender.CleanupSession(ctx, target, request)
+	if err == nil && !s.lost.Swap(true) {
+		return nil, context.DeadlineExceeded
+	}
+	return response, err
+}
+
+func (s *cleanupResponseBarrierSender) CleanupSession(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error) {
 	s.once.Do(func() { close(s.entered) })
 	<-s.release
+	response, err := s.RuntimeCommandSender.CleanupSession(ctx, target, request)
 	if err == nil && s.loseResponse {
 		s.lostResponses.Add(1)
 		return nil, context.DeadlineExceeded
@@ -385,7 +461,7 @@ func startCleanupComposition(t *testing.T, mode string, podUID string) *cleanupC
 		closePath:  filepath.Join(tempDir, "close"),
 	}
 	input, err := json.Marshal(map[string]any{
-		"targetPodUid": podUID, "mode": mode, "readyPath": readyPath,
+		"targetPodUid": podUID, "sessionId": strings.TrimPrefix(podUID, "pod_uid_"), "mode": mode, "readyPath": readyPath,
 		"effectPath": process.effectPath, "closePath": process.closePath,
 	})
 	if err != nil {

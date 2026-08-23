@@ -652,9 +652,9 @@ type leaseCandidateRow struct {
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
 	leasedAt := request.Now
 	// Reclaimed terminal work uses a bounded marker rather than new delivery
-	// budget. Interrupts retain their existing N marker. Generic agent mail may
-	// advance once to N+1 so JobRunner can identify a finalization-only lease;
-	// every later reclaim remains clamped at that marker.
+	// budget. Interrupts and cleanup outcome reconciliation retain their existing
+	// N marker. Generic agent mail may advance once to N+1 so JobRunner can
+	// identify a finalization-only lease; every later reclaim remains clamped.
 	row := tx.QueryRow(ctx,
 		`UPDATE queue_jobs
 		    SET status = 'leased',
@@ -664,6 +664,9 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		        leased_until = clock_timestamp() + ($8::bigint * interval '1 millisecond'),
 		        attempt_count = CASE
 		          WHEN $3 = 'runtime_input' AND $12 = 'interrupt_control'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          THEN attempt_count
+		          WHEN $3 = 'cleanup_session'
 		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
 		          THEN attempt_count
 		          WHEN $3 = 'runtime_input' AND $12 = 'agent_mail'
@@ -1520,12 +1523,14 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 		var maxAttempts int
 		var interruptBarrier bool
 		var agentMailFinalization bool
+		var cleanupOutcomeReconciliation bool
 		if err := tx.QueryRow(ctx,
 			`SELECT attempt_count, max_attempts,
 				        kind = 'runtime_input'
 				        AND payload_json::jsonb ->> 'input_kind' = 'interrupt_control',
 				        kind = 'runtime_input'
-				        AND payload_json::jsonb ->> 'input_kind' = 'agent_mail'
+				        AND payload_json::jsonb ->> 'input_kind' = 'agent_mail',
+				        kind = 'cleanup_session'
 				   FROM queue_jobs
 			  WHERE workspace_id = $1
 			    AND id = $2
@@ -1536,7 +1541,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
-		).Scan(&attemptCount, &maxAttempts, &interruptBarrier, &agentMailFinalization); dbconnect.IsNoRows(err) {
+		).Scan(&attemptCount, &maxAttempts, &interruptBarrier, &agentMailFinalization, &cleanupOutcomeReconciliation); dbconnect.IsNoRows(err) {
 			return nil
 		} else if err != nil {
 			return err
@@ -1547,7 +1552,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			effectiveMaxAttempts = s.retryPolicy.MaxAttempts
 		}
 		if attemptCount >= effectiveMaxAttempts {
-			if interruptBarrier || agentMailFinalization {
+			if interruptBarrier || agentMailFinalization || cleanupOutcomeReconciliation {
 				result, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
 						    SET status = 'pending',
