@@ -4,10 +4,8 @@ import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-l
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import { SessionRunHostCleanupController } from "../../src/cleanup-controller.js";
-import {
-  RuntimeControlService,
-  type RuntimeSessionRunHost,
-} from "../../src/runtime-service.js";
+import { RuntimeControlService } from "../../src/runtime-service.js";
+import type { RuntimeSessionRunHost } from "../../src/runtime-service.js";
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) throw new Error("cleanup composition input is required");
