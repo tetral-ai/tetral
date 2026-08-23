@@ -305,7 +305,11 @@ jobs:
             exit 1
           fi
           echo "$packages" | sed 's/^/  /'
-          go test -race -coverprofile=coverage.out $packages
+          # Race instrumentation plus coverage pushes the Bridge package beyond
+          # Go's default 10-minute package timeout on hosted runners. Keep the
+          # package bound below the 35-minute job wall while allowing the full
+          # ownership suite to finish.
+          go test -race -timeout=20m -coverprofile=coverage.out $packages
 
       - name: Coverage
         run: go tool cover -func=coverage.out
