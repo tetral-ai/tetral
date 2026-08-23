@@ -2158,11 +2158,6 @@ func (s *lostResponseAfterRequestStartSender) RecoverThread(ctx context.Context,
 	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
 }
 
-type lostAckQueueClient struct {
-	QueueClient
-	dropped bool
-}
-
 type birthInterruptAfterLeaseQueueClient struct {
 	QueueClient
 	once     sync.Once
@@ -2174,40 +2169,7 @@ type agentMailPreparationFailureStore struct {
 	*PostgreSQLRuntimeDeliveryStore
 }
 
-type requestStartAfterAgentMailPreparationStore struct {
-	*PostgreSQLRuntimeDeliveryStore
-	bridge *PostgreSQLBridgeAPIStore
-	once   sync.Once
-	err    error
-}
-
-func (s *requestStartAfterAgentMailPreparationStore) PrepareRuntimeCommand(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
-	plan, err := s.PostgreSQLRuntimeDeliveryStore.PrepareRuntimeCommand(ctx, job)
-	if err != nil || job.InputKind != "agent_mail" || (plan.AcceptAgentMail == nil && plan.RecoverThread == nil) {
-		return plan, err
-	}
-	s.once.Do(func() {
-		boundary := int64(1)
-		requestID := stableRuntimeID("pre_send_witness", job.WorkspaceID, job.SessionID, job.RuntimeInputID)
-		_, s.err = s.bridge.WriteEvent(ctx, &bridgev1.WriteEventRequest{
-			Scope:          runtimeScopeFromAttempt(job, plan.AttemptedBinding),
-			RuntimeWriteId: "rwrite_" + requestID,
-			ModelRequestId: "mreq_" + requestID,
-			EventType:      "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-			ContextThroughMessageSequence: &boundary, RequestKind: requestKindAgentProviderRequest,
-		})
-	})
-	return plan, s.err
-}
-
 type firstCommitInputsPodLossCutStore struct {
-	BridgeAPIStore
-	mu      sync.Mutex
-	cut     bool
-	entered chan struct{}
-}
-
-type firstRequestStartPodLossCutStore struct {
 	BridgeAPIStore
 	mu      sync.Mutex
 	cut     bool
@@ -2229,34 +2191,6 @@ func (s *requestStartBarrierBridgeStore) WriteEvent(ctx context.Context, request
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-	}
-	return s.BridgeAPIStore.WriteEvent(ctx, request)
-}
-
-type recoveryResponseObservingSender struct {
-	RuntimeCommandSender
-	responded chan *agentruntimev1.RecoverThreadRequest
-}
-
-func (s *recoveryResponseObservingSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
-	response, err := recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
-	if err == nil {
-		s.responded <- request
-	}
-	return response, err
-}
-
-func (s *firstRequestStartPodLossCutStore) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
-	s.mu.Lock()
-	cut := !s.cut && request.GetEventType() == "span.model_request_start"
-	if cut {
-		s.cut = true
-		close(s.entered)
-	}
-	s.mu.Unlock()
-	if cut {
-		<-ctx.Done()
-		return nil, ctx.Err()
 	}
 	return s.BridgeAPIStore.WriteEvent(ctx, request)
 }
@@ -2411,11 +2345,6 @@ type blockingAgentMailSender struct {
 	calls   int
 }
 
-type failingAgentMailSender struct {
-	RuntimeCommandSender
-	calls int
-}
-
 func recoverThreadThroughSender(
 	ctx context.Context,
 	sender RuntimeCommandSender,
@@ -2427,15 +2356,6 @@ func recoverThreadThroughSender(
 		return nil, status.Error(codes.Unavailable, "fixture Runtime recovery sender is unavailable")
 	}
 	return recoverySender.RecoverThread(ctx, target, request)
-}
-
-func (s *failingAgentMailSender) AcceptAgentMail(context.Context, RuntimePodTarget, *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
-	s.calls++
-	return nil, status.Error(codes.Unavailable, "fixture transport must be fenced by the Request Start witness")
-}
-
-func (s *failingAgentMailSender) RecoverThread(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error) {
-	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
 }
 
 func (s *blockingAgentMailSender) AcceptAgentMail(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error) {
@@ -2462,14 +2382,6 @@ func (s *countingAgentMailSender) RecoverThread(ctx context.Context, target Runt
 	s.recoveryCalls++
 	s.recoveryRequest = request
 	return recoverThreadThroughSender(ctx, s.RuntimeCommandSender, target, request)
-}
-
-func (c *lostAckQueueClient) Ack(ctx context.Context, request *queuev1.AckRequest) (*queuev1.TransitionResponse, error) {
-	if !c.dropped {
-		c.dropped = true
-		return nil, errors.New("fixture Queue ACK response lost before transition")
-	}
-	return c.QueueClient.Ack(ctx, request)
 }
 
 func runSubagentRuntimeQueueOnce(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID string) {
