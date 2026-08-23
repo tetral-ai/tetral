@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { Metadata } from "@grpc/grpc-js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import type {
 	McpErrorKind,
@@ -12,6 +13,8 @@ import type { ToolEntry } from "../../../../../agent-runtime/packages/core/src/t
 import { BridgeAPIEventWriter } from "../../../../../agent-runtime/packages/runtime-pod/src/bridge-client.js";
 import { RuntimePodToolRunner } from "../../../../../agent-runtime/packages/runtime-pod/src/tool-runner.js";
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
+import { McpSDKClient } from "../../src/client.js";
+import type { GitHubMcpCredentialResolver } from "../../src/credential.js";
 import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import type {
 	McpAuthenticator,
@@ -26,6 +29,8 @@ const runtimeTokenPath = process.argv[4];
 const toolUseEventIdArgument = process.argv[5];
 const cleanupToolUseEventIdArgument = process.argv[6];
 const cancelledToolUseEventIdArgument = process.argv[7];
+const oauthSuccessToolUseEventIdArgument = process.argv[8];
+const oauthFailureToolUseEventIdArgument = process.argv[9];
 if (
 	bridgeAddress === undefined ||
 	gatewayTokenPath === undefined ||
@@ -33,14 +38,20 @@ if (
 	toolUseEventIdArgument === undefined ||
 	cleanupToolUseEventIdArgument === undefined ||
 	cancelledToolUseEventIdArgument === undefined
+	|| oauthSuccessToolUseEventIdArgument === undefined
+	|| oauthFailureToolUseEventIdArgument === undefined
 ) {
 	throw new Error(
-		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id>",
+		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id> <oauth-success-tool-use-event-id> <oauth-failure-tool-use-event-id>",
 	);
 }
 const toolUseEventId: string = toolUseEventIdArgument;
 const cleanupToolUseEventId: string = cleanupToolUseEventIdArgument;
 const cancelledToolUseEventId: string = cancelledToolUseEventIdArgument;
+const oauthSuccessToolUseEventId: string = oauthSuccessToolUseEventIdArgument;
+const oauthFailureToolUseEventId: string = oauthFailureToolUseEventIdArgument;
+const compositionBridgeAddress: string = bridgeAddress;
+const compositionRuntimeTokenPath: string = runtimeTokenPath;
 
 class TakeoverMcpClient implements McpClient {
 	readonly calls: string[] = [];
@@ -145,7 +156,11 @@ const staleFirst = await first;
 const runtimeService = serviceForClaim("claim_mcp_production_runtime_replay");
 const connectorServer = createMcpConnectorGrpcServer(runtimeService);
 const connectorPort = await connectorServer.bind("127.0.0.1:0");
-const runtimeRequest = mcpRuntimeRequest();
+const runtimeRequest = mcpRuntimeRequest(
+	toolUseEventId,
+	"call_mcp_durable_claim",
+	{ title: "Bug", body: "Details" },
+);
 const runner = new RuntimePodToolRunner({
 	bridgeAddress,
 	webAddress: "127.0.0.1:1",
@@ -200,6 +215,18 @@ try {
 const cleanupReacquired = await serviceForClaim(
 	"claim_mcp_production_cleanup_reacquired",
 ).runMcpTool(runRequest(cleanupToolUseEventId), metadata);
+const oauthSuccess = await runOAuthRuntime(
+	oauthSuccessToolUseEventId,
+	"call_mcp_oauth_success",
+	"claim_mcp_oauth_success",
+	oauthMcpClient("success"),
+);
+const oauthFailure = await runOAuthRuntime(
+	oauthFailureToolUseEventId,
+	"call_mcp_oauth_failure",
+	"claim_mcp_oauth_failure",
+	oauthMcpClient("unavailable"),
+);
 
 process.stdout.write(
 	JSON.stringify({
@@ -210,12 +237,17 @@ process.stdout.write(
 		cancelledFirst: responseSummary(cancelledFirst),
 		cleanupFailureCode,
 		cleanupReacquired: responseSummary(cleanupReacquired),
-		runtimeResult,
-		settlement: settlement.result,
+	runtimeResult,
+	settlement: settlement.result,
+	oauthSuccess,
+	oauthFailure,
 	}),
 );
 
-function serviceForClaim(claimId: string): McpConnectorServiceShell {
+function serviceForClaim(
+	claimId: string,
+	serviceClient: McpClient = client,
+): McpConnectorServiceShell {
 	const authenticator: McpAuthenticator = {
 		authenticate: async ({ metadata: requestMetadata }) =>
 			requestMetadata
@@ -251,7 +283,7 @@ function serviceForClaim(claimId: string): McpConnectorServiceShell {
 		}),
 		logger,
 		ready: () => true,
-		client,
+		client: serviceClient,
 		idempotencyStore,
 		claimIdFactory: () => claimId,
 	});
@@ -269,7 +301,11 @@ function runRequest(eventId: string): RunMcpToolRequest {
 	};
 }
 
-function mcpRuntimeRequest(): RuntimeToolExecutionRequest {
+function mcpRuntimeRequest(
+	eventId: string,
+	modelToolCallId: string,
+	input: RuntimeToolExecutionRequest["input"],
+): RuntimeToolExecutionRequest {
 	return {
 		workspaceId: "default",
 		sessionId: "sesn_mcp_production_composition",
@@ -279,14 +315,101 @@ function mcpRuntimeRequest(): RuntimeToolExecutionRequest {
 		runtimeBindingToken: signedBindingToken(),
 		targetPodUid: runtimePodUid,
 		modelRequestId: "mreq_mcp_durable_claim",
-		modelToolCallId: "call_mcp_durable_claim",
+		modelToolCallId,
 		modelOrder: 0,
-		toolUseEventId,
+		toolUseEventId: eventId,
 		entry: mcpToolEntry(),
-		input: { title: "Bug", body: "Details" },
+		input,
 		retainedContextEntries: [],
 		abortSignal: new AbortController().signal,
 	};
+}
+
+async function runOAuthRuntime(
+	eventId: string,
+	modelToolCallId: string,
+	claimId: string,
+	oauthClient: McpClient,
+) {
+	const service = serviceForClaim(claimId, oauthClient);
+	const server = createMcpConnectorGrpcServer(service);
+	const port = await server.bind("127.0.0.1:0");
+	try {
+		const request = mcpRuntimeRequest(eventId, modelToolCallId, {
+			mode: claimId.endsWith("success") ? "oauth-success" : "oauth-failure",
+		});
+		const oauthRunner = new RuntimePodToolRunner({
+			bridgeAddress: compositionBridgeAddress,
+			webAddress: "127.0.0.1:1",
+			mcpConnectorAddress: `127.0.0.1:${port}`,
+			tokenPath: compositionRuntimeTokenPath,
+			sleep: async () => undefined,
+		});
+		const result = await oauthRunner.runTool(request);
+		if (result.type === "stale_custody") {
+			throw new Error("OAuth MCP composition lost Runtime custody");
+		}
+		const oauthSettlement = await writer.settleToolResult({
+			workspaceId: request.workspaceId,
+			sessionId: request.sessionId,
+			sessionThreadId: request.sessionThreadId,
+			bindingId: request.bindingId,
+			bindingGeneration: request.bindingGeneration,
+			targetPodUid: request.targetPodUid,
+			settlement: { toolUseEventId: eventId, outcome: runtimeToolSettlement(result) },
+		});
+		if (!oauthSettlement.ok) throw oauthSettlement.error;
+		return result;
+	} finally {
+		await server.shutdown();
+	}
+}
+
+function oauthMcpClient(mode: "success" | "unavailable"): McpSDKClient {
+	const success = {
+		ok: true as const,
+		mode: "bearer" as const,
+		token: "bounded-oauth-token",
+		tokenHash: "bounded-oauth-token-hash",
+		vaultId: "vlt_mcp_oauth",
+		credentialId: "cred_mcp_oauth",
+		refreshTriggered: true,
+	};
+	const unavailable = { ok: false as const, error: "expired" as const };
+	const resolver: GitHubMcpCredentialResolver = {
+		resolve: async () => (mode === "success" ? success : unavailable),
+		refresh: async () => (mode === "success" ? success : unavailable),
+	};
+	return new McpSDKClient({
+		credentialResolver: resolver,
+		onToolsListChanged: async () => undefined,
+		createTransport: () => new OAuthCompositionTransport(),
+	});
+}
+
+class OAuthCompositionTransport implements Transport {
+	onclose?: () => void;
+	onerror?: (error: Error) => void;
+	onmessage: NonNullable<Transport["onmessage"]> = () => undefined;
+
+	async start(): Promise<void> {}
+
+	async send(message: Parameters<Transport["send"]>[0]): Promise<void> {
+		if (!("id" in message) || !("method" in message)) return;
+		const result = message.method === "initialize"
+			? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "oauth-composition", version: "1.0.0" } }
+			: message.method === "tools/list"
+				? { tools: [] }
+				: message.method === "tools/call"
+					? { content: [{ type: "text", text: "oauth refreshed" }] }
+					: undefined;
+		if (result === undefined) throw new Error(`unexpected MCP request ${message.method}`);
+		queueMicrotask(() => this.onmessage?.({ jsonrpc: "2.0", id: message.id, result } as Parameters<NonNullable<Transport["onmessage"]>>[0]));
+	}
+
+	async close(): Promise<void> {
+		this.onclose?.();
+	}
 }
 
 function mcpToolEntry(): ToolEntry {

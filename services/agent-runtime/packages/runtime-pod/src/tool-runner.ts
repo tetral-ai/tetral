@@ -2139,6 +2139,9 @@ function modelVisibleMcpRuntimeFailure(
 	errorKind: McpErrorKind | undefined,
 ): string {
 	switch (errorKind) {
+		case McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED:
+		case McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED:
+			return "MCP authorization is unavailable. Reconnect the integration and try again.";
 		case McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT:
 			return "The MCP tool execution is still in progress. Check the external service before retrying.";
 		case McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED:

@@ -114,7 +114,7 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 		t.Fatalf("decode MCP failure composition: %v: %s", err, output)
 	}
 	if composed.ConnectorCalls != 1 || composed.Result.Type != "error" || composed.Result.Error.Retryable ||
-		composed.Result.Error.Message != "MCP tool execution is unavailable." || composed.Settlement.Type != "error" ||
+		composed.Result.Error.Message != "MCP authorization is unavailable. Reconnect the integration and try again." || composed.Settlement.Type != "error" ||
 		len(composed.DeclaredError) == 0 {
 		t.Fatalf("MCP failure composition = %+v; want one generic non-retryable Tool settlement", composed)
 	}
@@ -161,7 +161,7 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	}
 	result, _ := mcpProjection.Parts[1]["result"].(map[string]any)
 	failure, _ := result["error"].(map[string]any)
-	if result["type"] != "error" || failure["message"] != "MCP tool execution is unavailable." {
+	if result["type"] != "error" || failure["message"] != "MCP authorization is unavailable. Reconnect the integration and try again." {
 		t.Fatalf("MCP Tool error was not normalized: %s", durableMessage)
 	}
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})

@@ -2218,7 +2218,7 @@ describe("RuntimePodToolRunner", () => {
 		});
 	});
 
-	test("settles MCP infrastructure failures as one generic non-retryable Tool error", async () => {
+	test("settles customer MCP authorization failures as one actionable non-retryable Tool error", async () => {
 		for (const response of [
 			{
 				errorKind: McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED,
@@ -2227,10 +2227,6 @@ describe("RuntimePodToolRunner", () => {
 			{
 				errorKind: McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED,
 				retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
-			},
-			{
-				errorKind: McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED,
-				retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED,
 			},
 		]) {
 			const mcp = new RecordingMcpConnectorClient();
@@ -2249,10 +2245,26 @@ describe("RuntimePodToolRunner", () => {
 				type: "error",
 				error: expect.objectContaining({
 					retryable: false,
-					message: "MCP tool execution is unavailable.",
+					message: "MCP authorization is unavailable. Reconnect the integration and try again.",
 				}),
 			});
 		}
+	});
+
+	test("keeps non-authorization MCP infrastructure failures generic", async () => {
+		const mcp = new RecordingMcpConnectorClient();
+		mcp.runMcpToolResponse = {
+			status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+			resultText: "provider response must not escape",
+			attachments: [],
+			errorKind: McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED,
+			retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED,
+		};
+		const result = await makeRunner({ mcp }).runTool(mcpToolRequest({ repo: "tetral" }));
+		expect(result).toMatchObject({
+			type: "error",
+			error: { retryable: false, message: "MCP tool execution is unavailable." },
+		});
 	});
 
 	test("projects pre-commit MCP uncertainty without a discard loop", async () => {
