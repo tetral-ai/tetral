@@ -936,11 +936,7 @@ class RecordingCleanupController implements RuntimeCleanupController {
 		return {
 			ok: true as const,
 			sessionId: scope.sessionId,
-			completion: Promise.resolve({
-				ok: true as const,
-				sessionId: scope.sessionId,
-				cleaned: true,
-			}),
+			cleaned: true,
 		};
 	}
 }

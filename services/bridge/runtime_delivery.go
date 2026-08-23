@@ -68,6 +68,12 @@ type RuntimeCleanupFinalizer interface {
 	FinalizeRuntimeCleanup(context.Context, RuntimeJob) (RuntimeDeliveryResult, error)
 }
 
+type RuntimeCleanupDeliveryStore interface {
+	RuntimeCleanupDeliveryAuthority(context.Context, RuntimeJob) (RuntimeCleanupDeliveryAuthority, error)
+	RescheduleBusyRuntimeCleanup(context.Context, RuntimeJob) (RuntimeDeliveryResult, error)
+	FinalizeRuntimeCleanupExhaustion(context.Context, RuntimeJob, RuntimeDeliveryResult) (RuntimeDeliveryResult, error)
+}
+
 type RuntimeDeliveryFinalizationStore interface {
 	FinalizeRuntimeDelivery(context.Context, RuntimeJob, RuntimeDeliveryResult) (RuntimeDeliveryResult, error)
 	ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error)
@@ -356,6 +362,15 @@ func runtimeResultFromCleanup(response *agentruntimev1.CleanupSessionResponse) R
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
 	}
 	if rejected := response.GetRejected(); rejected != nil {
+		if rejected.GetReason() == agentruntimev1.CleanupSessionFailure_CLEANUP_SESSION_FAILURE_SESSION_BUSY {
+			return RuntimeDeliveryResult{
+				Status:       RuntimeDeliveryRejected,
+				Retryable:    rejected.GetRetryable(),
+				ErrorKind:    "cleanup_session_busy",
+				ErrorMessage: "runtime session is busy",
+				CleanupBusy:  true,
+			}
+		}
 		return rejectedRuntimeResponse(runtimeFailureKind(rejected.GetReason().String()), rejected.GetRetryable())
 	}
 	return invalidRuntimeResponse()
@@ -422,6 +437,14 @@ func (d RuntimePodDirectDeliverer) ReplayRuntimeDeliveryFinalization(ctx context
 		return RuntimeDeliveryResult{}, false, errors.New("runtime delivery finalization replayer is unavailable")
 	}
 	return replayer.ReplayRuntimeDeliveryFinalization(ctx, job)
+}
+
+func (d RuntimePodDirectDeliverer) FinalizeRuntimeCleanupExhaustion(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	store, ok := d.Store.(RuntimeCleanupDeliveryStore)
+	if !ok || store == nil {
+		return RuntimeDeliveryResult{}, errors.New("runtime cleanup exhaustion finalizer is unavailable")
+	}
+	return store.FinalizeRuntimeCleanupExhaustion(ctx, job, result)
 }
 
 func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
@@ -534,6 +557,23 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 			return RuntimeDeliveryResult{Status: status, QueueLeaseSettled: authority.QueueLeaseSettled}, nil
 		}
 	}
+	if job.Kind == queue.KindCleanupSession {
+		store, ok := d.Store.(RuntimeCleanupDeliveryStore)
+		if !ok || store == nil {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "cleanup_authority_unavailable", ErrorMessage: "runtime cleanup authority is unavailable"}, nil
+		}
+		authority, err := store.RuntimeCleanupDeliveryAuthority(ctx, job)
+		if err != nil {
+			return runtimeDeliveryResultFromPrepareError(err), nil
+		}
+		if !authority.Active {
+			status := RuntimeDeliveryAuthorityLost
+			if authority.QueueLeaseSettled {
+				status = RuntimeDeliveryDuplicate
+			}
+			return RuntimeDeliveryResult{Status: status, QueueLeaseSettled: authority.QueueLeaseSettled}, nil
+		}
+	}
 	result, err := plan.send(ctx, d.Sender)
 	if err != nil {
 		result, deliveryErr := runtimeDeliveryResultFromSendError(err)
@@ -557,6 +597,13 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	}
 	if converted {
 		return d.DeliverRuntimeJob(ctx, job)
+	}
+	if job.Kind == queue.KindCleanupSession && result.CleanupBusy {
+		store, ok := d.Store.(RuntimeCleanupDeliveryStore)
+		if !ok || store == nil {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "cleanup_reschedule_unavailable", ErrorMessage: "runtime cleanup reschedule is unavailable"}, nil
+		}
+		return store.RescheduleBusyRuntimeCleanup(ctx, job)
 	}
 	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" &&
 		(result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {

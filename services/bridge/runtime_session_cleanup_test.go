@@ -11,9 +11,11 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/id"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -642,6 +644,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 		CleanupJobID:   "cleanup_bridge_confirm_1",
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_confirm","cleanup_job_id":"cleanup_bridge_confirm_1"}`,
 	}
+	job = leaseCleanupRuntimeJobForTest(t, runtime, job)
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup confirmation: %v", err)
@@ -852,7 +855,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhenChildStartsB
 	seedBridgeCleanupTreeFixture(t, runtime, admin, sessionID, mainID, childID, cleanupID, false)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
-	job := cleanupTreeJob(sessionID, cleanupID)
+	job := leaseCleanupRuntimeJobForTest(t, runtime, cleanupTreeJob(sessionID, cleanupID))
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand before child starts: %v", err)
@@ -1038,6 +1041,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 		CleanupJobID:   "cleanup_bridge_gone_1",
 		PayloadJSON:    `{"workspace_id":"default","session_id":"sesn_bridge_cleanup_gone","cleanup_job_id":"cleanup_bridge_gone_1"}`,
 	}
+	job = leaseCleanupRuntimeJobForTest(t, runtime, job)
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil {
 		t.Fatalf("DeliverRuntimeJob cleanup gone: %v", err)
@@ -1182,15 +1186,15 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 			)
 		},
 	}
-	result, err := (RuntimePodDirectDeliverer{
-		Store:  cleanupStore,
-		Sender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
-	}).DeliverRuntimeJob(context.Background(), RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
-		JobID: "qjob_cleanup_cold_approval", LeaseToken: "lease_cleanup_cold_approval",
+	job := leaseCleanupRuntimeJobForTest(t, runtime, RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: sessionID,
 		RuntimeInputID: "cleanup_session:cleanup_cold_approval_1", CleanupJobID: "cleanup_cold_approval_1",
 		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"cleanup_cold_approval_1"}`,
 	})
+	result, err := (RuntimePodDirectDeliverer{
+		Store:  cleanupStore,
+		Sender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
+	}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil {
 		t.Fatalf("deliver proven-gone cleanup approval: %v", err)
 	}
@@ -1339,6 +1343,35 @@ func cleanupTreeJob(sessionID string, cleanupID string) RuntimeJob {
 		CleanupJobID:   cleanupID,
 		PayloadJSON:    `{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"` + cleanupID + `"}`,
 	}
+}
+
+func leaseCleanupRuntimeJobForTest(t *testing.T, runtime *sql.DB, job RuntimeJob) RuntimeJob {
+	t.Helper()
+	store := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	jobID := id.New(queue.JobIDPrefix)
+	partitionKey := queue.FormatSessionPartitionKey(workspace.DefaultID, job.SessionID)
+	dedupeKey := queue.FormatCleanupSessionDedupeKey(workspace.DefaultID, job.SessionID, job.CleanupJobID)
+	if _, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: jobID, WorkspaceID: workspace.DefaultID, Kind: queue.KindCleanupSession,
+		PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
+		PayloadJSON: []byte(job.PayloadJSON), MaxAttempts: 2,
+	}); err != nil {
+		t.Fatalf("enqueue cleanup test job: %v", err)
+	}
+	leased, err := store.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindCleanupSession},
+		LeaseOwner: "bridge-cleanup-test", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease cleanup test job = %#v/%v", leased, err)
+	}
+	job.JobID = leased[0].ID
+	job.LeaseToken = leased[0].LeaseToken
+	job.PartitionKey = leased[0].PartitionKey
+	job.DedupeKey = leased[0].DedupeKey
+	job.AttemptCount = int32(leased[0].AttemptCount)
+	job.MaxAttempts = int32(leased[0].MaxAttempts)
+	return job
 }
 
 func assertBridgeCleanupTreeRescheduled(t *testing.T, admin *sql.DB, sessionID string, wantCleanupAfter string) {

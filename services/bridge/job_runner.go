@@ -76,6 +76,10 @@ type RuntimeDeliveryFinalizationReplayer interface {
 	ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error)
 }
 
+type RuntimeCleanupExhaustionFinalizer interface {
+	FinalizeRuntimeCleanupExhaustion(context.Context, RuntimeJob, RuntimeDeliveryResult) (RuntimeDeliveryResult, error)
+}
+
 type malformedRuntimeInputCustodyReplacer interface {
 	ReplaceMalformedRuntimeInputCustody(context.Context, RuntimeJob) (queue.ReplaceMalformedRuntimeInputCustodyResult, error)
 }
@@ -138,6 +142,7 @@ type RuntimeDeliveryResult struct {
 	ErrorKind         string
 	ErrorMessage      string
 	QueueLeaseSettled bool
+	CleanupBusy       bool
 	// The command plan carries the binding that actually owned this attempt.
 	// These process-local fields fence Bridge finalization after a Pod-loss
 	// handoff; they are not Queue payload, RPC result, or durable state.
@@ -380,6 +385,14 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			r.logRuntimeJobAttempt(job, preparationKind, "deferred")
 			return r.deferRuntimeConfig(ctx, job)
 		}
+		if cleanupSessionFinalAttempt(job) {
+			finalized, err := r.finalizeRuntimeCleanupExhaustion(ctx, job, result)
+			if err != nil {
+				return err
+			}
+			r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(finalized))
+			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
+		}
 		if runtimeJobFinalAttempt(job) && job.InputKind != "interrupt_control" {
 			finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 			if err != nil {
@@ -413,6 +426,13 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 	// returned a nominally terminal rejection; only receipt replay may ACK it.
 	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" && result.Status == RuntimeDeliveryRejected {
 		result.Retryable = true
+	}
+	if cleanupSessionFinalAttempt(job) && result.Status == RuntimeDeliveryRejected {
+		finalized, err := r.finalizeRuntimeCleanupExhaustion(ctx, job, result)
+		if err != nil {
+			return err
+		}
+		result = finalized
 	}
 	preparationKind := "none"
 	if result.ErrorKind != "" {
@@ -592,6 +612,14 @@ func (r *JobRunner) finalizeRuntimeDelivery(ctx context.Context, job RuntimeJob,
 	return finalizer.FinalizeRuntimeDelivery(ctx, job, result)
 }
 
+func (r *JobRunner) finalizeRuntimeCleanupExhaustion(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	finalizer, ok := r.Deliverer.(RuntimeCleanupExhaustionFinalizer)
+	if !ok {
+		return RuntimeDeliveryResult{}, errors.New("runtime cleanup exhaustion finalizer is required")
+	}
+	return finalizer.FinalizeRuntimeCleanupExhaustion(ctx, job, result)
+}
+
 func runtimeDeliveryRequiresFinalization(job RuntimeJob, result RuntimeDeliveryResult) bool {
 	if result.Status == RuntimeDeliveryBarrierStale {
 		return job.Kind == queue.KindRuntimeInput && job.InputKind != "interrupt_control"
@@ -615,6 +643,10 @@ func runtimeJobFinalAttempt(job RuntimeJob) bool {
 	return (job.Kind == queue.KindRuntimeInput || job.Kind == queue.KindRuntimeRecovery || isMCPManifestRuntimeJob(job)) &&
 		job.MaxAttempts > 0 &&
 		job.AttemptCount >= job.MaxAttempts
+}
+
+func cleanupSessionFinalAttempt(job RuntimeJob) bool {
+	return job.Kind == queue.KindCleanupSession && job.MaxAttempts > 0 && job.AttemptCount >= job.MaxAttempts
 }
 
 func runtimeJobAgentMailFinalizationOnly(job RuntimeJob) bool {
@@ -906,11 +938,15 @@ func decodeCleanupSessionJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		JobID:          queueJob.GetId(),
 		LeaseToken:     queueJob.GetLeaseToken(),
 		Kind:           queue.KindCleanupSession,
+		PartitionKey:   queueJob.GetPartitionKey(),
+		DedupeKey:      queueJob.GetDedupeKey(),
 		WorkspaceID:    payload.WorkspaceID,
 		SessionID:      payload.SessionID,
 		RuntimeInputID: "cleanup_session:" + payload.CleanupJobID,
 		CleanupJobID:   payload.CleanupJobID,
 		PayloadJSON:    queueJob.GetPayloadJson(),
+		AttemptCount:   queueJob.GetAttemptCount(),
+		MaxAttempts:    queueJob.GetMaxAttempts(),
 	}, nil
 }
 

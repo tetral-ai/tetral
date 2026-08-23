@@ -13,6 +13,7 @@ import (
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -48,6 +49,159 @@ type cleanupSessionClaim struct {
 	PodName            string
 	Namespace          string
 	SandboxID          string
+}
+
+type RuntimeCleanupDeliveryAuthority struct {
+	Active            bool
+	QueueLeaseSettled bool
+}
+
+func cleanupSessionExactLease(job RuntimeJob) (queue.ExactLeaseRequest, error) {
+	if job.Kind != queue.KindCleanupSession || job.WorkspaceID == "" || job.SessionID == "" || job.CleanupJobID == "" ||
+		job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" {
+		return queue.ExactLeaseRequest{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "cleanup delivery authority is incomplete", retryable: false}
+	}
+	workspaceID := workspace.ID(job.WorkspaceID)
+	if job.PartitionKey != queue.FormatSessionPartitionKey(workspaceID, job.SessionID) ||
+		job.DedupeKey != queue.FormatCleanupSessionDedupeKey(workspaceID, job.SessionID, job.CleanupJobID) {
+		return queue.ExactLeaseRequest{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "cleanup delivery authority binding is invalid", retryable: false}
+	}
+	return queue.ExactLeaseRequest{
+		WorkspaceID: workspaceID, JobID: job.JobID, LeaseToken: job.LeaseToken,
+		Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
+	}, nil
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) RuntimeCleanupDeliveryAuthority(ctx context.Context, job RuntimeJob) (RuntimeCleanupDeliveryAuthority, error) {
+	if s == nil || s.Client == nil {
+		return RuntimeCleanupDeliveryAuthority{}, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime cleanup authority store is unavailable", retryable: true}
+	}
+	lease, err := cleanupSessionExactLease(job)
+	if err != nil {
+		return RuntimeCleanupDeliveryAuthority{}, err
+	}
+	authority := RuntimeCleanupDeliveryAuthority{}
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.authorize_cleanup_delivery", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, lease)
+		if err != nil {
+			return err
+		}
+		authority.Active = active
+		return nil
+	})
+	return authority, err
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) RescheduleBusyRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	if s == nil || s.Client == nil {
+		return RuntimeDeliveryResult{}, errors.New("runtime cleanup reschedule store is unavailable")
+	}
+	lease, err := cleanupSessionExactLease(job)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	now := storage.Now()
+	if s.Clock != nil {
+		now = s.Clock().UTC()
+	}
+	settled := false
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.reschedule_busy_cleanup", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, lease)
+		if err != nil || !active {
+			return err
+		}
+		if err := rescheduleBusyCleanupSessionTx(ctx, tx, job, now); err != nil {
+			return err
+		}
+		settled, err = queue.AckTx(ctx, tx, queue.AckRequest{
+			WorkspaceID: lease.WorkspaceID, JobID: lease.JobID, LeaseToken: lease.LeaseToken, Now: now,
+		})
+		return err
+	})
+	if err != nil {
+		return runtimeDeliveryResultFromPrepareError(err), nil
+	}
+	if !settled {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}, nil
+	}
+	return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted, QueueLeaseSettled: true}, nil
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanupExhaustion(ctx context.Context, job RuntimeJob, _ RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	if s == nil || s.Client == nil {
+		return RuntimeDeliveryResult{}, errors.New("runtime cleanup exhaustion store is unavailable")
+	}
+	if job.MaxAttempts <= 0 || job.AttemptCount < job.MaxAttempts {
+		return RuntimeDeliveryResult{}, runtimeDeliveryPrepareError{kind: "cleanup_exhaustion_invalid", message: "runtime cleanup attempts are not exhausted", retryable: false}
+	}
+	lease, err := cleanupSessionExactLease(job)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	now := storage.Now()
+	if s.Clock != nil {
+		now = s.Clock().UTC()
+	}
+	outcome := RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_cleanup_exhaustion", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, lease)
+		if err != nil {
+			return err
+		}
+		if !active {
+			var queueStatus string
+			if err := tx.QueryRow(ctx,
+				`SELECT status FROM queue_jobs
+				  WHERE workspace_id=$1 AND id=$2 AND kind=$3 AND partition_key=$4 AND dedupe_key=$5`,
+				job.WorkspaceID, job.JobID, job.Kind, job.PartitionKey, job.DedupeKey,
+			).Scan(&queueStatus); err != nil && !dbconnect.IsNoRows(err) {
+				return err
+			}
+			if queueStatus == queue.StatusDeadLettered {
+				outcome = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
+			}
+			return nil
+		}
+		deadLettered, err := queue.DeadLetterTx(ctx, tx, queue.DeadLetterRequest{
+			WorkspaceID: lease.WorkspaceID, JobID: lease.JobID, LeaseToken: lease.LeaseToken,
+			ErrorKind: "runtime_cleanup_exhausted", ErrorMessage: "runtime cleanup attempts are exhausted", Now: now,
+		})
+		if err != nil {
+			return err
+		}
+		if !deadLettered {
+			return nil
+		}
+		result, err := tx.Exec(ctx,
+			`UPDATE session_runtime_status
+			    SET cleanup_after=$4, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
+			        cleanup_job_id=NULL, updated_at=$5
+			  WHERE workspace_id=$1 AND session_id=$2 AND cleanup_job_id=$3`,
+			job.WorkspaceID, job.SessionID, job.CleanupJobID, now.Add(defaultIdleCleanupDelay), now,
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(result) {
+			return runtimeDeliveryPrepareError{kind: "cleanup_exhaustion_stale", message: "runtime cleanup exhaustion marker is stale", retryable: false}
+		}
+		outcome = RuntimeDeliveryResult{
+			Status: RuntimeDeliveryRejected, Retryable: false,
+			ErrorKind: "runtime_cleanup_exhausted", ErrorMessage: "runtime cleanup attempts are exhausted",
+			QueueLeaseSettled: true,
+		}
+		return nil
+	})
+	return outcome, err
 }
 
 type cleanupClaimOptions struct {
@@ -407,38 +561,60 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Cont
 	if job.Kind == queue.KindSessionDeleteCleanup {
 		return s.finalizeSessionDeleteCleanup(ctx, job)
 	}
+	lease, err := cleanupSessionExactLease(job)
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
 	now := storage.Now()
 	if s.Clock != nil {
 		now = s.Clock().UTC()
 	}
-	var claim cleanupSessionClaim
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.cleanup_settle", func(tx *dbconnect.Tx) error {
-		loaded, stale, err := loadClaimedCleanupSessionTx(ctx, tx, job, now)
-		if err != nil || stale {
-			if stale {
-				claim = cleanupSessionClaim{}
-			}
+	outcome := RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.cleanup_settle", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
+		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, lease)
+		if err != nil || !active {
+			return err
+		}
+		loaded, stale, err := loadClaimedCleanupSessionTx(ctx, tx, job, now)
+		if err != nil {
+			return err
+		}
+		if stale {
+			settled, err := queue.AckTx(ctx, tx, queue.AckRequest{
+				WorkspaceID: lease.WorkspaceID, JobID: lease.JobID, LeaseToken: lease.LeaseToken, Now: now,
+			})
+			if err != nil {
+				return err
+			}
+			if settled {
+				outcome = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
+			}
+			return nil
 		}
 		if err := expireCleanupSandboxExecutionsTx(ctx, tx, loaded, now); err != nil {
 			return err
 		}
-		claim = loaded
+		if err := finalizeCleanupSessionTx(ctx, tx, loaded, now); err != nil {
+			return err
+		}
+		settled, err := queue.AckTx(ctx, tx, queue.AckRequest{
+			WorkspaceID: lease.WorkspaceID, JobID: lease.JobID, LeaseToken: lease.LeaseToken, Now: now,
+		})
+		if err != nil {
+			return err
+		}
+		if settled {
+			outcome = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted, QueueLeaseSettled: true}
+		}
 		return nil
 	})
 	if err != nil {
 		return runtimeDeliveryResultFromPrepareError(err), nil
 	}
-	if claim.CleanupJobID == "" {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
-	}
-	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.cleanup_finalize", func(tx *dbconnect.Tx) error {
-		return finalizeCleanupSessionTx(ctx, tx, claim, now)
-	})
-	if err != nil {
-		return runtimeDeliveryResultFromPrepareError(err), nil
-	}
-	return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
+	return outcome, nil
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {

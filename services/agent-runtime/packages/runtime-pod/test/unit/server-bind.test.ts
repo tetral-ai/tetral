@@ -197,11 +197,7 @@ function fakeRuntimeControlService(): RuntimeControlService {
 			startCleanup: async (scope) => ({
 				ok: true,
 				sessionId: scope.sessionId,
-				completion: Promise.resolve({
-					ok: true,
-					sessionId: scope.sessionId,
-					cleaned: true,
-				}),
+				cleaned: true,
 			}),
 		},
 		logger: { info: () => undefined, error: () => undefined },
