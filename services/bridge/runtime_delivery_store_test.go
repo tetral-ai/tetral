@@ -2385,6 +2385,48 @@ func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *
 	}
 }
 
+func TestPostgreSQLRuntimeDeliveryStoreAgentMailAcceptanceDoesNotRegressCommittedMessageInput(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_message_committed_control"
+		threadID  = "thr_message_committed_control"
+		bindingID = "bind_message_committed_control"
+		podUID    = "pod_message_committed_control"
+		inputID   = "rin_message_committed_control"
+		eventID   = "evt_message_committed_control"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"control"}]}`)
+	job := RuntimeJob{
+		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID,
+		SessionThreadID: threadID, RuntimeInputID: inputID, EventIDs: []string{eventID},
+		SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + inputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
+	if err != nil {
+		t.Fatalf("prepare message input: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET status='committed'
+		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, inputID); err != nil {
+		t.Fatalf("mark message input committed: %v", err)
+	}
+	if settled, err := store.MarkRuntimeInputAccepted(context.Background(), job, plan.AttemptedBinding); err != nil || settled {
+		t.Fatalf("mark committed message input accepted = settled:%t err:%v", settled, err)
+	}
+	var statusValue string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, inputID).Scan(&statusValue); err != nil {
+		t.Fatalf("read committed message control: %v", err)
+	}
+	if statusValue != "committed" {
+		t.Fatalf("committed non-agent-mail status = %q; want committed", statusValue)
+	}
+}
+
 func TestPostgreSQLRuntimeDeliveryStoreRejectsRuntimeInboxPayloadConflict(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_conflict", "thr_bridge_inbox_conflict")

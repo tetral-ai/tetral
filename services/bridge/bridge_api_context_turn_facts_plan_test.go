@@ -5,13 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -60,7 +58,7 @@ func (tracer *loadContextQueryTracer) snapshot() []loadContextQueryInvocation {
 }
 
 func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
-	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_closed_plan_background", "thr_closed_plan_background")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -93,20 +91,22 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 		}
 		if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind, data_json,
-			source_event_id, created_at, updated_at
-		) VALUES ('default',$1,$2,$3,1,'compaction','{"parts":[{"type":"text","text":"summary"}]}',$4,now(),now())`,
-			sessionID, threadID, fmt.Sprintf("msg_closed_plan_%d", historySize), fmt.Sprintf("evt_closed_plan_compacted_%d", historySize)); err != nil {
+			source_event_id, model_request_id, created_at, updated_at
+		) VALUES
+		('default',$1,$2,$3,1,'compaction','{"parts":[{"type":"text","text":"summary"}]}',$4,NULL,now(),now()),
+		('default',$1,$2,'msg_closed_plan_assistant_'||$5,2,'assistant','{"parts":[{"type":"text","text":"retained tool pair"}]}',NULL,'mreq_closed_plan_'||$5,now(),now())`,
+			sessionID, threadID, fmt.Sprintf("msg_closed_plan_%d", historySize), fmt.Sprintf("evt_closed_plan_compacted_%d", historySize), fmt.Sprint(historySize)); err != nil {
 			t.Fatalf("seed plan compaction Message %d: %v", historySize, err)
 		}
 		if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events`); err != nil {
 			t.Fatalf("analyze closed turn history %d: %v", historySize, err)
 		}
 
-		openPlan := explainClosedTurnPlan(t, admin, loadOpenDurableTurnIDSQL,
+		openPlan := explainClosedTurnPlan(t, runtime, loadOpenDurableTurnIDSQL,
 			"default", sessionID, threadID)
-		turnPlan := explainClosedTurnPlan(t, admin, loadContextTurnEventsSQL,
+		turnPlan := explainClosedTurnPlan(t, runtime, loadContextTurnEventsSQL,
 			"default", sessionID, threadID, floor, "", `[]`, `[]`, "closed_for_runtime")
-		compactionPlan := explainClosedTurnPlan(t, admin, loadContextCompactionEventFloorSQL,
+		compactionPlan := explainClosedTurnPlan(t, runtime, loadContextCompactionEventFloorSQL,
 			"default", sessionID, threadID, fmt.Sprintf(`["evt_closed_plan_compacted_%d"]`, historySize))
 		combined := collectClosedTurnPlanStats(openPlan)
 		mergeClosedTurnPlanStats(&combined, collectClosedTurnPlanStats(turnPlan))
@@ -138,7 +138,7 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 			t.Fatalf("closed turn plan %d is not bounded (floor-filtered=%.0f): %#v\nopen=%s\nturn=%s\ncompaction=%s",
 				historySize, floorFiltered, combined, encodePlanForFailure(openPlan), encodePlanForFailure(turnPlan), encodePlanForFailure(compactionPlan))
 		}
-		tracedDB, tracer := openLoadContextTracedDB(t, admin)
+		tracedDB, tracer := openLoadContextTracedDB(t, runtime)
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(tracedDB))
 		store.RuntimeBindingTokenHMACKey = []byte("closed-turn-plan-key")
 		loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
@@ -152,26 +152,44 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 			t.Fatalf("decode full LoadContext %d: %v", historySize, err)
 		}
 		factIDs := make([]string, 0, len(payload.TurnFacts.Events))
+		retainedToolUses := 0
+		retainedToolResults := 0
 		for _, event := range payload.TurnFacts.Events {
 			factIDs = append(factIDs, strings.TrimSuffix(event.EventID, fmt.Sprint(historySize)))
+			if event.ToolUse != nil {
+				retainedToolUses++
+			}
+			if event.ToolResult != nil {
+				retainedToolResults++
+			}
+		}
+		if retainedToolUses != 1 || retainedToolResults != 1 {
+			t.Fatalf("full LoadContext retained Tool pair = uses:%d results:%d; want 1/1", retainedToolUses, retainedToolResults)
 		}
 		invocations := tracer.snapshot()
 		census := make([]string, 0, len(invocations))
 		statementStats := make([]closedTurnPlanStats, 0, len(invocations))
+		toolResultIdentityLookups := 0
 		for _, invocation := range invocations {
 			normalizedSQL := strings.Join(strings.Fields(invocation.SQL), " ")
 			census = append(census, normalizedSQL)
+			if strings.HasPrefix(normalizedSQL, "SELECT COALESCE(model_request_id, ''), payload_json, projection_json FROM session_events") {
+				toolResultIdentityLookups++
+			}
 			if strings.HasPrefix(normalizedSQL, "SELECT projection_json FROM session_events") &&
 				strings.Contains(normalizedSQL, "session.status_rescheduled") {
 				t.Fatalf("full LoadContext performed a per-Request-End reschedule lookup: %s", normalizedSQL)
 			}
-			plan := explainClosedTurnPlan(t, admin, invocation.SQL, invocation.Args...)
+			plan := explainClosedTurnPlan(t, runtime, invocation.SQL, invocation.Args...)
 			planStats := collectClosedTurnPlanStats(plan)
 			if planStats.sessionEventSeq != 0 || planStats.maxLoops > 1 || planStats.maxRows > 12 {
 				t.Fatalf("full LoadContext statement is unbounded at history %d: %#v sql=%s plan=%s",
 					historySize, planStats, census[len(census)-1], encodePlanForFailure(plan))
 			}
 			statementStats = append(statementStats, planStats)
+		}
+		if toolResultIdentityLookups != 1 {
+			t.Fatalf("full LoadContext Tool Result identity lookups = %d; want one for one retained pair", toolResultIdentityLookups)
 		}
 		if historySize == 64 {
 			wantCensus = census
@@ -199,25 +217,10 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 	}
 }
 
-func openLoadContextTracedDB(t *testing.T, admin *sql.DB) (*sql.DB, *loadContextQueryTracer) {
+func openLoadContextTracedDB(t *testing.T, runtime *sql.DB) (*sql.DB, *loadContextQueryTracer) {
 	t.Helper()
-	var schema string
-	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&schema); err != nil {
-		t.Fatalf("read isolated schema: %v", err)
-	}
-	config, err := pgx.ParseConfig(os.Getenv(storagetest.EnvTestDatabaseURL))
-	if err != nil {
-		t.Fatalf("parse test database config: %v", err)
-	}
-	config.RuntimeParams["search_path"] = schema
 	tracer := &loadContextQueryTracer{}
-	config.Tracer = tracer
-	db := stdlib.OpenDB(*config)
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.PingContext(context.Background()); err != nil {
-		t.Fatalf("open traced LoadContext database: %v", err)
-	}
-	return db, tracer
+	return storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, tracer), tracer
 }
 
 func planRowsRemovedByFloorFilter(plan map[string]any, floor int64) float64 {
@@ -262,9 +265,9 @@ func seedClosedTurnPlanHistory(t *testing.T, db *sql.DB, sessionID, threadID str
 	) VALUES
 	('default',$1,$2,'evt_closed_plan_running_'||$4,$3,'session.thread_status_running','{"type":"session.thread_status_running"}','internal',false,'rwrite_closed_plan_running_'||$4,NULL,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_start_'||$4,$3+1,'span.model_request_start','{"type":"span.model_request_start","model_request_id":"mreq_closed_plan_'||$4||'"}','internal',false,'rwrite_closed_plan_start_'||$4,'mreq_closed_plan_'||$4,'{"context_through_message_sequence":1,"request_kind":"agent_provider_request"}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_tool_'||$4,$3+2,'agent.tool_use','{}','internal',false,'rwrite_closed_plan_tool_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_result_'||$4,$3+3,'agent.tool_result','{}','internal',false,'rwrite_closed_plan_result_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
-	('default',$1,$2,'evt_closed_plan_end_'||$4,$3+4,'span.model_request_end','{"model_request_start_id":"evt_closed_plan_start_'||$4||'","is_error":false,"provider_context_retention":{"disposition":"none","tool_use_event_ids":[],"repair_event_ids":[]}}','internal',false,'rwrite_closed_plan_end_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_tool_'||$4,$3+2,'agent.tool_use','{"type":"agent.tool_use"}','internal',false,'rwrite_closed_plan_tool_'||$4,'mreq_closed_plan_'||$4,'{"model_tool_call_id":"call_closed_plan_'||$4||'","tool_name":"Bash"}',now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_result_'||$4,$3+3,'agent.tool_result','{"type":"agent.tool_result","tool_use_event_id":"evt_closed_plan_tool_'||$4||'"}','internal',false,'rwrite_closed_plan_result_'||$4,'mreq_closed_plan_'||$4,'{"state":"completed"}',now(),now(),now()),
+	('default',$1,$2,'evt_closed_plan_end_'||$4,$3+4,'span.model_request_end','{"model_request_start_id":"evt_closed_plan_start_'||$4||'","is_error":false,"provider_context_retention":{"disposition":"completed","assistant_message_sequence":2,"tool_use_event_ids":["evt_closed_plan_tool_'||$4||'"],"repair_event_ids":[]}}','internal',false,'rwrite_closed_plan_end_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_idle_'||$4,$3+5,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_closed_plan_idle_'||$4,NULL,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_close_'||$4,$3+6,'session.thread_status_idle','{"type":"session.thread_status_idle","stop_reason":{"type":"end_turn"}}','internal',false,'rwrite_closed_plan_close_'||$4,NULL,'{}',now(),now(),now()),
 	('default',$1,$2,'evt_closed_plan_tail_'||$4,$3+7,'agent.message','{}','internal',false,'rwrite_closed_plan_tail_'||$4,'mreq_closed_plan_'||$4,'{}',now(),now(),now()),
@@ -295,8 +298,19 @@ func seedClosedTurnPostFloorNoise(t *testing.T, db *sql.DB, sessionID, threadID 
 
 func explainClosedTurnPlan(t *testing.T, db *sql.DB, query string, args ...any) map[string]any {
 	t.Helper()
+	if len(args) == 0 {
+		t.Fatal("closed turn plan requires workspace identity")
+	}
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("begin closed turn plan transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), `SELECT set_config('tetral.workspace_id',$1,true)`, fmt.Sprint(args[0])); err != nil {
+		t.Fatalf("set closed turn plan workspace: %v", err)
+	}
 	var raw string
-	if err := db.QueryRowContext(context.Background(),
+	if err := tx.QueryRowContext(context.Background(),
 		"EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) "+query,
 		args...).Scan(&raw); err != nil {
 		t.Fatalf("explain closed turn query: %v", err)
