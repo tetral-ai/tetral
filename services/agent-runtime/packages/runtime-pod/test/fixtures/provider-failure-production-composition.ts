@@ -14,8 +14,10 @@ import type {
 	GatewayStreamTextInput,
 	GatewayStreamTextResult,
 } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
-import { ProviderCredentialResolver } from "../../../../../gateway/packages/provider-gateway/src/providers/credentials.js";
-import { encryptAES256GCM } from "../../../../../gateway/packages/provider-gateway/src/providers/crypto.js";
+import {
+	ProviderCredentialResolver,
+	SQLGatewayCredentialStore,
+} from "../../../../../gateway/packages/provider-gateway/src/providers/credentials.js";
 import { PlatformKeyPool } from "../../../../../gateway/packages/provider-gateway/src/providers/pool.js";
 import { ProviderGatewayServiceShell } from "../../../../../gateway/packages/provider-gateway/src/service.js";
 import type { ProviderRequestStreamInput } from "../../../../../gateway/packages/provider-gateway/src/service.js";
@@ -45,8 +47,10 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly readyPath: string;
 	readonly statePath: string;
 	readonly closePath: string;
+	readonly toolReleasePath?: string;
 	readonly scenario?:
 		| "semantic_timeout"
+		| "semantic_tool_route"
 		| "platform_billing_pre_progress"
 		| "platform_billing_post_progress"
 		| "platform_billing_exhausted"
@@ -57,16 +61,6 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 const scenario = input.scenario ?? "semantic_timeout";
 const customerCredentialScenario =
 	scenario === "invalid_kimi_byok" || scenario === "invalid_openai_oauth";
-const sessionProviderId =
-	scenario === "invalid_kimi_byok"
-		? ("moonshotai" as const)
-		: scenario === "invalid_openai_oauth"
-			? ("openai" as const)
-			: ("anthropic" as const);
-const sessionAccessMode = scenario === "invalid_openai_oauth" ? "oauth" : "user_api_key";
-const sessionCredentialAuthType =
-	scenario === "invalid_openai_oauth" ? ("provider_oauth" as const) : ("provider_api_key" as const);
-
 const metadataFactory = async () => new Metadata();
 const bridgeOptions = {
 	address: input.bridgeAddress,
@@ -100,45 +94,20 @@ const platformPool = new PlatformKeyPool(
 		onQuarantine: (event) => platformKeyQuarantines.push(event.keyId),
 	},
 );
-let sessionCredentialHealthy = false;
-const encryptSessionAuth = async (healthy: boolean): Promise<Uint8Array> =>
-	await encryptAES256GCM(
-		new TextEncoder().encode(
-			JSON.stringify(
-				scenario === "invalid_openai_oauth"
-					? {
-							type: "provider_oauth",
-							provider_id: "openai",
-							access_mode: "oauth",
-							access_token: healthy ? "oauth-access-healthy" : "oauth-access-invalid",
-							refresh_token: healthy ? "oauth-refresh-healthy" : "oauth-refresh-invalid",
-							expires_at: "2099-01-01T00:00:00.000Z",
-							account_id: "account-provider-failure-canary",
-						}
-					: {
-							type: "provider_api_key",
-							provider_id: sessionProviderId,
-							access_mode: sessionAccessMode,
-							token: healthy ? "session-key-healthy" : "session-key-invalid",
-						},
-			),
-		),
-		credentialMasterKeyHex,
-		() => new Uint8Array(12).fill(healthy ? 7 : 3),
-	);
-const invalidSessionAuth = await encryptSessionAuth(false);
-const healthySessionAuth = await encryptSessionAuth(true);
 let providerInvocations = 0;
+let toolInvocations = 0;
 let finishIdleInvocations = 0;
 let finishIdleResult = "none";
 const providerRequestContexts: string[] = [];
 let nextId = 0;
 const gatewayLogs: unknown[] = [];
+const runtimeLogs: unknown[] = [];
 const writeRuntimeState = async (): Promise<void> => {
 	await writeFile(
 		input.statePath,
 		JSON.stringify({
 			providerInvocations,
+			toolInvocations,
 			finishIdleInvocations,
 			finishIdleResult,
 			platformKeySelections,
@@ -146,7 +115,7 @@ const writeRuntimeState = async (): Promise<void> => {
 			providerRequestContexts,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
-					JSON.stringify(gatewayLogs),
+					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),
 				),
 		}),
 		{ mode: 0o600 },
@@ -161,11 +130,6 @@ const writer = {
 		await writeRuntimeState();
 		const result = await bridgeWriter.finishIdle(envelope);
 		finishIdleResult = result.ok ? result.type : result.error.code;
-		if (result.ok) {
-			if (customerCredentialScenario && finishIdleInvocations === 1) {
-				sessionCredentialHealthy = true;
-			}
-		}
 		await writeRuntimeState();
 		return result;
 	},
@@ -173,29 +137,15 @@ const writer = {
 		bridgeWriter.commitRuntimeTermination.bind(bridgeWriter),
 } satisfies SessionEventWriter;
 
+const databaseURL = process.env.TETRAL_TEST_DATABASE_URL;
+const databaseSchema = process.env.TETRAL_TEST_DATABASE_SCHEMA;
+if (databaseURL === undefined || databaseSchema === undefined) {
+	throw new Error("provider failure composition requires its PostgreSQL schema");
+}
+const credentialSQL = new Bun.SQL({ url: databaseURL, max: 1 });
+await credentialSQL.unsafe(`SET search_path TO ${databaseSchema}`);
 const credentialResolver = new ProviderCredentialResolver({
-	store: {
-		loadActiveSessionProviderAuth: async () =>
-			customerCredentialScenario
-				? [
-						{
-							providerId: sessionProviderId,
-							vaultId: "vlt_provider_failure",
-							credentialId: "cred_provider_failure",
-							accessMode: sessionAccessMode,
-							credentialAuthType: sessionCredentialAuthType,
-							credentialProviderId: sessionProviderId,
-							credentialAccessMode: sessionAccessMode,
-							encryptedAuth: sessionCredentialHealthy
-								? healthySessionAuth
-								: invalidSessionAuth,
-							archived: false,
-							revoked: false,
-						},
-					]
-				: [],
-		loadPlatformProviderKeyRows: async () => [],
-	},
+	store: new SQLGatewayCredentialStore(credentialSQL),
 	platformPool: {
 		select: async (providerId, options) =>
 			platformPool.select(providerId, options),
@@ -251,6 +201,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 	}),
 	streamText: (request: GatewayStreamTextInput) => {
 		providerInvocations += 1;
+		providerRequestContexts.push(JSON.stringify(request.messages));
 		void writeRuntimeState();
 		const apiKey = (request.model as { readonly apiKey?: string }).apiKey;
 		if (apiKey === badPlatformKey.key && scenario.startsWith("platform_billing_")) {
@@ -318,7 +269,38 @@ const semanticTimeoutStreamer = {
 		providerInvocations += 1;
 		providerRequestContexts.push(JSON.stringify(request.request.context));
 		await writeRuntimeState();
-		if (providerInvocations <= 2) {
+		if (scenario === "semantic_tool_route" && providerInvocations === 1) {
+			yield {
+				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+				toolCall: {
+					id: "call_semantic_tool_route",
+					name: "Read",
+					inputJson: '{"file_path":"/workspace/input.txt"}',
+					metadataJson: "{}",
+				},
+			};
+			yield {
+				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+				finish: {
+					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
+					contextWindowTokens: 200_000,
+					outputTokenLimit: 32_000,
+					usage: {
+						inputTotalTokens: 1,
+						inputUncachedTokens: 1,
+						outputTotalTokens: 1,
+						totalTokens: 2,
+						providerUsageJson: "{}",
+					},
+					metadataJson: "{}",
+				},
+			};
+			return;
+		}
+		if (
+			(scenario === "semantic_tool_route" && providerInvocations === 2) ||
+			(scenario !== "semantic_tool_route" && providerInvocations <= 2)
+		) {
 			yield {
 				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
@@ -395,7 +377,7 @@ const gatewayService = new ProviderGatewayServiceShell({
 		semanticProgressTimeoutMs: 40,
 	},
 	providerStreamer:
-		scenario === "semantic_timeout"
+		scenario === "semantic_timeout" || scenario === "semantic_tool_route"
 			? semanticTimeoutStreamer
 			: providerClientRegistry,
 });
@@ -409,6 +391,11 @@ const gatewayClient = new RuntimePodGatewayClient({
 const hosts = await buildRuntimeCoreHosts({
 	maxLocalSessions: 1,
 	now: () => new Date().toISOString(),
+	logger: {
+		info: (record: unknown) => runtimeLogs.push(record),
+		warn: (record: unknown) => runtimeLogs.push(record),
+		error: (record: unknown) => runtimeLogs.push(record),
+	} as never,
 	contextLoader: {
 		loadThreadContext: bridgeLoader.loadThreadContext.bind(bridgeLoader),
 		commitAcceptedInput: bridgeLoader.commitAcceptedInput.bind(bridgeLoader),
@@ -454,6 +441,30 @@ const hosts = await buildRuntimeCoreHosts({
 			toolCatalog: createToolCatalog({ family: "claude" }),
 			providerRescheduleBudget: 1,
 		}),
+		...(scenario === "semantic_tool_route"
+			? {
+					acceptSandboxExecution: async () => ({ type: "accepted" as const }),
+					awaitSandboxExecution: async () => {
+						toolInvocations += 1;
+						await writeRuntimeState();
+						if (input.toolReleasePath === undefined) {
+							throw new Error("semantic Tool route release path is required");
+						}
+						for (;;) {
+							try {
+								await access(input.toolReleasePath);
+								break;
+							} catch {
+								await new Promise((resolve) => setTimeout(resolve, 10));
+							}
+						}
+						return {
+							type: "completed" as const,
+							output: { text: "semantic tool result", truncated: false },
+						};
+					},
+				}
+			: {}),
 	},
 });
 const cleanupController = {
@@ -479,7 +490,11 @@ const runtimeService = new RuntimeControlService({
 	runHost: hosts.commandRunHost,
 	controlInputCommitter,
 	cleanupController,
-	logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+	logger: {
+		info: (record: unknown) => runtimeLogs.push(record),
+		warn: (record: unknown) => runtimeLogs.push(record),
+		error: (record: unknown) => runtimeLogs.push(record),
+	} as never,
 	ready: () => true,
 });
 const runtimeServer = createRuntimeGrpcServer(runtimeService);
@@ -500,6 +515,7 @@ try {
 	process.stdout.write(
 		JSON.stringify({
 			providerInvocations,
+			toolInvocations,
 			finishIdleInvocations,
 			finishIdleResult,
 			platformKeySelections,
@@ -507,7 +523,7 @@ try {
 			providerRequestContexts,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
-					JSON.stringify(gatewayLogs),
+					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),
 				),
 		}),
 	);
@@ -516,4 +532,5 @@ try {
 	await runtimeServer.shutdown();
 	await hosts.close();
 	await gatewayServer.shutdown();
+	await credentialSQL.close();
 }

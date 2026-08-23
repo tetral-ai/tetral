@@ -158,7 +158,7 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
   }): Promise<GitHubMcpCredentialResolution> {
     const started = Date.now();
     if (this.sql.begin === undefined) {
-      return this.finishRefresh(input, started, failedOwner("storage"));
+      return this.finishRefresh(input, started, failedOwner("storage", "refresh_unavailable"));
     }
     let failurePhase: "storage" | "encrypt" | "write_back" = "storage";
     try {
@@ -219,7 +219,12 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
         }
         const refreshed = await this.refreshGitHubOAuth(current.refresh, input.signal);
         if (!refreshed.ok) {
-          return failedOwner(refreshed.failureKind, "refresh_failed", refreshed.issuerAttempted, refreshed.httpStatusClass);
+          return failedOwner(
+            refreshed.failureKind,
+            refreshResolutionError(refreshed.failureKind, refreshed.httpStatusClass),
+            refreshed.issuerAttempted,
+            refreshed.httpStatusClass,
+          );
         }
         const nextAuth = materializeRefreshedAuth(current, refreshed.value);
         const publicAuth = publicAuthFromSecret(nextAuth);
@@ -245,7 +250,7 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
       });
       return this.finishRefresh(input, started, ownerResult);
     } catch {
-      return this.finishRefresh(input, started, failedOwner(failurePhase));
+      return this.finishRefresh(input, started, failedOwner(failurePhase, "refresh_unavailable"));
     }
   }
 
@@ -374,7 +379,7 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
 
 function failedOwner(
   failureKind: McpOAuthRefreshFailureKind,
-  error: "credential_required" | "undecryptable" | "expired" | "refresh_failed" = "refresh_failed",
+  error: "credential_required" | "undecryptable" | "expired" | "refresh_failed" | "refresh_unavailable" = "refresh_failed",
   issuerAttempted = ["transport", "timeout", "http_status", "response_shape", "encrypt", "write_back"].includes(failureKind),
   httpStatusClass?: string,
 ): RefreshOwnerResult {
@@ -383,6 +388,15 @@ function failedOwner(
     durableWrite: failureKind === "write_back" ? "failed" : "not_attempted",
     ...(issuerAttempted ? { refreshAttemptMetric: "failed" } : {}),
   } };
+}
+
+function refreshResolutionError(
+  failureKind: McpOAuthRefreshFailureKind,
+  httpStatusClass?: string,
+): "refresh_failed" | "refresh_unavailable" {
+  return failureKind === "http_status" && httpStatusClass === "4xx"
+    ? "refresh_failed"
+    : "refresh_unavailable";
 }
 
 function concurrentWinnerOwner(resolution: GitHubMcpCredentialResolution): RefreshOwnerResult {
@@ -460,7 +474,7 @@ function publicAuthFromSecret(auth: CredentialAuth): Record<string, unknown> {
   return output;
 }
 
-function fail(error: "credential_required" | "ambiguous" | "undecryptable" | "expired" | "refresh_failed"): GitHubMcpCredentialResolution {
+function fail(error: "credential_required" | "ambiguous" | "undecryptable" | "expired" | "refresh_failed" | "refresh_unavailable"): GitHubMcpCredentialResolution {
   return { ok: false, error };
 }
 

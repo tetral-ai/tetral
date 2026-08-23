@@ -568,7 +568,10 @@ function runtimeFailureFromGatewayProviderError(error: GatewayProviderError | un
   });
   return runtimeFailureFromProviderError(
     normalized,
-    normalized.code === "provider_key_unavailable" || normalized.code === "provider_unavailable"
+    normalized.code === "provider_key_unavailable" ||
+      normalized.code === "provider_unavailable" ||
+      normalized.code === "credential_required" ||
+      normalized.code === "credential_unavailable"
       ? { type: "exhausted" }
       : { type: "terminal" },
   );

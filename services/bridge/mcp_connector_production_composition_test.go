@@ -258,7 +258,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		result.Settlement.Type != "duplicate" ||
 		result.OAuthSuccess.Type != "completed" || result.OAuthSuccess.Output.Text != "oauth refreshed" ||
 		result.OAuthFailure.Type != "error" || result.OAuthFailure.Error.Retryable ||
-		result.OAuthFailure.Error.Message != "MCP authorization is unavailable. Reconnect the integration and try again." ||
+		result.OAuthFailure.Error.Message != "MCP tool execution is unavailable." ||
 		result.OAuthProof.IssuerRequests != 2 || result.OAuthProof.SuccessTransportCount != 1 ||
 		result.OAuthProof.FailureTransportCount != 0 || !result.OAuthProof.DurableRotation ||
 		!result.OAuthProof.FailedRefreshPreservedCredential || !result.OAuthProof.LeakSurfacesClean ||
@@ -377,7 +377,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode MCP OAuth provider composition: %v", err)
 	}
-	for _, required := range []string{"oauth refreshed", "MCP authorization is unavailable. Reconnect the integration and try again."} {
+	for _, required := range []string{"oauth refreshed", "MCP tool execution is unavailable."} {
 		if !bytes.Contains(providerJSON, []byte(required)) {
 			t.Fatalf("MCP OAuth provider composition omitted %q: %s", required, providerJSON)
 		}

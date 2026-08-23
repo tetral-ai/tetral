@@ -364,6 +364,45 @@ describe("McpSDKClient", () => {
     });
   });
 
+  test("reports transient OAuth refresh unavailability without retrying the rejected credential", async () => {
+    let refreshes = 0;
+    const clients: RecordingSDKClient[] = [];
+    const client = new McpSDKClient({
+      credentialResolver: {
+        resolve: async () => ({
+          ok: true, mode: "bearer", token: "rejected-token", tokenHash: "rejected-token",
+          vaultId: "vlt_1", credentialId: "cred_1",
+        }),
+        refresh: async () => {
+          refreshes += 1;
+          return { ok: false as const, error: "refresh_unavailable" as const };
+        },
+      },
+      onToolsListChanged: async () => undefined,
+      createClient: () => {
+        const sdk = new RecordingSDKClient();
+        sdk.callToolError = Object.assign(new Error("HTTP 401"), { code: 401 });
+        clients.push(sdk);
+        return sdk;
+      },
+      createTransport: (input) => input,
+      setTimer: fakeSetTimer,
+      clearTimer: () => undefined,
+    });
+
+    await expect(client.callTool({
+      ...validIdentity(),
+      sessionThreadId: "thrd_1",
+      toolName: "create_issue",
+      input: {},
+    })).rejects.toMatchObject({
+      code: "mcp_connection_failed",
+      retryStatus: "terminal",
+    });
+    expect(refreshes).toBe(1);
+    expect(clients).toHaveLength(1);
+  });
+
   test("rejects non-bearer resolver output before network I/O", async () => {
     const resolver = {
       resolve: async () => ({ ok: true, mode: "anonymous", tokenHash: "anonymous" }),
