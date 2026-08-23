@@ -2877,9 +2877,6 @@ describe("SessionManager", () => {
 				created: false,
 				started: false,
 			});
-			expect(
-				acceptedMail.ok ? acceptedMail.requestOpeningSettled : undefined,
-			).toBeInstanceOf(Promise);
 			threadLoop.runs[0]?.release({ type: "completed", modelMessageCount: 1 });
 			await waitForRuns(threadLoop, 2);
 			threadLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });
@@ -5387,64 +5384,6 @@ describe("SessionManager", () => {
 		);
 	});
 
-	test("cleanup rejects reservation-only opening custody", async () => {
-		const threadLoop = makeControlledThreadLoop();
-		const sessionId = "sesn_cleanup_opening_reservation";
-		const threadId = "thrd_cleanup_opening_reservation";
-		const thread: RuntimeAcceptedThreadMetadataState = {
-			role: "main",
-			visibility: "public",
-			agentType: "general",
-			status: "idle",
-		};
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				expect(
-					await Effect.runPromise(
-						manager.acceptInput(
-							acceptedInput(sessionId, "rin_cleanup_opening_initial", threadId),
-						),
-					),
-				).toMatchObject({ ok: true, started: true });
-				await waitForRuns(threadLoop, 1);
-				const session = threadLoop.runs[0]!.session;
-				threadLoop.runs[0]!.release({ type: "completed", modelMessageCount: 1 });
-				await waitForThreadIdle(manager, sessionId, threadId);
-
-				const mail = agentMailInput(
-					sessionId,
-					"agent_mail:delivery_cleanup_opening",
-					threadId,
-					"thrd_cleanup_opening_child",
-					thread,
-				);
-				expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
-				session.state.acknowledgeAcceptedInput(mail.runtimeInputId, true);
-				expect(session.state.acceptedInputCount()).toBe(0);
-				expect(session.state.hasAcceptedInputCustody()).toBe(true);
-				expect(
-					await Effect.runPromise(
-						manager.cleanupSession(
-							sessionId,
-							cleanupControl(sessionId, "cleanup_opening_reserved"),
-						),
-					),
-				).toEqual({ ok: false, sessionId, reason: "session_busy" });
-
-				session.state.completeRequestOpening();
-				expect(
-					await Effect.runPromise(
-						manager.cleanupSession(
-							sessionId,
-							cleanupControl(sessionId, "cleanup_opening_settled"),
-						),
-					),
-				).toEqual({ ok: true, sessionId, cleaned: true });
-			},
-		);
-	});
-
 	test("cleanup rejects an admitted task while its owning run has not settled it", async () => {
 		const threadLoop = makeControlledThreadLoop();
 		const sessionId = "sesn_cleanup_receipt_awaiting";
@@ -6636,56 +6575,6 @@ describe("SessionManager", () => {
 		});
 	});
 
-	test("shutdown does not resolve reservation-only opening custody", async () => {
-		const threadLoop = makeControlledThreadLoop();
-		const sessionId = "sesn_shutdown_opening_reservation";
-		const threadId = "thrd_shutdown_opening_reservation";
-		const thread: RuntimeAcceptedThreadMetadataState = {
-			role: "main",
-			visibility: "public",
-			agentType: "general",
-			status: "idle",
-		};
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				expect(
-					await Effect.runPromise(
-						manager.acceptInput(
-							acceptedInput(sessionId, "rin_shutdown_opening_initial", threadId),
-						),
-					),
-				).toMatchObject({ ok: true, started: true });
-				await waitForRuns(threadLoop, 1);
-				const session = threadLoop.runs[0]!.session;
-				threadLoop.runs[0]!.release({ type: "completed", modelMessageCount: 1 });
-				await waitForThreadIdle(manager, sessionId, threadId);
-
-				const mail = agentMailInput(
-					sessionId,
-					"agent_mail:delivery_shutdown_opening",
-					threadId,
-					"thrd_shutdown_opening_child",
-					thread,
-				);
-				expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
-				const opening = session.state.requestOpeningSettlement(mail.runtimeInputId);
-				session.state.acknowledgeAcceptedInput(mail.runtimeInputId, true);
-				let settled = false;
-				void opening.then(() => {
-					settled = true;
-				});
-
-				await Effect.runPromise(manager.shutdownActiveRuns());
-				await Promise.resolve();
-				expect(settled).toBe(false);
-				expect(
-					await Effect.runPromise(manager.inspectThread(threadControl(sessionId))),
-				).toMatchObject({ observed: false });
-			},
-		);
-	});
-
 	test("shutdown during a failed-run observation window releases after that window reports timeout", async () => {
 		let observationStartedResolve: () => void = () => {};
 		let observationWindowResolve: () => void = () => {};
@@ -6962,6 +6851,81 @@ describe("SessionManager", () => {
 				),
 			).toMatchObject({ observed: true, status: "running" });
 		});
+	});
+
+	test("releasing a failed parent leaves its resident child independently owned", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const sessionId = "sesn_parent_release_child_owned";
+		const parentId = "thrd_parent_release";
+		const childId = "thrd_parent_release_child";
+
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				for (const thread of [
+					{
+						id: parentId,
+						inputId: "rin_parent_release",
+						metadata: {
+							role: "main" as const,
+							visibility: "public" as const,
+							status: "idle" as const,
+						},
+					},
+					{
+						id: childId,
+						inputId: "rin_parent_release_child",
+						metadata: {
+							parentThreadId: parentId,
+							role: "subagent" as const,
+							visibility: "public" as const,
+							taskName: "independent-child",
+							agentType: "worker" as const,
+							status: "idle" as const,
+						},
+					},
+				]) {
+					expect(
+						await Effect.runPromise(
+							manager.preloadThread({
+								...threadControl(sessionId, `rin_preload_${thread.id}`, thread.id),
+								runtimeBindingToken: "runtime-binding-token",
+								contextEntries: [],
+								thread: thread.metadata,
+							}),
+						),
+					).toMatchObject({ ok: true, applied: true });
+					expect(
+						await Effect.runPromise(
+							manager.acceptInput(
+								acceptedInput(sessionId, thread.inputId, thread.id),
+							),
+						),
+					).toMatchObject({ ok: true, started: true });
+				}
+				await waitForRuns(threadLoop, 2);
+				const parentRun = threadLoop.runs.find(
+					(run) => run.session.identity.sessionThreadId === parentId,
+				);
+				parentRun?.release(fatalRunResult("persistence_failed"));
+
+				await waitForCondition(async () => {
+					const parent = await Effect.runPromise(
+						manager.inspectThread(
+							threadControl(sessionId, "rin_parent_release_inspect", parentId),
+						),
+					);
+					return parent.ok && !parent.observed;
+				}, "failed parent release");
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(
+							threadControl(sessionId, "rin_child_owned_inspect", childId),
+						),
+					),
+				).toMatchObject({ observed: true, status: "running" });
+			},
+		);
 	});
 
 	test("ThreadLoop rejected promise removes crashed entry without exposing hostile rejection text", async () => {

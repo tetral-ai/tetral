@@ -47,7 +47,7 @@ func TestPostgreSQLAtomicSubagentCreationCommitsAndReplaysWholeInitialLineage(t 
 	assertAtomicSubagentLineage(t, admin, sessionID, parentID, childID, toolUseID, prompt, 1)
 
 	conflict := proto.Clone(request).(*bridgev1.CreateSubagentThreadRequest)
-	conflict.InitialPrompt = "different opening input"
+	conflict.InitialPrompt = "different first mail"
 	if response, err := store.CreateSubagentThread(context.Background(), conflict); status.Code(err) != codes.AlreadyExists || response != nil {
 		t.Fatalf("conflicting atomic replay = %#v/%v; want AlreadyExists", response, err)
 	}

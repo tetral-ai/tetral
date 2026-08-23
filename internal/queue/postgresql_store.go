@@ -1519,10 +1519,13 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 		var attemptCount int
 		var maxAttempts int
 		var interruptBarrier bool
+		var agentMailFinalization bool
 		if err := tx.QueryRow(ctx,
 			`SELECT attempt_count, max_attempts,
 				        kind = 'runtime_input'
-				        AND payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+				        AND payload_json::jsonb ->> 'input_kind' = 'interrupt_control',
+				        kind = 'runtime_input'
+				        AND payload_json::jsonb ->> 'input_kind' = 'agent_mail'
 				   FROM queue_jobs
 			  WHERE workspace_id = $1
 			    AND id = $2
@@ -1533,7 +1536,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
-		).Scan(&attemptCount, &maxAttempts, &interruptBarrier); dbconnect.IsNoRows(err) {
+		).Scan(&attemptCount, &maxAttempts, &interruptBarrier, &agentMailFinalization); dbconnect.IsNoRows(err) {
 			return nil
 		} else if err != nil {
 			return err
@@ -1544,7 +1547,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			effectiveMaxAttempts = s.retryPolicy.MaxAttempts
 		}
 		if attemptCount >= effectiveMaxAttempts {
-			if interruptBarrier {
+			if interruptBarrier || agentMailFinalization {
 				result, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
 						    SET status = 'pending',

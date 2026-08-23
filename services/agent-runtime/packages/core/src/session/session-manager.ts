@@ -180,7 +180,6 @@ export type AcceptInputResult =
 			readonly created: boolean;
 			readonly started: boolean;
 			readonly duplicate?: true | undefined;
-			readonly requestOpeningSettled?: Promise<void> | undefined;
 			readonly reviewerExecutionToken?: ReviewerExecutionToken | undefined;
 	  }
 	| {
@@ -949,6 +948,12 @@ export function layer(
 				sessionEntry: SessionEntry,
 				threadEntry: ThreadEntry,
 			): Effect.Effect<void> =>
+				removeThreadEntry(sessionEntry, threadEntry);
+
+			const releaseThreadSubtree = (
+				sessionEntry: SessionEntry,
+				threadEntry: ThreadEntry,
+			): Effect.Effect<void> =>
 				Effect.gen(function* () {
 					const residentChildren = yield* sessionEntry.controlGate.withPermit(
 						Effect.sync(() => {
@@ -987,10 +992,10 @@ export function layer(
 					for (const childEntry of residentChildren) {
 						if (
 							sessionEntry.threads.get(childEntry.sessionThreadId) ===
-								childEntry &&
+							childEntry &&
 							childEntry.runSlot === undefined
 						) {
-							yield* releaseThreadEntry(sessionEntry, childEntry);
+							yield* releaseThreadSubtree(sessionEntry, childEntry);
 						}
 					}
 					if (
@@ -1247,7 +1252,7 @@ export function layer(
 					}
 					yield* closeRunScope(runSlot, exit);
 					if (sessionEntry.runtimeShutdown.requested) {
-						yield* releaseThreadEntry(sessionEntry, threadEntry);
+						yield* releaseThreadSubtree(sessionEntry, threadEntry);
 						yield* completeRunSlot(runSlot, exit);
 						return;
 					}
@@ -1259,7 +1264,7 @@ export function layer(
 						);
 						if (
 							closeout === "unrepairable" &&
-							threadEntry.runtimeThread.state.hasAcceptedInputCustody()
+							threadEntry.runtimeThread.state.acceptedInputCount() > 0
 						) {
 							// No successful input commit can release the accepted fact. Retain the
 							// completed run slot as a loud custody fence until Pod shutdown
@@ -1317,7 +1322,15 @@ export function layer(
 						return;
 					}
 					if (runRequiresHotStateDiscard(exit)) {
-						yield* releaseThreadEntry(sessionEntry, threadEntry);
+						if (
+							Exit.isSuccess(exit) &&
+							exit.value.type === "failed" &&
+							exit.value.releaseSession?.reason === "terminated"
+						) {
+							yield* releaseThreadSubtree(sessionEntry, threadEntry);
+						} else {
+							yield* releaseThreadEntry(sessionEntry, threadEntry);
+						}
 						yield* completeRunSlot(runSlot, exit);
 						return;
 					}
@@ -1338,7 +1351,7 @@ export function layer(
 							| undefined = exit.value.closeoutDisposition;
 						if (
 							closeout === undefined &&
-							threadEntry.runtimeThread.state.hasAcceptedInputCustody() &&
+							threadEntry.runtimeThread.state.acceptedInputCount() > 0 &&
 							exit.value.releaseSession?.reason !== "terminated"
 						) {
 							closeout = yield* settleFailedRunCloseout(
@@ -1534,12 +1547,6 @@ export function layer(
 									reason: "control_conflict",
 								} as const;
 							}
-							const requestOpeningSettled =
-								command.kind === "inter_agent_message"
-									? threadResult.threadEntry.runtimeThread.state.requestOpeningSettlement(
-											command.runtimeInputId,
-										)
-									: undefined;
 							if (accepted === "duplicate") {
 								if (command.kind === "approval_review") {
 									return {
@@ -1569,9 +1576,6 @@ export function layer(
 									created: threadResult.sessionCreated,
 									started,
 									duplicate: true,
-									...(requestOpeningSettled === undefined
-										? {}
-										: { requestOpeningSettled }),
 								} as const;
 							}
 							threadResult.threadEntry.bridgeScope = command;
@@ -1582,9 +1586,6 @@ export function layer(
 									sessionId,
 									created: threadResult.sessionCreated,
 									started: false,
-									...(requestOpeningSettled === undefined
-										? {}
-										: { requestOpeningSettled }),
 								} as const;
 							}
 							const started = yield* startThreadRun(
@@ -1613,9 +1614,6 @@ export function layer(
 								sessionId,
 								created: threadResult.sessionCreated,
 								started,
-								...(requestOpeningSettled === undefined
-									? {}
-									: { requestOpeningSettled }),
 								...(reviewerExecutionToken === undefined
 									? {}
 									: { reviewerExecutionToken }),
@@ -2320,7 +2318,7 @@ export function layer(
 								if (
 									threadEntry.installationState !== "ready" ||
 									threadEntry.runSlot !== undefined ||
-									threadEntry.runtimeThread.state.hasAcceptedInputCustody() ||
+									threadEntry.runtimeThread.state.acceptedInputCount() > 0 ||
 									threadEntry.commandChannel.busy()
 								) {
 									return {
@@ -3184,12 +3182,7 @@ export function layer(
 						const runExit = yield* awaitRunSlot(runSlot);
 						requestedRunExitOutcome = classifyRunExitOutcome(runExit);
 					}
-					if (
-						sessionEntry.threads.get(threadEntry.sessionThreadId) ===
-						threadEntry
-					) {
-						yield* releaseThreadEntry(sessionEntry, threadEntry);
-					}
+					yield* releaseThreadSubtree(sessionEntry, threadEntry);
 					return {
 						ok: true,
 						sessionId: command.sessionId,

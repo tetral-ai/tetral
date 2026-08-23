@@ -1055,23 +1055,6 @@ export class RuntimePodToolRunner {
 			}
 			durablyDeliveredThreadId = childThreadId;
 			throwIfToolRouteAborted(request.abortSignal);
-			await preloadChildThread(
-				host,
-				request,
-				parentScope,
-				childThreadId,
-				{
-					parentThreadId: request.sessionThreadId,
-					role: "subagent",
-					visibility: "public",
-					taskName,
-					agentType,
-					status: "idle",
-				},
-			);
-			// Creation already committed the opening input. Preload is a hot-path
-			// optimization; Queue custody remains the durable delivery owner when
-			// this pod cannot host the child immediately.
 			return completedText(
 				`task_name: ${taskName}\nsession_thread_id: ${childThreadId}\nstatus: delivered`,
 			);

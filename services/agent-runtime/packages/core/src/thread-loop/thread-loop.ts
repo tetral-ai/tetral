@@ -1246,15 +1246,8 @@ function runThreadLoopEffect(
 								(acceptedInput.kind === "messages" ||
 									acceptedInput.kind === "approval_review" ||
 									acceptedInput.kind === "inter_agent_message");
-							const reservesRequestOpening =
-								acceptedInput.kind === "inter_agent_message" &&
-								session.identity.threadRole === "subagent" &&
-								newlyResidentContextEntries.some(
-									(entry) => entry.messageSequence === 1,
-								);
 							session.state.acknowledgeAcceptedInput(
 								acceptedInput.runtimeInputId,
-								reservesRequestOpening,
 							);
 							if (makesRequestReady) {
 								session.state.applyThreadTurnFact({
@@ -3350,7 +3343,6 @@ function coordinateProviderTurnEffect(
 			session.state.clearAfterCustodyHandoff();
 			return providerTurnInterruptedWithDiscard();
 		}
-		session.state.completeRequestOpening();
 		const requestStartReduction = session.state.applyThreadTurnFact({
 			fact: "request_started",
 			eventId: spanStartAppend.eventId,

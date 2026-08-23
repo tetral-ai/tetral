@@ -800,6 +800,50 @@ func TestPostgreSQLStoreExpiredFinalAgentMailLeaseUsesOneClampedFinalizationMark
 	}
 }
 
+func TestPostgreSQLStoreFinalAgentMailRetrySchedulesOneFinalizationLease(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_mail_finalization_retry")
+	sessionID := "sesn_mail_finalization_retry"
+	now := time.Date(2026, 7, 1, 12, 49, 30, 0, time.UTC)
+	job := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_mail_fin_retry", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, sessionID, "agent_mail:finalization_retry"),
+		PayloadJSON:  []byte(`{"workspace_id":"ws_mail_finalization_retry","session_id":"sesn_mail_finalization_retry","session_thread_id":"thr_mail_finalization_retry","runtime_input_id":"agent_mail:finalization_retry","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"agent_mail"}`),
+		MaxAttempts:  1, Now: now,
+	})
+	first := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-runtime",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if first.ID != job.ID || first.AttemptCount != 1 {
+		t.Fatalf("final Runtime lease = %s/%d; want same job at N=1", first.ID, first.AttemptCount)
+	}
+	updated, err := store.Retry(ctx, RetryRequest{
+		WorkspaceID: ws, JobID: first.ID, LeaseToken: first.LeaseToken,
+		ErrorKind: "runtime_rejected_input", ErrorMessage: "runtime rejected input", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || !updated {
+		t.Fatalf("schedule agent-mail finalization = %t/%v; want true/nil", updated, err)
+	}
+	var status string
+	var attempts int
+	if err := admin.QueryRowContext(ctx, `SELECT status,attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), job.ID).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read scheduled finalization: %v", err)
+	}
+	if status != StatusPending || attempts != 1 {
+		t.Fatalf("scheduled finalization = %s/%d; want pending at exhausted N=1", status, attempts)
+	}
+	finalizer := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-finalizer",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(3 * time.Second),
+	})
+	if finalizer.ID != job.ID || finalizer.AttemptCount != 2 {
+		t.Fatalf("finalization-only lease = %s/%d; want same job at N+1=2", finalizer.ID, finalizer.AttemptCount)
+	}
+}
+
 func TestPostgreSQLStoreDatabaseAssignsPartitionSequence(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ws := workspace.ID("ws_queue_partition_sequence")

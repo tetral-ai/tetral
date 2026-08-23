@@ -792,6 +792,35 @@ type childCloseCustodyTransitions struct {
 	cancelled int
 }
 
+// agentMailMessageCoveredByRequestStartTx is child-CLOSE authority only. It
+// distinguishes an input already owned by an active Request from custody that
+// CLOSE must cancel; delivery and acknowledgement never consult this relation.
+func agentMailMessageCoveredByRequestStartTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	inbox lockedRuntimeInboxFinalization,
+) (bool, error) {
+	if len(inbox.eventIDs) != 1 {
+		return false, nil
+	}
+	var covered bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		  FROM session_messages message
+		  JOIN session_events request_start
+		    ON request_start.workspace_id=message.workspace_id
+		   AND request_start.session_id=message.session_id
+		   AND request_start.session_thread_id=message.session_thread_id
+		   AND request_start.type='span.model_request_start'
+		 WHERE message.workspace_id=$1 AND message.session_id=$2
+		   AND message.session_thread_id=$3 AND message.source_event_id=$4
+		   AND jsonb_typeof(request_start.projection_json::jsonb -> 'context_through_message_sequence')='number'
+		   AND (request_start.projection_json::jsonb ->> 'context_through_message_sequence')::bigint >= message.sequence
+	)`, job.WorkspaceID, job.SessionID, job.SessionThreadID, inbox.eventIDs[0]).Scan(&covered)
+	return covered, err
+}
+
 func settleChildCloseRuntimeInputsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -835,18 +864,11 @@ func settleChildCloseRuntimeInputsTx(
 					WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: targetID,
 					RuntimeInputID: input.runtimeInputID, Kind: queue.KindRuntimeInput, InputKind: "agent_mail",
 				}
-				opening, err := isOpeningAgentMailTx(ctx, tx, job)
-				if err != nil {
-					return childCloseCustodyTransitions{}, err
-				}
-				if input.status == "committed" && !opening {
-					continue
-				}
 				inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
 				if err != nil {
 					return childCloseCustodyTransitions{}, err
 				}
-				consumedAgentMail, err = agentMailRequestStartWitnessTx(ctx, tx, job, inbox)
+				consumedAgentMail, err = agentMailMessageCoveredByRequestStartTx(ctx, tx, job, inbox)
 				if err != nil {
 					return childCloseCustodyTransitions{}, err
 				}

@@ -2355,7 +2355,7 @@ describe("RuntimePodToolRunner", () => {
 		});
 	});
 
-	test("spawns a sub-agent by atomically declaring the child and its opening input", async () => {
+	test("spawns a sub-agent by atomically declaring the child and its first mail", async () => {
 		const bridge = new RecordingBridgeClient();
 		const subAgentHost = new RecordingSubAgentHost();
 		const runner = makeRunner({ bridge, subAgentHost });
@@ -2380,17 +2380,8 @@ describe("RuntimePodToolRunner", () => {
 			}),
 		]);
 		expect(bridge.deliverInterAgentMailRequests).toEqual([]);
-		expect(subAgentHost.actions).toEqual(["preload"]);
-		expect(subAgentHost.preloaded).toEqual([
-			expect.objectContaining({
-				sessionThreadId: "thr_child_1",
-				thread: expect.objectContaining({
-					parentThreadId: "thrd_1",
-					role: "subagent",
-					taskName: "researcher",
-				}),
-			}),
-		]);
+		expect(subAgentHost.actions).toEqual([]);
+		expect(subAgentHost.preloaded).toEqual([]);
 		expect(subAgentHost.enqueued).toEqual([]);
 		expect(JSON.stringify(result)).not.toContain("delivery");
 		expect(JSON.stringify(result)).not.toContain("binding-token");

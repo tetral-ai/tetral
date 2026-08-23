@@ -129,7 +129,7 @@ func appendSubagentMailEnvelopeTx(
 	}, nil
 }
 
-// appendDeclaredSubagentInitialEnvelopeTx persists the Runtime-declared opening
+// appendDeclaredSubagentInitialEnvelopeTx persists the Runtime-declared initial
 // input without rereading Tool business arguments. The executable route has
 // already been locked by CreateSubagentThread; this helper owns only the
 // declared parent-child envelope and its durable Inbox/Queue birth.

@@ -1992,67 +1992,7 @@ describe("ThreadState", () => {
 		);
 	});
 
-	test("agent-mail delivery identity remains reserved until Request Start", async () => {
-		const state = new ThreadState("sesn_agent_mail_dedup");
-		const mail = {
-			workspaceId: "wksp_agent_mail",
-			sessionId: "sesn_agent_mail_dedup",
-			sessionThreadId: "thrd_agent_mail_main",
-			bindingId: "bind_agent_mail",
-			bindingGeneration: 1,
-			targetPodUid: "pod_agent_mail",
-			runtimeInputId: "agent_mail:delivery_agent_mail",
-			kind: "inter_agent_message",
-			deliveryId: "delivery_agent_mail",
-			content:
-				"Message Type: FINAL_ANSWER\nTask name: main\nSender: worker\nPayload:\ndone",
-		} satisfies RuntimeAcceptedInputState;
-
-		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
-		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
-		expect(state.enqueueAcceptedInput({ ...mail, bindingGeneration: 2 })).toBe(
-			"conflict",
-		);
-		state.acknowledgeAcceptedInput(mail.runtimeInputId, true);
-		let settled = false;
-		const requestOpeningSettled = state
-			.requestOpeningSettlement(mail.runtimeInputId)
-			.then(() => {
-				settled = true;
-			});
-		expect(state.peekAcceptedInput()).toBeUndefined();
-		expect(state.hasAcceptedInputCustody()).toBe(true);
-		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
-		await Promise.resolve();
-		expect(settled).toBe(false);
-		state.clear();
-		await Promise.resolve();
-		expect(settled).toBe(false);
-		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
-		state.completeRequestOpening();
-		await requestOpeningSettled;
-		expect(settled).toBe(true);
-		expect(state.hasAcceptedInputCustody()).toBe(false);
-		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
-		expect(
-			state.enqueueAcceptedInput({ ...mail, deliveryId: "delivery_new" }),
-		).toBe("conflict");
-	});
-
-	test("ordinary accepted input does not acquire agent-mail opening custody", () => {
-		const state = new ThreadState("sesn_ordinary_opening_custody");
-		const input = acceptedInput(
-			"rin_ordinary_opening_custody",
-			"sesn_ordinary_opening_custody",
-		);
-
-		expect(state.enqueueAcceptedInput(input)).toBe("applied");
-		state.acknowledgeAcceptedInput(input.runtimeInputId, true);
-		expect(state.acceptedInputCount()).toBe(0);
-		expect(state.hasAcceptedInputCustody()).toBe(false);
-	});
-
-	test("ordinary subagent mail does not reserve opening custody after durable commit", async () => {
+	test("subagent mail leaves accepted-input custody after durable commit", async () => {
 		const session = new ThreadRuntime({
 			workspaceId: "wksp_ordinary_subagent_mail",
 			sessionId: "sesn_ordinary_subagent_mail",
@@ -2064,7 +2004,7 @@ describe("ThreadState", () => {
 			runtimeBindingToken: "token_ordinary_subagent_mail",
 		});
 		session.state.contextManager.appendEntry(
-			userMessage("msg_opening_subagent_mail", 1, "opening input"),
+			userMessage("msg_first_subagent_mail", 1, "first mail"),
 		);
 		session.state.markPersistentContextLoaded();
 		session.state.installThreadTurn(
@@ -2122,7 +2062,7 @@ describe("ThreadState", () => {
 		expect(result).toMatchObject({ type: "failed" });
 		expect(loader.commitCalls).toHaveLength(1);
 		expect(session.state.acceptedInputCount()).toBe(0);
-		expect(session.state.hasAcceptedInputCustody()).toBe(false);
+			expect(session.state.acceptedInputCount()).toBe(0);
 	});
 
 	test("does not reopen a request for an already resident committed mail", async () => {
@@ -2186,7 +2126,7 @@ describe("ThreadState", () => {
 
 		expect(result).toMatchObject({ type: "completed" });
 		expect(requests).toEqual([]);
-		expect(session.state.hasAcceptedInputCustody()).toBe(false);
+		expect(session.state.acceptedInputCount()).toBe(0);
 	});
 
 	test("interrupt fence preserves queued stamped completion mail", () => {

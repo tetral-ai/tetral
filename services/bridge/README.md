@@ -292,7 +292,7 @@ and active lifecycle facts directly from durable rows.
   idempotency without parsing Tool business arguments. The Tool Use may belong
   to an open provider request: Bridge snapshots exactly the referenced Messages
   before its durable Assistant boundary and commits the
-  child, immutable prefix, opening sent/received Events, target Inbox/Queue
+  child, immutable prefix, first-mail sent/received Events, target Inbox/Queue
   custody, and minimal child-identity operation receipt in one transaction. Exact replay returns that
   committed lineage without requiring the route to remain executable or
   rereading later parent Message growth; a new Tool Use identity still crosses
@@ -406,17 +406,17 @@ and active lifecycle facts directly from durable rows.
   connector's credential, reconnect, and list budgets while bounding the
   single-threaded Job Runner sweep to 180 seconds per stalled workspace; it
   abandons the Bridge wait but does not cancel connector work.
-- **Opening agent-mail custody.** An unrelated Session interrupt that wins
-  before opening-input commit returns the exact Inbox and Queue job to queued /
-  pending custody and refunds the lease attempt; it does not cancel the child
-  input. Retry preparation never downgrades committed materialization. The
-  final pre-send fence revalidates the exact live lease and settles an existing
-  durable Request Start before transport. A committed opening without that
-  witness uses payload-free `RecoverThread`; its original Queue lease remains
-  heartbeated until the matching Request Start or typed terminal settlement
-  atomically closes Inbox and Queue custody. The recovery response itself is
-  not ACK authority. Proven pod loss reuses the opening input identity and
-  original Queue job on both sides of `CommitInputs`.
+- **Agent-mail custody.** Child creation atomically persists the child, context
+  prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
+  mail then share one delivery path: `CommitInputs` makes the Message durable,
+  Runtime admits that input into hot state, Bridge records the agent-mail-only
+  accepted transition, and JobRunner acknowledges the exact Queue lease.
+  Request Start remains a Runtime declaration and is never delivery or ACK
+  authority. If the accepted Runtime is lost before Request Start, the generic
+  pod-loss owner returns the same durable input identity to Queue custody. At
+  exhaustion, a finalization-only lease performs no Runtime call and atomically
+  fails only the target subagent, settles the exact Inbox and Queue custody, and
+  emits one existing completion notification to its parent.
 - **Conformance.** `job_runner_test.go`, `runtime_delivery_test.go`,
   `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go`,
   `completion_mail_test.go`, `completion_mail_delivery_test.go`,

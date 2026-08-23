@@ -362,8 +362,8 @@ export async function closeFailedRunDurably(
 		// legal same-Pod release boundary. FinishIdle cannot disposition Inbox or
 		// Queue custody, so failed-run recovery reuses the open durable turn and
 		// the existing termination transaction until its typed result lands.
-		if (session.state.hasAcceptedInputCustody()) {
-			// A committed opening Message is owned by its Queue delivery until Request
+		if (session.state.acceptedInputCount() > 0) {
+			// A committed agent-mail Message is owned by its Queue delivery until Request
 			// Start consumes it. Runtime termination owns only inputs still accepted in
 			// this Pod; it must not terminalize reservation-only durable custody.
 			if (session.state.acceptedInputCount() === 0) {
