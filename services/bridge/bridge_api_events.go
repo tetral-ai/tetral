@@ -816,8 +816,8 @@ func verifyRequestStartMessageBoundaryTx(
 	).Scan(&current); err != nil {
 		return err
 	}
-	if boundary != current {
-		return status.Error(codes.InvalidArgument, "model request start message boundary is not current")
+	if boundary > current {
+		return status.Error(codes.InvalidArgument, "model request start message boundary exceeds durable history")
 	}
 	return nil
 }

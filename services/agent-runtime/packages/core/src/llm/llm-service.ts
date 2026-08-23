@@ -558,16 +558,19 @@ function gatewayTransportCompletionDeadlineFailure(request: ProviderRequest): Ru
 }
 
 function runtimeFailureFromGatewayProviderError(error: GatewayProviderError | undefined): RuntimeFailure {
+  const normalized = normalizeProviderError({
+    code: error?.code,
+    message: error?.message,
+    retryable: error?.retryable,
+    fatal: error?.fatal,
+    statusCode: error?.statusCode,
+    retryAfterMs: (error?.retryAfterMs ?? 0) > 0 ? error?.retryAfterMs : undefined,
+  });
   return runtimeFailureFromProviderError(
-    normalizeProviderError({
-      code: error?.code,
-      message: error?.message,
-      retryable: error?.retryable,
-      fatal: error?.fatal,
-      statusCode: error?.statusCode,
-      retryAfterMs: (error?.retryAfterMs ?? 0) > 0 ? error?.retryAfterMs : undefined,
-    }),
-    { type: "terminal" },
+    normalized,
+    normalized.code === "provider_key_unavailable" || normalized.code === "provider_unavailable"
+      ? { type: "exhausted" }
+      : { type: "terminal" },
   );
 }
 

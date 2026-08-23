@@ -51,9 +51,21 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 		| "platform_billing_post_progress"
 		| "platform_billing_exhausted"
 		| "statusless_transport"
-		| "invalid_byok";
+		| "invalid_kimi_byok"
+		| "invalid_openai_oauth";
 };
 const scenario = input.scenario ?? "semantic_timeout";
+const customerCredentialScenario =
+	scenario === "invalid_kimi_byok" || scenario === "invalid_openai_oauth";
+const sessionProviderId =
+	scenario === "invalid_kimi_byok"
+		? ("moonshotai" as const)
+		: scenario === "invalid_openai_oauth"
+			? ("openai" as const)
+			: ("anthropic" as const);
+const sessionAccessMode = scenario === "invalid_openai_oauth" ? "oauth" : "user_api_key";
+const sessionCredentialAuthType =
+	scenario === "invalid_openai_oauth" ? ("provider_oauth" as const) : ("provider_api_key" as const);
 
 const metadataFactory = async () => new Metadata();
 const bridgeOptions = {
@@ -89,24 +101,37 @@ const platformPool = new PlatformKeyPool(
 	},
 );
 let sessionCredentialHealthy = false;
-const encryptSessionAuth = async (token: string): Promise<Uint8Array> =>
+const encryptSessionAuth = async (healthy: boolean): Promise<Uint8Array> =>
 	await encryptAES256GCM(
 		new TextEncoder().encode(
-			JSON.stringify({
-				type: "provider_api_key",
-				provider_id: "anthropic",
-				access_mode: "user_api_key",
-				token,
-			}),
+			JSON.stringify(
+				scenario === "invalid_openai_oauth"
+					? {
+							type: "provider_oauth",
+							provider_id: "openai",
+							access_mode: "oauth",
+							access_token: healthy ? "oauth-access-healthy" : "oauth-access-invalid",
+							refresh_token: healthy ? "oauth-refresh-healthy" : "oauth-refresh-invalid",
+							expires_at: "2099-01-01T00:00:00.000Z",
+							account_id: "account-provider-failure-canary",
+						}
+					: {
+							type: "provider_api_key",
+							provider_id: sessionProviderId,
+							access_mode: sessionAccessMode,
+							token: healthy ? "session-key-healthy" : "session-key-invalid",
+						},
+			),
 		),
 		credentialMasterKeyHex,
-		() => new Uint8Array(12).fill(token === "sk-byok-invalid" ? 3 : 7),
+		() => new Uint8Array(12).fill(healthy ? 7 : 3),
 	);
-const invalidSessionAuth = await encryptSessionAuth("sk-byok-invalid");
-const healthySessionAuth = await encryptSessionAuth("sk-byok-healthy");
+const invalidSessionAuth = await encryptSessionAuth(false);
+const healthySessionAuth = await encryptSessionAuth(true);
 let providerInvocations = 0;
 let finishIdleInvocations = 0;
 let finishIdleResult = "none";
+const providerRequestContexts: string[] = [];
 let nextId = 0;
 const gatewayLogs: unknown[] = [];
 const writeRuntimeState = async (): Promise<void> => {
@@ -118,8 +143,9 @@ const writeRuntimeState = async (): Promise<void> => {
 			finishIdleResult,
 			platformKeySelections,
 			platformKeyQuarantines,
+			providerRequestContexts,
 			sensitiveLogLeak:
-				/private-billing-canary|statusless-private-canary|private-byok-canary|sk-provider-failure|sk-byok/i.test(
+				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify(gatewayLogs),
 				),
 		}),
@@ -136,7 +162,7 @@ const writer = {
 		const result = await bridgeWriter.finishIdle(envelope);
 		finishIdleResult = result.ok ? result.type : result.error.code;
 		if (result.ok) {
-			if (scenario === "invalid_byok" && finishIdleInvocations === 1) {
+			if (customerCredentialScenario && finishIdleInvocations === 1) {
 				sessionCredentialHealthy = true;
 			}
 		}
@@ -150,16 +176,16 @@ const writer = {
 const credentialResolver = new ProviderCredentialResolver({
 	store: {
 		loadActiveSessionProviderAuth: async () =>
-			scenario === "invalid_byok"
+			customerCredentialScenario
 				? [
 						{
-							providerId: "anthropic" as const,
+							providerId: sessionProviderId,
 							vaultId: "vlt_provider_failure",
 							credentialId: "cred_provider_failure",
-							accessMode: "user_api_key",
-							credentialAuthType: "provider_api_key" as const,
-							credentialProviderId: "anthropic",
-							credentialAccessMode: "user_api_key",
+							accessMode: sessionAccessMode,
+							credentialAuthType: sessionCredentialAuthType,
+							credentialProviderId: sessionProviderId,
+							credentialAccessMode: sessionAccessMode,
 							encryptedAuth: sessionCredentialHealthy
 								? healthySessionAuth
 								: invalidSessionAuth,
@@ -220,6 +246,9 @@ const providerClientRegistry = new ProviderClientRegistry({
 		modelId,
 		apiKey: settings.apiKey,
 	}),
+	openAIProviderFactory: (settings) => ({
+		responses: (modelId) => ({ provider: "openai", modelId, apiKey: settings.apiKey }),
+	}),
 	streamText: (request: GatewayStreamTextInput) => {
 		providerInvocations += 1;
 		void writeRuntimeState();
@@ -261,7 +290,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 				},
 			]);
 		}
-		if (scenario === "invalid_byok" && apiKey === "sk-byok-invalid") {
+		if (customerCredentialScenario && providerInvocations === 1) {
 			return streamTextResult([
 				{
 					type: "error",
@@ -269,7 +298,11 @@ const providerClientRegistry = new ProviderClientRegistry({
 						statusCode: 401,
 						data: {
 							error: {
-								type: "unknown_private_auth_code",
+								code:
+									scenario === "invalid_openai_oauth"
+										? "invalid_api_key"
+										: "invalid_authentication_error",
+								type: "invalid_authentication_error",
 								message: "invalid credential private-byok-canary",
 							},
 						},
@@ -283,8 +316,25 @@ const providerClientRegistry = new ProviderClientRegistry({
 const semanticTimeoutStreamer = {
 	stream: async function* (request: ProviderRequestStreamInput) {
 		providerInvocations += 1;
+		providerRequestContexts.push(JSON.stringify(request.request.context));
 		await writeRuntimeState();
 		if (providerInvocations <= 2) {
+			yield {
+				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
+			};
+			yield {
+				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+				text: {
+					id: `failed-partial-${providerInvocations}`,
+					text: `failed partial ${providerInvocations}`,
+					metadataJson: "{}",
+				},
+			};
+			yield {
+				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
+			};
 			for (let index = 0; index < 40; index += 1) {
 				request.onTransportActivity?.();
 				await new Promise((resolve) => setTimeout(resolve, 5));
@@ -394,7 +444,12 @@ const hosts = await buildRuntimeCoreHosts({
 			systemInstructions: "Provider timeout production composition.",
 			timeoutMs: 5_000,
 		},
-		runtimeModel: () => ({ providerId: "anthropic", modelId: "claude-opus-4-8" }),
+		runtimeModel: () =>
+			scenario === "invalid_kimi_byok"
+				? { providerId: "moonshotai", modelId: "kimi-k3" }
+				: scenario === "invalid_openai_oauth"
+					? { providerId: "openai", modelId: "gpt-5.5" }
+					: { providerId: "anthropic", modelId: "claude-opus-4-8" },
 		runtimePolicy: () => ({
 			toolCatalog: createToolCatalog({ family: "claude" }),
 			providerRescheduleBudget: 1,
@@ -449,8 +504,9 @@ try {
 			finishIdleResult,
 			platformKeySelections,
 			platformKeyQuarantines,
+			providerRequestContexts,
 			sensitiveLogLeak:
-				/private-billing-canary|statusless-private-canary|private-byok-canary|sk-provider-failure|sk-byok/i.test(
+				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify(gatewayLogs),
 				),
 		}),

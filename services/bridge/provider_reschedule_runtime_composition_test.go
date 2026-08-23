@@ -102,6 +102,14 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 		t.Fatalf("Gateway/provider and FinishIdle invocations/result = %d/%d/%s; want 3/2/committed",
 			result.ProviderInvocations, result.FinishIdleInvocations, result.FinishIdleResult)
 	}
+	if len(result.ProviderRequestContexts) != 3 {
+		t.Fatalf("captured provider request contexts = %d; want 3", len(result.ProviderRequestContexts))
+	}
+	for index, providerContext := range result.ProviderRequestContexts {
+		if strings.Contains(providerContext, "failed partial") {
+			t.Fatalf("provider request %d retained failed partial text: %s", index+1, providerContext)
+		}
+	}
 
 	var starts, ends, reschedules, errorEnds, userMessages, assistantMessages int
 	var finalEndPayloads string
@@ -118,8 +126,8 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 		Scan(&starts, &ends, &reschedules, &errorEnds, &userMessages, &assistantMessages, &finalEndPayloads); err != nil {
 		t.Fatalf("read provider timeout production facts: %v", err)
 	}
-	if starts != 3 || ends != 3 || reschedules != 1 || errorEnds != 2 || userMessages != 2 || assistantMessages != 1 {
-		t.Fatalf("provider timeout starts/ends/reschedules/errors/users/assistants = %d/%d/%d/%d/%d/%d; want 3/3/1/2/2/1; ends=%s",
+	if starts != 3 || ends != 3 || reschedules != 1 || errorEnds != 2 || userMessages != 2 || assistantMessages != 3 {
+		t.Fatalf("provider timeout starts/ends/reschedules/errors/users/assistants = %d/%d/%d/%d/%d/%d; want 3/3/1/2/2/3; ends=%s",
 			starts, ends, reschedules, errorEnds, userMessages, assistantMessages, finalEndPayloads)
 	}
 }
@@ -135,12 +143,15 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 		wantErrorEnds     int
 		wantAssistants    int
 		wantKeySelections []string
+		wantPublicStatus  string
+		wantPublicType    string
 	}{
 		{name: "platform billing before progress", scenario: "platform_billing_pre_progress", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 2, wantAssistants: 2, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy", "pfk_provider_failure_healthy"}},
 		{name: "platform billing after progress", scenario: "platform_billing_post_progress", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy"}},
-		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}},
+		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}, wantPublicStatus: "exhausted", wantPublicType: "model_overloaded_error"},
 		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2, wantAssistants: 1},
-		{name: "invalid BYOK", scenario: "invalid_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1},
+		{name: "invalid Kimi API key", scenario: "invalid_kimi_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error"},
+		{name: "invalid OpenAI OAuth", scenario: "invalid_openai_oauth", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -231,8 +242,8 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				t.Fatalf("%s platform key quarantines = %v; want one bad-key quarantine", testCase.scenario, result.PlatformKeyQuarantines)
 			}
 
-			var starts, ends, reschedules, errorEnds, users, assistants int
-			var durablePayloads string
+			var starts, ends, reschedules, errorEnds, users, assistants, publicErrors int
+			var durablePayloads, publicRetryStatuses, publicErrorTypes string
 			if err := admin.QueryRowContext(context.Background(), `SELECT
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end'),
@@ -240,8 +251,11 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true'),
 				(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='user'),
 				(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='assistant'),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+				COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,retry_status,type}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
+				COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,type}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
 				COALESCE((SELECT string_agg(payload_json || ' ' || projection_json, ' ') FROM session_events WHERE workspace_id='default' AND session_id=$1),'')`, sessionID).
-				Scan(&starts, &ends, &reschedules, &errorEnds, &users, &assistants, &durablePayloads); err != nil {
+				Scan(&starts, &ends, &reschedules, &errorEnds, &users, &assistants, &publicErrors, &publicRetryStatuses, &publicErrorTypes, &durablePayloads); err != nil {
 				t.Fatalf("read %s durable provider failure facts: %v", testCase.scenario, err)
 			}
 			if starts != testCase.wantRequestEnds || ends != testCase.wantRequestEnds || reschedules != testCase.wantReschedules ||
@@ -252,6 +266,21 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			}
 			if strings.Contains(durablePayloads, "private-billing-canary") || strings.Contains(durablePayloads, "statusless-private-canary") || strings.Contains(durablePayloads, "private-byok-canary") {
 				t.Fatalf("%s durable facts leaked provider-private detail", testCase.scenario)
+			}
+			if testCase.wantPublicStatus != "" {
+				if publicErrors == 0 {
+					t.Fatalf("%s emitted no public session.error", testCase.scenario)
+				}
+				for _, retryStatus := range strings.Split(publicRetryStatuses, ",") {
+					if retryStatus != testCase.wantPublicStatus {
+						t.Fatalf("%s public retry statuses = %q; want only %q", testCase.scenario, publicRetryStatuses, testCase.wantPublicStatus)
+					}
+				}
+				for _, errorType := range strings.Split(publicErrorTypes, ",") {
+					if errorType != testCase.wantPublicType {
+						t.Fatalf("%s public error types = %q; want only %q", testCase.scenario, publicErrorTypes, testCase.wantPublicType)
+					}
+				}
 			}
 		})
 	}
@@ -335,7 +364,7 @@ func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, 
 		time.Sleep(10 * time.Millisecond)
 	}
 	var starts, ends, reschedules, providerAttempts, runningEvents, userMessages int
-	var statusValue, endPayloads, inboxFacts, messageFacts string
+	var statusValue, endPayloads, inboxFacts, messageFacts, eventFacts string
 	_ = admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end'),
@@ -349,20 +378,23 @@ func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, 
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_running'),
 		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='user'),
 		COALESCE((SELECT jsonb_agg(jsonb_build_object('sequence',sequence,'kind',kind,'data',data_json::jsonb) ORDER BY sequence)::text
-		  FROM session_messages WHERE workspace_id='default' AND session_id=$1),'[]')`, sessionID).
-		Scan(&starts, &ends, &reschedules, &statusValue, &providerAttempts, &endPayloads, &inboxFacts, &runningEvents, &userMessages, &messageFacts)
+		  FROM session_messages WHERE workspace_id='default' AND session_id=$1),'[]'),
+		COALESCE((SELECT jsonb_agg(jsonb_build_object('type',type,'payload',payload_json::jsonb) ORDER BY sequence)::text
+		  FROM session_events WHERE workspace_id='default' AND session_id=$1),'[]')`, sessionID).
+		Scan(&starts, &ends, &reschedules, &statusValue, &providerAttempts, &endPayloads, &inboxFacts, &runningEvents, &userMessages, &messageFacts, &eventFacts)
 	state, _ := os.ReadFile(process.statePath)
-	t.Fatalf("provider failure facts starts/ends/reschedules/status/attempts/runs/users/state=%d/%d/%d/%s/%d/%d/%d/%s; want ends=%d status=%s; payloads=%s inbox=%s messages=%s process=%s",
-		starts, ends, reschedules, statusValue, providerAttempts, runningEvents, userMessages, state, wantEnds, wantThreadStatus, endPayloads, inboxFacts, messageFacts, process.output.String())
+	t.Fatalf("provider failure facts starts/ends/reschedules/status/attempts/runs/users/state=%d/%d/%d/%s/%d/%d/%d/%s; want ends=%d status=%s; payloads=%s inbox=%s messages=%s events=%s process=%s",
+		starts, ends, reschedules, statusValue, providerAttempts, runningEvents, userMessages, state, wantEnds, wantThreadStatus, endPayloads, inboxFacts, messageFacts, eventFacts, process.output.String())
 }
 
 func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
-	ProviderInvocations    int      `json:"providerInvocations"`
-	FinishIdleInvocations  int      `json:"finishIdleInvocations"`
-	FinishIdleResult       string   `json:"finishIdleResult"`
-	SensitiveLogLeak       bool     `json:"sensitiveLogLeak"`
-	PlatformKeySelections  []string `json:"platformKeySelections"`
-	PlatformKeyQuarantines []string `json:"platformKeyQuarantines"`
+	ProviderInvocations     int      `json:"providerInvocations"`
+	FinishIdleInvocations   int      `json:"finishIdleInvocations"`
+	FinishIdleResult        string   `json:"finishIdleResult"`
+	SensitiveLogLeak        bool     `json:"sensitiveLogLeak"`
+	PlatformKeySelections   []string `json:"platformKeySelections"`
+	PlatformKeyQuarantines  []string `json:"platformKeyQuarantines"`
+	ProviderRequestContexts []string `json:"providerRequestContexts"`
 } {
 	t.Helper()
 	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
@@ -372,12 +404,13 @@ func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
 		t.Fatalf("wait provider failure composition: %v: %s", err, p.output.String())
 	}
 	var result struct {
-		ProviderInvocations    int      `json:"providerInvocations"`
-		FinishIdleInvocations  int      `json:"finishIdleInvocations"`
-		FinishIdleResult       string   `json:"finishIdleResult"`
-		SensitiveLogLeak       bool     `json:"sensitiveLogLeak"`
-		PlatformKeySelections  []string `json:"platformKeySelections"`
-		PlatformKeyQuarantines []string `json:"platformKeyQuarantines"`
+		ProviderInvocations     int      `json:"providerInvocations"`
+		FinishIdleInvocations   int      `json:"finishIdleInvocations"`
+		FinishIdleResult        string   `json:"finishIdleResult"`
+		SensitiveLogLeak        bool     `json:"sensitiveLogLeak"`
+		PlatformKeySelections   []string `json:"platformKeySelections"`
+		PlatformKeyQuarantines  []string `json:"platformKeyQuarantines"`
+		ProviderRequestContexts []string `json:"providerRequestContexts"`
 	}
 	if err := json.Unmarshal(p.output.Bytes(), &result); err != nil {
 		t.Fatalf("decode provider failure composition: %v: %s", err, p.output.String())

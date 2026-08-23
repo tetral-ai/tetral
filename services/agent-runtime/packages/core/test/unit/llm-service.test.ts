@@ -334,6 +334,37 @@ describe("LLMService Gateway boundary", () => {
     }
   });
 
+  test("marks definitive credential and platform unavailability as current-turn exhaustion", async () => {
+    for (const code of ["provider_key_unavailable", "provider_unavailable"] as const) {
+      const service = createLLMService(gatewayClient([
+        event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, {
+          providerError: {
+            metadataJson: "{}",
+            error: {
+              code,
+              message: "Provider request cannot continue.",
+              retryable: false,
+              fatal: code === "provider_key_unavailable",
+              statusCode: 401,
+              retryAfterMs: 0,
+            },
+          },
+        }),
+      ]));
+
+      expect(await collect(service.stream(request()))).toEqual([
+        {
+          type: "provider-error",
+          error: expect.objectContaining({
+            type: "provider",
+            code,
+            retryStatus: { type: "exhausted" },
+          }),
+        },
+      ]);
+    }
+  });
+
   test("maps one pre-stream attachment rejection report for an origin in the request", async () => {
     const providerRequest = {
       ...request(),
