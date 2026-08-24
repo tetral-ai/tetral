@@ -413,14 +413,6 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 				ErrorMessage: result.ErrorMessage,
 			}))
 		}
-		if cleanupSessionFinalAttempt(job) {
-			finalized, err := r.finalizeRuntimeCleanupExhaustion(ctx, job, result)
-			if err != nil {
-				return err
-			}
-			r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(finalized))
-			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
-		}
 		if runtimeJobFinalAttempt(job) && job.InputKind != "interrupt_control" {
 			finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 			if err != nil {
@@ -455,12 +447,8 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 	if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" && result.Status == RuntimeDeliveryRejected {
 		result.Retryable = true
 	}
-	if cleanupSessionFinalAttempt(job) && result.Status == RuntimeDeliveryRejected {
-		finalized, err := r.finalizeRuntimeCleanupExhaustion(ctx, job, result)
-		if err != nil {
-			return err
-		}
-		result = finalized
+	if job.Kind == queue.KindCleanupSession {
+		return r.applyRuntimeCleanupResult(ctx, job, result)
 	}
 	preparationKind := "none"
 	if result.ErrorKind != "" {
@@ -646,6 +634,40 @@ func (r *JobRunner) finalizeRuntimeCleanupExhaustion(ctx context.Context, job Ru
 		return RuntimeDeliveryResult{}, errors.New("runtime cleanup exhaustion finalizer is required")
 	}
 	return finalizer.FinalizeRuntimeCleanupExhaustion(ctx, job, result)
+}
+
+// Cleanup Queue custody never enters the generic DeadLetter transition. A
+// rejection keeps the same cleanup identity until its bounded attempt ceiling;
+// only the cleanup finalizer may atomically dead-letter that identity and rearm
+// the Session for a future sweep.
+func (r *JobRunner) applyRuntimeCleanupResult(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) error {
+	if result.Status != RuntimeDeliveryRejected &&
+		result.Status != RuntimeDeliveryAccepted &&
+		result.Status != RuntimeDeliveryDuplicate &&
+		result.Status != RuntimeDeliveryAuthorityLost {
+		result = invalidRuntimeResponse()
+	}
+	preparationKind := valueOrDefault(result.ErrorKind, "none")
+	if result.Status != RuntimeDeliveryRejected {
+		r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(result))
+		return r.applyRuntimeDeliveryResult(ctx, job, result)
+	}
+	if cleanupSessionFinalAttempt(job) {
+		finalized, err := r.finalizeRuntimeCleanupExhaustion(ctx, job, result)
+		if err != nil {
+			return err
+		}
+		r.logRuntimeJobAttempt(job, preparationKind, runtimeJobFinalizationDisposition(finalized))
+		return r.applyRuntimeDeliveryResult(ctx, job, finalized)
+	}
+	r.logRuntimeJobAttempt(job, preparationKind, "retry_scheduled")
+	return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+		WorkspaceId:  job.WorkspaceID,
+		JobId:        job.JobID,
+		LeaseToken:   job.LeaseToken,
+		ErrorKind:    valueOrDefault(result.ErrorKind, "invalid_runtime_response"),
+		ErrorMessage: valueOrDefault(result.ErrorMessage, "runtime response is missing or invalid"),
+	}))
 }
 
 func runtimeDeliveryRequiresFinalization(job RuntimeJob, result RuntimeDeliveryResult) bool {

@@ -575,11 +575,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 			return runtimeDeliveryResultFromPrepareError(err), nil
 		}
 		if !authority.Active {
-			status := RuntimeDeliveryAuthorityLost
-			if authority.QueueLeaseSettled {
-				status = RuntimeDeliveryDuplicate
-			}
-			return RuntimeDeliveryResult{Status: status, QueueLeaseSettled: authority.QueueLeaseSettled}, nil
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}, nil
 		}
 	}
 	result, err := plan.send(ctx, d.Sender)

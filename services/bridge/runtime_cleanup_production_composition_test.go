@@ -227,6 +227,76 @@ func TestPostgreSQLCleanupExhaustionReleasesMarkerAndAllowsFreshSweep(t *testing
 	}
 }
 
+func TestPostgreSQLCleanupInvalidResponseRetriesThenReleasesMarkerAtExhaustion(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const sessionID = "sesn_clean_invresp"
+	const threadID = "thrd_clean_invresp"
+	const cleanupID = "cleanup_invresp"
+	process := startCleanupComposition(t, "success", "pod_uid_"+sessionID)
+	_, _, runner, queueJobID := seedCleanupComposition(
+		t, runtimeDB, admin, process.port, sessionID, threadID, cleanupID, 2,
+	)
+	direct := runner.Deliverer.(RuntimePodDirectDeliverer)
+	sender := &cleanupInvalidResponseSender{RuntimeCommandSender: direct.Sender}
+	direct.Sender = sender
+	runner.Deliverer = direct
+
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("run non-final invalid cleanup response = active:%t err:%v", active, err)
+	}
+	var queueStatus, errorKind string
+	var attempts int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status, attempt_count, last_error_kind FROM queue_jobs WHERE workspace_id='default' AND id=$1`, queueJobID,
+	).Scan(&queueStatus, &attempts, &errorKind); err != nil {
+		t.Fatalf("read retried invalid cleanup Queue state: %v", err)
+	}
+	if queueStatus != queue.StatusPending || attempts != 1 || errorKind != "invalid_runtime_response" {
+		t.Fatalf("retried invalid cleanup state = %s/%d/%s; want pending/1/invalid_runtime_response", queueStatus, attempts, errorKind)
+	}
+	assertCleanupMarkersClaimed(t, admin, sessionID, cleanupID)
+
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND id=$1`, queueJobID,
+	); err != nil {
+		t.Fatalf("make final invalid cleanup attempt ready: %v", err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("run final invalid cleanup response = active:%t err:%v", active, err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status, attempt_count, last_error_kind FROM queue_jobs WHERE workspace_id='default' AND id=$1`, queueJobID,
+	).Scan(&queueStatus, &attempts, &errorKind); err != nil {
+		t.Fatalf("read exhausted invalid cleanup Queue state: %v", err)
+	}
+	if queueStatus != queue.StatusDeadLettered || attempts != 2 || errorKind != "invalid_runtime_response" {
+		t.Fatalf("exhausted invalid cleanup state = %s/%d/%s; want dead_lettered/2/invalid_runtime_response", queueStatus, attempts, errorKind)
+	}
+	cleanupAfter := assertCleanupMarkersRearmed(t, admin, sessionID, true)
+	if sender.calls.Load() != 2 {
+		t.Fatalf("invalid cleanup Runtime calls = %d; want 2 bounded attempts", sender.calls.Load())
+	}
+	var effect struct {
+		HostInvocations int `json:"hostInvocations"`
+		HostEffects     int `json:"hostEffects"`
+	}
+	raw, err := os.ReadFile(process.effectPath)
+	if err != nil || json.Unmarshal(raw, &effect) != nil || effect.HostInvocations != 2 || effect.HostEffects != 1 {
+		t.Fatalf("invalid cleanup host effect = %s/%v; want two calls and one idempotent effect", raw, err)
+	}
+
+	scheduler := tetralcleanup.NewScheduler(dbconnect.NewClientForTesting(runtimeDB))
+	scheduler.Clock = func() time.Time { return cleanupAfter.Add(time.Second) }
+	scheduler.IDStrategy = func(prefix string) string { return prefix + "next" }
+	claimed, err := scheduler.ClaimDue(context.Background(), tetralcleanup.ClaimDueRequest{WorkspaceID: workspace.DefaultID, Limit: 1})
+	if err != nil {
+		t.Fatalf("claim cleanup successor after invalid response exhaustion: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].CleanupJobID == cleanupID || claimed[0].QueueJobID == queueJobID {
+		t.Fatalf("invalid response cleanup successor = %#v; want one fresh identity", claimed)
+	}
+}
+
 func TestPostgreSQLCleanupExhaustionRollsBackQueueAndMarkerTogether(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_clean_rollback"
@@ -415,6 +485,20 @@ type cleanupResponseBarrierSender struct {
 type cleanupLostResponseSender struct {
 	RuntimeCommandSender
 	lost atomic.Bool
+}
+
+type cleanupInvalidResponseSender struct {
+	RuntimeCommandSender
+	calls atomic.Int32
+}
+
+func (s *cleanupInvalidResponseSender) CleanupSession(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error) {
+	response, err := s.RuntimeCommandSender.CleanupSession(ctx, target, request)
+	if err != nil {
+		return response, err
+	}
+	s.calls.Add(1)
+	return &agentruntimev1.CleanupSessionResponse{}, nil
 }
 
 func (s *cleanupLostResponseSender) CleanupSession(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.CleanupSessionRequest) (*agentruntimev1.CleanupSessionResponse, error) {

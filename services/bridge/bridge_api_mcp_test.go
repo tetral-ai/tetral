@@ -28,7 +28,7 @@ import (
 
 // This file owns the Bridge mcp protocol-family boundary.
 
-func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinues(t *testing.T) {
+func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinues(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID    = "sesn_mcp_tool_failure_composition"
@@ -116,7 +116,7 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	if composed.ConnectorCalls != 1 || composed.Result.Type != "error" || composed.Result.Error.Retryable ||
 		composed.Result.Error.Message != "MCP authorization is unavailable. Reconnect the integration and try again." || composed.Settlement.Type != "error" ||
 		len(composed.DeclaredError) == 0 {
-		t.Fatalf("MCP failure composition = %+v; want one generic non-retryable Tool settlement", composed)
+		t.Fatalf("MCP failure composition = %+v; want one actionable non-retryable Tool settlement", composed)
 	}
 	request := bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUse.GetCommitted().GetEventId(),

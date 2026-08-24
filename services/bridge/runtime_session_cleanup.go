@@ -52,8 +52,7 @@ type cleanupSessionClaim struct {
 }
 
 type RuntimeCleanupDeliveryAuthority struct {
-	Active            bool
-	QueueLeaseSettled bool
+	Active bool
 }
 
 func cleanupSessionExactLease(job RuntimeJob) (queue.ExactLeaseRequest, error) {
