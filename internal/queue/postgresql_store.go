@@ -518,7 +518,7 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 				        SELECT 1 FROM sessions session
 				         WHERE session.workspace_id = candidate.workspace_id
 				           AND session.id = candidate.causal_session_id
-				           AND session.lifecycle_state = 'deleted'
+				           AND (session.lifecycle_state = 'deleted' OR session.status = 'terminated')
 				      ))
 				    )
 				    AND NOT EXISTS (
@@ -577,10 +577,7 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 				                          OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
 				                   OR (candidate.control_class <> 'interrupt'
 				                     AND pending.control_class <> 'interrupt'
-				                     AND pending.available_at <= $2
-				                     AND (pending.priority > candidate.priority
-				                          OR (pending.priority = candidate.priority
-				                              AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
+				                     AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
 				                 ))
 				             ))
 				         )
@@ -734,7 +731,7 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		        SELECT 1 FROM sessions session
 		         WHERE session.workspace_id = candidate.workspace_id
 		           AND session.id = candidate.causal_session_id
-		           AND session.lifecycle_state = 'deleted'
+		           AND (session.lifecycle_state = 'deleted' OR session.status = 'terminated')
 		      ))
 		    )
 		    AND NOT EXISTS (
@@ -792,10 +789,7 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 					                          OR pending.queue_partition_sequence < $10))
 					                   OR (candidate.control_class <> 'interrupt'
 					                     AND pending.control_class <> 'interrupt'
-		                     AND pending.available_at <= $7
-		                     AND (pending.priority > $11
-		                          OR (pending.priority = $11
-		                              AND pending.queue_partition_sequence < $10)))
+		                     AND pending.queue_partition_sequence < $10)
 		                 ))
 		             ))
 		         )

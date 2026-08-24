@@ -824,14 +824,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 			plan = deletePlan
 			return nil
 		}
-		var deleted bool
-		if err := tx.QueryRow(ctx, `SELECT lifecycle_state = 'deleted' FROM sessions WHERE workspace_id=$1 AND id=$2`, job.WorkspaceID, job.SessionID).Scan(&deleted); dbconnect.IsNoRows(err) {
+		var terminal bool
+		if err := tx.QueryRow(ctx, `SELECT lifecycle_state = 'deleted' OR status = 'terminated' FROM sessions WHERE workspace_id=$1 AND id=$2`, job.WorkspaceID, job.SessionID).Scan(&terminal); dbconnect.IsNoRows(err) {
 			plan = RuntimeCommandPlan{StaleAccepted: true}
 			return nil
 		} else if err != nil {
 			return err
 		}
-		if deleted {
+		if terminal {
 			plan = RuntimeCommandPlan{StaleAccepted: true}
 			return nil
 		}

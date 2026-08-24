@@ -163,6 +163,66 @@ func TestPostgreSQLStoreThreadLanesAndSessionExclusiveLeaseMatrix(t *testing.T) 
 	}
 }
 
+func TestPostgreSQLStoreOrdinaryRetryBackoffRetainsThreadLaneHead(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	store := NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), RetryPolicy{
+		BaseDelay: time.Minute,
+		MaxDelay:  time.Minute,
+		RandomInt64: func(limit int64) int64 {
+			return limit - 1
+		},
+	})
+	ctx := context.Background()
+	ws := workspace.ID("ws_queue_ordinary_backoff")
+	sessionID := "sesn_queue_ordinary_backoff"
+	threadID := "thrd_queue_ordinary_backoff"
+	now := time.Date(2026, 8, 24, 21, 0, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+
+	first := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_backoff_a", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_backoff_a"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_backoff_a", "messages", 1, 1),
+		Priority:    0, Now: now,
+	})
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_backoff_b", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: partition, DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "rin_backoff_b"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, "rin_backoff_b", "messages", 2, 2),
+		Priority:    100, Now: now.Add(time.Millisecond),
+	})
+
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-ordinary-first",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if leased.ID != first.ID {
+		t.Fatalf("first ordinary lease = %s; want causal head %s", leased.ID, first.ID)
+	}
+	if ok, err := store.Retry(ctx, RetryRequest{
+		WorkspaceID: ws, JobID: leased.ID, LeaseToken: leased.LeaseToken,
+		ErrorKind: "runtime_transport_error", Now: now.Add(2 * time.Second),
+	}); err != nil || !ok {
+		t.Fatalf("Retry causal head = (%v,%v); want true,nil", ok, err)
+	}
+	if jobs, err := store.Lease(ctx, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-ordinary-during-backoff",
+		MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(3 * time.Second),
+	}); err != nil || len(jobs) != 0 {
+		t.Fatalf("leases during ordinary predecessor backoff = %+v/%v; want none", jobs, err)
+	}
+	if got := queueJobStatus(t, admin, ws, "qjob_backoff_b"); got != StatusPending {
+		t.Fatalf("ordinary successor status = %s; want pending", got)
+	}
+	leased = mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-ordinary-retry",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(2 * time.Minute),
+	})
+	if leased.ID != first.ID || leased.AttemptCount != 2 {
+		t.Fatalf("ordinary retry lease = %s attempt=%d; want %s attempt=2", leased.ID, leased.AttemptCount, first.ID)
+	}
+}
+
 func TestPostgreSQLStoreBlockedThreadBacklogDoesNotStarveSiblingLane(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ws := workspace.ID("ws_queue_sibling_fairness")
@@ -285,6 +345,39 @@ func TestPostgreSQLStoreRevalidatesDeletedSessionAfterArbitration(t *testing.T) 
 	assertLeasedIDs(t, leased, []string{deleteCleanup.ID})
 	if got := queueJobStatus(t, admin, workspace.DefaultID, input.ID); got != StatusPending {
 		t.Fatalf("pre-delete input status = %s; want pending and ineligible", got)
+	}
+}
+
+func TestPostgreSQLStoreRejectsAllWorkForTerminatedSession(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	const sessionID = "sesn_queue_terminated"
+	now := time.Date(2026, 8, 24, 20, 20, 0, 0, time.UTC)
+	seedQueueRuntimeInbox(t, admin, sessionID, "thrd_queue_terminated", "rin_queue_terminated_seed", "messages", `[]`, 1, 1)
+	config := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_term_cfg", WorkspaceID: workspace.DefaultID, Kind: KindRuntimeConfigUpdate,
+		PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:    FormatRuntimeConfigUpdateDedupeKey(workspace.DefaultID, sessionID, "9"),
+		PayloadJSON:  []byte(`{"workspace_id":"default","session_id":"sesn_queue_terminated","config_generation":9}`),
+		Now:          now,
+	})
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE sessions SET status='terminated', updated_at=$2 WHERE workspace_id='default' AND id=$1`,
+		sessionID, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark Session terminated: %v", err)
+	}
+	leased, err := store.Lease(ctx, LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeConfigUpdate}, LeaseOwner: "bridge-terminal",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Lease terminated Session: %v", err)
+	}
+	if len(leased) != 0 {
+		t.Fatalf("terminated Session leases = %#v; want none", leased)
+	}
+	if got := queueJobStatus(t, admin, workspace.DefaultID, config.ID); got != StatusPending {
+		t.Fatalf("terminated Session config status = %s; want pending and ineligible", got)
 	}
 }
 
@@ -420,36 +513,65 @@ func TestPostgreSQLStoreMultiSessionLeaseUsesCanonicalLockOrder(t *testing.T) {
 		})
 	}
 
+	lockedZ := make(chan struct{})
+	releaseZ := make(chan struct{})
+	ownerZDone := make(chan error, 1)
+	go func() {
+		ownerZDone <- store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_lock_z", func(tx *dbconnect.Tx) error {
+			if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(workspace.DefaultID), "sesn_z_priority_first"); err != nil {
+				return err
+			}
+			close(lockedZ)
+			<-releaseZ
+			return nil
+		})
+	}()
+	<-lockedZ
+
 	type leaseResult struct {
 		jobs []*Job
 		err  error
 	}
-	results := make(chan leaseResult, 2)
-	for worker := 0; worker < 2; worker++ {
-		go func(worker int) {
-			jobs, err := store.Lease(ctx, LeaseRequest{
-				WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-multi-" + strconv.Itoa(worker),
-				MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second),
-			})
-			results <- leaseResult{jobs: jobs, err: err}
-		}(worker)
+	leaseDone := make(chan leaseResult, 1)
+	go func() {
+		jobs, err := store.Lease(ctx, LeaseRequest{
+			WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-multi",
+			MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second),
+		})
+		leaseDone <- leaseResult{jobs: jobs, err: err}
+	}()
+
+	// Candidate priority orders Z before A. Canonical locking must instead own A
+	// before waiting on the externally held Z owner.
+	time.Sleep(50 * time.Millisecond)
+	ownerADone := make(chan error, 1)
+	go func() {
+		ownerADone <- store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_lock_a", func(tx *dbconnect.Tx) error {
+			return storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(workspace.DefaultID), "sesn_a_available_first")
+		})
+	}()
+	select {
+	case err := <-ownerADone:
+		t.Fatalf("canonical A owner remained free while Lease waited on Z: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseZ)
+	if err := <-ownerZDone; err != nil {
+		t.Fatalf("release Z owner: %v", err)
+	}
+	result := <-leaseDone
+	if result.err != nil {
+		t.Fatalf("multi-Session Lease: %v", result.err)
 	}
 	seen := map[string]int{}
-	for range 2 {
-		select {
-		case result := <-results:
-			if result.err != nil {
-				t.Fatalf("multi-Session Lease: %v", result.err)
-			}
-			for _, job := range result.jobs {
-				seen[job.ID]++
-			}
-		case <-ctx.Done():
-			t.Fatal("multi-Session workers deadlocked")
-		}
+	for _, job := range result.jobs {
+		seen[job.ID]++
 	}
 	if !reflect.DeepEqual(seen, map[string]int{"qjob_a": 1, "qjob_z": 1}) {
 		t.Fatalf("multi-Session grants = %v; want each candidate exactly once", seen)
+	}
+	if err := <-ownerADone; err != nil {
+		t.Fatalf("A owner after Lease commit: %v", err)
 	}
 }
 

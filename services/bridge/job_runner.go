@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -233,15 +234,29 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 		return hadWork, errors.Join(phaseErrs...)
 	}
 	hadWork = hadWork || len(lease.GetJobs()) > 0
-	for _, job := range lease.GetJobs() {
+	jobs := lease.GetJobs()
+	for _, job := range jobs {
 		if job.GetWorkspaceId() != workspaceID {
 			phaseErrs = append(phaseErrs, errors.New("bridge queue returned a cross-workspace job"))
-			break
+			return hadWork, errors.Join(phaseErrs...)
 		}
-		if err := r.processRuntimeJob(ctx, job, cfg); err != nil {
-			phaseErrs = append(phaseErrs, err)
-			break
-		}
+	}
+	var wait sync.WaitGroup
+	jobErrs := make(chan error, len(jobs))
+	for _, job := range jobs {
+		job := job
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := r.processRuntimeJob(ctx, job, cfg); err != nil {
+				jobErrs <- err
+			}
+		}()
+	}
+	wait.Wait()
+	close(jobErrs)
+	for err := range jobErrs {
+		phaseErrs = append(phaseErrs, err)
 	}
 	return hadWork, errors.Join(phaseErrs...)
 }
@@ -279,7 +294,10 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			ErrorMessage: "runtime queue payload is invalid",
 		}))
 	}
-	workCtx, stopHeartbeat := startJobRunnerHeartbeat(ctx, r.Queue, job, cfg)
+	workCtx, stopHeartbeat, err := startJobRunnerHeartbeat(ctx, r.Queue, job, cfg)
+	if err != nil {
+		return err
+	}
 	if job.Kind == queue.KindRuntimeInput {
 		replayer, ok := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
 		if !ok {
@@ -708,13 +726,21 @@ func isMCPManifestRuntimeJob(job RuntimeJob) bool {
 	return job.Kind == queue.KindRuntimeConfigUpdate && job.MCPServerName != "" && job.MCPManifestGeneration != ""
 }
 
-func startJobRunnerHeartbeat(ctx context.Context, client QueueClient, job RuntimeJob, cfg JobRunnerConfig) (context.Context, func() error) {
+func startJobRunnerHeartbeat(ctx context.Context, client QueueClient, job RuntimeJob, cfg JobRunnerConfig) (context.Context, func() error, error) {
 	workCtx, cancelWork := context.WithCancel(ctx)
 	if cfg.HeartbeatInterval <= 0 || cfg.LeaseDuration <= 0 {
 		return workCtx, func() error {
 			cancelWork()
 			return nil
-		}
+		}, nil
+	}
+	response, err := client.Heartbeat(ctx, &queuev1.HeartbeatRequest{
+		WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+		LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
+	})
+	if err != nil || !response.GetUpdated() {
+		cancelWork()
+		return workCtx, func() error { return nil }, errors.New("bridge queue lease lost before delivery")
 	}
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -751,7 +777,7 @@ func startJobRunnerHeartbeat(ctx context.Context, client QueueClient, job Runtim
 		<-done
 		cancelWork()
 		return heartbeatErr
-	}
+	}, nil
 }
 
 func (r *JobRunner) applyRuntimeDeliveryResult(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) error {

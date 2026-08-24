@@ -436,6 +436,26 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, interruptID, "interrupt_control", interruptEvent, 4, 1, now)
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, followerID, "messages", followerEvent, 5, queue.DefaultMaxAttempts, now.Add(time.Second))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, secondID, "interrupt_control", secondEvent, 6, queue.DefaultMaxAttempts, now.Add(2*time.Second))
+	configJob, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeConfigUpdate,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeConfigUpdateDedupeKey(workspace.DefaultID, sessionID, "7"),
+		PayloadVersion: 1, PayloadJSON: []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","config_generation":7}`),
+		MaxAttempts: queue.DefaultMaxAttempts, Now: now.Add(3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("enqueue terminalized Session config custody: %v", err)
+	}
+	cleanupJob, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspace.DefaultID, Kind: queue.KindCleanupSession,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatCleanupSessionDedupeKey(workspace.DefaultID, sessionID, "cleanup_terminalized"),
+		PayloadVersion: 1, PayloadJSON: []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"cleanup_terminalized"}`),
+		MaxAttempts: queue.DefaultMaxAttempts, Now: now.Add(4 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("enqueue terminalized Session cleanup custody: %v", err)
+	}
 
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
@@ -450,7 +470,7 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		t.Fatalf("final interrupt Runtime deliveries = %d; want zero after receipt miss", deliverer.deliveries)
 	}
 
-	var sessionStatus, threadStatus, reviewerInboxStatus string
+	var sessionStatus, threadStatus, reviewerInboxStatus, configQueueStatus, cleanupQueueStatus string
 	var bindingRows, requestEnds, toolResults, terminalErrors, terminalStatuses, messages int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
@@ -461,15 +481,17 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
 			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated'),
 			(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND source_event_id IN ($5,$6,$7)),
-			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$8)`,
+			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$8),
+			(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$9),
+			(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$10)`,
 		sessionID, threadID, requestID, toolUseEventID, interruptEvent, followerEvent, secondEvent,
-		reviewerAdmission.GetCommitted().GetRuntimeInputId(),
-	).Scan(&sessionStatus, &threadStatus, &bindingRows, &requestEnds, &toolResults, &terminalErrors, &terminalStatuses, &messages, &reviewerInboxStatus); err != nil {
+		reviewerAdmission.GetCommitted().GetRuntimeInputId(), configJob.ID, cleanupJob.ID,
+	).Scan(&sessionStatus, &threadStatus, &bindingRows, &requestEnds, &toolResults, &terminalErrors, &terminalStatuses, &messages, &reviewerInboxStatus, &configQueueStatus, &cleanupQueueStatus); err != nil {
 		t.Fatalf("read final interrupt terminal facts: %v", err)
 	}
-	if sessionStatus != "terminated" || threadStatus != "failed" || reviewerInboxStatus != "cancelled" || bindingRows != 0 || requestEnds != 1 || toolResults != 1 || terminalErrors != 1 || terminalStatuses != 1 || messages != 0 {
-		t.Fatalf("terminal facts session/thread/reviewer/bindings/requestEnds/toolResults/errors/statuses/messages = %s/%s/%s/%d/%d/%d/%d/%d/%d",
-			sessionStatus, threadStatus, reviewerInboxStatus, bindingRows, requestEnds, toolResults, terminalErrors, terminalStatuses, messages)
+	if sessionStatus != "terminated" || threadStatus != "failed" || reviewerInboxStatus != "cancelled" || configQueueStatus != queue.StatusCancelled || cleanupQueueStatus != queue.StatusCancelled || bindingRows != 0 || requestEnds != 1 || toolResults != 1 || terminalErrors != 1 || terminalStatuses != 1 || messages != 0 {
+		t.Fatalf("terminal facts session/thread/reviewer/config/cleanup/bindings/requestEnds/toolResults/errors/statuses/messages = %s/%s/%s/%s/%s/%d/%d/%d/%d/%d/%d",
+			sessionStatus, threadStatus, reviewerInboxStatus, configQueueStatus, cleanupQueueStatus, bindingRows, requestEnds, toolResults, terminalErrors, terminalStatuses, messages)
 	}
 	rows, err := admin.QueryContext(context.Background(), `SELECT inbox.runtime_input_id, inbox.status, job.status, event.processed_at IS NOT NULL
 		FROM session_runtime_inbox inbox

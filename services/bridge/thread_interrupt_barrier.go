@@ -2,7 +2,9 @@ package agentruntimebridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"sort"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,6 +24,178 @@ type threadInterruptBarrier struct {
 	sessionThreadID string
 }
 
+type activeInterruptCustody struct {
+	threadInterruptBarrier
+	queueSequence int64
+	inboxStatus   string
+	hasReceipt    bool
+}
+
+// lockRuntimeInputQueueCustodyTx locks active Runtime-input Queue rows before a
+// closeout transaction locks the corresponding Inbox or Thread rows. An empty
+// Thread list means every Thread in the Session; otherwise only the declared
+// target set is included.
+func lockRuntimeInputQueueCustodyTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	sessionThreadIDs []string,
+) error {
+	threadIDsJSON, err := json.Marshal(sessionThreadIDs)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT queue.id
+		   FROM queue_jobs queue
+		  WHERE queue.workspace_id = $1
+		    AND queue.causal_session_id = $2
+		    AND queue.kind = 'runtime_input'
+		    AND queue.status IN ('pending', 'leased')
+		    AND ($3 OR queue.delivery_thread_id IN (
+		      SELECT jsonb_array_elements_text($4::jsonb)
+		    ))
+		  ORDER BY queue.id
+		  FOR UPDATE OF queue`,
+		workspaceID,
+		sessionID,
+		len(sessionThreadIDs) == 0,
+		string(threadIDsJSON),
+	)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var queueID string
+		if err := rows.Scan(&queueID); err != nil {
+			return errors.Join(err, rows.Close())
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.Join(err, rows.Close())
+	}
+	return rows.Close()
+}
+
+// lockActiveInterruptQueueCustodyTx starts from active Queue authority and
+// locks every matching Queue row in canonical ID order. Inbox rows are locked
+// separately after exact lease validation so no caller can invert Queue row
+// order or the Queue-before-Inbox class order.
+func lockActiveInterruptQueueCustodyTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	sessionThreadID string,
+) ([]activeInterruptCustody, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT queue.id, queue.queue_partition_sequence,
+		        inbox.runtime_input_id, inbox.session_thread_id
+		   FROM queue_jobs queue
+		   JOIN session_runtime_inbox inbox
+		     ON inbox.workspace_id = queue.workspace_id
+		    AND inbox.session_id = queue.causal_session_id
+		    AND inbox.session_thread_id = queue.delivery_thread_id
+		    AND queue.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		  WHERE queue.workspace_id = $1
+		    AND queue.causal_session_id = $2
+		    AND queue.kind = 'runtime_input'
+		    AND queue.delivery_scope = 'thread'
+		    AND queue.control_class = 'interrupt'
+		    AND queue.status IN ('pending', 'leased')
+		    AND ($3 = '' OR queue.delivery_thread_id = $3)
+		    AND inbox.input_kind = 'interrupt_control'
+		  ORDER BY queue.id
+		  FOR UPDATE OF queue`,
+		workspaceID,
+		sessionID,
+		sessionThreadID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var active []activeInterruptCustody
+	for rows.Next() {
+		var queueID string
+		var custody activeInterruptCustody
+		if err := rows.Scan(&queueID, &custody.queueSequence, &custody.runtimeInputID, &custody.sessionThreadID); err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
+		active = append(active, custody)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Join(err, rows.Close())
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	return active, nil
+}
+
+func lockActiveInterruptInboxCustodyTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	active []activeInterruptCustody,
+) error {
+	for index := range active {
+		custody := &active[index]
+		if err := tx.QueryRow(ctx,
+			`SELECT inbox.status,
+			        EXISTS (
+			          SELECT 1
+			            FROM session_bridge_operations operation
+			           WHERE operation.workspace_id = inbox.workspace_id
+			             AND operation.session_id = inbox.session_id
+			             AND operation.session_thread_id = inbox.session_thread_id
+			             AND operation.operation = 'commit_inputs'
+			             AND operation.source_kind = 'interrupt_control'
+			             AND operation.idempotency_key = inbox.runtime_input_id
+			             AND operation.receipt_json IS NOT NULL
+			             AND operation.receipt_json <> ''
+			        )
+			   FROM session_runtime_inbox inbox
+			  WHERE inbox.workspace_id = $1
+			    AND inbox.runtime_input_id = $2
+			  FOR UPDATE OF inbox`,
+			workspaceID,
+			custody.runtimeInputID,
+		).Scan(&custody.inboxStatus, &custody.hasReceipt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func lockActiveInterruptCustodyTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	sessionThreadID string,
+) ([]activeInterruptCustody, error) {
+	active, err := lockActiveInterruptQueueCustodyTx(ctx, tx, workspaceID, sessionID, sessionThreadID)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockActiveInterruptInboxCustodyTx(ctx, tx, workspaceID, active); err != nil {
+		return nil, err
+	}
+	sortActiveInterruptCustody(active)
+	return active, nil
+}
+
+func sortActiveInterruptCustody(active []activeInterruptCustody) {
+	sort.SliceStable(active, func(i, j int) bool {
+		if active[i].queueSequence != active[j].queueSequence {
+			return active[i].queueSequence < active[j].queueSequence
+		}
+		return active[i].runtimeInputID < active[j].runtimeInputID
+	})
+}
+
 // activeThreadInterruptDeliveryBarrierTx extends only the input-admission
 // edge through the receipt-to-ACK window. The committed Inbox and receipt end
 // ordinary closeout exclusion, while the still-pending exact Queue custody
@@ -33,83 +207,25 @@ func activeThreadInterruptDeliveryBarrierTx(
 	sessionID string,
 	sessionThreadID string,
 ) (bool, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT inbox.runtime_input_id
-		   FROM session_runtime_inbox inbox
-		  WHERE inbox.workspace_id = $1
-		    AND inbox.session_id = $2
-		    AND inbox.session_thread_id = $3
-		    AND inbox.input_kind = 'interrupt_control'
-		    AND inbox.status = 'committed'
-		    AND EXISTS (
-		      SELECT 1
-		        FROM session_bridge_operations operation
-		       WHERE operation.workspace_id = inbox.workspace_id
-		         AND operation.session_id = inbox.session_id
-		         AND operation.session_thread_id = inbox.session_thread_id
-		         AND operation.operation = 'commit_inputs'
-		         AND operation.source_kind = 'interrupt_control'
-		         AND operation.idempotency_key = inbox.runtime_input_id
-		         AND operation.receipt_json IS NOT NULL
-		         AND operation.receipt_json <> ''
-		    )
-		  ORDER BY inbox.sequence_to NULLS LAST, inbox.created_at, inbox.runtime_input_id
-		  FOR UPDATE OF inbox`,
-		workspaceID,
-		sessionID,
-		sessionThreadID,
-	)
+	active, err := lockActiveInterruptCustodyTx(ctx, tx, workspaceID, sessionID, sessionThreadID)
 	if err != nil {
 		return false, err
 	}
-	var interruptIDs []string
-	for rows.Next() {
-		var runtimeInputID string
-		if err := rows.Scan(&runtimeInputID); err != nil {
-			return false, errors.Join(err, rows.Close())
-		}
-		interruptIDs = append(interruptIDs, runtimeInputID)
-	}
-	if err := rows.Err(); err != nil {
-		return false, errors.Join(err, rows.Close())
-	}
-	if err := rows.Close(); err != nil {
-		return false, err
-	}
-
-	for _, runtimeInputID := range interruptIDs {
-		dedupeKey := queue.FormatRuntimeInputDedupeKey(workspace.ID(workspaceID), sessionID, runtimeInputID)
-		partitionKey := queue.FormatSessionPartitionKey(workspace.ID(workspaceID), sessionID)
-		var queueStatus, storedPartition string
-		err := tx.QueryRow(ctx,
-			`SELECT status, partition_key
-			   FROM queue_jobs
-			  WHERE workspace_id = $1
-			    AND kind = $2
-			    AND dedupe_key = $3
-			  FOR UPDATE`,
-			workspaceID,
-			queue.KindRuntimeInput,
-			dedupeKey,
-		).Scan(&queueStatus, &storedPartition)
-		if dbconnect.IsNoRows(err) {
-			return false, status.Error(codes.FailedPrecondition, "committed interrupt receipt is missing Queue custody")
-		}
-		if err != nil {
-			return false, err
-		}
-		if storedPartition != partitionKey {
-			return false, status.Error(codes.FailedPrecondition, "committed interrupt Queue custody has invalid partition")
-		}
-		switch queueStatus {
-		case queue.StatusPending, queue.StatusLeased:
+	for _, custody := range active {
+		switch custody.inboxStatus {
+		case "queued", "delivering", "accepted":
+			if custody.hasReceipt {
+				return false, status.Error(codes.FailedPrecondition, "active interrupt Inbox already has a closeout receipt")
+			}
+		case "committed":
+			if !custody.hasReceipt {
+				return false, status.Error(codes.FailedPrecondition, "committed interrupt Inbox is missing its closeout receipt")
+			}
 			return true, nil
-		case queue.StatusAcknowledged:
-			continue
-		case queue.StatusCancelled, queue.StatusDeadLettered:
-			return false, status.Error(codes.FailedPrecondition, "committed interrupt receipt conflicts with terminal Queue custody")
+		case "cancelled", "dead_lettered":
+			return false, status.Error(codes.FailedPrecondition, "active interrupt Queue custody conflicts with terminal Inbox custody")
 		default:
-			return false, status.Errorf(codes.FailedPrecondition, "committed interrupt Queue custody has invalid status %q", queueStatus)
+			return false, status.Errorf(codes.FailedPrecondition, "interrupt Inbox has invalid custody status %q", custody.inboxStatus)
 		}
 	}
 	return false, nil
@@ -169,74 +285,33 @@ func activeInterruptBarriersTx(
 	sessionID string,
 	sessionThreadID string,
 ) (map[string]threadInterruptBarrier, error) {
-	// Queue partition sequence orders interrupt custody within one Thread lane.
-	rows, err := tx.Query(ctx,
-		`SELECT inbox.runtime_input_id,
-		        inbox.session_thread_id,
-		        inbox.status,
-		        EXISTS (
-		          SELECT 1
-		            FROM session_bridge_operations operation
-		           WHERE operation.workspace_id = inbox.workspace_id
-		             AND operation.session_id = inbox.session_id
-		             AND operation.session_thread_id = inbox.session_thread_id
-		             AND operation.operation = 'commit_inputs'
-		             AND operation.source_kind = 'interrupt_control'
-		             AND operation.idempotency_key = inbox.runtime_input_id
-		             AND operation.receipt_json IS NOT NULL
-		             AND operation.receipt_json <> ''
-		        ) AS has_receipt
-		   FROM session_runtime_inbox inbox
-		   LEFT JOIN queue_jobs queue
-		     ON queue.workspace_id = inbox.workspace_id
-		    AND queue.kind = 'runtime_input'
-		    AND queue.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
-		    AND queue.status IN ('pending', 'leased')
-		  WHERE inbox.workspace_id = $1
-		    AND inbox.session_id = $2
-		    AND ($3 = '' OR inbox.session_thread_id = $3)
-		    AND inbox.input_kind = 'interrupt_control'
-		  ORDER BY queue.queue_partition_sequence NULLS LAST, inbox.created_at, inbox.runtime_input_id
-		  FOR UPDATE OF inbox`,
-		workspaceID,
-		sessionID,
-		sessionThreadID,
-	)
+	rows, err := lockActiveInterruptCustodyTx(ctx, tx, workspaceID, sessionID, sessionThreadID)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	return activeInterruptBarriersFromCustody(rows)
+}
+
+func activeInterruptBarriersFromCustody(rows []activeInterruptCustody) (map[string]threadInterruptBarrier, error) {
 	active := make(map[string]threadInterruptBarrier)
-	for rows.Next() {
-		var runtimeInputID string
-		var sessionThreadID string
-		var statusValue string
-		var hasReceipt bool
-		if err := rows.Scan(&runtimeInputID, &sessionThreadID, &statusValue, &hasReceipt); err != nil {
-			return nil, err
-		}
-		switch statusValue {
+	for _, custody := range rows {
+		switch custody.inboxStatus {
 		case "queued", "delivering", "accepted":
-			if hasReceipt {
+			if custody.hasReceipt {
 				return nil, status.Error(codes.FailedPrecondition, "active interrupt Inbox already has a closeout receipt")
 			}
-			if _, exists := active[sessionThreadID]; !exists {
-				active[sessionThreadID] = threadInterruptBarrier{runtimeInputID: runtimeInputID, sessionThreadID: sessionThreadID}
+			if _, exists := active[custody.sessionThreadID]; !exists {
+				active[custody.sessionThreadID] = custody.threadInterruptBarrier
 			}
 		case "committed":
-			if !hasReceipt {
+			if !custody.hasReceipt {
 				return nil, status.Error(codes.FailedPrecondition, "committed interrupt Inbox is missing its closeout receipt")
 			}
 		case "cancelled", "dead_lettered":
-			if hasReceipt {
-				return nil, status.Error(codes.FailedPrecondition, "terminal interrupt Inbox conflicts with a closeout receipt")
-			}
+			return nil, status.Error(codes.FailedPrecondition, "active interrupt Queue custody conflicts with terminal Inbox custody")
 		default:
-			return nil, status.Errorf(codes.FailedPrecondition, "interrupt Inbox has invalid custody status %q", statusValue)
+			return nil, status.Errorf(codes.FailedPrecondition, "interrupt Inbox has invalid custody status %q", custody.inboxStatus)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return active, nil
 }
@@ -299,11 +374,20 @@ func validateInterruptLeaseRefTx(
 	if ref.GetPartitionKey() != expectedPartition || ref.GetDedupeKey() != expectedDedupe {
 		return status.Error(codes.FailedPrecondition, "interrupt closeout lease binding is invalid")
 	}
-	barrier, active, err := activeInterruptBarrierTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId())
+	activeCustody, err := lockActiveInterruptQueueCustodyTx(
+		ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	)
 	if err != nil {
 		return err
 	}
-	if !active || barrier.runtimeInputID != runtimeInputID {
+	foundRuntimeInput := false
+	for _, custody := range activeCustody {
+		if custody.runtimeInputID == runtimeInputID {
+			foundRuntimeInput = true
+			break
+		}
+	}
+	if !foundRuntimeInput {
 		return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout barrier is stale"))
 	}
 	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
@@ -319,6 +403,18 @@ func validateInterruptLeaseRefTx(
 	}
 	if !live {
 		return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout lease is stale"))
+	}
+	if err := lockActiveInterruptInboxCustodyTx(ctx, tx, scope.GetWorkspaceId(), activeCustody); err != nil {
+		return err
+	}
+	sortActiveInterruptCustody(activeCustody)
+	barriers, err := activeInterruptBarriersFromCustody(activeCustody)
+	if err != nil {
+		return err
+	}
+	barrier, active := barriers[scope.GetSessionThreadId()]
+	if !active || barrier.runtimeInputID != runtimeInputID {
+		return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout barrier is stale"))
 	}
 	var payloadSessionID, payloadThreadID, payloadRuntimeInputID, payloadInputKind string
 	if err := tx.QueryRow(ctx,

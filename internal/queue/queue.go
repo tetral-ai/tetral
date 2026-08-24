@@ -200,8 +200,10 @@ func QueueJobEnvelopeAllowance() int {
 //     dead_lettered.
 //   - Partition-scoped jobs remain single-lease by partition. Runtime work is
 //     Thread-scoped: one live lease per Session Thread, while distinct Threads
-//     may lease concurrently. Session-exclusive jobs conflict with every Thread
-//     lane through the common Session arbitration lock and post-lock recheck.
+//     may lease concurrently. A pending ordinary retry remains the causal head
+//     of its Thread lane throughout backoff; later ordinary input cannot pass
+//     it. Session-exclusive jobs conflict with every Thread lane through the
+//     common Session arbitration lock and post-lock recheck.
 //   - Caller-driven transitions off leased (Ack/Retry/Defer/DeadLetter/Heartbeat) are
 //     lease-token fenced; a stale one carrying an old lease_token matches no
 //     row and is ignored. Heartbeat cannot revive an expired lease. Lease,

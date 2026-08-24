@@ -837,6 +837,12 @@ func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *test
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	service := NewService(store)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	seed, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_birth_lease_race_seed", messageAppendRequest("existing candidate"))
+	if err != nil || len(seed.Data) != 1 {
+		t.Fatalf("seed existing Queue candidate = %#v/%v; want one event", seed, err)
+	}
 	paused := make(chan struct{})
 	release := make(chan struct{})
 	store.beforeQueueJobInsert = func() error {
@@ -844,8 +850,6 @@ func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *test
 		<-release
 		return nil
 	}
-	service := NewService(store)
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 
 	appendDone := make(chan error, 1)
 	go func() {
@@ -853,29 +857,49 @@ func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *test
 		appendDone <- err
 	}()
 	<-paused
-	if jobs, err := queueStore.Lease(ctx, queue.LeaseRequest{
-		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-before-birth",
-		MaxJobs: 1, LeaseDuration: time.Minute,
-	}); err != nil || len(jobs) != 0 {
-		t.Fatalf("Lease during uncommitted birth = %#v/%v; want no partial candidate", jobs, err)
+	type leaseResult struct {
+		jobs []*queue.Job
+		err  error
 	}
-	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 0 {
-		t.Fatalf("visible Events during uncommitted birth = %#v; want none", events)
+	leaseDone := make(chan leaseResult, 1)
+	go func() {
+		jobs, err := queueStore.Lease(ctx, queue.LeaseRequest{
+			WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-before-birth",
+			MaxJobs: 1, LeaseDuration: time.Minute,
+		})
+		leaseDone <- leaseResult{jobs: jobs, err: err}
+	}()
+	select {
+	case result := <-leaseDone:
+		t.Fatalf("Lease passed the active Session birth owner: jobs=%#v err=%v", result.jobs, result.err)
+	case <-time.After(100 * time.Millisecond):
 	}
-	if jobs := readSessionEventQueueJobs(t, admin, sessionID); len(jobs) != 0 {
-		t.Fatalf("visible Queue jobs during uncommitted birth = %#v; want none", jobs)
+	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 1 {
+		t.Fatalf("visible Events during uncommitted birth = %#v; want only the committed seed", events)
+	}
+	if jobs := readSessionEventQueueJobs(t, admin, sessionID); len(jobs) != 1 {
+		t.Fatalf("visible Queue jobs during uncommitted birth = %#v; want only the committed seed", jobs)
 	}
 	close(release)
 	if err := <-appendDone; err != nil {
 		t.Fatalf("AppendClientEvents after lease race: %v", err)
 	}
 	jobs := readSessionEventQueueJobs(t, admin, sessionID)
-	if len(readSessionEventLedgerRows(t, admin, sessionID)) != 1 || len(jobs) != 1 {
-		t.Fatalf("committed birth facts = events:%d jobs:%d; want 1/1", len(readSessionEventLedgerRows(t, admin, sessionID)), len(jobs))
+	if len(readSessionEventLedgerRows(t, admin, sessionID)) != 2 || len(jobs) != 2 {
+		t.Fatalf("committed birth facts = events:%d jobs:%d; want 2/2", len(readSessionEventLedgerRows(t, admin, sessionID)), len(jobs))
+	}
+	result := <-leaseDone
+	if result.err != nil || len(result.jobs) != 1 || result.jobs[0].ID != jobs[0].id {
+		t.Fatalf("Lease after birth = %#v/%v; want committed predecessor %s", result.jobs, result.err, jobs[0].id)
+	}
+	if acknowledged, err := queueStore.Ack(ctx, queue.AckRequest{
+		WorkspaceID: workspace.DefaultID, JobID: result.jobs[0].ID, LeaseToken: result.jobs[0].LeaseToken,
+	}); err != nil || !acknowledged {
+		t.Fatalf("ack predecessor = %t/%v; want true/nil", acknowledged, err)
 	}
 	leased := mustLeaseSessionEventJob(t, queueStore, sessionID, "bridge-after-birth")
-	if leased.ID != jobs[0].id {
-		t.Fatalf("post-birth lease = %s; want %s", leased.ID, jobs[0].id)
+	if leased.ID != jobs[1].id {
+		t.Fatalf("post-birth lease = %s; want %s", leased.ID, jobs[1].id)
 	}
 }
 

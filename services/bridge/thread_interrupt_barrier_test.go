@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -207,6 +208,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsLateMessageCommit(t *testing.T) 
 		RuntimeInputID: interruptID, InputKind: "interrupt_control",
 		EventIDs: []string{"evt_interrupt_barrier_control"}, SequenceFrom: 2, SequenceTo: 2,
 	})
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, interruptID, "evt_interrupt_barrier_control", 2)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
@@ -247,6 +249,7 @@ func TestPostgreSQLThreadInterruptBarrierMakesLateToolSettlementStale(t *testing
 		RuntimeInputID: interruptID, InputKind: "interrupt_control",
 		EventIDs: []string{interruptEvent}, SequenceFrom: 2, SequenceTo: 2,
 	})
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, interruptID, interruptEvent, 2)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
@@ -287,6 +290,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsSuccessorStartAndChildLifecycle(
 		RuntimeInputID: interruptID, InputKind: "interrupt_control",
 		EventIDs: []string{interruptEvent}, SequenceFrom: 1, SequenceTo: 1,
 	})
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, interruptID, interruptEvent, 1)
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 
@@ -333,6 +337,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsInternalToolRepair(t *testing.T)
 		RuntimeInputID: "rin_interrupt_barrier_internal_repair", InputKind: "interrupt_control",
 		EventIDs: []string{"evt_interrupt_barrier_internal_repair"}, SequenceFrom: 1, SequenceTo: 1,
 	})
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, "rin_interrupt_barrier_internal_repair", "evt_interrupt_barrier_internal_repair", 1)
 	request := &bridgev1.CommitInternalToolRepairRequest{
 		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 		ModelRequestId: "mreq_interrupt_barrier_internal_repair", ModelToolCallId: "call_interrupt_barrier_internal_repair",
@@ -374,6 +379,7 @@ func TestPostgreSQLColdLoadRemainsAvailableWhileInterruptBarrierIsActive(t *test
 		RuntimeInputID: "rin_interrupt_barrier_cold_control", InputKind: "interrupt_control",
 		EventIDs: []string{"evt_interrupt_barrier_cold_control"}, SequenceFrom: 2, SequenceTo: 2,
 	})
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, "rin_interrupt_barrier_cold_control", "evt_interrupt_barrier_cold_control", 2)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("interrupt-barrier-cold-load-key")
 	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
@@ -383,5 +389,85 @@ func TestPostgreSQLColdLoadRemainsAvailableWhileInterruptBarrierIsActive(t *test
 		!strings.Contains(response.GetContextJson(), `"messageSequence":1`) ||
 		!strings.Contains(response.GetContextJson(), `"type":"user.interrupt"`) {
 		t.Fatalf("cold LoadContext during active interrupt barrier = %#v/%v; want durable message and interrupt custody", response, err)
+	}
+}
+
+func TestPostgreSQLThreadInterruptBarrierIgnoresLockedTerminalHistory(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_interrupt_barrier_bounded_history"
+		threadID  = "thr_interrupt_barrier_bounded_history"
+		activeID  = "rin_interrupt_barrier_bounded_history_active"
+		activeEvt = "evt_interrupt_barrier_bounded_history_active"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, activeEvt, 1, "user.interrupt", `{}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: activeID, InputKind: "interrupt_control", EventIDs: []string{activeEvt}, SequenceFrom: 1, SequenceTo: 1,
+	})
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, activeID, activeEvt, 1)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind, event_ids_json,
+		sequence_from, sequence_to, status, created_at, updated_at
+	) SELECT 'default', $1, $2, 'rin_terminal_' || value, 'interrupt_control', '[]',
+		value + 10, value + 10, 'cancelled', clock_timestamp(), clock_timestamp()
+		FROM generate_series(1, 1000) AS value`, sessionID, threadID); err != nil {
+		t.Fatalf("seed terminal interrupt history: %v", err)
+	}
+	terminalLock, err := admin.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin terminal history lock: %v", err)
+	}
+	t.Cleanup(func() { _ = terminalLock.Rollback() })
+	if _, err := terminalLock.ExecContext(context.Background(), `SELECT runtime_input_id
+		FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id='rin_terminal_1' FOR UPDATE`); err != nil {
+		t.Fatalf("lock terminal history row: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	client := dbconnect.NewClientForTesting(runtime)
+	var active bool
+	if err := client.WithWorkspaceTx(ctx, "default", "bridge.interrupt_barrier_bounded_history", func(tx *dbconnect.Tx) error {
+		var barrier threadInterruptBarrier
+		var lookupErr error
+		barrier, active, lookupErr = activeInterruptBarrierTx(ctx, tx, "default", sessionID, threadID)
+		if lookupErr == nil && (!active || barrier.runtimeInputID != activeID) {
+			return errors.New("active interrupt barrier was not selected")
+		}
+		return lookupErr
+	}); err != nil {
+		t.Fatalf("active barrier waited on terminal history: %v", err)
+	}
+}
+
+func seedActiveInterruptQueueCustody(
+	t *testing.T,
+	db *sql.DB,
+	sessionID string,
+	threadID string,
+	runtimeInputID string,
+	eventID string,
+	sequence int64,
+) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": runtimeInputID, "event_ids": []string{eventID},
+		"sequence_from": sequence, "sequence_to": sequence, "input_kind": "interrupt_control",
+	})
+	if err != nil {
+		t.Fatalf("marshal interrupt Queue custody: %v", err)
+	}
+	store := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(db))
+	if _, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, runtimeInputID),
+		PayloadVersion: 1, PayloadJSON: payload, Priority: 100,
+		MaxAttempts: queue.DefaultMaxAttempts, Now: time.Now().UTC().Add(-time.Second),
+	}); err != nil {
+		t.Fatalf("seed active interrupt Queue custody: %v", err)
 	}
 }

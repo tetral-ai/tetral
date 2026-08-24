@@ -682,6 +682,9 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		if err != nil {
 			return err
 		}
+		if err := lockRuntimeInputQueueCustodyTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetIDs); err != nil {
+			return err
+		}
 		if command.sourceKind == "tool_use" {
 			if err := validateChildCloseCensusTx(ctx, tx, scope, childThreadID, targetIDs, command.sourceCommandID); err != nil {
 				return err

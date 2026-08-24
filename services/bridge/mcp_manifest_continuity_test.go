@@ -533,6 +533,37 @@ func mustAcceptMCPManifestChange(t *testing.T, store *PostgreSQLBridgeAPIStore, 
 	return response
 }
 
+func TestPostgreSQLMCPManifestChangeRejectsTerminatedSessionWithoutCustody(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_mcp_manifest_terminated"
+		threadID  = "thr_mcp_manifest_terminated"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='terminated'
+		WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("terminate MCP Session: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.MCPManifestLister = &constantMCPManifestLister{result: mcpManifestResult("etag-terminal", "github_issue")}
+	response, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+		WorkspaceId: "default", SessionId: sessionID, McpServerName: "github", ManifestEtag: "etag-terminal",
+	})
+	if response != nil || !isConversationMutationStaleError(err) {
+		t.Fatalf("terminated Session MCP change = %#v/%v; want typed stale", response, err)
+	}
+	var manifests, jobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_mcp_manifests WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND causal_session_id=$1 AND kind='runtime_config_update')`,
+		sessionID).Scan(&manifests, &jobs); err != nil {
+		t.Fatalf("read terminal MCP residue: %v", err)
+	}
+	if manifests != 0 || jobs != 0 {
+		t.Fatalf("terminal MCP residue = manifests:%d jobs:%d; want zero", manifests, jobs)
+	}
+}
+
 func exactBoundMCPManifestTool(t *testing.T) MCPManifestTool {
 	t.Helper()
 	tool := MCPManifestTool{Name: "github_exact", InputSchemaJSON: `{"type":"object"}`}

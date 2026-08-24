@@ -38,6 +38,23 @@ func newControlPlaneSessionStore(t *testing.T, runtime *sql.DB) *session.Postgre
 	)
 }
 
+func TestPostgreSQLSessionRuntimeMutationUsesOnePoolConnection(t *testing.T) {
+	runtime, _ := newControlPlaneSessionStoreTestDB(t)
+	runtime.SetMaxOpenConns(1)
+	runtime.SetMaxIdleConns(1)
+	store := newControlPlaneSessionStore(t, runtime)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := store.WithRuntimeMutationTx(ctx, workspace.DefaultID, "sesn_single_connection", func(tx session.Transaction) error {
+		var one int
+		return tx.QueryRowScanner(ctx, "SELECT 1").Scan(&one)
+	})
+	if err != nil {
+		t.Fatalf("Runtime mutation with one pooled connection: %v", err)
+	}
+}
+
 func TestPostgreSQLSessionStoreDeleteRecordsSandboxReleaseBeforeCommit(t *testing.T) {
 	runtime, admin := newControlPlaneSessionStoreTestDB(t)
 	ctx := context.Background()

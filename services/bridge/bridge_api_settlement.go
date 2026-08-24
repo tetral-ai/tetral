@@ -1222,9 +1222,31 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err := verifyRuntimeBindingTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		var terminatingRole string
+		if err := tx.QueryRow(ctx,
+			`SELECT role FROM session_threads
+			  WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+			request.GetScope().GetSessionThreadId(),
+		).Scan(&terminatingRole); err != nil {
+			return err
+		}
+		queueThreadIDs := []string{request.GetScope().GetSessionThreadId()}
+		if terminatingRole == "main" {
+			queueThreadIDs = nil
+		}
+		if err := lockRuntimeInputQueueCustodyTx(
+			ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), queueThreadIDs,
+		); err != nil {
+			return err
+		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
+		}
+		if threadScope.role != terminatingRole {
+			return status.Error(codes.FailedPrecondition, "runtime termination Thread role changed during arbitration")
 		}
 		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
 		if err != nil {

@@ -83,12 +83,21 @@ func (s *PostgreSQLSessionStore) WithWorkspaceTxAndCleanup(ctx context.Context, 
 	}, onCommitFailure)
 }
 
-func (s *PostgreSQLSessionStore) WithRuntimeMutationLock(ctx context.Context, ws workspace.ID, sessionID string, fn func() error) error {
+func (s *PostgreSQLSessionStore) WithRuntimeMutationTx(ctx context.Context, ws workspace.ID, sessionID string, fn func(Transaction) error) error {
 	resource, err := storage.SessionRuntimeMutationAdvisoryLockResource(string(ws), sessionID)
 	if err != nil {
 		return &ValidationError{Message: "session runtime mutation lock is invalid"}
 	}
-	return s.client.WithAdvisoryLock(ctx, "session.runtime_mutation_lock", storage.SessionRuntimeMutationAdvisoryLockCategory, resource, fn)
+	return s.client.WithWorkspaceTx(ctx, string(ws), "session.runtime_mutation", func(tx *dbconnect.Tx) error {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)", storage.SessionRuntimeMutationAdvisoryLockCategory, resource); err != nil {
+			return err
+		}
+		return fn(&postgresqlTransaction{
+			store:       s,
+			workspaceID: ws,
+			tx:          postgresqlTxAdapter{tx: tx},
+		})
+	})
 }
 
 func (s *PostgreSQLSessionStore) Get(ctx context.Context, ws workspace.ID, sessionID string) (*Session, error) {

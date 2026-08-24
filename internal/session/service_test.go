@@ -3353,7 +3353,7 @@ func newRecordingSessionStore() *recordingSessionStore {
 	}
 }
 
-func (s *recordingSessionStore) WithRuntimeMutationLock(_ context.Context, ws workspace.ID, sessionID string, fn func() error) error {
+func (s *recordingSessionStore) WithRuntimeMutationTx(ctx context.Context, ws workspace.ID, sessionID string, fn func(Transaction) error) error {
 	lockKey := string(ws) + "\x00" + sessionID
 	s.runtimeMu.Lock()
 	if s.runtimeLocks == nil {
@@ -3371,7 +3371,7 @@ func (s *recordingSessionStore) WithRuntimeMutationLock(_ context.Context, ws wo
 	s.runtimeMu.Lock()
 	s.runtimeLockCalls++
 	s.runtimeMu.Unlock()
-	return fn()
+	return s.WithWorkspaceTx(ctx, ws, fn)
 }
 
 func (s *recordingSessionStore) WithWorkspaceTx(_ context.Context, ws workspace.ID, fn func(Transaction) error) error {
