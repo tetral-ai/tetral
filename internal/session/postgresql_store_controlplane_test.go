@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -542,6 +543,69 @@ func TestPostgreSQLSessionStoreDeleteRejectsReschedulingSession(t *testing.T) {
 	}
 	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM session_resource_prefix_gc WHERE workspace_id = $1 AND session_id = $2`, string(workspace.DefaultID), sessionID); got != 0 {
 		t.Fatalf("prefix GC markers after rejected delete = %d; want 0", got)
+	}
+}
+
+func TestPostgreSQLSessionStoreDeleteRejectsCommittedRuntimeDeliveryLease(t *testing.T) {
+	runtime, admin := newControlPlaneSessionStoreTestDB(t)
+	ctx := context.Background()
+	store := newControlPlaneSessionStore(t, runtime)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	seedSessionStoreReferences(t, admin, workspace.DefaultID, "agent_leased_delete", 1, "env_leased_delete")
+	now := time.Date(2026, 8, 24, 20, 20, 0, 0, time.UTC)
+	const (
+		sessionID = "sesn_leased_delete"
+		threadID  = "thrd_leased_delete"
+		inputID   = "rin_leased_delete"
+	)
+	if err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
+		if err := tx.CreateSession(ctx, minimalStoreSession(sessionID, "agent_leased_delete", 1, "env_leased_delete", now)); err != nil {
+			return err
+		}
+		return tx.CreatePrimaryThread(ctx, &session.Thread{
+			ID: threadID, WorkspaceID: workspace.DefaultID, SessionID: sessionID,
+			CreatedAt: now, UpdatedAt: now,
+		})
+	}); err != nil {
+		t.Fatalf("create Session and Thread: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": inputID, "event_ids": []string{"evt_leased_delete"},
+		"sequence_from": 1, "sequence_to": 1, "input_kind": "messages",
+	})
+	if err != nil {
+		t.Fatalf("marshal Runtime input payload: %v", err)
+	}
+	job, err := queueStore.Enqueue(ctx, queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:    queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+		PayloadJSON:  payload, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue Runtime input: %v", err)
+	}
+	leased, err := queueStore.Lease(ctx, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-delete-race",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != job.ID {
+		t.Fatalf("lease Runtime input = %+v/%v; want %s", leased, err, job.ID)
+	}
+
+	err = store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
+		return tx.DeleteSession(ctx, sessionID)
+	})
+	var conflict *session.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("DeleteSession with live delivery lease err = %T %v; want ConflictError", err, err)
+	}
+	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM sessions WHERE id=$1 AND lifecycle_state='active' AND delete_cleanup_id IS NULL`, sessionID); got != 1 {
+		t.Fatalf("active Session after rejected delete = %d; want 1", got)
+	}
+	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.deleted'`, sessionID); got != 0 {
+		t.Fatalf("deleted Events after rejected delete = %d; want 0", got)
 	}
 }
 

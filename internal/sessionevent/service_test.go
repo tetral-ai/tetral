@@ -829,6 +829,56 @@ func TestAppendClientEventsWritesIdempotencyAndRuntimeInputQueueJobsAtomically(t
 	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
 }
 
+func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const sessionID = "sesn_event_birth_lease_race"
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
+	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	store.beforeQueueJobInsert = func() error {
+		close(paused)
+		<-release
+		return nil
+	}
+	service := NewService(store)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_birth_lease_race", messageAppendRequest("atomic birth"))
+		appendDone <- err
+	}()
+	<-paused
+	if jobs, err := queueStore.Lease(ctx, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-before-birth",
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	}); err != nil || len(jobs) != 0 {
+		t.Fatalf("Lease during uncommitted birth = %#v/%v; want no partial candidate", jobs, err)
+	}
+	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 0 {
+		t.Fatalf("visible Events during uncommitted birth = %#v; want none", events)
+	}
+	if jobs := readSessionEventQueueJobs(t, admin, sessionID); len(jobs) != 0 {
+		t.Fatalf("visible Queue jobs during uncommitted birth = %#v; want none", jobs)
+	}
+	close(release)
+	if err := <-appendDone; err != nil {
+		t.Fatalf("AppendClientEvents after lease race: %v", err)
+	}
+	jobs := readSessionEventQueueJobs(t, admin, sessionID)
+	if len(readSessionEventLedgerRows(t, admin, sessionID)) != 1 || len(jobs) != 1 {
+		t.Fatalf("committed birth facts = events:%d jobs:%d; want 1/1", len(readSessionEventLedgerRows(t, admin, sessionID)), len(jobs))
+	}
+	leased := mustLeaseSessionEventJob(t, queueStore, sessionID, "bridge-after-birth")
+	if leased.ID != jobs[0].id {
+		t.Fatalf("post-birth lease = %s; want %s", leased.ID, jobs[0].id)
+	}
+}
+
 func TestAppendClientEventsRemainsDurableBehindLeasedInterruptBarrier(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	ctx := context.Background()

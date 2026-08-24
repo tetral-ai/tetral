@@ -62,7 +62,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 			response = &bridgev1.CreateSubagentThreadResponse{Outcome: &bridgev1.CreateSubagentThreadResponse_Duplicate{Duplicate: &bridgev1.CreateSubagentThreadDuplicate{ChildThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_create"); err != nil {
@@ -90,7 +90,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err != nil {
 			return err
 		}
-		_, err = appendDeclaredSubagentInitialReceivedEventTx(ctx, tx, scopeForThread(request.GetScope(), childThreadID), envelope, now)
+		_, err = appendDeclaredSubagentReceivedEventTx(ctx, tx, scopeForThread(request.GetScope(), childThreadID), envelope, now)
 		if err != nil {
 			return err
 		}
@@ -131,7 +131,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 			response = &bridgev1.EnsureApprovalReviewerTrunkResponse{Outcome: &bridgev1.EnsureApprovalReviewerTrunkResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerTrunkDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
@@ -183,7 +183,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 			response = &bridgev1.EnsureApprovalReviewerSidecarResponse{Outcome: &bridgev1.EnsureApprovalReviewerSidecarResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerSidecarDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
@@ -257,7 +257,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 		} else if !dbconnect.IsNoRows(err) {
 			return err
 		}
-		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		isTrunk, err := validateApprovalReviewerAdmissionTargetTx(ctx, tx, request, false)
@@ -307,7 +307,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 		}
 		return nil
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.AdmitApprovalReviewInputResponse{Outcome: &bridgev1.AdmitApprovalReviewInputResponse_Stale{
 				Stale: &bridgev1.AdmitApprovalReviewInputStale{},
 			}}, nil
@@ -440,22 +440,8 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 			response = &bridgev1.DeliverInterAgentMailResponse{Outcome: &bridgev1.DeliverInterAgentMailResponse_Duplicate{Duplicate: &bridgev1.DeliverInterAgentMailDuplicate{}}}
 			return nil
 		}
-		barrier, active, err := activeSessionInterruptBarrierTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId())
-		if err != nil {
+		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
-		}
-		if active {
-			if request.GetScope().GetSessionThreadId() == barrier.sessionThreadID || request.GetTargetThreadId() != barrier.sessionThreadID {
-				return sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "session interrupt barrier is active"))
-			}
-			ctx = withInterAgentMailBarrierBirth(ctx, interAgentMailBarrierBirthAuthority{
-				workspaceID:       request.GetScope().GetWorkspaceId(),
-				sessionID:         request.GetScope().GetSessionId(),
-				runtimeInputID:    barrier.runtimeInputID,
-				interruptedThread: barrier.sessionThreadID,
-				sourceThread:      request.GetScope().GetSessionThreadId(),
-				targetThread:      request.GetTargetThreadId(),
-			})
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_message"); err != nil {
 			return err
@@ -477,8 +463,20 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 		if err != nil {
 			return err
 		}
-		if _, err := admitAgentMailDeliveryTx(ctx, tx, scopeForThread(request.GetScope(), envelope.TargetThreadID), envelope, binding, now); err != nil {
+		targetScope := scopeForThread(request.GetScope(), envelope.TargetThreadID)
+		if _, err := appendDeclaredSubagentReceivedEventTx(ctx, tx, targetScope, envelope, now); err != nil {
 			return err
+		}
+		_, targetInterrupted, err := activeInterruptBarrierTx(
+			ctx, tx, targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId(),
+		)
+		if err != nil {
+			return err
+		}
+		if !targetInterrupted {
+			if _, err := admitAgentMailDeliveryTx(ctx, tx, targetScope, envelope, binding, now); err != nil {
+				return err
+			}
 		}
 		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
 			Operation: bridgeOpDeliverInterAgentMail, IdempotencyKey: request.GetDeliveryId(), RequestHash: requestHash,
@@ -762,7 +760,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		}
 		return nil
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &closeChildLifecycleResult{stale: true}, nil
 		}
 		return nil, err
@@ -1050,7 +1048,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		return nil
 	})
 	if err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.MarkChildThreadActiveResponse{Outcome: &bridgev1.MarkChildThreadActiveResponse_Stale{Stale: &bridgev1.MarkChildThreadActiveStale{}}}, nil
 		}
 		return nil, err

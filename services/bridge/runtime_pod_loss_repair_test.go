@@ -101,7 +101,7 @@ func TestPostgreSQLRuntimePodLossSweepPreservesActiveToolOwnerAndIsIdempotent(t 
 	}
 }
 
-func TestPostgreSQLRuntimePodLossRepairsRequestUnderExactInterruptBarrier(t *testing.T) {
+func TestPostgreSQLRuntimePodLossPreservesRequestForExactInterruptOwner(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 81, "Write", "idle", false, false, false, false, true)
 	const interruptID = "rin_pod_loss_interrupt_barrier"
@@ -136,8 +136,8 @@ func TestPostgreSQLRuntimePodLossRepairsRequestUnderExactInterruptBarrier(t *tes
 		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptID).Scan(&interruptStatus); err != nil {
 		t.Fatalf("read continuing interrupt custody: %v", err)
 	}
-	if requestEnds != 1 || bindingRows != 0 || interruptStatus != "queued" {
-		t.Fatalf("interrupt-fenced repair = ends:%d bindings:%d interrupt:%s; want 1/0/queued", requestEnds, bindingRows, interruptStatus)
+	if requestEnds != 0 || bindingRows != 0 || interruptStatus != "queued" {
+		t.Fatalf("interrupt-owned pod-loss handoff = ends:%d bindings:%d interrupt:%s; want 0/0/queued", requestEnds, bindingRows, interruptStatus)
 	}
 	if err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, fixture.binding, time.Now().UTC()); err == nil {
 		t.Fatal("stale old-binding repair unexpectedly retained authority")

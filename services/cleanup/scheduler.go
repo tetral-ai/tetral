@@ -3,6 +3,7 @@ package tetralcleanup
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -66,6 +67,7 @@ func (s *Scheduler) ClaimDue(ctx context.Context, request ClaimDueRequest) ([]Cl
 		if err != nil {
 			return err
 		}
+		sort.Strings(sessionIDs)
 		type cleanupEnqueue struct {
 			sessionID    string
 			cleanupJobID string
@@ -73,6 +75,9 @@ func (s *Scheduler) ClaimDue(ctx context.Context, request ClaimDueRequest) ([]Cl
 		}
 		enqueues := make([]cleanupEnqueue, 0, len(sessionIDs))
 		for _, sessionID := range sessionIDs {
+			if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(request.WorkspaceID), sessionID); err != nil {
+				return err
+			}
 			cleanupJobID := s.newID("cleanup_")
 			queueJobID := s.newID(queue.JobIDPrefix)
 			updated, err := markCleanupEnqueuedTx(ctx, tx, request.WorkspaceID, sessionID, cleanupJobID, now)
@@ -143,8 +148,7 @@ func dueCleanupSessionsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID wor
 		    AND cleanup_job_id IS NULL
 		    AND binding_id IS NOT NULL
 		  ORDER BY cleanup_after ASC, session_id ASC
-		  LIMIT $3
-		  FOR UPDATE SKIP LOCKED`,
+		  LIMIT $3`,
 		string(workspaceID),
 		now,
 		limit,

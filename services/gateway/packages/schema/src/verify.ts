@@ -19,7 +19,7 @@
 
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
 export const PostgreSQLSchemaVersionOneChecksum =
-	"3858543d16bd7c6a8e70d751320e458acb66dead2c6156ff1c0293f301f4119e";
+	"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6";
 
 const PostgreSQLSchemaRegistry = [PostgreSQLSchemaVersionOneChecksum] as const;
 

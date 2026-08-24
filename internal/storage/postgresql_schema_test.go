@@ -772,7 +772,8 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			"created_at", "updated_at", "uploaded_at", "adopted_at",
 		},
 		"queue_jobs": {
-			"id", "workspace_id", "kind", "partition_key", "queue_partition_sequence", "dedupe_key",
+			"id", "workspace_id", "kind", "partition_key", "queue_partition_sequence",
+			"causal_session_id", "delivery_scope", "delivery_thread_id", "control_class", "dedupe_key",
 			"payload_version", "status", "payload_json", "priority",
 			"lease_token", "leased_by", "leased_at", "leased_until",
 			"attempt_count", "defer_count", "max_attempts", "available_at", "created_at",
@@ -916,12 +917,18 @@ func assertQueuePartitionSequenceSchema(t *testing.T, db *sql.DB, schema string)
 		t.Fatal("queue partition sequence index is not unique")
 	}
 	if columns := readIndexColumns(t, db, schema, "idx_queue_jobs_available"); !equalStringSlices(columns, []string{
-		"workspace_id", "kind", "status", "partition_key", "priority", "available_at", "queue_partition_sequence",
+		"workspace_id", "kind", "status", "causal_session_id", "delivery_scope", "delivery_thread_id", "control_class", "priority", "available_at", "queue_partition_sequence",
 	}) {
 		t.Fatalf("queue available index columns = %v; want queue scan order", columns)
 	}
 	if predicate := readIndexPredicate(t, db, schema, "idx_queue_jobs_available"); !strings.Contains(predicate, "status = 'pending'") {
 		t.Fatalf("queue available index predicate = %q; want pending jobs only", predicate)
+	}
+	if columns := readIndexColumns(t, db, schema, "idx_queue_jobs_leased_thread"); !equalStringSlices(columns, []string{"workspace_id", "causal_session_id", "delivery_thread_id"}) {
+		t.Fatalf("queue leased Thread index columns = %v", columns)
+	}
+	if columns := readIndexColumns(t, db, schema, "idx_queue_jobs_leased_session"); !equalStringSlices(columns, []string{"workspace_id", "causal_session_id"}) {
+		t.Fatalf("queue leased Session index columns = %v", columns)
 	}
 
 	for _, constraint := range []struct {

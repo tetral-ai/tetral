@@ -39,7 +39,7 @@ func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testi
 	}
 }
 
-func TestPostgreSQLReviewerOutcomeWritesAreStaleBehindInterruptBarrier(t *testing.T) {
+func TestPostgreSQLReviewerOutcomeWritesCommitDuringUnrelatedThreadInterrupt(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID  = "sesn_reviewer_outcome_barrier"
@@ -66,8 +66,8 @@ func TestPostgreSQLReviewerOutcomeWritesAreStaleBehindInterruptBarrier(t *testin
 			Scope: bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID), RuntimeWriteId: writeID,
 			ModelRequestId: "mreq_reviewer_outcome_barrier", EventType: eventType, PayloadJson: `{"type":"` + eventType + `"}`,
 		})
-		if err != nil || response.GetStale() == nil {
-			t.Fatalf("late %s behind interrupt barrier = %#v/%v; want typed stale", eventType, response, err)
+		if err != nil || response.GetCommitted() == nil {
+			t.Fatalf("Reviewer %s during parent interrupt = %#v/%v; want committed", eventType, response, err)
 		}
 		var events, operations int
 		if err := admin.QueryRowContext(context.Background(), `SELECT
@@ -76,8 +76,8 @@ func TestPostgreSQLReviewerOutcomeWritesAreStaleBehindInterruptBarrier(t *testin
 			sessionID, reviewerID, eventType, writeID).Scan(&events, &operations); err != nil {
 			t.Fatalf("read late %s residue: %v", eventType, err)
 		}
-		if events != 0 || operations != 0 {
-			t.Fatalf("late %s events/operations = %d/%d; want zero parent-affecting writes", eventType, events, operations)
+		if events != 1 || operations != 1 {
+			t.Fatalf("Reviewer %s events/operations = %d/%d; want one Reviewer-lane settlement", eventType, events, operations)
 		}
 	}
 }

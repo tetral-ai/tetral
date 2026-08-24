@@ -13,29 +13,32 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-// The Session row is the ordering boundary for interrupt birth and every
-// conversation writer. Interrupt Inbox custody is the durable mutation barrier;
-// Queue ACK remains the separate delivery-barrier release owned by JobRunner.
-type sessionInterruptBarrier struct {
+// Interrupt Inbox custody is a Thread-local mutation barrier. Queue ACK remains
+// the separate delivery-barrier release owned by JobRunner. Session-wide
+// infrastructure joins the common Session arbitration lock before consulting
+// barriers across all Threads.
+type threadInterruptBarrier struct {
 	runtimeInputID  string
 	sessionThreadID string
 }
 
-// activeSessionInterruptDeliveryBarrierTx extends only the input-admission
+// activeThreadInterruptDeliveryBarrierTx extends only the input-admission
 // edge through the receipt-to-ACK window. The committed Inbox and receipt end
 // ordinary closeout exclusion, while the still-pending exact Queue custody
 // prevents a preplanned command from opening a successor before JobRunner ACK.
-func activeSessionInterruptDeliveryBarrierTx(
+func activeThreadInterruptDeliveryBarrierTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	workspaceID string,
 	sessionID string,
+	sessionThreadID string,
 ) (bool, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT inbox.runtime_input_id
 		   FROM session_runtime_inbox inbox
 		  WHERE inbox.workspace_id = $1
 		    AND inbox.session_id = $2
+		    AND inbox.session_thread_id = $3
 		    AND inbox.input_kind = 'interrupt_control'
 		    AND inbox.status = 'committed'
 		    AND EXISTS (
@@ -54,6 +57,7 @@ func activeSessionInterruptDeliveryBarrierTx(
 		  FOR UPDATE OF inbox`,
 		workspaceID,
 		sessionID,
+		sessionThreadID,
 	)
 	if err != nil {
 		return false, err
@@ -111,43 +115,37 @@ func activeSessionInterruptDeliveryBarrierTx(
 	return false, nil
 }
 
-func requireSessionInputDeliveryAllowedTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
-	active, err := activeSessionInterruptDeliveryBarrierTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
+func requireThreadInputDeliveryAllowedTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	active, err := activeThreadInterruptDeliveryBarrierTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId())
 	if err != nil || !active {
 		return err
 	}
-	return sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "session interrupt delivery barrier is active"))
+	return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "thread interrupt delivery barrier is active"))
 }
 
 type interruptCloseoutContextKey struct{}
-type interruptBarrierBirthContextKey struct{}
 type runtimePodLossInterruptRepairContextKey struct{}
-type interAgentMailBarrierBirthContextKey struct{}
+
+type interruptCloseoutAuthority struct {
+	workspaceID     string
+	sessionID       string
+	sessionThreadID string
+	runtimeInputID  string
+}
 
 type runtimePodLossInterruptRepairAuthority struct {
-	workspaceID       string
-	sessionID         string
-	runtimeInputID    string
-	bindingID         string
-	bindingGeneration int64
-	targetPodUID      string
+	workspaceID             string
+	sessionID               string
+	runtimeInputIDsByThread map[string]string
+	bindingID               string
+	bindingGeneration       int64
+	targetPodUID            string
 }
 
-type interAgentMailBarrierBirthAuthority struct {
-	workspaceID       string
-	sessionID         string
-	runtimeInputID    string
-	interruptedThread string
-	sourceThread      string
-	targetThread      string
-}
-
-func withInterruptBarrierBirth(ctx context.Context) context.Context {
-	return context.WithValue(ctx, interruptBarrierBirthContextKey{}, true)
-}
-
-func withInterruptCloseout(ctx context.Context, runtimeInputID string) context.Context {
-	return context.WithValue(ctx, interruptCloseoutContextKey{}, runtimeInputID)
+func withInterruptCloseout(ctx context.Context, workspaceID string, sessionID string, sessionThreadID string, runtimeInputID string) context.Context {
+	return context.WithValue(ctx, interruptCloseoutContextKey{}, interruptCloseoutAuthority{
+		workspaceID: workspaceID, sessionID: sessionID, sessionThreadID: sessionThreadID, runtimeInputID: runtimeInputID,
+	})
 }
 
 func withRuntimePodLossInterruptRepair(ctx context.Context, authority runtimePodLossInterruptRepairAuthority) context.Context {
@@ -159,23 +157,19 @@ func runtimePodLossInterruptRepairFromContext(ctx context.Context) (runtimePodLo
 	return authority, ok
 }
 
-func withInterAgentMailBarrierBirth(ctx context.Context, authority interAgentMailBarrierBirthAuthority) context.Context {
-	return context.WithValue(ctx, interAgentMailBarrierBirthContextKey{}, authority)
+func interruptCloseoutAuthorityFromContext(ctx context.Context) (interruptCloseoutAuthority, bool) {
+	authority, ok := ctx.Value(interruptCloseoutContextKey{}).(interruptCloseoutAuthority)
+	return authority, ok
 }
 
-func interruptCloseoutRuntimeInputID(ctx context.Context) string {
-	value, _ := ctx.Value(interruptCloseoutContextKey{}).(string)
-	return value
-}
-
-func activeSessionInterruptBarrierTx(
+func activeInterruptBarriersTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	workspaceID string,
 	sessionID string,
-) (sessionInterruptBarrier, bool, error) {
-	// Queue partition sequence is the Session-wide interrupt election order.
-	// Inbox sequence_to is Thread-local and cannot order custody across Threads.
+	sessionThreadID string,
+) (map[string]threadInterruptBarrier, error) {
+	// Queue partition sequence orders interrupt custody within one Thread lane.
 	rows, err := tx.Query(ctx,
 		`SELECT inbox.runtime_input_id,
 		        inbox.session_thread_id,
@@ -200,80 +194,93 @@ func activeSessionInterruptBarrierTx(
 		    AND queue.status IN ('pending', 'leased')
 		  WHERE inbox.workspace_id = $1
 		    AND inbox.session_id = $2
+		    AND ($3 = '' OR inbox.session_thread_id = $3)
 		    AND inbox.input_kind = 'interrupt_control'
 		  ORDER BY queue.queue_partition_sequence NULLS LAST, inbox.created_at, inbox.runtime_input_id
 		  FOR UPDATE OF inbox`,
 		workspaceID,
 		sessionID,
+		sessionThreadID,
 	)
 	if err != nil {
-		return sessionInterruptBarrier{}, false, err
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var active sessionInterruptBarrier
+	active := make(map[string]threadInterruptBarrier)
 	for rows.Next() {
 		var runtimeInputID string
 		var sessionThreadID string
 		var statusValue string
 		var hasReceipt bool
 		if err := rows.Scan(&runtimeInputID, &sessionThreadID, &statusValue, &hasReceipt); err != nil {
-			return sessionInterruptBarrier{}, false, err
+			return nil, err
 		}
 		switch statusValue {
 		case "queued", "delivering", "accepted":
 			if hasReceipt {
-				return sessionInterruptBarrier{}, false, status.Error(codes.FailedPrecondition, "active interrupt Inbox already has a closeout receipt")
+				return nil, status.Error(codes.FailedPrecondition, "active interrupt Inbox already has a closeout receipt")
 			}
-			if active.runtimeInputID == "" {
-				active.runtimeInputID = runtimeInputID
-				active.sessionThreadID = sessionThreadID
+			if _, exists := active[sessionThreadID]; !exists {
+				active[sessionThreadID] = threadInterruptBarrier{runtimeInputID: runtimeInputID, sessionThreadID: sessionThreadID}
 			}
 		case "committed":
 			if !hasReceipt {
-				return sessionInterruptBarrier{}, false, status.Error(codes.FailedPrecondition, "committed interrupt Inbox is missing its closeout receipt")
+				return nil, status.Error(codes.FailedPrecondition, "committed interrupt Inbox is missing its closeout receipt")
 			}
 		case "cancelled", "dead_lettered":
 			if hasReceipt {
-				return sessionInterruptBarrier{}, false, status.Error(codes.FailedPrecondition, "terminal interrupt Inbox conflicts with a closeout receipt")
+				return nil, status.Error(codes.FailedPrecondition, "terminal interrupt Inbox conflicts with a closeout receipt")
 			}
 		default:
-			return sessionInterruptBarrier{}, false, status.Errorf(codes.FailedPrecondition, "interrupt Inbox has invalid custody status %q", statusValue)
+			return nil, status.Errorf(codes.FailedPrecondition, "interrupt Inbox has invalid custody status %q", statusValue)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return sessionInterruptBarrier{}, false, err
+		return nil, err
 	}
-	return active, active.runtimeInputID != "", nil
+	return active, nil
 }
 
-func requireSessionMutationAllowedTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+func activeInterruptBarrierTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	sessionThreadID string,
+) (threadInterruptBarrier, bool, error) {
+	if sessionThreadID == "" {
+		return threadInterruptBarrier{}, false, status.Error(codes.InvalidArgument, "interrupt barrier lookup requires a Thread")
+	}
+	barriers, err := activeInterruptBarriersTx(ctx, tx, workspaceID, sessionID, sessionThreadID)
+	if err != nil {
+		return threadInterruptBarrier{}, false, err
+	}
+	barrier, active := barriers[sessionThreadID]
+	return barrier, active, nil
+}
+
+func requireThreadMutationAllowedTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
 	// Only validateInterruptLeaseRefTx and exact final-lease exhaustion mint this
 	// transaction-local authority. Once minted, the closeout may pass through
 	// intermediate Inbox=committed state before its receipt row is inserted.
-	if interruptCloseoutRuntimeInputID(ctx) != "" {
-		return nil
+	if authority, ok := interruptCloseoutAuthorityFromContext(ctx); ok {
+		if authority.workspaceID == scope.GetWorkspaceId() && authority.sessionID == scope.GetSessionId() &&
+			authority.sessionThreadID == scope.GetSessionThreadId() && authority.runtimeInputID != "" {
+			return nil
+		}
+		return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout authority does not own this Thread"))
 	}
-	barrier, active, err := activeSessionInterruptBarrierTx(
+	_, active, err := activeInterruptBarrierTx(
 		ctx,
 		tx,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
 	)
 	if err != nil || !active {
 		return err
 	}
-	if authority, ok := ctx.Value(interAgentMailBarrierBirthContextKey{}).(interAgentMailBarrierBirthAuthority); ok &&
-		authority.workspaceID == scope.GetWorkspaceId() && authority.sessionID == scope.GetSessionId() &&
-		authority.runtimeInputID == barrier.runtimeInputID && authority.interruptedThread == barrier.sessionThreadID &&
-		(scope.GetSessionThreadId() == authority.sourceThread || scope.GetSessionThreadId() == authority.targetThread) &&
-		authority.sourceThread != authority.interruptedThread &&
-		authority.targetThread == authority.interruptedThread {
-		return nil
-	}
-	if allowed, _ := ctx.Value(interruptBarrierBirthContextKey{}).(bool); allowed {
-		return nil
-	}
-	return sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "session interrupt barrier is active"))
+	return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "thread interrupt barrier is active"))
 }
 
 func validateInterruptLeaseRefTx(
@@ -292,12 +299,12 @@ func validateInterruptLeaseRefTx(
 	if ref.GetPartitionKey() != expectedPartition || ref.GetDedupeKey() != expectedDedupe {
 		return status.Error(codes.FailedPrecondition, "interrupt closeout lease binding is invalid")
 	}
-	barrier, active, err := activeSessionInterruptBarrierTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
+	barrier, active, err := activeInterruptBarrierTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId())
 	if err != nil {
 		return err
 	}
 	if !active || barrier.runtimeInputID != runtimeInputID {
-		return sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout barrier is stale"))
+		return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout barrier is stale"))
 	}
 	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
 		WorkspaceID:  workspaceID,
@@ -311,7 +318,7 @@ func validateInterruptLeaseRefTx(
 		return err
 	}
 	if !live {
-		return sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout lease is stale"))
+		return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "interrupt closeout lease is stale"))
 	}
 	var payloadSessionID, payloadThreadID, payloadRuntimeInputID, payloadInputKind string
 	if err := tx.QueryRow(ctx,

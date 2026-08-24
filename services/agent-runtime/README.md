@@ -56,6 +56,27 @@ Invariants a replacement must preserve:
    observes a half-hydrated entry.
 4. Hot state is not the source of truth.
 
+### Session infrastructure and Thread execution
+
+`SessionEntry` owns shared binding-local infrastructure and the `controlGate`.
+Each `ThreadEntry` independently owns its command queue, `ContextManager`,
+Reducer/checkpoint, and one `ThreadRunSlot`:
+
+```text
+SessionEntry
+  -> shared configuration / binding / cleanup control
+  -> ThreadEntry A -> accepted inputs -> runSlot A -> ThreadLoop A
+  -> ThreadEntry B -> accepted inputs -> runSlot B -> ThreadLoop B
+```
+
+Sibling run slots may execute concurrently. An interrupt or close addresses one
+ThreadEntry and cannot make another Thread's custody stale. Session-wide config
+installation and cleanup still use `SessionEntry.controlGate`; config returns
+`control_busy` while any resident Thread is installing or running, then applies
+once every run slot is idle. Durable delivery exclusion is owned by Queue and
+Bridge, while `threadRunCanStart`, `startThreadRunUnderControl`, and
+`applyRuntimeConfigPatch` own the corresponding hot-state rules.
+
 ### `run_slot` — single-owner run guard
 
 At most one owner run per thread. Many callers may join that owner. Inputs

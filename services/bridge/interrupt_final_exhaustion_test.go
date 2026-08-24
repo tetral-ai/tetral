@@ -501,6 +501,79 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 	}
 }
 
+func TestPostgreSQLJobRunnerFinalChildInterruptExhaustionPreservesSessionAndSiblings(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID       = "sesn_child_interrupt_final_exhaustion"
+		mainThreadID    = "thr_child_interrupt_final_main"
+		childThreadID   = "thr_child_interrupt_final_target"
+		siblingThreadID = "thr_child_interrupt_final_sibling"
+		bindingID       = "bind_child_interrupt_final_exhaustion"
+		podUID          = "pod_child_interrupt_final_exhaustion"
+		turnID          = "evt_child_interrupt_final_running"
+		interruptID     = "rin_child_interrupt_final_exhaustion"
+		interruptEvent  = "evt_child_interrupt_final_exhaustion"
+	)
+	now := time.Now().UTC().Add(-time.Minute)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, siblingThreadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, "evt_child_interrupt_final_created", 1,
+		"session.thread_created", `{"type":"session.thread_created","parent_thread_id":"`+mainThreadID+`","source_tool_use_event_id":"evt_child_interrupt_final_spawn"}`)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	scope := bridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
+		SET status='running' WHERE workspace_id='default' AND session_id=$1 AND id IN ($2,$3)`,
+		sessionID, mainThreadID, siblingThreadID); err != nil {
+		t.Fatalf("seed active parent and sibling: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, interruptEvent, 3, "user.interrupt", `{"type":"user.interrupt"}`)
+	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: childThreadID,
+		RuntimeInputID: interruptID, InputKind: "interrupt_control", EventIDs: []string{interruptEvent}, SequenceFrom: 3, SequenceTo: 3,
+	})
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, childThreadID, interruptID, "interrupt_control", interruptEvent, 3, 1, now)
+	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseOwner: "child-interrupt-final-exhaustion", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run final child interrupt owner: %v", err)
+	}
+
+	var sessionStatus, mainStatus, childStatus, siblingStatus, inboxStatus, queueStatus string
+	var bindings, childTerminalEvents, sessionTerminalEvents, completionMails int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$3),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$4),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$5),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$6),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='session.thread_status_terminated'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_terminated'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='agent.thread_message_sent')`,
+		sessionID, mainThreadID, childThreadID, siblingThreadID, interruptID,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
+	).Scan(&sessionStatus, &mainStatus, &childStatus, &siblingStatus, &inboxStatus, &queueStatus,
+		&bindings, &childTerminalEvents, &sessionTerminalEvents, &completionMails); err != nil {
+		t.Fatalf("read final child interrupt facts: %v", err)
+	}
+	if sessionStatus != "running" || mainStatus != "running" || childStatus != "failed" || siblingStatus != "running" ||
+		inboxStatus != "cancelled" || queueStatus != queue.StatusCancelled || bindings != 1 || childTerminalEvents != 1 ||
+		sessionTerminalEvents != 0 || completionMails != 1 || deliverer.deliveries != 0 {
+		t.Fatalf("child final exhaustion = Session %s, Threads %s/%s/%s, Inbox/Queue %s/%s, bindings/child terminal/session terminal/mail/runtime %d/%d/%d/%d/%d",
+			sessionStatus, mainStatus, childStatus, siblingStatus, inboxStatus, queueStatus,
+			bindings, childTerminalEvents, sessionTerminalEvents, completionMails, deliverer.deliveries)
+	}
+}
+
 func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

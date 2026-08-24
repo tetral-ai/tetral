@@ -102,10 +102,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			if err := validateInterruptLeaseRefTx(ctx, tx, request.GetScope(), key, request.GetInterruptLeaseRef()); err != nil {
 				return err
 			}
-			mutationCtx = withInterruptCloseout(ctx, key)
+			mutationCtx = withInterruptCloseout(ctx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), key)
 		} else if request.GetInterruptLeaseRef() != nil {
 			return status.Error(codes.InvalidArgument, "interrupt lease authority is not valid for ordinary input")
-		} else if err := requireSessionInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		} else if err := requireThreadInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		threadScope, err := lockThreadMutationTx(mutationCtx, tx, request.GetScope())
@@ -140,7 +140,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 		return err
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_BarrierStale{BarrierStale: &bridgev1.CommitInputsBarrierStale{}}}, nil
 		}
 		if isScopeSupersededError(err) && status.Code(err) == codes.FailedPrecondition {

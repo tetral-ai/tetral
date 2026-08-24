@@ -835,12 +835,12 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 	if _, err := bridgeStore.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: siblingScope, DeliveryId: agentMailDeliveryID(lateMail, grandchildID), TargetThreadId: grandchildID,
 		SourceToolUseEventId: lateMail, Content: "must be stale",
-	}); !isSessionInterruptBarrierStaleError(err) {
+	}); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source mail = %v; want barrier stale", err)
 	}
 	if _, err := bridgeStore.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: siblingScope, SourceToolUseEventId: lateChild, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
-	}); !isSessionInterruptBarrierStaleError(err) {
+	}); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child birth = %v; want barrier stale", err)
 	}
 	// The two rejected Tool sources are timing fixtures, not Runtime history.

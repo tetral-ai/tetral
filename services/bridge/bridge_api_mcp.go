@@ -1157,6 +1157,9 @@ func transitionMCPManifestUnreadyWithDeliveryTx(ctx context.Context, tx *dbconne
 }
 
 func acquireMCPManifestAcceptanceLockTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string) error {
+	if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
+		return err
+	}
 	sum := sha256.Sum256([]byte(workspaceID + "\x00" + sessionID + "\x00" + mcpServerName))
 	resource := int32(binary.BigEndian.Uint32(sum[:4]))
 	_, err := tx.Exec(ctx,

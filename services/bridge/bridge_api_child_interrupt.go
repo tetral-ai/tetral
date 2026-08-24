@@ -45,7 +45,6 @@ type childControlCommand struct {
 }
 
 func (s *PostgreSQLBridgeAPIStore) AdmitChildInterrupt(ctx context.Context, request *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error) {
-	ctx = withInterruptBarrierBirth(ctx)
 	if request.GetScope() == nil || request.GetSourceToolUseEventId() == "" || !validActorIdentity(request.GetTargetChildThreadId()) ||
 		(request.GetAction() != bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_INTERRUPT && request.GetAction() != bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE) {
 		err := status.Error(codes.InvalidArgument, "child interrupt scope, source, target, and action are required")

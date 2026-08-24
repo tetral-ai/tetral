@@ -48,7 +48,11 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 }
 
 func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, int, error) {
-	_, interruptRepair := runtimePodLossInterruptRepairFromContext(ctx)
+	interruptRepair, hasInterruptRepair := runtimePodLossInterruptRepairFromContext(ctx)
+	interruptedThreads := map[string]string(nil)
+	if hasInterruptRepair {
+		interruptedThreads = interruptRepair.runtimeInputIDsByThread
+	}
 	handedOff, err := handOffLostRuntimeAcceptedInputsTx(ctx, tx, workspaceID, sessionID, binding, now)
 	if err != nil {
 		return 0, 0, err
@@ -61,13 +65,12 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	if err != nil {
 		return 0, 0, err
 	}
-	var toolUses []runtimeOrphanToolUse
-	if !interruptRepair {
-		toolUses, err = runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
-		if err != nil {
-			return 0, 0, err
-		}
+	starts = filterRuntimePodLostRequestStarts(starts, interruptedThreads)
+	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
+	if err != nil {
+		return 0, 0, err
 	}
+	toolUses = filterRuntimePodLostToolUses(toolUses, interruptedThreads)
 	repaired := handedOff
 	for _, start := range starts {
 		inserted, err := insertRuntimePodLostRequestEndTx(ctx, tx, workspaceID, sessionID, binding, start, now)
@@ -77,9 +80,6 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 		if inserted {
 			repaired++
 		}
-	}
-	if interruptRepair {
-		return repaired, handedOff, nil
 	}
 	for _, toolUse := range toolUses {
 		inserted, err := insertRuntimePodLostToolResultTx(ctx, tx, workspaceID, sessionID, binding, toolUse, now)
@@ -101,22 +101,66 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
 		return 0, 0, err
 	}
-	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs, binding, now)
+	uninterruptedThreadIDs := filterRuntimePodLostThreadIDs(affected.ThreadIDs, interruptedThreads)
+	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, uninterruptedThreadIDs, binding, now)
 	if err != nil {
 		return 0, 0, err
 	}
 	repaired += deliveryRepaired
 	for _, start := range starts {
+		if _, interrupted := interruptedThreads[start.SessionThreadID]; interrupted {
+			continue
+		}
 		if err := retainRuntimePodLostToolPairsTx(ctx, tx, workspaceID, sessionID, start); err != nil {
 			return 0, 0, err
 		}
 	}
+	affected.ThreadIDs = uninterruptedThreadIDs
 	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, affected, binding, now)
 	if err != nil {
 		return 0, 0, err
 	}
 	repaired += liveScopesSettled
 	return repaired, handedOff, nil
+}
+
+func filterRuntimePodLostThreadIDs(threadIDs []string, interrupted map[string]string) []string {
+	if len(interrupted) == 0 {
+		return threadIDs
+	}
+	filtered := make([]string, 0, len(threadIDs))
+	for _, threadID := range threadIDs {
+		if _, blocked := interrupted[threadID]; !blocked {
+			filtered = append(filtered, threadID)
+		}
+	}
+	return filtered
+}
+
+func filterRuntimePodLostRequestStarts(starts []runtimeOpenRequestStart, interrupted map[string]string) []runtimeOpenRequestStart {
+	if len(interrupted) == 0 {
+		return starts
+	}
+	filtered := make([]runtimeOpenRequestStart, 0, len(starts))
+	for _, start := range starts {
+		if _, blocked := interrupted[start.SessionThreadID]; !blocked {
+			filtered = append(filtered, start)
+		}
+	}
+	return filtered
+}
+
+func filterRuntimePodLostToolUses(toolUses []runtimeOrphanToolUse, interrupted map[string]string) []runtimeOrphanToolUse {
+	if len(interrupted) == 0 {
+		return toolUses
+	}
+	filtered := make([]runtimeOrphanToolUse, 0, len(toolUses))
+	for _, toolUse := range toolUses {
+		if _, blocked := interrupted[toolUse.SessionThreadID]; !blocked {
+			filtered = append(filtered, toolUse)
+		}
+	}
+	return filtered
 }
 
 // retainRuntimePodLostToolPairsTx preserves the committed Assistant projection
@@ -1162,18 +1206,18 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 		// The census retains only the fence identity. Once that fence wins, the
 		// current durable row supplies the full binding facts consumed by closeout.
 		binding = current
-		barrier, barrierActive, err := activeSessionInterruptBarrierTx(ctx, tx, workspaceID, sessionID)
+		barriers, err := activeInterruptBarriersTx(ctx, tx, workspaceID, sessionID, "")
 		if err != nil {
 			return err
 		}
-		if barrierActive {
+		if len(barriers) > 0 {
+			interruptsByThread := make(map[string]string, len(barriers))
+			for threadID, barrier := range barriers {
+				interruptsByThread[threadID] = barrier.runtimeInputID
+			}
 			ctx = withRuntimePodLossInterruptRepair(ctx, runtimePodLossInterruptRepairAuthority{
-				workspaceID:       workspaceID,
-				sessionID:         sessionID,
-				runtimeInputID:    barrier.runtimeInputID,
-				bindingID:         binding.BindingID,
-				bindingGeneration: binding.BindingGeneration,
-				targetPodUID:      binding.PodUID,
+				workspaceID: workspaceID, sessionID: sessionID, runtimeInputIDsByThread: interruptsByThread,
+				bindingID: binding.BindingID, bindingGeneration: binding.BindingGeneration, targetPodUID: binding.PodUID,
 			})
 		}
 		if requireActive {
@@ -1580,17 +1624,21 @@ func lockRuntimePodLossRequestEndMutationTx(ctx context.Context, tx *dbconnect.T
 	if !ok {
 		return lockThreadMutationTx(ctx, tx, scope)
 	}
-	if authority.workspaceID != scope.GetWorkspaceId() || authority.sessionID != scope.GetSessionId() ||
-		authority.runtimeInputID == "" || authority.bindingID != scope.GetBinding().GetBindingId() ||
-		authority.bindingGeneration != scope.GetBinding().GetBindingGeneration() || authority.targetPodUID != scope.GetBinding().GetTargetPodUid() {
-		return threadMutationScope{}, sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "pod-loss interrupt repair authority is stale"))
+	runtimeInputID, interrupted := authority.runtimeInputIDsByThread[scope.GetSessionThreadId()]
+	if !interrupted {
+		return lockThreadMutationTx(ctx, tx, scope)
 	}
-	barrier, active, err := activeSessionInterruptBarrierTx(ctx, tx, authority.workspaceID, authority.sessionID)
+	if authority.workspaceID != scope.GetWorkspaceId() || authority.sessionID != scope.GetSessionId() ||
+		runtimeInputID == "" || authority.bindingID != scope.GetBinding().GetBindingId() ||
+		authority.bindingGeneration != scope.GetBinding().GetBindingGeneration() || authority.targetPodUID != scope.GetBinding().GetTargetPodUid() {
+		return threadMutationScope{}, threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "pod-loss interrupt repair authority is stale"))
+	}
+	barrier, active, err := activeInterruptBarrierTx(ctx, tx, authority.workspaceID, authority.sessionID, scope.GetSessionThreadId())
 	if err != nil {
 		return threadMutationScope{}, err
 	}
-	if !active || barrier.runtimeInputID != authority.runtimeInputID {
-		return threadMutationScope{}, sessionInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "pod-loss interrupt repair barrier is stale"))
+	if !active || barrier.runtimeInputID != runtimeInputID {
+		return threadMutationScope{}, threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "pod-loss interrupt repair barrier is stale"))
 	}
 	current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, authority.workspaceID, authority.sessionID)
 	if err != nil {

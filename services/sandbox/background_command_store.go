@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -577,6 +578,9 @@ func enqueueBackgroundReconcileTx(ctx context.Context, tx *dbconnect.Tx, workspa
 }
 
 func lockBackgroundSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
+	if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, workspaceID, sessionID); err != nil {
+		return err
+	}
 	var locked string
 	err := tx.QueryRow(ctx, `SELECT id FROM sessions WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, workspaceID, sessionID).Scan(&locked)
 	if dbconnect.IsNoRows(err) {

@@ -1112,6 +1112,10 @@ const (
 		kind TEXT NOT NULL,
 		partition_key TEXT NOT NULL,
 		queue_partition_sequence BIGINT NOT NULL,
+		causal_session_id TEXT,
+		delivery_scope TEXT NOT NULL DEFAULT 'partition',
+		delivery_thread_id TEXT,
+		control_class TEXT NOT NULL DEFAULT 'ordinary',
 		dedupe_key TEXT,
 		payload_version INTEGER NOT NULL DEFAULT 1,
 		status TEXT NOT NULL,
@@ -1138,6 +1142,13 @@ const (
 		CONSTRAINT queue_jobs_status_shape CHECK (status IN ('pending', 'leased', 'acknowledged', 'cancelled', 'dead_lettered')),
 		CONSTRAINT queue_jobs_payload_version_shape CHECK (payload_version > 0),
 		CONSTRAINT queue_jobs_partition_sequence_shape CHECK (queue_partition_sequence > 0),
+		CONSTRAINT queue_jobs_delivery_scope_shape CHECK (delivery_scope IN ('partition', 'thread', 'session')),
+		CONSTRAINT queue_jobs_control_class_shape CHECK (control_class IN ('ordinary', 'interrupt', 'agent_mail')),
+		CONSTRAINT queue_jobs_delivery_authority_shape CHECK (
+			(delivery_scope = 'partition' AND causal_session_id IS NULL AND delivery_thread_id IS NULL AND control_class = 'ordinary')
+			OR (delivery_scope = 'thread' AND causal_session_id IS NOT NULL AND delivery_thread_id IS NOT NULL)
+			OR (delivery_scope = 'session' AND causal_session_id IS NOT NULL AND delivery_thread_id IS NULL AND control_class = 'ordinary')
+		),
 		CONSTRAINT queue_jobs_attempt_count_shape CHECK (attempt_count >= 0),
 		CONSTRAINT queue_jobs_defer_count_shape CHECK (defer_count >= 0),
 		CONSTRAINT queue_jobs_max_attempts_shape CHECK (max_attempts >= 0),
@@ -1687,9 +1698,11 @@ END $$`
 	createPostgreSQLSessionProviderAuthActiveSessionIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_provider_auth_active_session ON session_provider_auth(workspace_id, session_id) WHERE deleted_at IS NULL`
 	createPostgreSQLPlatformProviderKeysProviderStatusIndex = `CREATE INDEX IF NOT EXISTS idx_platform_provider_keys_provider_status ON platform_provider_keys(provider_id, status, priority, key_id)` //nolint:gosec // Provider key-pool index name, not a secret value.
 	createPostgreSQLQueueJobsActiveDedupeIndex              = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_active_dedupe ON queue_jobs(workspace_id, dedupe_key) WHERE status IN ('pending', 'leased')`
-	createPostgreSQLQueueJobsLeasedPartitionIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_leased_partition ON queue_jobs(workspace_id, partition_key) WHERE status = 'leased'`
+	createPostgreSQLQueueJobsLeasedPartitionIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_leased_partition ON queue_jobs(workspace_id, partition_key) WHERE status = 'leased' AND delivery_scope = 'partition'`
+	createPostgreSQLQueueJobsLeasedThreadIndex              = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_leased_thread ON queue_jobs(workspace_id, causal_session_id, delivery_thread_id) WHERE status = 'leased' AND delivery_scope = 'thread'`
+	createPostgreSQLQueueJobsLeasedSessionIndex             = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_leased_session ON queue_jobs(workspace_id, causal_session_id) WHERE status = 'leased' AND delivery_scope = 'session'`
 	createPostgreSQLQueueJobsPartitionSequenceIndex         = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_partition_sequence ON queue_jobs(workspace_id, partition_key, queue_partition_sequence)`
-	createPostgreSQLQueueJobsAvailableIndex                 = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_available ON queue_jobs(workspace_id, kind, status, partition_key, priority DESC, available_at, queue_partition_sequence) WHERE status = 'pending'`
+	createPostgreSQLQueueJobsAvailableIndex                 = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_available ON queue_jobs(workspace_id, kind, status, causal_session_id, delivery_scope, delivery_thread_id, control_class, priority DESC, available_at, queue_partition_sequence) WHERE status = 'pending'`
 	createPostgreSQLQueueJobsSandboxTerminalRetentionIndex  = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_sandbox_terminal_retention ON queue_jobs(COALESCE(acknowledged_at, cancelled_at, dead_lettered_at), id) WHERE kind IN ('sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile') AND status IN ('acknowledged', 'cancelled', 'dead_lettered')`
 	createPostgreSQLQueueJobsSandboxSessionCleanupIndex     = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_sandbox_session_cleanup ON queue_jobs(workspace_id, (payload_json::jsonb ->> 'session_id'), status) WHERE kind IN ('sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')`
 	createPostgreSQLSessionResourcesSessionSeqIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resources_session_seq ON session_resources(workspace_id, session_id, storage_sequence)`
@@ -1963,6 +1976,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_platform_provider_keys_provider_status", createPostgreSQLPlatformProviderKeysProviderStatusIndex},
 		{"index_queue_jobs_active_dedupe", createPostgreSQLQueueJobsActiveDedupeIndex},
 		{"index_queue_jobs_leased_partition", createPostgreSQLQueueJobsLeasedPartitionIndex},
+		{"index_queue_jobs_leased_thread", createPostgreSQLQueueJobsLeasedThreadIndex},
+		{"index_queue_jobs_leased_session", createPostgreSQLQueueJobsLeasedSessionIndex},
 		{"index_queue_jobs_partition_sequence", createPostgreSQLQueueJobsPartitionSequenceIndex},
 		{"index_queue_jobs_available", createPostgreSQLQueueJobsAvailableIndex},
 		{"index_queue_jobs_sandbox_terminal_retention", createPostgreSQLQueueJobsSandboxTerminalRetentionIndex},
@@ -2376,6 +2391,23 @@ func SessionRuntimeMutationAdvisoryLockResource(workspaceID string, sessionID st
 	}
 	sum := sha256.Sum256([]byte(workspaceID + "\x00" + sessionID))
 	return int32(binary.BigEndian.Uint32(sum[:4])), nil
+}
+
+// AcquireSessionRuntimeMutationLock joins a transaction to the short,
+// database-wide Session arbitration boundary shared by Queue lease admission
+// and Session infrastructure mutations. Callers must take this lock before
+// locking pre-existing Queue, Inbox, Thread, or operation rows.
+func AcquireSessionRuntimeMutationLock(ctx context.Context, tx transactionExecutor, workspaceID string, sessionID string) error {
+	resource, err := SessionRuntimeMutationAdvisoryLockResource(workspaceID, sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
+		"SELECT pg_advisory_xact_lock($1, $2)",
+		SessionRuntimeMutationAdvisoryLockCategory,
+		resource,
+	)
+	return err
 }
 
 // RuntimeRoleError indicates that the active PostgreSQL connection

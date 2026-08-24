@@ -155,7 +155,7 @@ func appendDeclaredSubagentInitialEnvelopeTx(
 		return storedAgentMailEnvelope{}, err
 	}
 	if !targetExists {
-		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "sub-agent initial input target is invalid")
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "sub-agent input target is invalid")
 	}
 	deliveryID := agentMailDeliveryID(sourceToolUseEventID, targetThreadID)
 	messageJSON, err := publicAgentMailMessageJSON(content)
@@ -200,19 +200,22 @@ func appendDeclaredSubagentInitialEnvelopeTx(
 	}, nil
 }
 
-func appendDeclaredSubagentInitialReceivedEventTx(
+// appendDeclaredSubagentReceivedEventTx births the target-side durable input
+// fact. A target interrupt may delay Queue delivery, but it does not erase a
+// healthy source's already authorized input birth.
+func appendDeclaredSubagentReceivedEventTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	targetScope *bridgev1.RuntimeScope,
 	envelope storedAgentMailEnvelope,
 	now time.Time,
 ) (string, error) {
-	threadScope, err := lockThreadMutationTx(ctx, tx, targetScope)
+	threadScope, err := lockThreadMutationRowTx(ctx, tx, targetScope)
 	if err != nil {
 		return "", err
 	}
 	if threadScope.role != "subagent" || envelope.TargetThreadID != targetScope.GetSessionThreadId() {
-		return "", status.Error(codes.FailedPrecondition, "sub-agent initial input target is invalid")
+		return "", status.Error(codes.FailedPrecondition, "sub-agent input target is invalid")
 	}
 	sourceTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, targetScope, envelope.SourceThreadID)
 	if err != nil {

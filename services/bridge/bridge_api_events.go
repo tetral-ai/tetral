@@ -162,7 +162,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return nil
 		}
 		if requestStart != nil {
-			if err := requireSessionInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
+			if err := requireThreadInputDeliveryAllowedTx(ctx, tx, request.GetScope()); err != nil {
 				return err
 			}
 		}
@@ -328,7 +328,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			now,
 		)
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Stale{Stale: &bridgev1.WriteEventStale{}}}, nil
 		}
 		return nil, err
@@ -851,7 +851,7 @@ func (s threadMutationScope) publicProjection(eventType string) (string, bool) {
 }
 
 func lockThreadMutationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (threadMutationScope, error) {
-	if err := requireSessionMutationAllowedTx(ctx, tx, scope); err != nil {
+	if err := requireThreadMutationAllowedTx(ctx, tx, scope); err != nil {
 		return threadMutationScope{}, err
 	}
 	return lockThreadMutationRowTx(ctx, tx, scope)

@@ -284,7 +284,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			if err := validateInterruptLeaseRefTx(ctx, tx, request.GetScope(), interruptRequest.GetRuntimeInputId(), interruptRequest.GetInterruptLeaseRef()); err != nil {
 				return err
 			}
-			mutationCtx = withInterruptCloseout(ctx, interruptRequest.GetRuntimeInputId())
+			mutationCtx = withInterruptCloseout(ctx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), interruptRequest.GetRuntimeInputId())
 		}
 		if err := verifyModelRequestStartTx(ctx, tx, request.GetScope(), requestStart.EventID, request.GetModelRequestId(), requestKind); err != nil {
 			return err
@@ -484,7 +484,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 		return err
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Stale{Stale: &bridgev1.WriteRequestEndStale{}}}, nil
 		}
 		return nil, err
@@ -895,14 +895,14 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	now := s.now()
 	capture, err := s.ensureFinishIdleOutputCapture(ctx, request, sourceKind, key, declarationDigest, now)
 	if err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 		}
 		return nil, err
 	}
 	capture, err = s.waitForFinishIdleOutputCapture(ctx, request.GetScope(), key, capture)
 	if err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 		}
 		return nil, err
@@ -1300,7 +1300,7 @@ func settleRuntimeTerminationTx(
 		}
 	}
 	transitions, err := cancelRuntimeTerminationInputsTx(
-		ctx, tx, scope, threadScope.role == "main", threadScope.role == "main", now,
+		ctx, tx, scope, threadScope.role == "main", true, now,
 	)
 	if err != nil {
 		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err

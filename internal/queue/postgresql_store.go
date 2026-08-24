@@ -425,9 +425,10 @@ func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request Enqueu
 	row := tx.QueryRowScanner(ctx,
 		`INSERT INTO queue_jobs (
 			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key,
+			causal_session_id, delivery_scope, delivery_thread_id, control_class,
 			payload_version, status, payload_json, priority, attempt_count, max_attempts,
 			available_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, 0, $10, $11, $12, $12)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13, 0, $14, $15, $16, $16)
 		ON CONFLICT (workspace_id, dedupe_key) WHERE status IN ('pending', 'leased') DO NOTHING
 		RETURNING id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
 		          status, payload_json, priority, available_at, leased_by, lease_token,
@@ -438,6 +439,10 @@ func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request Enqueu
 		request.PartitionKey,
 		partitionSequence,
 		nullableString(request.DedupeKey),
+		nullableString(request.CausalSessionID),
+		request.DeliveryScope,
+		nullableString(request.DeliveryThreadID),
+		request.ControlClass,
 		request.PayloadVersion,
 		string(payload),
 		request.Priority,
@@ -489,93 +494,100 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 	var leased []*Job
 	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.lease", func(tx *dbconnect.Tx) error {
 		kindPredicate, args := leaseKindPredicate(request.Kinds, 4)
+		// Discovery deliberately holds no Queue row lock. Session-scoped
+		// candidates join the common arbitration boundary in canonical order;
+		// each exact candidate is then locked and revalidated by leaseCandidate.
 		query := `SELECT candidate.id, candidate.partition_key, candidate.kind, candidate.priority,
-		                candidate.available_at, candidate.queue_partition_sequence,
-		                COALESCE(candidate.payload_json::jsonb ->> 'input_kind', '')
-			   FROM queue_jobs candidate
-			  WHERE candidate.workspace_id = $1
-			    AND candidate.kind IN (` + kindPredicate + `)
-			    AND candidate.status = 'pending'
-			    AND candidate.available_at <= $2
-			    AND NOT EXISTS (
-			        SELECT 1
-			          FROM queue_jobs interrupt_barrier
-			         WHERE interrupt_barrier.workspace_id = candidate.workspace_id
-			           AND interrupt_barrier.partition_key = candidate.partition_key
-			           AND interrupt_barrier.status = 'leased'
-			           AND interrupt_barrier.kind = 'runtime_input'
-			           AND interrupt_barrier.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
-			           AND interrupt_barrier.id <> candidate.id
-			    )
-			    AND NOT EXISTS (
-			        SELECT 1
-			          FROM queue_jobs pending
-			         WHERE pending.workspace_id = candidate.workspace_id
-			           AND pending.partition_key = candidate.partition_key
-			           AND pending.status = 'pending'
-			           AND pending.id <> candidate.id
-			           AND (
-			                (pending.kind = 'runtime_input'
-			                 AND pending.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
-			                 AND (candidate.kind <> 'runtime_input'
-			                      OR candidate.payload_json::jsonb ->> 'input_kind' <> 'interrupt_control'
-			                      OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
-			                OR ((pending.available_at <= $2
-			                     OR (
-			                         candidate.kind = 'runtime_input'
-			                         AND candidate.payload_json::jsonb ->> 'input_kind' IS DISTINCT FROM 'interrupt_control'
-			                         AND pending.kind = 'runtime_config_update'
-			                         AND pending.queue_partition_sequence < candidate.queue_partition_sequence
-			                     ))
-			                    AND NOT (candidate.kind = 'runtime_input'
-			                             AND candidate.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
-			                             AND pending.queue_partition_sequence > candidate.queue_partition_sequence)
-			                    AND (
-			                (candidate.kind = 'runtime_input'
-			                 AND pending.kind = 'runtime_input'
-			                 AND (
-			                      pending.priority > candidate.priority
-			                      OR (
-			                         pending.priority = candidate.priority
-			                         AND pending.queue_partition_sequence < candidate.queue_partition_sequence
-			                      )
-			                 )
-			                 AND NOT EXISTS (
-			                     SELECT 1
-			                       FROM queue_jobs barrier
-			                      WHERE barrier.workspace_id = candidate.workspace_id
-			                        AND barrier.partition_key = candidate.partition_key
-			                        AND barrier.status = 'pending'
-			                        AND barrier.kind <> 'runtime_input'
-			                        AND NOT (
-			                            candidate.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
-			                            AND barrier.kind = 'runtime_config_update'
-			                        )
-			                        AND (
-			                            barrier.available_at <= $2
-			                            OR (
-			                                candidate.payload_json::jsonb ->> 'input_kind' IS DISTINCT FROM 'interrupt_control'
-			                                AND barrier.kind = 'runtime_config_update'
-			                            )
-			                        )
-			                        AND barrier.queue_partition_sequence < pending.queue_partition_sequence
-			                 )
-			                )
-			                OR (candidate.kind = 'runtime_input'
-			                    AND pending.kind <> 'runtime_input'
-			                    AND NOT (
-			                        candidate.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
-			                        AND pending.kind = 'runtime_config_update'
-			                    )
-			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
-			                OR (candidate.kind <> 'runtime_input'
-			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
-			           )
-			    )
-			  ORDER BY candidate.priority DESC, candidate.available_at ASC,
-			           candidate.partition_key ASC, candidate.queue_partition_sequence ASC
-			  FOR UPDATE SKIP LOCKED
-			  LIMIT $3`
+				                candidate.available_at, candidate.queue_partition_sequence,
+				                COALESCE(candidate.causal_session_id, ''), candidate.delivery_scope,
+				                COALESCE(candidate.delivery_thread_id, ''), candidate.control_class
+				   FROM queue_jobs candidate
+				  WHERE candidate.workspace_id = $1
+				    AND candidate.kind IN (` + kindPredicate + `)
+				    AND candidate.status = 'pending'
+				    AND candidate.available_at <= $2
+				    AND (
+				      candidate.causal_session_id IS NULL
+				      OR (candidate.kind = 'session_delete_cleanup' AND EXISTS (
+				        SELECT 1 FROM sessions session
+				         WHERE session.workspace_id = candidate.workspace_id
+				           AND session.id = candidate.causal_session_id
+				           AND session.lifecycle_state = 'deleted'
+				      ))
+				      OR (candidate.kind <> 'session_delete_cleanup' AND NOT EXISTS (
+				        SELECT 1 FROM sessions session
+				         WHERE session.workspace_id = candidate.workspace_id
+				           AND session.id = candidate.causal_session_id
+				           AND session.lifecycle_state = 'deleted'
+				      ))
+				    )
+				    AND NOT EXISTS (
+				      SELECT 1 FROM queue_jobs leased
+				       WHERE leased.workspace_id = candidate.workspace_id
+				         AND leased.status = 'leased'
+				         AND leased.id <> candidate.id
+				         AND (
+				           (candidate.delivery_scope = 'partition'
+				             AND leased.delivery_scope = 'partition'
+				             AND leased.partition_key = candidate.partition_key)
+				           OR (candidate.delivery_scope = 'thread'
+				             AND leased.causal_session_id = candidate.causal_session_id
+					             AND NOT (candidate.control_class = 'interrupt'
+					                      AND leased.kind = 'runtime_config_update')
+			             AND (leased.delivery_scope = 'session'
+			                  OR (leased.delivery_scope = 'thread'
+			                      AND leased.delivery_thread_id = candidate.delivery_thread_id)))
+				           OR (candidate.delivery_scope = 'session'
+				             AND leased.causal_session_id = candidate.causal_session_id
+				             AND leased.delivery_scope IN ('thread', 'session'))
+				         )
+				    )
+				    AND NOT EXISTS (
+				      SELECT 1 FROM queue_jobs pending
+				       WHERE pending.workspace_id = candidate.workspace_id
+				         AND pending.status = 'pending'
+				         AND pending.id <> candidate.id
+				         AND (
+				           (candidate.delivery_scope = 'partition'
+				             AND pending.delivery_scope = 'partition'
+				             AND pending.partition_key = candidate.partition_key
+				             AND pending.available_at <= $2
+				             AND (pending.priority > candidate.priority
+				                  OR (pending.priority = candidate.priority
+				                      AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
+					           OR (candidate.delivery_scope = 'session'
+					             AND pending.causal_session_id = candidate.causal_session_id
+					             AND pending.delivery_scope IN ('thread', 'session')
+					             AND NOT (candidate.kind = 'session_delete_cleanup'
+					                      AND pending.kind <> 'session_delete_cleanup')
+					             AND pending.available_at <= $2
+				             AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
+				           OR (candidate.delivery_scope = 'thread'
+				             AND pending.causal_session_id = candidate.causal_session_id
+				             AND (
+				               (pending.delivery_scope = 'session'
+				                 AND pending.queue_partition_sequence < candidate.queue_partition_sequence
+				                 AND NOT (candidate.control_class = 'interrupt'
+				                          AND pending.kind = 'runtime_config_update'))
+				               OR (pending.delivery_scope = 'thread'
+				                 AND pending.delivery_thread_id = candidate.delivery_thread_id
+				                 AND (
+				                   (pending.control_class = 'interrupt'
+				                     AND (candidate.control_class <> 'interrupt'
+				                          OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
+				                   OR (candidate.control_class <> 'interrupt'
+				                     AND pending.control_class <> 'interrupt'
+				                     AND pending.available_at <= $2
+				                     AND (pending.priority > candidate.priority
+				                          OR (pending.priority = candidate.priority
+				                              AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
+				                 ))
+				             ))
+				         )
+				    )
+				  ORDER BY candidate.priority DESC, candidate.available_at ASC,
+				           candidate.partition_key ASC, candidate.queue_partition_sequence ASC
+				  LIMIT $3`
 		queryArgs := append([]any{
 			string(request.WorkspaceID),
 			request.Now,
@@ -596,7 +608,10 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 				&candidate.priority,
 				&candidate.availableAt,
 				&candidate.partitionSequence,
-				&candidate.inputKind,
+				&candidate.causalSessionID,
+				&candidate.deliveryScope,
+				&candidate.deliveryThreadID,
+				&candidate.controlClass,
 			); err != nil {
 				return err
 			}
@@ -604,6 +619,25 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 		}
 		if err := rows.Err(); err != nil {
 			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		sessionIDs := make(map[string]struct{}, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.causalSessionID != "" {
+				sessionIDs[candidate.causalSessionID] = struct{}{}
+			}
+		}
+		orderedSessionIDs := make([]string, 0, len(sessionIDs))
+		for sessionID := range sessionIDs {
+			orderedSessionIDs = append(orderedSessionIDs, sessionID)
+		}
+		sort.Strings(orderedSessionIDs)
+		for _, sessionID := range orderedSessionIDs {
+			if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(request.WorkspaceID), sessionID); err != nil {
+				return err
+			}
 		}
 		for _, candidate := range candidates {
 			if len(leased) >= request.MaxJobs {
@@ -646,129 +680,134 @@ type leaseCandidateRow struct {
 	priority          int
 	availableAt       time.Time
 	partitionSequence int64
-	inputKind         string
+	causalSessionID   string
+	deliveryScope     string
+	deliveryThreadID  string
+	controlClass      string
 }
 
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
-	leasedAt := request.Now
-	// Reclaimed terminal work uses a bounded marker rather than new delivery
-	// budget. Interrupts and cleanup outcome reconciliation retain their existing
-	// N marker. Generic agent mail may advance once to N+1 so JobRunner can
-	// identify a finalization-only lease; every later reclaim remains clamped.
+	// Lock and re-read the exact candidate only after its Session arbitration
+	// owner has been acquired. Compatibility is evaluated from structured birth
+	// facts; payload JSON is never a lease authority.
 	row := tx.QueryRow(ctx,
-		`UPDATE queue_jobs
+		`UPDATE queue_jobs candidate
 		    SET status = 'leased',
 		        leased_by = $5,
 		        lease_token = $6,
 		        leased_at = clock_timestamp(),
 		        leased_until = clock_timestamp() + ($8::bigint * interval '1 millisecond'),
 		        attempt_count = CASE
-		          WHEN $3 = 'runtime_input' AND $12 = 'interrupt_control'
-		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          WHEN candidate.control_class = 'interrupt'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $12)
 		          THEN attempt_count
-		          WHEN $3 = 'cleanup_session'
-		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          WHEN candidate.kind = 'cleanup_session'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $12)
 		          THEN attempt_count
-		          WHEN $3 = 'runtime_input' AND $12 = 'agent_mail'
-		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13) + 1
+		          WHEN candidate.kind = 'runtime_input'
+		           AND candidate.control_class = 'agent_mail'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $12) + 1
 		          THEN attempt_count
 		          ELSE attempt_count + 1
 		        END,
 		        updated_at = clock_timestamp()
-		  WHERE workspace_id = $1
-		    AND id = $2
-		    AND kind = $3
-		    AND status = 'pending'
-		    AND available_at = $9
-		    AND queue_partition_sequence = $10
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM queue_jobs leased
-		         WHERE leased.workspace_id = $1
-		           AND leased.partition_key = $4
-		           AND leased.status = 'leased'
+		  WHERE candidate.workspace_id = $1
+		    AND candidate.id = $2
+		    AND candidate.kind = $3
+		    AND candidate.partition_key = $4
+		    AND candidate.status = 'pending'
+		    AND candidate.available_at = $9
+		    AND candidate.queue_partition_sequence = $10
+		    AND candidate.causal_session_id IS NOT DISTINCT FROM NULLIF($13, '')
+		    AND candidate.delivery_scope = $14
+		    AND candidate.delivery_thread_id IS NOT DISTINCT FROM NULLIF($15, '')
+		    AND candidate.control_class = $16
+		    AND (
+		      candidate.causal_session_id IS NULL
+		      OR (candidate.kind = 'session_delete_cleanup' AND EXISTS (
+		        SELECT 1 FROM sessions session
+		         WHERE session.workspace_id = candidate.workspace_id
+		           AND session.id = candidate.causal_session_id
+		           AND session.lifecycle_state = 'deleted'
+		      ))
+		      OR (candidate.kind <> 'session_delete_cleanup' AND NOT EXISTS (
+		        SELECT 1 FROM sessions session
+		         WHERE session.workspace_id = candidate.workspace_id
+		           AND session.id = candidate.causal_session_id
+		           AND session.lifecycle_state = 'deleted'
+		      ))
 		    )
 		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM queue_jobs pending
-		         WHERE pending.workspace_id = $1
-		           AND pending.partition_key = $4
-		           AND pending.status = 'pending'
-		           AND pending.id <> $2
-		           AND (
-			                (pending.kind = 'runtime_input'
-			                 AND pending.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
-		                 AND ($3 <> 'runtime_input'
-		                      OR $12 <> 'interrupt_control'
-		                      OR pending.queue_partition_sequence < $10))
-			                OR ((pending.available_at <= $7
-			                     OR (
-		                         $3 = 'runtime_input'
-		                         AND $12 <> 'interrupt_control'
-		                         AND pending.kind = 'runtime_config_update'
-			                         AND pending.queue_partition_sequence < $10
-			                     ))
-			                    AND NOT ($3 = 'runtime_input'
-			                             AND $12 = 'interrupt_control'
-			                             AND pending.queue_partition_sequence > $10)
-			                    AND (
-		                ($3 = 'runtime_input'
-		                 AND pending.kind = 'runtime_input'
+		      SELECT 1 FROM queue_jobs leased
+		       WHERE leased.workspace_id = candidate.workspace_id
+		         AND leased.status = 'leased'
+		         AND leased.id <> candidate.id
+		         AND (
+		           (candidate.delivery_scope = 'partition'
+		             AND leased.delivery_scope = 'partition'
+		             AND leased.partition_key = candidate.partition_key)
+		           OR (candidate.delivery_scope = 'thread'
+		             AND leased.causal_session_id = candidate.causal_session_id
+			             AND NOT (candidate.control_class = 'interrupt'
+			                      AND leased.kind = 'runtime_config_update')
+			             AND (leased.delivery_scope = 'session'
+			                  OR (leased.delivery_scope = 'thread'
+			                      AND leased.delivery_thread_id = candidate.delivery_thread_id)))
+		           OR (candidate.delivery_scope = 'session'
+		             AND leased.causal_session_id = candidate.causal_session_id
+		             AND leased.delivery_scope IN ('thread', 'session'))
+		         )
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM queue_jobs pending
+		       WHERE pending.workspace_id = candidate.workspace_id
+		         AND pending.status = 'pending'
+		         AND pending.id <> candidate.id
+		         AND (
+		           (candidate.delivery_scope = 'partition'
+		             AND pending.delivery_scope = 'partition'
+		             AND pending.partition_key = candidate.partition_key
+		             AND pending.available_at <= $7
+		             AND (pending.priority > $11
+		                  OR (pending.priority = $11 AND pending.queue_partition_sequence < $10)))
+			           OR (candidate.delivery_scope = 'session'
+			             AND pending.causal_session_id = candidate.causal_session_id
+			             AND pending.delivery_scope IN ('thread', 'session')
+			             AND NOT (candidate.kind = 'session_delete_cleanup'
+			                      AND pending.kind <> 'session_delete_cleanup')
+			             AND pending.available_at <= $7
+		             AND pending.queue_partition_sequence < $10)
+		           OR (candidate.delivery_scope = 'thread'
+		             AND pending.causal_session_id = candidate.causal_session_id
+		             AND (
+		               (pending.delivery_scope = 'session'
+		                 AND pending.queue_partition_sequence < $10
+			                 AND NOT (candidate.control_class = 'interrupt'
+			                          AND pending.kind = 'runtime_config_update'))
+		               OR (pending.delivery_scope = 'thread'
+		                 AND pending.delivery_thread_id = candidate.delivery_thread_id
 		                 AND (
-		                      pending.priority > $11
-		                      OR (
-		                         pending.priority = $11
-		                         AND pending.queue_partition_sequence < $10
-		                      )
-		                 )
-		                 AND NOT EXISTS (
-		                     SELECT 1
-		                       FROM queue_jobs barrier
-		                      WHERE barrier.workspace_id = $1
-		                        AND barrier.partition_key = $4
-		                        AND barrier.status = 'pending'
-		                        AND barrier.kind <> 'runtime_input'
-		                        AND NOT (
-		                            $12 = 'interrupt_control'
-		                            AND barrier.kind = 'runtime_config_update'
-		                        )
-		                        AND (
-		                            barrier.available_at <= $7
-		                            OR (
-		                                $12 <> 'interrupt_control'
-		                                AND barrier.kind = 'runtime_config_update'
-		                            )
-		                        )
-		                        AND barrier.queue_partition_sequence < pending.queue_partition_sequence
-		                 )
-		                )
-		                OR ($3 = 'runtime_input'
-		                    AND pending.kind <> 'runtime_input'
-		                    AND NOT (
-		                        $12 = 'interrupt_control'
-		                        AND pending.kind = 'runtime_config_update'
-		                    )
-		                    AND pending.queue_partition_sequence < $10)
-		                OR ($3 <> 'runtime_input'
-		                    AND pending.queue_partition_sequence < $10)))
-		           )
+					                   (pending.control_class = 'interrupt'
+					                     AND (candidate.control_class <> 'interrupt'
+					                          OR pending.queue_partition_sequence < $10))
+					                   OR (candidate.control_class <> 'interrupt'
+					                     AND pending.control_class <> 'interrupt'
+		                     AND pending.available_at <= $7
+		                     AND (pending.priority > $11
+		                          OR (pending.priority = $11
+		                              AND pending.queue_partition_sequence < $10)))
+		                 ))
+		             ))
+		         )
 		    )
 		  RETURNING id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
 		            status, payload_json, priority, available_at, leased_by, lease_token,
 		            leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at`,
-		string(request.WorkspaceID),
-		candidate.id,
-		candidate.kind,
-		candidate.partitionKey,
-		request.LeaseOwner,
-		leaseToken,
-		leasedAt,
-		request.LeaseDuration.Milliseconds(),
-		candidate.availableAt,
-		candidate.partitionSequence,
-		candidate.priority,
-		candidate.inputKind,
-		defaultMaxAttempts,
+		string(request.WorkspaceID), candidate.id, candidate.kind, candidate.partitionKey,
+		request.LeaseOwner, leaseToken, request.Now, request.LeaseDuration.Milliseconds(),
+		candidate.availableAt, candidate.partitionSequence, candidate.priority,
+		defaultMaxAttempts, candidate.causalSessionID, candidate.deliveryScope,
+		candidate.deliveryThreadID, candidate.controlClass,
 	)
 	job, err := scanJob(row)
 	if dbconnect.IsNoRows(err) {
@@ -1874,8 +1913,8 @@ func DeadLetterTx(ctx context.Context, tx queueMutationTransaction, request Dead
 // ReplaceMalformedRuntimeInputCustody atomically retires a lease-fenced
 // malformed runtime-input job and, when a canonical queued Inbox fact exists,
 // creates its sole replacement. The malformed payload contributes no business
-// fields; Inbox is locked before the Queue row and EnqueueTx takes the partition
-// counter lock last.
+// fields. The transaction takes the common Session owner, exact Queue lease,
+// Inbox row, and replacement partition counter in that order.
 func (s *PostgreSQLQueueStore) ReplaceMalformedRuntimeInputCustody(
 	ctx context.Context,
 	request ReplaceMalformedRuntimeInputCustodyRequest,
@@ -1892,6 +1931,26 @@ func (s *PostgreSQLQueueStore) ReplaceMalformedRuntimeInputCustody(
 	request.Now = request.Now.UTC()
 	var outcome ReplaceMalformedRuntimeInputCustodyResult
 	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.replace_malformed_runtime_input_custody", func(tx *dbconnect.Tx) error {
+		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(request.WorkspaceID), request.SessionID); err != nil {
+			return err
+		}
+		var kind, queueStatus, leaseToken string
+		var leaseCurrent bool
+		if err := tx.QueryRow(ctx,
+			`SELECT kind, status, COALESCE(lease_token, ''), COALESCE(leased_until > clock_timestamp(), false)
+			   FROM queue_jobs
+			  WHERE workspace_id = $1 AND id = $2 AND causal_session_id = $3
+			  FOR UPDATE`,
+			string(request.WorkspaceID), request.JobID, request.SessionID,
+		).Scan(&kind, &queueStatus, &leaseToken, &leaseCurrent); dbconnect.IsNoRows(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if kind != KindRuntimeInput || queueStatus != StatusLeased || leaseToken != request.LeaseToken || !leaseCurrent {
+			return nil
+		}
+
 		var (
 			threadID, inputKind, eventIDsJSON, inboxStatus string
 			sequenceFrom, sequenceTo                       sql.NullInt64
@@ -1905,23 +1964,6 @@ func (s *PostgreSQLQueueStore) ReplaceMalformedRuntimeInputCustody(
 		).Scan(&threadID, &inputKind, &eventIDsJSON, &sequenceFrom, &sequenceTo, &inboxStatus)
 		if inboxErr != nil && !dbconnect.IsNoRows(inboxErr) {
 			return inboxErr
-		}
-
-		var kind, queueStatus, leaseToken string
-		var leaseCurrent bool
-		if err := tx.QueryRow(ctx,
-			`SELECT kind, status, COALESCE(lease_token, ''), COALESCE(leased_until > clock_timestamp(), false)
-			   FROM queue_jobs
-			  WHERE workspace_id = $1 AND id = $2
-			  FOR UPDATE`,
-			string(request.WorkspaceID), request.JobID,
-		).Scan(&kind, &queueStatus, &leaseToken, &leaseCurrent); dbconnect.IsNoRows(err) {
-			return nil
-		} else if err != nil {
-			return err
-		}
-		if kind != KindRuntimeInput || queueStatus != StatusLeased || leaseToken != request.LeaseToken || !leaseCurrent {
-			return nil
 		}
 
 		result, err := tx.Exec(ctx,

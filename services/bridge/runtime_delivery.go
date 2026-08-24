@@ -813,6 +813,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 	var plan RuntimeCommandPlan
 	var initialMCPManifestToolsets []MCPManifestToolsetConfig
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.prepare_runtime_command", func(tx *dbconnect.Tx) error {
+		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
 		if job.Kind == queue.KindSessionDeleteCleanup {
 			deletePlan, err := s.prepareSessionDeleteCleanupCommandTx(ctx, tx, job, port, now)
 			if err != nil {
@@ -1029,7 +1032,7 @@ func interruptDeliveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job Run
 	if !live {
 		return RuntimeInterruptDeliveryAuthority{}, nil
 	}
-	barrier, barrierActive, err := activeSessionInterruptBarrierTx(ctx, tx, job.WorkspaceID, job.SessionID)
+	barrier, barrierActive, err := activeInterruptBarrierTx(ctx, tx, job.WorkspaceID, job.SessionID, job.SessionThreadID)
 	if err != nil {
 		return RuntimeInterruptDeliveryAuthority{}, err
 	}
@@ -1294,7 +1297,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
 				return nil
 			}
-			finalized, err = finalizeInterruptDeliveryExhaustionTx(withInterruptCloseout(ctx, job.RuntimeInputID), tx, job, now)
+			finalized, err = finalizeInterruptDeliveryExhaustionTx(withInterruptCloseout(ctx, job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID), tx, job, now)
 			return err
 		}
 		if err := validateRuntimeFinalizationBindingTx(ctx, tx, job, result); err != nil {
@@ -1716,20 +1719,8 @@ func finalizeInterruptDeliveryTerminalTx(
 		return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Inbox binding conflicts with the Session fence")
 	}
 
-	var mainThreadID string
-	if err := tx.QueryRow(ctx,
-		`SELECT id FROM session_threads
-		  WHERE workspace_id=$1 AND session_id=$2 AND role='main'
-		  FOR UPDATE`,
-		job.WorkspaceID, job.SessionID,
-	).Scan(&mainThreadID); err != nil {
-		if dbconnect.IsNoRows(err) {
-			return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Session main Thread is missing")
-		}
-		return RuntimeDeliveryResult{}, err
-	}
 	scope := &bridgev1.RuntimeScope{
-		WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: mainThreadID,
+		WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
 		Binding: &bridgev1.RuntimeBindingRef{
 			BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, TargetPodUid: podUID.String,
 		},
@@ -1761,20 +1752,22 @@ func finalizeInterruptDeliveryTerminalTx(
 	); err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2`,
-		job.WorkspaceID, job.SessionID,
-	); err != nil {
-		return RuntimeDeliveryResult{}, err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
-		        cleanup_job_id=NULL, binding_id=NULL, binding_generation=NULL, updated_at=$3
-		  WHERE workspace_id=$1 AND session_id=$2`,
-		job.WorkspaceID, job.SessionID, now,
-	); err != nil {
-		return RuntimeDeliveryResult{}, err
+	if threadScope.role == "main" {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2`,
+			job.WorkspaceID, job.SessionID,
+		); err != nil {
+			return RuntimeDeliveryResult{}, err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE session_runtime_status
+			    SET cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
+			        cleanup_job_id=NULL, binding_id=NULL, binding_generation=NULL, updated_at=$3
+			  WHERE workspace_id=$1 AND session_id=$2`,
+			job.WorkspaceID, job.SessionID, now,
+		); err != nil {
+			return RuntimeDeliveryResult{}, err
+		}
 	}
 	return RuntimeDeliveryResult{
 		Status: RuntimeDeliveryRejected, Retryable: false,
@@ -2037,6 +2030,17 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 		if err := lockRuntimeMutationSessionTx(ctx, tx, canonical.WorkspaceID, canonical.SessionID); err != nil {
 			return err
 		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+			WorkspaceID: workspace.ID(canonical.WorkspaceID), JobID: canonical.JobID, LeaseToken: canonical.LeaseToken,
+			Kind: canonical.Kind, PartitionKey: canonical.PartitionKey, DedupeKey: canonical.DedupeKey,
+		})
+		if err != nil {
+			return err
+		}
+		if !active {
+			outcome.Handled = true
+			return nil
+		}
 		var lockedThreadID, lockedInputKind, lockedEventIDsJSON string
 		var lockedSequenceFrom, lockedSequenceTo sql.NullInt64
 		if err := tx.QueryRow(ctx, `SELECT session_thread_id, input_kind, event_ids_json, sequence_from, sequence_to
@@ -2055,19 +2059,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 			canonical.SequenceFrom = sequenceFrom.Int64
 			canonical.SequenceTo = sequenceTo.Int64
 		}
-		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
-			WorkspaceID: workspace.ID(canonical.WorkspaceID), JobID: canonical.JobID, LeaseToken: canonical.LeaseToken,
-			Kind: canonical.Kind, PartitionKey: canonical.PartitionKey, DedupeKey: canonical.DedupeKey,
-		})
-		if err != nil {
-			return err
-		}
-		if !active {
-			outcome.Handled = true
-			return nil
-		}
 		if _, err := finalizeInterruptDeliveryTerminalTx(
-			withInterruptCloseout(ctx, canonical.RuntimeInputID), tx, canonical, now,
+			withInterruptCloseout(ctx, canonical.WorkspaceID, canonical.SessionID, canonical.SessionThreadID, canonical.RuntimeInputID), tx, canonical, now,
 		); err != nil {
 			return err
 		}
@@ -4454,7 +4447,7 @@ func (e runtimeDeliveryPrepareError) Error() string {
 }
 
 func runtimeDeliveryResultFromPrepareError(err error) RuntimeDeliveryResult {
-	if isSessionInterruptBarrierStaleError(err) {
+	if isThreadInterruptBarrierStaleError(err) {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
 	}
 	var prepareErr runtimeDeliveryPrepareError

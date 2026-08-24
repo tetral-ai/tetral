@@ -583,8 +583,8 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 	}
 }
 
-func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *testing.T) {
-	fixture := newSubagentMailFixture(t, "session_interrupt_deferral")
+func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
+	fixture := newSubagentMailFixture(t, "thread_interrupt_independence")
 	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
 	client := dbconnect.NewClientForTesting(fixture.runtimeDB)
 	events := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
@@ -595,11 +595,11 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 		QueueClient: baseQueue,
 		birth: func(ctx context.Context) error {
 			born, err := events.AppendClientEvents(ctx, workspace.DefaultID, fixture.sessionID,
-				"first_mail-session-interrupt-deferral", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+				"first_mail-thread-interrupt-independence", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
 					Type: sessionevent.EventTypeUserInterrupt,
 				}}})
 			if err == nil && len(born.Data) != 1 {
-				return errors.New("session interrupt owner did not birth exactly one Event")
+				return errors.New("main Thread interrupt owner did not birth exactly one Event")
 			}
 			return err
 		},
@@ -608,17 +608,17 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 		t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID,
 		fixture.bindingID, 1, fixture.podUID,
 	)
-	var attemptsBeforeDeferral int
+	var attemptsBeforeDelivery int
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT attempt_count FROM queue_jobs
-		WHERE workspace_id='default' AND id=$1`, fixture.jobID).Scan(&attemptsBeforeDeferral); err != nil {
+		WHERE workspace_id='default' AND id=$1`, fixture.jobID).Scan(&attemptsBeforeDelivery); err != nil {
 		t.Fatalf("read first_mail attempts before interrupt cut: %v", err)
 	}
-	deferredRunner := newSubagentRuntimeQueueRunner(
+	deliveryRunner := newSubagentRuntimeQueueRunner(
 		t, fixture.runtimeDB, fixture.admin, mailRuntime.port, fixture.sessionID, fixture.podUID,
 		queueWithBarrierCut, nil,
 	)
-	if active, err := deferredRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("defer first_mail input behind production interrupt = active:%t err:%v", active, err)
+	if active, err := deliveryRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver first_mail alongside unrelated interrupt = active:%t err:%v", active, err)
 	}
 	var inboxStatus, queueStatus string
 	var attempts, messages, starts int
@@ -632,9 +632,10 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 	).Scan(&inboxStatus, &queueStatus, &attempts, &messages, &starts); err != nil {
 		t.Fatalf("read interrupt-deferred first_mail custody: %v", err)
 	}
-	if inboxStatus != "queued" || queueStatus != queue.StatusPending || attempts != attemptsBeforeDeferral || messages != 0 || starts != 0 {
-		t.Fatalf("interrupt-deferred custody = Inbox:%s Queue:%s attempts:%d (before:%d) Messages:%d starts:%d", inboxStatus, queueStatus, attempts, attemptsBeforeDeferral, messages, starts)
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != attemptsBeforeDelivery+1 || messages != 1 || starts != 0 {
+		t.Fatalf("cross-Thread delivery custody = Inbox:%s Queue:%s attempts:%d (before:%d) Messages:%d starts:%d", inboxStatus, queueStatus, attempts, attemptsBeforeDelivery, messages, starts)
 	}
+	started := mailRuntime.providerStart(t)
 
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, parentID,
@@ -642,14 +643,12 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 	)
 	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, interruptRuntime.port, fixture.sessionID, fixture.podUID)
 	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
-		t.Fatalf("release session interrupt Runtime: %v", err)
+		t.Fatalf("release main Thread interrupt Runtime: %v", err)
 	}
 	if composed := interruptRuntime.wait(t); len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
-		t.Fatalf("session interrupt closeout = %+v", composed)
+		t.Fatalf("main Thread interrupt closeout = %+v", composed)
 	}
 
-	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, mailRuntime.port, fixture.sessionID, fixture.podUID)
-	started := mailRuntime.providerStart(t)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 	mailRuntime.kill(t)
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
@@ -662,7 +661,7 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 	).Scan(&inboxStatus, &queueStatus, &attempts, &messages, &starts); err != nil {
 		t.Fatalf("read resumed first_mail custody: %v", err)
 	}
-	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != attemptsBeforeDeferral+1 || messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != attemptsBeforeDelivery+1 || messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
 		t.Fatalf("resumed first_mail custody = Inbox:%s Queue:%s attempts:%d Messages:%d starts:%d providers:%d",
 			inboxStatus, queueStatus, attempts, messages, starts, started.ProviderInvocations)
 	}

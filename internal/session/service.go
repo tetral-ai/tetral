@@ -270,42 +270,51 @@ func (s *Service) ArchiveThread(ctx context.Context, ws workspace.ID, sessionID 
 
 func (s *Service) Update(ctx context.Context, ws workspace.ID, sessionID string, request UpdateRequest) (*Response, error) {
 	var updated *Session
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
-		current, err := s.lockMutableSession(ctx, tx, sessionID)
-		if err != nil {
-			return err
-		}
-		metadataBase := current.Metadata
-		if request.MetadataPresent && request.MetadataPatch == nil {
-			metadataBase = nil
-		}
-		if err := validateMetadataPatch(metadataBase, request.MetadataPatch); err != nil {
-			return err
-		}
-		if request.ApprovalMode != nil {
-			if err := validateSessionApprovalMode(*request.ApprovalMode); err != nil {
+	update := func() error {
+		return s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
+			current, err := s.lockMutableSession(ctx, tx, sessionID)
+			if err != nil {
 				return err
 			}
-		}
-		runtimeAgentConfig, err := s.resolveRuntimeAgentConfigPatch(ctx, ws, current, request)
-		if err != nil {
+			metadataBase := current.Metadata
+			if request.MetadataPresent && request.MetadataPatch == nil {
+				metadataBase = nil
+			}
+			if err := validateMetadataPatch(metadataBase, request.MetadataPatch); err != nil {
+				return err
+			}
+			if request.ApprovalMode != nil {
+				if err := validateSessionApprovalMode(*request.ApprovalMode); err != nil {
+					return err
+				}
+			}
+			runtimeAgentConfig, err := s.resolveRuntimeAgentConfigPatch(ctx, ws, current, request)
+			if err != nil {
+				return err
+			}
+			if !updateRequestChangesSession(current, request, runtimeAgentConfig) {
+				updated = current
+				return nil
+			}
+			updated, err = tx.UpdateSession(ctx, sessionID, UpdateSession{
+				Title:              request.Title,
+				TitlePresent:       request.TitlePresent,
+				MetadataPatch:      request.MetadataPatch,
+				MetadataPresent:    request.MetadataPresent,
+				ApprovalMode:       request.ApprovalMode,
+				RuntimeAgentConfig: runtimeAgentConfig,
+				UpdatedAt:          s.clock().UTC(),
+			})
 			return err
-		}
-		if !updateRequestChangesSession(current, request, runtimeAgentConfig) {
-			updated = current
-			return nil
-		}
-		updated, err = tx.UpdateSession(ctx, sessionID, UpdateSession{
-			Title:              request.Title,
-			TitlePresent:       request.TitlePresent,
-			MetadataPatch:      request.MetadataPatch,
-			MetadataPresent:    request.MetadataPresent,
-			ApprovalMode:       request.ApprovalMode,
-			RuntimeAgentConfig: runtimeAgentConfig,
-			UpdatedAt:          s.clock().UTC(),
 		})
-		return err
-	}); err != nil {
+	}
+	var err error
+	if request.ToolsPatch != nil || request.MCPServersPatch != nil || request.ApprovalMode != nil {
+		err = s.store.WithRuntimeMutationLock(ctx, ws, sessionID, update)
+	} else {
+		err = update()
+	}
+	if err != nil {
 		return nil, err
 	}
 	return s.assemble(ctx, ws, updated)
@@ -541,20 +550,23 @@ func (s *Service) Archive(ctx context.Context, ws workspace.ID, sessionID string
 }
 
 func (s *Service) Delete(ctx context.Context, ws workspace.ID, sessionID string) (*DeleteResponse, error) {
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
-		stored, err := tx.LockSessionForDelete(ctx, sessionID)
-		if err != nil {
-			return err
-		}
-		for _, resource := range stored.Resources {
-			if resource.File != nil {
-				if err := s.files.TombstoneSessionFileIdentity(ctx, filesTx{tx: tx}, ws, sessionID, resource.File.FileID); err != nil {
-					return err
+	err := s.store.WithRuntimeMutationLock(ctx, ws, sessionID, func() error {
+		return s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
+			stored, err := tx.LockSessionForDelete(ctx, sessionID)
+			if err != nil {
+				return err
+			}
+			for _, resource := range stored.Resources {
+				if resource.File != nil {
+					if err := s.files.TombstoneSessionFileIdentity(ctx, filesTx{tx: tx}, ws, sessionID, resource.File.FileID); err != nil {
+						return err
+					}
 				}
 			}
-		}
-		return tx.DeleteSession(ctx, sessionID)
-	}); err != nil {
+			return tx.DeleteSession(ctx, sessionID)
+		})
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &DeleteResponse{ID: sessionID, Type: "session_deleted"}, nil

@@ -15,7 +15,7 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-func TestPostgreSQLSessionInterruptBarrierDefersExactInflightCustody(t *testing.T) {
+func TestPostgreSQLThreadInterruptBarrierDefersExactInflightCustody(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID        = "sesn_interrupt_barrier_inflight"
@@ -188,7 +188,7 @@ func TestPostgreSQLSupersededInterruptSettlesItsExactQueueLease(t *testing.T) {
 	}
 }
 
-func TestPostgreSQLSessionInterruptBarrierRejectsLateMessageCommit(t *testing.T) {
+func TestPostgreSQLThreadInterruptBarrierRejectsLateMessageCommit(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID   = "sesn_interrupt_barrier_message"
@@ -225,7 +225,7 @@ func TestPostgreSQLSessionInterruptBarrierRejectsLateMessageCommit(t *testing.T)
 	}
 }
 
-func TestPostgreSQLSessionInterruptBarrierMakesLateToolSettlementStale(t *testing.T) {
+func TestPostgreSQLThreadInterruptBarrierMakesLateToolSettlementStale(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID      = "sesn_interrupt_barrier_tool"
@@ -269,7 +269,7 @@ func TestPostgreSQLSessionInterruptBarrierMakesLateToolSettlementStale(t *testin
 	}
 }
 
-func TestPostgreSQLSessionInterruptBarrierRejectsSuccessorStartAndChildLifecycle(t *testing.T) {
+func TestPostgreSQLThreadInterruptBarrierRejectsSuccessorStartAndChildLifecycle(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID      = "sesn_interrupt_barrier_lifecycle"
@@ -302,7 +302,7 @@ func TestPostgreSQLSessionInterruptBarrierRejectsSuccessorStartAndChildLifecycle
 	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: scope, SourceToolUseEventId: "evt_interrupt_barrier_spawn", TaskName: "blocked", AgentType: "worker", InitialPrompt: "blocked first mail",
 	})
-	if err == nil || created != nil || !isSessionInterruptBarrierStaleError(err) {
+	if err == nil || created != nil || !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("successor child lifecycle = %#v/%v; want private barrier-stale result", created, err)
 	}
 
@@ -317,7 +317,7 @@ func TestPostgreSQLSessionInterruptBarrierRejectsSuccessorStartAndChildLifecycle
 	}
 }
 
-func TestPostgreSQLSessionInterruptBarrierRejectsInternalToolRepair(t *testing.T) {
+func TestPostgreSQLThreadInterruptBarrierRejectsInternalToolRepair(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_interrupt_barrier_internal_repair"

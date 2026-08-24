@@ -639,12 +639,12 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		Scope: siblingScope, DeliveryId: agentMailDeliveryID(lateSourceID, grandchildID), TargetThreadId: grandchildID,
 		SourceToolUseEventId: lateSourceID, Content: "must be rejected",
 	}
-	if _, err := store.DeliverInterAgentMail(context.Background(), lateRequest); !isSessionInterruptBarrierStaleError(err) {
+	if _, err := store.DeliverInterAgentMail(context.Background(), lateRequest); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source mail error = %v; want interrupt barrier stale", err)
 	}
 	if _, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
-	}); !isSessionInterruptBarrierStaleError(err) {
+	}); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child error = %v; want interrupt barrier stale", err)
 	}
 	var sent, received, inbox, queued, lateOperations, lateChildren int

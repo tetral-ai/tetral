@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -93,6 +94,363 @@ func TestPostgreSQLStoreLeasePriorityPartitionBarrierAndAckFence(t *testing.T) {
 		t.Fatalf("second Lease: %v", err)
 	}
 	assertLeasedIDs(t, next, []string{"qjob_low"})
+}
+
+func TestPostgreSQLStoreThreadLanesAndSessionExclusiveLeaseMatrix(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_queue_thread_matrix")
+	sessionID := "sesn_queue_thread_matrix"
+	now := time.Date(2026, 8, 24, 20, 0, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+	enqueueInput := func(jobID, threadID, inputID string, sequence int64) {
+		mustEnqueue(t, store, EnqueueRequest{
+			ID: jobID, WorkspaceID: ws, Kind: KindRuntimeInput, PartitionKey: partition,
+			DedupeKey:   FormatRuntimeInputDedupeKey(ws, sessionID, inputID),
+			PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, inputID, "messages", sequence, sequence),
+			Now:         now.Add(time.Duration(sequence) * time.Millisecond),
+		})
+	}
+	enqueueInput("qjob_thread_a", "thrd_matrix_a", "rin_matrix_a", 1)
+	enqueueInput("qjob_thread_b", "thrd_matrix_b", "rin_matrix_b", 2)
+	enqueueInput("qjob_thread_a_later", "thrd_matrix_a", "rin_matrix_a_later", 3)
+
+	leased, err := store.Lease(ctx, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-matrix",
+		MaxJobs: 3, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Lease independent Thread lanes: %v", err)
+	}
+	assertLeasedIDs(t, leased, []string{"qjob_thread_a", "qjob_thread_b"})
+	if got := queueJobStatus(t, admin, ws, "qjob_thread_a_later"); got != StatusPending {
+		t.Fatalf("same-Thread successor status = %s; want pending", got)
+	}
+
+	config := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_matrix_config", WorkspaceID: ws, Kind: KindRuntimeConfigUpdate, PartitionKey: partition,
+		DedupeKey:   FormatRuntimeConfigUpdateDedupeKey(ws, sessionID, "1"),
+		PayloadJSON: []byte(`{"workspace_id":"ws_queue_thread_matrix","session_id":"sesn_queue_thread_matrix","config_generation":1}`),
+		Now:         now.Add(2 * time.Second),
+	})
+	if got, err := store.Lease(ctx, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput, KindRuntimeConfigUpdate}, LeaseOwner: "bridge-config",
+		MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(3 * time.Second),
+	}); err != nil || len(got) != 0 {
+		t.Fatalf("Lease with active Thread lanes = %+v/%v; want no Session-exclusive or same-Thread grant", got, err)
+	}
+	for _, job := range leased {
+		if ok, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: job.LeaseToken, Now: now.Add(4 * time.Second)}); err != nil || !ok {
+			t.Fatalf("Ack %s = (%v,%v)", job.ID, ok, err)
+		}
+	}
+	next := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput, KindRuntimeConfigUpdate}, LeaseOwner: "bridge-config",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(5 * time.Second),
+	})
+	if next.ID != "qjob_thread_a_later" {
+		t.Fatalf("next lease = %s; want causally earlier Thread successor", next.ID)
+	}
+	if ok, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: next.ID, LeaseToken: next.LeaseToken, Now: now.Add(6 * time.Second)}); err != nil || !ok {
+		t.Fatalf("Ack Thread successor = (%v,%v)", ok, err)
+	}
+	configLease := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeConfigUpdate}, LeaseOwner: "bridge-config",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(7 * time.Second),
+	})
+	if configLease.ID != config.ID {
+		t.Fatalf("Session-exclusive lease = %s; want %s", configLease.ID, config.ID)
+	}
+}
+
+func TestPostgreSQLStoreBlockedThreadBacklogDoesNotStarveSiblingLane(t *testing.T) {
+	store, _ := newPostgreSQLQueueStore(t)
+	ws := workspace.ID("ws_queue_sibling_fairness")
+	sessionID := "sesn_queue_sibling_fairness"
+	threadA := "thrd_queue_sibling_a"
+	threadB := "thrd_queue_sibling_b"
+	now := time.Date(2026, 8, 24, 20, 5, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+	enqueueInput := func(jobID, threadID, inputID string, sequence int64) {
+		mustEnqueue(t, store, EnqueueRequest{
+			ID: jobID, WorkspaceID: ws, Kind: KindRuntimeInput, PartitionKey: partition,
+			DedupeKey:   FormatRuntimeInputDedupeKey(ws, sessionID, inputID),
+			PayloadJSON: runtimeInputPayload(t, ws, sessionID, threadID, inputID, "messages", sequence, sequence),
+			Now:         now.Add(time.Duration(sequence) * time.Millisecond),
+		})
+	}
+	enqueueInput("qjob_sa", threadA, "rin_sibling_active_a", 1)
+	active := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-sibling-a",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if active.ID != "qjob_sa" {
+		t.Fatalf("active lease = %s; want Thread A", active.ID)
+	}
+	for sequence := int64(2); sequence <= 12; sequence++ {
+		enqueueInput(
+			"qjob_sa"+strconv.FormatInt(sequence, 10),
+			threadA,
+			"rin_sibling_blocked_a_"+strconv.FormatInt(sequence, 10),
+			sequence,
+		)
+	}
+	enqueueInput("qjob_sb", threadB, "rin_sibling_ready_b", 13)
+
+	sibling := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-sibling-b",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second),
+	})
+	if sibling.ID != "qjob_sb" {
+		t.Fatalf("sibling lease = %s; want ready Thread B behind blocked Thread A backlog", sibling.ID)
+	}
+}
+
+func TestPostgreSQLStoreConfigLeaseAllowsOnlyTargetedInterruptException(t *testing.T) {
+	store, _ := newPostgreSQLQueueStore(t)
+	ws := workspace.ID("ws_queue_config_interrupt")
+	sessionID := "sesn_queue_config_interrupt"
+	now := time.Date(2026, 8, 24, 20, 10, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+	config := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_config_active", WorkspaceID: ws, Kind: KindRuntimeConfigUpdate, PartitionKey: partition,
+		DedupeKey:   FormatRuntimeConfigUpdateDedupeKey(ws, sessionID, "1"),
+		PayloadJSON: []byte(`{"workspace_id":"ws_queue_config_interrupt","session_id":"sesn_queue_config_interrupt","config_generation":1}`),
+		Now:         now,
+	})
+	configLease := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeConfigUpdate}, LeaseOwner: "bridge-config",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if configLease.ID != config.ID {
+		t.Fatalf("config lease = %s; want %s", configLease.ID, config.ID)
+	}
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_config_ordinary", WorkspaceID: ws, Kind: KindRuntimeInput, PartitionKey: partition,
+		DedupeKey:   FormatRuntimeInputDedupeKey(ws, sessionID, "rin_config_ordinary"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_config_b", "rin_config_ordinary", "messages", 2, 2),
+		Now:         now.Add(2 * time.Second),
+	})
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_config_interrupt", WorkspaceID: ws, Kind: KindRuntimeInput, PartitionKey: partition,
+		DedupeKey:   FormatRuntimeInputDedupeKey(ws, sessionID, "rin_config_interrupt"),
+		PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_config_a", "rin_config_interrupt", "interrupt_control", 3, 3),
+		Priority:    100, Now: now.Add(3 * time.Second),
+	})
+	got := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-control",
+		MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(4 * time.Second),
+	})
+	if got.ID != interrupt.ID {
+		t.Fatalf("config exception lease = %s; want interrupt %s", got.ID, interrupt.ID)
+	}
+}
+
+func TestPostgreSQLStoreRevalidatesDeletedSessionAfterArbitration(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	const (
+		sessionID = "sesn_queue_deleted_recheck"
+		threadID  = "thrd_queue_deleted_recheck"
+		inputID   = "rin_queue_deleted_recheck"
+	)
+	now := time.Date(2026, 8, 24, 20, 15, 0, 0, time.UTC)
+	seedQueueRuntimeInbox(t, admin, sessionID, threadID, inputID, "messages", `["evt_queue_deleted_recheck"]`, 1, 1)
+	input := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_del_old", WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:    FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+		PayloadJSON:  runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, inputID, "messages", 1, 1),
+		Now:          now,
+	})
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE sessions SET lifecycle_state='deleted', updated_at=$2 WHERE workspace_id='default' AND id=$1`,
+		sessionID, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark Session deleted: %v", err)
+	}
+	deleteCleanup := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_del_cleanup", WorkspaceID: workspace.DefaultID, Kind: KindSessionDeleteCleanup,
+		PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:    FormatSessionDeleteCleanupDedupeKey(workspace.DefaultID, sessionID, "delcln_queue_deleted_recheck"),
+		PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": "default", "session_id": sessionID, "delete_cleanup_id": "delcln_queue_deleted_recheck"}),
+		Now:          now.Add(time.Second),
+	})
+	leased, err := store.Lease(ctx, LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput, KindSessionDeleteCleanup}, LeaseOwner: "bridge-deleted-recheck",
+		MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Lease after delete: %v", err)
+	}
+	assertLeasedIDs(t, leased, []string{deleteCleanup.ID})
+	if got := queueJobStatus(t, admin, workspace.DefaultID, input.ID); got != StatusPending {
+		t.Fatalf("pre-delete input status = %s; want pending and ineligible", got)
+	}
+}
+
+func TestPostgreSQLStoreSessionArbitrationPrecedesExactQueueCandidateLock(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		suffix    string
+		commit    bool
+		wantLease bool
+	}{
+		{name: "committed_delete_invalidates_candidate", suffix: "commit", commit: true, wantLease: false},
+		{name: "rolled_back_delete_preserves_candidate", suffix: "rollback", commit: false, wantLease: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, admin := newPostgreSQLQueueStore(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			sessionID := "sesn_lock_order_" + test.suffix
+			threadID := "thrd_lock_order_" + test.suffix
+			inputID := "rin_lock_order_" + test.suffix
+			jobID := "qjob_lock_" + test.suffix
+			now := time.Date(2026, 8, 24, 20, 30, 0, 0, time.UTC)
+			seedQueueRuntimeInbox(t, admin, sessionID, threadID, inputID, "messages", `["evt_lock_order"]`, 1, 1)
+			mustEnqueue(t, store, EnqueueRequest{
+				ID: jobID, WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+				PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+				DedupeKey:    FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+				PayloadJSON:  runtimeInputPayload(t, workspace.DefaultID, sessionID, threadID, inputID, "messages", 1, 1),
+				Now:          now,
+			})
+
+			locked := make(chan struct{})
+			updateCandidate := make(chan struct{})
+			candidateUpdated := make(chan error, 1)
+			releaseOwner := make(chan struct{})
+			ownerDone := make(chan error, 1)
+			rollback := errors.New("rollback Session owner")
+			go func() {
+				ownerDone <- store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_session_owner", func(tx *dbconnect.Tx) error {
+					if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(workspace.DefaultID), sessionID); err != nil {
+						return err
+					}
+					close(locked)
+					<-updateCandidate
+					_, err := tx.Exec(ctx, `UPDATE queue_jobs SET updated_at=updated_at WHERE workspace_id=$1 AND id=$2`, string(workspace.DefaultID), jobID)
+					candidateUpdated <- err
+					if err != nil {
+						return err
+					}
+					if _, err := tx.Exec(ctx, `UPDATE sessions SET lifecycle_state='deleted' WHERE workspace_id=$1 AND id=$2`, string(workspace.DefaultID), sessionID); err != nil {
+						return err
+					}
+					<-releaseOwner
+					if !test.commit {
+						return rollback
+					}
+					return nil
+				})
+			}()
+			<-locked
+
+			leaseDone := make(chan struct {
+				jobs []*Job
+				err  error
+			}, 1)
+			go func() {
+				jobs, err := store.Lease(ctx, LeaseRequest{
+					WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-lock-order",
+					MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+				})
+				leaseDone <- struct {
+					jobs []*Job
+					err  error
+				}{jobs: jobs, err: err}
+			}()
+			time.Sleep(50 * time.Millisecond)
+			close(updateCandidate)
+			select {
+			case err := <-candidateUpdated:
+				if err != nil {
+					t.Fatalf("Session owner exact Queue update: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Session owner blocked on Queue candidate while owning Session arbitration")
+			}
+			select {
+			case result := <-leaseDone:
+				t.Fatalf("Lease completed before Session owner released: jobs=%v err=%v", result.jobs, result.err)
+			default:
+			}
+			close(releaseOwner)
+			if err := <-ownerDone; test.commit && err != nil {
+				t.Fatalf("commit Session owner: %v", err)
+			} else if !test.commit && !errors.Is(err, rollback) {
+				t.Fatalf("rollback Session owner: %v", err)
+			}
+			result := <-leaseDone
+			if result.err != nil {
+				t.Fatalf("Lease after Session owner: %v", result.err)
+			}
+			if test.wantLease {
+				assertLeasedIDs(t, result.jobs, []string{jobID})
+			} else if len(result.jobs) != 0 {
+				t.Fatalf("Lease used stale pre-delete candidate: %+v", result.jobs)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLStoreMultiSessionLeaseUsesCanonicalLockOrder(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	now := time.Date(2026, 8, 24, 20, 40, 0, 0, time.UTC)
+	for _, candidate := range []struct {
+		sessionID string
+		threadID  string
+		inputID   string
+		jobID     string
+		priority  int
+		available time.Time
+	}{
+		{sessionID: "sesn_z_priority_first", threadID: "thrd_z", inputID: "rin_z", jobID: "qjob_z", priority: 100, available: now.Add(time.Second)},
+		{sessionID: "sesn_a_available_first", threadID: "thrd_a", inputID: "rin_a", jobID: "qjob_a", priority: 0, available: now},
+	} {
+		seedQueueRuntimeInbox(t, admin, candidate.sessionID, candidate.threadID, candidate.inputID, "messages", `["evt_multi_session"]`, 1, 1)
+		mustEnqueue(t, store, EnqueueRequest{
+			ID: candidate.jobID, WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
+			PartitionKey: FormatSessionPartitionKey(workspace.DefaultID, candidate.sessionID),
+			DedupeKey:    FormatRuntimeInputDedupeKey(workspace.DefaultID, candidate.sessionID, candidate.inputID),
+			PayloadJSON:  runtimeInputPayload(t, workspace.DefaultID, candidate.sessionID, candidate.threadID, candidate.inputID, "messages", 1, 1),
+			Priority:     candidate.priority, AvailableAt: candidate.available, Now: now,
+		})
+	}
+
+	type leaseResult struct {
+		jobs []*Job
+		err  error
+	}
+	results := make(chan leaseResult, 2)
+	for worker := 0; worker < 2; worker++ {
+		go func(worker int) {
+			jobs, err := store.Lease(ctx, LeaseRequest{
+				WorkspaceID: workspace.DefaultID, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-multi-" + strconv.Itoa(worker),
+				MaxJobs: 2, LeaseDuration: time.Minute, Now: now.Add(2 * time.Second),
+			})
+			results <- leaseResult{jobs: jobs, err: err}
+		}(worker)
+	}
+	seen := map[string]int{}
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatalf("multi-Session Lease: %v", result.err)
+			}
+			for _, job := range result.jobs {
+				seen[job.ID]++
+			}
+		case <-ctx.Done():
+			t.Fatal("multi-Session workers deadlocked")
+		}
+	}
+	if !reflect.DeepEqual(seen, map[string]int{"qjob_a": 1, "qjob_z": 1}) {
+		t.Fatalf("multi-Session grants = %v; want each candidate exactly once", seen)
+	}
 }
 
 func TestPostgreSQLQueueNotificationPublishesOnlyCommittedNewWork(t *testing.T) {
@@ -468,6 +826,55 @@ func TestPostgreSQLStoreLeaseHonorsCrossKindSessionBarrier(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLStoreSameThreadInterruptPrecedesHigherPriorityInput(t *testing.T) {
+	store, _ := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_queue_interrupt_precedence")
+	sessionID := "sesn_interrupt_precedence"
+	threadID := "thrd_interrupt_precedence"
+	now := time.Date(2026, 7, 1, 12, 32, 0, 0, time.UTC)
+	partition := FormatSessionPartitionKey(ws, sessionID)
+
+	ordinary := mustEnqueue(t, store, EnqueueRequest{
+		ID:           "qjob_hi_input",
+		WorkspaceID:  ws,
+		Kind:         KindRuntimeInput,
+		PartitionKey: partition,
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, sessionID, "rin_hi"),
+		PayloadJSON:  runtimeInputPayload(t, ws, sessionID, threadID, "rin_hi", "messages", 1, 1),
+		Priority:     1_000,
+		Now:          now,
+	})
+	interrupt := mustEnqueue(t, store, EnqueueRequest{
+		ID:           "qjob_interrupt",
+		WorkspaceID:  ws,
+		Kind:         KindRuntimeInput,
+		PartitionKey: partition,
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, sessionID, "rin_interrupt"),
+		PayloadJSON:  runtimeInputPayload(t, ws, sessionID, threadID, "rin_interrupt", "interrupt_control", 2, 2),
+		Priority:     0,
+		Now:          now.Add(time.Millisecond),
+	})
+
+	first := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if first.ID != interrupt.ID {
+		t.Fatalf("first same-thread lease = %s; want interrupt %s before higher-priority input", first.ID, interrupt.ID)
+	}
+	if ok, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: first.ID, LeaseToken: first.LeaseToken, Now: now.Add(2 * time.Second)}); err != nil || !ok {
+		t.Fatalf("Ack interrupt = (%v,%v); want true,nil", ok, err)
+	}
+	second := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(3 * time.Second),
+	})
+	if second.ID != ordinary.ID {
+		t.Fatalf("second same-thread lease = %s; want input %s", second.ID, ordinary.ID)
+	}
+}
+
 func TestPostgreSQLStoreDelayedRuntimeConfigBlocksOnlyLaterOrdinaryInput(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ctx := context.Background()
@@ -694,9 +1101,16 @@ func TestPostgreSQLStoreInterruptRetryRemainsSessionBarrierThroughFinalizationRe
 		Priority:    400, MaxAttempts: 2, Now: now.Add(3 * time.Second),
 	})
 
+	sibling := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-sibling", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(4 * time.Second)})
+	if sibling.ID != "qjob_sibling_after" {
+		t.Fatalf("first lease = %s; want independent sibling input", sibling.ID)
+	}
+	if ok, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: sibling.ID, LeaseToken: sibling.LeaseToken, Now: now.Add(4 * time.Second)}); err != nil || !ok {
+		t.Fatalf("Ack sibling = (%v,%v); want true,nil", ok, err)
+	}
 	first := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-a", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(4 * time.Second)})
 	if first.ID != interrupt.ID || first.AttemptCount != 1 {
-		t.Fatalf("first lease = %s attempt=%d; want interrupt attempt 1", first.ID, first.AttemptCount)
+		t.Fatalf("target lane lease = %s attempt=%d; want interrupt attempt 1", first.ID, first.AttemptCount)
 	}
 	if ok, err := store.Retry(ctx, RetryRequest{WorkspaceID: ws, JobID: first.ID, LeaseToken: first.LeaseToken, ErrorKind: "runtime_transport_error", Now: now.Add(4 * time.Second)}); err != nil || !ok {
 		t.Fatalf("Retry first interrupt = (%v,%v); want true,nil", ok, err)

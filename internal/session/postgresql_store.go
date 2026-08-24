@@ -1204,6 +1204,30 @@ func (t *postgresqlTransaction) DeleteSession(ctx context.Context, sessionID str
 	if current.Status == StatusRunning || current.Status == StatusRescheduling {
 		return &ConflictError{Message: "running or rescheduling sessions cannot be deleted", InvalidRequest: true}
 	}
+	// Service.Delete owns the common Session arbitration before this
+	// transaction starts. A Queue lease may have committed just before that
+	// owner; reject it here rather than deleting an apparently idle Session
+	// while Runtime delivery still has exact custody.
+	var activeDeliveryJobID string
+	err = t.tx.QueryRowScanner(ctx,
+		`SELECT id
+		   FROM queue_jobs
+		  WHERE workspace_id = $1
+		    AND causal_session_id = $2
+		    AND delivery_scope IN ('thread', 'session')
+		    AND status = 'leased'
+		  ORDER BY id
+		  LIMIT 1
+		  FOR UPDATE`,
+		string(t.workspaceID),
+		sessionID,
+	).Scan(&activeDeliveryJobID)
+	if err == nil {
+		return &ConflictError{Message: "running or rescheduling sessions cannot be deleted", InvalidRequest: true}
+	}
+	if !dbconnect.IsNoRows(err) {
+		return err
+	}
 	deleteCleanupID := id.New("delcln_")
 	timestamp := storage.Now()
 	if t.store.sessionDeleteSandboxRelease == nil {
