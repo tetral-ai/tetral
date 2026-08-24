@@ -720,6 +720,37 @@ describe("runtime boundary contracts", () => {
 		]);
 	});
 
+	test("maps exhausted credential failures to actionable request failures", () => {
+		const messages = {
+			credential_required: "Reconnect this provider before continuing.",
+			credential_unavailable: "The selected provider credential is not usable.",
+			provider_key_unavailable: "Provider access is unavailable.",
+		} as const;
+		for (const [code, message] of Object.entries(messages)) {
+			const event = sessionEventForDurableWrite(
+				SessionEventWriterAppendEventSchema.parse({
+					type: "session.error",
+					error: RuntimeFailureSchema.parse({
+						type: "provider",
+						code,
+						message,
+						retryable: false,
+						fatal: true,
+						retryStatus: { type: "exhausted" },
+					}),
+				}),
+			);
+			expect(event).toEqual({
+				type: "session.error",
+				error: {
+					type: "model_request_failed_error",
+					message,
+					retry_status: { type: "exhausted" },
+				},
+			});
+		}
+	});
+
 	test("emits MCP runtime events compatible with fork SDK event types", () => {
 		const mcpToolUse = withSDKEventEnvelope(
 			parseExactSessionEvent({

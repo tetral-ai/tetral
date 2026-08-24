@@ -56,7 +56,9 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 		| "platform_billing_exhausted"
 		| "statusless_transport"
 		| "invalid_kimi_byok"
-		| "invalid_openai_oauth";
+		| "invalid_openai_oauth"
+		| "missing_kimi_credential"
+		| "unavailable_openai_credential";
 };
 const scenario = input.scenario ?? "semantic_timeout";
 const customerCredentialScenario =
@@ -114,7 +116,7 @@ const writeRuntimeState = async (): Promise<void> => {
 			platformKeyQuarantines,
 			providerRequestContexts,
 			sensitiveLogLeak:
-				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
+				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),
 				),
 		}),
@@ -431,11 +433,12 @@ const hosts = await buildRuntimeCoreHosts({
 			systemInstructions: "Provider timeout production composition.",
 			timeoutMs: 5_000,
 		},
-		runtimeModel: () =>
-			scenario === "invalid_kimi_byok"
-				? { providerId: "moonshotai", modelId: "kimi-k3" }
-				: scenario === "invalid_openai_oauth"
-					? { providerId: "openai", modelId: "gpt-5.5" }
+	runtimeModel: () =>
+		scenario === "invalid_kimi_byok" || scenario === "missing_kimi_credential"
+			? { providerId: "moonshotai", modelId: "kimi-k3" }
+			: scenario === "invalid_openai_oauth" ||
+					scenario === "unavailable_openai_credential"
+				? { providerId: "openai", modelId: "gpt-5.5" }
 					: { providerId: "anthropic", modelId: "claude-opus-4-8" },
 		runtimePolicy: () => ({
 			toolCatalog: createToolCatalog({ family: "claude" }),
