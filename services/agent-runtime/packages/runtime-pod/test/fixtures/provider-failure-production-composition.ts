@@ -55,14 +55,14 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 		| "platform_billing_post_progress"
 		| "platform_billing_exhausted"
 		| "statusless_transport"
+		| "provider_rate_limited"
 		| "invalid_kimi_byok"
 		| "invalid_openai_oauth"
 		| "missing_kimi_credential"
 		| "unavailable_openai_credential";
 };
 const scenario = input.scenario ?? "semantic_timeout";
-const customerCredentialScenario =
-	scenario === "invalid_kimi_byok" || scenario === "invalid_openai_oauth";
+const customerCredentialScenario = scenario === "invalid_kimi_byok";
 const metadataFactory = async () => new Metadata();
 const bridgeOptions = {
 	address: input.bridgeAddress,
@@ -87,6 +87,7 @@ const healthyPlatformKey = {
 };
 const platformKeySelections: string[] = [];
 const platformKeyQuarantines: string[] = [];
+let oauthRefreshAttempts = 0;
 const platformPool = new PlatformKeyPool(
 	scenario === "platform_billing_pre_progress" || scenario === "platform_billing_post_progress"
 		? [badPlatformKey, healthyPlatformKey]
@@ -193,6 +194,18 @@ const successProviderParts = (): readonly GatewaySDKStreamPart[] => [
 	},
 ];
 const providerClientRegistry = new ProviderClientRegistry({
+	openAIOAuthCredentialRefreshWriter: {
+		refreshOpenAIOAuthCredential: async ({ credential }) => {
+			oauthRefreshAttempts += 1;
+			if (oauthRefreshAttempts === 1) {
+				return { ok: false as const, error: "credential_required" as const };
+			}
+			return {
+				ok: true as const,
+				credential: { ...credential, expiresAt: "2099-01-01T00:00:00.000Z" },
+			};
+		},
+	},
 	anthropicProviderFactory: (settings) => (modelId) => ({
 		provider: "anthropic",
 		modelId,
@@ -243,6 +256,26 @@ const providerClientRegistry = new ProviderClientRegistry({
 				},
 			]);
 		}
+		if (scenario === "provider_rate_limited" && providerInvocations === 1) {
+			return streamTextResult([
+				{ type: "text-start", id: "rate-limited-partial" },
+				{ type: "text-delta", id: "rate-limited-partial", text: "committed before rate limit" },
+				{ type: "text-end", id: "rate-limited-partial" },
+				{
+					type: "error",
+					error: {
+						statusCode: 429,
+						data: {
+							error: {
+								code: "rate_limit_exceeded",
+								type: "rate_limit_error",
+								message: "rate limited provider-failure-canary",
+							},
+						},
+					},
+				},
+			]);
+		}
 		if (customerCredentialScenario && providerInvocations === 1) {
 			return streamTextResult([
 				{
@@ -251,10 +284,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 						statusCode: 401,
 						data: {
 							error: {
-								code:
-									scenario === "invalid_openai_oauth"
-										? "invalid_api_key"
-										: "invalid_authentication_error",
+								code: "invalid_authentication_error",
 								type: "invalid_authentication_error",
 								message: "invalid credential private-byok-canary",
 							},
@@ -525,7 +555,7 @@ try {
 			platformKeyQuarantines,
 			providerRequestContexts,
 			sensitiveLogLeak:
-				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
+				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),
 				),
 		}),

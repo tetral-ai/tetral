@@ -218,7 +218,7 @@ Target resolution:
 | --- | --- |
 | `user.message` | `sessions.main_thread_id`. An archived primary thread is rejected at the session fence (Thread lifecycle above). |
 | `user.interrupt` with `session_thread_id` | that one thread, validated `visibility = 'public'` (`resolveInterruptTargetThreadID`). |
-| `user.interrupt` without `session_thread_id` | `sessions.main_thread_id`; one Stop creates one target-thread interrupt custody and a Session-wide delivery barrier. |
+| `user.interrupt` without `session_thread_id` | `sessions.main_thread_id`; one Stop creates one main-Thread interrupt custody and fences only that Thread's delivery and mutation. |
 | `user.tool_confirmation` | `session_thread_id` resolved from the referenced pending approval row — never client-chosen. |
 
 `Idempotency-Key` law:

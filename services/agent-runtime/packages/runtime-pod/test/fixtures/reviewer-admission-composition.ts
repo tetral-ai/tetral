@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
@@ -25,6 +25,8 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly beforeTrunkReleasePath?: string;
+	readonly trunkReleasePath?: string;
 };
 let phase = "initialize";
 const watchdog = setTimeout(() => {
@@ -205,6 +207,13 @@ await waitUntil(
 );
 
 phase = "release trunk";
+if (
+	input.beforeTrunkReleasePath !== undefined &&
+	input.trunkReleasePath !== undefined
+) {
+	await writeFile(input.beforeTrunkReleasePath, "ready");
+	await waitForFile(input.trunkReleasePath);
+}
 firstProviderRelease.resolve(undefined);
 const trunkResult = await trunk;
 const reviewIds = [...new Set(creations.map((creation) => creation.reviewId))];
@@ -301,5 +310,20 @@ async function waitUntil(
 			throw new Error("reviewer production boundary did not advance");
 		}
 		await new Promise((resolve) => setTimeout(resolve, 1));
+	}
+}
+
+async function waitForFile(path: string): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	for (;;) {
+		try {
+			await access(path);
+			return;
+		} catch {
+			if (Date.now() >= deadline) {
+				throw new Error(`timed out waiting for ${path}`);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
 	}
 }

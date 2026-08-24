@@ -1,6 +1,7 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
@@ -61,6 +63,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("reviewer-runtime-composition-key")
@@ -120,10 +123,14 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	client := bridgev1.NewAgentRuntimeBridgeServiceClient(connection)
 	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 
-	inputPath := t.TempDir() + "/reviewer-composition-input.json"
+	tempDir := t.TempDir()
+	inputPath := tempDir + "/reviewer-composition-input.json"
+	beforeTrunkReleasePath := tempDir + "/before-trunk-release"
+	trunkReleasePath := tempDir + "/release-trunk"
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default", "sessionId": sessionID,
 		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"beforeTrunkReleasePath": beforeTrunkReleasePath, "trunkReleasePath": trunkReleasePath,
 	})
 	if err != nil {
 		t.Fatalf("encode Reviewer Runtime composition input: %v", err)
@@ -162,7 +169,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 			}
 			active, captureErr := captureRunner.RunOnceWithActivity(captureCtx)
 			if captureErr != nil {
-				if errors.Is(captureErr, context.Canceled) {
+				if captureCtx.Err() != nil || errors.Is(captureErr, context.Canceled) {
 					captureFinished <- captureRunResult{jobs: jobs}
 				} else {
 					captureFinished <- captureRunResult{jobs: jobs, err: captureErr}
@@ -176,9 +183,61 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
+	var runtimeOutput bytes.Buffer
 	command := exec.Command("bun", "packages/runtime-pod/test/fixtures/reviewer-admission-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
 	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
+	command.Stdout = &runtimeOutput
+	command.Stderr = &runtimeOutput
+	if err := command.Start(); err != nil {
+		t.Fatalf("start Reviewer Runtime composition: %v", err)
+	}
+	waitForCompositionFile(t, beforeTrunkReleasePath, "running Reviewer before target interrupt", &runtimeOutput)
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)))
+	interruptBirth, err := eventService.AppendClientEvents(context.Background(), "default", sessionID, "reviewer-target-interrupt", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+		Type: sessionevent.EventTypeUserInterrupt, SessionThreadID: parentID,
+	}}})
+	if err != nil || len(interruptBirth.Data) != 1 {
+		t.Fatalf("birth target interrupt while Reviewer runs = %#v/%v", interruptBirth, err)
+	}
+	var interruptInputID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND input_kind='interrupt_control'
+		  AND event_ids_json::jsonb ? $3`, sessionID, parentID, interruptBirth.Data[0].ID).Scan(&interruptInputID); err != nil {
+		t.Fatalf("read Reviewer target interrupt custody: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	interruptLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: "default", Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "reviewer-target-interrupt",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	interruptJob := RuntimeJob{
+		JobID: interruptLease.ID, LeaseToken: interruptLease.LeaseToken, Kind: interruptLease.Kind,
+		PartitionKey: interruptLease.PartitionKey, DedupeKey: interruptLease.DedupeKey,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: parentID,
+		RuntimeInputID: interruptInputID, InputKind: "interrupt_control",
+		EventIDs: []string{interruptBirth.Data[0].ID}, SequenceFrom: interruptBirth.Data[0].Sequence,
+		SequenceTo: interruptBirth.Data[0].Sequence, PayloadJSON: string(interruptLease.PayloadJSON),
+		AttemptCount: int32(interruptLease.AttemptCount), MaxAttempts: int32(interruptLease.MaxAttempts),
+	}
+	if _, err := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090).PrepareRuntimeCommand(context.Background(), interruptJob); err != nil {
+		t.Fatalf("prepare Reviewer target interrupt delivery: %v", err)
+	}
+	interruptCloseout, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: parentScope, RuntimeInputId: interruptInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+	})
+	if err != nil || interruptCloseout.GetCommitted().GetInterrupt() == nil {
+		t.Fatalf("close reviewed target while Reviewer runs = %#v/%v", interruptCloseout, err)
+	}
+	if updated, err := queueStore.Ack(context.Background(), queue.AckRequest{
+		WorkspaceID: "default", JobID: interruptLease.ID, LeaseToken: interruptLease.LeaseToken, Now: time.Now().UTC(),
+	}); err != nil || !updated {
+		t.Fatalf("settle Reviewer target interrupt Queue lease = %t/%v", updated, err)
+	}
+	if err := os.WriteFile(trunkReleasePath, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release running Reviewer: %v", err)
+	}
+	err = command.Wait()
+	output := runtimeOutput.Bytes()
 	stopCapture()
 	captureResult := <-captureFinished
 	if captureResult.err != nil {
@@ -229,20 +288,26 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 		t.Fatalf("close before Runtime settlement = %#v/%v; want failed precondition", response, closeErr)
 	}
 
-	var decisions, failures, reviewerEnds, closed, open, closeOperations int
+	var decisions, failures, reviewerEnds, closed, open, closeOperations, unsettledReviewerInputs, targetToolFacts int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='approval_review.decision'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='approval_review.failure'),
 		(SELECT count(*) FROM request_usage_details WHERE workspace_id='default' AND session_id=$1 AND request_kind='approval_reviewer'),
 		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='approval_reviewer' AND status='closed_for_runtime'),
 		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='approval_reviewer' AND status<>'closed_for_runtime'),
-		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='close_approval_reviewer')`, sessionID).
-		Scan(&decisions, &failures, &reviewerEnds, &closed, &open, &closeOperations); err != nil {
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='close_approval_reviewer'),
+		(SELECT count(*) FROM session_runtime_inbox inbox JOIN session_threads thread
+		 ON thread.workspace_id=inbox.workspace_id AND thread.session_id=inbox.session_id AND thread.id=inbox.session_thread_id
+		 WHERE inbox.workspace_id='default' AND inbox.session_id=$1 AND thread.role='approval_reviewer'
+		   AND inbox.status IN ('queued','delivering','accepted')),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		 AND type IN ('agent.tool_use','agent.tool_result'))`, sessionID, parentID).
+		Scan(&decisions, &failures, &reviewerEnds, &closed, &open, &closeOperations, &unsettledReviewerInputs, &targetToolFacts); err != nil {
 		t.Fatalf("read Reviewer Runtime durable census: %v", err)
 	}
-	if decisions != 2 || failures != 1 || reviewerEnds != 4 || closed != 3 || open != 2 || closeOperations != 3 {
-		t.Fatalf("Reviewer durable decision/failure/requests/closed/open/closes = %d/%d/%d/%d/%d/%d; want 2/1/4/3/2/3",
-			decisions, failures, reviewerEnds, closed, open, closeOperations)
+	if decisions != 2 || failures != 1 || reviewerEnds != 4 || closed != 3 || open != 2 || closeOperations != 3 || unsettledReviewerInputs != 0 || targetToolFacts != 0 {
+		t.Fatalf("Reviewer durable decision/failure/requests/closed/open/closes/unsettled/target-tools = %d/%d/%d/%d/%d/%d/%d/%d; want 2/1/4/3/2/3/0/0",
+			decisions, failures, reviewerEnds, closed, open, closeOperations, unsettledReviewerInputs, targetToolFacts)
 	}
 
 	callsMu.Lock()

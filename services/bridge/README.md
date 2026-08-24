@@ -421,9 +421,10 @@ and active lifecycle facts directly from durable rows.
   mail-without-Inbox, or Inbox-without-Queue birth state. Completion replay
   joins the same durable identities; delivery never scans the event ledger to
   reconstruct custody. Delivery targets the bound pod directly, never a
-  load-balanced service. A leased interrupt is an exclusive Session-partition
-  delivery barrier: later inputs still commit their Event, Inbox, and Queue
-  custody, but no later job is leased until the interrupt's atomic Request End,
+  load-balanced service. A leased interrupt owns only its target Thread lane:
+  later inputs still commit their Event, Inbox, and Queue custody, sibling
+  Threads continue, and no later target-Thread job is leased until the
+  interrupt's atomic Request End,
   Tool settlements, and receipt are durable and its Queue job is acknowledged.
   Runtime acceptance alone never acknowledges an interrupt. Exact receipt
   replay acknowledges without another Runtime call; a 30-second interrupt send

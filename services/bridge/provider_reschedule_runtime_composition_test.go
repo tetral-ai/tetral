@@ -230,29 +230,38 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 
 func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testing.T) {
 	for _, testCase := range []struct {
-		name              string
-		scenario          string
-		wantProviderCalls int
-		wantTurns         int
-		wantRequestEnds   int
-		wantReschedules   int
-		wantErrorEnds     int
-		wantAssistants    int
-		wantKeySelections []string
-		wantPublicStatus  string
-		wantPublicType    string
-		wantPublicMessage string
+		name               string
+		scenario           string
+		wantProviderCalls  int
+		wantTurns          int
+		wantRequestEnds    int
+		wantReschedules    int
+		wantErrorEnds      int
+		wantAssistants     int
+		wantOutputCaptures int
+		wantFinishIdle     int
+		wantKeySelections  []string
+		wantPublicStatuses string
+		wantPublicTypes    string
+		wantPublicMessage  string
 	}{
 		{name: "platform billing before progress", scenario: "platform_billing_pre_progress", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 2, wantAssistants: 2, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy", "pfk_provider_failure_healthy"}},
 		{name: "platform billing after progress", scenario: "platform_billing_post_progress", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy"}},
-		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}, wantPublicStatus: "exhausted", wantPublicType: "model_overloaded_error"},
-		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2, wantAssistants: 1},
-		{name: "invalid Kimi API key", scenario: "invalid_kimi_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error"},
-		{name: "invalid OpenAI OAuth", scenario: "invalid_openai_oauth", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error"},
-		{name: "missing Kimi credential", scenario: "missing_kimi_credential", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error", wantPublicMessage: "This provider requires an explicit session credential."},
-		{name: "unavailable OpenAI credential", scenario: "unavailable_openai_credential", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error", wantPublicMessage: "The selected provider credential is not usable."},
+		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}, wantPublicStatuses: "exhausted,exhausted", wantPublicTypes: "model_overloaded_error,model_overloaded_error"},
+		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2, wantAssistants: 1, wantPublicStatuses: "retrying,exhausted", wantPublicTypes: "model_request_failed_error,model_overloaded_error"},
+		{name: "provider rate limited", scenario: "provider_rate_limited", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantReschedules: 1, wantErrorEnds: 1, wantAssistants: 2, wantOutputCaptures: 1, wantFinishIdle: 1, wantPublicStatuses: "retrying", wantPublicTypes: "model_rate_limited_error"},
+		{name: "invalid Kimi API key", scenario: "invalid_kimi_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error"},
+		{name: "OpenAI OAuth refresh rejected", scenario: "invalid_openai_oauth", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "OpenAI OAuth credential refresh failed; re-authorization is required."},
+		{name: "missing Kimi credential", scenario: "missing_kimi_credential", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "This provider requires an explicit session credential."},
+		{name: "unavailable OpenAI credential", scenario: "unavailable_openai_credential", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "The selected provider credential is not usable."},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			if testCase.wantOutputCaptures == 0 {
+				testCase.wantOutputCaptures = testCase.wantTurns
+			}
+			if testCase.wantFinishIdle == 0 {
+				testCase.wantFinishIdle = testCase.wantTurns
+			}
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			suffix := strings.ReplaceAll(testCase.scenario, "_", "")
 			sessionID := "sesn_provider_failure_" + suffix
@@ -283,7 +292,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				<-releaseFirstCapture
 				writeID := firstWriteID
 				captureGeneration := generation
-				for turn := 0; turn < testCase.wantTurns; turn++ {
+				for turn := 0; turn < testCase.wantOutputCaptures; turn++ {
 					if turn > 0 {
 						writeID, captureGeneration, err = waitForPendingOutputCapture(admin, sessionID, writeID)
 						if err != nil {
@@ -331,10 +340,10 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			if captureErr := <-capturesSettled; captureErr != nil {
 				t.Fatalf("settle %s output captures: %v", testCase.scenario, captureErr)
 			}
-			if result.ProviderInvocations != testCase.wantProviderCalls || result.FinishIdleInvocations != testCase.wantTurns || result.FinishIdleResult != "committed" || result.SensitiveLogLeak {
+			if result.ProviderInvocations != testCase.wantProviderCalls || result.FinishIdleInvocations != testCase.wantFinishIdle || result.FinishIdleResult != "committed" || result.SensitiveLogLeak {
 				t.Fatalf("%s provider/FinishIdle/log result = %d/%d/%s/%v; want %d/%d/committed/false",
 					testCase.scenario, result.ProviderInvocations, result.FinishIdleInvocations, result.FinishIdleResult, result.SensitiveLogLeak,
-					testCase.wantProviderCalls, testCase.wantTurns)
+					testCase.wantProviderCalls, testCase.wantFinishIdle)
 			}
 			if !slices.Equal(result.PlatformKeySelections, testCase.wantKeySelections) {
 				t.Fatalf("%s platform key selections = %v; want %v", testCase.scenario, result.PlatformKeySelections, testCase.wantKeySelections)
@@ -382,19 +391,15 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 					t.Fatalf("%s durable facts leaked provider-private detail %q", testCase.scenario, canary)
 				}
 			}
-			if testCase.wantPublicStatus != "" {
+			if testCase.wantPublicStatuses != "" {
 				if publicErrors == 0 {
 					t.Fatalf("%s emitted no public session.error", testCase.scenario)
 				}
-				for _, retryStatus := range strings.Split(publicRetryStatuses, ",") {
-					if retryStatus != testCase.wantPublicStatus {
-						t.Fatalf("%s public retry statuses = %q; want only %q", testCase.scenario, publicRetryStatuses, testCase.wantPublicStatus)
-					}
+				if publicRetryStatuses != testCase.wantPublicStatuses {
+					t.Fatalf("%s public retry statuses = %q; want %q", testCase.scenario, publicRetryStatuses, testCase.wantPublicStatuses)
 				}
-				for _, errorType := range strings.Split(publicErrorTypes, ",") {
-					if errorType != testCase.wantPublicType {
-						t.Fatalf("%s public error types = %q; want only %q", testCase.scenario, publicErrorTypes, testCase.wantPublicType)
-					}
+				if publicErrorTypes != testCase.wantPublicTypes {
+					t.Fatalf("%s public error types = %q; want %q", testCase.scenario, publicErrorTypes, testCase.wantPublicTypes)
 				}
 				if testCase.wantPublicMessage != "" && publicErrorMessages != testCase.wantPublicMessage {
 					t.Fatalf("%s public error message = %q; want %q", testCase.scenario, publicErrorMessages, testCase.wantPublicMessage)
@@ -523,6 +528,9 @@ func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessi
 			Type: "provider_oauth", ProviderID: providerID, AccessMode: accessMode,
 			AccessToken: "oauth-access-invalid", RefreshToken: "oauth-refresh-invalid",
 			ExpiresAt: "2099-01-01T00:00:00.000Z", AccountID: "account-provider-failure-canary",
+		}
+		if scenario == "invalid_openai_oauth" {
+			invalid.ExpiresAt = "2020-01-01T00:00:00.000Z"
 		}
 		healthy = invalid
 		healthy.AccessToken = "oauth-access-healthy"
