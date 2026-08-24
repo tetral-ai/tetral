@@ -16,7 +16,7 @@
 #   fuse_conf       /etc/fuse.conf contains user_allow_other
 #   capture_procfd  /proc/self/fd reopen self-test (kernel, not packaging)
 
-ARG SANDBOX_HELPER_BASE_IMAGE=golang:1.25.12-alpine
+ARG SANDBOX_HELPER_BASE_IMAGE=golang:1.25.13-alpine
 ARG SANDBOX_RUNTIME_BASE_IMAGE=ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9
 
 FROM ${SANDBOX_HELPER_BASE_IMAGE} AS helper
