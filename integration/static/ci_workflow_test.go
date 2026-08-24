@@ -614,9 +614,9 @@ permissions:
 		t.Fatal("base-image mirror workflow must wire each matrix source tuple into the matching shell variables")
 	}
 	for _, matrixEntry := range []string{
-		`          - primary: public.ecr.aws/docker/library/golang:1.25.12
-            fallback: docker.io/library/golang:1.25.12
-            target: ghcr.io/tetral-ai/mirror/golang:1.25.12`,
+		`          - primary: public.ecr.aws/docker/library/golang:1.25.13
+            fallback: docker.io/library/golang:1.25.13
+            target: ghcr.io/tetral-ai/mirror/golang:1.25.13`,
 		`          - primary: public.ecr.aws/docker/library/ubuntu:24.04
             fallback: docker.io/library/ubuntu:24.04
             target: ghcr.io/tetral-ai/mirror/ubuntu:24.04`,

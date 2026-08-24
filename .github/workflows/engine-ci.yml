@@ -40,7 +40,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: gofmt
@@ -127,7 +127,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: Install buf
@@ -336,7 +336,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: Install buf
@@ -533,7 +533,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: Install buf
@@ -558,7 +558,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: Setup Helm
@@ -587,7 +587,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: Setup Bun
@@ -638,7 +638,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: Helper privilege integration
@@ -666,7 +666,7 @@ jobs:
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache-dependency-path: go.sum
 
       - name: Setup Bun
