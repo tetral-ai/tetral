@@ -158,6 +158,47 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	}
 }
 
+func TestWriteEventAcceptsRuntimeSelectedRequestContextBoundary(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_request_context_boundary"
+		threadID  = "thr_request_context_boundary"
+		bindingID = "bind_request_context_boundary"
+		podUID    = "pod_request_context_boundary"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
+		workspace_id, session_id, session_thread_id, message_id, sequence, kind,
+		data_json, created_at, updated_at
+	) VALUES
+		('default', $1, $2, 'msg_request_context_boundary_1', 1, 'user', '{"parts":[{"type":"text","text":"retained"}]}', now(), now()),
+		('default', $1, $2, 'msg_request_context_boundary_2', 2, 'assistant', '{"parts":[{"type":"text","text":"failed partial"}]}', now(), now())`, sessionID, threadID); err != nil {
+		t.Fatalf("seed request context boundary messages: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	beyondHistory := int64(3)
+	rejected, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_request_context_boundary_future", ModelRequestId: "mreq_request_context_boundary_future",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
+		ContextThroughMessageSequence: &beyondHistory, RequestKind: requestKindAgentProviderRequest,
+	})
+	if rejected != nil || status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "exceeds durable history") {
+		t.Fatalf("future request context boundary = %#v/%v; want InvalidArgument", rejected, err)
+	}
+
+	selectedBoundary := int64(1)
+	accepted, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_request_context_boundary_selected", ModelRequestId: "mreq_request_context_boundary_selected",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
+		ContextThroughMessageSequence: &selectedBoundary, RequestKind: requestKindAgentProviderRequest,
+	})
+	if err != nil || accepted.GetCommitted() == nil {
+		t.Fatalf("Runtime-selected request context boundary = %#v/%v; want committed", accepted, err)
+	}
+}
+
 func TestPostgreSQLWriteEventUsesOneOperationNamespaceWithoutChangingChildLowering(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

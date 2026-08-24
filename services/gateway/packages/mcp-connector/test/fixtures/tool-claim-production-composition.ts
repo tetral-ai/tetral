@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { Metadata } from "@grpc/grpc-js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import type {
 	McpErrorKind,
@@ -12,6 +13,10 @@ import type { ToolEntry } from "../../../../../agent-runtime/packages/core/src/t
 import { BridgeAPIEventWriter } from "../../../../../agent-runtime/packages/runtime-pod/src/bridge-client.js";
 import { RuntimePodToolRunner } from "../../../../../agent-runtime/packages/runtime-pod/src/tool-runner.js";
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
+import { McpSDKClient } from "../../src/client.js";
+import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
+import type { McpCredentialSQL } from "../../src/credential.js";
+import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
 import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import type {
 	McpAuthenticator,
@@ -26,21 +31,34 @@ const runtimeTokenPath = process.argv[4];
 const toolUseEventIdArgument = process.argv[5];
 const cleanupToolUseEventIdArgument = process.argv[6];
 const cancelledToolUseEventIdArgument = process.argv[7];
+const oauthSuccessToolUseEventIdArgument = process.argv[8];
+const oauthFailureToolUseEventIdArgument = process.argv[9];
+const databaseURL = process.env.TETRAL_TEST_DATABASE_URL;
+const databaseSchema = process.env.TETRAL_TEST_DATABASE_SCHEMA;
 if (
 	bridgeAddress === undefined ||
 	gatewayTokenPath === undefined ||
 	runtimeTokenPath === undefined ||
 	toolUseEventIdArgument === undefined ||
 	cleanupToolUseEventIdArgument === undefined ||
-	cancelledToolUseEventIdArgument === undefined
+	cancelledToolUseEventIdArgument === undefined ||
+	oauthSuccessToolUseEventIdArgument === undefined ||
+	oauthFailureToolUseEventIdArgument === undefined ||
+	databaseURL === undefined ||
+	databaseSchema === undefined
 ) {
 	throw new Error(
-		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id>",
+		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id> <oauth-success-tool-use-event-id> <oauth-failure-tool-use-event-id> with TETRAL_TEST_DATABASE_URL and TETRAL_TEST_DATABASE_SCHEMA",
 	);
 }
 const toolUseEventId: string = toolUseEventIdArgument;
 const cleanupToolUseEventId: string = cleanupToolUseEventIdArgument;
 const cancelledToolUseEventId: string = cancelledToolUseEventIdArgument;
+const oauthSuccessToolUseEventId: string = oauthSuccessToolUseEventIdArgument;
+const oauthFailureToolUseEventId: string = oauthFailureToolUseEventIdArgument;
+const compositionBridgeAddress: string = bridgeAddress;
+const compositionRuntimeTokenPath: string = runtimeTokenPath;
+const connectorLogRecords: unknown[] = [];
 
 class TakeoverMcpClient implements McpClient {
 	readonly calls: string[] = [];
@@ -145,7 +163,11 @@ const staleFirst = await first;
 const runtimeService = serviceForClaim("claim_mcp_production_runtime_replay");
 const connectorServer = createMcpConnectorGrpcServer(runtimeService);
 const connectorPort = await connectorServer.bind("127.0.0.1:0");
-const runtimeRequest = mcpRuntimeRequest();
+const runtimeRequest = mcpRuntimeRequest(
+	toolUseEventId,
+	"call_mcp_durable_claim",
+	{ title: "Bug", body: "Details" },
+);
 const runner = new RuntimePodToolRunner({
 	bridgeAddress,
 	webAddress: "127.0.0.1:1",
@@ -200,6 +222,28 @@ try {
 const cleanupReacquired = await serviceForClaim(
 	"claim_mcp_production_cleanup_reacquired",
 ).runMcpTool(runRequest(cleanupToolUseEventId), metadata);
+const oauthComposition = await createOAuthCredentialComposition(databaseURL, databaseSchema);
+let oauthSuccess: Awaited<ReturnType<typeof runOAuthRuntime>>;
+let oauthFailure: Awaited<ReturnType<typeof runOAuthRuntime>>;
+let oauthProof: OAuthCredentialProof;
+try {
+	oauthSuccess = await runOAuthRuntime(
+		oauthSuccessToolUseEventId,
+		"call_mcp_oauth_success",
+		"claim_mcp_oauth_success",
+		oauthComposition.successClient,
+	);
+	await oauthComposition.prepareFailure();
+	oauthFailure = await runOAuthRuntime(
+		oauthFailureToolUseEventId,
+		"call_mcp_oauth_failure",
+		"claim_mcp_oauth_failure",
+		oauthComposition.failureClient,
+	);
+	oauthProof = await oauthComposition.proof();
+} finally {
+	await oauthComposition.close();
+}
 
 process.stdout.write(
 	JSON.stringify({
@@ -210,12 +254,18 @@ process.stdout.write(
 		cancelledFirst: responseSummary(cancelledFirst),
 		cleanupFailureCode,
 		cleanupReacquired: responseSummary(cleanupReacquired),
-		runtimeResult,
-		settlement: settlement.result,
+	runtimeResult,
+	settlement: settlement.result,
+	oauthSuccess,
+	oauthFailure,
+	oauthProof,
 	}),
 );
 
-function serviceForClaim(claimId: string): McpConnectorServiceShell {
+function serviceForClaim(
+	claimId: string,
+	serviceClient: McpClient = client,
+): McpConnectorServiceShell {
 	const authenticator: McpAuthenticator = {
 		authenticate: async ({ metadata: requestMetadata }) =>
 			requestMetadata
@@ -240,8 +290,8 @@ function serviceForClaim(claimId: string): McpConnectorServiceShell {
 					},
 	};
 	const logger: McpConnectorLogger = {
-		info: () => undefined,
-		error: () => undefined,
+		info: (...args: unknown[]) => { connectorLogRecords.push(args); },
+		error: (...args: unknown[]) => { connectorLogRecords.push(args); },
 	};
 	return new McpConnectorServiceShell({
 		authenticator,
@@ -251,7 +301,7 @@ function serviceForClaim(claimId: string): McpConnectorServiceShell {
 		}),
 		logger,
 		ready: () => true,
-		client,
+		client: serviceClient,
 		idempotencyStore,
 		claimIdFactory: () => claimId,
 	});
@@ -269,7 +319,11 @@ function runRequest(eventId: string): RunMcpToolRequest {
 	};
 }
 
-function mcpRuntimeRequest(): RuntimeToolExecutionRequest {
+function mcpRuntimeRequest(
+	eventId: string,
+	modelToolCallId: string,
+	input: RuntimeToolExecutionRequest["input"],
+): RuntimeToolExecutionRequest {
 	return {
 		workspaceId: "default",
 		sessionId: "sesn_mcp_production_composition",
@@ -279,14 +333,259 @@ function mcpRuntimeRequest(): RuntimeToolExecutionRequest {
 		runtimeBindingToken: signedBindingToken(),
 		targetPodUid: runtimePodUid,
 		modelRequestId: "mreq_mcp_durable_claim",
-		modelToolCallId: "call_mcp_durable_claim",
+		modelToolCallId,
 		modelOrder: 0,
-		toolUseEventId,
+		toolUseEventId: eventId,
 		entry: mcpToolEntry(),
-		input: { title: "Bug", body: "Details" },
+		input,
 		retainedContextEntries: [],
 		abortSignal: new AbortController().signal,
 	};
+}
+
+async function runOAuthRuntime(
+	eventId: string,
+	modelToolCallId: string,
+	claimId: string,
+	oauthClient: McpClient,
+) {
+	const service = serviceForClaim(claimId, oauthClient);
+	const server = createMcpConnectorGrpcServer(service);
+	const port = await server.bind("127.0.0.1:0");
+	try {
+		const request = mcpRuntimeRequest(eventId, modelToolCallId, {
+			mode: claimId.endsWith("success") ? "oauth-success" : "oauth-failure",
+		});
+		const oauthRunner = new RuntimePodToolRunner({
+			bridgeAddress: compositionBridgeAddress,
+			webAddress: "127.0.0.1:1",
+			mcpConnectorAddress: `127.0.0.1:${port}`,
+			tokenPath: compositionRuntimeTokenPath,
+			sleep: async () => undefined,
+		});
+		const result = await oauthRunner.runTool(request);
+		if (result.type === "stale_custody") {
+			throw new Error("OAuth MCP composition lost Runtime custody");
+		}
+		const oauthSettlement = await writer.settleToolResult({
+			workspaceId: request.workspaceId,
+			sessionId: request.sessionId,
+			sessionThreadId: request.sessionThreadId,
+			bindingId: request.bindingId,
+			bindingGeneration: request.bindingGeneration,
+			targetPodUid: request.targetPodUid,
+			settlement: { toolUseEventId: eventId, outcome: runtimeToolSettlement(result) },
+		});
+		if (!oauthSettlement.ok) throw oauthSettlement.error;
+		return result;
+	} finally {
+		await server.shutdown();
+	}
+}
+
+interface OAuthCredentialProof {
+	readonly issuerRequests: number;
+	readonly successTransportCount: number;
+	readonly failureTransportCount: number;
+	readonly durableRotation: boolean;
+	readonly failedRefreshPreservedCredential: boolean;
+	readonly refreshOutcomes: readonly string[];
+	readonly leakSurfacesClean: boolean;
+}
+
+async function createOAuthCredentialComposition(databaseURL: string, schema: string) {
+	if (!/^[a-z0-9_]+$/.test(schema)) throw new Error("invalid PostgreSQL composition schema");
+	const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+	const now = new Date("2026-01-01T00:00:00.000Z");
+	const initialAuth = {
+		type: "mcp_oauth",
+		mcp_server_url: "https://api.githubcopilot.com/mcp/",
+		access_token: "ACCESS_TOKEN_CANARY_OLD",
+		expires_at: "2025-12-31T23:59:00.000Z",
+		refresh: {
+			refresh_token: "REFRESH_TOKEN_CANARY_OLD",
+			client_id: "github-client",
+			token_endpoint: "https://github.example.invalid/oauth/token",
+			token_endpoint_auth: { type: "none" },
+		},
+	};
+	const publicAuth = JSON.stringify({
+		type: initialAuth.type,
+		mcp_server_url: initialAuth.mcp_server_url,
+		expires_at: initialAuth.expires_at,
+		refresh: {
+			client_id: initialAuth.refresh.client_id,
+			token_endpoint: initialAuth.refresh.token_endpoint,
+			token_endpoint_auth: initialAuth.refresh.token_endpoint_auth,
+		},
+	});
+	const initialEncrypted = await encryptAES256GCM(
+		new TextEncoder().encode(JSON.stringify(initialAuth)),
+		keyHex,
+	);
+	const admin = new Bun.SQL({ url: databaseURL, max: 1 });
+	const appURL = new URL(databaseURL);
+	appURL.username = "tetral_runtime_test";
+	appURL.password = "tetral_runtime_test_pw";
+	const app = new Bun.SQL({ url: appURL.toString(), max: 1 });
+	await admin.unsafe(`SET search_path TO ${schema}, pg_catalog`);
+	await app.unsafe(`SET search_path TO ${schema}, pg_catalog`);
+	await admin`
+		INSERT INTO vaults (workspace_id, id, display_name, metadata_json, created_at, updated_at)
+		VALUES ('default', 'vlt_mcp_oauth', 'MCP OAuth composition', '{}', ${now}, ${now})`;
+	await admin`UPDATE sessions SET vault_ids_json='["vlt_mcp_oauth"]' WHERE workspace_id='default' AND id='sesn_mcp_production_composition'`;
+	await admin`
+		INSERT INTO credentials (
+			workspace_id, id, vault_id, display_name, metadata_json, auth_type,
+			auth_public_json, mcp_server_url, expires_at, encrypted_auth, created_at, updated_at
+		) VALUES (
+			'default', 'cred_mcp_oauth', 'vlt_mcp_oauth', 'GitHub MCP OAuth', '{}', 'mcp_oauth',
+			${publicAuth}, ${initialAuth.mcp_server_url}, ${initialAuth.expires_at}, ${initialEncrypted}, ${now}, ${now}
+		)`;
+
+	let issuerFailure = false;
+	let issuerRequests = 0;
+	const refreshEvents: McpOAuthRefreshCompletedEvent[] = [];
+	const successTransportTokens: string[] = [];
+	const failureTransportTokens: string[] = [];
+	const fetchFn = async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): ReturnType<typeof fetch> => {
+		issuerRequests += 1;
+		if (new Headers(init?.headers).get("accept") !== "application/json") {
+			throw new Error("OAuth refresh omitted the JSON accept header");
+		}
+		if (issuerFailure) {
+			return new Response(JSON.stringify({ error: "RAW_ISSUER_ERROR_CANARY" }), { status: 503 });
+		}
+		return Response.json({
+			access_token: "ACCESS_TOKEN_CANARY_ROTATED",
+			refresh_token: "REFRESH_TOKEN_CANARY_ROTATED",
+			expires_in: 3600,
+		});
+	};
+	const resolver = new SQLGitHubMcpCredentialResolver(
+		app as unknown as McpCredentialSQL,
+		keyHex,
+		() => now,
+		fetchFn,
+		undefined,
+		undefined,
+		(event) => { refreshEvents.push(event); },
+	);
+	const successClient = oauthMcpClient(resolver, (token) => { successTransportTokens.push(token); });
+	const failureClient = oauthMcpClient(resolver, (token) => { failureTransportTokens.push(token); });
+	let rotatedCredential = false;
+	let failedRefreshPreservedCredential = false;
+
+	return {
+		successClient,
+		failureClient,
+		prepareFailure: async () => {
+			const rows = await admin<{ encrypted_auth: Uint8Array; expires_at: string }[]>`
+				SELECT encrypted_auth, expires_at FROM credentials
+				WHERE workspace_id='default' AND vault_id='vlt_mcp_oauth' AND id='cred_mcp_oauth'`;
+			const rotated = JSON.parse(new TextDecoder().decode(
+				await decryptAES256GCM(rows[0]!.encrypted_auth, keyHex),
+			)) as { access_token?: string; expires_at?: string; refresh?: { refresh_token?: string } };
+			rotatedCredential = rotated.access_token === "ACCESS_TOKEN_CANARY_ROTATED"
+				&& rotated.refresh?.refresh_token === "REFRESH_TOKEN_CANARY_ROTATED"
+				&& rows[0]!.expires_at === "2026-01-01T01:00:00.000Z";
+			await successClient.closeAll();
+			await admin`
+				UPDATE credentials SET auth_public_json=${publicAuth}, encrypted_auth=${initialEncrypted},
+					expires_at=${initialAuth.expires_at}, updated_at=${now}
+				WHERE workspace_id='default' AND vault_id='vlt_mcp_oauth' AND id='cred_mcp_oauth'`;
+			issuerFailure = true;
+		},
+		proof: async (): Promise<OAuthCredentialProof> => {
+			const rows = await admin<{ encrypted_auth: Uint8Array }[]>`
+				SELECT encrypted_auth FROM credentials
+				WHERE workspace_id='default' AND vault_id='vlt_mcp_oauth' AND id='cred_mcp_oauth'`;
+			failedRefreshPreservedCredential = Buffer.from(rows[0]!.encrypted_auth)
+				.equals(Buffer.from(initialEncrypted));
+			const leakSurface = JSON.stringify({ refreshEvents, connectorLogRecords });
+			return {
+				issuerRequests,
+				successTransportCount: successTransportTokens.length,
+				failureTransportCount: failureTransportTokens.length,
+				durableRotation: rotatedCredential,
+				failedRefreshPreservedCredential,
+				refreshOutcomes: refreshEvents.map((event) => event.outcome),
+				leakSurfacesClean: !["ACCESS_TOKEN_CANARY", "REFRESH_TOKEN_CANARY", "RAW_ISSUER_ERROR_CANARY"]
+					.some((canary) => leakSurface.includes(canary)),
+			};
+		},
+		close: async () => {
+			await successClient.closeAll();
+			await failureClient.closeAll();
+			await app.close();
+			await admin.close();
+		},
+	};
+}
+
+function oauthMcpClient(
+	resolver: SQLGitHubMcpCredentialResolver,
+	observeToken: (token: string) => void,
+): McpSDKClient {
+	return new McpSDKClient({
+		credentialResolver: resolver,
+		onToolsListChanged: async () => undefined,
+		createTransport: ({ token }) => {
+			observeToken(token ?? "");
+			return new OAuthCompositionTransport();
+		},
+	});
+}
+
+class OAuthCompositionTransport implements Transport {
+	onclose?: () => void;
+	onerror?: (error: Error) => void;
+	onmessage: NonNullable<Transport["onmessage"]> = () => undefined;
+
+	async start(): Promise<void> {}
+
+	async send(message: Parameters<Transport["send"]>[0]): Promise<void> {
+		if (!("id" in message) || !("method" in message)) return;
+		const result = message.method === "initialize"
+			? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "oauth-composition", version: "1.0.0" } }
+			: message.method === "tools/list"
+				? { tools: [] }
+				: message.method === "tools/call"
+					? { content: [{ type: "text", text: "oauth refreshed" }] }
+					: undefined;
+		if (result === undefined) throw new Error(`unexpected MCP request ${message.method}`);
+		queueMicrotask(() => this.onmessage?.({ jsonrpc: "2.0", id: message.id, result } as Parameters<NonNullable<Transport["onmessage"]>>[0]));
+	}
+
+	async close(): Promise<void> {
+		this.onclose?.();
+	}
+}
+
+async function encryptAES256GCM(plaintext: Uint8Array, keyHex: string): Promise<Uint8Array> {
+	const key = await crypto.subtle.importKey("raw", arrayBuffer(Uint8Array.fromHex(keyHex)), { name: "AES-GCM" }, false, ["encrypt"]);
+	const nonce = crypto.getRandomValues(new Uint8Array(12));
+	const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+		{ name: "AES-GCM", iv: arrayBuffer(nonce), tagLength: 128 }, key, arrayBuffer(plaintext),
+	));
+	const encoded = new Uint8Array(nonce.length + ciphertext.length);
+	encoded.set(nonce, 0);
+	encoded.set(ciphertext, nonce.length);
+	return encoded;
+}
+
+async function decryptAES256GCM(ciphertext: Uint8Array, keyHex: string): Promise<Uint8Array> {
+	const key = await crypto.subtle.importKey("raw", arrayBuffer(Uint8Array.fromHex(keyHex)), { name: "AES-GCM" }, false, ["decrypt"]);
+	const plaintext = await crypto.subtle.decrypt(
+		{ name: "AES-GCM", iv: arrayBuffer(ciphertext.slice(0, 12)), tagLength: 128 },
+		key,
+		arrayBuffer(ciphertext.slice(12)),
+	);
+	return new Uint8Array(plaintext);
+}
+
+function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
+	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 function mcpToolEntry(): ToolEntry {

@@ -269,7 +269,7 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 		{"ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z", "the test job requires the Tetral-owned MinIO mirror"},
 		{"TETRAL_TEST_DATABASE_URL", "the test step must export the PostgreSQL test DSN to Engine tests"},
 		{"go list ./...", "shards must derive their package set from the module, so no package can be silently dropped"},
-		{"go test -race -coverprofile=coverage.out $packages", "the shard test command must keep the race detector and coverage"},
+		{"go test -race -timeout=20m -coverprofile=coverage.out $packages", "the shard test command must keep the race detector, bounded package timeout, and coverage"},
 		{"pg_isready", "an explicit readiness probe must run before go test so go test is not itself the readiness probe"},
 	}
 	for _, r := range required {
@@ -371,7 +371,7 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 		// --health-cmd. The explicit standalone readiness step appears
 		// last and is the load-bearing step.
 		readinessIdx := strings.LastIndex(goTestJob, "pg_isready")
-		testCmdIdx := strings.Index(goTestJob, "go test -race -coverprofile=coverage.out $packages")
+		testCmdIdx := strings.Index(goTestJob, "go test -race -timeout=20m -coverprofile=coverage.out $packages")
 		if readinessIdx < 0 || testCmdIdx < 0 {
 			t.Fatal("readiness-order proof is missing its probe or sharded go-test command")
 		}

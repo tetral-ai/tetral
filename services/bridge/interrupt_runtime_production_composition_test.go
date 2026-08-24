@@ -918,7 +918,7 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 		t.Fatalf("read actor terminal facts: %v", err)
 	}
 	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
-		mailInbox != "committed" || mailQueue != queue.StatusAcknowledged || lateOperations != 0 || lateChildren != 0 || activeBarriers != 0 {
+		mailInbox != "committed" || mailQueue != queue.StatusDeadLettered || lateOperations != 0 || lateChildren != 0 || activeBarriers != 0 {
 		t.Fatalf("actor terminal facts = interrupt:%s/%s mail:%s/%s late:%d/%d barriers:%d Runtime:%s",
 			interruptInbox, interruptQueue, mailInbox, mailQueue, lateOperations, lateChildren, activeBarriers, composed.InterruptResult)
 	}

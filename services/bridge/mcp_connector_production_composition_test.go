@@ -59,6 +59,26 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("write cancellation-between-claims MCP Tool use = %#v/%v", cancelledToolUse, err)
 	}
 	cancelledToolUseEventID := cancelledToolUse.GetCommitted().GetEventId()
+	oauthSuccessToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_oauth_success_use", ModelRequestId: "mreq_mcp_durable_claim",
+		ToolDeclaration: bridgeMCPToolDeclarationForTest(
+			"call_mcp_oauth_success", "create_issue", "github", `{"mode":"oauth-success"}`, "allow",
+		),
+	})
+	if err != nil || oauthSuccessToolUse.GetCommitted() == nil {
+		t.Fatalf("write OAuth-success MCP Tool use = %#v/%v", oauthSuccessToolUse, err)
+	}
+	oauthFailureToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_mcp_oauth_failure_use", ModelRequestId: "mreq_mcp_durable_claim",
+		ToolDeclaration: bridgeMCPToolDeclarationForTest(
+			"call_mcp_oauth_failure", "create_issue", "github", `{"mode":"oauth-failure"}`, "allow",
+		),
+	})
+	if err != nil || oauthFailureToolUse.GetCommitted() == nil {
+		t.Fatalf("write OAuth-failure MCP Tool use = %#v/%v", oauthFailureToolUse, err)
+	}
+	oauthSuccessToolUseEventID := oauthSuccessToolUse.GetCommitted().GetEventId()
+	oauthFailureToolUseEventID := oauthFailureToolUse.GetCommitted().GetEventId()
 	cleanupToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_cleanup_use", ModelRequestId: "mreq_mcp_durable_claim",
 		ToolDeclaration: bridgeMCPToolDeclarationForTest(
@@ -75,7 +95,10 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
 			Disposition:              "completed",
 			AssistantMessageSequence: cleanupToolUse.GetCommitted().AssignedMessageSequence,
-			ToolUseEventIds:          []string{toolUseEventID, cancelledToolUseEventID, cleanupToolUseEventID},
+			ToolUseEventIds: []string{
+				toolUseEventID, cancelledToolUseEventID, oauthSuccessToolUseEventID,
+				oauthFailureToolUseEventID, cleanupToolUseEventID,
+			},
 		},
 	}); err != nil {
 		t.Fatalf("seal MCP production request: %v", err)
@@ -133,6 +156,10 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	if err := os.WriteFile(runtimeTokenPath, []byte("mcp-production-runtime-token\n"), 0o600); err != nil {
 		t.Fatalf("write Runtime composition token: %v", err)
 	}
+	var databaseSchema string
+	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&databaseSchema); err != nil {
+		t.Fatalf("read MCP composition database schema: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	command := exec.CommandContext(
@@ -146,8 +173,11 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		toolUseEventID,
 		cleanupToolUseEventID,
 		cancelledToolUseEventID,
+		oauthSuccessToolUseEventID,
+		oauthFailureToolUseEventID,
 	) //nolint:gosec // fixed repository fixture and test-owned arguments.
 	command.Dir = gatewayRoot
+	command.Env = append(os.Environ(), "TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -190,6 +220,28 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		Settlement struct {
 			Type string `json:"type"`
 		} `json:"settlement"`
+		OAuthSuccess struct {
+			Type   string `json:"type"`
+			Output struct {
+				Text string `json:"text"`
+			} `json:"output"`
+		} `json:"oauthSuccess"`
+		OAuthFailure struct {
+			Type  string `json:"type"`
+			Error struct {
+				Message   string `json:"message"`
+				Retryable bool   `json:"retryable"`
+			} `json:"error"`
+		} `json:"oauthFailure"`
+		OAuthProof struct {
+			IssuerRequests                   int      `json:"issuerRequests"`
+			SuccessTransportCount            int      `json:"successTransportCount"`
+			FailureTransportCount            int      `json:"failureTransportCount"`
+			DurableRotation                  bool     `json:"durableRotation"`
+			FailedRefreshPreservedCredential bool     `json:"failedRefreshPreservedCredential"`
+			RefreshOutcomes                  []string `json:"refreshOutcomes"`
+			LeakSurfacesClean                bool     `json:"leakSurfacesClean"`
+		} `json:"oauthProof"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("decode MCP Connector production composition: %v\nstdout=%s", err, stdout.String())
@@ -203,23 +255,33 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		result.CleanupFailureCode != int32(codes.Internal) ||
 		result.CleanupReacquired.Status != 1 || result.CleanupReacquired.ResultText != "reacquired claimant" ||
 		result.RuntimeResult.Type != "completed" || result.RuntimeResult.Output.Text != "takeover claimant" ||
-		result.Settlement.Type != "duplicate" {
+		result.Settlement.Type != "duplicate" ||
+		result.OAuthSuccess.Type != "completed" || result.OAuthSuccess.Output.Text != "oauth refreshed" ||
+		result.OAuthFailure.Type != "error" || result.OAuthFailure.Error.Retryable ||
+		result.OAuthFailure.Error.Message != "MCP tool execution is unavailable." ||
+		result.OAuthProof.IssuerRequests != 2 || result.OAuthProof.SuccessTransportCount != 1 ||
+		result.OAuthProof.FailureTransportCount != 0 || !result.OAuthProof.DurableRotation ||
+		!result.OAuthProof.FailedRefreshPreservedCredential || !result.OAuthProof.LeakSurfacesClean ||
+		len(result.OAuthProof.RefreshOutcomes) != 2 || result.OAuthProof.RefreshOutcomes[0] != "refreshed" ||
+		result.OAuthProof.RefreshOutcomes[1] != "failed" {
 		t.Fatalf("MCP Connector composition = %+v; want takeover, exact-claim cleanup/reacquisition, Runtime mapping, and settlement replay", result)
 	}
 
 	claims, commits, relinquishes, commitDropped, relinquishDropped, settlementDropped := bridge.snapshot()
-	if len(claims) != 7 || claims[0] != "claim_mcp_production_old" ||
+	if len(claims) != 9 || claims[0] != "claim_mcp_production_old" ||
 		claims[1] != "claim_mcp_production_takeover" ||
 		claims[2] != "claim_mcp_production_runtime_replay" ||
 		claims[3] != "claim_mcp_production_cancel_old" ||
 		claims[4] != "claim_mcp_production_cancel_takeover" ||
 		claims[5] != "claim_mcp_production_cleanup_failed" ||
-		claims[6] != "claim_mcp_production_cleanup_reacquired" {
+		claims[6] != "claim_mcp_production_cleanup_reacquired" ||
+		claims[7] != "claim_mcp_oauth_success" || claims[8] != "claim_mcp_oauth_failure" {
 		t.Fatalf("Bridge claim sequence = %v; want receipt convergence and immediate cleanup reacquisition", claims)
 	}
-	if len(commits) != 5 || commits[0] != "claim_mcp_production_takeover" ||
+	if len(commits) != 7 || commits[0] != "claim_mcp_production_takeover" ||
 		commits[1] != "claim_mcp_production_takeover" || commits[2] != "claim_mcp_production_old" ||
 		commits[3] != "claim_mcp_production_cancel_old" || commits[4] != "claim_mcp_production_cleanup_reacquired" ||
+		commits[5] != "claim_mcp_oauth_success" || commits[6] != "claim_mcp_oauth_failure" ||
 		len(relinquishes) != 3 || relinquishes[0] != "claim_mcp_production_old" ||
 		relinquishes[1] != "claim_mcp_production_cleanup_failed" ||
 		relinquishes[2] != "claim_mcp_production_cleanup_failed" ||
@@ -307,8 +369,37 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	assertProviderCompositionToolOrder(t, ready.ProviderComposition, []string{
 		"call_mcp_durable_claim",
 		"call_mcp_production_cancelled",
+		"call_mcp_oauth_success",
+		"call_mcp_oauth_failure",
 		"call_mcp_production_cleanup",
 	})
+	providerJSON, err := json.Marshal(ready.ProviderComposition)
+	if err != nil {
+		t.Fatalf("encode MCP OAuth provider composition: %v", err)
+	}
+	for _, required := range []string{"oauth refreshed", "MCP tool execution is unavailable."} {
+		if !bytes.Contains(providerJSON, []byte(required)) {
+			t.Fatalf("MCP OAuth provider composition omitted %q: %s", required, providerJSON)
+		}
+	}
+	var durablePublicSurfaces string
+	if err := admin.QueryRowContext(context.Background(), `
+		SELECT COALESCE(string_agg(surface, ''), '')
+		FROM (
+			SELECT payload_json AS surface FROM session_events WHERE workspace_id='default' AND session_id=$1
+			UNION ALL
+			SELECT data_json AS surface FROM session_messages WHERE workspace_id='default' AND session_id=$1
+			UNION ALL
+			SELECT result_json AS surface FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id=$1
+		) surfaces`, sessionID).Scan(&durablePublicSurfaces); err != nil {
+		t.Fatalf("read MCP OAuth durable public surfaces: %v", err)
+	}
+	publicSurfaces := bytes.Join([][]byte{stdout.Bytes(), []byte(loaded.GetContextJson()), []byte(finalLoaded.GetContextJson()), providerJSON, []byte(durablePublicSurfaces)}, nil)
+	for _, forbidden := range []string{"ACCESS_TOKEN_CANARY", "REFRESH_TOKEN_CANARY", "RAW_ISSUER_ERROR_CANARY"} {
+		if bytes.Contains(publicSurfaces, []byte(forbidden)) {
+			t.Fatalf("MCP OAuth public surfaces exposed %q", forbidden)
+		}
+	}
 }
 
 type mcpConnectorProductionBridgeServer struct {

@@ -768,6 +768,82 @@ func TestPostgreSQLStoreExpiredFinalInterruptLeaseReclaimsAsBarrier(t *testing.T
 	}
 }
 
+func TestPostgreSQLStoreExpiredFinalAgentMailLeaseUsesOneClampedFinalizationMarker(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_mail_marker")
+	sessionID := "sesn_mail_marker"
+	now := time.Date(2026, 7, 1, 12, 49, 0, 0, time.UTC)
+	job := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_mail_marker", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, sessionID, "agent_mail:delivery_marker"),
+		PayloadJSON:  []byte(`{"workspace_id":"ws_mail_marker","session_id":"sesn_mail_marker","session_thread_id":"thr_mail_marker","runtime_input_id":"agent_mail:delivery_marker","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"agent_mail"}`),
+		MaxAttempts:  1, Now: now,
+	})
+	first := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-runtime", MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second)})
+	if first.ID != job.ID || first.AttemptCount != 1 {
+		t.Fatalf("final Runtime lease = %s/%d; want same job at N=1", first.ID, first.AttemptCount)
+	}
+	for reclaim := 0; reclaim < 2; reclaim++ {
+		if _, err := admin.ExecContext(ctx, `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+			WHERE workspace_id=$1 AND id=$2`, string(ws), job.ID); err != nil {
+			t.Fatalf("expire agent-mail lease %d: %v", reclaim, err)
+		}
+		if count, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws}); err != nil || count != 1 {
+			t.Fatalf("reclaim agent-mail lease %d = %d/%v; want 1/nil", reclaim, count, err)
+		}
+		leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-finalizer", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(time.Minute)})
+		if leased.ID != job.ID || leased.AttemptCount != 2 {
+			t.Fatalf("agent-mail finalization lease %d = %s/%d; want same job clamped at N+1=2", reclaim, leased.ID, leased.AttemptCount)
+		}
+	}
+}
+
+func TestPostgreSQLStoreFinalAgentMailRetrySchedulesOneFinalizationLease(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_mail_finalization_retry")
+	sessionID := "sesn_mail_finalization_retry"
+	now := time.Date(2026, 7, 1, 12, 49, 30, 0, time.UTC)
+	job := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_mail_fin_retry", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, sessionID, "agent_mail:finalization_retry"),
+		PayloadJSON:  []byte(`{"workspace_id":"ws_mail_finalization_retry","session_id":"sesn_mail_finalization_retry","session_thread_id":"thr_mail_finalization_retry","runtime_input_id":"agent_mail:finalization_retry","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"agent_mail"}`),
+		MaxAttempts:  1, Now: now,
+	})
+	first := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-runtime",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+	if first.ID != job.ID || first.AttemptCount != 1 {
+		t.Fatalf("final Runtime lease = %s/%d; want same job at N=1", first.ID, first.AttemptCount)
+	}
+	updated, err := store.Retry(ctx, RetryRequest{
+		WorkspaceID: ws, JobID: first.ID, LeaseToken: first.LeaseToken,
+		ErrorKind: "runtime_rejected_input", ErrorMessage: "runtime rejected input", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || !updated {
+		t.Fatalf("schedule agent-mail finalization = %t/%v; want true/nil", updated, err)
+	}
+	var status string
+	var attempts int
+	if err := admin.QueryRowContext(ctx, `SELECT status,attempt_count FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, string(ws), job.ID).Scan(&status, &attempts); err != nil {
+		t.Fatalf("read scheduled finalization: %v", err)
+	}
+	if status != StatusPending || attempts != 1 {
+		t.Fatalf("scheduled finalization = %s/%d; want pending at exhausted N=1", status, attempts)
+	}
+	finalizer := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "bridge-finalizer",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(3 * time.Second),
+	})
+	if finalizer.ID != job.ID || finalizer.AttemptCount != 2 {
+		t.Fatalf("finalization-only lease = %s/%d; want same job at N+1=2", finalizer.ID, finalizer.AttemptCount)
+	}
+}
+
 func TestPostgreSQLStoreDatabaseAssignsPartitionSequence(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ws := workspace.ID("ws_queue_partition_sequence")
@@ -1276,10 +1352,26 @@ func TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases(t *testing.T) {
 		WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge-c",
 		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(2 * time.Second),
 	})
-	if currentLease.AttemptCount != 3 {
-		t.Fatalf("current lease attempt count = %d; want three acquisitions independent of two reclaims", currentLease.AttemptCount)
+	if currentLease.AttemptCount != 2 {
+		t.Fatalf("current lease attempt count = %d; want capped cleanup reconciliation marker", currentLease.AttemptCount)
 	}
-	if updated, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: expiring.ID, LeaseToken: currentLease.LeaseToken}); err != nil || !updated {
+	if updated, err := store.Retry(ctx, RetryRequest{
+		WorkspaceID: ws, JobID: expiring.ID, LeaseToken: currentLease.LeaseToken,
+		ErrorKind: "runtime_transport_error", Now: time.Now().UTC().Add(3 * time.Second),
+	}); err != nil || !updated {
+		t.Fatalf("Retry capped cleanup outcome = (%v,%v); want true,nil", updated, err)
+	}
+	if got := queueJobStatus(t, admin, ws, expiring.ID); got != StatusPending {
+		t.Fatalf("capped cleanup retry status = %s; want pending", got)
+	}
+	finalLease := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge-d",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(time.Minute),
+	})
+	if finalLease.AttemptCount != 2 {
+		t.Fatalf("replayed cleanup attempt count = %d; want capped marker 2", finalLease.AttemptCount)
+	}
+	if updated, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: expiring.ID, LeaseToken: finalLease.LeaseToken}); err != nil || !updated {
 		t.Fatalf("Ack current lease = (%v,%v); want eventual settlement", updated, err)
 	}
 }

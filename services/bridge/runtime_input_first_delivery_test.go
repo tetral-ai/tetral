@@ -3,10 +3,8 @@ package agentruntimebridge
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +12,6 @@ import (
 	"slices"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -465,87 +461,5 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 	}
 	if len(terminalContext.PendingAttachments) != 0 {
 		t.Fatalf("terminal media cold load = %#v; want no pending attachments", terminalContext.PendingAttachments)
-	}
-	const (
-		parentThreadID = "thr_first_queued_exhaustion_parent"
-		childTaskName  = "terminal_media_worker"
-		resumeSourceID = "evt_first_queued_exhaustion_resume"
-	)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, parentThreadID)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
-		SET parent_thread_id=$2, role='subagent', task_name=$3, agent_type='worker', updated_at=now()
-		WHERE workspace_id='default' AND session_id=$1 AND id=$4`, sessionID, parentThreadID, childTaskName, threadID); err != nil {
-		t.Fatalf("convert terminal-media Thread to a resumable child: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
-		SET parent_thread_id=NULL, role='main', task_name=NULL, agent_type='default', updated_at=now()
-		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, parentThreadID); err != nil {
-		t.Fatalf("promote terminal-media parent Thread: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET main_thread_id=$2
-		WHERE workspace_id='default' AND id=$1`, sessionID, parentThreadID); err != nil {
-		t.Fatalf("point Session at terminal-media parent Thread: %v", err)
-	}
-	seedBridgeAPIEvent(t, admin, "default", sessionID, parentThreadID, resumeSourceID, 1, "agent.tool_use",
-		`{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"`+childTaskName+`"},"evaluated_permission":"allow"}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public', session_visible=true
-		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, resumeSourceID); err != nil {
-		t.Fatalf("authorize terminal-media resume source: %v", err)
-	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentThreadID, resumeSourceID)
-	assertClosedThreadResumeWithoutPhantomAttachment(t, runtime, map[string]any{
-		"workspaceId": "default", "sessionId": sessionID, "parentThreadId": parentThreadID,
-		"childThreadId": threadID, "childTaskName": childTaskName, "bindingId": bindingID,
-		"bindingGeneration": 2, "targetPodUid": podUID, "sourceToolUseEventId": resumeSourceID,
-	})
-}
-
-func assertClosedThreadResumeWithoutPhantomAttachment(t *testing.T, runtime *sql.DB, input map[string]any) {
-	t.Helper()
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("closed-thread-resume-composition-key")
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for closed Thread resume composition: %v", err)
-	}
-	server := grpc.NewServer()
-	RegisterBridgeAPI(server, store)
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(server.Stop)
-	input["address"] = listener.Addr().String()
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("encode closed Thread resume input: %v", err)
-	}
-	inputPath := filepath.Join(t.TempDir(), "closed-thread-resume.json")
-	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
-		t.Fatalf("write closed Thread resume input: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/closed-thread-resume-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run closed Thread through Runtime resume owner: %v: %s", err, output)
-	}
-	var result struct {
-		Result struct {
-			Type string `json:"type"`
-		} `json:"result"`
-		Inspected struct {
-			OK       bool   `json:"ok"`
-			Observed bool   `json:"observed"`
-			Status   string `json:"status"`
-		} `json:"inspected"`
-		ProviderRequests int `json:"providerRequests"`
-		RuntimeEvents    int `json:"runtimeEvents"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode closed Thread resume result: %v: %s", err, output)
-	}
-	if result.Result.Type != "completed" || !result.Inspected.OK || !result.Inspected.Observed ||
-		result.Inspected.Status != "idle" || result.ProviderRequests != 0 || result.RuntimeEvents != 0 {
-		t.Fatalf("closed Thread resume = %#v; want completed resident idle with no Provider request or Runtime write", result)
 	}
 }

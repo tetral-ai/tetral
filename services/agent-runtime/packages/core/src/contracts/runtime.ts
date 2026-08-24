@@ -778,6 +778,7 @@ const RuntimeToolSettlementSchema = z.discriminatedUnion("type", [
 
 const NonTerminalProviderFailureCodes = new Set([
 	"credential_required",
+	"credential_unavailable",
 	"platform_keys_exhausted",
 	"provider_key_unavailable",
 	"provider_rate_limited",

@@ -2,6 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-func TestPostgreSQLSessionInterruptBarrierClosesExactInflightCustody(t *testing.T) {
+func TestPostgreSQLSessionInterruptBarrierDefersExactInflightCustody(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID        = "sesn_interrupt_barrier_inflight"
@@ -57,6 +58,11 @@ func TestPostgreSQLSessionInterruptBarrierClosesExactInflightCustody(t *testing.
 	}
 	lease := leased[0]
 	job.JobID, job.LeaseToken, job.Kind, job.PartitionKey, job.DedupeKey = lease.ID, lease.LeaseToken, lease.Kind, lease.PartitionKey, lease.DedupeKey
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET status='delivering',
+		binding_id='bind_barrier_deferred',binding_generation=1,target_pod_uid='pod_barrier_deferred'
+		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, inputID); err != nil {
+		t.Fatalf("bind input before barrier-stale response: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET status='committed',
 		binding_id='bind_released_interrupt',binding_generation=1,target_pod_uid='pod_released_interrupt',committed_at=clock_timestamp()
 		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, sessionID, interruptID); err != nil {
@@ -75,21 +81,26 @@ func TestPostgreSQLSessionInterruptBarrierClosesExactInflightCustody(t *testing.
 		t.Fatalf("finalize barrier stale = %#v/%v", result, err)
 	}
 	var queueStatus, inboxStatus string
-	var messages, processed int
+	var attempts, messages, processed int
+	var bindingID, leaseToken sql.NullString
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$2 AND runtime_input_id=$3),
+		(SELECT attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT binding_id FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$2 AND runtime_input_id=$3),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$1),
 		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$2),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND event_id=$4 AND processed_at IS NOT NULL)`,
-		created.ID, sessionID, inputID, eventID).Scan(&queueStatus, &inboxStatus, &messages, &processed); err != nil {
+		created.ID, sessionID, inputID, eventID).Scan(&queueStatus, &inboxStatus, &attempts, &bindingID, &leaseToken, &messages, &processed); err != nil {
 		t.Fatalf("read barrier-stale custody: %v", err)
 	}
-	if queueStatus != queue.StatusCancelled || inboxStatus != "cancelled" || messages != 0 || processed != 0 {
-		t.Fatalf("barrier-stale custody = %s/%s messages=%d processed=%d", queueStatus, inboxStatus, messages, processed)
+	if queueStatus != queue.StatusPending || inboxStatus != "queued" || attempts != 0 || bindingID.Valid || leaseToken.Valid || messages != 0 || processed != 0 {
+		t.Fatalf("barrier-stale custody = %s/%s attempts=%d binding=%v lease=%v messages=%d processed=%d",
+			queueStatus, inboxStatus, attempts, bindingID, leaseToken, messages, processed)
 	}
 	replay, err := store.FinalizeRuntimeDelivery(context.Background(), job, RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale})
-	if err != nil || replay.Status != RuntimeDeliveryDuplicate || !replay.QueueLeaseSettled {
-		t.Fatalf("stale lease replay = %#v/%v", replay, err)
+	if err != nil || replay.Status != RuntimeDeliveryAuthorityLost || replay.QueueLeaseSettled {
+		t.Fatalf("stale lease replay = %#v/%v; want authority loss without mutation", replay, err)
 	}
 }
 
@@ -289,7 +300,7 @@ func TestPostgreSQLSessionInterruptBarrierRejectsSuccessorStartAndChildLifecycle
 		t.Fatalf("successor Request Start = %#v/%v; want barrier stale", started, err)
 	}
 	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: scope, SourceToolUseEventId: "evt_interrupt_barrier_spawn", TaskName: "blocked", AgentType: "worker", InitialPrompt: "blocked opening input",
+		Scope: scope, SourceToolUseEventId: "evt_interrupt_barrier_spawn", TaskName: "blocked", AgentType: "worker", InitialPrompt: "blocked first mail",
 	})
 	if err == nil || created != nil || !isSessionInterruptBarrierStaleError(err) {
 		t.Fatalf("successor child lifecycle = %#v/%v; want private barrier-stale result", created, err)

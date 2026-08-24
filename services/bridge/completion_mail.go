@@ -41,7 +41,6 @@ type admittedAgentMailDelivery struct {
 	Envelope         storedAgentMailEnvelope
 	ReceivedEventID  string
 	ReceivedSequence int64
-	Terminal         bool
 }
 
 func agentMailDeliveryID(sourceToolUseEventID string, targetThreadID string) string {
@@ -130,7 +129,7 @@ func appendSubagentMailEnvelopeTx(
 	}, nil
 }
 
-// appendDeclaredSubagentInitialEnvelopeTx persists the Runtime-declared opening
+// appendDeclaredSubagentInitialEnvelopeTx persists the Runtime-declared initial
 // input without rereading Tool business arguments. The executable route has
 // already been locked by CreateSubagentThread; this helper owns only the
 // declared parent-child envelope and its durable Inbox/Queue birth.
@@ -449,7 +448,7 @@ func admitAgentMailDeliveryTx(
 		return admittedAgentMailDelivery{}, err
 	}
 	switch inboxStatus {
-	case "queued", "delivering", "accepted":
+	case "queued", "delivering", "accepted", "committed":
 	case "dead_lettered", "cancelled":
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery is terminal")
 	default:
@@ -474,10 +473,9 @@ func admitAgentMailDeliveryTx(
 		receivedEventID     string
 		receivedSequence    int64
 		receivedPayloadJSON string
-		processedAt         sql.NullTime
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT event_id, sequence, payload_json, processed_at
+		`SELECT event_id, sequence, payload_json
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -491,7 +489,7 @@ func admitAgentMailDeliveryTx(
 		targetScope.GetSessionId(),
 		targetScope.GetSessionThreadId(),
 		envelope.DeliveryID,
-	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON, &processedAt)
+	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON)
 	if dbconnect.IsNoRows(err) {
 		if closing, fenceErr := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId()); fenceErr != nil {
 			return admittedAgentMailDelivery{}, fenceErr
@@ -534,18 +532,16 @@ func admitAgentMailDeliveryTx(
 			return admittedAgentMailDelivery{}, err
 		}
 		receivedPayloadJSON = eventPayloadJSON
-		processedAt = sql.NullTime{}
 	} else if err != nil {
 		return admittedAgentMailDelivery{}, err
 	}
 	if normalizeJSONForCompare(json.RawMessage(receivedPayloadJSON)) != normalizeJSONForCompare(json.RawMessage(eventPayloadJSON)) {
 		return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery replay conflicts with the admitted source")
 	}
-	terminal := processedAt.Valid
-	if !terminal && !threadReceivableTx(threadScope) {
+	if !threadReceivableTx(threadScope) {
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 	}
-	if !terminal && inboxStatus == "accepted" {
+	if inboxStatus == "accepted" {
 		var inboxEventIDs []string
 		if err := json.Unmarshal([]byte(inboxEventIDsJSON), &inboxEventIDs); err != nil ||
 			len(inboxEventIDs) != 1 || inboxEventIDs[0] != receivedEventID ||
@@ -557,7 +553,7 @@ func admitAgentMailDeliveryTx(
 			return admittedAgentMailDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "accepted agent mail custody conflicts with the current Runtime", retryable: false}
 		}
 	}
-	if !terminal && inboxStatus != "accepted" {
+	if inboxStatus != "accepted" {
 		job := RuntimeJob{
 			WorkspaceID:     targetScope.GetWorkspaceId(),
 			SessionID:       targetScope.GetSessionId(),
@@ -577,7 +573,6 @@ func admitAgentMailDeliveryTx(
 		Envelope:         envelope,
 		ReceivedEventID:  receivedEventID,
 		ReceivedSequence: receivedSequence,
-		Terminal:         terminal,
 	}, nil
 }
 
@@ -600,7 +595,8 @@ func claimAgentMailInboxDeliveryTx(
 		return err
 	}
 	result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
-		SET event_ids_json=$5,sequence_from=$6,sequence_to=$6,status='delivering',
+		SET event_ids_json=$5,sequence_from=$6,sequence_to=$6,
+		    status=CASE WHEN status='committed' THEN 'committed' ELSE 'delivering' END,
 		    binding_id=$7,binding_generation=$8,target_pod_uid=$9,updated_at=$10
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND runtime_input_id=$4
 		  AND input_kind='agent_mail'
@@ -611,6 +607,7 @@ func claimAgentMailInboxDeliveryTx(
 		    ))
 		    OR (status='delivering' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6
 		        AND binding_id=$7 AND binding_generation=$8 AND target_pod_uid=$9)
+		    OR (status='committed' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6)
 		  )`,
 		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID,
 		string(eventIDsJSON), job.SequenceFrom, binding.BindingID, binding.BindingGeneration,

@@ -1233,9 +1233,6 @@ function runThreadLoopEffect(
 							session.state.addPendingAttachments(
 								declaration.result.pendingAttachments,
 							);
-							session.state.acknowledgeAcceptedInput(
-								acceptedInput.runtimeInputId,
-							);
 							session.state.setProviderOutputSchemaJson(
 								acceptedInput.kind === "approval_review"
 									? acceptedInput.outputSchemaJson
@@ -1244,12 +1241,14 @@ function runThreadLoopEffect(
 							const makesRequestReady =
 								(contextEntries.length > 0 ||
 									declaration.result.pendingAttachments.length > 0) &&
-								(declaration.result.type === "committed" ||
-									newlyResidentContextEntries.length > 0 ||
+								(newlyResidentContextEntries.length > 0 ||
 									resumesPendingInput) &&
 								(acceptedInput.kind === "messages" ||
 									acceptedInput.kind === "approval_review" ||
 									acceptedInput.kind === "inter_agent_message");
+							session.state.acknowledgeAcceptedInput(
+								acceptedInput.runtimeInputId,
+							);
 							if (makesRequestReady) {
 								session.state.applyThreadTurnFact({
 									fact: "inputs_committed",

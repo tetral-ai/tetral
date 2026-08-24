@@ -1657,6 +1657,10 @@ END $$`
 	createPostgreSQLSessionEventsInsertStreamPositionIndex  = `CREATE INDEX IF NOT EXISTS idx_session_events_insert_stream_position ON session_events(workspace_id, session_id, insert_stream_position)`
 	createPostgreSQLSessionEventsPendingClientIndex         = `CREATE INDEX IF NOT EXISTS idx_session_events_pending_client ON session_events(workspace_id, session_id, sequence) WHERE processed_at IS NULL`
 	createPostgreSQLSessionEventsThreadSequenceIndex        = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence)`
+	createPostgreSQLSessionEventsThreadTypeSequenceIndex    = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_type_sequence ON session_events(workspace_id, session_id, session_thread_id, type, sequence)`
+	createPostgreSQLSessionEventsThreadRequestTypeIndex     = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_request_type ON session_events(workspace_id, session_id, session_thread_id, model_request_id, type, sequence) WHERE model_request_id IS NOT NULL`
+	createPostgreSQLSessionEventsThreadRunningIndex         = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_running_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence) WHERE type IN ('session.status_running', 'session.thread_status_running')`
+	createPostgreSQLSessionEventsThreadCloseIndex           = `CREATE INDEX IF NOT EXISTS idx_session_events_thread_close_sequence ON session_events(workspace_id, session_id, session_thread_id, sequence) WHERE type IN ('session.status_idle', 'session.thread_status_idle', 'session.status_terminated', 'session.thread_status_terminated')`
 	createPostgreSQLSessionEventStreamChangesIndex          = `CREATE INDEX IF NOT EXISTS idx_session_event_stream_changes_session ON session_event_stream_changes(workspace_id, session_id, stream_position)`
 	createPostgreSQLSessionMessagesKindSeqIndex             = `CREATE INDEX IF NOT EXISTS idx_session_messages_kind_seq ON session_messages(workspace_id, session_id, session_thread_id, kind, sequence)`
 	createPostgreSQLSessionMessagesSeqIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_messages_seq ON session_messages(workspace_id, session_id, session_thread_id, sequence)`
@@ -1929,6 +1933,10 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_events_insert_stream_position", createPostgreSQLSessionEventsInsertStreamPositionIndex},
 		{"index_session_events_pending_client", createPostgreSQLSessionEventsPendingClientIndex},
 		{"index_session_events_thread_sequence", createPostgreSQLSessionEventsThreadSequenceIndex},
+		{"index_session_events_thread_type_sequence", createPostgreSQLSessionEventsThreadTypeSequenceIndex},
+		{"index_session_events_thread_request_type", createPostgreSQLSessionEventsThreadRequestTypeIndex},
+		{"index_session_events_thread_running_sequence", createPostgreSQLSessionEventsThreadRunningIndex},
+		{"index_session_events_thread_close_sequence", createPostgreSQLSessionEventsThreadCloseIndex},
 		{"index_session_event_stream_changes_session", createPostgreSQLSessionEventStreamChangesIndex},
 		{"index_session_messages_kind_seq", createPostgreSQLSessionMessagesKindSeqIndex},
 		{"index_session_messages_seq", createPostgreSQLSessionMessagesSeqIndex},

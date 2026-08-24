@@ -481,6 +481,53 @@ func TestJobRunnerFinalizationFailureLeavesQueueLeaseUnchanged(t *testing.T) {
 	}
 }
 
+func TestJobRunnerAgentMailNPlusOneFinalizesWithoutRuntimeOrRetry(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		finalized   RuntimeDeliveryResult
+		finalizeErr error
+		wantErr     bool
+		wantSteps   []string
+	}{
+		{
+			name:      "success terminalizes through finalizer",
+			finalized: RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted", QueueLeaseSettled: true},
+			wantSteps: []string{"replay:qjob_agent_mail", "finalize:qjob_agent_mail"},
+		},
+		{
+			name:        "transaction failure leaves exact lease for reclaim",
+			finalizeErr: errors.New("finalizer transaction cut"), wantErr: true,
+			wantSteps: []string{"replay:qjob_agent_mail", "finalize:qjob_agent_mail"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			steps := []string{}
+			job := runtimeAgentMailQueueJob()
+			job.AttemptCount = 3
+			job.MaxAttempts = 2
+			queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{job}, steps: &steps}
+			deliverer := &recordingDeliverer{finalizeResult: test.finalized, finalizeErr: test.finalizeErr, steps: &steps}
+			runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+			err := runner.RunOnce(context.Background())
+			if (err != nil) != test.wantErr {
+				t.Fatalf("RunOnce error = %v; want error=%t", err, test.wantErr)
+			}
+			if len(deliverer.jobs) != 0 || len(deliverer.finalizations) != 1 {
+				t.Fatalf("N+1 Runtime deliveries/finalizations = %d/%d; want 0/1", len(deliverer.jobs), len(deliverer.finalizations))
+			}
+			if !reflect.DeepEqual(steps, test.wantSteps) {
+				t.Fatalf("N+1 steps = %v; want %v", steps, test.wantSteps)
+			}
+			for _, transition := range queueClient.transitions {
+				if strings.HasPrefix(transition, "retry:") {
+					t.Fatalf("N+1 finalization used forbidden Queue.Retry: %v", queueClient.transitions)
+				}
+			}
+		})
+	}
+}
+
 func TestJobRunnerNonFinalRetryAndAcceptedFinalDeliveryRemainUnchanged(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -1360,6 +1407,16 @@ func runtimeInterruptQueueJob() *queuev1.QueueJob {
 		Kind:        "runtime_input",
 		LeaseToken:  "lease_interrupt",
 		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"rin_interrupt","event_ids":["evt_interrupt"],"sequence_from":9,"sequence_to":9,"input_kind":"interrupt_control"}`,
+	}
+}
+
+func runtimeAgentMailQueueJob() *queuev1.QueueJob {
+	return &queuev1.QueueJob{
+		Id: "qjob_agent_mail", WorkspaceId: "ws_bridge", Kind: queue.KindRuntimeInput,
+		PartitionKey: queue.FormatSessionPartitionKey("ws_bridge", "sesn_1"),
+		DedupeKey:    queue.FormatRuntimeInputDedupeKey("ws_bridge", "sesn_1", "agent_mail:delivery_1"),
+		LeaseToken:   "lease_agent_mail",
+		PayloadJson:  `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"agent_mail:delivery_1","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"agent_mail"}`,
 	}
 }
 

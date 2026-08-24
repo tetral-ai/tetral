@@ -232,11 +232,7 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_"+suffix, 1, "pod_"+suffix)
 			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-			job := completionMailRuntimeJob(
-				sessionID,
-				threadID,
-				"agent_mail:"+deliveryID,
-			)
+			job := leaseCompletionMailRuntimeJob(t, runtime)
 
 			plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 			if err != nil || plan.AcceptAgentMail == nil || plan.StaleAccepted {
@@ -290,17 +286,14 @@ func TestPostgreSQLAgentMailPrepareLocksSessionBeforeInbox(t *testing.T) {
 	defer func() { _ = blocker.Rollback() }()
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return now }
+	job := leaseCompletionMailRuntimeJob(t, runtime)
 	type prepareResult struct {
 		plan RuntimeCommandPlan
 		err  error
 	}
 	results := make(chan prepareResult, 1)
 	go func() {
-		plan, err := store.PrepareRuntimeCommand(context.Background(), completionMailRuntimeJob(
-			sessionID,
-			mainID,
-			completionRuntimeInputID(delivery),
-		))
+		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 		results <- prepareResult{plan: plan, err: err}
 	}()
 	waitForPostgreSQLLockWaiters(t, admin, blockerPID, 1)
@@ -339,4 +332,21 @@ func completionMailRuntimeJob(sessionID string, threadID string, runtimeInputID 
 		InputKind:       "agent_mail",
 		PayloadJSON:     "{}",
 	}
+}
+
+func leaseCompletionMailRuntimeJob(t *testing.T, runtime *sql.DB) RuntimeJob {
+	t.Helper()
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "completion-mail-production-test",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease completion-mail Queue custody = %#v/%v", leased, err)
+	}
+	job, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatalf("decode completion-mail Queue custody: %v", err)
+	}
+	return job
 }

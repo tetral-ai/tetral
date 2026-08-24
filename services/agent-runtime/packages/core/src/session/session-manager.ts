@@ -917,6 +917,8 @@ export function layer(
 			const removeThreadEntry = (
 				sessionEntry: SessionEntry,
 				threadEntry: ThreadEntry,
+				removal: "durable_custody_handoff" | "runtime_shutdown" =
+					"durable_custody_handoff",
 			): Effect.Effect<void> =>
 				threadEntry.commandChannel.close().pipe(
 					Effect.andThen(
@@ -925,7 +927,9 @@ export function layer(
 					Effect.ensuring(
 						Effect.sync(() => {
 							threadEntry.bridgeScope = undefined;
-							threadEntry.runtimeThread.state.clearAfterCustodyHandoff();
+							if (removal === "durable_custody_handoff") {
+								threadEntry.runtimeThread.state.clearAfterCustodyHandoff();
+							}
 							threadEntry.runSlot = undefined;
 							sessionEntry.threads.delete(threadEntry.sessionThreadId);
 							const key = entrySessionKey(sessionEntry);
@@ -941,6 +945,12 @@ export function layer(
 				);
 
 			const releaseThreadEntry = (
+				sessionEntry: SessionEntry,
+				threadEntry: ThreadEntry,
+			): Effect.Effect<void> =>
+				removeThreadEntry(sessionEntry, threadEntry);
+
+			const releaseThreadSubtree = (
 				sessionEntry: SessionEntry,
 				threadEntry: ThreadEntry,
 			): Effect.Effect<void> =>
@@ -982,10 +992,10 @@ export function layer(
 					for (const childEntry of residentChildren) {
 						if (
 							sessionEntry.threads.get(childEntry.sessionThreadId) ===
-								childEntry &&
+							childEntry &&
 							childEntry.runSlot === undefined
 						) {
-							yield* releaseThreadEntry(sessionEntry, childEntry);
+							yield* releaseThreadSubtree(sessionEntry, childEntry);
 						}
 					}
 					if (
@@ -1027,10 +1037,13 @@ export function layer(
 
 			const clearSessionEntry = (
 				sessionEntry: SessionEntry,
+				removal: "durable_custody_handoff" | "runtime_shutdown" =
+					"durable_custody_handoff",
 			): Effect.Effect<void> =>
 				Effect.forEach(
 					[...sessionEntry.threads.values()],
-					(threadEntry) => removeThreadEntry(sessionEntry, threadEntry),
+					(threadEntry) =>
+						removeThreadEntry(sessionEntry, threadEntry, removal),
 					{ concurrency: "unbounded", discard: true },
 				);
 
@@ -1239,7 +1252,7 @@ export function layer(
 					}
 					yield* closeRunScope(runSlot, exit);
 					if (sessionEntry.runtimeShutdown.requested) {
-						yield* releaseThreadEntry(sessionEntry, threadEntry);
+						yield* releaseThreadSubtree(sessionEntry, threadEntry);
 						yield* completeRunSlot(runSlot, exit);
 						return;
 					}
@@ -1309,7 +1322,15 @@ export function layer(
 						return;
 					}
 					if (runRequiresHotStateDiscard(exit)) {
-						yield* releaseThreadEntry(sessionEntry, threadEntry);
+						if (
+							Exit.isSuccess(exit) &&
+							exit.value.type === "failed" &&
+							exit.value.releaseSession?.reason === "terminated"
+						) {
+							yield* releaseThreadSubtree(sessionEntry, threadEntry);
+						} else {
+							yield* releaseThreadEntry(sessionEntry, threadEntry);
+						}
 						yield* completeRunSlot(runSlot, exit);
 						return;
 					}
@@ -3161,12 +3182,7 @@ export function layer(
 						const runExit = yield* awaitRunSlot(runSlot);
 						requestedRunExitOutcome = classifyRunExitOutcome(runExit);
 					}
-					if (
-						sessionEntry.threads.get(threadEntry.sessionThreadId) ===
-						threadEntry
-					) {
-						yield* releaseThreadEntry(sessionEntry, threadEntry);
-					}
+					yield* releaseThreadSubtree(sessionEntry, threadEntry);
 					return {
 						ok: true,
 						sessionId: command.sessionId,
@@ -3521,7 +3537,9 @@ export function layer(
 						}),
 						{ concurrency: "unbounded" },
 					);
-					yield* clearSessionEntry(entry);
+					// Process shutdown removes local residency but is not a durable
+					// Request Start or terminal custody handoff.
+					yield* clearSessionEntry(entry, "runtime_shutdown");
 				});
 
 			yield* Effect.addFinalizer(() => shutdownActiveRuns());

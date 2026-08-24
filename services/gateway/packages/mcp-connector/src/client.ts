@@ -225,6 +225,9 @@ export class McpSDKClient implements McpClient {
       if (credential.error === "credential_required") {
         throw new McpConnectorError("mcp_credential_required", `MCP server ${identity.mcpServerName} requires a configured credential.`, "terminal");
       }
+      if (credential.error === "refresh_unavailable") {
+        throw new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal");
+      }
       throw new McpConnectorError("mcp_authentication_failed", "MCP credential is unavailable.", "terminal");
     }
     if (credential.mode !== "bearer") {
@@ -422,6 +425,9 @@ export class McpSDKClient implements McpClient {
       throw new McpConnectorError("mcp_authentication_failed", "MCP credential refresh failed.", "terminal");
     }
     if (!refreshed.ok || refreshed.mode !== "bearer") {
+      if (!refreshed.ok && refreshed.error === "refresh_unavailable") {
+        throw new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal");
+      }
       throw new McpConnectorError("mcp_authentication_failed", "MCP credential refresh failed.", "terminal");
     }
     return refreshed;

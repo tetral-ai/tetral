@@ -2870,7 +2870,8 @@ describe("SessionManager", () => {
 				"thrd_busy_agent_mail_child",
 				thread,
 			);
-			expect(await Effect.runPromise(manager.acceptInput(mail))).toEqual({
+			const acceptedMail = await Effect.runPromise(manager.acceptInput(mail));
+			expect(acceptedMail).toMatchObject({
 				ok: true,
 				sessionId: sessionID,
 				created: false,
@@ -6850,6 +6851,81 @@ describe("SessionManager", () => {
 				),
 			).toMatchObject({ observed: true, status: "running" });
 		});
+	});
+
+	test("releasing a failed parent leaves its resident child independently owned", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const sessionId = "sesn_parent_release_child_owned";
+		const parentId = "thrd_parent_release";
+		const childId = "thrd_parent_release_child";
+
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				for (const thread of [
+					{
+						id: parentId,
+						inputId: "rin_parent_release",
+						metadata: {
+							role: "main" as const,
+							visibility: "public" as const,
+							status: "idle" as const,
+						},
+					},
+					{
+						id: childId,
+						inputId: "rin_parent_release_child",
+						metadata: {
+							parentThreadId: parentId,
+							role: "subagent" as const,
+							visibility: "public" as const,
+							taskName: "independent-child",
+							agentType: "worker" as const,
+							status: "idle" as const,
+						},
+					},
+				]) {
+					expect(
+						await Effect.runPromise(
+							manager.preloadThread({
+								...threadControl(sessionId, `rin_preload_${thread.id}`, thread.id),
+								runtimeBindingToken: "runtime-binding-token",
+								contextEntries: [],
+								thread: thread.metadata,
+							}),
+						),
+					).toMatchObject({ ok: true, applied: true });
+					expect(
+						await Effect.runPromise(
+							manager.acceptInput(
+								acceptedInput(sessionId, thread.inputId, thread.id),
+							),
+						),
+					).toMatchObject({ ok: true, started: true });
+				}
+				await waitForRuns(threadLoop, 2);
+				const parentRun = threadLoop.runs.find(
+					(run) => run.session.identity.sessionThreadId === parentId,
+				);
+				parentRun?.release(fatalRunResult("persistence_failed"));
+
+				await waitForCondition(async () => {
+					const parent = await Effect.runPromise(
+						manager.inspectThread(
+							threadControl(sessionId, "rin_parent_release_inspect", parentId),
+						),
+					);
+					return parent.ok && !parent.observed;
+				}, "failed parent release");
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(
+							threadControl(sessionId, "rin_child_owned_inspect", childId),
+						),
+					),
+				).toMatchObject({ observed: true, status: "running" });
+			},
+		);
 	});
 
 	test("ThreadLoop rejected promise removes crashed entry without exposing hostile rejection text", async () => {

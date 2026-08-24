@@ -21,6 +21,7 @@ export type ProviderId = string;
 /** Failure codes currently recognized by Runtime error normalization. */
 export const ProviderErrorCodes = [
 	"credential_required",
+	"credential_unavailable",
 	"platform_keys_exhausted",
 	"context_overflow",
 	"provider_request_invalid",
@@ -210,6 +211,8 @@ function defaultProviderErrorMessage(code: ProviderErrorCode): string {
 	switch (code) {
 		case "credential_required":
 			return "Provider credential is required.";
+		case "credential_unavailable":
+			return "Provider credential is unavailable.";
 		case "platform_keys_exhausted":
 			return "Platform provider keys are exhausted.";
 		case "context_overflow":
@@ -254,6 +257,7 @@ function defaultProviderErrorMessage(code: ProviderErrorCode): string {
 function isFatalProviderError(code: ProviderErrorCode): boolean {
 	return (
 		code === "credential_required" ||
+		code === "credential_unavailable" ||
 		code === "context_overflow" ||
 		code === "provider_request_invalid" ||
 		code === "provider_plan_required" ||

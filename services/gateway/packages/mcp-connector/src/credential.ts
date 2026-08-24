@@ -86,6 +86,7 @@ export type GitHubMcpCredentialError =
   | "ambiguous"
   | "undecryptable"
   | "expired"
+  | "refresh_unavailable"
   | "refresh_failed";
 
 interface GitHubCredentialSQLRow {
@@ -261,6 +262,9 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
       return fail("undecryptable");
     }
     if (auth.type === "static_bearer") {
+      if (options.force) {
+        return fail("credential_required");
+      }
       return nonEmpty(auth.token) ? useToken(auth.token, row) : fail("undecryptable");
     }
     if (auth.type !== "mcp_oauth" || !nonEmpty(auth.access_token)) {

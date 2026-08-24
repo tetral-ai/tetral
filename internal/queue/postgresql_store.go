@@ -651,9 +651,10 @@ type leaseCandidateRow struct {
 
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
 	leasedAt := request.Now
-	// A reclaimed interrupt at its attempt ceiling is leased only to recover
-	// JobRunner's receipt-or-Session-termination transaction. Its counter stays
-	// capped, so recovery cannot authorize another Runtime delivery attempt.
+	// Reclaimed terminal work uses a bounded marker rather than new delivery
+	// budget. Interrupts and cleanup outcome reconciliation retain their existing
+	// N marker. Generic agent mail may advance once to N+1 so JobRunner can
+	// identify a finalization-only lease; every later reclaim remains clamped.
 	row := tx.QueryRow(ctx,
 		`UPDATE queue_jobs
 		    SET status = 'leased',
@@ -664,6 +665,12 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		        attempt_count = CASE
 		          WHEN $3 = 'runtime_input' AND $12 = 'interrupt_control'
 		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          THEN attempt_count
+		          WHEN $3 = 'cleanup_session'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13)
+		          THEN attempt_count
+		          WHEN $3 = 'runtime_input' AND $12 = 'agent_mail'
+		           AND attempt_count >= COALESCE(NULLIF(max_attempts, 0), $13) + 1
 		          THEN attempt_count
 		          ELSE attempt_count + 1
 		        END,
@@ -1390,6 +1397,68 @@ func CancelLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, re
 	return true, nil
 }
 
+// DeferLeasedRuntimeInputCustodyTx atomically returns one barrier-blocked
+// delivery to its existing Inbox and Queue owners. This is not a retry: no
+// Runtime execution crossed the CommitInputs barrier, so the lease attempt is
+// refunded and the original job is immediately eligible when ordering permits it.
+func DeferLeasedRuntimeInputCustodyTx(ctx context.Context, tx *dbconnect.Tx, request DeferLeasedRuntimeInputRequest) (bool, error) {
+	if request.Lease.Kind != KindRuntimeInput || request.SessionID == "" || request.RuntimeInputID == "" || request.InputKind == "" {
+		return false, &ValidationError{Message: "complete barrier deferral runtime input identity is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	active, err := AssertExactLeaseTx(ctx, tx, request.Lease)
+	if err != nil || !active {
+		return active, err
+	}
+	var payloadSessionID, payloadRuntimeInputID, payloadInputKind string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json::jsonb ->> 'session_id',
+		        payload_json::jsonb ->> 'runtime_input_id',
+		        payload_json::jsonb ->> 'input_kind'
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2`,
+		string(request.Lease.WorkspaceID), request.Lease.JobID,
+	).Scan(&payloadSessionID, &payloadRuntimeInputID, &payloadInputKind); err != nil {
+		return false, err
+	}
+	if payloadSessionID != request.SessionID || payloadRuntimeInputID != request.RuntimeInputID || payloadInputKind != request.InputKind {
+		return false, &IntegrityError{Message: "barrier deferral Queue payload does not match Inbox custody"}
+	}
+	var inboxRows, queueRows int
+	err = tx.QueryRow(ctx,
+		`WITH deferred_inbox AS (
+		   UPDATE session_runtime_inbox
+		      SET status='queued', binding_id=NULL, binding_generation=NULL,
+		          target_pod_uid=NULL, updated_at=$4
+		    WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		      AND input_kind=$5 AND status IN ('queued','delivering')
+		  RETURNING runtime_input_id
+		), deferred_queue AS (
+		   UPDATE queue_jobs
+		      SET status='pending', available_at=$4, attempt_count=attempt_count-1,
+		          lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		          last_error_kind=NULL, last_error_message=NULL, updated_at=$4
+		    WHERE workspace_id=$1 AND id=$6 AND lease_token=$7
+		      AND status='leased' AND leased_until > clock_timestamp()
+		      AND attempt_count > 0
+		  RETURNING id
+		)
+		SELECT (SELECT count(*) FROM deferred_inbox),
+		       (SELECT count(*) FROM deferred_queue)`,
+		string(request.Lease.WorkspaceID), request.SessionID, request.RuntimeInputID,
+		request.Now.UTC(), request.InputKind, request.Lease.JobID, request.Lease.LeaseToken,
+	).Scan(&inboxRows, &queueRows)
+	if err != nil {
+		return false, err
+	}
+	if inboxRows != 1 || queueRows != 1 {
+		return false, &IntegrityError{Message: "barrier deferral Queue and Inbox custody diverged"}
+	}
+	return true, nil
+}
+
 func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (bool, error) {
 	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
 		return false, err
@@ -1453,10 +1522,15 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 		var attemptCount int
 		var maxAttempts int
 		var interruptBarrier bool
+		var agentMailFinalization bool
+		var cleanupOutcomeReconciliation bool
 		if err := tx.QueryRow(ctx,
 			`SELECT attempt_count, max_attempts,
 				        kind = 'runtime_input'
-				        AND payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+				        AND payload_json::jsonb ->> 'input_kind' = 'interrupt_control',
+				        kind = 'runtime_input'
+				        AND payload_json::jsonb ->> 'input_kind' = 'agent_mail',
+				        kind = 'cleanup_session'
 				   FROM queue_jobs
 			  WHERE workspace_id = $1
 			    AND id = $2
@@ -1467,7 +1541,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
-		).Scan(&attemptCount, &maxAttempts, &interruptBarrier); dbconnect.IsNoRows(err) {
+		).Scan(&attemptCount, &maxAttempts, &interruptBarrier, &agentMailFinalization, &cleanupOutcomeReconciliation); dbconnect.IsNoRows(err) {
 			return nil
 		} else if err != nil {
 			return err
@@ -1478,7 +1552,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			effectiveMaxAttempts = s.retryPolicy.MaxAttempts
 		}
 		if attemptCount >= effectiveMaxAttempts {
-			if interruptBarrier {
+			if interruptBarrier || agentMailFinalization || cleanupOutcomeReconciliation {
 				result, err := tx.Exec(ctx,
 					`UPDATE queue_jobs
 						    SET status = 'pending',
@@ -1743,7 +1817,58 @@ func (s *PostgreSQLQueueStore) DeadLetter(ctx context.Context, request DeadLette
 	if request.Now.IsZero() {
 		request.Now = storage.Now()
 	}
-	return s.fencedTerminalUpdate(ctx, request.WorkspaceID, request.JobID, request.LeaseToken, StatusDeadLettered, "dead_lettered_at", request.ErrorKind, request.ErrorMessage, request.Now.UTC())
+	if s == nil || s.client == nil {
+		return false, &ValidationError{Message: "queue store is required"}
+	}
+	var updated bool
+	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.dead_lettered", func(tx *dbconnect.Tx) error {
+		var err error
+		updated, err = DeadLetterTx(ctx, tx, request)
+		return err
+	})
+	return updated, err
+}
+
+// DeadLetterTx terminalizes one live lease inside a caller-owned business
+// transaction. Business state that depends on exhaustion must use this helper
+// so its durable settlement and release of Queue custody commit together.
+func DeadLetterTx(ctx context.Context, tx queueMutationTransaction, request DeadLetterRequest) (bool, error) {
+	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
+		return false, err
+	}
+	if tx == nil {
+		return false, &ValidationError{Message: "queue transaction is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status = 'dead_lettered',
+		        dead_lettered_at = $4,
+		        lease_token = NULL,
+		        leased_by = NULL,
+		        leased_at = NULL,
+		        leased_until = NULL,
+		        last_error_kind = $5,
+		        last_error_message = $6,
+		        updated_at = $4
+		  WHERE workspace_id = $1
+		    AND id = $2
+		    AND lease_token = $3
+		    AND status = 'leased'
+		    AND leased_until > clock_timestamp()`,
+		string(request.WorkspaceID),
+		request.JobID,
+		request.LeaseToken,
+		request.Now.UTC(),
+		nullableString(request.ErrorKind),
+		nullableString(request.ErrorMessage),
+	)
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected(result), nil
 }
 
 // ReplaceMalformedRuntimeInputCustody atomically retires a lease-fenced
@@ -1959,47 +2084,6 @@ func (s *PostgreSQLQueueStore) Cancel(ctx context.Context, request CancelRequest
 		return 0, err
 	}
 	return cancelled, nil
-}
-
-func (s *PostgreSQLQueueStore) fencedTerminalUpdate(ctx context.Context, workspaceID workspace.ID, jobID string, leaseToken string, status string, timestampColumn string, errorKind string, errorMessage string, now time.Time) (bool, error) {
-	if s == nil || s.client == nil {
-		return false, &ValidationError{Message: "queue store is required"}
-	}
-	query := `UPDATE queue_jobs
-	    SET status = '` + status + `',
-	        ` + timestampColumn + ` = $4,
-	        lease_token = NULL,
-	        leased_by = NULL,
-	        leased_at = NULL,
-	        leased_until = NULL,
-	        last_error_kind = $5,
-	        last_error_message = $6,
-	        updated_at = $4
-	  WHERE workspace_id = $1
-	    AND id = $2
-	    AND lease_token = $3
-	    AND status = 'leased'
-	    AND leased_until > clock_timestamp()`
-	var updated bool
-	if err := s.client.WithWorkspaceTx(ctx, string(workspaceID), "queue."+status, func(tx *dbconnect.Tx) error {
-		result, err := tx.Exec(ctx,
-			query,
-			string(workspaceID),
-			jobID,
-			leaseToken,
-			now,
-			nullableString(errorKind),
-			nullableString(errorMessage),
-		)
-		if err != nil {
-			return err
-		}
-		updated = rowsAffected(result)
-		return nil
-	}); err != nil {
-		return false, err
-	}
-	return updated, nil
 }
 
 func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {

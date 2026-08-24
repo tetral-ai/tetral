@@ -1055,23 +1055,6 @@ export class RuntimePodToolRunner {
 			}
 			durablyDeliveredThreadId = childThreadId;
 			throwIfToolRouteAborted(request.abortSignal);
-			await preloadChildThread(
-				host,
-				request,
-				parentScope,
-				childThreadId,
-				{
-					parentThreadId: request.sessionThreadId,
-					role: "subagent",
-					visibility: "public",
-					taskName,
-					agentType,
-					status: "idle",
-				},
-			);
-			// Creation already committed the opening input. Preload is a hot-path
-			// optimization; Queue custody remains the durable delivery owner when
-			// this pod cannot host the child immediately.
 			return completedText(
 				`task_name: ${taskName}\nsession_thread_id: ${childThreadId}\nstatus: delivered`,
 			);
@@ -2156,6 +2139,9 @@ function modelVisibleMcpRuntimeFailure(
 	errorKind: McpErrorKind | undefined,
 ): string {
 	switch (errorKind) {
+		case McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED:
+		case McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED:
+			return "MCP authorization is unavailable. Reconnect the integration and try again.";
 		case McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT:
 			return "The MCP tool execution is still in progress. Check the external service before retrying.";
 		case McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED:

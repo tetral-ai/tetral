@@ -41,6 +41,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly inspectResultPath?: string;
 	readonly providerStartedPath?: string;
 	readonly closePath?: string;
+	readonly rejectAdmissionAfterCommit?: boolean;
 };
 
 const metadataFactory = async () => new Metadata();
@@ -49,6 +50,14 @@ const bridgeLoader = new BridgeAPIContextLoader({
 	tokenPath: "/unused/service-account-token",
 	metadataFactory,
 });
+const address = {
+	workspaceId: input.workspaceId,
+	sessionId: input.sessionId,
+	sessionThreadId: input.sessionThreadId,
+	bindingId: input.bindingId,
+	bindingGeneration: input.bindingGeneration,
+	targetPodUid: input.targetPodUid,
+};
 const writer = new BridgeAPIEventWriter({
 	address: input.bridgeAddress,
 	tokenPath: "/unused/service-account-token",
@@ -173,7 +182,7 @@ const gatewayClient = new RuntimePodGatewayClient({
 	metadataFactory,
 });
 const hosts = await buildRuntimeCoreHosts({
-	maxLocalSessions: 2,
+	maxLocalSessions: input.rejectAdmissionAfterCommit === true ? 0 : 2,
 	now: () => "2026-08-17T00:00:00.000Z",
 	contextLoader: {
 		loadThreadContext: bridgeLoader.loadThreadContext.bind(bridgeLoader),
@@ -208,15 +217,6 @@ const hosts = await buildRuntimeCoreHosts({
 		runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
 	},
 });
-
-const address = {
-	workspaceId: input.workspaceId,
-	sessionId: input.sessionId,
-	sessionThreadId: input.sessionThreadId,
-	bindingId: input.bindingId,
-	bindingGeneration: input.bindingGeneration,
-	targetPodUid: input.targetPodUid,
-};
 
 if (input.mode === "cold") {
 	try {
@@ -286,6 +286,15 @@ if (input.mode === "cold") {
 						(error) => writeFile(input.inspectResultPath!, JSON.stringify({ error: String(error) }), { mode: 0o600 }),
 					);
 				}, 100);
+				return result;
+			},
+			handleAgentMail: async (...args) => {
+				const result = await hosts.commandRunHost.handleAgentMail(...args);
+				await writeFile(
+					input.acceptResultPath!,
+					JSON.stringify({ result, providerInvocations }),
+					{ mode: 0o600 },
+				);
 				return result;
 			},
 		},

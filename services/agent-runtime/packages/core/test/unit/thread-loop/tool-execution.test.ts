@@ -3557,7 +3557,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [userMessage("user-1", 1, "run the gated tool")],
+					contextEntries: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -3744,9 +3744,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [
-						userMessage("user-1", 1, "trigger an internal repair"),
-					],
+					contextEntries: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -4784,6 +4782,15 @@ describe("ThreadLoop", () => {
 				return result;
 			});
 			await new Promise<void>((resolve) => setImmediate(resolve));
+			const beforePostFence = await Effect.runPromise(
+				manager.inspectThread(interruptCommand),
+			);
+			if (beforePostFence.ok && beforePostFence.observed) {
+				nextMessageSequence = Math.max(
+					nextMessageSequence,
+					...beforePostFence.entries.map((entry) => entry.messageSequence + 1),
+				);
+			}
 			const postFenceInput = {
 				...acceptedInput("rin_after_non_cooperative_route"),
 				inputOrder: 10,
@@ -5275,10 +5282,7 @@ describe("ThreadLoop", () => {
 		expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
 	});
 	test("user interrupt joins an unknown Sandbox acceptance ACK before taking its closeout snapshot", async () => {
-		const loader = new RecordingContextLoader([], {
-			type: "context",
-			entries: [userMessage("user-1", 0, "hello")],
-		});
+		const loader = new RecordingContextLoader([], { type: "empty" });
 		const acceptanceStarted = deferred<void>();
 		const releaseAcceptance = deferred<void>();
 		const appended: SessionEvent[] = [];
@@ -5375,7 +5379,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...input,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [userMessage("user-1", 1, "hello")],
+					contextEntries: [],
 					thread: {
 						role: "main",
 						visibility: "public",

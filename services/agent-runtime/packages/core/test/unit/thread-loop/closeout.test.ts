@@ -1864,9 +1864,7 @@ describe("ThreadLoop", () => {
 				manager.preloadThread({
 					...firstInput,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [
-						userMessage("user-finish-idle-owner", 1, "hold the first run"),
-					],
+					contextEntries: [],
 					thread: {
 						role: "main",
 						visibility: "public",
@@ -2106,8 +2104,8 @@ describe("ThreadLoop", () => {
 				type: "requires_action",
 				event_ids: [settledToolUseEventId, pendingToolUseEventId],
 			},
-		);
-		await finishIdleStarted.promise;
+			);
+			await finishIdleStarted.promise;
 		session.state.applyThreadTurnFact({
 			fact: "tool_result_committed",
 			toolUseEventId: settledToolUseEventId,

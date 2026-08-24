@@ -83,9 +83,27 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 		ref.GetPartitionKey() != queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()) {
 		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
 	}
+	var jobKind, payloadJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT kind, payload_json
+		   FROM queue_jobs
+		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
+		    AND partition_key=$4 AND dedupe_key=$5 AND status='leased'
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), ref.GetJobId(), ref.GetLeaseToken(),
+		ref.GetPartitionKey(), ref.GetDedupeKey(),
+	).Scan(&jobKind, &payloadJSON); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+		}
+		return err
+	}
+	if jobKind != queue.KindRuntimeRecovery {
+		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
+	}
 	live, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
 		WorkspaceID: workspace.ID(scope.GetWorkspaceId()),
-		JobID:       ref.GetJobId(), LeaseToken: ref.GetLeaseToken(), Kind: queue.KindRuntimeRecovery,
+		JobID:       ref.GetJobId(), LeaseToken: ref.GetLeaseToken(), Kind: jobKind,
 		PartitionKey: ref.GetPartitionKey(), DedupeKey: ref.GetDedupeKey(),
 	})
 	if err != nil {
@@ -93,20 +111,6 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 	}
 	if !live {
 		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
-	}
-	var payloadJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT payload_json
-		   FROM queue_jobs
-		  WHERE workspace_id=$1 AND id=$2 AND lease_token=$3
-		    AND kind=$4 AND partition_key=$5 AND dedupe_key=$6 AND status='leased'`,
-		scope.GetWorkspaceId(), ref.GetJobId(), ref.GetLeaseToken(), queue.KindRuntimeRecovery,
-		ref.GetPartitionKey(), ref.GetDedupeKey(),
-	).Scan(&payloadJSON); err != nil {
-		if dbconnect.IsNoRows(err) {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
-		}
-		return err
 	}
 	var payload struct {
 		SessionID       string `json:"session_id"`
@@ -346,10 +350,6 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
-	if err != nil {
-		return "", err
-	}
 	threadContextPrefix, err := loadThreadContextPrefixTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
@@ -364,6 +364,15 @@ func loadThreadContextJSONTx(
 			   AND kind = 'compaction'
 		), pending_requests AS (
 			SELECT jsonb_array_elements_text($4::jsonb) AS model_request_id
+		), cancelled_message_sources AS MATERIALIZED (
+			SELECT event_identity.source_event_id
+			  FROM session_runtime_inbox inbox
+			 CROSS JOIN LATERAL jsonb_array_elements_text(inbox.event_ids_json::jsonb) event_identity(source_event_id)
+			 WHERE inbox.workspace_id = $1
+			   AND inbox.session_id = $2
+			   AND inbox.session_thread_id = $3
+			   AND inbox.input_kind = 'agent_mail'
+			   AND inbox.status = 'cancelled'
 		)
 			SELECT m.kind,
 			       m.sequence,
@@ -388,6 +397,11 @@ func loadThreadContextJSONTx(
 		   AND m.session_id = $2
 		   AND m.session_thread_id = $3
 		   AND (c.boundary_sequence IS NULL OR m.sequence >= c.boundary_sequence)
+		   AND NOT EXISTS (
+		     SELECT 1
+		       FROM cancelled_message_sources cancelled
+		      WHERE cancelled.source_event_id = m.source_event_id
+		   )
 		   AND (
 		     m.kind <> 'assistant'
 		     OR (
@@ -488,6 +502,14 @@ func loadThreadContextJSONTx(
 	if err := rows.Close(); err != nil {
 		return "", err
 	}
+	compactionFloor, err := loadContextCompactionEventFloorTx(ctx, tx, scope, messageDescriptors)
+	if err != nil {
+		return "", err
+	}
+	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
+	if err != nil {
+		return "", err
+	}
 	turnFacts, err := loadThreadTurnFactsTx(
 		ctx,
 		tx,
@@ -496,6 +518,8 @@ func loadThreadContextJSONTx(
 		durableTurnID,
 		pendingModelRequestIDs,
 		pendingToolUseEventIDs,
+		thread.Status,
+		compactionFloor,
 	)
 	if err != nil {
 		return "", err
@@ -621,6 +645,35 @@ func loadThreadMetadataForContextTx(
 	return thread, nil
 }
 
+const loadOpenDurableTurnIDSQL = `WITH latest_running AS MATERIALIZED (
+		SELECT event_id, sequence
+		  FROM session_events
+		 WHERE workspace_id=$1
+		   AND session_id=$2
+		   AND session_thread_id=$3
+		   AND type IN ('session.status_running', 'session.thread_status_running')
+		 ORDER BY sequence DESC
+		 LIMIT 1
+	)
+	SELECT running.event_id
+	  FROM latest_running running
+	 WHERE NOT EXISTS (
+	       SELECT 1
+	         FROM session_events closeout
+	        WHERE closeout.workspace_id=$1
+	          AND closeout.session_id=$2
+	          AND closeout.session_thread_id=$3
+	          AND closeout.type IN (
+	            'session.status_idle',
+	            'session.thread_status_idle',
+	            'session.status_terminated',
+	            'session.thread_status_terminated'
+	          )
+	          AND closeout.sequence > (SELECT sequence FROM latest_running)
+	        ORDER BY closeout.sequence ASC
+	        LIMIT 1
+	      )`
+
 func loadOpenDurableTurnIDTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -628,28 +681,7 @@ func loadOpenDurableTurnIDTx(
 ) (*string, error) {
 	var durableTurnID string
 	err := tx.QueryRow(ctx,
-		`WITH latest_close AS (
-			SELECT COALESCE(MAX(sequence), 0) AS sequence
-			  FROM session_events
-			 WHERE workspace_id=$1
-			   AND session_id=$2
-			   AND session_thread_id=$3
-			   AND type IN (
-			     'session.status_idle',
-			     'session.thread_status_idle',
-			     'session.status_terminated',
-			     'session.thread_status_terminated'
-			   )
-		)
-		SELECT event_id
-		  FROM session_events, latest_close
-		 WHERE workspace_id=$1
-		   AND session_id=$2
-		   AND session_thread_id=$3
-		   AND type IN ('session.status_running', 'session.thread_status_running')
-		   AND session_events.sequence > latest_close.sequence
-		 ORDER BY session_events.sequence ASC
-		 LIMIT 1`,
+		loadOpenDurableTurnIDSQL,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),

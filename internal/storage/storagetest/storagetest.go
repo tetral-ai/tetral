@@ -99,6 +99,39 @@ func NewPostgreSQLDBWithAdmin(t testing.TB) (runtime, admin *sql.DB) {
 	return newPostgreSQLDBPair(t, true)
 }
 
+// OpenRuntimeRoleDBWithTracer opens another connection pool to the isolated
+// schema owned by source. The new pool authenticates as the same non-superuser,
+// NOBYPASSRLS role used by NewPostgreSQLDB and installs tracer before any
+// connection is opened. It is intended for query-plan and statement-census
+// tests that must observe the real RLS execution posture.
+func OpenRuntimeRoleDBWithTracer(t testing.TB, source *sql.DB, tracer pgx.QueryTracer) *sql.DB {
+	t.Helper()
+	var schemaName string
+	if err := source.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&schemaName); err != nil {
+		t.Fatalf("storagetest: read isolated runtime schema: %v", err)
+	}
+	config, err := pgx.ParseConfig(os.Getenv(EnvTestDatabaseURL))
+	if err != nil {
+		t.Fatalf("storagetest: parse %s for traced runtime connection", EnvTestDatabaseURL)
+	}
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	config.RuntimeParams["search_path"] = schemaName + ",pg_catalog"
+	config.User = runtimeRoleName
+	config.Password = runtimeRolePassword
+	config.Tracer = tracer
+	db := sql.OpenDB(stdlib.GetConnector(*config))
+	db.SetMaxOpenConns(helperPoolMaxOpen)
+	db.SetMaxIdleConns(helperPoolMaxOpen)
+	if err := db.PingContext(context.Background()); err != nil {
+		_ = db.Close()
+		t.Fatalf("storagetest: open traced runtime-role database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
 // NewEmptyPostgreSQLAdminDB provisions an isolated schema without applying or
 // stamping the Engine schema. It is reserved for migration ownership tests
 // that must exercise empty and pre-registry states.

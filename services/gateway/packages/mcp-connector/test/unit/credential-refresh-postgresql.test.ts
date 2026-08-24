@@ -114,7 +114,7 @@ test("concurrent SDK calls share one durable OAuth rotation and terminal failure
     issuerRequests = 0;
     events.length = 0;
     const failingClient = mcpClient(resolver, () => undefined);
-    await expect(call(failingClient, "thrd_failure")).rejects.toThrow("credential is unavailable");
+    await expect(call(failingClient, "thrd_failure")).rejects.toThrow("credential refresh is temporarily unavailable");
     expect(issuerRequests).toBe(1);
     expect(events).toEqual([expect.objectContaining({ outcome: "failed", failureKind: "http_status",
       httpStatusClass: "5xx", durableWrite: "not_attempted", refreshAttemptMetric: "failed" })]);

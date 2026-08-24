@@ -792,6 +792,35 @@ type childCloseCustodyTransitions struct {
 	cancelled int
 }
 
+// agentMailMessageCoveredByRequestStartTx is child-CLOSE authority only. It
+// distinguishes an input already owned by an active Request from custody that
+// CLOSE must cancel; delivery and acknowledgement never consult this relation.
+func agentMailMessageCoveredByRequestStartTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	inbox lockedRuntimeInboxFinalization,
+) (bool, error) {
+	if len(inbox.eventIDs) != 1 {
+		return false, nil
+	}
+	var covered bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		  FROM session_messages message
+		  JOIN session_events request_start
+		    ON request_start.workspace_id=message.workspace_id
+		   AND request_start.session_id=message.session_id
+		   AND request_start.session_thread_id=message.session_thread_id
+		   AND request_start.type='span.model_request_start'
+		 WHERE message.workspace_id=$1 AND message.session_id=$2
+		   AND message.session_thread_id=$3 AND message.source_event_id=$4
+		   AND jsonb_typeof(request_start.projection_json::jsonb -> 'context_through_message_sequence')='number'
+		   AND (request_start.projection_json::jsonb ->> 'context_through_message_sequence')::bigint >= message.sequence
+	)`, job.WorkspaceID, job.SessionID, job.SessionThreadID, inbox.eventIDs[0]).Scan(&covered)
+	return covered, err
+}
+
 func settleChildCloseRuntimeInputsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -801,20 +830,21 @@ func settleChildCloseRuntimeInputsTx(
 ) (childCloseCustodyTransitions, error) {
 	var transitions childCloseCustodyTransitions
 	for _, targetID := range targetIDs {
-		rows, err := tx.Query(ctx, `SELECT runtime_input_id,input_kind
+		rows, err := tx.Query(ctx, `SELECT runtime_input_id,input_kind,status
 			FROM session_runtime_inbox
 			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			 AND status IN ('queued','delivering','accepted') AND input_kind <> 'approval_review'
+			 AND (status IN ('queued','delivering','accepted') OR (status='committed' AND input_kind='agent_mail'))
+			 AND input_kind <> 'approval_review'
 			ORDER BY created_at,runtime_input_id FOR UPDATE`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), targetID)
 		if err != nil {
 			return childCloseCustodyTransitions{}, err
 		}
-		type closeInput struct{ runtimeInputID, inputKind string }
+		type closeInput struct{ runtimeInputID, inputKind, status string }
 		var inputs []closeInput
 		for rows.Next() {
 			var input closeInput
-			if err := rows.Scan(&input.runtimeInputID, &input.inputKind); err != nil {
+			if err := rows.Scan(&input.runtimeInputID, &input.inputKind, &input.status); err != nil {
 				_ = rows.Close()
 				return childCloseCustodyTransitions{}, err
 			}
@@ -828,6 +858,21 @@ func settleChildCloseRuntimeInputsTx(
 			PodUID: scope.GetBinding().GetTargetPodUid(),
 		}
 		for _, input := range inputs {
+			consumedAgentMail := false
+			if input.inputKind == "agent_mail" {
+				job := RuntimeJob{
+					WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: targetID,
+					RuntimeInputID: input.runtimeInputID, Kind: queue.KindRuntimeInput, InputKind: "agent_mail",
+				}
+				inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
+				if err != nil {
+					return childCloseCustodyTransitions{}, err
+				}
+				consumedAgentMail, err = agentMailMessageCoveredByRequestStartTx(ctx, tx, job, inbox)
+				if err != nil {
+					return childCloseCustodyTransitions{}, err
+				}
+			}
 			if _, err := tx.Exec(ctx, `UPDATE queue_jobs
 				SET status='cancelled',cancelled_at=$4,lease_token=NULL,leased_by=NULL,leased_at=NULL,leased_until=NULL,updated_at=$4
 				WHERE workspace_id=$1 AND status IN ('pending','leased')
@@ -848,8 +893,21 @@ func settleChildCloseRuntimeInputsTx(
 				transitions.parked++
 				continue
 			}
+			if consumedAgentMail {
+				result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='committed',updated_at=$4
+					WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+					  AND status IN ('delivering','accepted','committed')`,
+					scope.GetWorkspaceId(), scope.GetSessionId(), input.runtimeInputID, now)
+				if err != nil {
+					return childCloseCustodyTransitions{}, err
+				}
+				if !rowsAffected(result) {
+					return childCloseCustodyTransitions{}, status.Error(codes.Aborted, "consumed agent mail Inbox authority changed during child close")
+				}
+				continue
+			}
 			result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox SET status='cancelled',updated_at=$4
-				WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status IN ('queued','delivering','accepted')`,
+				WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status IN ('queued','delivering','accepted','committed')`,
 				scope.GetWorkspaceId(), scope.GetSessionId(), input.runtimeInputID, now)
 			if err != nil {
 				return childCloseCustodyTransitions{}, err

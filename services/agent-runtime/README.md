@@ -90,7 +90,7 @@ actions around the six states rather than extra top-level states.
 
 | Loop state | Owner | Durable boundary |
 | --- | --- | --- |
-| `idle` | ThreadRun owner fiber | `CommitInputs` ACK makes a request eligible |
+| `idle` | ThreadRun owner fiber | `CommitInputs` installs pending context; the Reducer decides when that context authorizes Request Start |
 | `ready_to_request` | ThreadRun owner fiber | pure hot decision point |
 | `request_open` | provider-request scope | Tool Use ACKs and then `WriteRequestEnd` ACK |
 | `request_sealed` | ThreadRun owner fiber | typed seal reconciliation |
@@ -346,7 +346,7 @@ thread sees tool use/result; child work stays child-thread-local.
   committing initial custody atomically; turn partitioning is
   `core/src/runtime/conversation-turns.ts`.
 - Lifecycle: `spawn_agent` commits the durable child row, immutable context
-  prefix, opening sent/received Events, target Inbox/Queue custody, and one
+  prefix, initial sent/received Events, target Inbox/Queue custody, and one
   replay receipt directly from its live durable Tool Use, before the parent
   Provider Request End. Later `send_message` calls resolve the child by
   `task_name` and deliver through their own stored envelope and durable Runtime input rail;
@@ -357,14 +357,17 @@ thread sees tool use/result; child work stays child-thread-local.
 
 Invariants a replacement must preserve:
 
-- Child thread, prefix, opening Events, Inbox/Queue custody, and receipt exist
+- Child thread, prefix, initial mail Events, Inbox/Queue custody, and receipt exist
   together or not at all. A crash after `CreateSubagentThread` commits reuses
-  that complete Bridge-owned lineage without a second opening delivery; the
+  that complete Bridge-owned lineage without a second mail birth; the
   replay receipt carries only the child identity needed by Runtime.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → committed input
-  result. Pod-loss reconciliation hands an accepted input back to the existing
-  queue job or creates one replacement only after exact Runtime custody is lost.
+  result → hot admission → accepted Inbox stamp → exact Queue ACK. Initial and
+  later mail use this same path. Request Start remains a Reducer-owned action,
+  never delivery or ACK authority. If the Runtime binding is proven lost,
+  generic accepted-input handoff restores the same input and Queue identity for
+  the replacement owner without replaying a second durable Message.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
 - Completion return rides the same durable wake rail: the child

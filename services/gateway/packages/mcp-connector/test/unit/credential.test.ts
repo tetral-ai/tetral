@@ -64,6 +64,32 @@ describe("SQLGitHubMcpCredentialResolver", () => {
     });
   });
 
+  test("does not pretend a rejected static bearer has refresh authority", async () => {
+    const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const encrypted = await encryptAES256GCM(new TextEncoder().encode(JSON.stringify({
+      type: "static_bearer",
+      mcp_server_url: "https://api.githubcopilot.com/mcp/",
+      token: "rejected-static-token",
+    })), keyHex);
+    const resolver = new SQLGitHubMcpCredentialResolver(asyncSQL([{
+      id: "cred_static",
+      vault_id: "vlt_1",
+      mcp_server_url: "https://api.githubcopilot.com/mcp/",
+      auth_public_json: publicAuthJSON("https://api.githubcopilot.com/mcp/"),
+      encrypted_auth: encrypted,
+    }]), keyHex);
+
+    await expect(resolver.refresh({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      mcpServerName: "github",
+      vaultId: "vlt_1",
+      credentialId: "cred_static",
+      previousTokenHash: sha256("rejected-static-token"),
+      force: true,
+    })).resolves.toEqual({ ok: false, error: "credential_required" });
+  });
+
   test("does not match credential URL with more than one trailing slash stripped", async () => {
     const keyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const encrypted = await encryptAES256GCM(new TextEncoder().encode(JSON.stringify({
@@ -347,11 +373,14 @@ describe("SQLGitHubMcpCredentialResolver", () => {
           recordMcpOAuthRefreshCompleted({ info: (record) => logRecords.push(record) }, undefined, event);
         },
       );
-      await owner.refreshOAuthCredential({
+      const resolution = await owner.refreshOAuthCredential({
         workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github", row, vaultId: row.vault_id,
         credentialId: row.id, previousTokenHash: sha256("old-access"), force: true,
       });
       encryptSpy?.mockRestore();
+      if (["storage", "transport", "timeout", "http_status", "response_shape", "encrypt", "write_back"].includes(failureKind)) {
+        expect(resolution, failureKind).toEqual({ ok: false, error: "refresh_unavailable" });
+      }
       expect(events, failureKind).toEqual([expect.objectContaining({ outcome: "failed", failureKind })]);
       expect(logRecords, failureKind).toEqual([expect.objectContaining({
         event: "mcp_oauth_refresh_completed",
@@ -519,7 +548,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
       mcpServerName: "github",
-    })).resolves.toEqual({ ok: false, error: "refresh_failed" });
+    })).resolves.toEqual({ ok: false, error: "refresh_unavailable" });
     expect(fetchSignal?.aborted).toBe(true);
     expect(MCP_REFRESH_HTTP_TIMEOUT_MS).toBe(10_000);
   });
@@ -575,7 +604,7 @@ describe("SQLGitHubMcpCredentialResolver", () => {
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
       mcpServerName: "github",
-    })).resolves.toEqual({ ok: false, error: "refresh_failed" });
+    })).resolves.toEqual({ ok: false, error: "refresh_unavailable" });
     expect(state.updateCount).toBe(0);
     expect(refreshEvents).toEqual([expect.objectContaining({
       outcome: "failed", failureKind: "timeout", httpStatusClass: "2xx",
@@ -1023,6 +1052,7 @@ type GitHubCredentialVectorError =
   | "ambiguous"
   | "undecryptable"
   | "expired"
+  | "refresh_unavailable"
   | "refresh_failed";
 
 interface GitHubCredentialVectorRow {

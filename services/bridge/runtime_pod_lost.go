@@ -396,7 +396,7 @@ func handOffLostRuntimeAcceptedInputsTx(
 			if !input.QueueJobID.Valid {
 				return 0, runtimeDeliveryPrepareError{kind: "runtime_inbox_invariant", message: "delivering runtime input has no active queue custody", retryable: false}
 			}
-			if input.InputKind != "interrupt_control" {
+			if input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" {
 				continue
 			}
 		}

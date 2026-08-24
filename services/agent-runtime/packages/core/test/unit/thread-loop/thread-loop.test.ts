@@ -1992,33 +1992,141 @@ describe("ThreadState", () => {
 		);
 	});
 
-	test("agent-mail delivery identity deduplicates only while its active consumer owns it", () => {
-		const state = new ThreadState("sesn_agent_mail_dedup");
-		const mail = {
-			workspaceId: "wksp_agent_mail",
-			sessionId: "sesn_agent_mail_dedup",
-			sessionThreadId: "thrd_agent_mail_main",
-			bindingId: "bind_agent_mail",
+	test("subagent mail leaves accepted-input custody after durable commit", async () => {
+		const session = new ThreadRuntime({
+			workspaceId: "wksp_ordinary_subagent_mail",
+			sessionId: "sesn_ordinary_subagent_mail",
+			sessionThreadId: "thrd_ordinary_subagent_mail",
+			threadRole: "subagent",
+			bindingId: "bind_ordinary_subagent_mail",
 			bindingGeneration: 1,
-			targetPodUid: "pod_agent_mail",
-			runtimeInputId: "agent_mail:delivery_agent_mail",
-			kind: "inter_agent_message",
-			deliveryId: "delivery_agent_mail",
-			content:
-				"Message Type: FINAL_ANSWER\nTask name: main\nSender: worker\nPayload:\ndone",
-		} satisfies RuntimeAcceptedInputState;
-
-		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
-		expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
-		expect(state.enqueueAcceptedInput({ ...mail, bindingGeneration: 2 })).toBe(
-			"conflict",
+			targetPodUid: "pod_ordinary_subagent_mail",
+			runtimeBindingToken: "token_ordinary_subagent_mail",
+		});
+		session.state.contextManager.appendEntry(
+			userMessage("msg_first_subagent_mail", 1, "first mail"),
 		);
-		state.acknowledgeAcceptedInput(mail.runtimeInputId);
-		expect(state.peekAcceptedInput()).toBeUndefined();
-		expect(state.enqueueAcceptedInput(mail)).toBe("applied");
-		expect(
-			state.enqueueAcceptedInput({ ...mail, deliveryId: "delivery_new" }),
-		).toBe("conflict");
+		session.state.markPersistentContextLoaded();
+		session.state.installThreadTurn(
+			{
+				pendingInputContextSequences: [],
+				idleCloseout: {
+					eventId: "sevt_ordinary_subagent_mail_idle",
+					stopReason: "end_turn",
+				},
+			},
+			{ routes: [] },
+		);
+		const mail = {
+			workspaceId: session.identity.workspaceId,
+			sessionId: session.sessionId,
+			sessionThreadId: session.identity.sessionThreadId,
+			bindingId: session.identity.bindingId,
+			bindingGeneration: session.identity.bindingGeneration,
+			targetPodUid: session.identity.targetPodUid,
+			runtimeInputId: "agent_mail:delivery_ordinary_subagent_mail",
+			kind: "inter_agent_message",
+			deliveryId: "delivery_ordinary_subagent_mail",
+			content: "ordinary follow-up",
+		} satisfies RuntimeAcceptedInputState;
+		expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
+		const appended: string[] = [];
+		const loader = new QueuedContextLoader([], [], [
+			{
+				type: "committed",
+				assignedContextSequences: [2],
+				pendingAttachments: [],
+				interruptToolResults: [],
+			},
+		]);
+
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						installLoaderState: false,
+						writer: failingEventWriter(
+							appended,
+							(event) => event.type === "span.model_request_start",
+						),
+					}),
+				),
+			),
+		);
+
+		expect(result).toMatchObject({ type: "failed" });
+		expect(loader.commitCalls).toHaveLength(1);
+		expect(session.state.acceptedInputCount()).toBe(0);
+			expect(session.state.acceptedInputCount()).toBe(0);
+	});
+
+	test("does not reopen a request for an already resident committed mail", async () => {
+		const session = new ThreadRuntime("sesn_agent_mail_resident_replay");
+		session.state.contextManager.appendEntry(
+			userMessage("msg_agent_mail_resident", 1, "already resident"),
+		);
+		session.state.markPersistentContextLoaded();
+		session.state.installThreadTurn(
+			{
+				pendingInputContextSequences: [],
+				idleCloseout: {
+					eventId: "sevt_agent_mail_resident_idle",
+					stopReason: "end_turn",
+				},
+			},
+			{ routes: [] },
+		);
+		const mail = {
+			workspaceId: "wksp_agent_mail_resident_replay",
+			sessionId: "sesn_agent_mail_resident_replay",
+			sessionThreadId: "thrd_agent_mail_resident_replay",
+			bindingId: "bind_agent_mail_resident_replay",
+			bindingGeneration: 1,
+			targetPodUid: "pod_agent_mail_resident_replay",
+			runtimeInputId: "agent_mail:delivery_resident_replay",
+			kind: "inter_agent_message",
+			deliveryId: "delivery_resident_replay",
+			content: "already resident",
+		} satisfies RuntimeAcceptedInputState;
+		expect(session.state.enqueueAcceptedInput(mail)).toBe("applied");
+		const loader = new QueuedContextLoader(
+			[],
+			[],
+			[
+				{
+					type: "committed",
+					assignedContextSequences: [1],
+					pendingAttachments: [],
+					interruptToolResults: [],
+				},
+			],
+		);
+		const requests: LLMRequest[] = [];
+
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						installLoaderState: false,
+						onStream: (request) => requests.push(request),
+					}),
+				),
+			),
+		);
+
+		expect(result).toMatchObject({ type: "completed" });
+		expect(requests).toEqual([]);
+		expect(session.state.acceptedInputCount()).toBe(0);
 	});
 
 	test("interrupt fence preserves queued stamped completion mail", () => {

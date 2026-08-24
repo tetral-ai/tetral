@@ -28,7 +28,7 @@ import (
 
 // This file owns the Bridge mcp protocol-family boundary.
 
-func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinues(t *testing.T) {
+func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinues(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID    = "sesn_mcp_tool_failure_composition"
@@ -114,9 +114,9 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 		t.Fatalf("decode MCP failure composition: %v: %s", err, output)
 	}
 	if composed.ConnectorCalls != 1 || composed.Result.Type != "error" || composed.Result.Error.Retryable ||
-		composed.Result.Error.Message != "MCP tool execution is unavailable." || composed.Settlement.Type != "error" ||
+		composed.Result.Error.Message != "MCP authorization is unavailable. Reconnect the integration and try again." || composed.Settlement.Type != "error" ||
 		len(composed.DeclaredError) == 0 {
-		t.Fatalf("MCP failure composition = %+v; want one generic non-retryable Tool settlement", composed)
+		t.Fatalf("MCP failure composition = %+v; want one actionable non-retryable Tool settlement", composed)
 	}
 	request := bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
@@ -161,7 +161,7 @@ func TestPostgreSQLMCPInfrastructureFailureSettlesOneToolResultAndReducerContinu
 	}
 	result, _ := mcpProjection.Parts[1]["result"].(map[string]any)
 	failure, _ := result["error"].(map[string]any)
-	if result["type"] != "error" || failure["message"] != "MCP tool execution is unavailable." {
+	if result["type"] != "error" || failure["message"] != "MCP authorization is unavailable. Reconnect the integration and try again." {
 		t.Fatalf("MCP Tool error was not normalized: %s", durableMessage)
 	}
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})

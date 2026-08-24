@@ -343,11 +343,7 @@ export interface RuntimeCleanupController {
 		| {
 				readonly ok: true;
 				readonly sessionId: string;
-				readonly completion: Promise<{
-					readonly ok: true;
-					readonly sessionId: string;
-					readonly cleaned: boolean;
-				}>;
+				readonly cleaned: boolean;
 		  }
 		| {
 				readonly ok: false;
@@ -1010,22 +1006,20 @@ export class RuntimeControlService {
 				response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
 			apply: async () => {
-				const cleanup = await this.options.cleanupController.startCleanup(
-					scope,
-					request.reason === CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED
-						? "expired"
-						: "operator_requested",
-				);
-				if (!cleanup.ok) {
-					runtimeMetrics(this.options).recordCleanupCommandOutcome("rejected");
-					return cleanupRejected(
-						CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SESSION_BUSY,
-						true,
-					);
-				}
-				runtimeMetrics(this.options).recordCleanupCommandOutcome("accepted");
 				try {
-					await cleanup.completion;
+					const cleanup = await this.options.cleanupController.startCleanup(
+						scope,
+						request.reason === CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED
+							? "expired"
+							: "operator_requested",
+					);
+					if (!cleanup.ok) {
+						runtimeMetrics(this.options).recordCleanupCommandOutcome("rejected");
+						return cleanupRejected(
+							CleanupSessionFailure.CLEANUP_SESSION_FAILURE_SESSION_BUSY,
+							true,
+						);
+					}
 					this.configContentMemo.delete(sessionKey(request));
 					runtimeMetrics(this.options).recordCleanupCommandOutcome("completed");
 					return { completed: {} };
