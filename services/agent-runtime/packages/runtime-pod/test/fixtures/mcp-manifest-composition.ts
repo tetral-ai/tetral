@@ -316,6 +316,8 @@ async function buildManager(): Promise<{
 			run: () => Effect.succeed({ type: "completed", modelMessageCount: 0 }),
 			closeFailedRun: () =>
 				Effect.succeed({ type: "landed", disposition: "continuation" }),
+			closeRecoveredOpenRequestForInterrupt: () =>
+				Effect.succeed({ type: "interrupted" }),
 			seedRuntimeModel: () => undefined,
 			installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 			installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),

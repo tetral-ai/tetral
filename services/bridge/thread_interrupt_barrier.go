@@ -240,7 +240,6 @@ func requireThreadInputDeliveryAllowedTx(ctx context.Context, tx *dbconnect.Tx, 
 }
 
 type interruptCloseoutContextKey struct{}
-type runtimePodLossInterruptRepairContextKey struct{}
 type sessionRootTerminationContextKey struct{}
 
 type interruptCloseoutAuthority struct {
@@ -248,15 +247,6 @@ type interruptCloseoutAuthority struct {
 	sessionID       string
 	sessionThreadID string
 	runtimeInputID  string
-}
-
-type runtimePodLossInterruptRepairAuthority struct {
-	workspaceID             string
-	sessionID               string
-	runtimeInputIDsByThread map[string]string
-	bindingID               string
-	bindingGeneration       int64
-	targetPodUID            string
 }
 
 type sessionRootTerminationAuthority struct {
@@ -272,10 +262,6 @@ func withInterruptCloseout(ctx context.Context, workspaceID string, sessionID st
 	})
 }
 
-func withRuntimePodLossInterruptRepair(ctx context.Context, authority runtimePodLossInterruptRepairAuthority) context.Context {
-	return context.WithValue(ctx, runtimePodLossInterruptRepairContextKey{}, authority)
-}
-
 func withSessionRootTermination(ctx context.Context, workspaceID string, sessionID string, mainThreadID string, operationID string) context.Context {
 	return context.WithValue(ctx, sessionRootTerminationContextKey{}, sessionRootTerminationAuthority{
 		workspaceID: workspaceID, sessionID: sessionID, mainThreadID: mainThreadID, operationID: operationID,
@@ -284,11 +270,6 @@ func withSessionRootTermination(ctx context.Context, workspaceID string, session
 
 func sessionRootTerminationAuthorityFromContext(ctx context.Context) (sessionRootTerminationAuthority, bool) {
 	authority, ok := ctx.Value(sessionRootTerminationContextKey{}).(sessionRootTerminationAuthority)
-	return authority, ok
-}
-
-func runtimePodLossInterruptRepairFromContext(ctx context.Context) (runtimePodLossInterruptRepairAuthority, bool) {
-	authority, ok := ctx.Value(runtimePodLossInterruptRepairContextKey{}).(runtimePodLossInterruptRepairAuthority)
 	return authority, ok
 }
 

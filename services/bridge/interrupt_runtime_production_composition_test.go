@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -48,6 +49,29 @@ type interruptFollowerRuntimeServer struct {
 type committingInterruptRuntimeSender struct {
 	*recordingRuntimeCommandSender
 	bridge *PostgreSQLBridgeAPIStore
+}
+
+var errSyntheticInterruptResponseLoss = errors.New("synthetic interrupt response loss")
+
+type interruptResponseLossSender struct {
+	RuntimeCommandSender
+	calls atomic.Int32
+}
+
+func (s *interruptResponseLossSender) Interrupt(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.InterruptRequest,
+) (*agentruntimev1.InterruptResponse, error) {
+	s.calls.Add(1)
+	response, err := s.RuntimeCommandSender.Interrupt(ctx, target, request)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, errors.New("interrupt response is nil")
+	}
+	return nil, errSyntheticInterruptResponseLoss
 }
 
 func (s *committingInterruptRuntimeSender) Interrupt(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
@@ -667,23 +691,38 @@ func TestPostgreSQLExplicitChildInterruptColdRecoversOnlyChild(t *testing.T) {
 func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID    = "sesn_interrupt_pod_loss_production"
-		threadID     = "thr_interrupt_pod_loss_production"
-		oldBindingID = "bind_interrupt_pod_loss_old"
-		oldPodUID    = "pod_interrupt_pod_loss_old"
-		newBindingID = "bind_interrupt_pod_loss_new"
-		newPodUID    = "pod_interrupt_pod_loss_new"
+		sessionID     = "sesn_interrupt_pod_loss_production"
+		threadID      = "thr_interrupt_pod_loss_production"
+		siblingID     = "thr_interrupt_pod_loss_sibling"
+		mainTurnID    = "evt_interrupt_pod_loss_main_running"
+		siblingTurnID = "evt_interrupt_pod_loss_sibling_running"
+		mainRequestID = "mreq_interrupt_pod_loss_main"
+		siblingReqID  = "mreq_interrupt_pod_loss_sibling"
+		oldBindingID  = "bind_interrupt_pod_loss_old"
+		oldPodUID     = "pod_interrupt_pod_loss_old"
+		newBindingID  = "bind_interrupt_pod_loss_new"
+		newPodUID     = "pod_interrupt_pod_loss_new"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
 	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	client := dbconnect.NewClientForTesting(runtime)
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	mainScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID)
+	siblingScope := bridgeAPIScope(sessionID, siblingID, oldBindingID, 1, oldPodUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, mainScope, mainTurnID)
+	seedBridgeAPIOpenDurableTurn(t, admin, siblingScope, siblingTurnID)
+	mainToolID := writeDurableOrdinaryToolUseForTest(t, bridgeStore, mainScope, mainRequestID,
+		"call_interrupt_pod_loss_main", "Read", `{"path":"main.txt"}`)
+	seedBridgeAPIRequestStart(t, bridgeStore, siblingScope, "rwrite_"+siblingReqID+"_start", siblingReqID, "agent_provider_request", 0)
 	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
 	birth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, "interrupt-pod-loss-production",
 		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}})
 	if err != nil || len(birth.Data) != 1 {
 		t.Fatalf("birth pre-loss interrupt = %#v/%v", birth, err)
 	}
+	interruptEventID := birth.Data[0].ID
 	var interruptID, jobID string
 	var attemptsBefore int
 	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.runtime_input_id, job.id, job.attempt_count
@@ -700,15 +739,42 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
 		t.Fatalf("repair pod loss under interrupt = %d/%v", repaired, err)
 	}
+	var mainEndsAfterLoss, mainResultsAfterLoss, siblingEndsAfterLoss, oldBindings int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		 AND type='span.model_request_end' AND model_request_id=$4),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$5),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3
+		 AND type='span.model_request_end' AND model_request_id=$6),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`,
+		sessionID, threadID, siblingID, mainRequestID, mainToolID, siblingReqID,
+	).Scan(&mainEndsAfterLoss, &mainResultsAfterLoss, &siblingEndsAfterLoss, &oldBindings); err != nil {
+		t.Fatalf("read pod-loss Thread partition: %v", err)
+	}
+	if mainEndsAfterLoss != 0 || mainResultsAfterLoss != 0 || siblingEndsAfterLoss != 1 || oldBindings != 0 {
+		t.Fatalf("pod-loss partition = main %d/%d sibling ends %d bindings %d; want 0/0 1 0",
+			mainEndsAfterLoss, mainResultsAfterLoss, siblingEndsAfterLoss, oldBindings)
+	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
 		SET status='running', binding_id=$2, binding_generation=2, updated_at=clock_timestamp()
 		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
 		t.Fatalf("install replacement Runtime status fence: %v", err)
 	}
-
-	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-pod-loss-production-key")
+	replacementScope := bridgeAPIScope(sessionID, threadID, newBindingID, 2, newPodUID)
+	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: replacementScope})
+	if err != nil {
+		t.Fatalf("load replacement interrupt context: %v", err)
+	}
+	loadedContext := []byte(loaded.GetContextJson())
+	for _, requiredFact := range []string{mainTurnID, mainRequestID, mainToolID, interruptEventID} {
+		if !bytes.Contains(loadedContext, []byte(requiredFact)) {
+			t.Fatalf("replacement context does not contain required durable fact %q", requiredFact)
+		}
+	}
+
 	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for pod-loss Bridge: %v", err)
@@ -731,14 +797,67 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
 		}})
 	}}
+	queueStore := queue.NewPostgreSQLStore(client)
+	responseLossSender := &interruptResponseLossSender{
+		RuntimeCommandSender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
+	}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseLossSender},
 		Config:    JobRunnerConfig{LeaseOwner: "interrupt-pod-loss-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("deliver same interrupt after pod loss = active:%t err:%v", active, err)
+	type deliveryResult struct {
+		active bool
+		err    error
 	}
+	delivery := make(chan deliveryResult, 1)
+	go func() {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		delivery <- deliveryResult{active: active, err: runErr}
+	}()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build pod-loss output capture provider registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(dbconnect.NewClientForTesting(runtime)),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "interrupt-pod-loss-output-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	captureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete pod-loss interrupt output capture: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(captureDeadline) {
+			t.Fatalf("pod-loss interrupt did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var delivered deliveryResult
+	select {
+	case delivered = <-delivery:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("pod-loss interrupt delivery did not finish after output capture: %s", runtimeProcess.output.String())
+	}
+	if delivered.err != nil || !delivered.active {
+		t.Fatalf("deliver same interrupt after pod loss = active:%t err:%v", delivered.active, delivered.err)
+	}
+	if calls := responseLossSender.calls.Load(); calls != 1 {
+		t.Fatalf("replacement Runtime interrupt calls after response loss = %d; want 1", calls)
+	}
+	waitForThreadRequestEnds(t, admin, sessionID, threadID, 1)
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release pod-loss Runtime composition: %v", err)
 	}
@@ -747,7 +866,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		t.Fatalf("pod-loss interrupt Runtime composition = %+v", composed)
 	}
 	var finalInbox, finalQueue string
-	var attemptsAfter, lineage, receipts, activeBarriers int
+	var attemptsAfter, lineage, receipts, activeBarriers, mainEnds, mainResults, danglingTools int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
@@ -756,14 +875,163 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$4
 		 AND source_kind='interrupt_control' AND idempotency_key=$1 AND receipt_json <> ''),
 		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$4
-		 AND input_kind='interrupt_control' AND status IN ('queued','delivering','accepted'))`,
-		interruptID, jobID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), sessionID).
-		Scan(&finalInbox, &finalQueue, &attemptsAfter, &lineage, &receipts, &activeBarriers); err != nil {
+		 AND input_kind='interrupt_control' AND status IN ('queued','delivering','accepted')),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$4 AND session_thread_id=$5
+		 AND type='span.model_request_end'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$4 AND session_thread_id=$5
+		 AND type='agent.tool_result' AND (payload_json::jsonb->>'tool_use_event_id'=$6 OR payload_json::jsonb->>'tool_use_id'=$6)),
+		(SELECT count(*) FROM session_events tool_use WHERE tool_use.workspace_id='default' AND tool_use.session_id=$4
+		 AND tool_use.session_thread_id=$5 AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+		 AND NOT EXISTS (SELECT 1 FROM session_events result WHERE result.workspace_id=tool_use.workspace_id
+		  AND result.session_id=tool_use.session_id AND result.session_thread_id=tool_use.session_thread_id
+		  AND ((result.type='agent.tool_result' AND (result.payload_json::jsonb->>'tool_use_event_id'=tool_use.event_id
+		    OR result.payload_json::jsonb->>'tool_use_id'=tool_use.event_id))
+		    OR (result.type='agent.mcp_tool_result' AND result.payload_json::jsonb->>'mcp_tool_use_id'=tool_use.event_id))))`,
+		interruptID, jobID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), sessionID,
+		threadID, mainToolID).
+		Scan(&finalInbox, &finalQueue, &attemptsAfter, &lineage, &receipts, &activeBarriers, &mainEnds, &mainResults, &danglingTools); err != nil {
 		t.Fatalf("read pod-loss interrupt terminal facts: %v", err)
 	}
-	if finalInbox != "committed" || finalQueue != queue.StatusAcknowledged || attemptsAfter != attemptsBefore+1 || lineage != 1 || receipts != 1 || activeBarriers != 0 {
-		t.Fatalf("pod-loss terminal facts = Inbox:%s Queue:%s attempts:%d->%d lineage:%d receipts:%d barriers:%d",
-			finalInbox, finalQueue, attemptsBefore, attemptsAfter, lineage, receipts, activeBarriers)
+	if finalInbox != "committed" || finalQueue != queue.StatusAcknowledged || attemptsAfter != attemptsBefore+1 || lineage != 1 ||
+		receipts != 1 || activeBarriers != 0 || mainEnds != 1 || mainResults != 1 || danglingTools != 0 {
+		t.Fatalf("pod-loss terminal facts = Inbox:%s Queue:%s attempts:%d->%d lineage:%d receipts:%d barriers:%d main:%d/%d dangling:%d",
+			finalInbox, finalQueue, attemptsBefore, attemptsAfter, lineage, receipts, activeBarriers, mainEnds, mainResults, danglingTools)
+	}
+	reloaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: replacementScope})
+	if err != nil {
+		t.Fatalf("cold reload completed pod-loss interrupt: %v", err)
+	}
+	var cold bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(reloaded.GetContextJson()), &cold); err != nil {
+		t.Fatalf("decode completed pod-loss interrupt context: %v", err)
+	}
+	var coldStarts, coldEnds, coldToolUses, coldToolResults int
+	for _, event := range cold.TurnFacts.Events {
+		if event.ModelRequestID != nil && *event.ModelRequestID == mainRequestID {
+			if event.RequestStart != nil {
+				coldStarts++
+			}
+			if event.RequestEnd != nil {
+				coldEnds++
+			}
+		}
+		if event.EventID == mainToolID && event.ToolUse != nil {
+			coldToolUses++
+		}
+		if event.ToolResult != nil && event.ToolResult.ToolName == "Read" {
+			coldToolResults++
+		}
+	}
+	if coldStarts != 1 || coldEnds != 1 || coldToolUses != 1 || coldToolResults != 1 || len(cold.PendingToolUses) != 0 {
+		t.Fatalf("cold completed pair = starts:%d ends:%d uses:%d results:%d pending:%d; want 1/1/1/1/0",
+			coldStarts, coldEnds, coldToolUses, coldToolResults, len(cold.PendingToolUses))
+	}
+}
+
+func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_interrupt_closeout_then_loss"
+		threadID       = "thr_interrupt_closeout_then_loss"
+		bindingID      = "bind_interrupt_closeout_then_loss"
+		podUID         = "pod_interrupt_closeout_then_loss"
+		turnID         = "evt_interrupt_closeout_then_loss_running"
+		modelRequestID = "mreq_interrupt_closeout_then_loss"
+		interruptID    = "rin_interrupt_closeout_then_loss"
+		interruptEvent = "evt_interrupt_closeout_then_loss"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_closeout_then_loss_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 3, "user.interrupt", `{}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
+		`["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 3, 3)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, interruptID, "interrupt_control", interruptEvent, 3, 3, time.Now().UTC())
+	oldLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "interrupt-closeout-old-owner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_interrupt_closeout_then_loss_end", ModelRequestId: modelRequestID,
+		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"},
+		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
+			RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(oldLease),
+		},
+	})
+	if err != nil || ended.GetCommitted() == nil {
+		t.Fatalf("commit interrupt closeout before pod loss = %#v/%v", ended, err)
+	}
+	var inboxAfterCloseout string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptID).Scan(&inboxAfterCloseout); err != nil {
+		t.Fatalf("read interrupt Inbox after closeout: %v", err)
+	}
+	if inboxAfterCloseout != "committed" {
+		t.Fatalf("interrupt Inbox after closeout = %s; want committed", inboxAfterCloseout)
+	}
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	repairStore := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
+		t.Fatalf("repair pod loss after interrupt closeout = %d/%v", repaired, err)
+	}
+	var inboxAfterLoss string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptID).Scan(&inboxAfterLoss); err != nil {
+		t.Fatalf("read interrupt Inbox after pod loss: %v", err)
+	}
+	if inboxAfterLoss != "committed" {
+		t.Fatalf("interrupt Inbox after pod loss = %s; want committed", inboxAfterLoss)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, oldLease.ID); err != nil {
+		t.Fatalf("expire pre-loss interrupt lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim pre-loss interrupt lease = %d/%v", reclaimed, err)
+	}
+	sender := &recordingRuntimeCommandSender{}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config: JobRunnerConfig{LeaseOwner: "interrupt-closeout-replay-owner", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("replay interrupt receipt after pod loss = active:%t err:%v", active, err)
+	}
+	if len(sender.requests) != 0 {
+		t.Fatalf("Runtime calls after committed interrupt closeout and pod loss = %d; want 0", len(sender.requests))
+	}
+	var queueStatus string
+	var requestEnds, receipts, bindings int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2
+		 AND session_thread_id=$3 AND type='span.model_request_end' AND model_request_id=$4),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$2
+		 AND session_thread_id=$3 AND source_kind='interrupt_control' AND idempotency_key=$5 AND receipt_json <> ''),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$2)`,
+		oldLease.ID, sessionID, threadID, modelRequestID, interruptID,
+	).Scan(&queueStatus, &requestEnds, &receipts, &bindings); err != nil {
+		t.Fatalf("read post-loss receipt replay facts: %v", err)
+	}
+	if queueStatus != queue.StatusAcknowledged || requestEnds != 1 || receipts != 1 || bindings != 0 {
+		t.Fatalf("post-loss receipt replay = Queue:%s ends:%d receipts:%d bindings:%d; want acknowledged/1/1/0",
+			queueStatus, requestEnds, receipts, bindings)
 	}
 }
 
