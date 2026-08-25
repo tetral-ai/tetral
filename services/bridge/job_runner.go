@@ -294,35 +294,28 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			ErrorMessage: "runtime queue payload is invalid",
 		}))
 	}
-	workCtx, stopHeartbeat, err := startJobRunnerHeartbeat(ctx, r.Queue, job, cfg)
-	if err != nil {
-		return err
-	}
 	if job.Kind == queue.KindRuntimeInput {
 		replayer, ok := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
 		if !ok {
-			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-				return heartbeatErr
-			}
 			return errors.New("bridge runtime delivery finalization replayer is required")
 		}
-		replayed, found, err := replayer.ReplayRuntimeDeliveryFinalization(workCtx, job)
+		replayed, found, err := replayer.ReplayRuntimeDeliveryFinalization(ctx, job)
 		if err != nil {
-			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-				return heartbeatErr
-			}
 			if invalidRuntimeJobPayload(err) {
 				return r.settleInvalidRuntimeJobPayload(ctx, job)
 			}
 			return err
 		}
 		if found {
-			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-				return heartbeatErr
-			}
 			r.logRuntimeJobAttempt(job, "none", "durable_replay")
 			return r.applyRuntimeDeliveryResult(ctx, job, replayed)
 		}
+	}
+	workCtx, stopHeartbeat, err := startJobRunnerHeartbeat(ctx, r.Queue, job, cfg)
+	if err != nil {
+		return err
+	}
+	if job.Kind == queue.KindRuntimeInput {
 		if runtimeJobAgentMailFinalizationOnly(job) {
 			finalized, finalizeErr := r.finalizeRuntimeDelivery(workCtx, job, RuntimeDeliveryResult{
 				Status:       RuntimeDeliveryRejected,

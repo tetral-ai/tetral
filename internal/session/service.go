@@ -310,7 +310,9 @@ func (s *Service) Update(ctx context.Context, ws workspace.ID, sessionID string,
 	if request.ToolsPatch != nil || request.MCPServersPatch != nil || request.ApprovalMode != nil {
 		err = s.store.WithRuntimeMutationTx(ctx, ws, sessionID, update)
 	} else {
-		err = s.store.WithWorkspaceTx(ctx, ws, update)
+		err = s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
+			return update(tx)
+		})
 	}
 	if err != nil {
 		return nil, err
