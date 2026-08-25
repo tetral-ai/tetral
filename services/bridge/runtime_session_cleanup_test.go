@@ -14,9 +14,11 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 // This file owns cleanup-session and delete-cleanup state-machine tests.
@@ -602,6 +604,112 @@ func TestPostgreSQLRuntimeDeliveryStoreDeletedSessionSilentlyStalesOrdinaryJobs(
 		if !plan.StaleAccepted || plan.CleanupSession != nil {
 			t.Fatalf("deleted %s plan = %#v; want silent stale ack", job.Kind, plan)
 		}
+	}
+}
+
+func TestPostgreSQLSessionDeleteRevokesPausedRuntimeWorkerBeforeDurableEffects(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_delete_paused_worker"
+		threadID  = "thr_delete_paused_worker"
+		inputID   = "rin_delete_paused_worker"
+		eventID   = "evt_delete_paused_worker"
+		bindingID = "bind_delete_paused_worker"
+		podUID    = "pod_delete_paused_worker"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='idle' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("mark paused-worker Session idle: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='idle', running_since=NULL, idle_since=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+		t.Fatalf("mark paused-worker residency idle: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"delete before delivery"}]}`)
+	job := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "messages", EventIDs: []string{eventID},
+		SequenceFrom: 1, SequenceTo: 1,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + inputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	queued, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+		PayloadVersion: 1, PayloadJSON: []byte(job.PayloadJSON), MaxAttempts: queue.DefaultMaxAttempts,
+	})
+	if err != nil {
+		t.Fatalf("enqueue paused Runtime worker: %v", err)
+	}
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "delete-paused-worker", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != queued.ID {
+		t.Fatalf("lease paused Runtime worker = %#v/%v; want %s", leased, err, queued.ID)
+	}
+	leasedJob, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatalf("decode paused Runtime worker: %v", err)
+	}
+
+	workerEntered := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	workerDone := make(chan RuntimeDeliveryResult, 1)
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	deliverer := RuntimePodDirectDeliverer{
+		Store:  NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090),
+		Sender: sender,
+	}
+	go func() {
+		close(workerEntered)
+		<-releaseWorker
+		result, _ := deliverer.DeliverRuntimeJob(context.Background(), leasedJob)
+		workerDone <- result
+	}()
+	<-workerEntered
+	var sessionStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM sessions WHERE workspace_id='default' AND id=$1`, sessionID).Scan(&sessionStatus); err != nil || sessionStatus != "idle" {
+		t.Fatalf("Session at paused-worker cut = %s/%v; want idle", sessionStatus, err)
+	}
+
+	sessionStore := session.NewPostgreSQLSessionStore(
+		dbconnect.NewClientForTesting(runtimeDB),
+		session.WithSessionDeleteSandboxRelease(func(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, id string, now time.Time) error {
+			_, _, err := tetralsandbox.EnsureSandboxReleaseTx(ctx, tx, string(ws), id, tetralsandbox.SandboxReleaseSessionDelete, "", now)
+			return err
+		}),
+	)
+	if err := sessionStore.WithRuntimeMutationTx(context.Background(), workspace.DefaultID, sessionID, func(tx session.Transaction) error {
+		return tx.DeleteSession(context.Background(), sessionID)
+	}); err != nil {
+		t.Fatalf("delete Session while Runtime worker paused: %v", err)
+	}
+	close(releaseWorker)
+	result := <-workerDone
+	if result.Status != RuntimeDeliveryAuthorityLost && result.Status != RuntimeDeliveryDuplicate {
+		t.Fatalf("resumed stale worker result = %#v; want authority lost or durable duplicate", result)
+	}
+	if len(sender.requests) != 0 {
+		t.Fatalf("resumed stale worker sent %d Runtime requests; want zero", len(sender.requests))
+	}
+	var queueStatus, inboxStatus string
+	var postDeleteFacts int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3
+		 AND type IN ('span.model_request_start','span.model_request_end','agent.tool_use','agent.tool_result'))`,
+		queued.ID, inputID, sessionID).Scan(&queueStatus, &inboxStatus, &postDeleteFacts); err != nil {
+		t.Fatalf("read stale worker durable effects: %v", err)
+	}
+	if queueStatus != queue.StatusCancelled || inboxStatus != "cancelled" || postDeleteFacts != 0 {
+		t.Fatalf("stale worker custody = Queue:%s Inbox:%s facts:%d; want cancelled/cancelled/0", queueStatus, inboxStatus, postDeleteFacts)
 	}
 }
 

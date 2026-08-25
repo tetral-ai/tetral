@@ -60,6 +60,11 @@ export type ProviderStreamAccumulatorResult =
 			readonly durableEventIds?: readonly string[];
 	  }
 	| {
+			readonly ok: true;
+			readonly type: "stale_custody";
+			readonly events: readonly [];
+	  }
+	| {
 			readonly ok: false;
 			readonly events: readonly SessionEvent[];
 			readonly error: RuntimeFailure;
@@ -75,6 +80,11 @@ export type ToolUseCommitResult =
 			readonly ok: true;
 			readonly events: readonly SessionEvent[];
 			readonly toolUseEventId: string;
+	  }
+	| {
+			readonly ok: false;
+			readonly type: "stale_custody";
+			readonly events: readonly [];
 	  }
 	| {
 			readonly ok: false;
@@ -277,10 +287,10 @@ export class ProviderStreamAccumulator {
 						events: [],
 						error: eventWriterFailure(result.error),
 					};
-				if (
-					result.type === "stale" ||
-					!this.applyMemberAppend(result, frozen.append)
-				) {
+				if (result.type === "stale") {
+					return { ok: true, type: "stale_custody", events: [] };
+				}
+				if (!this.applyMemberAppend(result, frozen.append)) {
 					return declarationApplicationFailure();
 				}
 				return { ok: true, events: [event], durableEventIds: [result.eventId] };
@@ -564,6 +574,9 @@ export class ProviderStreamAccumulator {
 		reserved.authorize(event);
 		const committed = await reserved.committed;
 		if (!committed.ok) return committed;
+		if ("type" in committed && committed.type === "stale_custody") {
+			return { ok: false, type: "stale_custody", events: [] };
+		}
 		const eventId = this.toolUseEventIds.get(toolCallId);
 		if (eventId === undefined)
 			return { ok: false, events: [], error: protocolSequenceFailure() };

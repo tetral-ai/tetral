@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -618,6 +619,96 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	t.Logf("initial Runtime composition Inbox=%s Messages=%d starts=%d toolUses=%d", diagnosticInbox, diagnosticMessages, diagnosticStarts, diagnosticToolUses)
 	waitForCompositionFile(t, paths.toolStarted, "durable Runtime operation", &runtimeProcess.output)
 
+	// Cleanup may observe a durable idle projection while the pod still owns a
+	// hot run slot. The Runtime is the final busy authority in that lag window.
+	cleanupID := "cleanup_interrupt_production_hot"
+	idleEventID := "evt_interrupt_production_lagging_idle"
+	idleSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, idleEventID, idleSequence, "session.status_idle", `{"type":"session.status_idle"}`)
+	seedBridgeAPIStreamChange(t, admin, "default", sessionID, threadID, idleEventID, 1, "internal", false)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='idle', updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("seed lagging idle Thread projection: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='idle', status_event_id=$2, cleanup_job_id=$3, cleanup_enqueued_at=clock_timestamp(), updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, idleEventID, cleanupID); err != nil {
+		t.Fatalf("seed lagging idle cleanup projection: %v", err)
+	}
+	cleanupJobID := queue.NewJobID()
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: cleanupJobID, WorkspaceID: workspace.DefaultID, Kind: queue.KindCleanupSession,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatCleanupSessionDedupeKey(workspace.DefaultID, sessionID, cleanupID),
+		PayloadVersion: 1,
+		PayloadJSON:    []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"` + cleanupID + `"}`),
+		MaxAttempts:    queue.DefaultMaxAttempts, Now: time.Now().UTC().Add(-time.Second),
+	}); err != nil {
+		t.Fatalf("enqueue cleanup during hot Thread run: %v", err)
+	}
+	cleanupSender := &countingCleanupSender{RuntimeCommandSender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})}
+	cleanupRunner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: cleanupSender},
+		Config:    JobRunnerConfig{LeaseOwner: "interrupt-production-hot-cleanup", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := cleanupRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("run cleanup against hot Thread = active:%t err:%v", active, err)
+	}
+	var cleanupQueueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, cleanupJobID).Scan(&cleanupQueueStatus); err != nil {
+		t.Fatalf("read hot cleanup Queue state: %v", err)
+	}
+	if cleanupSender.calls.Load() != 1 || cleanupQueueStatus != queue.StatusAcknowledged {
+		t.Fatalf("hot cleanup = Runtime calls:%d Queue:%s; want one busy check and acknowledged reschedule", cleanupSender.calls.Load(), cleanupQueueStatus)
+	}
+	assertCleanupMarkersRearmed(t, admin, sessionID, true)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running', updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("restore running Thread projection: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='running', status_event_id=NULL, cleanup_after=NULL, updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+		t.Fatalf("restore running Session projection: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_event_stream_changes
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, idleEventID); err != nil {
+		t.Fatalf("remove lagging idle stream fixture: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, idleEventID); err != nil {
+		t.Fatalf("remove lagging idle Event fixture: %v", err)
+	}
+
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET config_generation=2, updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("advance config generation during hot Thread run: %v", err)
+	}
+	configJobID := queue.NewJobID()
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: configJobID, WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeConfigUpdate,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeConfigUpdateDedupeKey(workspace.DefaultID, sessionID, "2"),
+		PayloadVersion: 2,
+		PayloadJSON:    []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","config_generation":2}`),
+		MaxAttempts:    queue.DefaultMaxAttempts, Now: time.Now().UTC().Add(-time.Second),
+	}); err != nil {
+		t.Fatalf("enqueue config during hot Thread run: %v", err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("defer config against hot Thread = active:%t err:%v", active, err)
+	}
+	var configStatus string
+	var configAttempts int
+	if err := admin.QueryRowContext(context.Background(), `SELECT status, attempt_count FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1`, configJobID).Scan(&configStatus, &configAttempts); err != nil {
+		t.Fatalf("read deferred config boundary: %v", err)
+	}
+	if configStatus != queue.StatusPending || configAttempts != 0 {
+		t.Fatalf("deferred config boundary = %s/%d; want pending/0", configStatus, configAttempts)
+	}
+
 	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)))
 	interruptBirth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID,
 		"interrupt-production-composition", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
@@ -633,6 +724,28 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'
 		  AND event_ids_json::jsonb ? $2`, sessionID, interruptEvent).Scan(&interruptID); err != nil {
 		t.Fatalf("read production-born interrupt Inbox: %v", err)
+	}
+	postConfigEventID := "evt_interrupt_production_post_config"
+	postConfigSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, postConfigEventID, postConfigSequence, "user.message", `{"content":[{"type":"text","text":"post-config ordinary"}]}`)
+	postConfigJob := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_interrupt_production_post_config", InputKind: "messages", EventIDs: []string{postConfigEventID},
+		SequenceFrom: postConfigSequence, SequenceTo: postConfigSequence,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"rin_interrupt_production_post_config","event_ids":["` + postConfigEventID + `"],"sequence_from":` + strconv.FormatInt(postConfigSequence, 10) + `,"sequence_to":` + strconv.FormatInt(postConfigSequence, 10) + `,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, postConfigJob)
+	enqueueRuntimeCompositionJob(t, queueStore, sessionID, postConfigJob, 0)
+	var ordinaryQueueStatus, ordinaryInboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, postConfigJob.RuntimeInputID), postConfigJob.RuntimeInputID,
+	).Scan(&ordinaryQueueStatus, &ordinaryInboxStatus); err != nil {
+		t.Fatalf("read post-interrupt config follower: %v", err)
+	}
+	if ordinaryQueueStatus != queue.StatusPending || ordinaryInboxStatus != "queued" {
+		t.Fatalf("post-interrupt config follower = %s/%s; want pending/queued", ordinaryQueueStatus, ordinaryInboxStatus)
 	}
 
 	type deliveryResult struct {
@@ -690,12 +803,54 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	if delivered.err != nil || !delivered.active {
 		t.Fatalf("deliver interrupt through Runtime closeout = active:%t err:%v", delivered.active, delivered.err)
 	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1 AND status='pending'`, configJobID); err != nil {
+		t.Fatalf("make deferred config eligible after interrupt: %v", err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("install deferred config after interrupt = active:%t err:%v", active, err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, configJobID).Scan(&configStatus); err != nil || configStatus != queue.StatusAcknowledged {
+		t.Fatalf("installed config Queue state = %s/%v; want acknowledged", configStatus, err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver ordinary input after config install = active:%t err:%v", active, err)
+	}
+	postConfigDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var ends int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'`, sessionID, threadID).Scan(&ends); err != nil {
+			t.Fatalf("read post-config Request End: %v", err)
+		}
+		if ends == 2 {
+			break
+		}
+		if time.Now().After(postConfigDeadline) {
+			t.Fatalf("ordinary input did not resume after config install: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	postConfigCaptureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete post-config output capture: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(postConfigCaptureDeadline) {
+			t.Fatalf("post-config completion did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release Runtime composition: %v", err)
 	}
 	composed := runtimeProcess.wait(t)
-	if composed.ProviderInvocations != 1 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
-		t.Fatalf("Runtime composition = %+v; want one Provider, one joined operation, and interrupt response", composed)
+	if composed.ProviderInvocations != 2 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
+		t.Fatalf("Runtime composition = %+v; want interrupted and resumed Provider calls, one joined operation, and interrupt response", composed)
 	}
 
 	var inboxStatus, queueStatus string
@@ -713,7 +868,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	).Scan(&inboxStatus, &queueStatus, &starts, &ends, &toolUses, &toolResults, &receipts); err != nil {
 		t.Fatalf("read interrupt production closeout: %v", err)
 	}
-	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || starts != 1 || ends != 1 || toolUses != 1 || toolResults != 1 || receipts != 1 {
+	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || starts != 2 || ends != 2 || toolUses != 1 || toolResults != 1 || receipts != 1 {
 		t.Fatalf("production closeout = Inbox:%s Queue:%s starts:%d ends:%d tool uses/results:%d/%d receipts:%d",
 			inboxStatus, queueStatus, starts, ends, toolUses, toolResults, receipts)
 	}
@@ -1547,6 +1702,7 @@ func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sess
 		"targetPodUid": podUID, "readyPath": readyPath, "toolStartedPath": paths.toolStarted,
 		"acceptResultPath":              paths.acceptResult,
 		"durableOperationCompletedPath": paths.operationCompleted, "closePath": paths.close,
+		"fastThreadText": "post-config ordinary", "fastAfterFirstProviderCall": true,
 	})
 	if err != nil {
 		t.Fatalf("encode interrupt Runtime composition: %v", err)

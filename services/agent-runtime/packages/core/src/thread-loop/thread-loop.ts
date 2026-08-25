@@ -5166,6 +5166,9 @@ function coordinateRuntimeToolJobEffect(
 			),
 		);
 		if (!toolUse.ok) {
+			if (!("error" in toolUse)) {
+				return providerTurnInterruptedWithDiscard();
+			}
 			return yield* Effect.promise(() =>
 				handleProcessorFailure(session, options, toolUse.error),
 			);
@@ -7432,13 +7435,19 @@ function terminalFailureFromProcessorResult(
 	if (!result.ok) {
 		return undefined;
 	}
-	const sessionError = result.events.find(
-		(event) => event.type === "session.error",
-	)?.error;
-	if (sessionError === undefined || !("code" in sessionError)) {
+	if ("type" in result && result.type === "stale_custody") {
 		return undefined;
 	}
-	return sessionError;
+	const sessionErrorEvent = result.events.find(
+		(event) => event.type === "session.error",
+	);
+	if (sessionErrorEvent?.type !== "session.error") {
+		return undefined;
+	}
+	if (!("code" in sessionErrorEvent.error)) {
+		return undefined;
+	}
+	return sessionErrorEvent.error;
 }
 
 function runtimeFailureFromLlmService(error: unknown): LLMRuntimeFailure {

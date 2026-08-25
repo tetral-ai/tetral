@@ -129,6 +129,117 @@ func TestJobRunnerCancelsInFlightDeliveryWhenHeartbeatLosesAuthority(t *testing.
 	}
 }
 
+func TestPostgreSQLJobRunnerHeartbeatLossYieldsToReclaimedExactOwner(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_heartbeat_reclaim"
+		threadID  = "thr_heartbeat_reclaim"
+		inputID   = "rin_heartbeat_reclaim"
+		eventID   = "evt_heartbeat_reclaim"
+		bindingID = "bind_heartbeat_reclaim"
+		podUID    = "pod_heartbeat_reclaim"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"reclaim me"}]}`)
+	job := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "messages", EventIDs: []string{eventID},
+		SequenceFrom: 1, SequenceTo: 1,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + inputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	queued, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+		PayloadVersion: 1, PayloadJSON: []byte(job.PayloadJSON), MaxAttempts: queue.DefaultMaxAttempts,
+	})
+	if err != nil {
+		t.Fatalf("enqueue heartbeat reclaim job: %v", err)
+	}
+	queueServer := tetralqueue.NewServer(queueStore, nil)
+	blocked := newBlockingDeliverer()
+	oldRunner := &JobRunner{
+		Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: blocked,
+		Config: JobRunnerConfig{
+			LeaseOwner: "heartbeat-old-owner", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 2 * time.Second,
+		},
+	}
+	oldDone := make(chan error, 1)
+	go func() { oldDone <- oldRunner.RunOnce(context.Background()) }()
+	select {
+	case <-blocked.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old heartbeat worker did not enter delivery")
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
+		t.Fatalf("expire old heartbeat lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim heartbeat lease = %d/%v; want 1/nil", reclaimed, err)
+	}
+	newLeases, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "heartbeat-new-owner", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(newLeases) != 1 || newLeases[0].ID != queued.ID {
+		t.Fatalf("lease reclaimed heartbeat job = %#v/%v; want %s", newLeases, err, queued.ID)
+	}
+	select {
+	case <-blocked.cancelled:
+	case <-time.After(4 * time.Second):
+		t.Fatal("old worker was not cancelled after its heartbeat lost exact authority")
+	}
+	if err := <-oldDone; err == nil || !strings.Contains(err.Error(), "queue lease lost") {
+		t.Fatalf("old worker after reclaim = %v; want queue lease lost", err)
+	}
+	var queueStatus, leaseToken, inboxStatus string
+	var startsBeforeWinner int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND type='span.model_request_start')`,
+		queued.ID, inputID, sessionID).Scan(&queueStatus, &leaseToken, &inboxStatus, &startsBeforeWinner); err != nil {
+		t.Fatalf("read reclaimed heartbeat custody: %v", err)
+	}
+	if queueStatus != queue.StatusLeased || leaseToken != newLeases[0].LeaseToken || inboxStatus != "queued" || startsBeforeWinner != 0 {
+		t.Fatalf("post-reclaim custody = Queue:%s token:%s Inbox:%s starts:%d; want new exact lease, queued, zero starts",
+			queueStatus, leaseToken, inboxStatus, startsBeforeWinner)
+	}
+
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	winner := &JobRunner{
+		Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:    JobRunnerConfig{LeaseOwner: "heartbeat-new-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := winner.processRuntimeJob(context.Background(), queueJobProto(newLeases[0]), winner.Config); err != nil {
+		t.Fatalf("winning heartbeat worker: %v", err)
+	}
+	if len(sender.requests) != 1 {
+		t.Fatalf("winning heartbeat worker Runtime requests = %d; want one", len(sender.requests))
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		queued.ID, inputID).Scan(&queueStatus, &inboxStatus); err != nil {
+		t.Fatalf("read winning heartbeat settlement: %v", err)
+	}
+	if queueStatus != queue.StatusAcknowledged || inboxStatus != "accepted" {
+		t.Fatalf("winning heartbeat settlement = Queue:%s Inbox:%s; want acknowledged/accepted", queueStatus, inboxStatus)
+	}
+}
+
 func TestJobRunnerInitialLeaseLossPreventsDeliveryAndTransition(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1669,13 +1780,16 @@ type recordedRuntimeFinalization struct {
 type blockingDeliverer struct {
 	release   chan struct{}
 	cancelled chan struct{}
+	entered   chan struct{}
+	once      sync.Once
 }
 
 func newBlockingDeliverer() *blockingDeliverer {
-	return &blockingDeliverer{release: make(chan struct{}), cancelled: make(chan struct{})}
+	return &blockingDeliverer{release: make(chan struct{}), cancelled: make(chan struct{}), entered: make(chan struct{})}
 }
 
 func (d *blockingDeliverer) DeliverRuntimeJob(ctx context.Context, _ RuntimeJob) (RuntimeDeliveryResult, error) {
+	d.once.Do(func() { close(d.entered) })
 	select {
 	case <-d.release:
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil

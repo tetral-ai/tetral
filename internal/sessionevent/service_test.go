@@ -853,7 +853,9 @@ func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *test
 
 	appendDone := make(chan error, 1)
 	go func() {
-		_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_birth_lease_race", messageAppendRequest("atomic birth"))
+		_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_birth_lease_race", AppendRequest{
+			Events: []IncomingEvent{{Type: EventTypeUserInterrupt}},
+		})
 		appendDone <- err
 	}()
 	<-paused
@@ -869,11 +871,7 @@ func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *test
 		})
 		leaseDone <- leaseResult{jobs: jobs, err: err}
 	}()
-	select {
-	case result := <-leaseDone:
-		t.Fatalf("Lease passed the active Session birth owner: jobs=%#v err=%v", result.jobs, result.err)
-	case <-time.After(100 * time.Millisecond):
-	}
+	waitForSessionEventAdvisoryLockWaiter(t, admin)
 	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 1 {
 		t.Fatalf("visible Events during uncommitted birth = %#v; want only the committed seed", events)
 	}
@@ -889,17 +887,15 @@ func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *test
 		t.Fatalf("committed birth facts = events:%d jobs:%d; want 2/2", len(readSessionEventLedgerRows(t, admin, sessionID)), len(jobs))
 	}
 	result := <-leaseDone
-	if result.err != nil || len(result.jobs) != 1 || result.jobs[0].ID != jobs[0].id {
-		t.Fatalf("Lease after birth = %#v/%v; want committed predecessor %s", result.jobs, result.err, jobs[0].id)
-	}
-	if acknowledged, err := queueStore.Ack(ctx, queue.AckRequest{
-		WorkspaceID: workspace.DefaultID, JobID: result.jobs[0].ID, LeaseToken: result.jobs[0].LeaseToken,
-	}); err != nil || !acknowledged {
-		t.Fatalf("ack predecessor = %t/%v; want true/nil", acknowledged, err)
+	if result.err != nil || len(result.jobs) != 0 {
+		t.Fatalf("Lease after interrupt birth = %#v/%v; want stale predecessor rejected", result.jobs, result.err)
 	}
 	leased := mustLeaseSessionEventJob(t, queueStore, sessionID, "bridge-after-birth")
 	if leased.ID != jobs[1].id {
-		t.Fatalf("post-birth lease = %s; want %s", leased.ID, jobs[1].id)
+		t.Fatalf("post-birth interrupt lease = %s; want %s", leased.ID, jobs[1].id)
+	}
+	if runtimeInputKindFromQueueJob(t, leased) != RuntimeInputKindInterruptControl {
+		t.Fatalf("post-birth input kind = %s; want interrupt", runtimeInputKindFromQueueJob(t, leased))
 	}
 }
 
@@ -947,7 +943,7 @@ func TestAppendClientEventsRevalidatesAfterQueueLeaseOwnsSession(t *testing.T) {
 		})
 		leaseDone <- leaseResult{jobs: jobs, err: err}
 	}()
-	waitForSessionEventLockWaiters(t, admin, blockerPID, 1)
+	leasePID := waitForSessionEventLockWaiterPID(t, admin, blockerPID)
 
 	appendEntered := make(chan struct{})
 	appendDone := make(chan error, 1)
@@ -957,11 +953,7 @@ func TestAppendClientEventsRevalidatesAfterQueueLeaseOwnsSession(t *testing.T) {
 		appendDone <- err
 	}()
 	<-appendEntered
-	select {
-	case err := <-appendDone:
-		t.Fatalf("Event birth passed active Queue lease owner: %v", err)
-	default:
-	}
+	waitForSessionEventLockWaiterPID(t, admin, leasePID)
 	if err := blocker.Commit(); err != nil {
 		t.Fatalf("release Queue candidate: %v", err)
 	}
@@ -981,21 +973,46 @@ func TestAppendClientEventsRevalidatesAfterQueueLeaseOwnsSession(t *testing.T) {
 	}
 }
 
-func waitForSessionEventLockWaiters(t testing.TB, admin *sql.DB, blockerPID int, want int) {
+func waitForSessionEventLockWaiterPID(t testing.TB, admin *sql.DB, blockerPID int) int {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var count int
-		if err := admin.QueryRow(`SELECT count(*) FROM pg_stat_activity activity
-			WHERE $1 = ANY(pg_blocking_pids(activity.pid))`, blockerPID).Scan(&count); err != nil {
+		var waiterPID int
+		err := admin.QueryRow(`SELECT activity.pid FROM pg_stat_activity activity
+			WHERE $1 = ANY(pg_blocking_pids(activity.pid))
+			ORDER BY activity.pid
+			LIMIT 1`, blockerPID).Scan(&waiterPID)
+		if err == nil {
+			return waiterPID
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("read SessionEvent lock waiters: %v", err)
 		}
-		if count >= want {
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no PostgreSQL worker blocked behind owner %d", blockerPID)
+	return 0
+}
+
+func waitForSessionEventAdvisoryLockWaiter(t testing.TB, admin *sql.DB) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var exists bool
+		if err := admin.QueryRow(`SELECT EXISTS (
+			SELECT 1
+			  FROM pg_stat_activity
+			 WHERE wait_event_type = 'Lock'
+			   AND query LIKE '%pg_advisory_xact_lock%'
+		)`).Scan(&exists); err != nil {
+			t.Fatalf("read SessionEvent advisory lock waiter: %v", err)
+		}
+		if exists {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("Queue Lease did not block behind exact candidate owner %d", blockerPID)
+	t.Fatal("Queue Lease did not block behind active Event birth owner")
 }
 
 func TestAppendClientEventsRemainsDurableBehindLeasedInterruptBarrier(t *testing.T) {

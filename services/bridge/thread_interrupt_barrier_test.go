@@ -426,6 +426,39 @@ func TestPostgreSQLToolSettlementAndInterruptBirthConvergeBothWinnerOrders(t *te
 			if resultEvents != 1 || requestEnds != 1 {
 				t.Fatalf("converged Tool results/Request Ends = %d/%d; want 1/1", resultEvents, requestEnds)
 			}
+			var resultEventID, resultText string
+			var isError bool
+			if err := admin.QueryRowContext(ctx, `SELECT event_id,
+				COALESCE((payload_json::jsonb->>'is_error')::boolean, false),
+				COALESCE(payload_json::jsonb->'content'->0->>'text', '')
+				FROM session_events
+				WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'
+				  AND payload_json::jsonb->>'tool_use_id'=$2`, sessionID, toolUseID).Scan(
+				&resultEventID, &isError, &resultText,
+			); err != nil {
+				t.Fatalf("read converged Tool Result payload: %v", err)
+			}
+			if settlementFirst {
+				if isError || resultText != "done" {
+					t.Fatalf("Tool-first terminal payload = error:%t text:%q; want success done", isError, resultText)
+				}
+			} else if !isError {
+				t.Fatal("interrupt-first terminal Tool Result is not an error")
+			}
+			var executionState, consumedEventID, consumptionReason string
+			var resultJSON sql.NullString
+			if err := admin.QueryRowContext(ctx, `SELECT execution_state, result_json,
+				COALESCE(consumed_by_terminal_event_id, ''), COALESCE(consumption_reason, '')
+				FROM session_runtime_tool_results
+				WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`,
+				sessionID, toolUseID,
+			).Scan(&executionState, &resultJSON, &consumedEventID, &consumptionReason); err != nil {
+				t.Fatalf("read converged executor custody: %v", err)
+			}
+			if executionState != "consumed" || resultJSON.Valid || consumedEventID != resultEventID || consumptionReason != "conversation_tool_result" {
+				t.Fatalf("executor custody = state:%s result:%#v event:%s reason:%s; want consumed/null/%s/conversation_tool_result",
+					executionState, resultJSON, consumedEventID, consumptionReason, resultEventID)
+			}
 		})
 	}
 }

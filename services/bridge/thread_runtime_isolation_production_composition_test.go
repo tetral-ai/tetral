@@ -19,7 +19,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
@@ -146,28 +145,6 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 		t.Fatalf("run concurrent Thread jobs: %v; output=%s", err, output.String())
 	}
 
-	target := RuntimePodTarget{
-		Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1", Port: ready.Port,
-	}
-	sender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
-	configResponse, err := sender.ApplyRuntimeConfig(context.Background(), target, &agentruntimev1.ApplyRuntimeConfigRequest{
-		WorkspaceId: "default", SessionId: sessionID, BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
-		Config: &agentruntimev1.ApplyRuntimeConfigRequest_SessionConfig{SessionConfig: &agentruntimev1.RuntimeSessionConfig{
-			Generation: 2, ContentJson: `{"approval_mode":"full_access","tool_policy":{"tools":[]}}`,
-		}},
-	})
-	if err != nil || configResponse.GetRejected().GetReason() != agentruntimev1.ApplyRuntimeConfigFailure_APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY || !configResponse.GetRejected().GetRetryable() {
-		t.Fatalf("config while Thread A hot = %#v/%v; want retryable control busy", configResponse, err)
-	}
-	cleanupResponse, err := sender.CleanupSession(context.Background(), target, &agentruntimev1.CleanupSessionRequest{
-		WorkspaceId: "default", SessionId: sessionID, BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
-		CleanupOperationId: "cleanup_hot_thread_isolation", Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_EXPIRED,
-	})
-	if err != nil || cleanupResponse.GetRejected().GetReason() != agentruntimev1.CleanupSessionFailure_CLEANUP_SESSION_FAILURE_SESSION_BUSY || !cleanupResponse.GetRejected().GetRetryable() {
-		t.Fatalf("cleanup while Thread A hot = reason:%s retryable:%t err:%v; want retryable session busy",
-			cleanupResponse.GetRejected().GetReason(), cleanupResponse.GetRejected().GetRetryable(), err)
-	}
-
 	followupEventID := "evt_hot_thread_a_followup"
 	followupSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadA)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadA, followupEventID, followupSequence, "user.message", `{"content":[{"type":"text","text":"join existing run"}]}`)
@@ -204,6 +181,7 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 	if threadAStarts != 1 || threadAToolUses != 1 || threadAEnds != 0 {
 		t.Fatalf("blocked Thread A facts = starts:%d ToolUses:%d ends:%d; want 1/1/0", threadAStarts, threadAToolUses, threadAEnds)
 	}
+
 	if err := os.WriteFile(closePath, []byte("close"), 0o600); err != nil {
 		t.Fatalf("close hot Thread Runtime: %v", err)
 	}

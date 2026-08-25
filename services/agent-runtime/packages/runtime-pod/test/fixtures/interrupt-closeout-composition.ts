@@ -29,6 +29,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly durableOperationCompletedPath: string;
 	readonly closePath: string;
 	readonly fastThreadText?: string;
+	readonly fastAfterFirstProviderCall?: boolean;
 };
 
 const metadataFactory = async () => new Metadata();
@@ -86,8 +87,9 @@ const hosts = await buildRuntimeCoreHosts({
 			stream: (request) => {
 				providerInvocations += 1;
 				if (
-					input.fastThreadText !== undefined &&
-					JSON.stringify(request.context).includes(input.fastThreadText)
+					(input.fastAfterFirstProviderCall === true && providerInvocations > 1) ||
+					(input.fastThreadText !== undefined &&
+						JSON.stringify(request.context).includes(input.fastThreadText))
 				) {
 					return Stream.fromIterable([
 						{ type: "text-start" as const, id: "thread-isolation-fast" },
