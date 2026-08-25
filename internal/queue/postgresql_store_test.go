@@ -163,6 +163,150 @@ func TestPostgreSQLStoreThreadLanesAndSessionExclusiveLeaseMatrix(t *testing.T) 
 	}
 }
 
+func TestPostgreSQLStoreLeaseCandidatePlanUsesActiveQueueIndexesUnderRLS(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	ctx := context.Background()
+	ws := workspace.ID("default")
+	const (
+		sessionID = "sesn_queue_lease_plan"
+		threadID  = "thrd_queue_lease_plan"
+	)
+	now := time.Date(2026, 8, 25, 8, 0, 0, 0, time.UTC)
+	seedQueueRuntimeInbox(t, admin, sessionID, threadID, "rin_queue_lease_plan", "messages", `[]`, 1, 1)
+	mustEnqueue(t, store, EnqueueRequest{
+		ID:               "qjob_plan_target",
+		WorkspaceID:      ws,
+		Kind:             KindRuntimeInput,
+		PartitionKey:     FormatSessionPartitionKey(ws, sessionID),
+		DedupeKey:        FormatRuntimeInputDedupeKey(ws, sessionID, "rin_queue_lease_plan"),
+		PayloadJSON:      runtimeInputPayload(t, ws, sessionID, threadID, "rin_queue_lease_plan", "messages", 1, 1),
+		Priority:         10,
+		AvailableAt:      now,
+		Now:              now,
+		MaxAttempts:      10,
+		DeliveryScope:    DeliveryScopeThread,
+		ControlClass:     ControlClassOrdinary,
+		CausalSessionID:  sessionID,
+		DeliveryThreadID: threadID,
+	})
+	if _, err := admin.ExecContext(ctx, `INSERT INTO queue_jobs (
+		id, workspace_id, kind, partition_key, queue_partition_sequence,
+		causal_session_id, delivery_scope, delivery_thread_id, control_class,
+		payload_version, status, payload_json, priority, lease_token, leased_by,
+		leased_at, leased_until, attempt_count, max_attempts, available_at, created_at, updated_at
+	) VALUES (
+		'qjob_queue_lease_plan_active', 'default', 'runtime_input',
+		'session:default:sesn_queue_lease_plan_active', 1,
+		'sesn_queue_lease_plan_active', 'thread', 'thrd_queue_lease_plan_active', 'ordinary',
+		1, 'leased', '{}', 0, 'lease_queue_plan_active', 'queue-plan-worker',
+		$1, $2, 1, 10, $1, $1, $1
+	)`, now, now.Add(time.Minute)); err != nil {
+		t.Fatalf("seed active Queue custody: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `INSERT INTO queue_jobs (
+		id, workspace_id, kind, partition_key, queue_partition_sequence,
+		delivery_scope, control_class, payload_version, status, payload_json,
+		priority, attempt_count, max_attempts, available_at, created_at, updated_at
+	)
+	SELECT 'qjob_queue_lease_plan_pending_' || value::text, 'default', 'environment_build',
+	       'environment:queue-plan:' || value::text, 1,
+	       'partition', 'ordinary', 1, 'pending', '{}', 0, 0, 10, $1, $1, $1
+	  FROM generate_series(1, 512) AS value`, now); err != nil {
+		t.Fatalf("seed unrelated pending Queue custody: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `INSERT INTO queue_jobs (
+		id, workspace_id, kind, partition_key, queue_partition_sequence,
+		delivery_scope, control_class, payload_version, status, payload_json,
+		priority, attempt_count, max_attempts, available_at, created_at, updated_at,
+		acknowledged_at
+	)
+	SELECT 'qjob_queue_lease_plan_history_' || value::text, 'default', 'runtime_input',
+	       'history:queue-plan:' || value::text, 1,
+	       'partition', 'ordinary', 1, 'acknowledged', '{}', 0, 1, 10, $1, $1, $1, $1
+	  FROM generate_series(1, 2048) AS value`, now); err != nil {
+		t.Fatalf("seed terminal Queue history: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `ANALYZE queue_jobs; ANALYZE sessions`); err != nil {
+		t.Fatalf("analyze Queue lease plan tables: %v", err)
+	}
+
+	tx, err := runtime.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("begin Queue lease plan transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('tetral.workspace_id', $1, true)`, string(ws)); err != nil {
+		t.Fatalf("set Queue lease plan workspace: %v", err)
+	}
+	var role string
+	var bypassRLS bool
+	if err := tx.QueryRowContext(ctx, `SELECT current_user, rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&role, &bypassRLS); err != nil {
+		t.Fatalf("read Queue lease plan role: %v", err)
+	}
+	if role == "" || bypassRLS {
+		t.Fatalf("Queue lease plan role = %q bypassrls=%t; want named NOBYPASSRLS role", role, bypassRLS)
+	}
+	query := leaseCandidatesQuery("$4")
+	args := []any{string(ws), now.Add(time.Second), 8, KindRuntimeInput}
+	var selected int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM (`+query+`) selected`, args...).Scan(&selected); err != nil {
+		t.Fatalf("execute Queue lease candidate statement: %v", err)
+	}
+	if selected != 1 {
+		t.Fatalf("Queue lease candidate count = %d; want one nonempty candidate", selected)
+	}
+	var rawPlan string
+	if err := tx.QueryRowContext(ctx,
+		"EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) "+query,
+		args...).Scan(&rawPlan); err != nil {
+		t.Fatalf("explain Queue lease candidate statement: %v", err)
+	}
+	var documents []struct {
+		Plan map[string]any `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(rawPlan), &documents); err != nil || len(documents) != 1 {
+		t.Fatalf("decode Queue lease plan: %v raw=%s", err, rawPlan)
+	}
+	availableIndex := false
+	queueScans := 0
+	queueSeqScans := 0
+	maxRows := float64(0)
+	maxLoops := float64(0)
+	walkQueueLeasePlan(documents[0].Plan, func(node map[string]any) {
+		if indexName, _ := node["Index Name"].(string); indexName == "idx_queue_jobs_available" {
+			availableIndex = true
+		}
+		if relation, _ := node["Relation Name"].(string); relation == "queue_jobs" {
+			queueScans++
+			if nodeType, _ := node["Node Type"].(string); nodeType == "Seq Scan" {
+				queueSeqScans++
+			}
+			if rows, _ := node["Actual Rows"].(float64); rows > maxRows {
+				maxRows = rows
+			}
+			if loops, _ := node["Actual Loops"].(float64); loops > maxLoops {
+				maxLoops = loops
+			}
+		}
+	})
+	if !availableIndex || queueScans == 0 || queueSeqScans != 0 || maxRows > 8 || maxLoops > 8 {
+		t.Fatalf("Queue lease plan availableIndex=%t scans=%d seqScans=%d maxRows=%.0f maxLoops=%.0f\n%s",
+			availableIndex, queueScans, queueSeqScans, maxRows, maxLoops, rawPlan)
+	}
+}
+
+func walkQueueLeasePlan(node map[string]any, visit func(map[string]any)) {
+	visit(node)
+	children, _ := node["Plans"].([]any)
+	for _, child := range children {
+		childNode, _ := child.(map[string]any)
+		if childNode != nil {
+			walkQueueLeasePlan(childNode, visit)
+		}
+	}
+}
+
 func TestPostgreSQLStoreOrdinaryRetryBackoffRetainsThreadLaneHead(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), RetryPolicy{
@@ -1186,7 +1330,7 @@ func TestPostgreSQLStoreLeaseCandidateWindowKeepsInterruptException(t *testing.T
 	}
 }
 
-func TestPostgreSQLStoreInterruptRetryRemainsSessionBarrierThroughFinalizationRecovery(t *testing.T) {
+func TestPostgreSQLStoreInterruptRetryRemainsThreadBarrierThroughFinalizationRecovery(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), RetryPolicy{
 		BaseDelay: time.Minute, MaxDelay: time.Minute, MaxAttempts: 2,

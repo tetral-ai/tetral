@@ -61,6 +61,7 @@ func (s *PostgreSQLSessionStore) WithWorkspaceTx(ctx context.Context, ws workspa
 	if ws == "" {
 		return &ValidationError{Message: "workspace_id is required"}
 	}
+	// This boundary owns the literal diagnostic label for generic Session transactions.
 	return s.client.WithWorkspaceTx(ctx, string(ws), "session.transaction", func(tx *dbconnect.Tx) error {
 		return fn(&postgresqlTransaction{
 			store:       s,

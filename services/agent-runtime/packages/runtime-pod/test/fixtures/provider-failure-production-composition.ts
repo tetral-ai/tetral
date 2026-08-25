@@ -18,6 +18,7 @@ import {
 	ProviderCredentialResolver,
 	SQLGatewayCredentialStore,
 } from "../../../../../gateway/packages/provider-gateway/src/providers/credentials.js";
+import { SQLOpenAIOAuthCredentialRefreshWriter } from "../../../../../gateway/packages/provider-gateway/src/providers/openai-oauth-refresh.js";
 import { PlatformKeyPool } from "../../../../../gateway/packages/provider-gateway/src/providers/pool.js";
 import { ProviderGatewayServiceShell } from "../../../../../gateway/packages/provider-gateway/src/service.js";
 import type { ProviderRequestStreamInput } from "../../../../../gateway/packages/provider-gateway/src/service.js";
@@ -87,7 +88,6 @@ const healthyPlatformKey = {
 };
 const platformKeySelections: string[] = [];
 const platformKeyQuarantines: string[] = [];
-let oauthRefreshAttempts = 0;
 const platformPool = new PlatformKeyPool(
 	scenario === "platform_billing_pre_progress" || scenario === "platform_billing_post_progress"
 		? [badPlatformKey, healthyPlatformKey]
@@ -102,7 +102,7 @@ let toolInvocations = 0;
 let finishIdleInvocations = 0;
 let finishIdleResult = "none";
 const providerRequestContexts: string[] = [];
-let nextId = 0;
+let nextId = input.bindingGeneration * 1_000;
 const gatewayLogs: unknown[] = [];
 const runtimeLogs: unknown[] = [];
 const writeRuntimeState = async (): Promise<void> => {
@@ -194,18 +194,18 @@ const successProviderParts = (): readonly GatewaySDKStreamPart[] => [
 	},
 ];
 const providerClientRegistry = new ProviderClientRegistry({
-	openAIOAuthCredentialRefreshWriter: {
-		refreshOpenAIOAuthCredential: async ({ credential }) => {
-			oauthRefreshAttempts += 1;
-			if (oauthRefreshAttempts === 1) {
-				return { ok: false as const, error: "credential_required" as const };
-			}
-			return {
-				ok: true as const,
-				credential: { ...credential, expiresAt: "2099-01-01T00:00:00.000Z" },
-			};
-		},
-	},
+	openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
+		sql: credentialSQL,
+		masterKeyHex: credentialMasterKeyHex,
+		fetch: Object.assign(
+			async () =>
+				new Response('{"error":"invalid_grant"}', {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			{ preconnect: () => {} },
+		),
+	}),
 	anthropicProviderFactory: (settings) => (modelId) => ({
 		provider: "anthropic",
 		modelId,
@@ -463,13 +463,13 @@ const hosts = await buildRuntimeCoreHosts({
 			systemInstructions: "Provider timeout production composition.",
 			timeoutMs: 5_000,
 		},
-	runtimeModel: () =>
-		scenario === "invalid_kimi_byok" || scenario === "missing_kimi_credential"
-			? { providerId: "moonshotai", modelId: "kimi-k3" }
-			: scenario === "invalid_openai_oauth" ||
-					scenario === "unavailable_openai_credential"
-				? { providerId: "openai", modelId: "gpt-5.5" }
-					: { providerId: "anthropic", modelId: "claude-opus-4-8" },
+			runtimeModel: () =>
+				scenario === "invalid_kimi_byok" || scenario === "missing_kimi_credential"
+					? { providerId: "moonshotai", modelId: "kimi-k3" }
+					: scenario === "invalid_openai_oauth" ||
+							scenario === "unavailable_openai_credential"
+						? { providerId: "openai", modelId: "gpt-5.5" }
+						: { providerId: "anthropic", modelId: "claude-opus-4-8" },
 		runtimePolicy: () => ({
 			toolCatalog: createToolCatalog({ family: "claude" }),
 			providerRescheduleBudget: 1,

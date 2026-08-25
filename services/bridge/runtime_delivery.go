@@ -4266,8 +4266,7 @@ func allRuntimeInputEventsProcessedTx(ctx context.Context, tx *dbconnect.Tx, job
 //	status         meaning                                writer
 //	queued         source fact and Queue custody committed  input producer
 //	delivering     existing custody bound before send       this claim
-//	accepted       execution custody durably witnessed       MarkRuntimeInputAccepted,
-//	                                                          agent-mail Request Start settlement
+//	accepted       execution custody durably witnessed       MarkRuntimeInputAccepted
 //	committed      inputs durably committed                 CommitInputs, the
 //	                                                         task_notification commit
 //	                                                         (CommitTaskNotificationResult)

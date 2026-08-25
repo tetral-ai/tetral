@@ -432,12 +432,13 @@ and active lifecycle facts directly from durable rows.
   closeout writes, and receipt return. A caller timeout remains outcome-unknown
   and retains the same barrier and attempt identity. Proven pod loss may
   transfer that identity only while attempts remain. At exhaustion, the exact
-  live Queue lease owner replays a receipt or terminalizes the Session without
-  sending the interrupt to a replacement Runtime. Initial MCP manifest listing
-  similarly uses a fixed 180-second per-call deadline. This accommodates the
-  connector's credential, reconnect, and list budgets while bounding the
-  single-threaded Job Runner sweep to 180 seconds per stalled workspace; it
-  abandons the Bridge wait but does not cancel connector work.
+  live Queue lease owner replays a receipt or terminalizes the target Thread;
+  only main-Thread exhaustion terminalizes the Session. Neither path sends the
+  interrupt to a replacement Runtime. Initial MCP manifest listing similarly
+  uses a fixed 180-second per-call deadline. This accommodates the connector's
+  credential, reconnect, and list budgets while bounding one concurrent
+  JobRunner worker slot per stalled call; it abandons the Bridge wait but does
+  not cancel connector work.
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,

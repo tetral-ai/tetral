@@ -497,94 +497,7 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 		// Discovery deliberately holds no Queue row lock. Session-scoped
 		// candidates join the common arbitration boundary in canonical order;
 		// each exact candidate is then locked and revalidated by leaseCandidate.
-		query := `SELECT candidate.id, candidate.partition_key, candidate.kind, candidate.priority,
-				                candidate.available_at, candidate.queue_partition_sequence,
-				                COALESCE(candidate.causal_session_id, ''), candidate.delivery_scope,
-				                COALESCE(candidate.delivery_thread_id, ''), candidate.control_class
-				   FROM queue_jobs candidate
-				  WHERE candidate.workspace_id = $1
-				    AND candidate.kind IN (` + kindPredicate + `)
-				    AND candidate.status = 'pending'
-				    AND candidate.available_at <= $2
-				    AND (
-				      candidate.causal_session_id IS NULL
-				      OR (candidate.kind = 'session_delete_cleanup' AND EXISTS (
-				        SELECT 1 FROM sessions session
-				         WHERE session.workspace_id = candidate.workspace_id
-				           AND session.id = candidate.causal_session_id
-				           AND session.lifecycle_state = 'deleted'
-				      ))
-				      OR (candidate.kind <> 'session_delete_cleanup' AND NOT EXISTS (
-				        SELECT 1 FROM sessions session
-				         WHERE session.workspace_id = candidate.workspace_id
-				           AND session.id = candidate.causal_session_id
-				           AND (session.lifecycle_state = 'deleted' OR session.status = 'terminated')
-				      ))
-				    )
-				    AND NOT EXISTS (
-				      SELECT 1 FROM queue_jobs leased
-				       WHERE leased.workspace_id = candidate.workspace_id
-				         AND leased.status = 'leased'
-				         AND leased.id <> candidate.id
-				         AND (
-				           (candidate.delivery_scope = 'partition'
-				             AND leased.delivery_scope = 'partition'
-				             AND leased.partition_key = candidate.partition_key)
-				           OR (candidate.delivery_scope = 'thread'
-				             AND leased.causal_session_id = candidate.causal_session_id
-					             AND NOT (candidate.control_class = 'interrupt'
-					                      AND leased.kind = 'runtime_config_update')
-			             AND (leased.delivery_scope = 'session'
-			                  OR (leased.delivery_scope = 'thread'
-			                      AND leased.delivery_thread_id = candidate.delivery_thread_id)))
-				           OR (candidate.delivery_scope = 'session'
-				             AND leased.causal_session_id = candidate.causal_session_id
-				             AND leased.delivery_scope IN ('thread', 'session'))
-				         )
-				    )
-				    AND NOT EXISTS (
-				      SELECT 1 FROM queue_jobs pending
-				       WHERE pending.workspace_id = candidate.workspace_id
-				         AND pending.status = 'pending'
-				         AND pending.id <> candidate.id
-				         AND (
-				           (candidate.delivery_scope = 'partition'
-				             AND pending.delivery_scope = 'partition'
-				             AND pending.partition_key = candidate.partition_key
-				             AND pending.available_at <= $2
-				             AND (pending.priority > candidate.priority
-				                  OR (pending.priority = candidate.priority
-				                      AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
-					           OR (candidate.delivery_scope = 'session'
-					             AND pending.causal_session_id = candidate.causal_session_id
-					             AND pending.delivery_scope IN ('thread', 'session')
-					             AND NOT (candidate.kind = 'session_delete_cleanup'
-					                      AND pending.kind <> 'session_delete_cleanup')
-					             AND pending.available_at <= $2
-				             AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
-				           OR (candidate.delivery_scope = 'thread'
-				             AND pending.causal_session_id = candidate.causal_session_id
-				             AND (
-				               (pending.delivery_scope = 'session'
-				                 AND pending.queue_partition_sequence < candidate.queue_partition_sequence
-				                 AND NOT (candidate.control_class = 'interrupt'
-				                          AND pending.kind = 'runtime_config_update'))
-				               OR (pending.delivery_scope = 'thread'
-				                 AND pending.delivery_thread_id = candidate.delivery_thread_id
-				                 AND (
-				                   (pending.control_class = 'interrupt'
-				                     AND (candidate.control_class <> 'interrupt'
-				                          OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
-				                   OR (candidate.control_class <> 'interrupt'
-				                     AND pending.control_class <> 'interrupt'
-				                     AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
-				                 ))
-				             ))
-				         )
-				    )
-				  ORDER BY candidate.priority DESC, candidate.available_at ASC,
-				           candidate.partition_key ASC, candidate.queue_partition_sequence ASC
-				  LIMIT $3`
+		query := leaseCandidatesQuery(kindPredicate)
 		queryArgs := append([]any{
 			string(request.WorkspaceID),
 			request.Now,
@@ -668,6 +581,97 @@ func leaseKindPredicate(kinds []string, placeholderStart int) (string, []any) {
 		args = append(args, kind)
 	}
 	return strings.Join(parts, ", "), args
+}
+
+func leaseCandidatesQuery(kindPredicate string) string {
+	return `SELECT candidate.id, candidate.partition_key, candidate.kind, candidate.priority,
+	                candidate.available_at, candidate.queue_partition_sequence,
+	                COALESCE(candidate.causal_session_id, ''), candidate.delivery_scope,
+	                COALESCE(candidate.delivery_thread_id, ''), candidate.control_class
+	   FROM queue_jobs candidate
+	  WHERE candidate.workspace_id = $1
+	    AND candidate.kind IN (` + kindPredicate + `)
+	    AND candidate.status = 'pending'
+	    AND candidate.available_at <= $2
+	    AND (
+	      candidate.causal_session_id IS NULL
+	      OR (candidate.kind = 'session_delete_cleanup' AND EXISTS (
+	        SELECT 1 FROM sessions session
+	         WHERE session.workspace_id = candidate.workspace_id
+	           AND session.id = candidate.causal_session_id
+	           AND session.lifecycle_state = 'deleted'
+	      ))
+	      OR (candidate.kind <> 'session_delete_cleanup' AND NOT EXISTS (
+	        SELECT 1 FROM sessions session
+	         WHERE session.workspace_id = candidate.workspace_id
+	           AND session.id = candidate.causal_session_id
+	           AND (session.lifecycle_state = 'deleted' OR session.status = 'terminated')
+	      ))
+	    )
+	    AND NOT EXISTS (
+	      SELECT 1 FROM queue_jobs leased
+	       WHERE leased.workspace_id = candidate.workspace_id
+	         AND leased.status = 'leased'
+	         AND leased.id <> candidate.id
+	         AND (
+	           (candidate.delivery_scope = 'partition'
+	             AND leased.delivery_scope = 'partition'
+	             AND leased.partition_key = candidate.partition_key)
+	           OR (candidate.delivery_scope = 'thread'
+	             AND leased.causal_session_id = candidate.causal_session_id
+	             AND NOT (candidate.control_class = 'interrupt'
+	                      AND leased.kind = 'runtime_config_update')
+	             AND (leased.delivery_scope = 'session'
+	                  OR (leased.delivery_scope = 'thread'
+	                      AND leased.delivery_thread_id = candidate.delivery_thread_id)))
+	           OR (candidate.delivery_scope = 'session'
+	             AND leased.causal_session_id = candidate.causal_session_id
+	             AND leased.delivery_scope IN ('thread', 'session'))
+	         )
+	    )
+	    AND NOT EXISTS (
+	      SELECT 1 FROM queue_jobs pending
+	       WHERE pending.workspace_id = candidate.workspace_id
+	         AND pending.status = 'pending'
+	         AND pending.id <> candidate.id
+	         AND (
+	           (candidate.delivery_scope = 'partition'
+	             AND pending.delivery_scope = 'partition'
+	             AND pending.partition_key = candidate.partition_key
+	             AND pending.available_at <= $2
+	             AND (pending.priority > candidate.priority
+	                  OR (pending.priority = candidate.priority
+	                      AND pending.queue_partition_sequence < candidate.queue_partition_sequence)))
+	           OR (candidate.delivery_scope = 'session'
+	             AND pending.causal_session_id = candidate.causal_session_id
+	             AND pending.delivery_scope IN ('thread', 'session')
+	             AND NOT (candidate.kind = 'session_delete_cleanup'
+	                      AND pending.kind <> 'session_delete_cleanup')
+	             AND pending.available_at <= $2
+	             AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
+	           OR (candidate.delivery_scope = 'thread'
+	             AND pending.causal_session_id = candidate.causal_session_id
+	             AND (
+	               (pending.delivery_scope = 'session'
+	                 AND pending.queue_partition_sequence < candidate.queue_partition_sequence
+	                 AND NOT (candidate.control_class = 'interrupt'
+	                          AND pending.kind = 'runtime_config_update'))
+	               OR (pending.delivery_scope = 'thread'
+	                 AND pending.delivery_thread_id = candidate.delivery_thread_id
+	                 AND (
+	                   (pending.control_class = 'interrupt'
+	                     AND (candidate.control_class <> 'interrupt'
+	                          OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
+	                   OR (candidate.control_class <> 'interrupt'
+	                     AND pending.control_class <> 'interrupt'
+	                     AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
+	                 ))
+	             ))
+	         )
+	    )
+	  ORDER BY candidate.priority DESC, candidate.available_at ASC,
+	           candidate.partition_key ASC, candidate.queue_partition_sequence ASC
+	  LIMIT $3`
 }
 
 type leaseCandidateRow struct {

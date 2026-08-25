@@ -12,7 +12,7 @@ import (
 const (
 	closeoutScopeSupersededCode = "scope_superseded"
 	closeoutUnrepairableCode    = "closeout_unrepairable"
-	threadInterruptBarrierCode  = "session_interrupt_barrier_stale"
+	threadInterruptBarrierCode  = "thread_interrupt_barrier_stale"
 )
 
 type closeoutSentinelError struct {

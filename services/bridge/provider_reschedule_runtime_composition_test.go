@@ -277,7 +277,14 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
 			t.Cleanup(stopBridge)
 			repairCredential := seedProviderFailureCredential(t, runtimeDB, admin, sessionID, testCase.scenario)
+			activePodUID := podUID
 			process := startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, testCase.scenario)
+			priorProviderInvocations := 0
+			priorFinishIdleInvocations := 0
+			priorFinishIdleCommitted := true
+			priorSensitiveLogLeak := false
+			priorKeySelections := []string(nil)
+			priorKeyQuarantines := []string(nil)
 
 			firstCapturePending := make(chan string, 1)
 			releaseFirstCapture := make(chan struct{})
@@ -333,23 +340,56 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			}
 			waitForProviderFailureFacts(t, admin, sessionID, firstTurnEnds, "idle", process)
 			repairCredential()
+			if testCase.scenario == "invalid_openai_oauth" {
+				prior := process.close(t)
+				priorProviderInvocations = prior.ProviderInvocations
+				priorFinishIdleInvocations = prior.FinishIdleInvocations
+				priorFinishIdleCommitted = prior.FinishIdleResult == "committed"
+				priorSensitiveLogLeak = prior.SensitiveLogLeak
+				priorKeySelections = prior.PlatformKeySelections
+				priorKeyQuarantines = prior.PlatformKeyQuarantines
+				if result, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+					WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2 AND binding_generation=1`,
+					sessionID, bindingID); err != nil {
+					t.Fatalf("fence lost provider credential Runtime binding: %v", err)
+				} else if deleted, _ := result.RowsAffected(); deleted != 1 {
+					t.Fatalf("fenced lost provider credential Runtime bindings = %d; want 1", deleted)
+				}
+				const replacementGeneration int64 = 2
+				replacementBindingID := bindingID + "_replacement"
+				activePodUID = podUID + "_replacement"
+				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, replacementBindingID, replacementGeneration, activePodUID)
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+					SET binding_id=$2, binding_generation=$3, updated_at=clock_timestamp()
+					WHERE workspace_id='default' AND session_id=$1`, sessionID, replacementBindingID, replacementGeneration); err != nil {
+					t.Fatalf("install replacement provider credential Runtime status: %v", err)
+				}
+				process = startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID,
+					replacementBindingID, replacementGeneration, activePodUID, testCase.scenario)
+			}
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
-			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, activePodUID)
 			waitForProviderFailureFacts(t, admin, sessionID, testCase.wantRequestEnds, "idle", process)
 			result := process.close(t)
 			if captureErr := <-capturesSettled; captureErr != nil {
 				t.Fatalf("settle %s output captures: %v", testCase.scenario, captureErr)
 			}
-			if result.ProviderInvocations != testCase.wantProviderCalls || result.FinishIdleInvocations != testCase.wantFinishIdle || result.FinishIdleResult != "committed" || result.SensitiveLogLeak {
+			providerInvocations := priorProviderInvocations + result.ProviderInvocations
+			finishIdleInvocations := priorFinishIdleInvocations + result.FinishIdleInvocations
+			finishIdleCommitted := priorFinishIdleCommitted && result.FinishIdleResult == "committed"
+			sensitiveLogLeak := priorSensitiveLogLeak || result.SensitiveLogLeak
+			keySelections := append(priorKeySelections, result.PlatformKeySelections...)
+			keyQuarantines := append(priorKeyQuarantines, result.PlatformKeyQuarantines...)
+			if providerInvocations != testCase.wantProviderCalls || finishIdleInvocations != testCase.wantFinishIdle || !finishIdleCommitted || sensitiveLogLeak {
 				t.Fatalf("%s provider/FinishIdle/log result = %d/%d/%s/%v; want %d/%d/committed/false",
-					testCase.scenario, result.ProviderInvocations, result.FinishIdleInvocations, result.FinishIdleResult, result.SensitiveLogLeak,
+					testCase.scenario, providerInvocations, finishIdleInvocations, result.FinishIdleResult, sensitiveLogLeak,
 					testCase.wantProviderCalls, testCase.wantFinishIdle)
 			}
-			if !slices.Equal(result.PlatformKeySelections, testCase.wantKeySelections) {
-				t.Fatalf("%s platform key selections = %v; want %v", testCase.scenario, result.PlatformKeySelections, testCase.wantKeySelections)
+			if !slices.Equal(keySelections, testCase.wantKeySelections) {
+				t.Fatalf("%s platform key selections = %v; want %v", testCase.scenario, keySelections, testCase.wantKeySelections)
 			}
-			if strings.HasPrefix(testCase.scenario, "platform_billing_") && !slices.Equal(result.PlatformKeyQuarantines, []string{"pfk_provider_failure_bad"}) {
-				t.Fatalf("%s platform key quarantines = %v; want one bad-key quarantine", testCase.scenario, result.PlatformKeyQuarantines)
+			if strings.HasPrefix(testCase.scenario, "platform_billing_") && !slices.Equal(keyQuarantines, []string{"pfk_provider_failure_bad"}) {
+				t.Fatalf("%s platform key quarantines = %v; want one bad-key quarantine", testCase.scenario, keyQuarantines)
 			}
 
 			var starts, ends, reschedules, errorEnds, users, assistants, publicErrors int
@@ -423,6 +463,10 @@ func startProviderTimeoutRuntime(t *testing.T, admin *sql.DB, bridgeAddress, ses
 }
 
 func startProviderFailureRuntime(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerFailureRuntimeProcess {
+	return startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID, bindingID, 1, podUID, scenario)
+}
+
+func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID, scenario string) *providerFailureRuntimeProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
@@ -434,7 +478,7 @@ func startProviderFailureRuntime(t *testing.T, admin *sql.DB, bridgeAddress, ses
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingGeneration": bindingGeneration, "targetPodUid": podUID,
 		"readyPath": readyPath, "statePath": process.statePath, "closePath": process.closePath,
 		"toolReleasePath": process.toolReleasePath, "scenario": scenario,
 	})
@@ -535,6 +579,7 @@ func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessi
 		healthy = invalid
 		healthy.AccessToken = "oauth-access-healthy"
 		healthy.RefreshToken = "oauth-refresh-healthy"
+		healthy.ExpiresAt = "2099-01-01T00:00:00.000Z"
 	}
 	credential, err := credentialStore.Create(context.Background(), workspace.DefaultID, createdVault.ID, vault.CreateCredentialRequest{
 		DisplayName: "provider failure credential", Auth: invalid,
