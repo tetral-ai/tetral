@@ -1317,7 +1317,10 @@ func settleRuntimeTerminationTx(
 		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, status.Error(codes.FailedPrecondition, "runtime termination has a live Tool use after derived settlement")
 	}
 	if threadScope.role == "main" {
-		if err := closeRuntimeTerminatedSessionSiblingsTx(ctx, tx, scope, runtimeWriteID, now); err != nil {
+		rootCtx := withSessionRootTermination(
+			ctx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimeWriteID,
+		)
+		if err := closeRuntimeTerminatedSessionSiblingsTx(rootCtx, tx, scope, runtimeWriteID, now); err != nil {
 			return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
 		}
 	}

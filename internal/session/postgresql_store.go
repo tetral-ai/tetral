@@ -1213,30 +1213,6 @@ func (t *postgresqlTransaction) DeleteSession(ctx context.Context, sessionID str
 	if current.Status == StatusRunning || current.Status == StatusRescheduling {
 		return &ConflictError{Message: "running or rescheduling sessions cannot be deleted", InvalidRequest: true}
 	}
-	// Service.Delete owns the common Session arbitration before this
-	// transaction starts. A Queue lease may have committed just before that
-	// owner; reject it here rather than deleting an apparently idle Session
-	// while Runtime delivery still has exact custody.
-	var activeDeliveryJobID string
-	err = t.tx.QueryRowScanner(ctx,
-		`SELECT id
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND causal_session_id = $2
-		    AND delivery_scope IN ('thread', 'session')
-		    AND status = 'leased'
-		  ORDER BY id
-		  LIMIT 1
-		  FOR UPDATE`,
-		string(t.workspaceID),
-		sessionID,
-	).Scan(&activeDeliveryJobID)
-	if err == nil {
-		return &ConflictError{Message: "running or rescheduling sessions cannot be deleted", InvalidRequest: true}
-	}
-	if !dbconnect.IsNoRows(err) {
-		return err
-	}
 	deleteCleanupID := id.New("delcln_")
 	timestamp := storage.Now()
 	if t.store.sessionDeleteSandboxRelease == nil {
@@ -1244,6 +1220,9 @@ func (t *postgresqlTransaction) DeleteSession(ctx context.Context, sessionID str
 	}
 	rawTx, err := t.rawDBTx()
 	if err != nil {
+		return err
+	}
+	if err := cancelSessionRuntimeCustodyForDelete(ctx, rawTx, t.workspaceID, sessionID, timestamp); err != nil {
 		return err
 	}
 	// Deletion commits its Sandbox release fence before cleanup can be leased;
@@ -1286,6 +1265,62 @@ func (t *postgresqlTransaction) DeleteSession(ctx context.Context, sessionID str
 		return err
 	}
 	return t.enqueueSessionDeleteCleanup(ctx, sessionID, deleteCleanupID, timestamp)
+}
+
+// cancelSessionRuntimeCustodyForDelete revokes every current Runtime delivery
+// authority while the delete owner holds the common Session arbitration lock.
+// Queue rows are locked before Inbox rows to preserve the cross-table order.
+func cancelSessionRuntimeCustodyForDelete(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, now time.Time) error {
+	rows, err := tx.Query(ctx,
+		`SELECT id
+		   FROM queue_jobs
+		  WHERE workspace_id = $1
+		    AND causal_session_id = $2
+		    AND kind IN ($3, $4, $5, $6)
+		    AND status IN ('pending', 'leased')
+		  ORDER BY id
+		  FOR UPDATE`,
+		string(workspaceID), sessionID,
+		queue.KindRuntimeInput, queue.KindRuntimeRecovery, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession,
+	)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			return errors.Join(err, rows.Close())
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.Join(err, rows.Close())
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status='cancelled', cancelled_at=$3,
+		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		        updated_at=$3
+		  WHERE workspace_id=$1
+		    AND causal_session_id=$2
+		    AND kind IN ($4, $5, $6, $7)
+		    AND status IN ('pending', 'leased')`,
+		string(workspaceID), sessionID, now,
+		queue.KindRuntimeInput, queue.KindRuntimeRecovery, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession,
+	); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE session_runtime_inbox
+		    SET status='cancelled', updated_at=$3
+		  WHERE workspace_id=$1
+		    AND session_id=$2
+		    AND status IN ('queued', 'delivering', 'accepted', 'parked')`,
+		string(workspaceID), sessionID, now,
+	)
+	return err
 }
 
 func (t *postgresqlTransaction) enqueueSessionDeleteCleanup(ctx context.Context, sessionID string, deleteCleanupID string, timestamp time.Time) error {

@@ -241,6 +241,7 @@ func requireThreadInputDeliveryAllowedTx(ctx context.Context, tx *dbconnect.Tx, 
 
 type interruptCloseoutContextKey struct{}
 type runtimePodLossInterruptRepairContextKey struct{}
+type sessionRootTerminationContextKey struct{}
 
 type interruptCloseoutAuthority struct {
 	workspaceID     string
@@ -258,6 +259,13 @@ type runtimePodLossInterruptRepairAuthority struct {
 	targetPodUID            string
 }
 
+type sessionRootTerminationAuthority struct {
+	workspaceID  string
+	sessionID    string
+	mainThreadID string
+	operationID  string
+}
+
 func withInterruptCloseout(ctx context.Context, workspaceID string, sessionID string, sessionThreadID string, runtimeInputID string) context.Context {
 	return context.WithValue(ctx, interruptCloseoutContextKey{}, interruptCloseoutAuthority{
 		workspaceID: workspaceID, sessionID: sessionID, sessionThreadID: sessionThreadID, runtimeInputID: runtimeInputID,
@@ -266,6 +274,17 @@ func withInterruptCloseout(ctx context.Context, workspaceID string, sessionID st
 
 func withRuntimePodLossInterruptRepair(ctx context.Context, authority runtimePodLossInterruptRepairAuthority) context.Context {
 	return context.WithValue(ctx, runtimePodLossInterruptRepairContextKey{}, authority)
+}
+
+func withSessionRootTermination(ctx context.Context, workspaceID string, sessionID string, mainThreadID string, operationID string) context.Context {
+	return context.WithValue(ctx, sessionRootTerminationContextKey{}, sessionRootTerminationAuthority{
+		workspaceID: workspaceID, sessionID: sessionID, mainThreadID: mainThreadID, operationID: operationID,
+	})
+}
+
+func sessionRootTerminationAuthorityFromContext(ctx context.Context) (sessionRootTerminationAuthority, bool) {
+	authority, ok := ctx.Value(sessionRootTerminationContextKey{}).(sessionRootTerminationAuthority)
+	return authority, ok
 }
 
 func runtimePodLossInterruptRepairFromContext(ctx context.Context) (runtimePodLossInterruptRepairAuthority, bool) {
@@ -335,6 +354,16 @@ func activeInterruptBarrierTx(
 }
 
 func requireThreadMutationAllowedTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	// Session-root termination is minted only after the main declaration or
+	// final delivery identity wins Session arbitration. It closes every Thread
+	// in that one transaction; it is not an ordinary cross-Thread bypass.
+	if authority, ok := sessionRootTerminationAuthorityFromContext(ctx); ok {
+		if authority.workspaceID == scope.GetWorkspaceId() && authority.sessionID == scope.GetSessionId() &&
+			authority.mainThreadID != "" && authority.operationID != "" {
+			return nil
+		}
+		return threadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "Session-root termination authority is invalid"))
+	}
 	// Only validateInterruptLeaseRefTx and exact final-lease exhaustion mint this
 	// transaction-local authority. Once minted, the closeout may pass through
 	// intermediate Inbox=committed state before its receipt row is inserted.

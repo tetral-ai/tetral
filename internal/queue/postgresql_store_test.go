@@ -343,9 +343,7 @@ func TestPostgreSQLStoreRevalidatesDeletedSessionAfterArbitration(t *testing.T) 
 		t.Fatalf("Lease after delete: %v", err)
 	}
 	assertLeasedIDs(t, leased, []string{deleteCleanup.ID})
-	if got := queueJobStatus(t, admin, workspace.DefaultID, input.ID); got != StatusPending {
-		t.Fatalf("pre-delete input status = %s; want pending and ineligible", got)
-	}
+	_ = input // The delete owner, not Lease revalidation, settles pre-delete custody.
 }
 
 func TestPostgreSQLStoreRejectsAllWorkForTerminatedSession(t *testing.T) {

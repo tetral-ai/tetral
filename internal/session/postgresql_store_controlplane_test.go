@@ -563,7 +563,7 @@ func TestPostgreSQLSessionStoreDeleteRejectsReschedulingSession(t *testing.T) {
 	}
 }
 
-func TestPostgreSQLSessionStoreDeleteRejectsCommittedRuntimeDeliveryLease(t *testing.T) {
+func TestPostgreSQLSessionStoreDeleteRevokesIdleRuntimeDeliveryLease(t *testing.T) {
 	runtime, admin := newControlPlaneSessionStoreTestDB(t)
 	ctx := context.Background()
 	store := newControlPlaneSessionStore(t, runtime)
@@ -571,9 +571,11 @@ func TestPostgreSQLSessionStoreDeleteRejectsCommittedRuntimeDeliveryLease(t *tes
 	seedSessionStoreReferences(t, admin, workspace.DefaultID, "agent_leased_delete", 1, "env_leased_delete")
 	now := time.Date(2026, 8, 24, 20, 20, 0, 0, time.UTC)
 	const (
-		sessionID = "sesn_leased_delete"
-		threadID  = "thrd_leased_delete"
-		inputID   = "rin_leased_delete"
+		sessionID      = "sesn_leased_delete"
+		threadID       = "thrd_leased_delete"
+		inputID        = "rin_leased_delete"
+		interruptInput = "rin_pending_interrupt_delete"
+		interruptEvent = "evt_pending_interrupt_delete"
 	)
 	if err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
 		if err := tx.CreateSession(ctx, minimalStoreSession(sessionID, "agent_leased_delete", 1, "env_leased_delete", now)); err != nil {
@@ -585,6 +587,14 @@ func TestPostgreSQLSessionStoreDeleteRejectsCommittedRuntimeDeliveryLease(t *tes
 		})
 	}); err != nil {
 		t.Fatalf("create Session and Thread: %v", err)
+	}
+	seedThreadRuntimeInbox(t, admin, workspace.DefaultID, sessionID, threadID, inputID)
+	seedThreadRuntimeInbox(t, admin, workspace.DefaultID, sessionID, threadID, interruptInput)
+	if _, err := admin.ExecContext(ctx, `UPDATE session_runtime_inbox
+		SET input_kind='interrupt_control', event_ids_json=$2, status='queued',
+		    binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL
+		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptInput, `["`+interruptEvent+`"]`); err != nil {
+		t.Fatalf("seed pending interrupt Inbox: %v", err)
 	}
 	payload, err := json.Marshal(map[string]any{
 		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
@@ -610,19 +620,158 @@ func TestPostgreSQLSessionStoreDeleteRejectsCommittedRuntimeDeliveryLease(t *tes
 	if err != nil || len(leased) != 1 || leased[0].ID != job.ID {
 		t.Fatalf("lease Runtime input = %+v/%v; want %s", leased, err, job.ID)
 	}
+	interruptPayload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": interruptInput, "event_ids": []string{interruptEvent},
+		"sequence_from": 2, "sequence_to": 2, "input_kind": "interrupt_control",
+	})
+	if err != nil {
+		t.Fatalf("marshal interrupt payload: %v", err)
+	}
+	interruptJob, err := queueStore.Enqueue(ctx, queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:    queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptInput),
+		PayloadJSON:  interruptPayload, Now: now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("enqueue pending interrupt: %v", err)
+	}
 
-	err = store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
+	err = store.WithRuntimeMutationTx(ctx, workspace.DefaultID, sessionID, func(tx session.Transaction) error {
 		return tx.DeleteSession(ctx, sessionID)
 	})
-	var conflict *session.ConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("DeleteSession with live delivery lease err = %T %v; want ConflictError", err, err)
+	if err != nil {
+		t.Fatalf("DeleteSession with live idle delivery lease: %v", err)
 	}
-	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM sessions WHERE id=$1 AND lifecycle_state='active' AND delete_cleanup_id IS NULL`, sessionID); got != 1 {
-		t.Fatalf("active Session after rejected delete = %d; want 1", got)
+	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM sessions WHERE id=$1 AND lifecycle_state='deleted' AND delete_cleanup_id IS NOT NULL`, sessionID); got != 1 {
+		t.Fatalf("deleted Session after lease revocation = %d; want 1", got)
 	}
-	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.deleted'`, sessionID); got != 0 {
-		t.Fatalf("deleted Events after rejected delete = %d; want 0", got)
+	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.deleted'`, sessionID); got != 1 {
+		t.Fatalf("deleted Events after lease revocation = %d; want 1", got)
+	}
+	var queueStatus, inboxStatus, interruptQueueStatus, interruptInboxStatus string
+	if err := admin.QueryRowContext(ctx, `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$4)`,
+		job.ID, inputID, interruptJob.ID, interruptInput,
+	).Scan(&queueStatus, &inboxStatus, &interruptQueueStatus, &interruptInboxStatus); err != nil {
+		t.Fatalf("read revoked delivery custody: %v", err)
+	}
+	if queueStatus != queue.StatusCancelled || inboxStatus != "cancelled" ||
+		interruptQueueStatus != queue.StatusCancelled || interruptInboxStatus != "cancelled" {
+		t.Fatalf("revoked delivery custody = message %s/%s interrupt %s/%s; want all cancelled",
+			queueStatus, inboxStatus, interruptQueueStatus, interruptInboxStatus)
+	}
+	acked, err := queueStore.Ack(ctx, queue.AckRequest{
+		WorkspaceID: workspace.DefaultID, JobID: job.ID, LeaseToken: leased[0].LeaseToken, Now: now.Add(2 * time.Second),
+	})
+	if err != nil || acked {
+		t.Fatalf("stale worker ACK after delete = %t/%v; want false/nil", acked, err)
+	}
+	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='session_delete_cleanup' AND status='pending'`); got != 1 {
+		t.Fatalf("delete cleanup jobs = %d; want 1", got)
+	}
+}
+
+func TestPostgreSQLSessionStoreDeleteOwnsIdleCleanupLeaseAtomically(t *testing.T) {
+	for _, rollback := range []bool{false, true} {
+		name := "commit"
+		if rollback {
+			name = "rollback"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtime, admin := newControlPlaneSessionStoreTestDB(t)
+			ctx := context.Background()
+			store := newControlPlaneSessionStore(t, runtime)
+			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			suffix := name
+			sessionID := "sesn_cleanup_delete_" + suffix
+			threadID := "thrd_cleanup_delete_" + suffix
+			cleanupID := "cleanup_delete_" + suffix
+			now := time.Date(2026, 8, 24, 21, 0, 0, 0, time.UTC)
+			seedSessionStoreReferences(t, admin, workspace.DefaultID, "agent_cleanup_delete_"+suffix, 1, "env_cleanup_delete_"+suffix)
+			if err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
+				if err := tx.CreateSession(ctx, minimalStoreSession(sessionID, "agent_cleanup_delete_"+suffix, 1, "env_cleanup_delete_"+suffix, now)); err != nil {
+					return err
+				}
+				return tx.CreatePrimaryThread(ctx, &session.Thread{
+					ID: threadID, WorkspaceID: workspace.DefaultID, SessionID: sessionID,
+					CreatedAt: now, UpdatedAt: now,
+				})
+			}); err != nil {
+				t.Fatalf("create cleanup Session: %v", err)
+			}
+			if _, err := admin.ExecContext(ctx, `UPDATE session_runtime_status
+				SET cleanup_after=$3, cleanup_job_id=$4, cleanup_enqueued_at=$3
+				WHERE workspace_id=$1 AND session_id=$2`, string(workspace.DefaultID), sessionID, now, cleanupID); err != nil {
+				t.Fatalf("seed cleanup identity: %v", err)
+			}
+			job, err := queueStore.Enqueue(ctx, queue.EnqueueRequest{
+				WorkspaceID: workspace.DefaultID, Kind: queue.KindCleanupSession,
+				PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+				DedupeKey:    queue.FormatCleanupSessionDedupeKey(workspace.DefaultID, sessionID, cleanupID),
+				PayloadJSON:  []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"` + cleanupID + `"}`),
+				Now:          now,
+			})
+			if err != nil {
+				t.Fatalf("enqueue cleanup: %v", err)
+			}
+			leased, err := queueStore.Lease(ctx, queue.LeaseRequest{
+				WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindCleanupSession}, LeaseOwner: "cleanup-delete-" + suffix,
+				MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+			})
+			if err != nil || len(leased) != 1 || leased[0].ID != job.ID {
+				t.Fatalf("lease cleanup = %+v/%v; want %s", leased, err, job.ID)
+			}
+			rollbackErr := errors.New("force cleanup delete rollback")
+			err = store.WithRuntimeMutationTx(ctx, workspace.DefaultID, sessionID, func(tx session.Transaction) error {
+				if err := tx.DeleteSession(ctx, sessionID); err != nil {
+					return err
+				}
+				if rollback {
+					return rollbackErr
+				}
+				return nil
+			})
+			if rollback {
+				if !errors.Is(err, rollbackErr) {
+					t.Fatalf("rollback delete = %v; want injected error", err)
+				}
+				var lifecycle, queueStatus, leaseToken string
+				if err := admin.QueryRowContext(ctx, `SELECT
+					(SELECT lifecycle_state FROM sessions WHERE workspace_id='default' AND id=$1),
+					(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+					(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$2)`,
+					sessionID, job.ID,
+				).Scan(&lifecycle, &queueStatus, &leaseToken); err != nil {
+					t.Fatalf("read rolled-back cleanup lease: %v", err)
+				}
+				if lifecycle != "active" || queueStatus != queue.StatusLeased || leaseToken != leased[0].LeaseToken {
+					t.Fatalf("rolled-back cleanup = lifecycle %s queue %s token %q; want active/leased/original", lifecycle, queueStatus, leaseToken)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("delete with cleanup lease: %v", err)
+			}
+			var lifecycle, queueStatus string
+			if err := admin.QueryRowContext(ctx, `SELECT
+				(SELECT lifecycle_state FROM sessions WHERE workspace_id='default' AND id=$1),
+				(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2)`,
+				sessionID, job.ID,
+			).Scan(&lifecycle, &queueStatus); err != nil {
+				t.Fatalf("read superseded cleanup lease: %v", err)
+			}
+			if lifecycle != "deleted" || queueStatus != queue.StatusCancelled {
+				t.Fatalf("superseded cleanup = lifecycle %s queue %s; want deleted/cancelled", lifecycle, queueStatus)
+			}
+			if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='session_delete_cleanup' AND status='pending'`); got != 1 {
+				t.Fatalf("delete cleanup custody = %d; want 1", got)
+			}
+		})
 	}
 }
 
