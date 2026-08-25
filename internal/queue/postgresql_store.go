@@ -589,46 +589,50 @@ func leaseCandidatesQuery(kindPredicate string) string {
 	                COALESCE(candidate.causal_session_id, ''), candidate.delivery_scope,
 	                COALESCE(candidate.delivery_thread_id, ''), candidate.control_class
 	   FROM queue_jobs candidate
+	   LEFT JOIN sessions candidate_session
+	     ON candidate_session.workspace_id = candidate.workspace_id
+	    AND candidate_session.id = candidate.causal_session_id
 	  WHERE candidate.workspace_id = $1
 	    AND candidate.kind IN (` + kindPredicate + `)
 	    AND candidate.status = 'pending'
 	    AND candidate.available_at <= $2
 	    AND (
 	      candidate.causal_session_id IS NULL
-	      OR (candidate.kind = 'session_delete_cleanup' AND EXISTS (
-	        SELECT 1 FROM sessions session
-	         WHERE session.workspace_id = candidate.workspace_id
-	           AND session.id = candidate.causal_session_id
-	           AND session.lifecycle_state = 'deleted'
-	      ))
-	      OR (candidate.kind <> 'session_delete_cleanup' AND NOT EXISTS (
-	        SELECT 1 FROM sessions session
-	         WHERE session.workspace_id = candidate.workspace_id
-	           AND session.id = candidate.causal_session_id
-	           AND (session.lifecycle_state = 'deleted' OR session.status = 'terminated')
-	      ))
+	      OR (candidate.kind = 'session_delete_cleanup'
+	          AND candidate_session.lifecycle_state = 'deleted')
+	      OR (candidate.kind <> 'session_delete_cleanup'
+	          AND (candidate_session.id IS NULL
+	               OR (candidate_session.lifecycle_state <> 'deleted'
+	                   AND candidate_session.status <> 'terminated')))
 	    )
-	    AND NOT EXISTS (
+	    AND (candidate.delivery_scope <> 'partition' OR NOT EXISTS (
 	      SELECT 1 FROM queue_jobs leased
 	       WHERE leased.workspace_id = candidate.workspace_id
 	         AND leased.status = 'leased'
 	         AND leased.id <> candidate.id
-	         AND (
-	           (candidate.delivery_scope = 'partition'
-	             AND leased.delivery_scope = 'partition'
-	             AND leased.partition_key = candidate.partition_key)
-	           OR (candidate.delivery_scope = 'thread'
-	             AND leased.causal_session_id = candidate.causal_session_id
-	             AND NOT (candidate.control_class = 'interrupt'
-	                      AND leased.kind = 'runtime_config_update')
-	             AND (leased.delivery_scope = 'session'
-	                  OR (leased.delivery_scope = 'thread'
-	                      AND leased.delivery_thread_id = candidate.delivery_thread_id)))
-	           OR (candidate.delivery_scope = 'session'
-	             AND leased.causal_session_id = candidate.causal_session_id
-	             AND leased.delivery_scope IN ('thread', 'session'))
-	         )
-	    )
+	         AND leased.delivery_scope = 'partition'
+	         AND leased.partition_key = candidate.partition_key
+	    ))
+	    AND (candidate.delivery_scope <> 'thread' OR NOT EXISTS (
+	      SELECT 1 FROM queue_jobs leased
+	       WHERE leased.workspace_id = candidate.workspace_id
+	         AND leased.status = 'leased'
+	         AND leased.id <> candidate.id
+	         AND leased.causal_session_id = candidate.causal_session_id
+	         AND NOT (candidate.control_class = 'interrupt'
+	                  AND leased.kind = 'runtime_config_update')
+	         AND (leased.delivery_scope = 'session'
+	              OR (leased.delivery_scope = 'thread'
+	                  AND leased.delivery_thread_id = candidate.delivery_thread_id))
+	    ))
+	    AND (candidate.delivery_scope <> 'session' OR NOT EXISTS (
+	      SELECT 1 FROM queue_jobs leased
+	       WHERE leased.workspace_id = candidate.workspace_id
+	         AND leased.status = 'leased'
+	         AND leased.id <> candidate.id
+	         AND leased.causal_session_id = candidate.causal_session_id
+	         AND leased.delivery_scope IN ('thread', 'session')
+	    ))
 	    AND NOT EXISTS (
 	      SELECT 1 FROM queue_jobs pending
 	       WHERE pending.workspace_id = candidate.workspace_id

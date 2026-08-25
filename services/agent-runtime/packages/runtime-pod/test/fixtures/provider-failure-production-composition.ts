@@ -101,6 +101,7 @@ let providerInvocations = 0;
 let toolInvocations = 0;
 let finishIdleInvocations = 0;
 let finishIdleResult = "none";
+let oauthAccessTokenConsumed = false;
 const providerRequestContexts: string[] = [];
 let nextId = input.bindingGeneration * 1_000;
 const gatewayLogs: unknown[] = [];
@@ -115,6 +116,7 @@ const writeRuntimeState = async (): Promise<void> => {
 			finishIdleResult,
 			platformKeySelections,
 			platformKeyQuarantines,
+			oauthAccessTokenConsumed,
 			providerRequestContexts,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
@@ -193,7 +195,23 @@ const successProviderParts = (): readonly GatewaySDKStreamPart[] => [
 		},
 	},
 ];
+const providerFetch = Object.assign(
+	async (input: RequestInfo | URL, init?: RequestInit) => {
+		const request = new Request(input, init);
+		if (scenario === "invalid_openai_oauth") {
+			oauthAccessTokenConsumed =
+				request.headers.get("authorization") === "Bearer oauth-access-healthy";
+			await writeRuntimeState();
+			if (!oauthAccessTokenConsumed) {
+				return new Response('{"error":"invalid_token"}', { status: 401 });
+			}
+		}
+		return new Response("{}", { status: 200 });
+	},
+	{ preconnect: () => {} },
+);
 const providerClientRegistry = new ProviderClientRegistry({
+	fetch: providerFetch,
 	openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
 		sql: credentialSQL,
 		masterKeyHex: credentialMasterKeyHex,
@@ -212,13 +230,37 @@ const providerClientRegistry = new ProviderClientRegistry({
 		apiKey: settings.apiKey,
 	}),
 	openAIProviderFactory: (settings) => ({
-		responses: (modelId) => ({ provider: "openai", modelId, apiKey: settings.apiKey }),
+		responses: (modelId) => ({
+			provider: "openai",
+			modelId,
+			apiKey: settings.apiKey,
+			fetch: settings.fetch,
+		}),
 	}),
 	streamText: (request: GatewayStreamTextInput) => {
 		providerInvocations += 1;
 		providerRequestContexts.push(JSON.stringify(request.messages));
 		void writeRuntimeState();
 		const apiKey = (request.model as { readonly apiKey?: string }).apiKey;
+		if (scenario === "invalid_openai_oauth") {
+			const oauthFetch = (request.model as { readonly fetch?: typeof providerFetch }).fetch;
+			return {
+				fullStream: (async function* () {
+					if (oauthFetch === undefined) {
+						throw new Error("OpenAI OAuth fetch wrapper is missing");
+					}
+					const response = await oauthFetch("https://api.openai.com/v1/responses", {
+						method: "POST",
+						headers: { authorization: "Bearer sdk-placeholder" },
+						body: "{}",
+					});
+					if (!response.ok) {
+						throw new Error("repaired OpenAI OAuth credential was not consumed");
+					}
+					for (const part of successProviderParts()) yield part;
+				})(),
+			};
+		}
 		if (apiKey === badPlatformKey.key && scenario.startsWith("platform_billing_")) {
 			platformKeySelections.push(badPlatformKey.keyId);
 			const error = {
@@ -463,13 +505,13 @@ const hosts = await buildRuntimeCoreHosts({
 			systemInstructions: "Provider timeout production composition.",
 			timeoutMs: 5_000,
 		},
-			runtimeModel: () =>
-				scenario === "invalid_kimi_byok" || scenario === "missing_kimi_credential"
-					? { providerId: "moonshotai", modelId: "kimi-k3" }
-					: scenario === "invalid_openai_oauth" ||
-							scenario === "unavailable_openai_credential"
-						? { providerId: "openai", modelId: "gpt-5.5" }
-						: { providerId: "anthropic", modelId: "claude-opus-4-8" },
+		runtimeModel: () =>
+			scenario === "invalid_kimi_byok" || scenario === "missing_kimi_credential"
+				? { providerId: "moonshotai", modelId: "kimi-k3" }
+				: scenario === "invalid_openai_oauth" ||
+						scenario === "unavailable_openai_credential"
+					? { providerId: "openai", modelId: "gpt-5.5" }
+					: { providerId: "anthropic", modelId: "claude-opus-4-8" },
 		runtimePolicy: () => ({
 			toolCatalog: createToolCatalog({ family: "claude" }),
 			providerRescheduleBudget: 1,
@@ -553,6 +595,7 @@ try {
 			finishIdleResult,
 			platformKeySelections,
 			platformKeyQuarantines,
+			oauthAccessTokenConsumed,
 			providerRequestContexts,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(

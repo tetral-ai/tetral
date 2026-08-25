@@ -283,6 +283,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			priorFinishIdleInvocations := 0
 			priorFinishIdleCommitted := true
 			priorSensitiveLogLeak := false
+			priorOAuthAccessTokenConsumed := false
 			priorKeySelections := []string(nil)
 			priorKeyQuarantines := []string(nil)
 
@@ -346,6 +347,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				priorFinishIdleInvocations = prior.FinishIdleInvocations
 				priorFinishIdleCommitted = prior.FinishIdleResult == "committed"
 				priorSensitiveLogLeak = prior.SensitiveLogLeak
+				priorOAuthAccessTokenConsumed = prior.OAuthAccessTokenConsumed
 				priorKeySelections = prior.PlatformKeySelections
 				priorKeyQuarantines = prior.PlatformKeyQuarantines
 				if result, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
@@ -378,12 +380,16 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			finishIdleInvocations := priorFinishIdleInvocations + result.FinishIdleInvocations
 			finishIdleCommitted := priorFinishIdleCommitted && result.FinishIdleResult == "committed"
 			sensitiveLogLeak := priorSensitiveLogLeak || result.SensitiveLogLeak
+			oauthAccessTokenConsumed := priorOAuthAccessTokenConsumed || result.OAuthAccessTokenConsumed
 			keySelections := append(priorKeySelections, result.PlatformKeySelections...)
 			keyQuarantines := append(priorKeyQuarantines, result.PlatformKeyQuarantines...)
 			if providerInvocations != testCase.wantProviderCalls || finishIdleInvocations != testCase.wantFinishIdle || !finishIdleCommitted || sensitiveLogLeak {
 				t.Fatalf("%s provider/FinishIdle/log result = %d/%d/%s/%v; want %d/%d/committed/false",
 					testCase.scenario, providerInvocations, finishIdleInvocations, result.FinishIdleResult, sensitiveLogLeak,
 					testCase.wantProviderCalls, testCase.wantFinishIdle)
+			}
+			if testCase.scenario == "invalid_openai_oauth" && !oauthAccessTokenConsumed {
+				t.Fatal("replacement Runtime did not consume the repaired OAuth access token through the provider fetch boundary")
 			}
 			if !slices.Equal(keySelections, testCase.wantKeySelections) {
 				t.Fatalf("%s platform key selections = %v; want %v", testCase.scenario, keySelections, testCase.wantKeySelections)
@@ -663,14 +669,15 @@ func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, 
 }
 
 func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
-	ProviderInvocations     int      `json:"providerInvocations"`
-	ToolInvocations         int      `json:"toolInvocations"`
-	FinishIdleInvocations   int      `json:"finishIdleInvocations"`
-	FinishIdleResult        string   `json:"finishIdleResult"`
-	SensitiveLogLeak        bool     `json:"sensitiveLogLeak"`
-	PlatformKeySelections   []string `json:"platformKeySelections"`
-	PlatformKeyQuarantines  []string `json:"platformKeyQuarantines"`
-	ProviderRequestContexts []string `json:"providerRequestContexts"`
+	ProviderInvocations      int      `json:"providerInvocations"`
+	ToolInvocations          int      `json:"toolInvocations"`
+	FinishIdleInvocations    int      `json:"finishIdleInvocations"`
+	FinishIdleResult         string   `json:"finishIdleResult"`
+	SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
+	OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
+	PlatformKeySelections    []string `json:"platformKeySelections"`
+	PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
+	ProviderRequestContexts  []string `json:"providerRequestContexts"`
 } {
 	t.Helper()
 	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
@@ -680,14 +687,15 @@ func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
 		t.Fatalf("wait provider failure composition: %v: %s", err, p.output.String())
 	}
 	var result struct {
-		ProviderInvocations     int      `json:"providerInvocations"`
-		ToolInvocations         int      `json:"toolInvocations"`
-		FinishIdleInvocations   int      `json:"finishIdleInvocations"`
-		FinishIdleResult        string   `json:"finishIdleResult"`
-		SensitiveLogLeak        bool     `json:"sensitiveLogLeak"`
-		PlatformKeySelections   []string `json:"platformKeySelections"`
-		PlatformKeyQuarantines  []string `json:"platformKeyQuarantines"`
-		ProviderRequestContexts []string `json:"providerRequestContexts"`
+		ProviderInvocations      int      `json:"providerInvocations"`
+		ToolInvocations          int      `json:"toolInvocations"`
+		FinishIdleInvocations    int      `json:"finishIdleInvocations"`
+		FinishIdleResult         string   `json:"finishIdleResult"`
+		SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
+		OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
+		PlatformKeySelections    []string `json:"platformKeySelections"`
+		PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
+		ProviderRequestContexts  []string `json:"providerRequestContexts"`
 	}
 	if err := json.Unmarshal(p.output.Bytes(), &result); err != nil {
 		t.Fatalf("decode provider failure composition: %v: %s", err, p.output.String())
