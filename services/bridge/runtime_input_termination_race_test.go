@@ -172,11 +172,8 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 	if err != nil {
 		t.Fatalf("settle terminal task notification Queue custody: %v", err)
 	}
-	if notificationFirst && !active {
-		t.Fatal("notification-first terminal Queue custody was not reclaimed by JobRunner")
-	}
-	if !notificationFirst && active {
-		t.Fatal("termination-first Queue custody was not settled by termination")
+	if active {
+		t.Fatal("terminal Queue custody was not settled by termination")
 	}
 	var queueStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
@@ -184,9 +181,6 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 		t.Fatalf("read terminal task notification Queue custody: %v", err)
 	}
 	wantQueueStatus := queue.StatusCancelled
-	if notificationFirst {
-		wantQueueStatus = queue.StatusAcknowledged
-	}
 	if queueStatus != wantQueueStatus || deliverer.deliveries != 0 {
 		t.Fatalf("terminal task notification Queue custody = %s with %d Runtime calls; want %s/0", queueStatus, deliverer.deliveries, wantQueueStatus)
 	}

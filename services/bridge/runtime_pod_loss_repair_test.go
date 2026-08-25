@@ -113,6 +113,7 @@ func TestPostgreSQLRuntimePodLossPreservesRequestForExactInterruptOwner(t *testi
 		fixture.sessionID, fixture.parentThreadID, interruptID); err != nil {
 		t.Fatalf("seed interrupt barrier Inbox: %v", err)
 	}
+	seedActiveInterruptQueueCustody(t, runtime, fixture.sessionID, fixture.parentThreadID, interruptID, "evt_pod_loss_interrupt_barrier", 2)
 	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})

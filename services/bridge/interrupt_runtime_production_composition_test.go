@@ -78,7 +78,7 @@ func (s *committingInterruptRuntimeSender) Interrupt(ctx context.Context, target
 
 func (s *interruptFollowerRuntimeServer) AcceptInput(context.Context, *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error) {
 	switch s.calls.Add(1) {
-	case 2:
+	case 1:
 		return nil, status.Error(codes.InvalidArgument, "fixture-controlled deterministic rejection")
 	default:
 		return &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Rejected{Rejected: &agentruntimev1.AcceptInputRejected{
@@ -87,7 +87,7 @@ func (s *interruptFollowerRuntimeServer) AcceptInput(context.Context, *agentrunt
 	}
 }
 
-func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *testing.T) {
+func TestPostgreSQLInterruptSettlesPreparedRejectionAndQueuedFollowers(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_interrupt_follower_production"
@@ -163,28 +163,26 @@ func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *tes
 		}
 	}
 
-	retryID := appendMessage("interrupt-follower-retry", "retry before stop")
-	if active, err := newRunner(fixturePort, "interrupt-follower-retry").RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("deliver retryable follower = active:%t err:%v", active, err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
-		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, retryID)); err != nil {
-		t.Fatalf("hold retryable follower behind interrupt: %v", err)
-	}
 	rejectionID := appendMessage("interrupt-follower-rejection", "reject before stop")
 	if active, err := newRunner(fixturePort, "interrupt-follower-rejection").RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("prepare deterministic rejection follower = active:%t err:%v", active, err)
 	}
-	var retryStatus, rejectionStatus, rejectionKind string
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, rejectionID)); err != nil {
+		t.Fatalf("hold rejection follower behind interrupt: %v", err)
+	}
+	queuedID := appendMessage("interrupt-follower-queued", "queued before stop")
+	var rejectionStatus, rejectionKind, queuedStatus, queuedKind string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
-		(SELECT input_kind FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`, retryID, rejectionID).
-		Scan(&retryStatus, &rejectionStatus, &rejectionKind); err != nil {
+			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+			(SELECT input_kind FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+			(SELECT input_kind FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`, rejectionID, queuedID).
+		Scan(&rejectionStatus, &rejectionKind, &queuedStatus, &queuedKind); err != nil {
 		t.Fatalf("read pre-interrupt follower custody: %v", err)
 	}
-	if retryStatus != "delivering" || rejectionStatus != "delivering" || rejectionKind != "rejection" || followerRuntime.calls.Load() != 3 {
-		t.Fatalf("pre-interrupt followers = retry:%s rejection:%s/%s calls:%d", retryStatus, rejectionStatus, rejectionKind, followerRuntime.calls.Load())
+	if rejectionStatus != "delivering" || rejectionKind != "rejection" || queuedStatus != "queued" || queuedKind != "messages" || followerRuntime.calls.Load() != 2 {
+		t.Fatalf("pre-interrupt followers = rejection:%s/%s queued:%s/%s calls:%d", rejectionStatus, rejectionKind, queuedStatus, queuedKind, followerRuntime.calls.Load())
 	}
 
 	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, threadID, bindingID, 1, podUID)
@@ -208,7 +206,7 @@ func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *tes
 	if len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
 		t.Fatalf("follower interrupt Runtime composition = %+v", composed)
 	}
-	var interruptInbox, interruptQueue, retryInbox, retryQueue, rejectionInbox, rejectionQueue string
+	var interruptInbox, interruptQueue, rejectionInbox, rejectionQueue, queuedInbox, queuedQueue string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
@@ -217,16 +215,16 @@ func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *tes
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$5),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$6)`,
 		interruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
-		retryID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, retryID),
-		rejectionID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, rejectionID)).
-		Scan(&interruptInbox, &interruptQueue, &retryInbox, &retryQueue, &rejectionInbox, &rejectionQueue); err != nil {
+		rejectionID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, rejectionID),
+		queuedID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, queuedID)).
+		Scan(&interruptInbox, &interruptQueue, &rejectionInbox, &rejectionQueue, &queuedInbox, &queuedQueue); err != nil {
 		t.Fatalf("read terminal follower custody: %v", err)
 	}
 	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
-		retryInbox != "cancelled" || retryQueue != queue.StatusCancelled ||
-		rejectionInbox != "cancelled" || rejectionQueue != queue.StatusCancelled {
-		t.Fatalf("terminal follower custody = interrupt:%s/%s retry:%s/%s rejection:%s/%s",
-			interruptInbox, interruptQueue, retryInbox, retryQueue, rejectionInbox, rejectionQueue)
+		rejectionInbox != "cancelled" || rejectionQueue != queue.StatusCancelled ||
+		queuedInbox != "cancelled" || queuedQueue != queue.StatusCancelled {
+		t.Fatalf("terminal follower custody = interrupt:%s/%s rejection:%s/%s queued:%s/%s",
+			interruptInbox, interruptQueue, rejectionInbox, rejectionQueue, queuedInbox, queuedQueue)
 	}
 }
 
