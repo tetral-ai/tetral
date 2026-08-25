@@ -58,6 +58,33 @@ type interruptResponseLossSender struct {
 	calls atomic.Int32
 }
 
+type blockingRecoveryCommandSender struct {
+	RuntimeCommandSender
+	recovery   RuntimeRecoveryCommandSender
+	planned    chan *agentruntimev1.RecoverThreadRequest
+	release    chan struct{}
+	targetPort atomic.Int32
+}
+
+func (s *blockingRecoveryCommandSender) RecoverThread(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.RecoverThreadRequest,
+) (*agentruntimev1.RecoverThreadResponse, error) {
+	select {
+	case s.planned <- request:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	target.Port = int(s.targetPort.Load())
+	return s.recovery.RecoverThread(ctx, target, request)
+}
+
 func (s *interruptResponseLossSender) Interrupt(
 	ctx context.Context,
 	target RuntimePodTarget,
@@ -72,6 +99,18 @@ func (s *interruptResponseLossSender) Interrupt(
 		return nil, errors.New("interrupt response is nil")
 	}
 	return nil, errSyntheticInterruptResponseLoss
+}
+
+func (s *interruptResponseLossSender) RecoverThread(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.RecoverThreadRequest,
+) (*agentruntimev1.RecoverThreadResponse, error) {
+	recovery, ok := s.RuntimeCommandSender.(RuntimeRecoveryCommandSender)
+	if !ok {
+		return nil, errors.New("runtime recovery sender is unavailable")
+	}
+	return recovery.RecoverThread(ctx, target, request)
 }
 
 func (s *committingInterruptRuntimeSender) Interrupt(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
@@ -700,7 +739,6 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		siblingReqID  = "mreq_interrupt_pod_loss_sibling"
 		oldBindingID  = "bind_interrupt_pod_loss_old"
 		oldPodUID     = "pod_interrupt_pod_loss_old"
-		newBindingID  = "bind_interrupt_pod_loss_new"
 		newPodUID     = "pod_interrupt_pod_loss_new"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
@@ -722,7 +760,6 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 	if err != nil || len(birth.Data) != 1 {
 		t.Fatalf("birth pre-loss interrupt = %#v/%v", birth, err)
 	}
-	interruptEventID := birth.Data[0].ID
 	var interruptID, jobID string
 	var attemptsBefore int
 	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.runtime_input_id, job.id, job.attempt_count
@@ -756,25 +793,18 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		t.Fatalf("pod-loss partition = main %d/%d sibling ends %d bindings %d; want 0/0 1 0",
 			mainEndsAfterLoss, mainResultsAfterLoss, siblingEndsAfterLoss, oldBindings)
 	}
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
-		SET status='running', binding_id=$2, binding_generation=2, updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
-		t.Fatalf("install replacement Runtime status fence: %v", err)
+	var recoveryJobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND dedupe_key=$2 AND status='pending'`,
+		queue.KindRuntimeRecovery,
+		queue.FormatRuntimeRecoveryDedupeKey(workspace.DefaultID, sessionID, mainToolID),
+	).Scan(&recoveryJobs); err != nil {
+		t.Fatalf("read interrupted Thread recovery custody: %v", err)
+	}
+	if recoveryJobs != 1 {
+		t.Fatalf("interrupted Thread recovery jobs = %d; want one exact pending owner", recoveryJobs)
 	}
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-pod-loss-production-key")
-	replacementScope := bridgeAPIScope(sessionID, threadID, newBindingID, 2, newPodUID)
-	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: replacementScope})
-	if err != nil {
-		t.Fatalf("load replacement interrupt context: %v", err)
-	}
-	loadedContext := []byte(loaded.GetContextJson())
-	for _, requiredFact := range []string{mainTurnID, mainRequestID, mainToolID, interruptEventID} {
-		if !bytes.Contains(loadedContext, []byte(requiredFact)) {
-			t.Fatalf("replacement context does not contain required durable fact %q", requiredFact)
-		}
-	}
-
 	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for pod-loss Bridge: %v", err)
@@ -786,20 +816,22 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		bridgeServer.Stop()
 		_ = bridgeListener.Close()
 	})
-	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, threadID, newBindingID, 2, newPodUID)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
-		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, newBindingID); err != nil {
-		t.Fatalf("align replacement Runtime binding: %v", err)
-	}
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, runtimeProcess.port)
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
 		}})
 	}}
 	queueStore := queue.NewPostgreSQLStore(client)
+	baseSender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	recoverySender := &blockingRecoveryCommandSender{
+		RuntimeCommandSender: baseSender,
+		recovery:             baseSender,
+		planned:              make(chan *agentruntimev1.RecoverThreadRequest, 1),
+		release:              make(chan struct{}),
+	}
 	responseLossSender := &interruptResponseLossSender{
-		RuntimeCommandSender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
+		RuntimeCommandSender: recoverySender,
 	}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
@@ -811,6 +843,62 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		err    error
 	}
 	delivery := make(chan deliveryResult, 1)
+	go func() {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		delivery <- deliveryResult{active: active, err: runErr}
+	}()
+	var recoveryRequest *agentruntimev1.RecoverThreadRequest
+	select {
+	case recoveryRequest = <-recoverySender.planned:
+	case unexpected := <-delivery:
+		t.Fatalf("first post-loss Queue job bypassed recovery = active:%t err:%v", unexpected.active, unexpected.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("runtime recovery lease did not install the replacement Runtime")
+	}
+	if recoveryRequest.GetSourceEventId() != mainToolID || recoveryRequest.GetRecoveryLeaseRef() == nil {
+		t.Fatalf("replacement recovery authority = source:%s lease:%#v; want %s and exact lease",
+			recoveryRequest.GetSourceEventId(), recoveryRequest.GetRecoveryLeaseRef(), mainToolID)
+	}
+	runtimeProcess, paths := startInterruptRuntimeComposition(
+		t,
+		t.TempDir(),
+		bridgeListener.Addr().String(),
+		sessionID,
+		threadID,
+		recoveryRequest.GetBindingId(),
+		recoveryRequest.GetBindingGeneration(),
+		recoveryRequest.GetTargetPodUid(),
+	)
+	deliveryStore.RuntimeGRPCPort = runtimeProcess.port
+	recoverySender.targetPort.Store(int32(runtimeProcess.port))
+	close(recoverySender.release)
+	select {
+	case recovered := <-delivery:
+		if recovered.err != nil || !recovered.active {
+			t.Fatalf("recover interrupted Thread under exact lease = active:%t err:%v", recovered.active, recovered.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("runtime recovery delivery did not finish: %s", runtimeProcess.output.String())
+	}
+	var recoveryQueueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND dedupe_key=$2`,
+		queue.KindRuntimeRecovery,
+		queue.FormatRuntimeRecoveryDedupeKey(workspace.DefaultID, sessionID, mainToolID),
+	).Scan(&recoveryQueueStatus); err != nil {
+		t.Fatalf("read recovery Queue settlement: %v", err)
+	}
+	if recoveryQueueStatus != queue.StatusAcknowledged {
+		t.Fatalf("recovery Queue status = %s; want acknowledged before interrupt delivery", recoveryQueueStatus)
+	}
+	replacementScope := bridgeAPIScope(
+		sessionID,
+		threadID,
+		recoveryRequest.GetBindingId(),
+		recoveryRequest.GetBindingGeneration(),
+		recoveryRequest.GetTargetPodUid(),
+	)
+	delivery = make(chan deliveryResult, 1)
 	go func() {
 		active, runErr := runner.RunOnceWithActivity(context.Background())
 		delivery <- deliveryResult{active: active, err: runErr}
@@ -935,6 +1023,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 		threadID       = "thr_interrupt_closeout_then_loss"
 		bindingID      = "bind_interrupt_closeout_then_loss"
 		podUID         = "pod_interrupt_closeout_then_loss"
+		newPodUID      = "pod_interrupt_closeout_then_loss_new"
 		turnID         = "evt_interrupt_closeout_then_loss_running"
 		modelRequestID = "mreq_interrupt_closeout_then_loss"
 		interruptID    = "rin_interrupt_closeout_then_loss"
@@ -974,6 +1063,14 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	if inboxAfterCloseout != "committed" {
 		t.Fatalf("interrupt Inbox after closeout = %s; want committed", inboxAfterCloseout)
 	}
+	closeoutJob, err := DecodeRuntimeJob(queueJobProto(oldLease))
+	if err != nil {
+		t.Fatalf("decode committed interrupt closeout job: %v", err)
+	}
+	if replayed, found, replayErr := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090).
+		ReplayRuntimeDeliveryFinalization(context.Background(), closeoutJob); replayErr != nil || found {
+		t.Fatalf("replay interrupt receipt while durable Turn is open = %#v/%t/%v; want not found", replayed, found, replayErr)
+	}
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	repairStore := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
@@ -999,22 +1096,141 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	}); err != nil || reclaimed != 1 {
 		t.Fatalf("reclaim pre-loss interrupt lease = %d/%v", reclaimed, err)
 	}
-	sender := &recordingRuntimeCommandSender{}
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	client := dbconnect.NewClientForTesting(runtime)
+	store.RuntimeBindingTokenHMACKey = []byte("interrupt-closeout-then-loss-key")
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for closeout recovery Bridge: %v", err)
+	}
+	bridgeServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeServer, store)
+	go func() { _ = bridgeServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeServer.Stop()
+		_ = bridgeListener.Close()
+	})
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
-		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
+		}})
 	}}
+	baseSender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	recoverySender := &blockingRecoveryCommandSender{
+		RuntimeCommandSender: baseSender,
+		recovery:             baseSender,
+		planned:              make(chan *agentruntimev1.RecoverThreadRequest, 1),
+		release:              make(chan struct{}),
+	}
+	responseLossSender := &interruptResponseLossSender{RuntimeCommandSender: recoverySender}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseLossSender},
 		Config: JobRunnerConfig{LeaseOwner: "interrupt-closeout-replay-owner", MaxJobs: 1,
 			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("replay interrupt receipt after pod loss = active:%t err:%v", active, err)
+	type deliveryResult struct {
+		active bool
+		err    error
 	}
-	if len(sender.requests) != 0 {
-		t.Fatalf("Runtime calls after committed interrupt closeout and pod loss = %d; want 0", len(sender.requests))
+	recoveryDelivery := make(chan deliveryResult, 1)
+	go func() {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		recoveryDelivery <- deliveryResult{active: active, err: runErr}
+	}()
+	var recoveryRequest *agentruntimev1.RecoverThreadRequest
+	select {
+	case recoveryRequest = <-recoverySender.planned:
+	case unexpected := <-recoveryDelivery:
+		t.Fatalf("committed closeout bypassed recovery = active:%t err:%v", unexpected.active, unexpected.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("committed closeout did not lease Runtime recovery")
+	}
+	if recoveryRequest.GetSourceEventId() == "" || recoveryRequest.GetRecoveryLeaseRef() == nil {
+		t.Fatalf("closeout recovery authority = source:%q lease:%#v; want Request End source and exact lease",
+			recoveryRequest.GetSourceEventId(), recoveryRequest.GetRecoveryLeaseRef())
+	}
+	runtimeProcess, paths := startInterruptRuntimeComposition(
+		t,
+		t.TempDir(),
+		bridgeListener.Addr().String(),
+		sessionID,
+		threadID,
+		recoveryRequest.GetBindingId(),
+		recoveryRequest.GetBindingGeneration(),
+		recoveryRequest.GetTargetPodUid(),
+	)
+	deliveryStore.RuntimeGRPCPort = runtimeProcess.port
+	recoverySender.targetPort.Store(int32(runtimeProcess.port))
+	close(recoverySender.release)
+	select {
+	case recovered := <-recoveryDelivery:
+		if recovered.err != nil || !recovered.active {
+			t.Fatalf("recover committed interrupt closeout = active:%t err:%v", recovered.active, recovered.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("committed closeout recovery did not finish delivery: %s", runtimeProcess.output.String())
+	}
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build closeout recovery output capture registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "interrupt-closeout-recovery-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	captureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete recovered interrupt output capture: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(captureDeadline) {
+			t.Fatalf("recovered interrupt closeout did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	idleDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var idleEvents int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			  AND type='session.status_idle' AND sequence > (
+			    SELECT sequence FROM session_events WHERE workspace_id='default' AND event_id=$3
+			  )`, sessionID, threadID, turnID).Scan(&idleEvents); err != nil {
+			t.Fatalf("read recovered idle settlement: %v", err)
+		}
+		if idleEvents == 1 {
+			break
+		}
+		if time.Now().After(idleDeadline) {
+			t.Fatalf("replacement Runtime did not FinishIdle before receipt replay: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release closeout recovery Runtime: %v", err)
+	}
+	composed := runtimeProcess.wait(t)
+	if composed.ProviderInvocations != 0 || len(composed.InterruptResult) != 0 {
+		t.Fatalf("closeout recovery Runtime activity = %+v; want recovered closeout without Provider or new interrupt", composed)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("replay interrupt receipt after recovered FinishIdle = active:%t err:%v", active, err)
+	}
+	if calls := responseLossSender.calls.Load(); calls != 0 {
+		t.Fatalf("Runtime interrupt calls after recovered closeout receipt = %d; want 0", calls)
 	}
 	var queueStatus string
 	var requestEnds, receipts, bindings int
@@ -1029,8 +1245,8 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	).Scan(&queueStatus, &requestEnds, &receipts, &bindings); err != nil {
 		t.Fatalf("read post-loss receipt replay facts: %v", err)
 	}
-	if queueStatus != queue.StatusAcknowledged || requestEnds != 1 || receipts != 1 || bindings != 0 {
-		t.Fatalf("post-loss receipt replay = Queue:%s ends:%d receipts:%d bindings:%d; want acknowledged/1/1/0",
+	if queueStatus != queue.StatusAcknowledged || requestEnds != 1 || receipts != 1 || bindings != 1 {
+		t.Fatalf("post-loss receipt replay = Queue:%s ends:%d receipts:%d bindings:%d; want acknowledged/1/1/1",
 			queueStatus, requestEnds, receipts, bindings)
 	}
 }

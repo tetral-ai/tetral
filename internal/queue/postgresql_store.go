@@ -649,9 +649,11 @@ func leaseCandidatesQuery(kindPredicate string) string {
 	                      AND pending.kind <> 'session_delete_cleanup')
 	             AND pending.available_at <= $2
 	             AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
-	           OR (candidate.delivery_scope = 'thread'
-	             AND pending.causal_session_id = candidate.causal_session_id
-	             AND (
+	               OR (candidate.delivery_scope = 'thread'
+	                 AND pending.causal_session_id = candidate.causal_session_id
+	                 AND NOT (candidate.kind = 'runtime_recovery'
+	                          AND pending.control_class = 'interrupt')
+	                 AND (
 	               (pending.delivery_scope = 'session'
 	                 AND pending.queue_partition_sequence < candidate.queue_partition_sequence
 	                 AND NOT (candidate.control_class = 'interrupt'
@@ -659,6 +661,9 @@ func leaseCandidatesQuery(kindPredicate string) string {
 	               OR (pending.delivery_scope = 'thread'
 	                 AND pending.delivery_thread_id = candidate.delivery_thread_id
 	                 AND (
+	                   (pending.kind = 'runtime_recovery'
+	                     AND candidate.control_class = 'interrupt')
+	                   OR
 	                   (pending.control_class = 'interrupt'
 	                     AND (candidate.control_class <> 'interrupt'
 	                          OR pending.queue_partition_sequence < candidate.queue_partition_sequence))
@@ -780,6 +785,8 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		             AND pending.queue_partition_sequence < $10)
 		           OR (candidate.delivery_scope = 'thread'
 		             AND pending.causal_session_id = candidate.causal_session_id
+		             AND NOT (candidate.kind = 'runtime_recovery'
+		                      AND pending.control_class = 'interrupt')
 		             AND (
 		               (pending.delivery_scope = 'session'
 		                 AND pending.queue_partition_sequence < $10
@@ -788,6 +795,9 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		               OR (pending.delivery_scope = 'thread'
 		                 AND pending.delivery_thread_id = candidate.delivery_thread_id
 		                 AND (
+		                   (pending.kind = 'runtime_recovery'
+		                     AND candidate.control_class = 'interrupt')
+		                   OR
 					                   (pending.control_class = 'interrupt'
 					                     AND (candidate.control_class <> 'interrupt'
 					                          OR pending.queue_partition_sequence < $10))

@@ -73,6 +73,18 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := enqueueInterruptedRuntimePodLostRecoveriesTx(
+		ctx,
+		tx,
+		workspaceID,
+		sessionID,
+		affected.ThreadIDs,
+		interruptedThreads,
+		binding,
+		now,
+	); err != nil {
+		return 0, 0, err
+	}
 	toolUses = filterRuntimePodLostToolUses(toolUses, interruptedThreads)
 	repaired := handedOff
 	for _, start := range starts {
@@ -125,6 +137,35 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	}
 	repaired += liveScopesSettled
 	return repaired, handedOff, nil
+}
+
+func enqueueInterruptedRuntimePodLostRecoveriesTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	threadIDs []string,
+	interruptedThreads map[string]string,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) error {
+	for _, threadID := range threadIDs {
+		if _, interrupted := interruptedThreads[threadID]; !interrupted {
+			continue
+		}
+		scope := runtimePodLostRepairScope(workspaceID, sessionID, threadID, binding)
+		toolUseEventID, ownedToolRoute, err := runtimePodLostNonterminalToolOwnerTx(ctx, tx, scope)
+		if err != nil {
+			return err
+		}
+		if !ownedToolRoute {
+			continue
+		}
+		if err := retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, binding, toolUseEventID, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func filterRuntimePodLostThreadIDs(threadIDs []string, interrupted map[string]string) []string {
@@ -756,7 +797,14 @@ func settleRuntimePodLostLiveScopeTx(
 		return err
 	}
 	if ownedToolRoute {
-		return retireRuntimePodLostOwnedToolBindingTx(ctx, tx, scope, binding, toolUseEventID, now)
+		return retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, binding, toolUseEventID, now)
+	}
+	interruptCloseoutEventID, interruptCloseoutPending, err := runtimePodLostPendingInterruptCloseoutSourceTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if interruptCloseoutPending {
+		return retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, binding, interruptCloseoutEventID, now)
 	}
 	interruptedThenLost, err := runtimePodLostInterruptedThenLostTx(ctx, tx, workspaceID, sessionID, threadID)
 	if err != nil {
@@ -911,7 +959,7 @@ func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx,
 // A lost binding does not own a Runtime-selected nonterminal Tool route. Retire
 // only the process custody; the existing Thread lifecycle remains recoverable
 // so a replacement Runtime can wait on the same durable owner.
-func retireRuntimePodLostOwnedToolBindingTx(
+func retireRuntimePodLostRecoverableBindingTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
@@ -940,6 +988,84 @@ func retireRuntimePodLostOwnedToolBindingTx(
 		return err
 	}
 	return enqueueRuntimeRecoveryTx(ctx, tx, scope, toolUseEventID, now)
+}
+
+func runtimePodLostPendingInterruptCloseoutSourceTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+) (string, bool, error) {
+	var requestEndEventID string
+	err := tx.QueryRow(ctx,
+		`WITH latest_running AS MATERIALIZED (
+		   SELECT event_id, sequence
+		     FROM session_events
+		    WHERE workspace_id = $1
+		      AND session_id = $2
+		      AND session_thread_id = $3
+		      AND type IN ('session.status_running', 'session.thread_status_running')
+		    ORDER BY sequence DESC
+		    LIMIT 1
+		 ), open_running AS MATERIALIZED (
+		   SELECT event_id, sequence
+		     FROM latest_running running
+		    WHERE NOT EXISTS (
+		      SELECT 1
+		        FROM session_events closeout
+		       WHERE closeout.workspace_id = $1
+		         AND closeout.session_id = $2
+		         AND closeout.session_thread_id = $3
+		         AND closeout.type IN (
+		           'session.status_idle',
+		           'session.thread_status_idle',
+		           'session.status_terminated',
+		           'session.thread_status_terminated'
+		         )
+		         AND closeout.sequence > running.sequence
+		    )
+		 )
+		 SELECT request_end.event_id
+		   FROM open_running running
+		   JOIN session_events request_end
+		     ON request_end.workspace_id = $1
+		    AND request_end.session_id = $2
+		    AND request_end.session_thread_id = $3
+		    AND request_end.type = 'span.model_request_end'
+		    AND request_end.sequence > running.sequence
+		  WHERE EXISTS (
+		    SELECT 1
+		      FROM session_runtime_inbox inbox
+		      JOIN session_bridge_operations receipt
+		        ON receipt.workspace_id = inbox.workspace_id
+		       AND receipt.session_id = inbox.session_id
+		       AND receipt.session_thread_id = inbox.session_thread_id
+		       AND receipt.operation = $4
+		       AND receipt.source_kind = 'interrupt_control'
+		       AND receipt.idempotency_key = inbox.runtime_input_id
+		       AND receipt.receipt_json <> ''
+		      JOIN queue_jobs queue
+		        ON queue.workspace_id = inbox.workspace_id
+		       AND queue.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		       AND queue.kind = 'runtime_input'
+		       AND queue.status IN ('pending', 'leased')
+		     WHERE inbox.workspace_id = $1
+		       AND inbox.session_id = $2
+		       AND inbox.session_thread_id = $3
+		       AND inbox.input_kind = 'interrupt_control'
+		       AND inbox.status = 'committed'
+		  )
+		  ORDER BY request_end.sequence DESC
+		  LIMIT 1
+		  FOR UPDATE OF request_end`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		bridgeOpCommitInputs,
+	).Scan(&requestEndEventID)
+	if dbconnect.IsNoRows(err) {
+		return "", false, nil
+	}
+	return requestEndEventID, err == nil, err
 }
 
 func activeRuntimePodLostRescheduleTx(

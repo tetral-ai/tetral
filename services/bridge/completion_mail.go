@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -658,6 +659,19 @@ func appendDeclaredCompletionMailForSourceTx(
 	parentThreadID, sourceToolUseEventID, targetTaskName, err := completionLineageTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
+	}
+	closing, err := childcontrol.ThreadOrAncestorClosingTx(
+		ctx,
+		tx,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		parentThreadID,
+	)
+	if err != nil {
+		return "", err
+	}
+	if closing {
+		return "", nil
 	}
 	deliveryID := completionDeliveryID(scope.GetSessionThreadId(), sourceID)
 	messageJSON, err := publicAgentMailMessageJSON(text)

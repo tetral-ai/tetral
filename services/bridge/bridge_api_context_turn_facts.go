@@ -256,6 +256,38 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND inbox.input_kind = 'interrupt_control'
 		   AND inbox.status IN ('queued', 'delivering', 'accepted')
 	),
+	committed_interrupt_closeout AS MATERIALIZED (
+		SELECT request_end.event_id, request_end.model_request_id, interrupt_input.event_ids_json
+		  FROM turn_root
+		  JOIN session_events request_end
+		    ON request_end.workspace_id = $1
+		   AND request_end.session_id = $2
+		   AND request_end.session_thread_id = $3
+		   AND request_end.type = 'span.model_request_end'
+		   AND request_end.model_request_id IS NOT NULL
+		   AND request_end.sequence > turn_root.sequence
+		   AND request_end.payload_json::jsonb ->> 'error_kind' = 'runtime_interrupted'
+		  JOIN session_runtime_inbox interrupt_input
+		    ON interrupt_input.workspace_id = request_end.workspace_id
+		   AND interrupt_input.session_id = request_end.session_id
+		   AND interrupt_input.session_thread_id = request_end.session_thread_id
+		   AND interrupt_input.input_kind = 'interrupt_control'
+		   AND interrupt_input.status = 'committed'
+		  JOIN session_bridge_operations receipt
+		    ON receipt.workspace_id = interrupt_input.workspace_id
+		   AND receipt.session_id = interrupt_input.session_id
+		   AND receipt.session_thread_id = interrupt_input.session_thread_id
+		   AND receipt.operation = 'commit_inputs'
+		   AND receipt.source_kind = 'interrupt_control'
+		   AND receipt.idempotency_key = interrupt_input.runtime_input_id
+		   AND receipt.receipt_json <> ''
+		 ORDER BY request_end.sequence DESC
+		 LIMIT 1
+	),
+	committed_interrupt_events AS MATERIALIZED (
+		SELECT jsonb_array_elements_text(event_ids_json::jsonb) AS event_id
+		  FROM committed_interrupt_closeout
+	),
 	retained_ends AS MATERIALIZED (
 		SELECT event_id, model_request_id, payload_json::jsonb AS payload
 		  FROM session_events
@@ -269,6 +301,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		     SELECT model_request_id FROM selected_request_input
 		     UNION SELECT model_request_id FROM open_request
 		     UNION SELECT model_request_id FROM current_reschedule
+		     UNION SELECT model_request_id FROM committed_interrupt_closeout
 		   )
 	),
 	retained_requests AS MATERIALIZED (
@@ -279,6 +312,8 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		SELECT model_request_id FROM open_request
 		UNION
 		SELECT model_request_id FROM current_reschedule
+		UNION
+		SELECT model_request_id FROM committed_interrupt_closeout
 	),
 	request_reschedules AS MATERIALIZED (
 		SELECT DISTINCT ON (model_request_id) model_request_id, projection_json
@@ -340,6 +375,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		UNION SELECT event_id FROM retained_tools
 		UNION SELECT event_id FROM retained_repairs
 		UNION SELECT event_id FROM pending_interrupts
+		UNION SELECT event_id FROM committed_interrupt_events
 	),
 	selected_events AS MATERIALIZED (
 		SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id

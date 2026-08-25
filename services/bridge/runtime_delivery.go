@@ -1037,6 +1037,13 @@ func interruptDeliveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job Run
 		return RuntimeInterruptDeliveryAuthority{}, err
 	}
 	if !barrierActive || barrier.runtimeInputID != job.RuntimeInputID {
+		pendingCloseout, err := committedInterruptCloseoutNeedsRuntimeTx(ctx, tx, job)
+		if err != nil {
+			return RuntimeInterruptDeliveryAuthority{}, err
+		}
+		if pendingCloseout {
+			return RuntimeInterruptDeliveryAuthority{Active: true}, nil
+		}
 		settled, err := queue.CancelLeasedRuntimeInputCustodyTx(ctx, tx, queue.CancelLeasedRuntimeInputRequest{
 			Lease: queue.ExactLeaseRequest{
 				WorkspaceID: workspaceID, JobID: job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
@@ -2359,6 +2366,15 @@ func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, 
 	case "dead_lettered":
 		return runtimeDeliveryExhaustedResult(), true, nil
 	case "committed":
+		if job.InputKind == "interrupt_control" {
+			pendingCloseout, err := committedInterruptCloseoutNeedsRuntimeTx(ctx, tx, job)
+			if err != nil {
+				return RuntimeDeliveryResult{}, false, err
+			}
+			if pendingCloseout {
+				return RuntimeDeliveryResult{}, false, nil
+			}
+		}
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
 	case "cancelled":
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}, true, nil
@@ -2367,6 +2383,49 @@ func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, 
 	default:
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 	}
+}
+
+func committedInterruptCloseoutNeedsRuntimeTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
+	if job.InputKind != "interrupt_control" {
+		return false, nil
+	}
+	var committed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1
+		     FROM session_runtime_inbox inbox
+		     JOIN session_bridge_operations receipt
+		       ON receipt.workspace_id = inbox.workspace_id
+		      AND receipt.session_id = inbox.session_id
+		      AND receipt.session_thread_id = inbox.session_thread_id
+		      AND receipt.operation = $5
+		      AND receipt.source_kind = 'interrupt_control'
+		      AND receipt.idempotency_key = inbox.runtime_input_id
+		      AND receipt.receipt_json <> ''
+		    WHERE inbox.workspace_id = $1
+		      AND inbox.session_id = $2
+		      AND inbox.session_thread_id = $3
+		      AND inbox.runtime_input_id = $4
+		      AND inbox.input_kind = 'interrupt_control'
+		      AND inbox.status = 'committed'
+		 )`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.SessionThreadID,
+		job.RuntimeInputID,
+		bridgeOpCommitInputs,
+	).Scan(&committed); err != nil {
+		return false, err
+	}
+	if !committed {
+		return false, nil
+	}
+	openTurn, err := loadOpenDurableTurnIDTx(ctx, tx, &bridgev1.RuntimeScope{
+		WorkspaceId:     job.WorkspaceID,
+		SessionId:       job.SessionID,
+		SessionThreadId: job.SessionThreadID,
+	})
+	return openTurn != nil, err
 }
 
 func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
@@ -3234,7 +3293,8 @@ func validateRuntimeRecoveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, j
 	}
 	if sourceThreadID != job.SessionThreadID ||
 		(sourceType != "agent.tool_use" && sourceType != "agent.mcp_tool_use" &&
-			sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled") {
+			sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled" &&
+			sourceType != "span.model_request_end") {
 		return false, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery source is invalid", retryable: false}
 	}
 	return true, false, nil
