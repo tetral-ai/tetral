@@ -142,9 +142,7 @@ const hosts = await buildRuntimeCoreHosts({
 });
 
 const cleanupController = {
-	startCleanup: async () => {
-		throw new Error("unexpected cleanup command");
-	},
+	startCleanup: hosts.cleanupRunHost.handleCleanupSession,
 } satisfies RuntimeCleanupController;
 const service = new RuntimeControlService({
 	ownPod: {

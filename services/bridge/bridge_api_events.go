@@ -328,7 +328,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			now,
 		)
 	}); err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) || (toolDeclaration != nil && isModelRequestSealedError(err)) {
 			return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Stale{Stale: &bridgev1.WriteEventStale{}}}, nil
 		}
 		return nil, err
@@ -453,7 +453,7 @@ func verifyModelRequestAcceptsMembersTx(
 		return status.Error(codes.FailedPrecondition, "model request start is not durable")
 	}
 	if ends != 0 {
-		return status.Error(codes.FailedPrecondition, "model request is already sealed")
+		return modelRequestSealedError(status.Error(codes.FailedPrecondition, "model request is already sealed"))
 	}
 	return nil
 }

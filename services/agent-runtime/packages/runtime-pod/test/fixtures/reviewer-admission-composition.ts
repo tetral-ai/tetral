@@ -25,6 +25,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly parentBoundaryEventId: string;
 	readonly beforeTrunkReleasePath?: string;
 	readonly trunkReleasePath?: string;
 };
@@ -253,7 +254,7 @@ function reviewRequest(
 		targetPodUid: input.targetPodUid,
 		runtimeBindingToken: "reviewer-composition-token",
 		modelRequestId: "mreq_reviewer_composition_parent",
-		parentBoundaryEventId: "evt_reviewer_composition_parent",
+		parentBoundaryEventId: input.parentBoundaryEventId,
 		targetModelToolCallId,
 		targetToolName: "Write",
 		actionJson: { path: "src/a.ts", content: "ok" },

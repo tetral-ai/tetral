@@ -674,6 +674,33 @@ func TestPostgreSQLSessionStoreDeleteRevokesIdleRuntimeDeliveryLease(t *testing.
 	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='session_delete_cleanup' AND status='pending'`); got != 1 {
 		t.Fatalf("delete cleanup jobs = %d; want 1", got)
 	}
+	// Treat the first successful transaction response as lost. Re-entering the
+	// production delete owner must replay the same tombstone and cleanup custody.
+	if err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
+		return tx.DeleteSession(ctx, sessionID)
+	}); err != nil {
+		t.Fatalf("replay DeleteSession after response loss: %v", err)
+	}
+	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.deleted'`, sessionID); got != 1 {
+		t.Fatalf("session.deleted Events after response-loss replay = %d; want 1", got)
+	}
+	if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='session_delete_cleanup'`); got != 1 {
+		t.Fatalf("delete cleanup jobs after response-loss replay = %d; want 1", got)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$3),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$4)`,
+		job.ID, inputID, interruptJob.ID, interruptInput,
+	).Scan(&queueStatus, &inboxStatus, &interruptQueueStatus, &interruptInboxStatus); err != nil {
+		t.Fatalf("read replayed delete custody: %v", err)
+	}
+	if queueStatus != queue.StatusCancelled || inboxStatus != "cancelled" ||
+		interruptQueueStatus != queue.StatusCancelled || interruptInboxStatus != "cancelled" {
+		t.Fatalf("replayed delete custody = message %s/%s interrupt %s/%s; want all cancelled",
+			queueStatus, inboxStatus, interruptQueueStatus, interruptInboxStatus)
+	}
 }
 
 func TestPostgreSQLSessionStoreDeleteOwnsIdleCleanupLeaseAtomically(t *testing.T) {

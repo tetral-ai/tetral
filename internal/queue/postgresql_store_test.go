@@ -163,6 +163,104 @@ func TestPostgreSQLStoreThreadLanesAndSessionExclusiveLeaseMatrix(t *testing.T) 
 	}
 }
 
+func TestPostgreSQLStoreThreadAndSessionLeaseOwnersRevalidateBothWinnerOrders(t *testing.T) {
+	for _, winner := range []string{"thread", "session"} {
+		t.Run(winner+"_wins", func(t *testing.T) {
+			store, admin := newPostgreSQLQueueStore(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			ws := workspace.DefaultID
+			sessionID := "sesn_scope_lease_" + winner
+			threadID := "thrd_scope_lease_" + winner
+			inputID := "rin_scope_lease_" + winner
+			now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+			seedQueueRuntimeInbox(t, admin, sessionID, threadID, inputID, "messages", `[]`, 1, 1)
+			threadRequest := EnqueueRequest{
+				ID: "qjob_scope_t_" + winner, WorkspaceID: ws, Kind: KindRuntimeInput,
+				PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+				DedupeKey:    FormatRuntimeInputDedupeKey(ws, sessionID, inputID),
+				PayloadJSON:  runtimeInputPayload(t, ws, sessionID, threadID, inputID, "messages", 1, 1),
+				Now:          now,
+			}
+			sessionRequest := EnqueueRequest{
+				ID: "qjob_scope_s_" + winner, WorkspaceID: ws, Kind: KindRuntimeConfigUpdate,
+				PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+				DedupeKey:    FormatRuntimeConfigUpdateDedupeKey(ws, sessionID, "1"),
+				PayloadJSON:  []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","config_generation":1}`),
+				Now:          now.Add(time.Millisecond),
+			}
+			var threadJob, sessionJob *Job
+			if winner == "session" {
+				sessionJob = mustEnqueue(t, store, sessionRequest)
+				threadJob = mustEnqueue(t, store, threadRequest)
+			} else {
+				threadJob = mustEnqueue(t, store, threadRequest)
+				sessionJob = mustEnqueue(t, store, sessionRequest)
+			}
+			winnerJob := threadJob
+			winnerKinds := []string{KindRuntimeInput}
+			loserKinds := []string{KindRuntimeConfigUpdate}
+			if winner == "session" {
+				winnerJob = sessionJob
+				winnerKinds, loserKinds = loserKinds, winnerKinds
+			}
+
+			blocker, err := admin.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin exact candidate blocker: %v", err)
+			}
+			defer func() { _ = blocker.Rollback() }()
+			var blockedJob string
+			if err := blocker.QueryRowContext(ctx, `SELECT id FROM queue_jobs WHERE workspace_id='default' AND id=$1 FOR UPDATE`, winnerJob.ID).Scan(&blockedJob); err != nil {
+				t.Fatalf("lock winning candidate: %v", err)
+			}
+			var blockerPID int
+			if err := blocker.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+				t.Fatalf("read candidate blocker pid: %v", err)
+			}
+
+			type leaseResult struct {
+				jobs []*Job
+				err  error
+			}
+			winning := make(chan leaseResult, 1)
+			go func() {
+				jobs, err := store.Lease(ctx, LeaseRequest{
+					WorkspaceID: ws, Kinds: winnerKinds, LeaseOwner: "bridge-" + winner + "-winner",
+					MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+				})
+				winning <- leaseResult{jobs: jobs, err: err}
+			}()
+			waitForQueueSessionLockWaiters(t, admin, blockerPID, 1)
+
+			losing := make(chan leaseResult, 1)
+			go func() {
+				jobs, err := store.Lease(ctx, LeaseRequest{
+					WorkspaceID: ws, Kinds: loserKinds, LeaseOwner: "bridge-" + winner + "-loser",
+					MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+				})
+				losing <- leaseResult{jobs: jobs, err: err}
+			}()
+			select {
+			case result := <-losing:
+				t.Fatalf("incompatible Lease passed active Session owner: jobs=%#v err=%v", result.jobs, result.err)
+			default:
+			}
+			if err := blocker.Commit(); err != nil {
+				t.Fatalf("release winning candidate: %v", err)
+			}
+			won := <-winning
+			if won.err != nil || len(won.jobs) != 1 || won.jobs[0].ID != winnerJob.ID {
+				t.Fatalf("winning %s Lease = %#v/%v; want %s", winner, won.jobs, won.err, winnerJob.ID)
+			}
+			lost := <-losing
+			if lost.err != nil || len(lost.jobs) != 0 {
+				t.Fatalf("losing incompatible Lease = %#v/%v; want no grant after revalidation", lost.jobs, lost.err)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLStoreLeaseCandidatePlanUsesActiveQueueIndexesUnderRLS(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
@@ -704,8 +802,8 @@ func TestPostgreSQLStoreMultiSessionLeaseUsesCanonicalLockOrder(t *testing.T) {
 		jobID, sessionID, threadID, inputID string
 		priority                            int
 	}{
-		{jobID: "qjob_input_a", sessionID: "sesn_lock_worker_a", threadID: "thrd_lock_worker_a", inputID: "rin_lock_worker_a", priority: 100},
-		{jobID: "qjob_input_b", sessionID: "sesn_lock_worker_b", threadID: "thrd_lock_worker_b", inputID: "rin_lock_worker_b", priority: 0},
+		{jobID: "qjob_input_a", sessionID: "sesn_lock_worker_a", threadID: "thrd_lock_worker_a", inputID: "rin_lock_worker_a", priority: 0},
+		{jobID: "qjob_input_b", sessionID: "sesn_lock_worker_b", threadID: "thrd_lock_worker_b", inputID: "rin_lock_worker_b", priority: 100},
 	} {
 		mustEnqueue(t, store, EnqueueRequest{
 			ID: candidate.jobID, WorkspaceID: workspace.DefaultID, Kind: KindRuntimeInput,
@@ -780,7 +878,7 @@ func TestPostgreSQLStoreMultiSessionLeaseUsesCanonicalLockOrder(t *testing.T) {
 	if len(second.jobs) != 0 {
 		winner = second
 	}
-	want := []string{"qjob_input_a", "qjob_input_b"}
+	want := []string{"qjob_input_b", "qjob_input_a"}
 	if got := jobIDs(winner.jobs); !reflect.DeepEqual(got, want) {
 		t.Fatalf("concurrent Queue winner %s = %v; want %v", winner.owner, got, want)
 	}

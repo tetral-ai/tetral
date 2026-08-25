@@ -167,7 +167,7 @@ func TestRuntimePodDirectDelivererSendsPreparedRuntimeCommand(t *testing.T) {
 	}
 }
 
-func TestRuntimeDeliveryMapsSessionBarrierStaleWithoutRetryOrAcceptance(t *testing.T) {
+func TestRuntimeDeliveryMapsThreadBarrierStaleWithoutRetryOrAcceptance(t *testing.T) {
 	results := []RuntimeDeliveryResult{
 		runtimeResultFromAcceptInput(&agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Rejected{Rejected: &agentruntimev1.AcceptInputRejected{Reason: agentruntimev1.AcceptInputFailure_ACCEPT_INPUT_FAILURE_SESSION_INTERRUPT_BARRIER_STALE}}}),
 		runtimeResultFromAcceptAgentMail(&agentruntimev1.AcceptAgentMailResponse{Outcome: &agentruntimev1.AcceptAgentMailResponse_Rejected{Rejected: &agentruntimev1.AcceptAgentMailRejected{Reason: agentruntimev1.AcceptAgentMailFailure_ACCEPT_AGENT_MAIL_FAILURE_SESSION_INTERRUPT_BARRIER_STALE}}}),

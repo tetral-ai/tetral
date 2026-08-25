@@ -186,9 +186,41 @@ func TestRuntimeRecoveryRevalidatesReclaimedLeaseBeforeBindingAndRuntime(t *test
 	if !ok || recoveryRequest.GetRecoveryLeaseRef().GetLeaseToken() != jobB.LeaseToken {
 		t.Fatalf("worker B recovery request = %#v; want exact live lease", senderB.requests[0])
 	}
+	type recoveryDurableSnapshot struct {
+		bindingCount    int
+		runtimeStatus   string
+		statusBindingID string
+		queueStatus     string
+		leaseToken      string
+		eventCount      int
+		operationCount  int
+	}
+	readSnapshot := func() recoveryDurableSnapshot {
+		t.Helper()
+		var snapshot recoveryDurableSnapshot
+		if err := admin.QueryRowContext(context.Background(), `SELECT
+			(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+			(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+			(SELECT binding_id FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+			(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+			(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),
+			(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`,
+			sessionID, jobB.JobID,
+		).Scan(&snapshot.bindingCount, &snapshot.runtimeStatus, &snapshot.statusBindingID,
+			&snapshot.queueStatus, &snapshot.leaseToken, &snapshot.eventCount, &snapshot.operationCount); err != nil {
+			t.Fatalf("read recovery durable snapshot: %v", err)
+		}
+		return snapshot
+	}
+	beforeStaleWorker := readSnapshot()
 	close(blockedStore.release)
 	if stale := <-resultA; stale.Status != RuntimeDeliveryAuthorityLost || len(senderA.requests) != 0 {
 		t.Fatalf("worker A resumed = %#v calls=%d; want authority loss before Runtime", stale, len(senderA.requests))
+	}
+	afterStaleWorker := readSnapshot()
+	if afterStaleWorker != beforeStaleWorker {
+		t.Fatalf("stale recovery worker changed durable state: before=%+v after=%+v", beforeStaleWorker, afterStaleWorker)
 	}
 	var bindingCount int
 	var runtimeStatus string

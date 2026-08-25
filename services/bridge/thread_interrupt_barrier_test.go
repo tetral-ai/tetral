@@ -11,6 +11,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -269,6 +270,163 @@ func TestPostgreSQLThreadInterruptBarrierMakesLateToolSettlementStale(t *testing
 	}
 	if results != 0 {
 		t.Fatalf("late Tool results = %d; want 0", results)
+	}
+}
+
+func TestPostgreSQLToolSettlementAndInterruptBirthConvergeBothWinnerOrders(t *testing.T) {
+	for _, settlementFirst := range []bool{true, false} {
+		name := "interrupt_first"
+		if settlementFirst {
+			name = "tool_settlement_first"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			suffix := "interrupt"
+			if settlementFirst {
+				suffix = "tool"
+			}
+			sessionID := "sesn_tool_interrupt_" + suffix
+			threadID := "thr_tool_interrupt_" + suffix
+			bindingID := "bind_tool_interrupt_" + suffix
+			podUID := "pod_tool_interrupt_" + suffix
+			modelRequestID := "mreq_tool_interrupt_" + suffix
+			toolUseID := "evt_tool_interrupt_use_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			seedBridgeAPIRequestStart(t, bridgeStore, scope, "rwrite_tool_interrupt_start_"+suffix, modelRequestID, requestKindAgentProviderRequest, 0)
+			sequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, sequence, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
+			if _, err := admin.ExecContext(ctx, `UPDATE session_events SET model_request_id=$2,projection_json=$3
+				WHERE workspace_id='default' AND event_id=$1`, toolUseID, modelRequestID, `{"model_tool_call_id":"call_`+suffix+`"}`); err != nil {
+				t.Fatalf("stamp Tool Use provider identity: %v", err)
+			}
+			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, "call_"+suffix, "Read")
+			seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+			if accepted, err := bridgeStore.AcceptSandboxExecution(ctx, &bridgev1.AcceptSandboxExecutionRequest{Scope: scope, ToolUseEventId: toolUseID}); err != nil || accepted.GetCommitted() == nil {
+				t.Fatalf("accept Tool execution = %#v/%v", accepted, err)
+			}
+			const terminalResult = `{"status":"success","result":{"content":"done"}}`
+			if _, err := admin.ExecContext(ctx, `UPDATE session_runtime_tool_results
+				SET execution_state='terminal_unconsumed',result_json=$2,result_digest=$3,updated_at=clock_timestamp()
+				WHERE workspace_id='default' AND tool_use_event_id=$1`, toolUseID, terminalResult, sha256Hex(terminalResult)); err != nil {
+				t.Fatalf("stage terminal Tool result: %v", err)
+			}
+			settleRequest := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUseID, "done"))
+			eventStore := sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			eventService := sessionevent.NewService(eventStore)
+
+			blocker, err := admin.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin Session race blocker: %v", err)
+			}
+			defer func() { _ = blocker.Rollback() }()
+			var locked string
+			if err := blocker.QueryRowContext(ctx, `SELECT id FROM sessions WHERE workspace_id='default' AND id=$1 FOR UPDATE`, sessionID).Scan(&locked); err != nil {
+				t.Fatalf("lock Session race owner: %v", err)
+			}
+			var blockerPID int
+			if err := blocker.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+				t.Fatalf("read Session race blocker pid: %v", err)
+			}
+			type raceResult struct {
+				kind       string
+				settlement *bridgev1.SettleToolResultResponse
+				interrupt  *sessionevent.AppendResult
+				err        error
+			}
+			results := make(chan raceResult, 2)
+			startSettlement := func() {
+				go func() {
+					response, err := bridgeStore.SettleToolResult(ctx, settleRequest)
+					results <- raceResult{kind: "settlement", settlement: response, err: err}
+				}()
+			}
+			startInterrupt := func() {
+				go func() {
+					response, err := eventService.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_tool_interrupt_"+suffix,
+						sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}})
+					results <- raceResult{kind: "interrupt", interrupt: response, err: err}
+				}()
+			}
+			if settlementFirst {
+				startSettlement()
+				waitForPostgreSQLLockWaiters(t, admin, blockerPID, 1)
+				startInterrupt()
+			} else {
+				startInterrupt()
+				waitForPostgreSQLLockWaiters(t, admin, blockerPID, 1)
+				startSettlement()
+			}
+			waitForPostgreSQLLockWaiters(t, admin, blockerPID, 2)
+			if err := blocker.Commit(); err != nil {
+				t.Fatalf("release Tool/interrupt race: %v", err)
+			}
+			var settlement *bridgev1.SettleToolResultResponse
+			var interrupt *sessionevent.AppendResult
+			for range 2 {
+				outcome := <-results
+				if outcome.err != nil {
+					t.Fatalf("%s winner-order operation: %v", outcome.kind, outcome.err)
+				}
+				if outcome.kind == "settlement" {
+					settlement = outcome.settlement
+				} else {
+					interrupt = outcome.interrupt
+				}
+			}
+			if interrupt == nil || len(interrupt.Data) != 1 {
+				t.Fatalf("interrupt birth = %#v; want one Event", interrupt)
+			}
+			if settlementFirst && settlement.GetCommitted() == nil {
+				t.Fatalf("Tool-first settlement = %#v; want committed", settlement)
+			}
+			if !settlementFirst && settlement.GetStale() == nil {
+				t.Fatalf("interrupt-first settlement = %#v; want typed stale", settlement)
+			}
+
+			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+			leased, err := queueStore.Lease(ctx, queue.LeaseRequest{
+				WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "tool-interrupt-closeout",
+				MaxJobs: 1, LeaseDuration: time.Minute,
+			})
+			if err != nil || len(leased) != 1 {
+				t.Fatalf("lease interrupt closeout = %#v/%v", leased, err)
+			}
+			interruptJob, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+			if err != nil || interruptJob.InputKind != "interrupt_control" {
+				t.Fatalf("decode interrupt closeout = %#v/%v", interruptJob, err)
+			}
+			if _, err := admin.ExecContext(ctx, `UPDATE session_runtime_inbox SET status='accepted',binding_id=$2,binding_generation=1,target_pod_uid=$3
+				WHERE workspace_id='default' AND runtime_input_id=$1`, interruptJob.RuntimeInputID, bindingID, podUID); err != nil {
+				t.Fatalf("accept interrupt closeout input: %v", err)
+			}
+			ended, err := bridgeStore.WriteRequestEnd(ctx, &bridgev1.WriteRequestEndRequest{
+				Scope: scope, RuntimeWriteId: "rwrite_tool_interrupt_end_" + suffix, ModelRequestId: modelRequestID,
+				FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+				ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"},
+				InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
+					RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(leased[0]),
+				},
+			})
+			if err != nil || ended.GetCommitted() == nil {
+				t.Fatalf("interrupt Request End = %#v/%v; want committed", ended, err)
+			}
+			var resultEvents, requestEnds int
+			if err := admin.QueryRowContext(ctx, `SELECT
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$2),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end' AND model_request_id=$3)`,
+				sessionID, toolUseID, modelRequestID).Scan(&resultEvents, &requestEnds); err != nil {
+				t.Fatalf("read converged Tool/interrupt facts: %v", err)
+			}
+			if resultEvents != 1 || requestEnds != 1 {
+				t.Fatalf("converged Tool results/Request Ends = %d/%d; want 1/1", resultEvents, requestEnds)
+			}
+		})
 	}
 }
 

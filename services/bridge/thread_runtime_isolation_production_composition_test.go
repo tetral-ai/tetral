@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
@@ -142,6 +144,54 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 	}
 	if err := <-runDone; err != nil {
 		t.Fatalf("run concurrent Thread jobs: %v; output=%s", err, output.String())
+	}
+
+	target := RuntimePodTarget{
+		Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1", Port: ready.Port,
+	}
+	sender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	configResponse, err := sender.ApplyRuntimeConfig(context.Background(), target, &agentruntimev1.ApplyRuntimeConfigRequest{
+		WorkspaceId: "default", SessionId: sessionID, BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
+		Config: &agentruntimev1.ApplyRuntimeConfigRequest_SessionConfig{SessionConfig: &agentruntimev1.RuntimeSessionConfig{
+			Generation: 2, ContentJson: `{"approval_mode":"full_access","tool_policy":{"tools":[]}}`,
+		}},
+	})
+	if err != nil || configResponse.GetRejected().GetReason() != agentruntimev1.ApplyRuntimeConfigFailure_APPLY_RUNTIME_CONFIG_FAILURE_CONTROL_BUSY || !configResponse.GetRejected().GetRetryable() {
+		t.Fatalf("config while Thread A hot = %#v/%v; want retryable control busy", configResponse, err)
+	}
+	cleanupResponse, err := sender.CleanupSession(context.Background(), target, &agentruntimev1.CleanupSessionRequest{
+		WorkspaceId: "default", SessionId: sessionID, BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
+		CleanupOperationId: "cleanup_hot_thread_isolation", Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_EXPIRED,
+	})
+	if err != nil || cleanupResponse.GetRejected().GetReason() != agentruntimev1.CleanupSessionFailure_CLEANUP_SESSION_FAILURE_SESSION_BUSY || !cleanupResponse.GetRejected().GetRetryable() {
+		t.Fatalf("cleanup while Thread A hot = reason:%s retryable:%t err:%v; want retryable session busy",
+			cleanupResponse.GetRejected().GetReason(), cleanupResponse.GetRejected().GetRetryable(), err)
+	}
+
+	followupEventID := "evt_hot_thread_a_followup"
+	followupSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadA)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadA, followupEventID, followupSequence, "user.message", `{"content":[{"type":"text","text":"join existing run"}]}`)
+	followup := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadA,
+		RuntimeInputID: "rin_hot_thread_a_followup", InputKind: "messages", EventIDs: []string{followupEventID},
+		SequenceFrom: followupSequence, SequenceTo: followupSequence,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadA + `","runtime_input_id":"rin_hot_thread_a_followup","event_ids":["` + followupEventID + `"],"sequence_from":` + fmt.Sprint(followupSequence) + `,"sequence_to":` + fmt.Sprint(followupSequence) + `,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, followup)
+	enqueueRuntimeCompositionJob(t, queueStore, sessionID, followup, 0)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("deliver second same-Thread input: %v", err)
+	}
+	var followupQueueStatus string
+	var threadAStartsAfterFollowup int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$3),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_start')`,
+		sessionID, threadA, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, followup.RuntimeInputID)).Scan(&followupQueueStatus, &threadAStartsAfterFollowup); err != nil {
+		t.Fatalf("read second same-Thread delivery: %v", err)
+	}
+	if followupQueueStatus != queue.StatusAcknowledged || threadAStartsAfterFollowup != 1 {
+		t.Fatalf("second same-Thread input = Queue:%s starts:%d; want acknowledged and one existing run", followupQueueStatus, threadAStartsAfterFollowup)
 	}
 	var threadAStarts, threadAToolUses, threadAEnds int
 	if err := admin.QueryRowContext(context.Background(), `SELECT

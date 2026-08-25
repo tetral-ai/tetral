@@ -67,6 +67,12 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("reviewer-runtime-composition-key")
+	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	parentStart := seedBridgeAPIRequestStart(t, store, parentScope, "rwrite_reviewer_composition_parent_start", "mreq_reviewer_composition_parent", requestKindAgentProviderRequest, 0)
+	parentBoundaryEventID := parentStart.GetCommitted().GetEventId()
+	if parentBoundaryEventID == "" {
+		t.Fatalf("Reviewer parent Request Start = %#v; want committed Event", parentStart)
+	}
 	var callsMu sync.Mutex
 	var closeRequests []*bridgev1.CloseApprovalReviewerRequest
 	var admissionCalls int
@@ -121,8 +127,6 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	client := bridgev1.NewAgentRuntimeBridgeServiceClient(connection)
-	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
-
 	tempDir := t.TempDir()
 	inputPath := tempDir + "/reviewer-composition-input.json"
 	beforeTrunkReleasePath := tempDir + "/before-trunk-release"
@@ -130,6 +134,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default", "sessionId": sessionID,
 		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"parentBoundaryEventId":  parentBoundaryEventID,
 		"beforeTrunkReleasePath": beforeTrunkReleasePath, "trunkReleasePath": trunkReleasePath,
 	})
 	if err != nil {
@@ -222,16 +227,22 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	if _, err := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090).PrepareRuntimeCommand(context.Background(), interruptJob); err != nil {
 		t.Fatalf("prepare Reviewer target interrupt delivery: %v", err)
 	}
-	interruptCloseout, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: parentScope, RuntimeInputId: interruptInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+	parentEnd, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: parentScope, RuntimeWriteId: "rwrite_reviewer_composition_parent_end", ModelRequestId: "mreq_reviewer_composition_parent",
+		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"},
+		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
+			RuntimeInputId: interruptInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+		},
 	})
-	if err != nil || interruptCloseout.GetCommitted().GetInterrupt() == nil {
-		t.Fatalf("close reviewed target while Reviewer runs = %#v/%v", interruptCloseout, err)
+	if err != nil || parentEnd.GetCommitted() == nil {
+		t.Fatalf("terminalize reviewed target while Reviewer runs = %#v/%v; want committed closeout", parentEnd, err)
 	}
-	if updated, err := queueStore.Ack(context.Background(), queue.AckRequest{
-		WorkspaceID: "default", JobID: interruptLease.ID, LeaseToken: interruptLease.LeaseToken, Now: time.Now().UTC(),
-	}); err != nil || !updated {
-		t.Fatalf("settle Reviewer target interrupt Queue lease = %t/%v", updated, err)
+	var parentEnds int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='span.model_request_end' AND model_request_id='mreq_reviewer_composition_parent'`, sessionID, parentID).Scan(&parentEnds); err != nil || parentEnds != 1 {
+		t.Fatalf("reviewed target Request Ends = %d/%v; want one durable end", parentEnds, err)
 	}
 	if err := os.WriteFile(trunkReleasePath, []byte("release"), 0o600); err != nil {
 		t.Fatalf("release running Reviewer: %v", err)
@@ -258,7 +269,27 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 		composed.Failure.Type != "failed" || !composed.CancellationSettled ||
 		composed.ProviderRequests != 4 || !composed.ManagerDisposed ||
 		len(composed.HotStateBeforeDispose.EphemeralReviewIDs) != 0 {
-		t.Fatalf("Reviewer Runtime composition = %+v; want decision/failure/interrupt exits and released manager state", composed)
+		t.Fatalf("Reviewer Runtime composition = %+v; want decision/failure/interrupt exits and released manager state; output=%s", composed, output)
+	}
+	targetApplication, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: parentScope, RuntimeWriteId: "rwrite_reviewer_composition_target_tool", ModelRequestId: "mreq_reviewer_composition_parent",
+		ToolDeclaration: bridgeToolDeclarationForTest("tool_call_reviewer_trunk", "Write", `{"path":"src/a.ts","content":"ok"}`, "allow", "sandbox_execute"),
+	})
+	if err != nil || targetApplication.GetStale() == nil {
+		t.Fatalf("apply late Reviewer allow to terminal target = %#v/%v; want typed stale", targetApplication, err)
+	}
+	ordinaryMember, ordinaryMemberErr := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: parentScope, RuntimeWriteId: "rwrite_reviewer_composition_late_message", ModelRequestId: "mreq_reviewer_composition_parent",
+		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"late"}]}`,
+		AssistantContextDelta: bridgeTextContextDeltaForTest("late"),
+	})
+	if ordinaryMember != nil || status.Code(ordinaryMemberErr) != codes.FailedPrecondition {
+		t.Fatalf("write ordinary member to terminal target = %#v/%v; want FailedPrecondition", ordinaryMember, ordinaryMemberErr)
+	}
+	if updated, err := queueStore.Ack(context.Background(), queue.AckRequest{
+		WorkspaceID: "default", JobID: interruptLease.ID, LeaseToken: interruptLease.LeaseToken, Now: time.Now().UTC(),
+	}); err != nil || !updated {
+		t.Fatalf("settle Reviewer target interrupt Queue lease = %t/%v", updated, err)
 	}
 	if len(composed.Creations) != 4 || !composed.Creations[0].IsTrunk {
 		t.Fatalf("Reviewer selection sequence = %+v; want one trunk followed by three sidecars", composed.Creations)

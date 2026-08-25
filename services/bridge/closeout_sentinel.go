@@ -13,6 +13,7 @@ const (
 	closeoutScopeSupersededCode = "scope_superseded"
 	closeoutUnrepairableCode    = "closeout_unrepairable"
 	threadInterruptBarrierCode  = "thread_interrupt_barrier_stale"
+	modelRequestSealedCode      = "model_request_sealed"
 )
 
 type closeoutSentinelError struct {
@@ -44,6 +45,10 @@ func threadInterruptBarrierStaleError(err error) error {
 	return &closeoutSentinelError{code: threadInterruptBarrierCode, err: err}
 }
 
+func modelRequestSealedError(err error) error {
+	return &closeoutSentinelError{code: modelRequestSealedCode, err: err}
+}
+
 func closeoutSentinelCode(err error) (string, bool) {
 	var sentinel *closeoutSentinelError
 	if !errors.As(err, &sentinel) {
@@ -60,6 +65,11 @@ func isScopeSupersededError(err error) bool {
 func isThreadInterruptBarrierStaleError(err error) bool {
 	code, ok := closeoutSentinelCode(err)
 	return ok && code == threadInterruptBarrierCode
+}
+
+func isModelRequestSealedError(err error) bool {
+	code, ok := closeoutSentinelCode(err)
+	return ok && code == modelRequestSealedCode
 }
 
 func isConversationMutationStaleError(err error) bool {
