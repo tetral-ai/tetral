@@ -770,7 +770,9 @@ func TestPostgreSQLStoreMultiSessionLeaseUsesCanonicalLockOrder(t *testing.T) {
 	if first.err != nil || second.err != nil {
 		t.Fatalf("concurrent Queue Lease workers = %v/%v", first.err, second.err)
 	}
-	if !((len(first.jobs) == 2 && len(second.jobs) == 0) || (len(first.jobs) == 0 && len(second.jobs) == 2)) {
+	firstWon := len(first.jobs) == 2 && len(second.jobs) == 0
+	secondWon := len(first.jobs) == 0 && len(second.jobs) == 2
+	if !firstWon && !secondWon {
 		t.Fatalf("concurrent Queue lease grants = %s:%v %s:%v; want one exact winner",
 			first.owner, jobIDs(first.jobs), second.owner, jobIDs(second.jobs))
 	}
