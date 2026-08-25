@@ -446,6 +446,19 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_message"); err != nil {
 			return err
 		}
+		closing, err := childcontrol.ThreadOrAncestorClosingTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+			request.GetTargetThreadId(),
+		)
+		if err != nil {
+			return err
+		}
+		if closing {
+			return status.Error(codes.FailedPrecondition, "agent mail target is closing")
+		}
 		envelope, err := appendSubagentMailEnvelopeTx(
 			ctx,
 			tx,

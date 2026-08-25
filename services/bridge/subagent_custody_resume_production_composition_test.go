@@ -1429,6 +1429,36 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	controlID := admitChildCloseThroughProduction(
 		t, fixture.admin, client, parentScope, fixture.sessionID, parentID, fixture.childID, closeSourceID,
 	)
+	closeFirstSourceID := "evt_mail_after_close_admission"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, closeFirstSourceID, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, closeFirstSourceID)
+	closeFirstDeliveryID := agentMailDeliveryID(closeFirstSourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: parentScope, DeliveryId: closeFirstDeliveryID, TargetThreadId: fixture.childID,
+		SourceToolUseEventId: closeFirstSourceID, Content: "must not be born after close admission",
+	}); status.Code(err) != codes.FailedPrecondition || delivered != nil {
+		t.Fatalf("mail after close admission = %#v/%v; want FailedPrecondition before birth", delivered, err)
+	}
+	var lateSent, lateReceived, lateInbox, lateQueue, lateReceipt int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		 AND payload_json::jsonb->>'delivery_id'=$2 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		 AND payload_json::jsonb->>'delivery_id'=$2 AND type='agent.thread_message_received'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1
+		 AND operation='deliver_inter_agent_mail' AND idempotency_key=$2)`,
+		fixture.sessionID, closeFirstDeliveryID, completionRuntimeInputID(closeFirstDeliveryID),
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, completionRuntimeInputID(closeFirstDeliveryID)),
+	).Scan(&lateSent, &lateReceived, &lateInbox, &lateQueue, &lateReceipt); err != nil {
+		t.Fatalf("read close-first mail birth: %v", err)
+	}
+	if lateSent != 0 || lateReceived != 0 || lateInbox != 0 || lateQueue != 0 || lateReceipt != 0 {
+		t.Fatalf("close-first mail artifacts = sent %d received %d Inbox %d Queue %d receipt %d; want zero",
+			lateSent, lateReceived, lateInbox, lateQueue, lateReceipt)
+	}
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, fixture.childID,
 		fixture.bindingID, 1, fixture.podUID,

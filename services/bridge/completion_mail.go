@@ -12,7 +12,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -494,11 +493,6 @@ func admitAgentMailDeliveryTx(
 		envelope.DeliveryID,
 	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON)
 	if dbconnect.IsNoRows(err) {
-		if closing, fenceErr := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId()); fenceErr != nil {
-			return admittedAgentMailDelivery{}, fenceErr
-		} else if closing {
-			return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is closing")
-		}
 		if !threadReceivableTx(threadScope) {
 			return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 		}

@@ -103,6 +103,32 @@ func TestJobRunnerHeartbeatsLongDeliveryBeforeAck(t *testing.T) {
 	}
 }
 
+func TestJobRunnerCancelsInFlightDeliveryWhenHeartbeatLosesAuthority(t *testing.T) {
+	queueClient := &recordingQueueClient{
+		leased:             []*queuev1.QueueJob{runtimeInputQueueJob()},
+		heartbeatLoseAfter: 2,
+	}
+	deliverer := newBlockingDeliverer()
+	runner := &JobRunner{
+		Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseDuration: 100 * time.Millisecond, HeartbeatInterval: 5 * time.Millisecond},
+	}
+	done := make(chan error, 1)
+	go func() { done <- runner.RunOnce(context.Background()) }()
+
+	select {
+	case <-deliverer.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight Runtime delivery was not cancelled after heartbeat authority loss")
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "queue lease lost") {
+		t.Fatalf("RunOnce after heartbeat authority loss = %v; want lease-lost error", err)
+	}
+	if transitions := queueClient.transitionSnapshot(); len(transitions) != 0 {
+		t.Fatalf("Queue transitions after heartbeat authority loss = %v; want none", transitions)
+	}
+}
+
 func TestJobRunnerInitialLeaseLossPreventsDeliveryAndTransition(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1466,19 +1492,20 @@ func runtimeAgentMailQueueJob() *queuev1.QueueJob {
 }
 
 type recordingQueueClient struct {
-	mu                sync.Mutex
-	leased            []*queuev1.QueueJob
-	leaseKinds        []string
-	leaseWorkspaceIDs []string
-	leaseErrWorkspace string
-	leaseErr          error
-	transitions       []string
-	heartbeatLost     bool
-	heartbeatErr      error
-	heartbeats        int
-	heartbeatNotify   chan struct{}
-	steps             *[]string
-	phaseSteps        *[]string
+	mu                 sync.Mutex
+	leased             []*queuev1.QueueJob
+	leaseKinds         []string
+	leaseWorkspaceIDs  []string
+	leaseErrWorkspace  string
+	leaseErr           error
+	transitions        []string
+	heartbeatLost      bool
+	heartbeatLoseAfter int
+	heartbeatErr       error
+	heartbeats         int
+	heartbeatNotify    chan struct{}
+	steps              *[]string
+	phaseSteps         *[]string
 }
 
 type staticWorkspaceLister []workspace.ID
@@ -1517,7 +1544,8 @@ func (c *recordingQueueClient) Heartbeat(_ context.Context, _ *queuev1.Heartbeat
 	if c.heartbeatErr != nil {
 		return nil, c.heartbeatErr
 	}
-	return &queuev1.HeartbeatResponse{Updated: !c.heartbeatLost}, nil
+	lost := c.heartbeatLost || (c.heartbeatLoseAfter > 0 && c.heartbeats >= c.heartbeatLoseAfter)
+	return &queuev1.HeartbeatResponse{Updated: !lost}, nil
 }
 
 func (c *recordingQueueClient) transitionSnapshot() []string {
