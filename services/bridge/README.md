@@ -54,6 +54,35 @@ state. A listener connection or reconnect also triggers a catch-up poll, and
 the bounded polling loop remains the fallback if a notification is coalesced or
 lost.
 
+### Session infrastructure and Thread execution
+
+One Session binding hosts a collection of independently executing Threads.
+The durable ownership chain is:
+
+```text
+SessionEvent producer
+  -> Event + target-Thread Inbox + Queue job (one transaction)
+  -> Queue Session arbitration + exact delivery lane lease
+  -> JobRunner validates lease and Session binding
+  -> Runtime target ThreadEntry / runSlot
+  -> Bridge receipt + Inbox settlement + Queue ACK
+```
+
+`queue_jobs.causal_session_id` orders work against shared configuration,
+cleanup, delete, binding loss, and Pod loss. `delivery_scope` and
+`delivery_thread_id` separately define lease exclusion: one live lease per
+Thread, concurrent sibling Thread lanes, and Session-exclusive shared work.
+The short PostgreSQL arbitration owner is acquired before an exact existing
+Queue row; it is released before Runtime, Provider, Tool, or approval work.
+
+An interrupt fences only its target Thread's later delivery and mutation.
+Source and sibling Threads keep their own custody. Shared configuration remains
+Session-exclusive; only a structurally declared target interrupt may cross a
+pending or leased config boundary, and it does not release ordinary input past
+that boundary. The concrete carriers are `queue.EnqueueRequest`,
+`queue.PostgreSQLQueueStore.Lease`, `AppendClientEvents`,
+`threadInterruptBarrier`, and `RuntimePodDirectDeliverer`.
+
 ### The Bridge API RPC surface
 
 Grouped by what each call settles. Every durable-write RPC carries a stable
@@ -131,9 +160,11 @@ binding remains for the next input to replace through the same Session lock and
 binding-generation fence. Errors are isolated across repair and Queue phases,
 with runner cancellation as the only early stop.
 
-Under the session mutation lock and binding fence, from durable evidence
-alone: every Thread sharing the lost Session binding that has unfinished work
-is included regardless of its current Thread status; unfinished
+Under the Session arbitration owner and binding fence, durable evidence is
+reconstructed per Thread. Threads already owned by an exact interrupt keep
+their open Request and control custody for the replacement interrupt owner;
+unaffected Threads with unfinished work are repaired independently. For each
+included repair scope, unfinished
 request spans close as errors (`runtime_pod_lost`, original
 `model_request_id` reused); each orphaned public tool use gets exactly one
 terminal result (`spawn_agent` / `send_message` settle delivery-aware by their
@@ -390,9 +421,10 @@ and active lifecycle facts directly from durable rows.
   mail-without-Inbox, or Inbox-without-Queue birth state. Completion replay
   joins the same durable identities; delivery never scans the event ledger to
   reconstruct custody. Delivery targets the bound pod directly, never a
-  load-balanced service. A leased interrupt is an exclusive Session-partition
-  delivery barrier: later inputs still commit their Event, Inbox, and Queue
-  custody, but no later job is leased until the interrupt's atomic Request End,
+  load-balanced service. A leased interrupt owns only its target Thread lane:
+  later inputs still commit their Event, Inbox, and Queue custody, sibling
+  Threads continue, and no later target-Thread job is leased until the
+  interrupt's atomic Request End,
   Tool settlements, and receipt are durable and its Queue job is acknowledged.
   Runtime acceptance alone never acknowledges an interrupt. Exact receipt
   replay acknowledges without another Runtime call; a 30-second interrupt send
@@ -400,12 +432,13 @@ and active lifecycle facts directly from durable rows.
   closeout writes, and receipt return. A caller timeout remains outcome-unknown
   and retains the same barrier and attempt identity. Proven pod loss may
   transfer that identity only while attempts remain. At exhaustion, the exact
-  live Queue lease owner replays a receipt or terminalizes the Session without
-  sending the interrupt to a replacement Runtime. Initial MCP manifest listing
-  similarly uses a fixed 180-second per-call deadline. This accommodates the
-  connector's credential, reconnect, and list budgets while bounding the
-  single-threaded Job Runner sweep to 180 seconds per stalled workspace; it
-  abandons the Bridge wait but does not cancel connector work.
+  live Queue lease owner replays a receipt or terminalizes the target Thread;
+  only main-Thread exhaustion terminalizes the Session. Neither path sends the
+  interrupt to a replacement Runtime. Initial MCP manifest listing similarly
+  uses a fixed 180-second per-call deadline. This accommodates the connector's
+  credential, reconnect, and list budgets while bounding one concurrent
+  JobRunner worker slot per stalled call; it abandons the Bridge wait but does
+  not cancel connector work.
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,

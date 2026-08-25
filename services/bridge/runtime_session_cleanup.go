@@ -633,6 +633,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 	var stale bool
 	var releaseComplete bool
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_settle", func(tx *dbconnect.Tx) error {
+		if _, err := lockSessionRuntimeArbitrationTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
 		var err error
 		state, stale, err = loadSessionDeleteCleanupStateTx(ctx, tx, job, true)
 		if err != nil || stale {

@@ -11,7 +11,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 func TestPostgreSQLInputCommitAndRuntimeTerminationSerializeAtSessionBoundary(t *testing.T) {
@@ -163,32 +162,14 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 	if inboxStatus != wantInbox || sessionStatus != "terminated" || notificationEvents != wantProjection || notificationMessages != wantProjection || rejectionOperations != 0 {
 		t.Fatalf("winner = Inbox:%s session:%s Events:%d Messages:%d rejectedOps:%d", inboxStatus, sessionStatus, notificationEvents, notificationMessages, rejectionOperations)
 	}
-	deliverer := &taskNotificationReplayOnlyDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
-	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
-		Config: JobRunnerConfig{LeaseOwner: "notification-termination-replay", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
-	}
-	active, err := runner.RunOnceWithActivity(context.Background())
-	if err != nil {
-		t.Fatalf("settle terminal task notification Queue custody: %v", err)
-	}
-	if notificationFirst && !active {
-		t.Fatal("notification-first terminal Queue custody was not reclaimed by JobRunner")
-	}
-	if !notificationFirst && active {
-		t.Fatal("termination-first Queue custody was not settled by termination")
-	}
 	var queueStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
 		WHERE workspace_id='default' AND id=$1`, queued.ID).Scan(&queueStatus); err != nil {
 		t.Fatalf("read terminal task notification Queue custody: %v", err)
 	}
 	wantQueueStatus := queue.StatusCancelled
-	if notificationFirst {
-		wantQueueStatus = queue.StatusAcknowledged
-	}
-	if queueStatus != wantQueueStatus || deliverer.deliveries != 0 {
-		t.Fatalf("terminal task notification Queue custody = %s with %d Runtime calls; want %s/0", queueStatus, deliverer.deliveries, wantQueueStatus)
+	if queueStatus != wantQueueStatus {
+		t.Fatalf("terminal task notification Queue custody = %s; want %s", queueStatus, wantQueueStatus)
 	}
 }
 

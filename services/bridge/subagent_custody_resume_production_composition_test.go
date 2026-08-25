@@ -583,8 +583,8 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 	}
 }
 
-func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *testing.T) {
-	fixture := newSubagentMailFixture(t, "session_interrupt_deferral")
+func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
+	fixture := newSubagentMailFixture(t, "thread_interrupt_independence")
 	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
 	client := dbconnect.NewClientForTesting(fixture.runtimeDB)
 	events := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
@@ -595,11 +595,11 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 		QueueClient: baseQueue,
 		birth: func(ctx context.Context) error {
 			born, err := events.AppendClientEvents(ctx, workspace.DefaultID, fixture.sessionID,
-				"first_mail-session-interrupt-deferral", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+				"first_mail-thread-interrupt-independence", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
 					Type: sessionevent.EventTypeUserInterrupt,
 				}}})
 			if err == nil && len(born.Data) != 1 {
-				return errors.New("session interrupt owner did not birth exactly one Event")
+				return errors.New("main Thread interrupt owner did not birth exactly one Event")
 			}
 			return err
 		},
@@ -608,17 +608,17 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 		t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID,
 		fixture.bindingID, 1, fixture.podUID,
 	)
-	var attemptsBeforeDeferral int
+	var attemptsBeforeDelivery int
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT attempt_count FROM queue_jobs
-		WHERE workspace_id='default' AND id=$1`, fixture.jobID).Scan(&attemptsBeforeDeferral); err != nil {
+		WHERE workspace_id='default' AND id=$1`, fixture.jobID).Scan(&attemptsBeforeDelivery); err != nil {
 		t.Fatalf("read first_mail attempts before interrupt cut: %v", err)
 	}
-	deferredRunner := newSubagentRuntimeQueueRunner(
+	deliveryRunner := newSubagentRuntimeQueueRunner(
 		t, fixture.runtimeDB, fixture.admin, mailRuntime.port, fixture.sessionID, fixture.podUID,
 		queueWithBarrierCut, nil,
 	)
-	if active, err := deferredRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("defer first_mail input behind production interrupt = active:%t err:%v", active, err)
+	if active, err := deliveryRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver first_mail alongside unrelated interrupt = active:%t err:%v", active, err)
 	}
 	var inboxStatus, queueStatus string
 	var attempts, messages, starts int
@@ -632,9 +632,10 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 	).Scan(&inboxStatus, &queueStatus, &attempts, &messages, &starts); err != nil {
 		t.Fatalf("read interrupt-deferred first_mail custody: %v", err)
 	}
-	if inboxStatus != "queued" || queueStatus != queue.StatusPending || attempts != attemptsBeforeDeferral || messages != 0 || starts != 0 {
-		t.Fatalf("interrupt-deferred custody = Inbox:%s Queue:%s attempts:%d (before:%d) Messages:%d starts:%d", inboxStatus, queueStatus, attempts, attemptsBeforeDeferral, messages, starts)
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != attemptsBeforeDelivery+1 || messages != 1 || starts != 0 {
+		t.Fatalf("cross-Thread delivery custody = Inbox:%s Queue:%s attempts:%d (before:%d) Messages:%d starts:%d", inboxStatus, queueStatus, attempts, attemptsBeforeDelivery, messages, starts)
 	}
+	started := mailRuntime.providerStart(t)
 
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, parentID,
@@ -642,14 +643,12 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 	)
 	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, interruptRuntime.port, fixture.sessionID, fixture.podUID)
 	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
-		t.Fatalf("release session interrupt Runtime: %v", err)
+		t.Fatalf("release main Thread interrupt Runtime: %v", err)
 	}
 	if composed := interruptRuntime.wait(t); len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
-		t.Fatalf("session interrupt closeout = %+v", composed)
+		t.Fatalf("main Thread interrupt closeout = %+v", composed)
 	}
 
-	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, mailRuntime.port, fixture.sessionID, fixture.podUID)
-	started := mailRuntime.providerStart(t)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 	mailRuntime.kill(t)
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
@@ -662,7 +661,7 @@ func TestSubagentMailDefersBehindUnrelatedSessionInterruptThenExecutesOnce(t *te
 	).Scan(&inboxStatus, &queueStatus, &attempts, &messages, &starts); err != nil {
 		t.Fatalf("read resumed first_mail custody: %v", err)
 	}
-	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != attemptsBeforeDeferral+1 || messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
+	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != attemptsBeforeDelivery+1 || messages != 1 || starts != 1 || started.ProviderInvocations != 1 {
 		t.Fatalf("resumed first_mail custody = Inbox:%s Queue:%s attempts:%d Messages:%d starts:%d providers:%d",
 			inboxStatus, queueStatus, attempts, messages, starts, started.ProviderInvocations)
 	}
@@ -1430,6 +1429,36 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	controlID := admitChildCloseThroughProduction(
 		t, fixture.admin, client, parentScope, fixture.sessionID, parentID, fixture.childID, closeSourceID,
 	)
+	closeFirstSourceID := "evt_mail_after_close_admission"
+	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, closeFirstSourceID, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
+	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, closeFirstSourceID)
+	closeFirstDeliveryID := agentMailDeliveryID(closeFirstSourceID, fixture.childID)
+	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
+		Scope: parentScope, DeliveryId: closeFirstDeliveryID, TargetThreadId: fixture.childID,
+		SourceToolUseEventId: closeFirstSourceID, Content: "must not be born after close admission",
+	}); status.Code(err) != codes.FailedPrecondition || delivered != nil {
+		t.Fatalf("mail after close admission = %#v/%v; want FailedPrecondition before birth", delivered, err)
+	}
+	var lateSent, lateReceived, lateInbox, lateQueue, lateReceipt int
+	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		 AND payload_json::jsonb->>'delivery_id'=$2 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1
+		 AND payload_json::jsonb->>'delivery_id'=$2 AND type='agent.thread_message_received'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1
+		 AND operation='deliver_inter_agent_mail' AND idempotency_key=$2)`,
+		fixture.sessionID, closeFirstDeliveryID, completionRuntimeInputID(closeFirstDeliveryID),
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, fixture.sessionID, completionRuntimeInputID(closeFirstDeliveryID)),
+	).Scan(&lateSent, &lateReceived, &lateInbox, &lateQueue, &lateReceipt); err != nil {
+		t.Fatalf("read close-first mail birth: %v", err)
+	}
+	if lateSent != 0 || lateReceived != 0 || lateInbox != 0 || lateQueue != 0 || lateReceipt != 0 {
+		t.Fatalf("close-first mail artifacts = sent %d received %d Inbox %d Queue %d receipt %d; want zero",
+			lateSent, lateReceived, lateInbox, lateQueue, lateReceipt)
+	}
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, fixture.childID,
 		fixture.bindingID, 1, fixture.podUID,

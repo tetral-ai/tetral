@@ -137,11 +137,13 @@ function publicSessionError(failure: RuntimeFailure): {
 			? "unknown_error"
 			: failure.code === "provider_rate_limited"
 				? "model_rate_limited_error"
-				: failure.code === "provider_key_unavailable"
+				: failure.code === "credential_required" ||
+						failure.code === "credential_unavailable" ||
+						failure.code === "provider_key_unavailable"
 					? "model_request_failed_error"
-				: failure.retryStatus?.type === "exhausted"
-					? "model_overloaded_error"
-					: "model_request_failed_error";
+					: failure.retryStatus?.type === "exhausted"
+						? "model_overloaded_error"
+						: "model_request_failed_error";
 	return {
 		type,
 		message: failure.message,

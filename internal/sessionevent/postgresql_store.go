@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -44,11 +45,11 @@ func NewPostgreSQLStore(client *dbconnect.Client, options ...PostgreSQLStoreOpti
 	return store
 }
 
-// AppendClientEvents serializes public event admission on the session row and
-// the runtime-status row. It numbers new events from MAX(sequence), stores
-// them as unprocessed public input, and creates the matching Runtime Inbox and
-// Queue custody in the same PostgreSQL transaction. Delivery may bind that
-// custody to a Runtime Pod, but it never reconstructs an input from the event.
+// AppendClientEvents joins the short Session arbitration boundary, resolves
+// each event's target Thread, and atomically creates Event, Thread-owned Inbox,
+// and Queue custody. The Queue row keeps Session causal order but leases on the
+// target Thread lane. Delivery may bind that custody to a Runtime Pod, but it
+// never reconstructs an input from the event or turns admission into execution.
 //
 // The append path never scans, locks, or JSON-decodes stored session_events
 // rows; the only session_events read is the bounded MAX(sequence) aggregate.
@@ -61,6 +62,9 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 	for attempt := 0; attempt < 2; attempt++ {
 		outcome = nil
 		err := s.client.WithWorkspaceTx(ctx, string(workspaceID), "sessionevent.append_client_events", func(tx *dbconnect.Tx) error {
+			if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(workspaceID), sessionID); err != nil {
+				return err
+			}
 			admission, err := lockOpenSession(ctx, tx, workspaceID, sessionID)
 			if err != nil {
 				return err

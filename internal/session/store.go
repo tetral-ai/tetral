@@ -10,7 +10,7 @@ import (
 type Store interface {
 	WithWorkspaceTx(ctx context.Context, ws workspace.ID, fn func(Transaction) error) error
 	WithWorkspaceTxAndCleanup(ctx context.Context, ws workspace.ID, fn func(Transaction) error, onCommitFailure func()) error
-	WithRuntimeMutationLock(ctx context.Context, ws workspace.ID, sessionID string, fn func() error) error
+	WithRuntimeMutationTx(ctx context.Context, ws workspace.ID, sessionID string, fn func(Transaction) error) error
 	Get(ctx context.Context, ws workspace.ID, sessionID string) (*Session, error)
 	List(ctx context.Context, ws workspace.ID, options ListOptions) (*StoreListResult, error)
 	ListSessionProviderAuth(ctx context.Context, ws workspace.ID, sessionID string) (ProviderSelectors, error)

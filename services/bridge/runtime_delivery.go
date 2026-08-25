@@ -813,6 +813,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 	var plan RuntimeCommandPlan
 	var initialMCPManifestToolsets []MCPManifestToolsetConfig
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.prepare_runtime_command", func(tx *dbconnect.Tx) error {
+		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
 		if job.Kind == queue.KindSessionDeleteCleanup {
 			deletePlan, err := s.prepareSessionDeleteCleanupCommandTx(ctx, tx, job, port, now)
 			if err != nil {
@@ -821,14 +824,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 			plan = deletePlan
 			return nil
 		}
-		var deleted bool
-		if err := tx.QueryRow(ctx, `SELECT lifecycle_state = 'deleted' FROM sessions WHERE workspace_id=$1 AND id=$2`, job.WorkspaceID, job.SessionID).Scan(&deleted); dbconnect.IsNoRows(err) {
+		var terminal bool
+		if err := tx.QueryRow(ctx, `SELECT lifecycle_state = 'deleted' OR status = 'terminated' FROM sessions WHERE workspace_id=$1 AND id=$2`, job.WorkspaceID, job.SessionID).Scan(&terminal); dbconnect.IsNoRows(err) {
 			plan = RuntimeCommandPlan{StaleAccepted: true}
 			return nil
 		} else if err != nil {
 			return err
 		}
-		if deleted {
+		if terminal {
 			plan = RuntimeCommandPlan{StaleAccepted: true}
 			return nil
 		}
@@ -1029,11 +1032,18 @@ func interruptDeliveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job Run
 	if !live {
 		return RuntimeInterruptDeliveryAuthority{}, nil
 	}
-	barrier, barrierActive, err := activeSessionInterruptBarrierTx(ctx, tx, job.WorkspaceID, job.SessionID)
+	barrier, barrierActive, err := activeInterruptBarrierTx(ctx, tx, job.WorkspaceID, job.SessionID, job.SessionThreadID)
 	if err != nil {
 		return RuntimeInterruptDeliveryAuthority{}, err
 	}
 	if !barrierActive || barrier.runtimeInputID != job.RuntimeInputID {
+		pendingCloseout, err := committedInterruptCloseoutNeedsRuntimeTx(ctx, tx, job)
+		if err != nil {
+			return RuntimeInterruptDeliveryAuthority{}, err
+		}
+		if pendingCloseout {
+			return RuntimeInterruptDeliveryAuthority{Active: true}, nil
+		}
 		settled, err := queue.CancelLeasedRuntimeInputCustodyTx(ctx, tx, queue.CancelLeasedRuntimeInputRequest{
 			Lease: queue.ExactLeaseRequest{
 				WorkspaceID: workspaceID, JobID: job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
@@ -1294,7 +1304,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
 				return nil
 			}
-			finalized, err = finalizeInterruptDeliveryExhaustionTx(withInterruptCloseout(ctx, job.RuntimeInputID), tx, job, now)
+			finalized, err = finalizeInterruptDeliveryExhaustionTx(withInterruptCloseout(ctx, job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID), tx, job, now)
 			return err
 		}
 		if err := validateRuntimeFinalizationBindingTx(ctx, tx, job, result); err != nil {
@@ -1716,20 +1726,8 @@ func finalizeInterruptDeliveryTerminalTx(
 		return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Inbox binding conflicts with the Session fence")
 	}
 
-	var mainThreadID string
-	if err := tx.QueryRow(ctx,
-		`SELECT id FROM session_threads
-		  WHERE workspace_id=$1 AND session_id=$2 AND role='main'
-		  FOR UPDATE`,
-		job.WorkspaceID, job.SessionID,
-	).Scan(&mainThreadID); err != nil {
-		if dbconnect.IsNoRows(err) {
-			return RuntimeDeliveryResult{}, invalidRuntimeFinalizationIdentity("interrupt Session main Thread is missing")
-		}
-		return RuntimeDeliveryResult{}, err
-	}
 	scope := &bridgev1.RuntimeScope{
-		WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: mainThreadID,
+		WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
 		Binding: &bridgev1.RuntimeBindingRef{
 			BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, TargetPodUid: podUID.String,
 		},
@@ -1761,20 +1759,22 @@ func finalizeInterruptDeliveryTerminalTx(
 	); err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2`,
-		job.WorkspaceID, job.SessionID,
-	); err != nil {
-		return RuntimeDeliveryResult{}, err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
-		        cleanup_job_id=NULL, binding_id=NULL, binding_generation=NULL, updated_at=$3
-		  WHERE workspace_id=$1 AND session_id=$2`,
-		job.WorkspaceID, job.SessionID, now,
-	); err != nil {
-		return RuntimeDeliveryResult{}, err
+	if threadScope.role == "main" {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2`,
+			job.WorkspaceID, job.SessionID,
+		); err != nil {
+			return RuntimeDeliveryResult{}, err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE session_runtime_status
+			    SET cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
+			        cleanup_job_id=NULL, binding_id=NULL, binding_generation=NULL, updated_at=$3
+			  WHERE workspace_id=$1 AND session_id=$2`,
+			job.WorkspaceID, job.SessionID, now,
+		); err != nil {
+			return RuntimeDeliveryResult{}, err
+		}
 	}
 	return RuntimeDeliveryResult{
 		Status: RuntimeDeliveryRejected, Retryable: false,
@@ -2037,6 +2037,17 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 		if err := lockRuntimeMutationSessionTx(ctx, tx, canonical.WorkspaceID, canonical.SessionID); err != nil {
 			return err
 		}
+		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
+			WorkspaceID: workspace.ID(canonical.WorkspaceID), JobID: canonical.JobID, LeaseToken: canonical.LeaseToken,
+			Kind: canonical.Kind, PartitionKey: canonical.PartitionKey, DedupeKey: canonical.DedupeKey,
+		})
+		if err != nil {
+			return err
+		}
+		if !active {
+			outcome.Handled = true
+			return nil
+		}
 		var lockedThreadID, lockedInputKind, lockedEventIDsJSON string
 		var lockedSequenceFrom, lockedSequenceTo sql.NullInt64
 		if err := tx.QueryRow(ctx, `SELECT session_thread_id, input_kind, event_ids_json, sequence_from, sequence_to
@@ -2055,19 +2066,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 			canonical.SequenceFrom = sequenceFrom.Int64
 			canonical.SequenceTo = sequenceTo.Int64
 		}
-		active, err := queue.AssertExactLeaseTx(ctx, tx, queue.ExactLeaseRequest{
-			WorkspaceID: workspace.ID(canonical.WorkspaceID), JobID: canonical.JobID, LeaseToken: canonical.LeaseToken,
-			Kind: canonical.Kind, PartitionKey: canonical.PartitionKey, DedupeKey: canonical.DedupeKey,
-		})
-		if err != nil {
-			return err
-		}
-		if !active {
-			outcome.Handled = true
-			return nil
-		}
 		if _, err := finalizeInterruptDeliveryTerminalTx(
-			withInterruptCloseout(ctx, canonical.RuntimeInputID), tx, canonical, now,
+			withInterruptCloseout(ctx, canonical.WorkspaceID, canonical.SessionID, canonical.SessionThreadID, canonical.RuntimeInputID), tx, canonical, now,
 		); err != nil {
 			return err
 		}
@@ -2366,6 +2366,15 @@ func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, 
 	case "dead_lettered":
 		return runtimeDeliveryExhaustedResult(), true, nil
 	case "committed":
+		if job.InputKind == "interrupt_control" {
+			pendingCloseout, err := committedInterruptCloseoutNeedsRuntimeTx(ctx, tx, job)
+			if err != nil {
+				return RuntimeDeliveryResult{}, false, err
+			}
+			if pendingCloseout {
+				return RuntimeDeliveryResult{}, false, nil
+			}
+		}
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
 	case "cancelled":
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}, true, nil
@@ -2374,6 +2383,49 @@ func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, 
 	default:
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 	}
+}
+
+func committedInterruptCloseoutNeedsRuntimeTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
+	if job.InputKind != "interrupt_control" {
+		return false, nil
+	}
+	var committed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1
+		     FROM session_runtime_inbox inbox
+		     JOIN session_bridge_operations receipt
+		       ON receipt.workspace_id = inbox.workspace_id
+		      AND receipt.session_id = inbox.session_id
+		      AND receipt.session_thread_id = inbox.session_thread_id
+		      AND receipt.operation = $5
+		      AND receipt.source_kind = 'interrupt_control'
+		      AND receipt.idempotency_key = inbox.runtime_input_id
+		      AND receipt.receipt_json <> ''
+		    WHERE inbox.workspace_id = $1
+		      AND inbox.session_id = $2
+		      AND inbox.session_thread_id = $3
+		      AND inbox.runtime_input_id = $4
+		      AND inbox.input_kind = 'interrupt_control'
+		      AND inbox.status = 'committed'
+		 )`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.SessionThreadID,
+		job.RuntimeInputID,
+		bridgeOpCommitInputs,
+	).Scan(&committed); err != nil {
+		return false, err
+	}
+	if !committed {
+		return false, nil
+	}
+	openTurn, err := loadOpenDurableTurnIDTx(ctx, tx, &bridgev1.RuntimeScope{
+		WorkspaceId:     job.WorkspaceID,
+		SessionId:       job.SessionID,
+		SessionThreadId: job.SessionThreadID,
+	})
+	return openTurn != nil, err
 }
 
 func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
@@ -3241,7 +3293,8 @@ func validateRuntimeRecoveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, j
 	}
 	if sourceThreadID != job.SessionThreadID ||
 		(sourceType != "agent.tool_use" && sourceType != "agent.mcp_tool_use" &&
-			sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled") {
+			sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled" &&
+			sourceType != "span.model_request_end") {
 		return false, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime recovery source is invalid", retryable: false}
 	}
 	return true, false, nil
@@ -4273,8 +4326,7 @@ func allRuntimeInputEventsProcessedTx(ctx context.Context, tx *dbconnect.Tx, job
 //	status         meaning                                writer
 //	queued         source fact and Queue custody committed  input producer
 //	delivering     existing custody bound before send       this claim
-//	accepted       execution custody durably witnessed       MarkRuntimeInputAccepted,
-//	                                                          agent-mail Request Start settlement
+//	accepted       execution custody durably witnessed       MarkRuntimeInputAccepted
 //	committed      inputs durably committed                 CommitInputs, the
 //	                                                         task_notification commit
 //	                                                         (CommitTaskNotificationResult)
@@ -4454,7 +4506,7 @@ func (e runtimeDeliveryPrepareError) Error() string {
 }
 
 func runtimeDeliveryResultFromPrepareError(err error) RuntimeDeliveryResult {
-	if isSessionInterruptBarrierStaleError(err) {
+	if isThreadInterruptBarrierStaleError(err) {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
 	}
 	var prepareErr runtimeDeliveryPrepareError

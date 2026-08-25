@@ -5779,6 +5779,86 @@ describe("ThreadLoop", () => {
 			}),
 		);
 	});
+	test("late Tool declaration stale after reviewer allow discards the sealed turn", async () => {
+		const session = new ThreadRuntime(
+			"sesn_1",
+			new AutoApprovalReviewerManager(),
+		);
+		const loader = new RecordingContextLoader([], {
+			type: "context",
+			entries: [userMessage("user-1", 0, "hello")],
+		});
+		const appended: SessionEvent[] = [];
+		let runToolCalls = 0;
+		const writer = writerFrom((envelope) => {
+			if (envelope.event.type === "agent.tool_use") {
+				return { ok: true, type: "stale" };
+			}
+			appended.push(envelope.event);
+			return {
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+				eventSequence: 1,
+			};
+		});
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const threadLoop = yield* ThreadLoop.Service;
+				return yield* threadLoop.run(session, testRunCustody());
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						writer,
+						approvalMode: "approve_for_me",
+						events: [
+							{
+								type: "tool-call",
+								id: "tool-1",
+								toolName: "Write",
+								input: { file_path: "src/a.ts", content: "ok" },
+								inputPreview: {
+									preview: '{"file_path":"src/a.ts"}',
+									truncated: false,
+								},
+							},
+							{ type: "finish", finishReason: "tool-calls" },
+						],
+						providerCallRuntime: {
+							systemInstructions: "late Tool declaration stale test system",
+							toolCatalog: catalogForTest({
+								name: "Write",
+								description: "Write file",
+								inputSchema: { type: "object" },
+								permissionPolicy: "always_ask",
+							}),
+						},
+						reviewApproval: () =>
+							Effect.succeed({
+								type: "decision" as const,
+								riskLevel: "low" as const,
+								userAuthorization: "high" as const,
+								outcome: "allow" as const,
+							}),
+						runTool: () => {
+							runToolCalls += 1;
+							return {
+								type: "completed",
+								output: { text: "must not run", truncated: false },
+							};
+						},
+					}),
+				),
+			),
+		);
+
+		expect(result).toEqual({ type: "interrupted", discardHotState: true });
+		expect(runToolCalls).toBe(0);
+		expect(appended.some((event) => event.type === "session.error")).toBe(false);
+		expect(appended.some((event) => event.type === "agent.tool_use")).toBe(
+			false,
+		);
+	});
 	test("approve_for_me reviewer failure falls back to public ask approval", async () => {
 		const session = new ThreadRuntime(
 			"sesn_1",

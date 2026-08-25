@@ -1157,6 +1157,20 @@ func transitionMCPManifestUnreadyWithDeliveryTx(ctx context.Context, tx *dbconne
 }
 
 func acquireMCPManifestAcceptanceLockTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string) error {
+	if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
+		return err
+	}
+	var sessionStatus string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM sessions WHERE workspace_id=$1 AND id=$2`,
+		workspaceID,
+		sessionID,
+	).Scan(&sessionStatus); err != nil {
+		return err
+	}
+	if sessionStatus == "terminated" {
+		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is terminal"))
+	}
 	sum := sha256.Sum256([]byte(workspaceID + "\x00" + sessionID + "\x00" + mcpServerName))
 	resource := int32(binary.BigEndian.Uint32(sum[:4]))
 	_, err := tx.Exec(ctx,

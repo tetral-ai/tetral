@@ -713,9 +713,10 @@ func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job RuntimeJob, inbox
 }
 
 type postgresFinalizingDeliverer struct {
-	store      *PostgreSQLRuntimeDeliveryStore
-	result     RuntimeDeliveryResult
-	deliveries int
+	store            *PostgreSQLRuntimeDeliveryStore
+	result           RuntimeDeliveryResult
+	deliveries       int
+	lastFinalizedJob *RuntimeJob
 }
 
 type concurrentRuntimeFinalizationResult struct {
@@ -790,6 +791,7 @@ func (d *postgresFinalizingDeliverer) DeliverRuntimeJob(context.Context, Runtime
 }
 
 func (d *postgresFinalizingDeliverer) FinalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	d.lastFinalizedJob = &job
 	return d.store.FinalizeRuntimeDelivery(ctx, job, result)
 }
 

@@ -1640,6 +1640,92 @@ export function layer(
 				Effect.gen(function* () {
 					const threadEntry = threadResult.threadEntry;
 					const declaration = { inputKind: "interrupt" as const };
+					const openRequest =
+						threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request;
+					if (openRequest !== undefined && openRequest.requestEnd === undefined) {
+						let closeoutCompleted = false;
+						const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
+							interruptStateCommand(command),
+							commitInput,
+							() => {
+								closeoutCompleted = true;
+							},
+						);
+						if (admitted === "conflict") {
+							return { ok: false, sessionId, reason: "control_busy" } as const;
+						}
+						threadEntry.interruptLeaseRef = command.interruptLeaseRef;
+						if (admitted === "applied") {
+							threadEntry.runtimeThread.state.discardQueuedAcceptedInputsForInterrupt(
+								command.origin === "user",
+							);
+						}
+						const closeout = yield* threadLoop.closeRecoveredOpenRequestForInterrupt(
+							threadEntry.runtimeThread,
+							{
+								activeTurnId: (session) =>
+									session.state.threadTurnReduction().checkpoint.executionRunId,
+								interruptLeaseRef: (runtimeInputId) =>
+									threadEntry.runtimeThread.state.userInterruptCommand()
+										?.runtimeInputId === runtimeInputId
+										? threadEntry.interruptLeaseRef
+										: undefined,
+							},
+						);
+						const committed = threadEntry.runtimeThread.state.userInterruptCommitResult(
+							command.runtimeInputId,
+						);
+						threadEntry.interruptLeaseRef = undefined;
+						if (closeout.type === "failed") {
+							return {
+								ok: false,
+								sessionId,
+								reason: "context_load_failed",
+								retryable: closeout.error.retryable,
+								errorCode: closeout.error.code,
+							} as const;
+						}
+						if (committed?.ok !== true) {
+							return {
+								ok: false,
+								sessionId,
+								reason: "context_load_failed",
+								...(committed === undefined
+									? {}
+									: {
+											retryable: committed.retryable,
+											errorCode: committed.errorCode,
+										}),
+							} as const;
+						}
+						if (
+							"stale" in committed ||
+							(closeout.type === "interrupted" && closeout.discardHotState === true)
+						) {
+							yield* discardThreadEntryForStaleCustody(
+								threadResult.sessionEntry,
+								threadEntry,
+							);
+							return {
+								ok: true,
+								sessionId,
+								created: false,
+								interrupted: true,
+								idleInterrupt: false,
+								stale: true,
+							} as const;
+						}
+						if (!closeoutCompleted) {
+							return { ok: false, sessionId, reason: "control_busy" } as const;
+						}
+						return {
+							ok: true,
+							sessionId,
+							created: false,
+							interrupted: true,
+							idleInterrupt: false,
+						} as const;
+					}
 					const committed = yield* Effect.promise(() => commitInput(declaration));
 					if (!committed.ok) {
 						return {

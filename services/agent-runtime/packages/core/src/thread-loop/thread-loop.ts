@@ -373,6 +373,11 @@ export interface Interface {
 		defect: unknown,
 		custody: ThreadLoopRunCustody,
 	) => Effect.Effect<FailedRunCloseoutResult>;
+	/** Re-enters target interrupt closeout for an open Request restored before a run Fiber exists. */
+	readonly closeRecoveredOpenRequestForInterrupt: (
+		session: ThreadRuntime,
+		custody: ThreadLoopRunCustody,
+	) => Effect.Effect<ThreadLoopRunResult>;
 	/**
 	 * Seeds config-sourced model state synchronously. Both preload and accepted-input config
 	 * application call this before pending-tool restoration; an unresolved model stays undefined
@@ -797,6 +802,10 @@ function threadLoopLayer(
 						),
 					);
 				},
+				closeRecoveredOpenRequestForInterrupt: (session, custody) =>
+					nonAbandonablePromise(() =>
+						closeRecoveredOpenRequestForUserInterrupt(session, options, custody),
+					),
 				seedRuntimeModel: (session) => seedRuntimeModel(session, options),
 				installLoadedPendingToolUses: (
 					session,
@@ -912,6 +921,99 @@ async function consumeRecoveredRequestRetryOrRescheduleAction(
 			? {}
 			: { failureEventId: terminalAppend.failureEventId }),
 	};
+}
+
+async function closeRecoveredOpenRequestForUserInterrupt(
+	session: ThreadRuntime,
+	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
+): Promise<ThreadLoopRunResult> {
+	const request = session.state.threadTurnReduction().checkpoint.request;
+	if (request === undefined || request.requestEnd !== undefined) {
+		session.state.markUserInterruptCloseoutEligible();
+		return { type: "interrupted" };
+	}
+	const command = session.state.userInterruptCommand();
+	const interruptLeaseRef =
+		command === undefined
+			? undefined
+			: custody.interruptLeaseRef(command.runtimeInputId);
+	if (command === undefined || interruptLeaseRef === undefined) {
+		return failRecoveredOpenRequest(session);
+	}
+	const end = await appendModelRequestEndEvent(
+		options,
+		session,
+		request.modelRequestId,
+		request.requestStartEventId,
+		true,
+		"runtime_interrupted",
+		"cancelled",
+		undefined,
+		[],
+		request.requestKind,
+		undefined,
+		undefined,
+		undefined,
+		{ command, interruptLeaseRef },
+	);
+	if (!end.ok) {
+		return {
+			type: "failed",
+			error: end.error,
+			releaseSession: { reason: "event_write_failed" },
+		};
+	}
+	if (end.type === "stale") {
+		session.state.recordJoinedUserInterruptResult(
+			command.runtimeInputId,
+			{ ok: true, stale: true },
+			{ inputKind: "interrupt" },
+		);
+		return { type: "interrupted", discardHotState: true };
+	}
+	if (!acknowledgeJoinedInterruptRequestEnd(session, end)) {
+		return failRecoveredOpenRequest(session);
+	}
+	const requestSealFailure = reconcileRequestEndTurn(
+		session,
+		end.requestEndEventId,
+		request.modelRequestId,
+		true,
+		"runtime_interrupted",
+		providerContextRetentionForRequest(session, "interrupted"),
+		undefined,
+	);
+	if (requestSealFailure !== undefined) {
+		return { type: "failed", error: requestSealFailure };
+	}
+	const projectionFailure = applyFailedRequestProviderProjection(session);
+	if (projectionFailure !== undefined) {
+		return { type: "failed", error: projectionFailure };
+	}
+	releaseInterruptedPendingTools(
+		session,
+		options,
+		end.interruptToolResults.map((result) => result.toolUseEventId),
+	);
+	session.state.markUserInterruptCloseoutEligible();
+	const idle = await appendIdleEvent(
+		options,
+		session,
+		custody,
+		{ type: "end_turn" },
+		undefined,
+		true,
+	);
+	if (!idle.ok) {
+		return {
+			type: "failed",
+			error: idle.error,
+			releaseSession: { reason: "event_write_failed" },
+		};
+	}
+	session.state.completeUserInterrupt(command.runtimeInputId);
+	return { type: "interrupted" };
 }
 
 function runThreadLoopEffect(
@@ -5064,6 +5166,9 @@ function coordinateRuntimeToolJobEffect(
 			),
 		);
 		if (!toolUse.ok) {
+			if (!("error" in toolUse)) {
+				return providerTurnInterruptedWithDiscard();
+			}
 			return yield* Effect.promise(() =>
 				handleProcessorFailure(session, options, toolUse.error),
 			);
@@ -7330,13 +7435,19 @@ function terminalFailureFromProcessorResult(
 	if (!result.ok) {
 		return undefined;
 	}
-	const sessionError = result.events.find(
-		(event) => event.type === "session.error",
-	)?.error;
-	if (sessionError === undefined || !("code" in sessionError)) {
+	if ("type" in result && result.type === "stale_custody") {
 		return undefined;
 	}
-	return sessionError;
+	const sessionErrorEvent = result.events.find(
+		(event) => event.type === "session.error",
+	);
+	if (sessionErrorEvent?.type !== "session.error") {
+		return undefined;
+	}
+	if (!("code" in sessionErrorEvent.error)) {
+		return undefined;
+	}
+	return sessionErrorEvent.error;
 }
 
 function runtimeFailureFromLlmService(error: unknown): LLMRuntimeFailure {

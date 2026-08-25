@@ -18,6 +18,7 @@ import {
 	ProviderCredentialResolver,
 	SQLGatewayCredentialStore,
 } from "../../../../../gateway/packages/provider-gateway/src/providers/credentials.js";
+import { SQLOpenAIOAuthCredentialRefreshWriter } from "../../../../../gateway/packages/provider-gateway/src/providers/openai-oauth-refresh.js";
 import { PlatformKeyPool } from "../../../../../gateway/packages/provider-gateway/src/providers/pool.js";
 import { ProviderGatewayServiceShell } from "../../../../../gateway/packages/provider-gateway/src/service.js";
 import type { ProviderRequestStreamInput } from "../../../../../gateway/packages/provider-gateway/src/service.js";
@@ -55,12 +56,14 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 		| "platform_billing_post_progress"
 		| "platform_billing_exhausted"
 		| "statusless_transport"
+		| "provider_rate_limited"
 		| "invalid_kimi_byok"
-		| "invalid_openai_oauth";
+		| "invalid_openai_oauth"
+		| "missing_kimi_credential"
+		| "unavailable_openai_credential";
 };
 const scenario = input.scenario ?? "semantic_timeout";
-const customerCredentialScenario =
-	scenario === "invalid_kimi_byok" || scenario === "invalid_openai_oauth";
+const customerCredentialScenario = scenario === "invalid_kimi_byok";
 const metadataFactory = async () => new Metadata();
 const bridgeOptions = {
 	address: input.bridgeAddress,
@@ -98,8 +101,9 @@ let providerInvocations = 0;
 let toolInvocations = 0;
 let finishIdleInvocations = 0;
 let finishIdleResult = "none";
+let oauthAccessTokenConsumed = false;
 const providerRequestContexts: string[] = [];
-let nextId = 0;
+let nextId = input.bindingGeneration * 1_000;
 const gatewayLogs: unknown[] = [];
 const runtimeLogs: unknown[] = [];
 const writeRuntimeState = async (): Promise<void> => {
@@ -112,9 +116,10 @@ const writeRuntimeState = async (): Promise<void> => {
 			finishIdleResult,
 			platformKeySelections,
 			platformKeyQuarantines,
+			oauthAccessTokenConsumed,
 			providerRequestContexts,
 			sensitiveLogLeak:
-				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
+				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),
 				),
 		}),
@@ -190,20 +195,72 @@ const successProviderParts = (): readonly GatewaySDKStreamPart[] => [
 		},
 	},
 ];
+const providerFetch = Object.assign(
+	async (input: RequestInfo | URL, init?: RequestInit) => {
+		const request = new Request(input, init);
+		if (scenario === "invalid_openai_oauth") {
+			oauthAccessTokenConsumed =
+				request.headers.get("authorization") === "Bearer oauth-access-healthy";
+			await writeRuntimeState();
+			if (!oauthAccessTokenConsumed) {
+				return new Response('{"error":"invalid_token"}', { status: 401 });
+			}
+		}
+		return new Response("{}", { status: 200 });
+	},
+	{ preconnect: () => {} },
+);
 const providerClientRegistry = new ProviderClientRegistry({
+	fetch: providerFetch,
+	openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
+		sql: credentialSQL,
+		masterKeyHex: credentialMasterKeyHex,
+		fetch: Object.assign(
+			async () =>
+				new Response('{"error":"invalid_grant"}', {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			{ preconnect: () => {} },
+		),
+	}),
 	anthropicProviderFactory: (settings) => (modelId) => ({
 		provider: "anthropic",
 		modelId,
 		apiKey: settings.apiKey,
 	}),
 	openAIProviderFactory: (settings) => ({
-		responses: (modelId) => ({ provider: "openai", modelId, apiKey: settings.apiKey }),
+		responses: (modelId) => ({
+			provider: "openai",
+			modelId,
+			apiKey: settings.apiKey,
+			fetch: settings.fetch,
+		}),
 	}),
 	streamText: (request: GatewayStreamTextInput) => {
 		providerInvocations += 1;
 		providerRequestContexts.push(JSON.stringify(request.messages));
 		void writeRuntimeState();
 		const apiKey = (request.model as { readonly apiKey?: string }).apiKey;
+		if (scenario === "invalid_openai_oauth") {
+			const oauthFetch = (request.model as { readonly fetch?: typeof providerFetch }).fetch;
+			return {
+				fullStream: (async function* () {
+					if (oauthFetch === undefined) {
+						throw new Error("OpenAI OAuth fetch wrapper is missing");
+					}
+					const response = await oauthFetch("https://api.openai.com/v1/responses", {
+						method: "POST",
+						headers: { authorization: "Bearer sdk-placeholder" },
+						body: "{}",
+					});
+					if (!response.ok) {
+						throw new Error("repaired OpenAI OAuth credential was not consumed");
+					}
+					for (const part of successProviderParts()) yield part;
+				})(),
+			};
+		}
 		if (apiKey === badPlatformKey.key && scenario.startsWith("platform_billing_")) {
 			platformKeySelections.push(badPlatformKey.keyId);
 			const error = {
@@ -241,6 +298,26 @@ const providerClientRegistry = new ProviderClientRegistry({
 				},
 			]);
 		}
+		if (scenario === "provider_rate_limited" && providerInvocations === 1) {
+			return streamTextResult([
+				{ type: "text-start", id: "rate-limited-partial" },
+				{ type: "text-delta", id: "rate-limited-partial", text: "committed before rate limit" },
+				{ type: "text-end", id: "rate-limited-partial" },
+				{
+					type: "error",
+					error: {
+						statusCode: 429,
+						data: {
+							error: {
+								code: "rate_limit_exceeded",
+								type: "rate_limit_error",
+								message: "rate limited provider-failure-canary",
+							},
+						},
+					},
+				},
+			]);
+		}
 		if (customerCredentialScenario && providerInvocations === 1) {
 			return streamTextResult([
 				{
@@ -249,10 +326,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 						statusCode: 401,
 						data: {
 							error: {
-								code:
-									scenario === "invalid_openai_oauth"
-										? "invalid_api_key"
-										: "invalid_authentication_error",
+								code: "invalid_authentication_error",
 								type: "invalid_authentication_error",
 								message: "invalid credential private-byok-canary",
 							},
@@ -432,9 +506,10 @@ const hosts = await buildRuntimeCoreHosts({
 			timeoutMs: 5_000,
 		},
 		runtimeModel: () =>
-			scenario === "invalid_kimi_byok"
+			scenario === "invalid_kimi_byok" || scenario === "missing_kimi_credential"
 				? { providerId: "moonshotai", modelId: "kimi-k3" }
-				: scenario === "invalid_openai_oauth"
+				: scenario === "invalid_openai_oauth" ||
+						scenario === "unavailable_openai_credential"
 					? { providerId: "openai", modelId: "gpt-5.5" }
 					: { providerId: "anthropic", modelId: "claude-opus-4-8" },
 		runtimePolicy: () => ({
@@ -520,9 +595,10 @@ try {
 			finishIdleResult,
 			platformKeySelections,
 			platformKeyQuarantines,
+			oauthAccessTokenConsumed,
 			providerRequestContexts,
 			sensitiveLogLeak:
-				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
+				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),
 				),
 		}),

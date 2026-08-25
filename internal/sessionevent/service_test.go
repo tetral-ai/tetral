@@ -829,6 +829,192 @@ func TestAppendClientEventsWritesIdempotencyAndRuntimeInputQueueJobsAtomically(t
 	assertSessionEventInboxMatchesQueue(t, admin, sessionID, jobs)
 }
 
+func TestAppendClientEventsBirthRemainsAtomicWhileLeaseRacesSessionOwner(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const sessionID = "sesn_event_birth_lease_race"
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
+	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	service := NewService(store)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	seed, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_birth_lease_race_seed", messageAppendRequest("existing candidate"))
+	if err != nil || len(seed.Data) != 1 {
+		t.Fatalf("seed existing Queue candidate = %#v/%v; want one event", seed, err)
+	}
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	store.beforeQueueJobInsert = func() error {
+		close(paused)
+		<-release
+		return nil
+	}
+
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_birth_lease_race", AppendRequest{
+			Events: []IncomingEvent{{Type: EventTypeUserInterrupt}},
+		})
+		appendDone <- err
+	}()
+	<-paused
+	type leaseResult struct {
+		jobs []*queue.Job
+		err  error
+	}
+	leaseDone := make(chan leaseResult, 1)
+	go func() {
+		jobs, err := queueStore.Lease(ctx, queue.LeaseRequest{
+			WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-before-birth",
+			MaxJobs: 1, LeaseDuration: time.Minute,
+		})
+		leaseDone <- leaseResult{jobs: jobs, err: err}
+	}()
+	waitForSessionEventAdvisoryLockWaiter(t, admin)
+	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 1 {
+		t.Fatalf("visible Events during uncommitted birth = %#v; want only the committed seed", events)
+	}
+	if jobs := readSessionEventQueueJobs(t, admin, sessionID); len(jobs) != 1 {
+		t.Fatalf("visible Queue jobs during uncommitted birth = %#v; want only the committed seed", jobs)
+	}
+	close(release)
+	if err := <-appendDone; err != nil {
+		t.Fatalf("AppendClientEvents after lease race: %v", err)
+	}
+	jobs := readSessionEventQueueJobs(t, admin, sessionID)
+	if len(readSessionEventLedgerRows(t, admin, sessionID)) != 2 || len(jobs) != 2 {
+		t.Fatalf("committed birth facts = events:%d jobs:%d; want 2/2", len(readSessionEventLedgerRows(t, admin, sessionID)), len(jobs))
+	}
+	result := <-leaseDone
+	if result.err != nil || len(result.jobs) != 0 {
+		t.Fatalf("Lease after interrupt birth = %#v/%v; want stale predecessor rejected", result.jobs, result.err)
+	}
+	leased := mustLeaseSessionEventJob(t, queueStore, sessionID, "bridge-after-birth")
+	if leased.ID != jobs[1].id {
+		t.Fatalf("post-birth interrupt lease = %s; want %s", leased.ID, jobs[1].id)
+	}
+	if runtimeInputKindFromQueueJob(t, leased) != RuntimeInputKindInterruptControl {
+		t.Fatalf("post-birth input kind = %s; want interrupt", runtimeInputKindFromQueueJob(t, leased))
+	}
+}
+
+func TestAppendClientEventsRevalidatesAfterQueueLeaseOwnsSession(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	const sessionID = "sesn_event_lease_birth_race"
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
+	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	service := NewService(store)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	seed, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_lease_birth_seed", messageAppendRequest("lease predecessor"))
+	if err != nil || len(seed.Data) != 1 {
+		t.Fatalf("seed lease predecessor = %#v/%v; want one event", seed, err)
+	}
+	seedJobs := readSessionEventQueueJobs(t, admin, sessionID)
+	if len(seedJobs) != 1 {
+		t.Fatalf("seed Queue jobs = %#v; want one", seedJobs)
+	}
+
+	blocker, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin Queue candidate blocker: %v", err)
+	}
+	defer func() { _ = blocker.Rollback() }()
+	var blockedJob string
+	if err := blocker.QueryRowContext(ctx, `SELECT id FROM queue_jobs WHERE workspace_id='default' AND id=$1 FOR UPDATE`, seedJobs[0].id).Scan(&blockedJob); err != nil {
+		t.Fatalf("lock Queue candidate: %v", err)
+	}
+	var blockerPID int
+	if err := blocker.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+		t.Fatalf("read Queue candidate blocker pid: %v", err)
+	}
+	type leaseResult struct {
+		jobs []*queue.Job
+		err  error
+	}
+	leaseDone := make(chan leaseResult, 1)
+	go func() {
+		jobs, err := queueStore.Lease(ctx, queue.LeaseRequest{
+			WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "bridge-lease-before-birth",
+			MaxJobs: 1, LeaseDuration: time.Minute,
+		})
+		leaseDone <- leaseResult{jobs: jobs, err: err}
+	}()
+	leasePID := waitForSessionEventLockWaiterPID(t, admin, blockerPID)
+
+	appendEntered := make(chan struct{})
+	appendDone := make(chan error, 1)
+	go func() {
+		close(appendEntered)
+		_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_lease_birth_race", messageAppendRequest("born after lease"))
+		appendDone <- err
+	}()
+	<-appendEntered
+	waitForSessionEventLockWaiterPID(t, admin, leasePID)
+	if err := blocker.Commit(); err != nil {
+		t.Fatalf("release Queue candidate: %v", err)
+	}
+	leased := <-leaseDone
+	if leased.err != nil || len(leased.jobs) != 1 || leased.jobs[0].ID != seedJobs[0].id {
+		t.Fatalf("lease predecessor = %#v/%v; want %s", leased.jobs, leased.err, seedJobs[0].id)
+	}
+	if err := <-appendDone; err != nil {
+		t.Fatalf("AppendClientEvents after Queue lease commit: %v", err)
+	}
+	jobs := readSessionEventQueueJobs(t, admin, sessionID)
+	if len(readSessionEventLedgerRows(t, admin, sessionID)) != 2 || len(jobs) != 2 {
+		t.Fatalf("post-lease atomic birth facts = events:%d jobs:%d; want 2/2", len(readSessionEventLedgerRows(t, admin, sessionID)), len(jobs))
+	}
+	if jobs[1].id == seedJobs[0].id || jobs[1].status != queue.StatusPending {
+		t.Fatalf("post-lease Queue custody = %#v; want distinct pending successor", jobs[1])
+	}
+}
+
+func waitForSessionEventLockWaiterPID(t testing.TB, admin *sql.DB, blockerPID int) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiterPID int
+		err := admin.QueryRow(`SELECT activity.pid FROM pg_stat_activity activity
+			WHERE $1 = ANY(pg_blocking_pids(activity.pid))
+			ORDER BY activity.pid
+			LIMIT 1`, blockerPID).Scan(&waiterPID)
+		if err == nil {
+			return waiterPID
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("read SessionEvent lock waiters: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no PostgreSQL worker blocked behind owner %d", blockerPID)
+	return 0
+}
+
+func waitForSessionEventAdvisoryLockWaiter(t testing.TB, admin *sql.DB) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var exists bool
+		if err := admin.QueryRow(`SELECT EXISTS (
+			SELECT 1
+			  FROM pg_stat_activity
+			 WHERE wait_event_type = 'Lock'
+			   AND query LIKE '%pg_advisory_xact_lock%'
+		)`).Scan(&exists); err != nil {
+			t.Fatalf("read SessionEvent advisory lock waiter: %v", err)
+		}
+		if exists {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("Queue Lease did not block behind active Event birth owner")
+}
+
 func TestAppendClientEventsRemainsDurableBehindLeasedInterruptBarrier(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	ctx := context.Background()

@@ -28,6 +28,8 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly toolStartedPath: string;
 	readonly durableOperationCompletedPath: string;
 	readonly closePath: string;
+	readonly fastThreadText?: string;
+	readonly fastAfterFirstProviderCall?: boolean;
 };
 
 const metadataFactory = async () => new Metadata();
@@ -82,8 +84,24 @@ const hosts = await buildRuntimeCoreHosts({
 			sleep: runtimeSleep,
 		},
 		llmService: {
-			stream: () => {
+			stream: (request) => {
 				providerInvocations += 1;
+				if (
+					(input.fastAfterFirstProviderCall === true && providerInvocations > 1) ||
+					(input.fastThreadText !== undefined &&
+						JSON.stringify(request.context).includes(input.fastThreadText))
+				) {
+					return Stream.fromIterable([
+						{ type: "text-start" as const, id: "thread-isolation-fast" },
+						{
+							type: "text-delta" as const,
+							id: "thread-isolation-fast",
+							text_delta: "sibling complete",
+						},
+						{ type: "text-end" as const, id: "thread-isolation-fast" },
+						{ type: "finish" as const, finishReason: "stop" as const },
+					]);
+				}
 				return Stream.concat(
 					Stream.fromEffect(Effect.sync(() => {
 						return {
@@ -126,9 +144,7 @@ const hosts = await buildRuntimeCoreHosts({
 });
 
 const cleanupController = {
-	startCleanup: async () => {
-		throw new Error("unexpected cleanup command");
-	},
+	startCleanup: hosts.cleanupRunHost.handleCleanupSession,
 } satisfies RuntimeCleanupController;
 const service = new RuntimeControlService({
 	ownPod: {

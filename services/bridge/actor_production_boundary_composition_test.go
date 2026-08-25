@@ -1,6 +1,7 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -23,7 +24,9 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 type lostACKSubagentBridge struct {
@@ -236,6 +239,136 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 	}
 	if childEnds != 1 || inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged {
 		t.Fatalf("cold child settlement ends/Inbox/Queue = %d/%s/%s; want 1/accepted/acknowledged", childEnds, inboxStatus, queueStatus)
+	}
+}
+
+func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_child_control_rejoin"
+		parentID  = "thr_child_control_parent"
+		bindingID = "bind_child_control_rejoin"
+		podUID    = "pod_child_control_rejoin"
+		taskName  = "child-control-target"
+		spawnID   = "evt_child_control_spawn"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("child-control-rejoin-key")
+	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, parentID, "msg_child_control_prefix", "evt_child_control_prefix", 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, spawnID, 1, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"`+taskName+`","agent_type":"worker","fork_turns":"all"},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public',session_visible=true,model_request_id='mreq_child_control_spawn'
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, spawnID); err != nil {
+		t.Fatalf("authorize child control spawn source: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_child_control_spawn", spawnID, "call_child_control_spawn", "spawn_agent")
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnID)
+	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
+		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: spawnID,
+		TaskName: taskName, AgentType: "worker", InitialPrompt: "perform child work", ParentMessageSequences: []int64{1},
+	})
+	if err != nil || created.GetCommitted().GetChildThreadId() == "" {
+		t.Fatalf("create child control target = %#v/%v", created, err)
+	}
+	childID := created.GetCommitted().GetChildThreadId()
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running'
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID); err != nil {
+		t.Fatalf("activate child control target: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for child control composition: %v", err)
+	}
+	server := grpc.NewServer()
+	RegisterBridgeAPI(server, store)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+	input, err := json.Marshal(map[string]any{
+		"bridgeAddress": listener.Addr().String(), "workspaceId": "default", "sessionId": sessionID,
+		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1,
+		"targetPodUid": podUID, "taskName": taskName,
+	})
+	if err != nil {
+		t.Fatalf("encode child control composition: %v", err)
+	}
+	inputPath := t.TempDir() + "/child-control.json"
+	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
+		t.Fatalf("write child control composition: %v", err)
+	}
+	var output bytes.Buffer
+	command := exec.Command("bun", "packages/runtime-pod/test/fixtures/child-control-exhaustion-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	command.Dir = "../agent-runtime"
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatalf("start child control composition: %v", err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var jobs int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+			WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1
+			  AND payload_json::jsonb->>'session_thread_id'=$2
+			  AND payload_json::jsonb->>'input_kind'='interrupt_control'`, sessionID, childID).Scan(&jobs); err == nil && jobs == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Runtime did not create child interrupt custody: %s", output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET attempt_count=max_attempts,available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1
+		  AND payload_json::jsonb->>'session_thread_id'=$2
+		  AND payload_json::jsonb->>'input_kind'='interrupt_control'`, sessionID, childID); err != nil {
+		t.Fatalf("advance child control to final delivery owner: %v", err)
+	}
+	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseOwner: "child-control-rejoin", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run child control final owner: %v", err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("run child control composition: %v: %s", err, output.String())
+	}
+	var composed struct {
+		ProviderInvocations int               `json:"providerInvocations"`
+		ProviderContexts    []json.RawMessage `json:"providerContexts"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &composed); err != nil {
+		t.Fatalf("decode child control composition: %v: %s", err, output.String())
+	}
+	var childStatus string
+	var toolUses, toolResults, parentEnds, completionMails int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='agent.tool_use' AND payload_json::jsonb->>'name'='interrupt_agent'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='agent.tool_result'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3 AND type='span.model_request_end'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.thread_message_sent')`,
+		sessionID, childID, parentID).Scan(&childStatus, &toolUses, &toolResults, &parentEnds, &completionMails); err != nil {
+		t.Fatalf("read child control durable rejoin: %v", err)
+	}
+	if composed.ProviderInvocations != 2 || childStatus != "failed" || toolUses != 1 || toolResults != 1 || parentEnds != 2 || completionMails != 1 || deliverer.deliveries != 0 {
+		t.Fatalf("child control rejoin = providers:%d child:%s uses/results/ends/mail/runtime:%d/%d/%d/%d/%d contexts:%s",
+			composed.ProviderInvocations, childStatus, toolUses, toolResults, parentEnds, completionMails, deliverer.deliveries, output.String())
 	}
 }
 

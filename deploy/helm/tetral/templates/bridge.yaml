@@ -174,7 +174,7 @@ spec:
             - name: TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS
               value: "10000"
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
-              value: "1"
+              value: "8"
             - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
               value: "1000"
             - name: TETRAL_KUBERNETES_NAMESPACE

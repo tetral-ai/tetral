@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,6 +52,68 @@ type committingInterruptRuntimeSender struct {
 	bridge *PostgreSQLBridgeAPIStore
 }
 
+var errSyntheticInterruptResponseLoss = errors.New("synthetic interrupt response loss")
+
+type interruptResponseLossSender struct {
+	RuntimeCommandSender
+	calls atomic.Int32
+}
+
+type blockingRecoveryCommandSender struct {
+	RuntimeCommandSender
+	recovery   RuntimeRecoveryCommandSender
+	planned    chan *agentruntimev1.RecoverThreadRequest
+	release    chan struct{}
+	targetPort atomic.Int32
+}
+
+func (s *blockingRecoveryCommandSender) RecoverThread(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.RecoverThreadRequest,
+) (*agentruntimev1.RecoverThreadResponse, error) {
+	select {
+	case s.planned <- request:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	target.Port = int(s.targetPort.Load())
+	return s.recovery.RecoverThread(ctx, target, request)
+}
+
+func (s *interruptResponseLossSender) Interrupt(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.InterruptRequest,
+) (*agentruntimev1.InterruptResponse, error) {
+	s.calls.Add(1)
+	response, err := s.RuntimeCommandSender.Interrupt(ctx, target, request)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, errors.New("interrupt response is nil")
+	}
+	return nil, errSyntheticInterruptResponseLoss
+}
+
+func (s *interruptResponseLossSender) RecoverThread(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.RecoverThreadRequest,
+) (*agentruntimev1.RecoverThreadResponse, error) {
+	recovery, ok := s.RuntimeCommandSender.(RuntimeRecoveryCommandSender)
+	if !ok {
+		return nil, errors.New("runtime recovery sender is unavailable")
+	}
+	return recovery.RecoverThread(ctx, target, request)
+}
+
 func (s *committingInterruptRuntimeSender) Interrupt(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
 	s.targets = append(s.targets, target)
 	s.requests = append(s.requests, request)
@@ -78,7 +142,7 @@ func (s *committingInterruptRuntimeSender) Interrupt(ctx context.Context, target
 
 func (s *interruptFollowerRuntimeServer) AcceptInput(context.Context, *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error) {
 	switch s.calls.Add(1) {
-	case 2:
+	case 1:
 		return nil, status.Error(codes.InvalidArgument, "fixture-controlled deterministic rejection")
 	default:
 		return &agentruntimev1.AcceptInputResponse{Outcome: &agentruntimev1.AcceptInputResponse_Rejected{Rejected: &agentruntimev1.AcceptInputRejected{
@@ -87,7 +151,7 @@ func (s *interruptFollowerRuntimeServer) AcceptInput(context.Context, *agentrunt
 	}
 }
 
-func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *testing.T) {
+func TestPostgreSQLInterruptSettlesPreparedRejectionAndQueuedFollowers(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_interrupt_follower_production"
@@ -163,28 +227,26 @@ func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *tes
 		}
 	}
 
-	retryID := appendMessage("interrupt-follower-retry", "retry before stop")
-	if active, err := newRunner(fixturePort, "interrupt-follower-retry").RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("deliver retryable follower = active:%t err:%v", active, err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
-		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, retryID)); err != nil {
-		t.Fatalf("hold retryable follower behind interrupt: %v", err)
-	}
 	rejectionID := appendMessage("interrupt-follower-rejection", "reject before stop")
 	if active, err := newRunner(fixturePort, "interrupt-follower-rejection").RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("prepare deterministic rejection follower = active:%t err:%v", active, err)
 	}
-	var retryStatus, rejectionStatus, rejectionKind string
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()+interval '1 hour'
+		WHERE workspace_id='default' AND dedupe_key=$1`, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, rejectionID)); err != nil {
+		t.Fatalf("hold rejection follower behind interrupt: %v", err)
+	}
+	queuedID := appendMessage("interrupt-follower-queued", "queued before stop")
+	var rejectionStatus, rejectionKind, queuedStatus, queuedKind string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
-		(SELECT input_kind FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`, retryID, rejectionID).
-		Scan(&retryStatus, &rejectionStatus, &rejectionKind); err != nil {
+			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+			(SELECT input_kind FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+			(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+			(SELECT input_kind FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`, rejectionID, queuedID).
+		Scan(&rejectionStatus, &rejectionKind, &queuedStatus, &queuedKind); err != nil {
 		t.Fatalf("read pre-interrupt follower custody: %v", err)
 	}
-	if retryStatus != "delivering" || rejectionStatus != "delivering" || rejectionKind != "rejection" || followerRuntime.calls.Load() != 3 {
-		t.Fatalf("pre-interrupt followers = retry:%s rejection:%s/%s calls:%d", retryStatus, rejectionStatus, rejectionKind, followerRuntime.calls.Load())
+	if rejectionStatus != "delivering" || rejectionKind != "rejection" || queuedStatus != "queued" || queuedKind != "messages" || followerRuntime.calls.Load() != 2 {
+		t.Fatalf("pre-interrupt followers = rejection:%s/%s queued:%s/%s calls:%d", rejectionStatus, rejectionKind, queuedStatus, queuedKind, followerRuntime.calls.Load())
 	}
 
 	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, threadID, bindingID, 1, podUID)
@@ -208,7 +270,7 @@ func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *tes
 	if len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
 		t.Fatalf("follower interrupt Runtime composition = %+v", composed)
 	}
-	var interruptInbox, interruptQueue, retryInbox, retryQueue, rejectionInbox, rejectionQueue string
+	var interruptInbox, interruptQueue, rejectionInbox, rejectionQueue, queuedInbox, queuedQueue string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
@@ -217,16 +279,16 @@ func TestPostgreSQLInterruptSettlesRetryableAndPreparedRejectionFollowers(t *tes
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$5),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$6)`,
 		interruptID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
-		retryID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, retryID),
-		rejectionID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, rejectionID)).
-		Scan(&interruptInbox, &interruptQueue, &retryInbox, &retryQueue, &rejectionInbox, &rejectionQueue); err != nil {
+		rejectionID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, rejectionID),
+		queuedID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, queuedID)).
+		Scan(&interruptInbox, &interruptQueue, &rejectionInbox, &rejectionQueue, &queuedInbox, &queuedQueue); err != nil {
 		t.Fatalf("read terminal follower custody: %v", err)
 	}
 	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
-		retryInbox != "cancelled" || retryQueue != queue.StatusCancelled ||
-		rejectionInbox != "cancelled" || rejectionQueue != queue.StatusCancelled {
-		t.Fatalf("terminal follower custody = interrupt:%s/%s retry:%s/%s rejection:%s/%s",
-			interruptInbox, interruptQueue, retryInbox, retryQueue, rejectionInbox, rejectionQueue)
+		rejectionInbox != "cancelled" || rejectionQueue != queue.StatusCancelled ||
+		queuedInbox != "cancelled" || queuedQueue != queue.StatusCancelled {
+		t.Fatalf("terminal follower custody = interrupt:%s/%s rejection:%s/%s queued:%s/%s",
+			interruptInbox, interruptQueue, rejectionInbox, rejectionQueue, queuedInbox, queuedQueue)
 	}
 }
 
@@ -557,6 +619,96 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	t.Logf("initial Runtime composition Inbox=%s Messages=%d starts=%d toolUses=%d", diagnosticInbox, diagnosticMessages, diagnosticStarts, diagnosticToolUses)
 	waitForCompositionFile(t, paths.toolStarted, "durable Runtime operation", &runtimeProcess.output)
 
+	// Cleanup may observe a durable idle projection while the pod still owns a
+	// hot run slot. The Runtime is the final busy authority in that lag window.
+	cleanupID := "cleanup_interrupt_production_hot"
+	idleEventID := "evt_interrupt_production_lagging_idle"
+	idleSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, idleEventID, idleSequence, "session.status_idle", `{"type":"session.status_idle"}`)
+	seedBridgeAPIStreamChange(t, admin, "default", sessionID, threadID, idleEventID, 1, "internal", false)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='idle', updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("seed lagging idle Thread projection: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='idle', status_event_id=$2, cleanup_job_id=$3, cleanup_enqueued_at=clock_timestamp(), updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, idleEventID, cleanupID); err != nil {
+		t.Fatalf("seed lagging idle cleanup projection: %v", err)
+	}
+	cleanupJobID := queue.NewJobID()
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: cleanupJobID, WorkspaceID: workspace.DefaultID, Kind: queue.KindCleanupSession,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatCleanupSessionDedupeKey(workspace.DefaultID, sessionID, cleanupID),
+		PayloadVersion: 1,
+		PayloadJSON:    []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"` + cleanupID + `"}`),
+		MaxAttempts:    queue.DefaultMaxAttempts, Now: time.Now().UTC().Add(-time.Second),
+	}); err != nil {
+		t.Fatalf("enqueue cleanup during hot Thread run: %v", err)
+	}
+	cleanupSender := &countingCleanupSender{RuntimeCommandSender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})}
+	cleanupRunner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: cleanupSender},
+		Config:    JobRunnerConfig{LeaseOwner: "interrupt-production-hot-cleanup", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := cleanupRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("run cleanup against hot Thread = active:%t err:%v", active, err)
+	}
+	var cleanupQueueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, cleanupJobID).Scan(&cleanupQueueStatus); err != nil {
+		t.Fatalf("read hot cleanup Queue state: %v", err)
+	}
+	if cleanupSender.calls.Load() != 1 || cleanupQueueStatus != queue.StatusAcknowledged {
+		t.Fatalf("hot cleanup = Runtime calls:%d Queue:%s; want one busy check and acknowledged reschedule", cleanupSender.calls.Load(), cleanupQueueStatus)
+	}
+	assertCleanupMarkersRearmed(t, admin, sessionID, true)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running', updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("restore running Thread projection: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+		SET status='running', status_event_id=NULL, cleanup_after=NULL, updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+		t.Fatalf("restore running Session projection: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_event_stream_changes
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, idleEventID); err != nil {
+		t.Fatalf("remove lagging idle stream fixture: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `DELETE FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, idleEventID); err != nil {
+		t.Fatalf("remove lagging idle Event fixture: %v", err)
+	}
+
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET config_generation=2, updated_at=clock_timestamp()
+		WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("advance config generation during hot Thread run: %v", err)
+	}
+	configJobID := queue.NewJobID()
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: configJobID, WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeConfigUpdate,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeConfigUpdateDedupeKey(workspace.DefaultID, sessionID, "2"),
+		PayloadVersion: 2,
+		PayloadJSON:    []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","config_generation":2}`),
+		MaxAttempts:    queue.DefaultMaxAttempts, Now: time.Now().UTC().Add(-time.Second),
+	}); err != nil {
+		t.Fatalf("enqueue config during hot Thread run: %v", err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("defer config against hot Thread = active:%t err:%v", active, err)
+	}
+	var configStatus string
+	var configAttempts int
+	if err := admin.QueryRowContext(context.Background(), `SELECT status, attempt_count FROM queue_jobs
+		WHERE workspace_id='default' AND id=$1`, configJobID).Scan(&configStatus, &configAttempts); err != nil {
+		t.Fatalf("read deferred config boundary: %v", err)
+	}
+	if configStatus != queue.StatusPending || configAttempts != 0 {
+		t.Fatalf("deferred config boundary = %s/%d; want pending/0", configStatus, configAttempts)
+	}
+
 	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)))
 	interruptBirth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID,
 		"interrupt-production-composition", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
@@ -572,6 +724,28 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'
 		  AND event_ids_json::jsonb ? $2`, sessionID, interruptEvent).Scan(&interruptID); err != nil {
 		t.Fatalf("read production-born interrupt Inbox: %v", err)
+	}
+	postConfigEventID := "evt_interrupt_production_post_config"
+	postConfigSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, postConfigEventID, postConfigSequence, "user.message", `{"content":[{"type":"text","text":"post-config ordinary"}]}`)
+	postConfigJob := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_interrupt_production_post_config", InputKind: "messages", EventIDs: []string{postConfigEventID},
+		SequenceFrom: postConfigSequence, SequenceTo: postConfigSequence,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"rin_interrupt_production_post_config","event_ids":["` + postConfigEventID + `"],"sequence_from":` + strconv.FormatInt(postConfigSequence, 10) + `,"sequence_to":` + strconv.FormatInt(postConfigSequence, 10) + `,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, postConfigJob)
+	enqueueRuntimeCompositionJob(t, queueStore, sessionID, postConfigJob, 0)
+	var ordinaryQueueStatus, ordinaryInboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, postConfigJob.RuntimeInputID), postConfigJob.RuntimeInputID,
+	).Scan(&ordinaryQueueStatus, &ordinaryInboxStatus); err != nil {
+		t.Fatalf("read post-interrupt config follower: %v", err)
+	}
+	if ordinaryQueueStatus != queue.StatusPending || ordinaryInboxStatus != "queued" {
+		t.Fatalf("post-interrupt config follower = %s/%s; want pending/queued", ordinaryQueueStatus, ordinaryInboxStatus)
 	}
 
 	type deliveryResult struct {
@@ -629,12 +803,54 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	if delivered.err != nil || !delivered.active {
 		t.Fatalf("deliver interrupt through Runtime closeout = active:%t err:%v", delivered.active, delivered.err)
 	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1 AND status='pending'`, configJobID); err != nil {
+		t.Fatalf("make deferred config eligible after interrupt: %v", err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("install deferred config after interrupt = active:%t err:%v", active, err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, configJobID).Scan(&configStatus); err != nil || configStatus != queue.StatusAcknowledged {
+		t.Fatalf("installed config Queue state = %s/%v; want acknowledged", configStatus, err)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver ordinary input after config install = active:%t err:%v", active, err)
+	}
+	postConfigDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var ends int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'`, sessionID, threadID).Scan(&ends); err != nil {
+			t.Fatalf("read post-config Request End: %v", err)
+		}
+		if ends == 2 {
+			break
+		}
+		if time.Now().After(postConfigDeadline) {
+			t.Fatalf("ordinary input did not resume after config install: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	postConfigCaptureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete post-config output capture: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(postConfigCaptureDeadline) {
+			t.Fatalf("post-config completion did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release Runtime composition: %v", err)
 	}
 	composed := runtimeProcess.wait(t)
-	if composed.ProviderInvocations != 1 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
-		t.Fatalf("Runtime composition = %+v; want one Provider, one joined operation, and interrupt response", composed)
+	if composed.ProviderInvocations != 2 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
+		t.Fatalf("Runtime composition = %+v; want interrupted and resumed Provider calls, one joined operation, and interrupt response", composed)
 	}
 
 	var inboxStatus, queueStatus string
@@ -652,7 +868,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	).Scan(&inboxStatus, &queueStatus, &starts, &ends, &toolUses, &toolResults, &receipts); err != nil {
 		t.Fatalf("read interrupt production closeout: %v", err)
 	}
-	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || starts != 1 || ends != 1 || toolUses != 1 || toolResults != 1 || receipts != 1 {
+	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || starts != 2 || ends != 2 || toolUses != 1 || toolResults != 1 || receipts != 1 {
 		t.Fatalf("production closeout = Inbox:%s Queue:%s starts:%d ends:%d tool uses/results:%d/%d receipts:%d",
 			inboxStatus, queueStatus, starts, ends, toolUses, toolResults, receipts)
 	}
@@ -669,17 +885,30 @@ func TestPostgreSQLExplicitChildInterruptColdRecoversOnlyChild(t *testing.T) {
 func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID    = "sesn_interrupt_pod_loss_production"
-		threadID     = "thr_interrupt_pod_loss_production"
-		oldBindingID = "bind_interrupt_pod_loss_old"
-		oldPodUID    = "pod_interrupt_pod_loss_old"
-		newBindingID = "bind_interrupt_pod_loss_new"
-		newPodUID    = "pod_interrupt_pod_loss_new"
+		sessionID     = "sesn_interrupt_pod_loss_production"
+		threadID      = "thr_interrupt_pod_loss_production"
+		siblingID     = "thr_interrupt_pod_loss_sibling"
+		mainTurnID    = "evt_interrupt_pod_loss_main_running"
+		siblingTurnID = "evt_interrupt_pod_loss_sibling_running"
+		mainRequestID = "mreq_interrupt_pod_loss_main"
+		siblingReqID  = "mreq_interrupt_pod_loss_sibling"
+		oldBindingID  = "bind_interrupt_pod_loss_old"
+		oldPodUID     = "pod_interrupt_pod_loss_old"
+		newPodUID     = "pod_interrupt_pod_loss_new"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
 	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	client := dbconnect.NewClientForTesting(runtime)
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	mainScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID)
+	siblingScope := bridgeAPIScope(sessionID, siblingID, oldBindingID, 1, oldPodUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, mainScope, mainTurnID)
+	seedBridgeAPIOpenDurableTurn(t, admin, siblingScope, siblingTurnID)
+	mainToolID := writeDurableOrdinaryToolUseForTest(t, bridgeStore, mainScope, mainRequestID,
+		"call_interrupt_pod_loss_main", "Read", `{"path":"main.txt"}`)
+	seedBridgeAPIRequestStart(t, bridgeStore, siblingScope, "rwrite_"+siblingReqID+"_start", siblingReqID, "agent_provider_request", 0)
 	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
 	birth, err := eventService.AppendClientEvents(context.Background(), workspace.DefaultID, sessionID, "interrupt-pod-loss-production",
 		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}})
@@ -702,14 +931,34 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
 		t.Fatalf("repair pod loss under interrupt = %d/%v", repaired, err)
 	}
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, newBindingID, 2, newPodUID)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
-		SET status='running', binding_id=$2, binding_generation=2, updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1`, sessionID, newBindingID); err != nil {
-		t.Fatalf("install replacement Runtime status fence: %v", err)
+	var mainEndsAfterLoss, mainResultsAfterLoss, siblingEndsAfterLoss, oldBindings int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		 AND type='span.model_request_end' AND model_request_id=$4),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_event_id'=$5),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$3
+		 AND type='span.model_request_end' AND model_request_id=$6),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`,
+		sessionID, threadID, siblingID, mainRequestID, mainToolID, siblingReqID,
+	).Scan(&mainEndsAfterLoss, &mainResultsAfterLoss, &siblingEndsAfterLoss, &oldBindings); err != nil {
+		t.Fatalf("read pod-loss Thread partition: %v", err)
 	}
-
-	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	if mainEndsAfterLoss != 0 || mainResultsAfterLoss != 0 || siblingEndsAfterLoss != 1 || oldBindings != 0 {
+		t.Fatalf("pod-loss partition = main %d/%d sibling ends %d bindings %d; want 0/0 1 0",
+			mainEndsAfterLoss, mainResultsAfterLoss, siblingEndsAfterLoss, oldBindings)
+	}
+	var recoveryJobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND dedupe_key=$2 AND status='pending'`,
+		queue.KindRuntimeRecovery,
+		queue.FormatRuntimeRecoveryDedupeKey(workspace.DefaultID, sessionID, mainToolID),
+	).Scan(&recoveryJobs); err != nil {
+		t.Fatalf("read interrupted Thread recovery custody: %v", err)
+	}
+	if recoveryJobs != 1 {
+		t.Fatalf("interrupted Thread recovery jobs = %d; want one exact pending owner", recoveryJobs)
+	}
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-pod-loss-production-key")
 	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -722,25 +971,136 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		bridgeServer.Stop()
 		_ = bridgeListener.Close()
 	})
-	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, threadID, newBindingID, 2, newPodUID)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
-		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, newBindingID); err != nil {
-		t.Fatalf("align replacement Runtime binding: %v", err)
-	}
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, runtimeProcess.port)
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
 		}})
 	}}
+	queueStore := queue.NewPostgreSQLStore(client)
+	baseSender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	recoverySender := &blockingRecoveryCommandSender{
+		RuntimeCommandSender: baseSender,
+		recovery:             baseSender,
+		planned:              make(chan *agentruntimev1.RecoverThreadRequest, 1),
+		release:              make(chan struct{}),
+	}
+	responseLossSender := &interruptResponseLossSender{
+		RuntimeCommandSender: recoverySender,
+	}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseLossSender},
 		Config:    JobRunnerConfig{LeaseOwner: "interrupt-pod-loss-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("deliver same interrupt after pod loss = active:%t err:%v", active, err)
+	type deliveryResult struct {
+		active bool
+		err    error
 	}
+	delivery := make(chan deliveryResult, 1)
+	go func() {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		delivery <- deliveryResult{active: active, err: runErr}
+	}()
+	var recoveryRequest *agentruntimev1.RecoverThreadRequest
+	select {
+	case recoveryRequest = <-recoverySender.planned:
+	case unexpected := <-delivery:
+		t.Fatalf("first post-loss Queue job bypassed recovery = active:%t err:%v", unexpected.active, unexpected.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("runtime recovery lease did not install the replacement Runtime")
+	}
+	if recoveryRequest.GetSourceEventId() != mainToolID || recoveryRequest.GetRecoveryLeaseRef() == nil {
+		t.Fatalf("replacement recovery authority = source:%s lease:%#v; want %s and exact lease",
+			recoveryRequest.GetSourceEventId(), recoveryRequest.GetRecoveryLeaseRef(), mainToolID)
+	}
+	runtimeProcess, paths := startInterruptRuntimeComposition(
+		t,
+		t.TempDir(),
+		bridgeListener.Addr().String(),
+		sessionID,
+		threadID,
+		recoveryRequest.GetBindingId(),
+		recoveryRequest.GetBindingGeneration(),
+		recoveryRequest.GetTargetPodUid(),
+	)
+	deliveryStore.RuntimeGRPCPort = runtimeProcess.port
+	recoverySender.targetPort.Store(int32(runtimeProcess.port))
+	close(recoverySender.release)
+	select {
+	case recovered := <-delivery:
+		if recovered.err != nil || !recovered.active {
+			t.Fatalf("recover interrupted Thread under exact lease = active:%t err:%v", recovered.active, recovered.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("runtime recovery delivery did not finish: %s", runtimeProcess.output.String())
+	}
+	var recoveryQueueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND dedupe_key=$2`,
+		queue.KindRuntimeRecovery,
+		queue.FormatRuntimeRecoveryDedupeKey(workspace.DefaultID, sessionID, mainToolID),
+	).Scan(&recoveryQueueStatus); err != nil {
+		t.Fatalf("read recovery Queue settlement: %v", err)
+	}
+	if recoveryQueueStatus != queue.StatusAcknowledged {
+		t.Fatalf("recovery Queue status = %s; want acknowledged before interrupt delivery", recoveryQueueStatus)
+	}
+	replacementScope := bridgeAPIScope(
+		sessionID,
+		threadID,
+		recoveryRequest.GetBindingId(),
+		recoveryRequest.GetBindingGeneration(),
+		recoveryRequest.GetTargetPodUid(),
+	)
+	delivery = make(chan deliveryResult, 1)
+	go func() {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		delivery <- deliveryResult{active: active, err: runErr}
+	}()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build pod-loss output capture provider registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(dbconnect.NewClientForTesting(runtime)),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "interrupt-pod-loss-output-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	captureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete pod-loss interrupt output capture: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(captureDeadline) {
+			t.Fatalf("pod-loss interrupt did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var delivered deliveryResult
+	select {
+	case delivered = <-delivery:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("pod-loss interrupt delivery did not finish after output capture: %s", runtimeProcess.output.String())
+	}
+	if delivered.err != nil || !delivered.active {
+		t.Fatalf("deliver same interrupt after pod loss = active:%t err:%v", delivered.active, delivered.err)
+	}
+	if calls := responseLossSender.calls.Load(); calls != 1 {
+		t.Fatalf("replacement Runtime interrupt calls after response loss = %d; want 1", calls)
+	}
+	waitForThreadRequestEnds(t, admin, sessionID, threadID, 1)
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release pod-loss Runtime composition: %v", err)
 	}
@@ -749,7 +1109,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		t.Fatalf("pod-loss interrupt Runtime composition = %+v", composed)
 	}
 	var finalInbox, finalQueue string
-	var attemptsAfter, lineage, receipts, activeBarriers int
+	var attemptsAfter, lineage, receipts, activeBarriers, mainEnds, mainResults, danglingTools int
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
@@ -758,14 +1118,291 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$4
 		 AND source_kind='interrupt_control' AND idempotency_key=$1 AND receipt_json <> ''),
 		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$4
-		 AND input_kind='interrupt_control' AND status IN ('queued','delivering','accepted'))`,
-		interruptID, jobID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), sessionID).
-		Scan(&finalInbox, &finalQueue, &attemptsAfter, &lineage, &receipts, &activeBarriers); err != nil {
+		 AND input_kind='interrupt_control' AND status IN ('queued','delivering','accepted')),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$4 AND session_thread_id=$5
+		 AND type='span.model_request_end'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$4 AND session_thread_id=$5
+		 AND type='agent.tool_result' AND (payload_json::jsonb->>'tool_use_event_id'=$6 OR payload_json::jsonb->>'tool_use_id'=$6)),
+		(SELECT count(*) FROM session_events tool_use WHERE tool_use.workspace_id='default' AND tool_use.session_id=$4
+		 AND tool_use.session_thread_id=$5 AND tool_use.type IN ('agent.tool_use','agent.mcp_tool_use')
+		 AND NOT EXISTS (SELECT 1 FROM session_events result WHERE result.workspace_id=tool_use.workspace_id
+		  AND result.session_id=tool_use.session_id AND result.session_thread_id=tool_use.session_thread_id
+		  AND ((result.type='agent.tool_result' AND (result.payload_json::jsonb->>'tool_use_event_id'=tool_use.event_id
+		    OR result.payload_json::jsonb->>'tool_use_id'=tool_use.event_id))
+		    OR (result.type='agent.mcp_tool_result' AND result.payload_json::jsonb->>'mcp_tool_use_id'=tool_use.event_id))))`,
+		interruptID, jobID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID), sessionID,
+		threadID, mainToolID).
+		Scan(&finalInbox, &finalQueue, &attemptsAfter, &lineage, &receipts, &activeBarriers, &mainEnds, &mainResults, &danglingTools); err != nil {
 		t.Fatalf("read pod-loss interrupt terminal facts: %v", err)
 	}
-	if finalInbox != "committed" || finalQueue != queue.StatusAcknowledged || attemptsAfter != attemptsBefore+1 || lineage != 1 || receipts != 1 || activeBarriers != 0 {
-		t.Fatalf("pod-loss terminal facts = Inbox:%s Queue:%s attempts:%d->%d lineage:%d receipts:%d barriers:%d",
-			finalInbox, finalQueue, attemptsBefore, attemptsAfter, lineage, receipts, activeBarriers)
+	if finalInbox != "committed" || finalQueue != queue.StatusAcknowledged || attemptsAfter != attemptsBefore+1 || lineage != 1 ||
+		receipts != 1 || activeBarriers != 0 || mainEnds != 1 || mainResults != 1 || danglingTools != 0 {
+		t.Fatalf("pod-loss terminal facts = Inbox:%s Queue:%s attempts:%d->%d lineage:%d receipts:%d barriers:%d main:%d/%d dangling:%d",
+			finalInbox, finalQueue, attemptsBefore, attemptsAfter, lineage, receipts, activeBarriers, mainEnds, mainResults, danglingTools)
+	}
+	reloaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: replacementScope})
+	if err != nil {
+		t.Fatalf("cold reload completed pod-loss interrupt: %v", err)
+	}
+	var cold bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(reloaded.GetContextJson()), &cold); err != nil {
+		t.Fatalf("decode completed pod-loss interrupt context: %v", err)
+	}
+	var coldStarts, coldEnds, coldToolUses, coldToolResults int
+	for _, event := range cold.TurnFacts.Events {
+		if event.ModelRequestID != nil && *event.ModelRequestID == mainRequestID {
+			if event.RequestStart != nil {
+				coldStarts++
+			}
+			if event.RequestEnd != nil {
+				coldEnds++
+			}
+		}
+		if event.EventID == mainToolID && event.ToolUse != nil {
+			coldToolUses++
+		}
+		if event.ToolResult != nil && event.ToolResult.ToolName == "Read" {
+			coldToolResults++
+		}
+	}
+	if coldStarts != 1 || coldEnds != 1 || coldToolUses != 1 || coldToolResults != 1 || len(cold.PendingToolUses) != 0 {
+		t.Fatalf("cold completed pair = starts:%d ends:%d uses:%d results:%d pending:%d; want 1/1/1/1/0",
+			coldStarts, coldEnds, coldToolUses, coldToolResults, len(cold.PendingToolUses))
+	}
+}
+
+func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_interrupt_closeout_then_loss"
+		threadID       = "thr_interrupt_closeout_then_loss"
+		bindingID      = "bind_interrupt_closeout_then_loss"
+		podUID         = "pod_interrupt_closeout_then_loss"
+		newPodUID      = "pod_interrupt_closeout_then_loss_new"
+		turnID         = "evt_interrupt_closeout_then_loss_running"
+		modelRequestID = "mreq_interrupt_closeout_then_loss"
+		interruptID    = "rin_interrupt_closeout_then_loss"
+		interruptEvent = "evt_interrupt_closeout_then_loss"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_closeout_then_loss_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 3, "user.interrupt", `{}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
+		`["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 3, 3)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, interruptID, "interrupt_control", interruptEvent, 3, 3, time.Now().UTC())
+	oldLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "interrupt-closeout-old-owner",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_interrupt_closeout_then_loss_end", ModelRequestId: modelRequestID,
+		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"},
+		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
+			RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(oldLease),
+		},
+	})
+	if err != nil || ended.GetCommitted() == nil {
+		t.Fatalf("commit interrupt closeout before pod loss = %#v/%v", ended, err)
+	}
+	var inboxAfterCloseout string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptID).Scan(&inboxAfterCloseout); err != nil {
+		t.Fatalf("read interrupt Inbox after closeout: %v", err)
+	}
+	if inboxAfterCloseout != "committed" {
+		t.Fatalf("interrupt Inbox after closeout = %s; want committed", inboxAfterCloseout)
+	}
+	closeoutJob, err := DecodeRuntimeJob(queueJobProto(oldLease))
+	if err != nil {
+		t.Fatalf("decode committed interrupt closeout job: %v", err)
+	}
+	if replayed, found, replayErr := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090).
+		ReplayRuntimeDeliveryFinalization(context.Background(), closeoutJob); replayErr != nil || found {
+		t.Fatalf("replay interrupt receipt while durable Turn is open = %#v/%t/%v; want not found", replayed, found, replayErr)
+	}
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	repairStore := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
+		t.Fatalf("repair pod loss after interrupt closeout = %d/%v", repaired, err)
+	}
+	var inboxAfterLoss string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id=$1`, interruptID).Scan(&inboxAfterLoss); err != nil {
+		t.Fatalf("read interrupt Inbox after pod loss: %v", err)
+	}
+	if inboxAfterLoss != "committed" {
+		t.Fatalf("interrupt Inbox after pod loss = %s; want committed", inboxAfterLoss)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, oldLease.ID); err != nil {
+		t.Fatalf("expire pre-loss interrupt lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim pre-loss interrupt lease = %d/%v", reclaimed, err)
+	}
+	client := dbconnect.NewClientForTesting(runtime)
+	store.RuntimeBindingTokenHMACKey = []byte("interrupt-closeout-then-loss-key")
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for closeout recovery Bridge: %v", err)
+	}
+	bridgeServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeServer, store)
+	go func() { _ = bridgeServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeServer.Stop()
+		_ = bridgeListener.Close()
+	})
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	baseSender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	recoverySender := &blockingRecoveryCommandSender{
+		RuntimeCommandSender: baseSender,
+		recovery:             baseSender,
+		planned:              make(chan *agentruntimev1.RecoverThreadRequest, 1),
+		release:              make(chan struct{}),
+	}
+	responseLossSender := &interruptResponseLossSender{RuntimeCommandSender: recoverySender}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: responseLossSender},
+		Config: JobRunnerConfig{LeaseOwner: "interrupt-closeout-replay-owner", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	type deliveryResult struct {
+		active bool
+		err    error
+	}
+	recoveryDelivery := make(chan deliveryResult, 1)
+	go func() {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		recoveryDelivery <- deliveryResult{active: active, err: runErr}
+	}()
+	var recoveryRequest *agentruntimev1.RecoverThreadRequest
+	select {
+	case recoveryRequest = <-recoverySender.planned:
+	case unexpected := <-recoveryDelivery:
+		t.Fatalf("committed closeout bypassed recovery = active:%t err:%v", unexpected.active, unexpected.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("committed closeout did not lease Runtime recovery")
+	}
+	if recoveryRequest.GetSourceEventId() == "" || recoveryRequest.GetRecoveryLeaseRef() == nil {
+		t.Fatalf("closeout recovery authority = source:%q lease:%#v; want Request End source and exact lease",
+			recoveryRequest.GetSourceEventId(), recoveryRequest.GetRecoveryLeaseRef())
+	}
+	runtimeProcess, paths := startInterruptRuntimeComposition(
+		t,
+		t.TempDir(),
+		bridgeListener.Addr().String(),
+		sessionID,
+		threadID,
+		recoveryRequest.GetBindingId(),
+		recoveryRequest.GetBindingGeneration(),
+		recoveryRequest.GetTargetPodUid(),
+	)
+	deliveryStore.RuntimeGRPCPort = runtimeProcess.port
+	recoverySender.targetPort.Store(int32(runtimeProcess.port))
+	close(recoverySender.release)
+	select {
+	case recovered := <-recoveryDelivery:
+		if recovered.err != nil || !recovered.active {
+			t.Fatalf("recover committed interrupt closeout = active:%t err:%v", recovered.active, recovered.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("committed closeout recovery did not finish delivery: %s", runtimeProcess.output.String())
+	}
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build closeout recovery output capture registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "interrupt-closeout-recovery-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	captureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete recovered interrupt output capture: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(captureDeadline) {
+			t.Fatalf("recovered interrupt closeout did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	idleDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var idleEvents int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			  AND type='session.status_idle' AND sequence > (
+			    SELECT sequence FROM session_events WHERE workspace_id='default' AND event_id=$3
+			  )`, sessionID, threadID, turnID).Scan(&idleEvents); err != nil {
+			t.Fatalf("read recovered idle settlement: %v", err)
+		}
+		if idleEvents == 1 {
+			break
+		}
+		if time.Now().After(idleDeadline) {
+			t.Fatalf("replacement Runtime did not FinishIdle before receipt replay: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release closeout recovery Runtime: %v", err)
+	}
+	composed := runtimeProcess.wait(t)
+	if composed.ProviderInvocations != 0 || len(composed.InterruptResult) != 0 {
+		t.Fatalf("closeout recovery Runtime activity = %+v; want recovered closeout without Provider or new interrupt", composed)
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("replay interrupt receipt after recovered FinishIdle = active:%t err:%v", active, err)
+	}
+	if calls := responseLossSender.calls.Load(); calls != 0 {
+		t.Fatalf("Runtime interrupt calls after recovered closeout receipt = %d; want 0", calls)
+	}
+	var queueStatus string
+	var requestEnds, receipts, bindings int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2
+		 AND session_thread_id=$3 AND type='span.model_request_end' AND model_request_id=$4),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$2
+		 AND session_thread_id=$3 AND source_kind='interrupt_control' AND idempotency_key=$5 AND receipt_json <> ''),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$2)`,
+		oldLease.ID, sessionID, threadID, modelRequestID, interruptID,
+	).Scan(&queueStatus, &requestEnds, &receipts, &bindings); err != nil {
+		t.Fatalf("read post-loss receipt replay facts: %v", err)
+	}
+	if queueStatus != queue.StatusAcknowledged || requestEnds != 1 || receipts != 1 || bindings != 1 {
+		t.Fatalf("post-loss receipt replay = Queue:%s ends:%d receipts:%d bindings:%d; want acknowledged/1/1/1",
+			queueStatus, requestEnds, receipts, bindings)
 	}
 }
 
@@ -835,12 +1472,12 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 	if _, err := bridgeStore.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: siblingScope, DeliveryId: agentMailDeliveryID(lateMail, grandchildID), TargetThreadId: grandchildID,
 		SourceToolUseEventId: lateMail, Content: "must be stale",
-	}); !isSessionInterruptBarrierStaleError(err) {
+	}); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source mail = %v; want barrier stale", err)
 	}
 	if _, err := bridgeStore.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: siblingScope, SourceToolUseEventId: lateChild, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
-	}); !isSessionInterruptBarrierStaleError(err) {
+	}); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child birth = %v; want barrier stale", err)
 	}
 	// The two rejected Tool sources are timing fixtures, not Runtime history.
@@ -1065,6 +1702,7 @@ func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sess
 		"targetPodUid": podUID, "readyPath": readyPath, "toolStartedPath": paths.toolStarted,
 		"acceptResultPath":              paths.acceptResult,
 		"durableOperationCompletedPath": paths.operationCompleted, "closePath": paths.close,
+		"fastThreadText": "post-config ordinary", "fastAfterFirstProviderCall": true,
 	})
 	if err != nil {
 		t.Fatalf("encode interrupt Runtime composition: %v", err)

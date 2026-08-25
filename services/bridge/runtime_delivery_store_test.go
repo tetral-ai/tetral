@@ -186,9 +186,41 @@ func TestRuntimeRecoveryRevalidatesReclaimedLeaseBeforeBindingAndRuntime(t *test
 	if !ok || recoveryRequest.GetRecoveryLeaseRef().GetLeaseToken() != jobB.LeaseToken {
 		t.Fatalf("worker B recovery request = %#v; want exact live lease", senderB.requests[0])
 	}
+	type recoveryDurableSnapshot struct {
+		bindingCount    int
+		runtimeStatus   string
+		statusBindingID string
+		queueStatus     string
+		leaseToken      string
+		eventCount      int
+		operationCount  int
+	}
+	readSnapshot := func() recoveryDurableSnapshot {
+		t.Helper()
+		var snapshot recoveryDurableSnapshot
+		if err := admin.QueryRowContext(context.Background(), `SELECT
+			(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+			(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+			(SELECT binding_id FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+			(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+			(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$2),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),
+			(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`,
+			sessionID, jobB.JobID,
+		).Scan(&snapshot.bindingCount, &snapshot.runtimeStatus, &snapshot.statusBindingID,
+			&snapshot.queueStatus, &snapshot.leaseToken, &snapshot.eventCount, &snapshot.operationCount); err != nil {
+			t.Fatalf("read recovery durable snapshot: %v", err)
+		}
+		return snapshot
+	}
+	beforeStaleWorker := readSnapshot()
 	close(blockedStore.release)
 	if stale := <-resultA; stale.Status != RuntimeDeliveryAuthorityLost || len(senderA.requests) != 0 {
 		t.Fatalf("worker A resumed = %#v calls=%d; want authority loss before Runtime", stale, len(senderA.requests))
+	}
+	afterStaleWorker := readSnapshot()
+	if afterStaleWorker != beforeStaleWorker {
+		t.Fatalf("stale recovery worker changed durable state: before=%+v after=%+v", beforeStaleWorker, afterStaleWorker)
 	}
 	var bindingCount int
 	var runtimeStatus string
@@ -398,6 +430,107 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				t.Fatalf("replayed child events = %d/%d; want one durable pair", replayFailureEvents, replayCloseoutEvents)
 			}
 		})
+	}
+}
+
+func TestRuntimeRecoveryChildFinalExhaustionSkipsMailAfterParentCloseAdmission(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_child_recovery_parent_closing"
+		mainThreadID   = "thr_child_recovery_parent_closing_main"
+		parentThreadID = "thr_child_recovery_parent_closing"
+		childThreadID  = "thr_child_recovery_parent_closing_target"
+		recoverySource = "evt_child_recovery_parent_closing_source"
+		closeSource    = "evt_child_recovery_parent_closing_close"
+		bindingID      = "bind_child_recovery_parent_closing"
+		podUID         = "pod_child_recovery_parent_closing"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, parentThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentThreadID, childThreadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, "evt_child_recovery_parent_closing_created", 1, "session.thread_created",
+		`{"type":"session.thread_created","parent_thread_id":"`+parentThreadID+`","source_tool_use_event_id":"evt_child_recovery_parent_closing_spawn"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, recoverySource, 2, "session.thread_status_rescheduled", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainThreadID, closeSource, 1, "agent.tool_use",
+		`{"type":"agent.tool_use","name":"close_agent","input":{"task_name":"child"}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public'
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, closeSource); err != nil {
+		t.Fatalf("make close source public: %v", err)
+	}
+	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainThreadID, closeSource)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
+		t.Fatalf("seed Session state: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='rescheduling'
+		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childThreadID); err != nil {
+		t.Fatalf("seed child recovery state: %v", err)
+	}
+
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	enqueue, err := queue.NewRuntimeRecoveryEnqueueRequest(workspace.DefaultID, sessionID, childThreadID, recoverySource, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("build recovery Queue job: %v", err)
+	}
+	queued, err := queueStore.Enqueue(context.Background(), enqueue)
+	if err != nil {
+		t.Fatalf("enqueue recovery Queue job: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET max_attempts=1
+		WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
+		t.Fatalf("set recovery attempt ceiling: %v", err)
+	}
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeRecovery}, LeaseOwner: "closing-parent-recovery-finalizer",
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != queued.ID {
+		t.Fatalf("lease recovery final attempt = %#v/%v", leased, err)
+	}
+	job, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatalf("decode recovery job: %v", err)
+	}
+
+	apiStore := NewPostgreSQLBridgeAPIStore(client)
+	admitted, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+		Scope: bridgeAPIScope(sessionID, mainThreadID, bindingID, 1, podUID), SourceToolUseEventId: closeSource,
+		TargetChildThreadId: parentThreadID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+	})
+	if err != nil || admitted.GetCommitted() == nil {
+		t.Fatalf("admit parent close after recovery lease = %#v/%v", admitted, err)
+	}
+
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	finalized, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), job, RuntimeDeliveryResult{
+		Status: RuntimeDeliveryRejected, Retryable: true,
+		ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime recovery failed",
+	})
+	if err != nil || !finalized.QueueLeaseSettled || finalized.Retryable {
+		t.Fatalf("finalize child recovery after parent close = %#v/%v", finalized, err)
+	}
+
+	var recoveryQueueStatus, childStatus string
+	var failureEvents, closeoutEvents, completionEvents, completionInboxes, completionJobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$2 AND id=$3),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.error'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.thread_status_terminated'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$2 AND input_kind='agent_mail'),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND partition_key='session:default:' || $2
+		 AND kind='runtime_input' AND payload_json::jsonb->>'input_kind'='agent_mail')`,
+		queued.ID, sessionID, childThreadID,
+	).Scan(&recoveryQueueStatus, &childStatus, &failureEvents, &closeoutEvents, &completionEvents, &completionInboxes, &completionJobs); err != nil {
+		t.Fatalf("read close-first recovery finalization: %v", err)
+	}
+	if recoveryQueueStatus != queue.StatusDeadLettered || childStatus != "failed" || failureEvents != 1 || closeoutEvents != 1 ||
+		completionEvents != 0 || completionInboxes != 0 || completionJobs != 0 {
+		t.Fatalf("close-first recovery = Queue %s child %s terminal %d/%d mail %d/%d/%d",
+			recoveryQueueStatus, childStatus, failureEvents, closeoutEvents, completionEvents, completionInboxes, completionJobs)
 	}
 }
 
@@ -2556,7 +2689,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 	}
 }
 
-func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(t *testing.T) {
+func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDelivery(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID        = "sesn_bridge_interrupt_replay_fence"
@@ -2566,7 +2699,6 @@ func TestPostgreSQLJobRunnerReplaysInterruptReceiptBeforeAckAndFollowerDelivery(
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence")
-	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence"), "sevt_interrupt_replay_run")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 2, "user.interrupt", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEventID, 3, "user.message", `{"content":[{"type":"text","text":"new turn"}]}`)
 

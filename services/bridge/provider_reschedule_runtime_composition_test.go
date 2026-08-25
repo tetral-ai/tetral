@@ -230,26 +230,38 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 
 func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testing.T) {
 	for _, testCase := range []struct {
-		name              string
-		scenario          string
-		wantProviderCalls int
-		wantTurns         int
-		wantRequestEnds   int
-		wantReschedules   int
-		wantErrorEnds     int
-		wantAssistants    int
-		wantKeySelections []string
-		wantPublicStatus  string
-		wantPublicType    string
+		name               string
+		scenario           string
+		wantProviderCalls  int
+		wantTurns          int
+		wantRequestEnds    int
+		wantReschedules    int
+		wantErrorEnds      int
+		wantAssistants     int
+		wantOutputCaptures int
+		wantFinishIdle     int
+		wantKeySelections  []string
+		wantPublicStatuses string
+		wantPublicTypes    string
+		wantPublicMessage  string
 	}{
 		{name: "platform billing before progress", scenario: "platform_billing_pre_progress", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 2, wantAssistants: 2, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy", "pfk_provider_failure_healthy"}},
 		{name: "platform billing after progress", scenario: "platform_billing_post_progress", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy"}},
-		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}, wantPublicStatus: "exhausted", wantPublicType: "model_overloaded_error"},
-		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2, wantAssistants: 1},
-		{name: "invalid Kimi API key", scenario: "invalid_kimi_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error"},
-		{name: "invalid OpenAI OAuth", scenario: "invalid_openai_oauth", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatus: "exhausted", wantPublicType: "model_request_failed_error"},
+		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}, wantPublicStatuses: "exhausted,exhausted", wantPublicTypes: "model_overloaded_error,model_overloaded_error"},
+		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2, wantAssistants: 1, wantPublicStatuses: "retrying,exhausted", wantPublicTypes: "model_request_failed_error,model_overloaded_error"},
+		{name: "provider rate limited", scenario: "provider_rate_limited", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantReschedules: 1, wantErrorEnds: 1, wantAssistants: 2, wantOutputCaptures: 1, wantFinishIdle: 1, wantPublicStatuses: "retrying", wantPublicTypes: "model_rate_limited_error"},
+		{name: "invalid Kimi API key", scenario: "invalid_kimi_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error"},
+		{name: "OpenAI OAuth refresh rejected", scenario: "invalid_openai_oauth", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "OpenAI OAuth credential refresh failed; re-authorization is required."},
+		{name: "missing Kimi credential", scenario: "missing_kimi_credential", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "This provider requires an explicit session credential."},
+		{name: "unavailable OpenAI credential", scenario: "unavailable_openai_credential", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "The selected provider credential is not usable."},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			if testCase.wantOutputCaptures == 0 {
+				testCase.wantOutputCaptures = testCase.wantTurns
+			}
+			if testCase.wantFinishIdle == 0 {
+				testCase.wantFinishIdle = testCase.wantTurns
+			}
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			suffix := strings.ReplaceAll(testCase.scenario, "_", "")
 			sessionID := "sesn_provider_failure_" + suffix
@@ -265,7 +277,15 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
 			t.Cleanup(stopBridge)
 			repairCredential := seedProviderFailureCredential(t, runtimeDB, admin, sessionID, testCase.scenario)
+			activePodUID := podUID
 			process := startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, testCase.scenario)
+			priorProviderInvocations := 0
+			priorFinishIdleInvocations := 0
+			priorFinishIdleCommitted := true
+			priorSensitiveLogLeak := false
+			priorOAuthAccessTokenConsumed := false
+			priorKeySelections := []string(nil)
+			priorKeyQuarantines := []string(nil)
 
 			firstCapturePending := make(chan string, 1)
 			releaseFirstCapture := make(chan struct{})
@@ -280,7 +300,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				<-releaseFirstCapture
 				writeID := firstWriteID
 				captureGeneration := generation
-				for turn := 0; turn < testCase.wantTurns; turn++ {
+				for turn := 0; turn < testCase.wantOutputCaptures; turn++ {
 					if turn > 0 {
 						writeID, captureGeneration, err = waitForPendingOutputCapture(admin, sessionID, writeID)
 						if err != nil {
@@ -321,27 +341,65 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			}
 			waitForProviderFailureFacts(t, admin, sessionID, firstTurnEnds, "idle", process)
 			repairCredential()
+			if testCase.scenario == "invalid_openai_oauth" {
+				prior := process.close(t)
+				priorProviderInvocations = prior.ProviderInvocations
+				priorFinishIdleInvocations = prior.FinishIdleInvocations
+				priorFinishIdleCommitted = prior.FinishIdleResult == "committed"
+				priorSensitiveLogLeak = prior.SensitiveLogLeak
+				priorOAuthAccessTokenConsumed = prior.OAuthAccessTokenConsumed
+				priorKeySelections = prior.PlatformKeySelections
+				priorKeyQuarantines = prior.PlatformKeyQuarantines
+				if result, err := admin.ExecContext(context.Background(), `DELETE FROM session_runtime_bindings
+					WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2 AND binding_generation=1`,
+					sessionID, bindingID); err != nil {
+					t.Fatalf("fence lost provider credential Runtime binding: %v", err)
+				} else if deleted, _ := result.RowsAffected(); deleted != 1 {
+					t.Fatalf("fenced lost provider credential Runtime bindings = %d; want 1", deleted)
+				}
+				const replacementGeneration int64 = 2
+				replacementBindingID := bindingID + "_replacement"
+				activePodUID = podUID + "_replacement"
+				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, replacementBindingID, replacementGeneration, activePodUID)
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+					SET binding_id=$2, binding_generation=$3, updated_at=clock_timestamp()
+					WHERE workspace_id='default' AND session_id=$1`, sessionID, replacementBindingID, replacementGeneration); err != nil {
+					t.Fatalf("install replacement provider credential Runtime status: %v", err)
+				}
+				process = startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID,
+					replacementBindingID, replacementGeneration, activePodUID, testCase.scenario)
+			}
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
-			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, activePodUID)
 			waitForProviderFailureFacts(t, admin, sessionID, testCase.wantRequestEnds, "idle", process)
 			result := process.close(t)
 			if captureErr := <-capturesSettled; captureErr != nil {
 				t.Fatalf("settle %s output captures: %v", testCase.scenario, captureErr)
 			}
-			if result.ProviderInvocations != testCase.wantProviderCalls || result.FinishIdleInvocations != testCase.wantTurns || result.FinishIdleResult != "committed" || result.SensitiveLogLeak {
+			providerInvocations := priorProviderInvocations + result.ProviderInvocations
+			finishIdleInvocations := priorFinishIdleInvocations + result.FinishIdleInvocations
+			finishIdleCommitted := priorFinishIdleCommitted && result.FinishIdleResult == "committed"
+			sensitiveLogLeak := priorSensitiveLogLeak || result.SensitiveLogLeak
+			oauthAccessTokenConsumed := priorOAuthAccessTokenConsumed || result.OAuthAccessTokenConsumed
+			keySelections := append(priorKeySelections, result.PlatformKeySelections...)
+			keyQuarantines := append(priorKeyQuarantines, result.PlatformKeyQuarantines...)
+			if providerInvocations != testCase.wantProviderCalls || finishIdleInvocations != testCase.wantFinishIdle || !finishIdleCommitted || sensitiveLogLeak {
 				t.Fatalf("%s provider/FinishIdle/log result = %d/%d/%s/%v; want %d/%d/committed/false",
-					testCase.scenario, result.ProviderInvocations, result.FinishIdleInvocations, result.FinishIdleResult, result.SensitiveLogLeak,
-					testCase.wantProviderCalls, testCase.wantTurns)
+					testCase.scenario, providerInvocations, finishIdleInvocations, result.FinishIdleResult, sensitiveLogLeak,
+					testCase.wantProviderCalls, testCase.wantFinishIdle)
 			}
-			if !slices.Equal(result.PlatformKeySelections, testCase.wantKeySelections) {
-				t.Fatalf("%s platform key selections = %v; want %v", testCase.scenario, result.PlatformKeySelections, testCase.wantKeySelections)
+			if testCase.scenario == "invalid_openai_oauth" && !oauthAccessTokenConsumed {
+				t.Fatal("replacement Runtime did not consume the repaired OAuth access token through the provider fetch boundary")
 			}
-			if strings.HasPrefix(testCase.scenario, "platform_billing_") && !slices.Equal(result.PlatformKeyQuarantines, []string{"pfk_provider_failure_bad"}) {
-				t.Fatalf("%s platform key quarantines = %v; want one bad-key quarantine", testCase.scenario, result.PlatformKeyQuarantines)
+			if !slices.Equal(keySelections, testCase.wantKeySelections) {
+				t.Fatalf("%s platform key selections = %v; want %v", testCase.scenario, keySelections, testCase.wantKeySelections)
+			}
+			if strings.HasPrefix(testCase.scenario, "platform_billing_") && !slices.Equal(keyQuarantines, []string{"pfk_provider_failure_bad"}) {
+				t.Fatalf("%s platform key quarantines = %v; want one bad-key quarantine", testCase.scenario, keyQuarantines)
 			}
 
 			var starts, ends, reschedules, errorEnds, users, assistants, publicErrors int
-			var durablePayloads, publicRetryStatuses, publicErrorTypes string
+			var durablePayloads, publicRetryStatuses, publicErrorTypes, publicErrorMessages string
 			if err := admin.QueryRowContext(context.Background(), `SELECT
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end'),
@@ -350,11 +408,12 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='user'),
 				(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='assistant'),
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
-				COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,retry_status,type}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
-				COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,type}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
-				COALESCE((SELECT string_agg(payload_json || ' ' || projection_json, ' ') FROM session_events WHERE workspace_id='default' AND session_id=$1),'') || ' ' ||
-				COALESCE((SELECT string_agg(data_json, ' ') FROM session_messages WHERE workspace_id='default' AND session_id=$1),'')`, sessionID).
-				Scan(&starts, &ends, &reschedules, &errorEnds, &users, &assistants, &publicErrors, &publicRetryStatuses, &publicErrorTypes, &durablePayloads); err != nil {
+					COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,retry_status,type}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
+					COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,type}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
+					COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,message}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
+					COALESCE((SELECT string_agg(payload_json || ' ' || projection_json, ' ') FROM session_events WHERE workspace_id='default' AND session_id=$1),'') || ' ' ||
+					COALESCE((SELECT string_agg(data_json, ' ') FROM session_messages WHERE workspace_id='default' AND session_id=$1),'')`, sessionID).
+				Scan(&starts, &ends, &reschedules, &errorEnds, &users, &assistants, &publicErrors, &publicRetryStatuses, &publicErrorTypes, &publicErrorMessages, &durablePayloads); err != nil {
 				t.Fatalf("read %s durable provider failure facts: %v", testCase.scenario, err)
 			}
 			if starts != testCase.wantRequestEnds || ends != testCase.wantRequestEnds || reschedules != testCase.wantReschedules ||
@@ -368,6 +427,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 				"statusless-private-canary",
 				"private-byok-canary",
 				"provider-failure-canary",
+				"credential-unavailable-canary",
 				"session-key-",
 				"oauth-access-",
 				"oauth-refresh-",
@@ -377,19 +437,18 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 					t.Fatalf("%s durable facts leaked provider-private detail %q", testCase.scenario, canary)
 				}
 			}
-			if testCase.wantPublicStatus != "" {
+			if testCase.wantPublicStatuses != "" {
 				if publicErrors == 0 {
 					t.Fatalf("%s emitted no public session.error", testCase.scenario)
 				}
-				for _, retryStatus := range strings.Split(publicRetryStatuses, ",") {
-					if retryStatus != testCase.wantPublicStatus {
-						t.Fatalf("%s public retry statuses = %q; want only %q", testCase.scenario, publicRetryStatuses, testCase.wantPublicStatus)
-					}
+				if publicRetryStatuses != testCase.wantPublicStatuses {
+					t.Fatalf("%s public retry statuses = %q; want %q", testCase.scenario, publicRetryStatuses, testCase.wantPublicStatuses)
 				}
-				for _, errorType := range strings.Split(publicErrorTypes, ",") {
-					if errorType != testCase.wantPublicType {
-						t.Fatalf("%s public error types = %q; want only %q", testCase.scenario, publicErrorTypes, testCase.wantPublicType)
-					}
+				if publicErrorTypes != testCase.wantPublicTypes {
+					t.Fatalf("%s public error types = %q; want %q", testCase.scenario, publicErrorTypes, testCase.wantPublicTypes)
+				}
+				if testCase.wantPublicMessage != "" && publicErrorMessages != testCase.wantPublicMessage {
+					t.Fatalf("%s public error message = %q; want %q", testCase.scenario, publicErrorMessages, testCase.wantPublicMessage)
 				}
 			}
 		})
@@ -410,6 +469,10 @@ func startProviderTimeoutRuntime(t *testing.T, admin *sql.DB, bridgeAddress, ses
 }
 
 func startProviderFailureRuntime(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerFailureRuntimeProcess {
+	return startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID, bindingID, 1, podUID, scenario)
+}
+
+func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID, scenario string) *providerFailureRuntimeProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
@@ -421,7 +484,7 @@ func startProviderFailureRuntime(t *testing.T, admin *sql.DB, bridgeAddress, ses
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingGeneration": bindingGeneration, "targetPodUid": podUID,
 		"readyPath": readyPath, "statePath": process.statePath, "closePath": process.closePath,
 		"toolReleasePath": process.toolReleasePath, "scenario": scenario,
 	})
@@ -484,7 +547,8 @@ func readProviderFailureRuntimeState(path string) (providerFailureRuntimeState, 
 
 func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessionID, scenario string) func() {
 	t.Helper()
-	if scenario != "invalid_kimi_byok" && scenario != "invalid_openai_oauth" {
+	if scenario != "invalid_kimi_byok" && scenario != "invalid_openai_oauth" &&
+		scenario != "missing_kimi_credential" && scenario != "unavailable_openai_credential" {
 		return func() {}
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -507,7 +571,7 @@ func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessi
 	}
 	healthy := invalid
 	healthy.Token = "session-key-healthy"
-	if scenario == "invalid_openai_oauth" {
+	if scenario == "invalid_openai_oauth" || scenario == "unavailable_openai_credential" {
 		providerID = "openai"
 		accessMode = "oauth"
 		invalid = vault.CredentialAuth{
@@ -515,9 +579,13 @@ func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessi
 			AccessToken: "oauth-access-invalid", RefreshToken: "oauth-refresh-invalid",
 			ExpiresAt: "2099-01-01T00:00:00.000Z", AccountID: "account-provider-failure-canary",
 		}
+		if scenario == "invalid_openai_oauth" {
+			invalid.ExpiresAt = "2020-01-01T00:00:00.000Z"
+		}
 		healthy = invalid
 		healthy.AccessToken = "oauth-access-healthy"
 		healthy.RefreshToken = "oauth-refresh-healthy"
+		healthy.ExpiresAt = "2099-01-01T00:00:00.000Z"
 	}
 	credential, err := credentialStore.Create(context.Background(), workspace.DefaultID, createdVault.ID, vault.CreateCredentialRequest{
 		DisplayName: "provider failure credential", Auth: invalid,
@@ -525,11 +593,34 @@ func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessi
 	if err != nil {
 		t.Fatalf("create provider failure credential: %v", err)
 	}
-	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_provider_auth (
-		workspace_id, session_id, provider_id, vault_id, credential_id, access_mode, created_at, updated_at
-	) VALUES ('default',$1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp())`,
-		sessionID, providerID, createdVault.ID, credential.ID, accessMode); err != nil {
-		t.Fatalf("bind provider failure credential: %v", err)
+	bindCredential := func() {
+		t.Helper()
+		if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_provider_auth (
+			workspace_id, session_id, provider_id, vault_id, credential_id, access_mode, created_at, updated_at
+		) VALUES ('default',$1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp())`,
+			sessionID, providerID, createdVault.ID, credential.ID, accessMode); err != nil {
+			t.Fatalf("bind provider failure credential: %v", err)
+		}
+	}
+	if scenario == "missing_kimi_credential" {
+		return bindCredential
+	}
+	var originalEncryptedAuth []byte
+	if scenario == "unavailable_openai_credential" {
+		if err := admin.QueryRowContext(context.Background(), `SELECT encrypted_auth FROM credentials WHERE workspace_id='default' AND id=$1`, credential.ID).Scan(&originalEncryptedAuth); err != nil {
+			t.Fatalf("read provider failure encrypted credential: %v", err)
+		}
+	}
+	bindCredential()
+	if scenario == "unavailable_openai_credential" {
+		if _, err := admin.ExecContext(context.Background(), `UPDATE credentials SET encrypted_auth=$1 WHERE workspace_id='default' AND id=$2`, []byte("credential-unavailable-canary"), credential.ID); err != nil {
+			t.Fatalf("make provider failure credential unavailable: %v", err)
+		}
+		return func() {
+			if _, err := admin.ExecContext(context.Background(), `UPDATE credentials SET encrypted_auth=$1 WHERE workspace_id='default' AND id=$2`, originalEncryptedAuth, credential.ID); err != nil {
+				t.Fatalf("repair unavailable provider failure credential: %v", err)
+			}
+		}
 	}
 	return func() {
 		if _, err := credentialStore.Update(context.Background(), workspace.DefaultID, createdVault.ID, credential.ID, vault.CredentialPatch{Auth: &healthy}); err != nil {
@@ -578,14 +669,15 @@ func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, 
 }
 
 func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
-	ProviderInvocations     int      `json:"providerInvocations"`
-	ToolInvocations         int      `json:"toolInvocations"`
-	FinishIdleInvocations   int      `json:"finishIdleInvocations"`
-	FinishIdleResult        string   `json:"finishIdleResult"`
-	SensitiveLogLeak        bool     `json:"sensitiveLogLeak"`
-	PlatformKeySelections   []string `json:"platformKeySelections"`
-	PlatformKeyQuarantines  []string `json:"platformKeyQuarantines"`
-	ProviderRequestContexts []string `json:"providerRequestContexts"`
+	ProviderInvocations      int      `json:"providerInvocations"`
+	ToolInvocations          int      `json:"toolInvocations"`
+	FinishIdleInvocations    int      `json:"finishIdleInvocations"`
+	FinishIdleResult         string   `json:"finishIdleResult"`
+	SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
+	OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
+	PlatformKeySelections    []string `json:"platformKeySelections"`
+	PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
+	ProviderRequestContexts  []string `json:"providerRequestContexts"`
 } {
 	t.Helper()
 	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
@@ -595,14 +687,15 @@ func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
 		t.Fatalf("wait provider failure composition: %v: %s", err, p.output.String())
 	}
 	var result struct {
-		ProviderInvocations     int      `json:"providerInvocations"`
-		ToolInvocations         int      `json:"toolInvocations"`
-		FinishIdleInvocations   int      `json:"finishIdleInvocations"`
-		FinishIdleResult        string   `json:"finishIdleResult"`
-		SensitiveLogLeak        bool     `json:"sensitiveLogLeak"`
-		PlatformKeySelections   []string `json:"platformKeySelections"`
-		PlatformKeyQuarantines  []string `json:"platformKeyQuarantines"`
-		ProviderRequestContexts []string `json:"providerRequestContexts"`
+		ProviderInvocations      int      `json:"providerInvocations"`
+		ToolInvocations          int      `json:"toolInvocations"`
+		FinishIdleInvocations    int      `json:"finishIdleInvocations"`
+		FinishIdleResult         string   `json:"finishIdleResult"`
+		SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
+		OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
+		PlatformKeySelections    []string `json:"platformKeySelections"`
+		PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
+		ProviderRequestContexts  []string `json:"providerRequestContexts"`
 	}
 	if err := json.Unmarshal(p.output.Bytes(), &result); err != nil {
 		t.Fatalf("decode provider failure composition: %v: %s", err, p.output.String())

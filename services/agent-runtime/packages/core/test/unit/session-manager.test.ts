@@ -309,6 +309,8 @@ function threadLoopService(
 	return ThreadLoop.Service.of({
 		closeFailedRun: () =>
 			Effect.succeed({ type: "landed", disposition: "terminal" }),
+		closeRecoveredOpenRequestForInterrupt: () =>
+			Effect.succeed({ type: "interrupted" }),
 		seedRuntimeModel: () => {},
 		installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 		installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),

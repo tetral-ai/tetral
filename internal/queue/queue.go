@@ -159,7 +159,14 @@ func QueueJobEnvelopeAllowance() int {
 	return queueJobEnvelopeAllowance()
 }
 
-// Queue job lifecycle state machine. These are the closed status values of a
+// Queue job lifecycle state machine. A runtime-facing job has two independent
+// coordinates: causal_session_id preserves Session-wide ordering with shared
+// infrastructure, while delivery_scope plus delivery_thread_id defines lease
+// exclusion. NormalizeEnqueueRequest derives these structured facts once from
+// the producer declaration; PostgreSQLQueueStore.Lease never interprets the
+// payload to recover authority.
+//
+// These are the closed status values of a
 // queue_jobs row. Every transition is written by a PostgreSQLQueueStore method
 // in postgresql_store.go. Every caller-driven write off "leased"
 // (Ack/Retry/Defer/DeadLetter/Heartbeat) matches on the row's lease_token, so a stale
@@ -180,7 +187,7 @@ func QueueJobEnvelopeAllowance() int {
 //	               dead-letter
 //	                                                            DeadLetterExhaustedTx
 //
-// Readers of status: Lease candidate selection with its per-partition barrier,
+// Readers of status: Lease candidate selection with its delivery-scope barrier,
 // the active-dedupe lookup in EnqueueTx, Metrics, the Sandbox over-budget
 // census, and terminal-retention maintenance.
 //
@@ -191,17 +198,21 @@ func QueueJobEnvelopeAllowance() int {
 //     row. The scope excludes terminal rows, so a later job for the same durable
 //     work item is admitted once the prior job is acknowledged, cancelled, or
 //     dead_lettered.
-//   - At most one leased job per partition_key: the same-session serial-execution
-//     barrier. leaseCandidate's NOT EXISTS leased-in-partition guard and the
-//     partial-unique index run a partition's jobs one at a time.
+//   - Partition-scoped jobs remain single-lease by partition. Runtime work is
+//     Thread-scoped: one live lease per Session Thread, while distinct Threads
+//     may lease concurrently. A pending ordinary retry remains the causal head
+//     of its Thread lane throughout backoff; later ordinary input cannot pass
+//     it. Session-exclusive jobs conflict with every Thread lane through the
+//     common Session arbitration lock and post-lock recheck.
 //   - Caller-driven transitions off leased (Ack/Retry/Defer/DeadLetter/Heartbeat) are
 //     lease-token fenced; a stale one carrying an old lease_token matches no
 //     row and is ignored. Heartbeat cannot revive an expired lease. Lease,
 //     Heartbeat, and reclaim author durable lease times from PostgreSQL's
 //     clock. ReclaimExpiredLeases is exempt by design: it reclaims an expired
 //     lease off leased without the stale token.
-//   - Lease scans candidates FOR UPDATE SKIP LOCKED; runtime-facing consumers
-//     hold at most one leased job per session partition.
+//   - Lease discovers candidates without Queue row locks, acquires the bounded
+//     Session arbitration set in canonical order, then locks and revalidates
+//     each exact candidate. It never waits Queue-row-first on a Session owner.
 //
 // UPDATE-WITH: internal/queue/postgresql_store.go (every transition writer plus
 // the ON CONFLICT and NOT EXISTS guards that enforce the two invariants).
@@ -254,6 +265,16 @@ type Job struct {
 	UpdatedAt              time.Time
 }
 
+const (
+	DeliveryScopePartition = "partition"
+	DeliveryScopeThread    = "thread"
+	DeliveryScopeSession   = "session"
+
+	ControlClassOrdinary  = "ordinary"
+	ControlClassInterrupt = "interrupt"
+	ControlClassAgentMail = "agent_mail"
+)
+
 type MetricsSnapshot struct {
 	Kind             string
 	PendingJobs      int
@@ -264,17 +285,21 @@ type MetricsSnapshot struct {
 }
 
 type EnqueueRequest struct {
-	ID             string
-	WorkspaceID    workspace.ID
-	Kind           string
-	PartitionKey   string
-	DedupeKey      string
-	PayloadVersion int
-	PayloadJSON    json.RawMessage
-	Priority       int
-	MaxAttempts    int
-	AvailableAt    time.Time
-	Now            time.Time
+	ID               string
+	WorkspaceID      workspace.ID
+	Kind             string
+	PartitionKey     string
+	DedupeKey        string
+	PayloadVersion   int
+	PayloadJSON      json.RawMessage
+	Priority         int
+	MaxAttempts      int
+	AvailableAt      time.Time
+	Now              time.Time
+	CausalSessionID  string
+	DeliveryScope    string
+	DeliveryThreadID string
+	ControlClass     string
 }
 
 type LeaseRequest struct {
@@ -318,7 +343,7 @@ type ExactLeaseRequest struct {
 }
 
 // CancelLeasedRuntimeInputRequest identifies one exact live delivery whose
-// Runtime commit lost to the Session interrupt barrier.
+// Runtime commit lost to the target Thread's interrupt barrier.
 type CancelLeasedRuntimeInputRequest struct {
 	Lease          ExactLeaseRequest
 	SessionID      string
@@ -328,7 +353,7 @@ type CancelLeasedRuntimeInputRequest struct {
 }
 
 // DeferLeasedRuntimeInputRequest identifies one exact live delivery that an
-// active Session interrupt barrier must return to Queue custody without
+// active target-Thread interrupt barrier must return to Queue custody without
 // consuming an attempt.
 type DeferLeasedRuntimeInputRequest struct {
 	Lease          ExactLeaseRequest
@@ -517,7 +542,53 @@ func NormalizeEnqueueRequest(request EnqueueRequest) (EnqueueRequest, error) {
 	if err := validateCanonicalQueueShape(request); err != nil {
 		return EnqueueRequest{}, err
 	}
+	if err := deriveQueueDeliveryAuthority(&request); err != nil {
+		return EnqueueRequest{}, err
+	}
 	return request, nil
+}
+
+// deriveQueueDeliveryAuthority converts the already validated canonical job
+// declaration into the bounded structural facts used by lease admission.
+// Payload JSON remains the delivery carrier; it is not consulted by Lease.
+func deriveQueueDeliveryAuthority(request *EnqueueRequest) error {
+	request.CausalSessionID = ""
+	request.DeliveryScope = DeliveryScopePartition
+	request.DeliveryThreadID = ""
+	request.ControlClass = ControlClassOrdinary
+
+	if request.Kind != KindRuntimeInput && request.Kind != KindRuntimeRecovery &&
+		request.Kind != KindRuntimeConfigUpdate && request.Kind != KindCleanupSession &&
+		request.Kind != KindSessionDeleteCleanup {
+		return nil
+	}
+	rawPayload, err := decodePayloadObject(request.PayloadJSON)
+	if err != nil {
+		return err
+	}
+	payload := payloadTokens(rawPayload)
+	sessionID, err := requiredPayloadToken(payload, "session_id")
+	if err != nil {
+		return err
+	}
+	request.CausalSessionID = sessionID
+	switch request.Kind {
+	case KindRuntimeInput, KindRuntimeRecovery:
+		threadID, err := requiredPayloadToken(payload, "session_thread_id")
+		if err != nil {
+			return err
+		}
+		request.DeliveryScope = DeliveryScopeThread
+		request.DeliveryThreadID = threadID
+		if request.Kind == KindRuntimeInput && payload["input_kind"] == "interrupt_control" {
+			request.ControlClass = ControlClassInterrupt
+		} else if request.Kind == KindRuntimeInput && payload["input_kind"] == "agent_mail" {
+			request.ControlClass = ControlClassAgentMail
+		}
+	case KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup:
+		request.DeliveryScope = DeliveryScopeSession
+	}
+	return nil
 }
 
 func ValidateLeaseRequest(request LeaseRequest) error {

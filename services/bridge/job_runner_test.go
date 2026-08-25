@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -102,7 +103,144 @@ func TestJobRunnerHeartbeatsLongDeliveryBeforeAck(t *testing.T) {
 	}
 }
 
-func TestJobRunnerLeaseLossCancelsDeliveryWithoutTransition(t *testing.T) {
+func TestJobRunnerCancelsInFlightDeliveryWhenHeartbeatLosesAuthority(t *testing.T) {
+	queueClient := &recordingQueueClient{
+		leased:             []*queuev1.QueueJob{runtimeInputQueueJob()},
+		heartbeatLoseAfter: 2,
+	}
+	deliverer := newBlockingDeliverer()
+	runner := &JobRunner{
+		Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer,
+		Config: JobRunnerConfig{LeaseDuration: 100 * time.Millisecond, HeartbeatInterval: 5 * time.Millisecond},
+	}
+	done := make(chan error, 1)
+	go func() { done <- runner.RunOnce(context.Background()) }()
+
+	select {
+	case <-deliverer.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight Runtime delivery was not cancelled after heartbeat authority loss")
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "queue lease lost") {
+		t.Fatalf("RunOnce after heartbeat authority loss = %v; want lease-lost error", err)
+	}
+	if transitions := queueClient.transitionSnapshot(); len(transitions) != 0 {
+		t.Fatalf("Queue transitions after heartbeat authority loss = %v; want none", transitions)
+	}
+}
+
+func TestPostgreSQLJobRunnerHeartbeatLossYieldsToReclaimedExactOwner(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_heartbeat_reclaim"
+		threadID  = "thr_heartbeat_reclaim"
+		inputID   = "rin_heartbeat_reclaim"
+		eventID   = "evt_heartbeat_reclaim"
+		bindingID = "bind_heartbeat_reclaim"
+		podUID    = "pod_heartbeat_reclaim"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"reclaim me"}]}`)
+	job := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: inputID, InputKind: "messages", EventIDs: []string{eventID},
+		SequenceFrom: 1, SequenceTo: 1,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + inputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	queued, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+		PayloadVersion: 1, PayloadJSON: []byte(job.PayloadJSON), MaxAttempts: queue.DefaultMaxAttempts,
+	})
+	if err != nil {
+		t.Fatalf("enqueue heartbeat reclaim job: %v", err)
+	}
+	queueServer := tetralqueue.NewServer(queueStore, nil)
+	blocked := newBlockingDeliverer()
+	oldRunner := &JobRunner{
+		Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: blocked,
+		Config: JobRunnerConfig{
+			LeaseOwner: "heartbeat-old-owner", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 2 * time.Second,
+		},
+	}
+	oldDone := make(chan error, 1)
+	go func() { oldDone <- oldRunner.RunOnce(context.Background()) }()
+	select {
+	case <-blocked.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old heartbeat worker did not enter delivery")
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
+		t.Fatalf("expire old heartbeat lease: %v", err)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim heartbeat lease = %d/%v; want 1/nil", reclaimed, err)
+	}
+	newLeases, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "heartbeat-new-owner", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(newLeases) != 1 || newLeases[0].ID != queued.ID {
+		t.Fatalf("lease reclaimed heartbeat job = %#v/%v; want %s", newLeases, err, queued.ID)
+	}
+	select {
+	case <-blocked.cancelled:
+	case <-time.After(4 * time.Second):
+		t.Fatal("old worker was not cancelled after its heartbeat lost exact authority")
+	}
+	if err := <-oldDone; err == nil || !strings.Contains(err.Error(), "queue lease lost") {
+		t.Fatalf("old worker after reclaim = %v; want queue lease lost", err)
+	}
+	var queueStatus, leaseToken, inboxStatus string
+	var startsBeforeWinner int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT lease_token FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3 AND type='span.model_request_start')`,
+		queued.ID, inputID, sessionID).Scan(&queueStatus, &leaseToken, &inboxStatus, &startsBeforeWinner); err != nil {
+		t.Fatalf("read reclaimed heartbeat custody: %v", err)
+	}
+	if queueStatus != queue.StatusLeased || leaseToken != newLeases[0].LeaseToken || inboxStatus != "queued" || startsBeforeWinner != 0 {
+		t.Fatalf("post-reclaim custody = Queue:%s token:%s Inbox:%s starts:%d; want new exact lease, queued, zero starts",
+			queueStatus, leaseToken, inboxStatus, startsBeforeWinner)
+	}
+
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	winner := &JobRunner{
+		Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},
+		Config:    JobRunnerConfig{LeaseOwner: "heartbeat-new-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := winner.processRuntimeJob(context.Background(), queueJobProto(newLeases[0]), winner.Config); err != nil {
+		t.Fatalf("winning heartbeat worker: %v", err)
+	}
+	if len(sender.requests) != 1 {
+		t.Fatalf("winning heartbeat worker Runtime requests = %d; want one", len(sender.requests))
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
+		queued.ID, inputID).Scan(&queueStatus, &inboxStatus); err != nil {
+		t.Fatalf("read winning heartbeat settlement: %v", err)
+	}
+	if queueStatus != queue.StatusAcknowledged || inboxStatus != "accepted" {
+		t.Fatalf("winning heartbeat settlement = Queue:%s Inbox:%s; want acknowledged/accepted", queueStatus, inboxStatus)
+	}
+}
+
+func TestJobRunnerInitialLeaseLossPreventsDeliveryAndTransition(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -117,7 +255,7 @@ func TestJobRunnerLeaseLossCancelsDeliveryWithoutTransition(t *testing.T) {
 				heartbeatLost: tc.lost,
 				heartbeatErr:  tc.err,
 			}
-			deliverer := newBlockingDeliverer()
+			deliverer := &recordingDeliverer{}
 			runner := &JobRunner{
 				Queue:      queueClient,
 				Workspaces: staticWorkspaceLister{"ws_bridge"},
@@ -134,12 +272,53 @@ func TestJobRunnerLeaseLossCancelsDeliveryWithoutTransition(t *testing.T) {
 			if transitions := queueClient.transitionSnapshot(); len(transitions) != 0 {
 				t.Fatalf("queue transitions after lease loss = %v; want none", transitions)
 			}
-			select {
-			case <-deliverer.cancelled:
-			default:
-				t.Fatal("lease loss did not cancel blocked delivery")
+			if len(deliverer.jobs) != 0 {
+				t.Fatalf("deliveries after initial lease loss = %d; want zero", len(deliverer.jobs))
 			}
 		})
+	}
+}
+
+func TestJobRunnerProcessesLeasedThreadsConcurrently(t *testing.T) {
+	first := runtimeInputQueueJob()
+	second := runtimeInputQueueJob()
+	second.Id = "qjob_2"
+	second.LeaseToken = "lease_2"
+	second.PayloadJson = `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_2","runtime_input_id":"rin_2","event_ids":["evt_2"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`
+	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{first, second}}
+	deliverer := newConcurrentThreadDeliverer("thr_1")
+	runner := &JobRunner{
+		Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer,
+		Config: JobRunnerConfig{MaxJobs: 2, LeaseDuration: time.Second, HeartbeatInterval: 100 * time.Millisecond},
+	}
+	done := make(chan error, 1)
+	go func() { done <- runner.RunOnce(context.Background()) }()
+
+	select {
+	case <-deliverer.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("first Thread delivery did not block")
+	}
+	select {
+	case <-deliverer.completed:
+	case <-time.After(time.Second):
+		t.Fatal("second Thread did not complete while first Thread was blocked")
+	}
+	ackDeadline := time.Now().Add(time.Second)
+	for !slices.Contains(queueClient.transitionSnapshot(), "ack:qjob_2") && time.Now().Before(ackDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := queueClient.transitionSnapshot(); !slices.Contains(got, "ack:qjob_2") {
+		t.Fatalf("transitions while first Thread blocked = %v; want second Thread ACK", got)
+	}
+	close(deliverer.release)
+	if err := <-done; err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	got := queueClient.transitionSnapshot()
+	slices.Sort(got)
+	if want := []string{"ack:qjob_1", "ack:qjob_2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("transitions = %v; want %v", got, want)
 	}
 }
 
@@ -778,21 +957,24 @@ func TestJobRunnerHandlesRuntimeConfigAndCleanupAsSeparateQueueKinds(t *testing.
 	if got := len(deliverer.jobs); got != 3 {
 		t.Fatalf("delivered jobs = %d; want 3", got)
 	}
-	if deliverer.jobs[0].Kind != "runtime_config_update" ||
-		deliverer.jobs[0].RuntimeInputID != "runtime_config_update:sesn_1:7" ||
-		deliverer.jobs[0].ConfigGeneration != "7" {
-		t.Fatalf("runtime config job = %#v", deliverer.jobs[0])
+	jobsByKind := map[string]RuntimeJob{}
+	for _, job := range deliverer.jobs {
+		jobsByKind[job.Kind] = job
 	}
-	if deliverer.jobs[1].Kind != "cleanup_session" ||
-		deliverer.jobs[1].CleanupJobID != "cleanup_1" {
-		t.Fatalf("cleanup job = %#v", deliverer.jobs[1])
+	if job := jobsByKind["runtime_config_update"]; job.RuntimeInputID != "runtime_config_update:sesn_1:7" || job.ConfigGeneration != "7" {
+		t.Fatalf("runtime config job = %#v", job)
 	}
-	if deliverer.jobs[2].Kind != "session_delete_cleanup" || deliverer.jobs[2].DeleteCleanupID != "delcln_1" || deliverer.jobs[2].RuntimeInputID != "session_delete_cleanup:delcln_1" ||
-		deliverer.jobs[2].AttemptCount != 2 || deliverer.jobs[2].MaxAttempts != 5 {
-		t.Fatalf("delete cleanup job = %#v", deliverer.jobs[2])
+	if job := jobsByKind["cleanup_session"]; job.CleanupJobID != "cleanup_1" {
+		t.Fatalf("cleanup job = %#v", job)
 	}
-	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_config", "ack:qjob_cleanup", "ack:qjob_delete_cleanup"}) {
-		t.Fatalf("queue transitions = %v; want duplicate responses to ack", queueClient.transitions)
+	if job := jobsByKind["session_delete_cleanup"]; job.DeleteCleanupID != "delcln_1" || job.RuntimeInputID != "session_delete_cleanup:delcln_1" ||
+		job.AttemptCount != 2 || job.MaxAttempts != 5 {
+		t.Fatalf("delete cleanup job = %#v", job)
+	}
+	transitions := queueClient.transitionSnapshot()
+	slices.Sort(transitions)
+	if want := []string{"ack:qjob_cleanup", "ack:qjob_config", "ack:qjob_delete_cleanup"}; !reflect.DeepEqual(transitions, want) {
+		t.Fatalf("queue transitions = %v; want %v", transitions, want)
 	}
 }
 
@@ -1421,19 +1603,20 @@ func runtimeAgentMailQueueJob() *queuev1.QueueJob {
 }
 
 type recordingQueueClient struct {
-	mu                sync.Mutex
-	leased            []*queuev1.QueueJob
-	leaseKinds        []string
-	leaseWorkspaceIDs []string
-	leaseErrWorkspace string
-	leaseErr          error
-	transitions       []string
-	heartbeatLost     bool
-	heartbeatErr      error
-	heartbeats        int
-	heartbeatNotify   chan struct{}
-	steps             *[]string
-	phaseSteps        *[]string
+	mu                 sync.Mutex
+	leased             []*queuev1.QueueJob
+	leaseKinds         []string
+	leaseWorkspaceIDs  []string
+	leaseErrWorkspace  string
+	leaseErr           error
+	transitions        []string
+	heartbeatLost      bool
+	heartbeatLoseAfter int
+	heartbeatErr       error
+	heartbeats         int
+	heartbeatNotify    chan struct{}
+	steps              *[]string
+	phaseSteps         *[]string
 }
 
 type staticWorkspaceLister []workspace.ID
@@ -1472,7 +1655,8 @@ func (c *recordingQueueClient) Heartbeat(_ context.Context, _ *queuev1.Heartbeat
 	if c.heartbeatErr != nil {
 		return nil, c.heartbeatErr
 	}
-	return &queuev1.HeartbeatResponse{Updated: !c.heartbeatLost}, nil
+	lost := c.heartbeatLost || (c.heartbeatLoseAfter > 0 && c.heartbeats >= c.heartbeatLoseAfter)
+	return &queuev1.HeartbeatResponse{Updated: !lost}, nil
 }
 
 func (c *recordingQueueClient) transitionSnapshot() []string {
@@ -1482,6 +1666,8 @@ func (c *recordingQueueClient) transitionSnapshot() []string {
 }
 
 func (c *recordingQueueClient) Ack(_ context.Context, request *queuev1.AckRequest) (*queuev1.TransitionResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.transitions = append(c.transitions, "ack:"+request.GetJobId())
 	if c.steps != nil {
 		*c.steps = append(*c.steps, "ack:"+request.GetJobId())
@@ -1490,6 +1676,8 @@ func (c *recordingQueueClient) Ack(_ context.Context, request *queuev1.AckReques
 }
 
 func (c *recordingQueueClient) Retry(_ context.Context, request *queuev1.RetryRequest) (*queuev1.TransitionResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.transitions = append(c.transitions, "retry:"+request.GetJobId()+":"+request.GetErrorKind())
 	if c.steps != nil {
 		*c.steps = append(*c.steps, "retry:"+request.GetJobId())
@@ -1498,6 +1686,8 @@ func (c *recordingQueueClient) Retry(_ context.Context, request *queuev1.RetryRe
 }
 
 func (c *recordingQueueClient) Defer(_ context.Context, request *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.transitions = append(c.transitions, "defer:"+request.GetJobId())
 	if c.steps != nil {
 		*c.steps = append(*c.steps, "defer:"+request.GetJobId())
@@ -1506,6 +1696,8 @@ func (c *recordingQueueClient) Defer(_ context.Context, request *queuev1.DeferRe
 }
 
 func (c *recordingQueueClient) DeadLetter(_ context.Context, request *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.transitions = append(c.transitions, "dead:"+request.GetJobId()+":"+request.GetErrorKind())
 	if c.steps != nil {
 		*c.steps = append(*c.steps, "dead:"+request.GetJobId())
@@ -1514,6 +1706,8 @@ func (c *recordingQueueClient) DeadLetter(_ context.Context, request *queuev1.De
 }
 
 func (c *recordingQueueClient) Cancel(_ context.Context, request *queuev1.CancelRequest) (*queuev1.CancelResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.transitions = append(c.transitions, "cancel:"+request.GetSessionId()+":"+request.GetSessionThreadId()+":"+int64String(request.GetInterruptFenceSequence()))
 	if c.steps != nil {
 		*c.steps = append(*c.steps, "cancel")
@@ -1522,6 +1716,7 @@ func (c *recordingQueueClient) Cancel(_ context.Context, request *queuev1.Cancel
 }
 
 type recordingDeliverer struct {
+	mu                       sync.Mutex
 	result                   RuntimeDeliveryResult
 	err                      error
 	jobs                     []RuntimeJob
@@ -1543,6 +1738,40 @@ type recordingDeliverer struct {
 	sealErr                  error
 }
 
+type concurrentThreadDeliverer struct {
+	blockedThread string
+	blocked       chan struct{}
+	completed     chan struct{}
+	release       chan struct{}
+}
+
+func newConcurrentThreadDeliverer(blockedThread string) *concurrentThreadDeliverer {
+	return &concurrentThreadDeliverer{
+		blockedThread: blockedThread,
+		blocked:       make(chan struct{}),
+		completed:     make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+}
+
+func (d *concurrentThreadDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	if job.SessionThreadID != d.blockedThread {
+		close(d.completed)
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
+	}
+	close(d.blocked)
+	select {
+	case <-d.release:
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
+	case <-ctx.Done():
+		return RuntimeDeliveryResult{}, ctx.Err()
+	}
+}
+
+func (d *concurrentThreadDeliverer) ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error) {
+	return RuntimeDeliveryResult{}, false, nil
+}
+
 type recordedRuntimeFinalization struct {
 	job    RuntimeJob
 	result RuntimeDeliveryResult
@@ -1551,13 +1780,16 @@ type recordedRuntimeFinalization struct {
 type blockingDeliverer struct {
 	release   chan struct{}
 	cancelled chan struct{}
+	entered   chan struct{}
+	once      sync.Once
 }
 
 func newBlockingDeliverer() *blockingDeliverer {
-	return &blockingDeliverer{release: make(chan struct{}), cancelled: make(chan struct{})}
+	return &blockingDeliverer{release: make(chan struct{}), cancelled: make(chan struct{}), entered: make(chan struct{})}
 }
 
 func (d *blockingDeliverer) DeliverRuntimeJob(ctx context.Context, _ RuntimeJob) (RuntimeDeliveryResult, error) {
+	d.once.Do(func() { close(d.entered) })
 	select {
 	case <-d.release:
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
@@ -1580,6 +1812,8 @@ func (d *recordingDeliverer) ResolveRuntimeInputSeal(context.Context, RuntimeJob
 }
 
 func (d *recordingDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.podLossRepairCalls++
 	if d.phaseSteps != nil {
 		*d.phaseSteps = append(*d.phaseSteps, "pod-loss")
@@ -1591,6 +1825,8 @@ func (d *recordingDeliverer) RepairLostRuntimeBindings(ctx context.Context, work
 }
 
 func (d *recordingDeliverer) DeliverRuntimeJob(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.jobs = append(d.jobs, job)
 	if d.steps != nil {
 		*d.steps = append(*d.steps, "deliver:"+job.JobID)
@@ -1603,6 +1839,8 @@ func (d *recordingDeliverer) FinalizeMalformedRuntimeInputCustody(context.Contex
 }
 
 func (d *recordingDeliverer) FinalizeRuntimeDelivery(_ context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.finalizations = append(d.finalizations, recordedRuntimeFinalization{job: job, result: result})
 	if d.steps != nil {
 		*d.steps = append(*d.steps, "finalize:"+job.JobID)
@@ -1614,6 +1852,8 @@ func (d *recordingDeliverer) FinalizeRuntimeDelivery(_ context.Context, job Runt
 }
 
 func (d *recordingDeliverer) ReplayRuntimeDeliveryFinalization(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.replayJobs = append(d.replayJobs, job)
 	if d.steps != nil {
 		*d.steps = append(*d.steps, "replay:"+job.JobID)

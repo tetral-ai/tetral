@@ -34,7 +34,12 @@ key; no consumer takes its serving workspace from configuration.
 a `payload_version` (positive integer; the payload-schema-version guard, rejected
 at admission when negative, while an unset or zero value defaults to 1), lease bookkeeping (`leased_by`, `lease_token`,
 `leased_at`, `leased_until`), `attempt_count` / `max_attempts`, the config-only
-`defer_count`, a `priority`, an `available_at`, and a `status`.
+`defer_count`, a `priority`, an `available_at`, and a `status`. Runtime-facing
+rows also carry structured scheduling authority: `causal_session_id` preserves
+Session causal order, `delivery_scope` is `thread` or `session`,
+`delivery_thread_id` identifies a Thread lane, and `control_class` distinguishes
+ordinary, agent-mail, and interrupt delivery. Non-Runtime rows use the
+independent `partition` delivery scope.
 Payloads are references only — the admission whitelist (below) rejects any job
 that would persist user content, resource bytes, model config, or credentials.
 
@@ -65,7 +70,7 @@ changes nothing.
 
 | Call | Fencing | Kinds | Effect |
 |---|---|---|---|
-| `Lease` | mints a fresh `lease_token` | any requested kind | selects `pending` candidates whose own `available_at` has arrived, ordered by priority/availability and partition sequence under `FOR UPDATE SKIP LOCKED`; leases only where the partition holds no `leased` job and no higher-ranked or causally earlier `pending` sibling; increments `attempt_count`; projects an "unset" `max_attempts = 0` to the effective default in the response |
+| `Lease` | mints a fresh `lease_token` | any requested kind | discovers a bounded candidate set without row locks, locks distinct Session arbitration owners in canonical order, then locks and revalidates each exact Queue row; partition rows remain mutually exclusive, Thread rows conflict only with the same Thread or Session-exclusive work, and Session rows conflict with every Thread in that Session; increments `attempt_count`; projects an "unset" `max_attempts = 0` to the effective default in the response |
 | `Heartbeat` | lease-token | any | pushes an unexpired `leased_until` forward and returns the database-written expiry; an expired lease cannot be revived |
 | `Ack` | lease-token | any | → `acknowledged`; legal only after the consumer reconciled durable state and delivered/resolved the command |
 | `Retry` | lease-token | any | carries an error kind/message only, no delay authority. If `attempt_count` reached the effective `max_attempts`, dead-letters instead. Otherwise → `pending` with capped exponential backoff + full jitter |
@@ -103,13 +108,15 @@ through `Retry` and an explicit `DeadLetter` are the leased-job routes to
 
 ### Invariants
 
-Two partial-unique constraints carry the durable invariants; the transition
-writers uphold them under concurrency.
+Partial-unique constraints and lease-time compatibility checks carry the
+durable invariants; the transition writers uphold them under concurrency.
 
 | Invariant | Scope | Enforced by |
 |---|---|---|
 | At most one active job per `(workspace_id, dedupe_key)` | `pending` + `leased` only | `EnqueueTx` `ON CONFLICT … DO NOTHING` + partial-unique index; a later job for the same durable item is admitted once the prior one is `acknowledged`/`cancelled`/`dead_lettered` |
-| At most one `leased` job per `(workspace_id, partition_key)` — the same-session serial-execution barrier | `leased` only | `leaseCandidate`'s NOT-EXISTS leased-in-partition guard + partial-unique index; many `pending` jobs may still sit in one partition awaiting their turn |
+| At most one `partition` lease per `(workspace_id, partition_key)` | `leased` partition rows only | partial-unique partition index plus exact candidate revalidation |
+| At most one Thread lease per `(workspace_id, causal_session_id, delivery_thread_id)` | `leased` Thread rows only | partial-unique Thread index plus compatibility checks against Session-exclusive leases |
+| At most one Session-exclusive lease per `(workspace_id, causal_session_id)` | `leased` Session rows only | partial-unique Session index plus compatibility checks against every Thread lease in that Session |
 | One causal position per partition | all jobs | the locked `(workspace_id, partition_key)` counter assigns `queue_partition_sequence`; Retry, Defer, and reclaim update availability/lease state without changing it |
 
 ### The maintenance loop
@@ -166,16 +173,17 @@ credentials are never included, and polling remains the reconnect fallback.
 
 ### Seam 1 — Job kind registry
 
-Sixteen kinds share the table. The queue stores `kind` as an opaque label and
+Seventeen kinds share the table. The queue stores `kind` as an opaque label and
 never performs Sandbox business behavior; admission shape, partition identity,
 and a few transport transitions are kind-specific.
 
 | Kind | Partition family | Leased by |
 |---|---|---|
-| `runtime_input` | `session:<workspace_id>:<session_id>` | Bridge Job Runner |
-| `runtime_config_update` | `session:…` | Bridge Job Runner |
-| `cleanup_session` | `session:…` | Bridge Job Runner |
-| `session_delete_cleanup` | `session:…` | Bridge Job Runner |
+| `runtime_input` | Session causal partition; Thread delivery lane | Bridge Job Runner |
+| `runtime_recovery` | Session causal partition; Thread delivery lane | Bridge Job Runner |
+| `runtime_config_update` | Session causal partition; Session-exclusive delivery | Bridge Job Runner |
+| `cleanup_session` | Session causal partition; Session-exclusive delivery | Bridge Job Runner |
+| `session_delete_cleanup` | Session causal partition; Session-exclusive delivery | Bridge Job Runner |
 | `environment_build` | `environment:<workspace_id>:<environment_id>` | Sandbox Service |
 | `environment_ready_fanout` | `environment:…` | Sandbox Service |
 | `sandbox_tool_execute` | `sandbox-execution:<workspace>:<session>:<thread>:<tool-use-event>` | dedicated Sandbox execution runner |
@@ -199,13 +207,13 @@ non-whitelisted field, or whose partition/dedupe keys differ from the computed
 forms. A single kind may carry more than one canonical payload sub-shape: the
 `runtime_mcp_manifest_update` shape (with its own `Format…DedupeKey` helper and
 `validateCanonicalQueueShape` branch) is a variant of `runtime_config_update`,
-not an additional kind — `isKnownKind` still admits only the sixteen above.
+not an additional kind — `isKnownKind` still admits only the seventeen above.
 
 The `runtime_input` kind carries an `input_kind` discriminator, checked by
 `isRuntimeInputKind`, over a closed set: `messages`, `interrupt_control`,
 `tool_confirmation`, `task_notification`, `agent_mail`. The kind-specific
 behaviors below hinge on it (`Cancel` applies to `input_kind = messages`;
-priority overtaking to `interrupt_control`). A `task_notification` marks a
+same-Thread precedence applies to `interrupt_control`). A `task_notification` marks a
 background command's terminal completion; it is not a public user message and
 produces no second public user event.
 
@@ -219,9 +227,9 @@ validation error.
   manifest-generation `runtime_config_update` rows. It validates the
   locked stored payload before admitting either config arm.
 - `Cancel` touches **only** `runtime_input` `input_kind = messages` rows.
-- Priority-based lease overtaking applies **only** among `runtime_input`
-  candidates: an `interrupt_control` `runtime_input` is admitted at higher
-  `priority` and carries past still-`pending` message siblings.
+- Same-Thread interrupt precedence applies **only** among `runtime_input`
+  candidates: an `interrupt_control` may overtake earlier pending ordinary
+  input in its own Thread lane. It never cancels or delays a sibling Thread.
 - An earlier `runtime_config_update` blocks later ordinary `runtime_input`
   independently of the config row's `available_at`. `interrupt_control` is the
   sole exception and may cross that config row; it does not release later
@@ -281,8 +289,12 @@ the next holder re-leases under a new token.
   already committed or resolved; a consumer must reconcile the durable row before
   acknowledging. Because lease expiry never dead-letters, the recovery path
   depends on the next holder revalidating and stale-acking already-done work.
-- **One in-flight job per partition.** A consumer must not assume it can run two
-  jobs of one session partition concurrently; the barrier serializes them.
+- **Compatible in-flight scopes only.** Two Thread-scoped jobs may run together
+  only when their `delivery_thread_id` values differ. A Session-exclusive lease
+  conflicts with every Thread lane in that Session. One narrow exception lets
+  `interrupt_control` reach its target while an earlier config boundary is
+  pending, deferred, or leased; ordinary successors remain fenced by that
+  config boundary.
 - **No delay authority.** Backoff timing is Queue-owned; `Retry` carries only an
   error, not a delay.
 
@@ -291,8 +303,8 @@ the next holder re-leases under a new token.
 `TestQueueServiceValidationErrorsMapToInvalidArgument` (`services/queue`);
 `TestPostgreSQLStoreLeasePriorityPartitionBarrierAndAckFence`,
 `TestPostgreSQLStoreLeaseHonorsCrossKindSessionBarrier`,
-`TestPostgreSQLStoreLeaseRuntimeConfigBeforeRetriedRuntimeInput`,
-`TestPostgreSQLStoreLeaseCandidateWindowCannotStarveEarlierBarrierJob`,
+`TestPostgreSQLStoreLeaseRuntimeConfigBeforeRetryingRuntimeInput`,
+`TestPostgreSQLStoreLeaseCandidateWindowKeepsInterruptException`,
 `TestPostgreSQLStoreCancelInterruptFenceOnlyCancelsPendingOlderSameThreadMessages`,
 `TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases`,
 `TestPostgreSQLStoreDeferCanonicalRuntimeConfigUsesScopedCounter`
@@ -303,7 +315,7 @@ the next holder re-leases under a new token.
 | Suite (file) | Proves |
 |---|---|
 | `internal/queue/queue_test.go` | admission validation: per-kind canonical shape, references-only payload bounds, event-reference limits, lease batch-capacity arithmetic |
-| `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: lease ordering + priority overtaking + partition barrier, ack/retry/defer/dead-letter fencing, both cancellation boundaries, over-budget conditional dead-lettering, Sandbox terminal retention and empty-counter cleanup, backoff full-jitter, unset-`max_attempts` projection, cross-workspace maintenance, metrics summary |
+| `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: Thread/Session lease compatibility, same-Thread interrupt precedence, partition exclusion, ack/retry/defer/dead-letter fencing, both cancellation boundaries, over-budget conditional dead-lettering, Sandbox terminal retention and empty-counter cleanup, backoff full-jitter, unset-`max_attempts` projection, cross-workspace maintenance, metrics summary |
 | `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse, the field census matching lease arithmetic, validation → `InvalidArgument` mapping |
 | `services/queue/config_test.go` | `ConfigFromEnv` pins the retry policy and rejects invalid values |
 | `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, then bounded empty-counter cleanup, and logs shared operation/error fields |

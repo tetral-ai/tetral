@@ -70,7 +70,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 			}
 			return nil
 		}
-		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
@@ -509,7 +509,7 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "memory_execute"); err != nil {
 			return err
 		}
-		if err := requireSessionMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		resultJSON, err := applyMemoryToolTx(ctx, tx, request.GetScope(), memoryInput.Action, tool.InputJSON)

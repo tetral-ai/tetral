@@ -582,7 +582,10 @@ func verifyRuntimeDeclarationCaller(ctx context.Context, scope *bridgev1.Runtime
 	return verifyRuntimeCallerPodUID(ctx, scope)
 }
 
-func lockRuntimeMutationSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
+func lockSessionRuntimeArbitrationTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (string, error) {
+	if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, workspaceID, sessionID); err != nil {
+		return "", err
+	}
 	var lifecycleState string
 	if err := tx.QueryRow(ctx,
 		`SELECT lifecycle_state
@@ -593,8 +596,16 @@ func lockRuntimeMutationSessionTx(ctx context.Context, tx *dbconnect.Tx, workspa
 		workspaceID,
 		sessionID,
 	).Scan(&lifecycleState); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.NotFound, "session not found"))
+		return "", scopeSupersededError(status.Error(codes.NotFound, "session not found"))
 	} else if err != nil {
+		return "", err
+	}
+	return lifecycleState, nil
+}
+
+func lockRuntimeMutationSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
+	lifecycleState, err := lockSessionRuntimeArbitrationTx(ctx, tx, workspaceID, sessionID)
+	if err != nil {
 		return err
 	}
 	if lifecycleState == "deleted" {

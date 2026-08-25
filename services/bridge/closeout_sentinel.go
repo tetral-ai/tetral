@@ -12,7 +12,8 @@ import (
 const (
 	closeoutScopeSupersededCode = "scope_superseded"
 	closeoutUnrepairableCode    = "closeout_unrepairable"
-	sessionInterruptBarrierCode = "session_interrupt_barrier_stale"
+	threadInterruptBarrierCode  = "thread_interrupt_barrier_stale"
+	modelRequestSealedCode      = "model_request_sealed"
 )
 
 type closeoutSentinelError struct {
@@ -40,8 +41,12 @@ func closeoutUnrepairableError(err error) error {
 	return &closeoutSentinelError{code: closeoutUnrepairableCode, err: err}
 }
 
-func sessionInterruptBarrierStaleError(err error) error {
-	return &closeoutSentinelError{code: sessionInterruptBarrierCode, err: err}
+func threadInterruptBarrierStaleError(err error) error {
+	return &closeoutSentinelError{code: threadInterruptBarrierCode, err: err}
+}
+
+func modelRequestSealedError(err error) error {
+	return &closeoutSentinelError{code: modelRequestSealedCode, err: err}
 }
 
 func closeoutSentinelCode(err error) (string, bool) {
@@ -57,11 +62,16 @@ func isScopeSupersededError(err error) bool {
 	return ok && code == closeoutScopeSupersededCode
 }
 
-func isSessionInterruptBarrierStaleError(err error) bool {
+func isThreadInterruptBarrierStaleError(err error) bool {
 	code, ok := closeoutSentinelCode(err)
-	return ok && code == sessionInterruptBarrierCode
+	return ok && code == threadInterruptBarrierCode
+}
+
+func isModelRequestSealedError(err error) bool {
+	code, ok := closeoutSentinelCode(err)
+	return ok && code == modelRequestSealedCode
 }
 
 func isConversationMutationStaleError(err error) bool {
-	return isScopeSupersededError(err) || isSessionInterruptBarrierStaleError(err)
+	return isScopeSupersededError(err) || isThreadInterruptBarrierStaleError(err)
 }

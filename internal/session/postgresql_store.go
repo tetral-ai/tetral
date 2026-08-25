@@ -61,6 +61,7 @@ func (s *PostgreSQLSessionStore) WithWorkspaceTx(ctx context.Context, ws workspa
 	if ws == "" {
 		return &ValidationError{Message: "workspace_id is required"}
 	}
+	// This boundary owns the literal diagnostic label for generic Session transactions.
 	return s.client.WithWorkspaceTx(ctx, string(ws), "session.transaction", func(tx *dbconnect.Tx) error {
 		return fn(&postgresqlTransaction{
 			store:       s,
@@ -83,12 +84,21 @@ func (s *PostgreSQLSessionStore) WithWorkspaceTxAndCleanup(ctx context.Context, 
 	}, onCommitFailure)
 }
 
-func (s *PostgreSQLSessionStore) WithRuntimeMutationLock(ctx context.Context, ws workspace.ID, sessionID string, fn func() error) error {
+func (s *PostgreSQLSessionStore) WithRuntimeMutationTx(ctx context.Context, ws workspace.ID, sessionID string, fn func(Transaction) error) error {
 	resource, err := storage.SessionRuntimeMutationAdvisoryLockResource(string(ws), sessionID)
 	if err != nil {
 		return &ValidationError{Message: "session runtime mutation lock is invalid"}
 	}
-	return s.client.WithAdvisoryLock(ctx, "session.runtime_mutation_lock", storage.SessionRuntimeMutationAdvisoryLockCategory, resource, fn)
+	return s.client.WithWorkspaceTx(ctx, string(ws), "session.runtime_mutation", func(tx *dbconnect.Tx) error {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)", storage.SessionRuntimeMutationAdvisoryLockCategory, resource); err != nil {
+			return err
+		}
+		return fn(&postgresqlTransaction{
+			store:       s,
+			workspaceID: ws,
+			tx:          postgresqlTxAdapter{tx: tx},
+		})
+	})
 }
 
 func (s *PostgreSQLSessionStore) Get(ctx context.Context, ws workspace.ID, sessionID string) (*Session, error) {
@@ -1213,6 +1223,9 @@ func (t *postgresqlTransaction) DeleteSession(ctx context.Context, sessionID str
 	if err != nil {
 		return err
 	}
+	if err := cancelSessionRuntimeCustodyForDelete(ctx, rawTx, t.workspaceID, sessionID, timestamp); err != nil {
+		return err
+	}
 	// Deletion commits its Sandbox release fence before cleanup can be leased;
 	// a later cleanup pass may join this operation but cannot be its producer.
 	if err := t.store.sessionDeleteSandboxRelease(ctx, rawTx, t.workspaceID, sessionID, timestamp); err != nil {
@@ -1253,6 +1266,62 @@ func (t *postgresqlTransaction) DeleteSession(ctx context.Context, sessionID str
 		return err
 	}
 	return t.enqueueSessionDeleteCleanup(ctx, sessionID, deleteCleanupID, timestamp)
+}
+
+// cancelSessionRuntimeCustodyForDelete revokes every current Runtime delivery
+// authority while the delete owner holds the common Session arbitration lock.
+// Queue rows are locked before Inbox rows to preserve the cross-table order.
+func cancelSessionRuntimeCustodyForDelete(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, now time.Time) error {
+	rows, err := tx.Query(ctx,
+		`SELECT id
+		   FROM queue_jobs
+		  WHERE workspace_id = $1
+		    AND causal_session_id = $2
+		    AND kind IN ($3, $4, $5, $6)
+		    AND status IN ('pending', 'leased')
+		  ORDER BY id
+		  FOR UPDATE`,
+		string(workspaceID), sessionID,
+		queue.KindRuntimeInput, queue.KindRuntimeRecovery, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession,
+	)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			return errors.Join(err, rows.Close())
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.Join(err, rows.Close())
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status='cancelled', cancelled_at=$3,
+		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
+		        updated_at=$3
+		  WHERE workspace_id=$1
+		    AND causal_session_id=$2
+		    AND kind IN ($4, $5, $6, $7)
+		    AND status IN ('pending', 'leased')`,
+		string(workspaceID), sessionID, now,
+		queue.KindRuntimeInput, queue.KindRuntimeRecovery, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession,
+	); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE session_runtime_inbox
+		    SET status='cancelled', updated_at=$3
+		  WHERE workspace_id=$1
+		    AND session_id=$2
+		    AND status IN ('queued', 'delivering', 'accepted', 'parked')`,
+		string(workspaceID), sessionID, now,
+	)
+	return err
 }
 
 func (t *postgresqlTransaction) enqueueSessionDeleteCleanup(ctx context.Context, sessionID string, deleteCleanupID string, timestamp time.Time) error {

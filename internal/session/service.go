@@ -270,7 +270,7 @@ func (s *Service) ArchiveThread(ctx context.Context, ws workspace.ID, sessionID 
 
 func (s *Service) Update(ctx context.Context, ws workspace.ID, sessionID string, request UpdateRequest) (*Response, error) {
 	var updated *Session
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
+	update := func(tx Transaction) error {
 		current, err := s.lockMutableSession(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -305,7 +305,14 @@ func (s *Service) Update(ctx context.Context, ws workspace.ID, sessionID string,
 			UpdatedAt:          s.clock().UTC(),
 		})
 		return err
-	}); err != nil {
+	}
+	var err error
+	if request.ToolsPatch != nil || request.MCPServersPatch != nil || request.ApprovalMode != nil {
+		err = s.store.WithRuntimeMutationTx(ctx, ws, sessionID, update)
+	} else {
+		err = s.store.WithWorkspaceTx(ctx, ws, update)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return s.assemble(ctx, ws, updated)
@@ -541,7 +548,7 @@ func (s *Service) Archive(ctx context.Context, ws workspace.ID, sessionID string
 }
 
 func (s *Service) Delete(ctx context.Context, ws workspace.ID, sessionID string) (*DeleteResponse, error) {
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
+	err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
 		stored, err := tx.LockSessionForDelete(ctx, sessionID)
 		if err != nil {
 			return err
@@ -554,7 +561,8 @@ func (s *Service) Delete(ctx context.Context, ws workspace.ID, sessionID string)
 			}
 		}
 		return tx.DeleteSession(ctx, sessionID)
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &DeleteResponse{ID: sessionID, Type: "session_deleted"}, nil
@@ -579,15 +587,15 @@ func (s *Service) AddResource(ctx context.Context, ws workspace.ID, sessionID st
 		}
 	}
 	var response *ResourceResponse
-	err := s.store.WithRuntimeMutationLock(ctx, ws, sessionID, func() error {
-		var err error
-		response, err = s.addResourceLocked(ctx, ws, sessionID, request, normalizedMountPath)
-		return err
+	err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
+		var mutationErr error
+		response, mutationErr = s.addResourceLocked(ctx, tx, ws, sessionID, request, normalizedMountPath)
+		return mutationErr
 	})
 	return response, err
 }
 
-func (s *Service) addResourceLocked(ctx context.Context, ws workspace.ID, sessionID string, request ResourceRequest, normalizedMountPath string) (*ResourceResponse, error) {
+func (s *Service) addResourceLocked(ctx context.Context, tx Transaction, ws workspace.ID, sessionID string, request ResourceRequest, normalizedMountPath string) (*ResourceResponse, error) {
 	resourceID := s.resourceIDStrategy()
 	sessionFileID := s.fileIDStrategy()
 	mountPath := "/mnt/session/uploads/" + sessionFileID
@@ -608,30 +616,25 @@ func (s *Service) addResourceLocked(ctx context.Context, ws workspace.ID, sessio
 			MountPath:    mountPath,
 		},
 	}
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
-		storedSession, err := s.lockMutableSession(ctx, tx, sessionID)
-		if err != nil {
-			return err
-		}
-		if activeFileResourceCount(storedSession.Resources) >= maxFileResources {
-			return &ValidationError{Message: "too many file resources"}
-		}
-		if err := rejectMountOverlap(resourceMounts(storedSession.Resources), mountPath); err != nil {
-			return err
-		}
-		if _, err := s.files.CreateSessionFileIdentity(ctx, filesTx{tx: tx}, ws, files.SessionFileIdentityRequest{
-			SourceFileID:  request.FileID,
-			SessionID:     sessionID,
-			SessionFileID: sessionFileID,
-			CreatedAt:     now,
-		}); err != nil {
-			return err
-		}
-		if err := tx.CreateResource(ctx, resource); err != nil {
-			return err
-		}
-		return tx.RecordSessionResourceMutation(ctx, sessionID, now)
+	storedSession, err := s.lockMutableSession(ctx, tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if activeFileResourceCount(storedSession.Resources) >= maxFileResources {
+		return nil, &ValidationError{Message: "too many file resources"}
+	}
+	if err := rejectMountOverlap(resourceMounts(storedSession.Resources), mountPath); err != nil {
+		return nil, err
+	}
+	if _, err := s.files.CreateSessionFileIdentity(ctx, filesTx{tx: tx}, ws, files.SessionFileIdentityRequest{
+		SourceFileID: request.FileID, SessionID: sessionID, SessionFileID: sessionFileID, CreatedAt: now,
 	}); err != nil {
+		return nil, err
+	}
+	if err := tx.CreateResource(ctx, resource); err != nil {
+		return nil, err
+	}
+	if err := tx.RecordSessionResourceMutation(ctx, sessionID, now); err != nil {
 		return nil, err
 	}
 	return resourceResponse(resource), nil
@@ -666,33 +669,29 @@ func (s *Service) GetResource(ctx context.Context, ws workspace.ID, sessionID st
 
 func (s *Service) DeleteResource(ctx context.Context, ws workspace.ID, sessionID string, resourceID string) (*ResourceDeleteResponse, error) {
 	var response *ResourceDeleteResponse
-	err := s.store.WithRuntimeMutationLock(ctx, ws, sessionID, func() error {
-		var err error
-		response, err = s.deleteResourceLocked(ctx, ws, sessionID, resourceID)
-		return err
+	err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
+		var mutationErr error
+		response, mutationErr = s.deleteResourceLocked(ctx, tx, ws, sessionID, resourceID)
+		return mutationErr
 	})
 	return response, err
 }
 
-func (s *Service) deleteResourceLocked(ctx context.Context, ws workspace.ID, sessionID string, resourceID string) (*ResourceDeleteResponse, error) {
+func (s *Service) deleteResourceLocked(ctx context.Context, tx Transaction, ws workspace.ID, sessionID string, resourceID string) (*ResourceDeleteResponse, error) {
 	now := s.clock().UTC()
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
-		if _, err := s.lockMutableSession(ctx, tx, sessionID); err != nil {
-			return err
+	if _, err := s.lockMutableSession(ctx, tx, sessionID); err != nil {
+		return nil, err
+	}
+	deleted, err := tx.RequestResourceDelete(ctx, sessionID, resourceID, now)
+	if err != nil {
+		return nil, err
+	}
+	if deleted.DetachedAt != nil && deleted.File != nil {
+		if err := s.files.TombstoneSessionFileIdentity(ctx, filesTx{tx: tx}, ws, sessionID, deleted.File.FileID); err != nil {
+			return nil, err
 		}
-		deleted, err := tx.RequestResourceDelete(ctx, sessionID, resourceID, now)
-		if err != nil {
-			return err
-		}
-		if deleted.DetachedAt != nil {
-			if deleted.File != nil {
-				if err := s.files.TombstoneSessionFileIdentity(ctx, filesTx{tx: tx}, ws, sessionID, deleted.File.FileID); err != nil {
-					return err
-				}
-			}
-		}
-		return tx.RecordSessionResourceMutation(ctx, sessionID, now)
-	}); err != nil {
+	}
+	if err := tx.RecordSessionResourceMutation(ctx, sessionID, now); err != nil {
 		return nil, err
 	}
 	return &ResourceDeleteResponse{ID: resourceID, Type: "session_resource_deleted"}, nil
@@ -897,42 +896,40 @@ func (s *Service) UpdateResource(ctx context.Context, ws workspace.ID, sessionID
 		return nil, &ValidationError{Message: "authorization_token is required"}
 	}
 	var resource *Resource
-	err := s.store.WithRuntimeMutationLock(ctx, ws, sessionID, func() error {
-		return s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
-			storedSession, err := tx.LockSession(ctx, sessionID)
-			if err != nil {
-				return err
-			}
-			if storedSession.LifecycleState == LifecycleStateDeleted {
-				return &NotFoundError{Message: "session not found"}
-			}
-			if storedSession.ArchivedAt != nil || storedSession.LifecycleState == LifecycleStateArchiving || storedSession.LifecycleState == LifecycleStateArchived {
-				return &ConflictError{Message: "session is archived", InvalidRequest: true}
-			}
-			if err := tx.RequireSessionUsableForMutation(ctx, sessionID); err != nil {
-				return err
-			}
-			current, err := tx.GetResource(ctx, sessionID, resourceID)
-			if err != nil {
-				return err
-			}
-			if current.Type != ResourceTypeGitHubRepository {
-				return &ValidationError{Message: "only github_repository authorization_token can be updated"}
-			}
-			if s.encryptor == nil {
-				return fmt.Errorf("session resource encryptor is required")
-			}
-			encrypted, err := s.encryptor.Encrypt([]byte(token))
-			if err != nil {
-				return err
-			}
-			now := s.clock().UTC()
-			resource, err = tx.UpdateGitHubRepositoryToken(ctx, sessionID, resourceID, encrypted, now)
-			if err != nil {
-				return err
-			}
-			return tx.RecordSessionResourceMutation(ctx, sessionID, now)
-		})
+	err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
+		storedSession, err := tx.LockSession(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if storedSession.LifecycleState == LifecycleStateDeleted {
+			return &NotFoundError{Message: "session not found"}
+		}
+		if storedSession.ArchivedAt != nil || storedSession.LifecycleState == LifecycleStateArchiving || storedSession.LifecycleState == LifecycleStateArchived {
+			return &ConflictError{Message: "session is archived", InvalidRequest: true}
+		}
+		if err := tx.RequireSessionUsableForMutation(ctx, sessionID); err != nil {
+			return err
+		}
+		current, err := tx.GetResource(ctx, sessionID, resourceID)
+		if err != nil {
+			return err
+		}
+		if current.Type != ResourceTypeGitHubRepository {
+			return &ValidationError{Message: "only github_repository authorization_token can be updated"}
+		}
+		if s.encryptor == nil {
+			return fmt.Errorf("session resource encryptor is required")
+		}
+		encrypted, err := s.encryptor.Encrypt([]byte(token))
+		if err != nil {
+			return err
+		}
+		now := s.clock().UTC()
+		resource, err = tx.UpdateGitHubRepositoryToken(ctx, sessionID, resourceID, encrypted, now)
+		if err != nil {
+			return err
+		}
+		return tx.RecordSessionResourceMutation(ctx, sessionID, now)
 	})
 	if err != nil {
 		return nil, err

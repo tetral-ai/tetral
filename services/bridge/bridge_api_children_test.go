@@ -625,6 +625,7 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		sessionID, siblingID, interruptID, interruptSequence); err != nil {
 		t.Fatalf("seed actor interrupt barrier: %v", err)
 	}
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, siblingID, interruptID, "evt_interrupt_actor_control", interruptSequence)
 	if response, err := store.DeliverInterAgentMail(context.Background(), preRequest); err != nil || response.GetDuplicate() == nil {
 		t.Fatalf("pre-interrupt mail replay = %#v/%v; want duplicate", response, err)
 	}
@@ -639,12 +640,12 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		Scope: siblingScope, DeliveryId: agentMailDeliveryID(lateSourceID, grandchildID), TargetThreadId: grandchildID,
 		SourceToolUseEventId: lateSourceID, Content: "must be rejected",
 	}
-	if _, err := store.DeliverInterAgentMail(context.Background(), lateRequest); !isSessionInterruptBarrierStaleError(err) {
+	if _, err := store.DeliverInterAgentMail(context.Background(), lateRequest); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source mail error = %v; want interrupt barrier stale", err)
 	}
 	if _, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
-	}); !isSessionInterruptBarrierStaleError(err) {
+	}); !isThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child error = %v; want interrupt barrier stale", err)
 	}
 	var sent, received, inbox, queued, lateOperations, lateChildren int
@@ -1030,6 +1031,7 @@ func TestPostgreSQLAdmitApprovalReviewInputRejectsInterruptFirstWithoutCustody(t
 		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, sessionID, parentID); err != nil {
 		t.Fatalf("seed interrupt-first barrier: %v", err)
 	}
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, parentID, "rin_reviewer_admission_interrupt", "evt_reviewer_admission_interrupt", 1)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
@@ -1063,10 +1065,11 @@ func TestPostgreSQLReviewerEnsureRejectsInterruptFirstWithTypedStale(t *testing.
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
 		event_ids_json, sequence_from, sequence_to, status, created_at, updated_at
-	) VALUES ('default', $1, $2, $3, 'interrupt_control', '[]', 1, 1, 'queued',
-		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, sessionID, parentID, interruptID); err != nil {
+	) VALUES ('default', $1, $2, $3, 'interrupt_control', '["evt_reviewer_ensure_interrupt"]', 1, 1, 'queued',
+			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, sessionID, parentID, interruptID); err != nil {
 		t.Fatalf("seed interrupt-first reviewer ensure barrier: %v", err)
 	}
+	seedActiveInterruptQueueCustody(t, runtime, sessionID, parentID, interruptID, "evt_reviewer_ensure_interrupt", 1)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	server := BridgeAPIServer{store: store}

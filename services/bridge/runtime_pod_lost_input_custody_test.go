@@ -52,7 +52,7 @@ func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testi
 		}})
 	}}
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	sender := &requestStartWitnessAgentMailSender{
+	sender := &committingAgentMailSender{
 		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}},
 		bridge:                        bridgeStore,
 	}
@@ -75,8 +75,8 @@ func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testi
 	if len(sender.requests) != 1 {
 		t.Fatalf("Runtime requests after canonical replacement = %d; want one", len(sender.requests))
 	}
-	if sender.witnessErr != nil {
-		t.Fatalf("commit canonical replacement Request Start: %v", sender.witnessErr)
+	if sender.commitErr != nil {
+		t.Fatalf("commit canonical replacement Request Start: %v", sender.commitErr)
 	}
 	var oldStatus string
 	var deadLetters, pending, acknowledged int
@@ -95,13 +95,13 @@ func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testi
 	}
 }
 
-type requestStartWitnessAgentMailSender struct {
+type committingAgentMailSender struct {
 	*recordingRuntimeCommandSender
-	bridge     *PostgreSQLBridgeAPIStore
-	witnessErr error
+	bridge    *PostgreSQLBridgeAPIStore
+	commitErr error
 }
 
-func (s *requestStartWitnessAgentMailSender) AcceptAgentMail(
+func (s *committingAgentMailSender) AcceptAgentMail(
 	ctx context.Context,
 	target RuntimePodTarget,
 	request *agentruntimev1.AcceptAgentMailRequest,
@@ -124,13 +124,13 @@ func (s *requestStartWitnessAgentMailSender) AcceptAgentMail(
 		if err == nil {
 			err = errors.New("canonical replacement input was not committed")
 		}
-		s.witnessErr = err
+		s.commitErr = err
 		return response, err
 	}
 	sequences := committed.GetCommitted().GetContext().GetAssignedContextSequences()
 	if len(sequences) != 1 {
 		err = errors.New("canonical replacement input assigned an invalid context sequence")
-		s.witnessErr = err
+		s.commitErr = err
 		return response, err
 	}
 	boundary := sequences[0]
@@ -143,7 +143,7 @@ func (s *requestStartWitnessAgentMailSender) AcceptAgentMail(
 		ContextThroughMessageSequence: &boundary,
 		RequestKind:                   requestKindAgentProviderRequest,
 	})
-	s.witnessErr = err
+	s.commitErr = err
 	return response, err
 }
 

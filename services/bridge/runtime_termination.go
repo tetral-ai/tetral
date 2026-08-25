@@ -551,15 +551,18 @@ func cancelRuntimeTerminationInputsTx(
 	}
 	_, err = tx.Exec(ctx,
 		`UPDATE queue_jobs
-		    SET status='cancelled', cancelled_at=$3,
+			    SET status='cancelled', cancelled_at=$3,
 		        lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL,
 		        updated_at=$3
-		  WHERE workspace_id=$1 AND kind=$4 AND partition_key=$2
+			  WHERE workspace_id=$1 AND kind IN ($4, $5, $6, $7) AND partition_key=$2
 		    AND status IN ('pending','leased')`,
 		scope.GetWorkspaceId(),
 		queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()),
 		now,
 		queue.KindRuntimeRecovery,
+		queue.KindRuntimeConfigUpdate,
+		queue.KindCleanupSession,
+		queue.KindRuntimeInput,
 	)
 	return transitions, err
 }

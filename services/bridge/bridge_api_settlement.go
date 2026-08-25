@@ -284,7 +284,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			if err := validateInterruptLeaseRefTx(ctx, tx, request.GetScope(), interruptRequest.GetRuntimeInputId(), interruptRequest.GetInterruptLeaseRef()); err != nil {
 				return err
 			}
-			mutationCtx = withInterruptCloseout(ctx, interruptRequest.GetRuntimeInputId())
+			mutationCtx = withInterruptCloseout(ctx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), interruptRequest.GetRuntimeInputId())
 		}
 		if err := verifyModelRequestStartTx(ctx, tx, request.GetScope(), requestStart.EventID, request.GetModelRequestId(), requestKind); err != nil {
 			return err
@@ -484,7 +484,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 		return err
 	}); err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Stale{Stale: &bridgev1.WriteRequestEndStale{}}}, nil
 		}
 		return nil, err
@@ -895,14 +895,14 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	now := s.now()
 	capture, err := s.ensureFinishIdleOutputCapture(ctx, request, sourceKind, key, declarationDigest, now)
 	if err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 		}
 		return nil, err
 	}
 	capture, err = s.waitForFinishIdleOutputCapture(ctx, request.GetScope(), key, capture)
 	if err != nil {
-		if isSessionInterruptBarrierStaleError(err) {
+		if isThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 		}
 		return nil, err
@@ -1222,9 +1222,31 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err := verifyRuntimeBindingTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
+		var terminatingRole string
+		if err := tx.QueryRow(ctx,
+			`SELECT role FROM session_threads
+			  WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+			request.GetScope().GetSessionThreadId(),
+		).Scan(&terminatingRole); err != nil {
+			return err
+		}
+		queueThreadIDs := []string{request.GetScope().GetSessionThreadId()}
+		if terminatingRole == "main" {
+			queueThreadIDs = nil
+		}
+		if err := lockRuntimeInputQueueCustodyTx(
+			ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), queueThreadIDs,
+		); err != nil {
+			return err
+		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
+		}
+		if threadScope.role != terminatingRole {
+			return status.Error(codes.FailedPrecondition, "runtime termination Thread role changed during arbitration")
 		}
 		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -1295,12 +1317,15 @@ func settleRuntimeTerminationTx(
 		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, status.Error(codes.FailedPrecondition, "runtime termination has a live Tool use after derived settlement")
 	}
 	if threadScope.role == "main" {
-		if err := closeRuntimeTerminatedSessionSiblingsTx(ctx, tx, scope, runtimeWriteID, now); err != nil {
+		rootCtx := withSessionRootTermination(
+			ctx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimeWriteID,
+		)
+		if err := closeRuntimeTerminatedSessionSiblingsTx(rootCtx, tx, scope, runtimeWriteID, now); err != nil {
 			return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err
 		}
 	}
 	transitions, err := cancelRuntimeTerminationInputsTx(
-		ctx, tx, scope, threadScope.role == "main", threadScope.role == "main", now,
+		ctx, tx, scope, threadScope.role == "main", true, now,
 	)
 	if err != nil {
 		return runtimeTerminationResult{}, runtimeTerminationCustodyTransitions{}, err

@@ -110,12 +110,15 @@ func scanConfirmedStorePackage(t *testing.T, directory string, packagePath strin
 				if callName == "storage.WithWorkspaceTx" || callName == "storage.WithWorkspaceTxAndCleanup" {
 					t.Fatalf("%s calls legacy %s at %s", path, callName, fileSet.Position(value.Pos()))
 				}
-				if callName == "WithWorkspaceTx" || callName == "WithWorkspaceTxAndCleanup" ||
-					strings.HasSuffix(callName, ".WithWorkspaceTx") || strings.HasSuffix(callName, ".WithWorkspaceTxAndCleanup") {
-					if len(value.Args) >= 3 {
-						if _, ok := value.Args[2].(*ast.FuncLit); ok {
-							return true
-						}
+				if callName == "WithWorkspaceTx" || strings.HasSuffix(callName, ".WithWorkspaceTx") {
+					if len(value.Args) == 3 {
+						return true
+					}
+					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value)
+				}
+				if callName == "WithWorkspaceTxAndCleanup" || strings.HasSuffix(callName, ".WithWorkspaceTxAndCleanup") {
+					if len(value.Args) == 4 {
+						return true
 					}
 					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value)
 				}
