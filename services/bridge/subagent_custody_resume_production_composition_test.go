@@ -636,12 +636,35 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 		t.Fatalf("cross-Thread delivery custody = Inbox:%s Queue:%s attempts:%d (before:%d) Messages:%d starts:%d", inboxStatus, queueStatus, attempts, attemptsBeforeDelivery, messages, starts)
 	}
 	started := mailRuntime.providerStart(t)
+	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, parentID,
 		fixture.bindingID, 1, fixture.podUID,
 	)
-	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, interruptRuntime.port, fixture.sessionID, fixture.podUID)
+	type interruptDeliveryResult struct {
+		active bool
+		err    error
+	}
+	interruptDelivery := make(chan interruptDeliveryResult, 1)
+	interruptRunner := newSubagentRuntimeQueueRunner(
+		t, fixture.runtimeDB, fixture.admin, interruptRuntime.port,
+		fixture.sessionID, fixture.podUID, nil, nil,
+	)
+	go func() {
+		active, runErr := interruptRunner.RunOnceWithActivity(context.Background())
+		interruptDelivery <- interruptDeliveryResult{active: active, err: runErr}
+	}()
+	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
+	select {
+	case delivered := <-interruptDelivery:
+		if delivered.err != nil || !delivered.active {
+			t.Fatalf("deliver unrelated Thread interrupt = active:%t err:%v", delivered.active, delivered.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("unrelated Thread interrupt did not settle after output capture: %s", interruptRuntime.output.String())
+	}
 	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release main Thread interrupt Runtime: %v", err)
 	}
@@ -649,7 +672,6 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 		t.Fatalf("main Thread interrupt closeout = %+v", composed)
 	}
 
-	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 	mailRuntime.kill(t)
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
