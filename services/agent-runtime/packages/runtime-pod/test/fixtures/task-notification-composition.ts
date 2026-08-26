@@ -241,6 +241,19 @@ const hosts = await buildRuntimeCoreHosts({
 		}),
 	},
 });
+const preloadResult = await hosts.subAgentRunHost.preloadThread({
+	workspaceId: input.workspaceId,
+	sessionId: input.sessionId,
+	sessionThreadId: input.sessionThreadId,
+	bindingId: input.bindingId,
+	bindingGeneration: input.bindingGeneration,
+	targetPodUid: input.targetPodUid,
+});
+if (!preloadResult.ok || !preloadResult.applied) {
+	throw new Error(
+		`task-notification resident preload failed: ${JSON.stringify(preloadResult)}`,
+	);
+}
 const service = new RuntimeControlService({
 	ownPod: {
 		namespace: "engine",

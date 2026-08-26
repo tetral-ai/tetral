@@ -456,9 +456,10 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 	var accepted struct {
 		OK      bool `json:"ok"`
 		Applied bool `json:"applied"`
+		Created bool `json:"created"`
 	}
-	if err := json.Unmarshal(composed.AcceptResult, &accepted); err != nil || !accepted.OK || !accepted.Applied {
-		t.Fatalf("Runtime task-notification acceptance = %s/%v; want applied", composed.AcceptResult, err)
+	if err := json.Unmarshal(composed.AcceptResult, &accepted); err != nil || !accepted.OK || !accepted.Applied || accepted.Created {
+		t.Fatalf("Runtime task-notification acceptance = %s/%v; want applied to an existing resident Thread", composed.AcceptResult, err)
 	}
 	if !bridgeServerStore.didDrop() {
 		t.Fatal("task notification composition did not exercise committed lost-ACK replay")
@@ -512,6 +513,18 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 	if composed.ProviderInvocations != 1 || composed.RequestEndCount != 1 || requestStartCount != 1 || requestEndCount != 1 {
 		t.Fatalf("parked notification wake lifecycle = providers:%d runtime-ends:%d starts:%d durable-ends:%d; want 1/1/1/1",
 			composed.ProviderInvocations, composed.RequestEndCount, requestStartCount, requestEndCount)
+	}
+	var providerContext []struct {
+		Content []struct {
+			Text *struct {
+				Text string `json:"text"`
+			} `json:"text"`
+		} `json:"content"`
+	}
+	if len(composed.ProviderContexts) != 1 || json.Unmarshal(composed.ProviderContexts[0], &providerContext) != nil ||
+		len(providerContext) != 1 || len(providerContext[0].Content) != 1 || providerContext[0].Content[0].Text == nil ||
+		providerContext[0].Content[0].Text.Text != storedMessageText {
+		t.Fatalf("parked notification Provider context = %s; want exact task identity and result", composed.ProviderContexts)
 	}
 }
 
