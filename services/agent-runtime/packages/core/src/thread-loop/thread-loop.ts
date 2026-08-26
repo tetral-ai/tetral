@@ -6444,7 +6444,7 @@ function settleRuntimeShutdownEffect(
 				modelRequestId,
 				true,
 				"runtime_interrupted",
-				providerContextRetentionForRequest(session, "interrupted"),
+				spanEndAppend.providerContextRetention,
 				undefined,
 			);
 			if (requestSealFailure !== undefined) {
@@ -7082,6 +7082,7 @@ async function appendModelRequestEndEvent(
 				SessionEventWriterRequestEndResult,
 				{ readonly ok: true; readonly type: "committed" | "duplicate" }
 			>["outcome"];
+			readonly providerContextRetention: SessionEventWriterRequestEndEnvelope["providerContextRetention"];
 			readonly interruptToolResults: readonly RuntimeInterruptToolResult[];
 			readonly assistantSeal: {
 				readonly status: "completed" | "failed";
@@ -7234,6 +7235,7 @@ async function appendModelRequestEndEvent(
 		type: result.type,
 		requestEndEventId: result.requestEndEventId,
 		outcome: result.outcome,
+		providerContextRetention,
 		interruptToolResults: result.interruptToolResults,
 		assistantSeal,
 	};
@@ -7798,10 +7800,6 @@ function applyJoinedInterruptRequestEnd(
 	if (request === undefined) {
 		return false;
 	}
-	const providerContextRetention = providerContextRetentionForRequest(
-		session,
-		"interrupted",
-	);
 	try {
 		const pendingTools = [
 			...session.state.pendingApprovalToolJobs(),
@@ -7816,6 +7814,14 @@ function applyJoinedInterruptRequestEnd(
 			})),
 			result.interruptToolResults,
 		);
+		for (const settlement of result.interruptToolResults) {
+			session.state.applyThreadTurnFact({
+				fact: "tool_result_committed",
+				toolUseEventId: settlement.toolUseEventId,
+				outcome: settlement.result.type,
+			});
+			session.state.clearThreadToolRoute(settlement.toolUseEventId);
+		}
 		const openDraft = session.state.contextManager.openRequestDraft();
 		if (openDraft !== undefined) {
 			if (
@@ -7839,10 +7845,14 @@ function applyJoinedInterruptRequestEnd(
 		request.modelRequestId,
 		true,
 		"runtime_interrupted",
-		providerContextRetention,
+		result.providerContextRetention,
 		undefined,
 	);
 	if (requestSealFailure !== undefined) {
+		return false;
+	}
+	const projectionFailure = applyFailedRequestProviderProjection(session);
+	if (projectionFailure !== undefined) {
 		return false;
 	}
 	return session.state.recordJoinedUserInterruptResult(

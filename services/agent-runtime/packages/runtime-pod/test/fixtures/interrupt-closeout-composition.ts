@@ -3,7 +3,7 @@ import { credentials, Metadata } from "@grpc/grpc-js";
 import { normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
-import { Effect, Stream } from "effect";
+import { Stream } from "effect";
 import {
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,
@@ -70,6 +70,7 @@ const controlInputCommitter = new BridgeAPIControlInputCommitter({
 });
 let nextId = 0;
 let providerInvocations = 0;
+const providerContexts: unknown[] = [];
 let durableOperationCompletions = 0;
 let interruptResult: unknown;
 const interruptResults: unknown[] = [];
@@ -108,6 +109,7 @@ const hosts = await buildRuntimeCoreHosts({
 		llmService: {
 			stream: (request) => {
 				providerInvocations += 1;
+				providerContexts.push(request.context);
 				if (
 					(input.fastAfterFirstProviderCall === true && providerInvocations > 1) ||
 					(input.fastThreadText !== undefined &&
@@ -125,15 +127,33 @@ const hosts = await buildRuntimeCoreHosts({
 					]);
 				}
 				return Stream.concat(
-					Stream.fromEffect(Effect.sync(() => {
-						return {
+					Stream.fromIterable([
+						{ type: "text-start" as const, id: "interrupt-partial" },
+						{
+							type: "text-delta" as const,
+							id: "interrupt-partial",
+							text_delta: "failed interrupt partial text",
+						},
+						{ type: "text-end" as const, id: "interrupt-partial" },
+						{ type: "reasoning-start" as const, id: "interrupt-reasoning" },
+						{
+							type: "reasoning-delta" as const,
+							id: "interrupt-reasoning",
+							text_delta: "interrupt Tool reasoning",
+						},
+						{
+							type: "reasoning-end" as const,
+							id: "interrupt-reasoning",
+							providerMetadata: { anthropic: { signature: "sig_interrupt_composition" } },
+						},
+						{
 							type: "tool-call" as const,
-						id: "call_interrupt_composition",
-						toolName: "Bash",
-						input: { command: "durable-operation" },
-						inputPreview: { preview: "{}", truncated: false },
-						};
-					})),
+							id: "call_interrupt_composition",
+							toolName: "Bash",
+							input: { command: "durable-operation" },
+							inputPreview: { preview: "{}", truncated: false },
+						},
+					]),
 					Stream.never,
 				);
 			},
@@ -221,6 +241,7 @@ try {
 		threadSnapshot,
 		finishIdleInvocations,
 		providerInvocations,
+		providerContexts,
 		durableOperationCompletions,
 	}));
 } finally {

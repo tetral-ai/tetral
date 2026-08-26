@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,11 +43,13 @@ type interruptRuntimeCompositionOutput struct {
 	ThreadSnapshot              json.RawMessage   `json:"threadSnapshot"`
 	FinishIdleInvocations       int               `json:"finishIdleInvocations"`
 	ProviderInvocations         int               `json:"providerInvocations"`
+	ProviderContexts            []json.RawMessage `json:"providerContexts"`
 	DurableOperationCompletions int               `json:"durableOperationCompletions"`
 }
 
 type interruptRuntimeCompositionOptions struct {
 	failFirstFinishIdle bool
+	fastThreadText      string
 }
 
 type interruptFollowerRuntimeServer struct {
@@ -836,6 +839,12 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, configJobID).Scan(&configStatus); err != nil || configStatus != queue.StatusAcknowledged {
 		t.Fatalf("installed config Queue state = %s/%v; want acknowledged", configStatus, err)
 	}
+	coldAfterInterrupt, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+	})
+	if err != nil {
+		t.Fatalf("load cold Provider context after interrupt: %v", err)
+	}
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("deliver ordinary input after config install = active:%t err:%v", active, err)
 	}
@@ -872,9 +881,53 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		t.Fatalf("release Runtime composition: %v", err)
 	}
 	composed := runtimeProcess.wait(t)
-	if composed.ProviderInvocations != 2 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
+	if composed.ProviderInvocations != 2 || len(composed.ProviderContexts) != 2 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
 		t.Fatalf("Runtime composition = %+v; want interrupted and resumed Provider calls, one joined operation, and interrupt response", composed)
 	}
+	hotProviderContext := composed.ProviderContexts[1]
+	for _, providerRequest := range runRuntimeProviderComposition(t, coldAfterInterrupt.GetContextJson()) {
+		var coldRequest struct {
+			Context json.RawMessage `json:"context"`
+		}
+		if err := json.Unmarshal(providerRequest, &coldRequest); err != nil {
+			t.Fatalf("decode cold Provider request: %v", err)
+		}
+		var hotValue, coldValue []any
+		if err := json.Unmarshal(hotProviderContext, &hotValue); err != nil {
+			t.Fatalf("decode hot Provider context: %v", err)
+		}
+		if err := json.Unmarshal(coldRequest.Context, &coldValue); err != nil {
+			t.Fatalf("decode cold Provider context: %v", err)
+		}
+		if len(hotValue) == 0 {
+			t.Fatal("hot Provider context omitted the accepted follower input")
+		}
+		followerJSON, _ := json.Marshal(hotValue[len(hotValue)-1])
+		if !strings.Contains(string(followerJSON), "post-config ordinary") {
+			t.Fatalf("hot Provider context did not end with the accepted follower: %s", followerJSON)
+		}
+		hotJSON, _ := json.Marshal(hotValue[:len(hotValue)-1])
+		coldJSON, _ := json.Marshal(coldValue)
+		if !bytes.Equal(hotJSON, coldJSON) {
+			t.Fatalf("interrupt hot/cold Provider context diverged:\nhot:  %s\ncold: %s", hotJSON, coldJSON)
+		}
+		assertInterruptedProviderContext(
+			t,
+			coldRequest.Context,
+			"failed interrupt partial text",
+			"interrupt Tool reasoning",
+			"sig_interrupt_composition",
+			"call_interrupt_composition",
+		)
+	}
+	assertInterruptedProviderContext(
+		t,
+		hotProviderContext,
+		"failed interrupt partial text",
+		"interrupt Tool reasoning",
+		"sig_interrupt_composition",
+		"call_interrupt_composition",
+	)
 
 	var inboxStatus, queueStatus string
 	var starts, ends, toolUses, toolResults, receipts int
@@ -915,15 +968,25 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-joined-replay-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
-	toolUseEventID := writeDurableOrdinaryToolUseForTest(
-		t,
-		bridgeStore,
-		scope,
-		modelRequestID,
-		"call_interrupt_joined_replay",
-		"Read",
-		`{"path":"joined.txt"}`,
-	)
+	seedBridgeAPIRequestStart(t, bridgeStore, scope, "rwrite_"+modelRequestID+"_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	partial, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_partial", ModelRequestId: modelRequestID,
+		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"failed partial text"}]}`,
+		AssistantContextDelta: bridgeTextContextDeltaForTest("failed partial text"),
+	})
+	if err != nil || partial.GetCommitted() == nil {
+		t.Fatalf("write joined replay failed partial: response=%#v err=%v", partial, err)
+	}
+	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_tool", ModelRequestId: modelRequestID,
+		ToolDeclaration: bridgeSignedReasoningToolDeclarationForTest(
+			"call_interrupt_joined_replay", "Read", `{"path":"joined.txt"}`, "allow",
+		),
+	})
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("write joined replay Tool use: response=%#v err=%v", toolUse, err)
+	}
+	toolUseEventID := toolUse.GetCommitted().GetEventId()
 
 	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
 	birth, err := eventService.AppendClientEvents(
@@ -942,7 +1005,6 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		AND input_kind='interrupt_control'`, sessionID).Scan(&interruptID); err != nil {
 		t.Fatalf("read joined replay interrupt identity: %v", err)
 	}
-
 	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for joined replay Bridge: %v", err)
@@ -994,7 +1056,11 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 	defer cancelReplay()
 	replay, err := baseSender.Interrupt(replayContext, captureSender.target, captureSender.request)
 	if err != nil || replay.GetDuplicate() == nil {
-		t.Fatalf("redeliver joined interrupt = %#v/%v; want duplicate", replay, err)
+		if closeErr := os.WriteFile(paths.close, []byte("close"), 0o600); closeErr != nil {
+			t.Fatalf("redeliver joined interrupt = %#v/%v and close Runtime: %v", replay, err, closeErr)
+		}
+		failed := runtimeProcess.wait(t)
+		t.Fatalf("redeliver joined interrupt = %#v rejected=%#v err=%v output=%+v; want duplicate", replay, replay.GetRejected(), err, failed)
 	}
 	replayDeadline := time.Now().Add(3 * time.Second)
 	for {
@@ -1018,12 +1084,42 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		t.Fatalf("joined replay Runtime output = %+v; want zero Provider, one failed FinishIdle, two interrupts", composed)
 	}
 	var snapshot struct {
-		Ok       bool   `json:"ok"`
-		Observed bool   `json:"observed"`
-		Status   string `json:"status"`
+		Ok       bool              `json:"ok"`
+		Observed bool              `json:"observed"`
+		Status   string            `json:"status"`
+		Entries  []json.RawMessage `json:"entries"`
 	}
 	if err := json.Unmarshal(composed.ThreadSnapshot, &snapshot); err != nil || !snapshot.Ok || !snapshot.Observed {
 		t.Fatalf("joined replay resident snapshot = %s/%v", composed.ThreadSnapshot, err)
+	}
+	joinedCold, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("load joined replay durable projection: %v", err)
+	}
+	hotEntries, _ := json.Marshal(snapshot.Entries)
+	assertInterruptedResidentContext(
+		t,
+		hotEntries,
+		"failed partial text",
+		"provider-declared reasoning",
+		"sig_provider_context",
+		"call_interrupt_joined_replay",
+	)
+	for _, providerRequest := range runRuntimeProviderComposition(t, joinedCold.GetContextJson()) {
+		var coldRequest struct {
+			Context json.RawMessage `json:"context"`
+		}
+		if err := json.Unmarshal(providerRequest, &coldRequest); err != nil {
+			t.Fatalf("decode joined replay cold Provider request: %v", err)
+		}
+		assertInterruptedProviderContext(
+			t,
+			coldRequest.Context,
+			"failed partial text",
+			"provider-declared reasoning",
+			"sig_provider_context",
+			"call_interrupt_joined_replay",
+		)
 	}
 	var inboxStatus, queueStatus string
 	var requestEnds, toolResults, receipts, idleEvents int
@@ -1862,6 +1958,151 @@ func enqueueRuntimeCompositionJob(t *testing.T, store *queue.PostgreSQLQueueStor
 	}
 }
 
+func assertInterruptedProviderContext(
+	t *testing.T,
+	raw json.RawMessage,
+	failedText string,
+	reasoningText string,
+	reasoningSignature string,
+	modelToolCallID string,
+) {
+	t.Helper()
+	var entries []struct {
+		Content []struct {
+			Text *struct {
+				Text string `json:"text"`
+			} `json:"text"`
+			Reasoning *struct {
+				Text         string `json:"text"`
+				MetadataJSON string `json:"metadataJson"`
+			} `json:"reasoning"`
+			ToolCall *struct {
+				ModelToolCallID string `json:"modelToolCallId"`
+			} `json:"toolCall"`
+			ToolResult *struct {
+				ModelToolCallID string `json:"modelToolCallId"`
+			} `json:"toolResult"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("decode interrupted Provider context: %v: %s", err, raw)
+	}
+	reasoningIndex, toolCallIndex, toolResultIndex := -1, -1, -1
+	reasoningCount, toolCallCount, toolResultCount := 0, 0, 0
+	partIndex := 0
+	for _, entry := range entries {
+		for _, part := range entry.Content {
+			if part.Text != nil && strings.Contains(part.Text.Text, failedText) {
+				t.Fatalf("interrupted Provider context retained failed text %q: %s", failedText, raw)
+			}
+			if part.Reasoning != nil {
+				reasoningCount++
+				reasoningIndex = partIndex
+				if part.Reasoning.Text != reasoningText {
+					t.Fatalf("interrupted Provider reasoning text = %q; want %q", part.Reasoning.Text, reasoningText)
+				}
+				var metadata any
+				if err := json.Unmarshal([]byte(part.Reasoning.MetadataJSON), &metadata); err != nil {
+					t.Fatalf("decode interrupted Provider reasoning metadata %q: %v", part.Reasoning.MetadataJSON, err)
+				}
+				gotMetadata, _ := json.Marshal(metadata)
+				wantMetadata, _ := json.Marshal(map[string]any{"anthropic": map[string]any{"signature": reasoningSignature}})
+				if !bytes.Equal(gotMetadata, wantMetadata) {
+					t.Fatalf("interrupted Provider reasoning metadata = %s; want %s", gotMetadata, wantMetadata)
+				}
+			}
+			if part.ToolCall != nil {
+				toolCallCount++
+				toolCallIndex = partIndex
+				if part.ToolCall.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted Provider Tool Call ID = %q; want %q", part.ToolCall.ModelToolCallID, modelToolCallID)
+				}
+			}
+			if part.ToolResult != nil {
+				toolResultCount++
+				toolResultIndex = partIndex
+				if part.ToolResult.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted Provider Tool Result ID = %q; want %q", part.ToolResult.ModelToolCallID, modelToolCallID)
+				}
+			}
+			partIndex++
+		}
+	}
+	if reasoningCount != 1 || toolCallCount != 1 || toolResultCount != 1 ||
+		!(reasoningIndex < toolCallIndex && toolCallIndex < toolResultIndex) {
+		t.Fatalf("interrupted Provider ordering = reasoning:%d@%d call:%d@%d result:%d@%d: %s",
+			reasoningCount, reasoningIndex, toolCallCount, toolCallIndex, toolResultCount, toolResultIndex, raw)
+	}
+}
+
+func assertInterruptedResidentContext(
+	t *testing.T,
+	raw json.RawMessage,
+	failedText string,
+	reasoningText string,
+	reasoningSignature string,
+	modelToolCallID string,
+) {
+	t.Helper()
+	var entries []struct {
+		Parts []struct {
+			Type             string          `json:"type"`
+			Text             string          `json:"text"`
+			ModelToolCallID  string          `json:"modelToolCallId"`
+			ProviderMetadata json.RawMessage `json:"providerMetadata"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("decode interrupted resident context: %v: %s", err, raw)
+	}
+	reasoningIndex, toolCallIndex, toolResultIndex := -1, -1, -1
+	reasoningCount, toolCallCount, toolResultCount := 0, 0, 0
+	partIndex := 0
+	for _, entry := range entries {
+		for _, part := range entry.Parts {
+			if part.Type == "text" && strings.Contains(part.Text, failedText) {
+				t.Fatalf("interrupted resident context retained failed text %q: %s", failedText, raw)
+			}
+			if part.Type == "reasoning" {
+				reasoningCount++
+				reasoningIndex = partIndex
+				if part.Text != reasoningText {
+					t.Fatalf("interrupted resident reasoning text = %q; want %q", part.Text, reasoningText)
+				}
+				var metadata any
+				if err := json.Unmarshal(part.ProviderMetadata, &metadata); err != nil {
+					t.Fatalf("decode interrupted resident reasoning metadata: %v", err)
+				}
+				gotMetadata, _ := json.Marshal(metadata)
+				wantMetadata, _ := json.Marshal(map[string]any{"anthropic": map[string]any{"signature": reasoningSignature}})
+				if !bytes.Equal(gotMetadata, wantMetadata) {
+					t.Fatalf("interrupted resident reasoning metadata = %s; want %s", gotMetadata, wantMetadata)
+				}
+			}
+			if part.Type == "tool_call" {
+				toolCallCount++
+				toolCallIndex = partIndex
+				if part.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted resident Tool Call ID = %q; want %q", part.ModelToolCallID, modelToolCallID)
+				}
+			}
+			if part.Type == "tool_result" {
+				toolResultCount++
+				toolResultIndex = partIndex
+				if part.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted resident Tool Result ID = %q; want %q", part.ModelToolCallID, modelToolCallID)
+				}
+			}
+			partIndex++
+		}
+	}
+	if reasoningCount != 1 || toolCallCount != 1 || toolResultCount != 1 ||
+		!(reasoningIndex < toolCallIndex && toolCallIndex < toolResultIndex) {
+		t.Fatalf("interrupted resident ordering = reasoning:%d@%d call:%d@%d result:%d@%d: %s",
+			reasoningCount, reasoningIndex, toolCallCount, toolCallIndex, toolResultCount, toolResultIndex, raw)
+	}
+}
+
 type interruptRuntimeCompositionPaths struct {
 	toolStarted        string
 	operationCompleted string
@@ -1880,15 +2121,21 @@ func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sess
 		toolStarted: tempDir + "/tool-started", operationCompleted: tempDir + "/operation-completed",
 		acceptResult: tempDir + "/accept-result.json", close: tempDir + "/close",
 	}
+	fastThreadText := compositionOptions.fastThreadText
+	if fastThreadText == "" {
+		fastThreadText = "post-config ordinary"
+	}
 	inputPath := tempDir + "/input.json"
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": bridgeAddress, "workspaceId": "default", "sessionId": sessionID,
 		"sessionThreadId": threadID, "bindingId": bindingID, "bindingGeneration": bindingGeneration,
 		"targetPodUid": podUID, "readyPath": readyPath, "toolStartedPath": paths.toolStarted,
 		"acceptResultPath":              paths.acceptResult,
-		"durableOperationCompletedPath": paths.operationCompleted, "closePath": paths.close,
-		"fastThreadText": "post-config ordinary", "fastAfterFirstProviderCall": true,
-		"failFirstFinishIdle": compositionOptions.failFirstFinishIdle,
+		"durableOperationCompletedPath": paths.operationCompleted,
+		"closePath":                     paths.close,
+		"fastThreadText":                fastThreadText,
+		"fastAfterFirstProviderCall":    true,
+		"failFirstFinishIdle":           compositionOptions.failFirstFinishIdle,
 	})
 	if err != nil {
 		t.Fatalf("encode interrupt Runtime composition: %v", err)

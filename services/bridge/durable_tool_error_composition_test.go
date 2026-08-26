@@ -170,6 +170,10 @@ func runRuntimeProviderComposition(t *testing.T, contextJSON string) []json.RawM
 	var result struct {
 		ProviderComposition struct {
 			Strategies []struct {
+				ProviderFamily string `json:"providerFamily"`
+				Validation     struct {
+					Ok bool `json:"ok"`
+				} `json:"validation"`
 				ProviderRequest json.RawMessage `json:"providerRequest"`
 			} `json:"strategies"`
 		} `json:"providerComposition"`
@@ -179,9 +183,13 @@ func runRuntimeProviderComposition(t *testing.T, contextJSON string) []json.RawM
 	}
 	requests := make([]json.RawMessage, 0, len(result.ProviderComposition.Strategies))
 	for _, strategy := range result.ProviderComposition.Strategies {
-		if len(strategy.ProviderRequest) > 0 {
-			requests = append(requests, strategy.ProviderRequest)
+		if !strategy.Validation.Ok || len(strategy.ProviderRequest) == 0 {
+			t.Fatalf("Runtime Provider composition for %s was invalid or absent: %s", strategy.ProviderFamily, output)
 		}
+		requests = append(requests, strategy.ProviderRequest)
+	}
+	if len(requests) == 0 {
+		t.Fatal("Runtime Provider composition returned no strategies")
 	}
 	return requests
 }

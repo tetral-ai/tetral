@@ -47,6 +47,7 @@ import { AutoApprovalReviewerManager } from "../../../src/session/approval-revie
 import * as SessionManager from "../../../src/session/session-manager.js";
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
+import type { ThreadTurnCheckpoint } from "../../../src/thread-loop/turn/checkpoint.js";
 import type {
 	RuntimeAcceptedInputState,
 } from "../../../src/thread-loop/input/accepted-input.js";
@@ -4032,11 +4033,13 @@ describe("ThreadLoop", () => {
 		});
 		expect(session.state.pendingAttachments()).toEqual([]);
 	});
-	test("user interrupt repairs a committed ToolFiber before CommitInputs and FinishIdle", async () => {
+	for (const requestEndReceipt of ["committed", "duplicate"] as const) {
+		test(`user interrupt applies frozen Tool retention from a ${requestEndReceipt} Request End`, async () => {
 		const session = new ThreadRuntime("sesn_1");
+		const initialContext = userMessage("user-1", 0, "remember this");
 		const loader = new RecordingContextLoader([], {
 			type: "context",
-			entries: [userMessage("user-1", 0, "remember this")],
+			entries: [initialContext],
 		});
 		const releaseProvider = deferred<void>();
 		const projectionFailureSeen = deferred<void>();
@@ -4044,6 +4047,10 @@ describe("ThreadLoop", () => {
 		const appended: SessionEvent[] = [];
 		const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+		let assistantBeforeEnd:
+			| NonNullable<ReturnType<typeof session.state.contextManager.openRequestDraft>>
+			| undefined;
+		let hotRequestBeforeIdle: NonNullable<ThreadTurnCheckpoint["request"]> | undefined;
 		const closeoutOrder: string[] = [];
 		let observedToolSignal: AbortSignal | undefined;
 		let toolRunnerCalls = 0;
@@ -4052,6 +4059,20 @@ describe("ThreadLoop", () => {
 			stream(_request, options) {
 				return Stream.fromAsyncIterable(
 					(async function* () {
+						yield { type: "text-start" as const, id: "text-memory" };
+						yield {
+							type: "text-delta" as const,
+							id: "text-memory",
+							text_delta: "partial response that must not survive",
+						};
+						yield { type: "text-end" as const, id: "text-memory" };
+						yield { type: "reasoning-start" as const, id: "reasoning-memory" };
+						yield {
+							type: "reasoning-delta" as const,
+							id: "reasoning-memory",
+							text_delta: "reasoning attached to the Tool call",
+						};
+						yield { type: "reasoning-end" as const, id: "reasoning-memory" };
 						yield {
 							type: "tool-call" as const,
 							id: "tool-memory",
@@ -4095,6 +4116,11 @@ describe("ThreadLoop", () => {
 			(envelope) => {
 				appended.push(envelope.event);
 				closeoutOrder.push(`event:${envelope.event.type}`);
+				if (envelope.event.type === "session.status_idle") {
+					hotRequestBeforeIdle = structuredClone(
+						session.state.threadTurnTransition().checkpoint.request,
+					);
+				}
 				return {
 					ok: true,
 					eventId:
@@ -4106,9 +4132,15 @@ describe("ThreadLoop", () => {
 				};
 			},
 			async (envelope) => {
+				assistantBeforeEnd = structuredClone(
+					session.state.contextManager.openRequestDraft(),
+				);
 				requestEnds.push(envelope);
 				closeoutOrder.push("event:span.model_request_end");
-				return requestEndResultForTest(envelope);
+				const result = requestEndResultForTest(envelope);
+				return result.ok && result.type !== "stale"
+					? { ...result, type: requestEndReceipt }
+					: result;
 			},
 			[],
 			undefined,
@@ -4200,7 +4232,30 @@ describe("ThreadLoop", () => {
 			closeoutOrder.indexOf("event:session.status_idle"),
 		);
 		expect(contextToolStatus(session)).toBe("cancelled");
-	});
+		const request = hotRequestBeforeIdle;
+		const frozenAssistant = assistantBeforeEnd;
+		const durableEnd = requestEnds[0];
+		if (
+			request?.requestEnd === undefined ||
+			frozenAssistant === undefined ||
+			durableEnd === undefined
+		) {
+			throw new Error("interrupt Request retention proof is incomplete");
+		}
+		expect(request.requestEnd.providerContextRetention).toEqual(
+			durableEnd.providerContextRetention,
+		);
+		expect(request.requestEnd.providerContextRetention).toEqual({
+			disposition: "interrupted",
+			assistantMessageSequence: frozenAssistant.messageSequence,
+			toolUseEventIds: ["sevt_memory_projection_cancel"],
+			repairEventIds: [],
+		});
+		expect(JSON.stringify(session.state.contextManager.entries())).not.toContain(
+			"partial response that must not survive",
+		);
+		});
+	}
 	test("SessionManager enforces the five-state interrupt fence across tools and CommitInputs", async () => {
 		const terminalResultAcked = deferred<void>();
 		const releaseNextProviderTool = deferred<void>();

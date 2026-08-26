@@ -14,6 +14,7 @@ import {
 import {
 	deriveThreadTurnSnapshot,
 } from "@tetral/agent-runtime-core/src/thread-loop/turn/reducer.js";
+import { projectFailedRequestsProviderContext } from "@tetral/agent-runtime-core/src/thread-loop/turn/provider-context.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
 import { GatewayProviderRules } from "../../../../../gateway/packages/lowering/src/rules/index.js";
@@ -77,6 +78,13 @@ const coldActiveInputView = {
 };
 const checkpoint = extractThreadTurnCheckpoint({
 	contextEntries: cold.contextEntries,
+	facts: cold.turnFacts,
+});
+const residentContext = projectFailedRequestsProviderContext({
+	contextEntries: cold.contextEntries,
+	...(cold.openRequestDraft === undefined
+		? {}
+		: { openRequestDraft: cold.openRequestDraft }),
 	facts: cold.turnFacts,
 });
 const toolRouteView = extractColdThreadToolRouteView({
@@ -209,7 +217,7 @@ process.stdout.write(
 		...(input.providerComposition === true
 			? {
 					providerComposition: composeProviderRequests(
-						cold.contextEntries,
+						residentContext.contextEntries,
 						cold.threadContextPrefix?.entries,
 					),
 				}
