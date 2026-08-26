@@ -306,13 +306,6 @@ export async function appendIdleEvent(
 	if (!validated.ok) {
 		return { ok: false, error: runtimeFailureFromEventWriter(validated.error) };
 	}
-	const currentNextStep = session.state.threadTurnTransition().nextStep;
-	const committedRequiresActionTargets =
-		stopReason.type === "requires_action" &&
-		currentNextStep.action === "finish_idle" &&
-		currentNextStep.stopReason.type === "requires_action"
-			? currentNextStep.stopReason.eventIds
-			: undefined;
 	session.state.applyFinishIdleFact(transitionOwner, {
 		fact: "finish_idle_committed",
 		eventId: validated.eventId,
@@ -320,8 +313,7 @@ export async function appendIdleEvent(
 			stopReason.type === "requires_action"
 				? {
 						type: "requires_action",
-						eventIds:
-							committedRequiresActionTargets ?? stopReason.event_ids,
+						eventIds: stopReason.event_ids,
 					}
 				: stopReason.type === "retries_exhausted"
 					? {

@@ -1678,6 +1678,9 @@ export function layer(
 						);
 						threadEntry.interruptLeaseRef = undefined;
 						if (closeout.type === "failed") {
+							if (closeout.reloadHotState === true) {
+								markReloadRequired();
+							}
 							return {
 								ok: false,
 								sessionId,

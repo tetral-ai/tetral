@@ -2058,6 +2058,7 @@ describe("ThreadLoop", () => {
 		const attempts: SessionEventWriterRequestEndEnvelope[] = [];
 		const appended: SessionEvent[] = [];
 		let providerCalls = 0;
+		const providerRequests: LLMRequest[] = [];
 		let requestEndFacts = 0;
 		const applyThreadTurnFact = session.state.applyThreadTurnFact.bind(
 			session.state,
@@ -2102,10 +2103,22 @@ describe("ThreadLoop", () => {
 					}
 					lostRequestEndReceipt = durableResult;
 					expect(
-					session.state.enqueueAcceptedInput(
-						acceptedInput("rin_during_request_end_replay", session.sessionId),
-					),
-				).toBe("applied");
+						session.state.enqueueAcceptedInput({
+							...acceptedInput(
+								"rin_during_request_end_replay",
+								session.sessionId,
+							),
+							contentJson: JSON.stringify({
+								messages: [
+									userMessage(
+										"user-during-request-end-replay",
+										1,
+										"REQUEST_END_REPLAY_SUCCESSOR_CANARY",
+									),
+								],
+							}),
+						}),
+					).toBe("applied");
 					return {
 						ok: false,
 						error: {
@@ -2135,8 +2148,9 @@ describe("ThreadLoop", () => {
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						writer,
-						onStream: () => {
+						onStream: (request) => {
 							providerCalls += 1;
+							providerRequests.push(request);
 						},
 						events: [
 							{ type: "reasoning-start", id: "retry-reasoning-1" },
@@ -2168,6 +2182,9 @@ describe("ThreadLoop", () => {
 		expect(attempts[1]).toEqual(attempts[0]);
 		expect(attempts[2]?.writeId).not.toBe(attempts[0]?.writeId);
 		expect(providerCalls).toBe(2);
+		expect(JSON.stringify(providerRequests[1]?.context)).toContain(
+			"REQUEST_END_REPLAY_SUCCESSOR_CANARY",
+		);
 		expect(requestEndFacts).toBe(2);
 		expect(loader.commitCalls).toHaveLength(2);
 		expect(loader.commitCalls.at(-1)?.runtimeInputId).toBe(

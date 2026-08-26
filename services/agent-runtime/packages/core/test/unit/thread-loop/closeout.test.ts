@@ -706,22 +706,14 @@ describe("ThreadLoop", () => {
 		});
 		expect(appendedTypes).toEqual([]);
 	});
-	test("idle finalization retries lost ACKs with the same runtime write id", async () => {
-		const loader = new RecordingContextLoader([], { type: "empty" });
-		const session = new ThreadRuntime("sesn_1");
-		session.state.markPersistentContextLoaded();
-		session.state.installThreadTurn(
-			{
-				executionRunId: "evt_open_idle_retry",
-				pendingInputContextSequences: [],
-			},
-			{ routes: [] },
-		);
+	test("SessionManager starts the queued successor after replaying a lost FinishIdle ACK", async () => {
+		const loader = new QueuedContextLoader([], []);
 		const finishIdleWriteIds: string[] = [];
 		const finishIdleEnvelopes: SessionEventWriterFinishIdleEnvelope[] = [];
-		const statesBeforeFinishIdleReceipts: string[] = [];
 		const appended: SessionEvent[] = [];
-		let providerCalls = 0;
+		const providerRequests: LLMRequest[] = [];
+		const finishIdleStarted = deferred<void>();
+		const releaseFinishIdle = deferred<void>();
 		const durableSequence = { eventSequence: 0, messageSequence: 0 };
 		let lostFinishIdleReceipt:
 			| Extract<
@@ -747,9 +739,6 @@ describe("ThreadLoop", () => {
 			finishIdle: async (envelope) => {
 				finishIdleWriteIds.push(envelope.durableTurnId);
 				finishIdleEnvelopes.push(envelope);
-				statesBeforeFinishIdleReceipts.push(
-					session.state.threadTurnTransition().state.state,
-				);
 				if (finishIdleWriteIds.length === 1) {
 					const durableResult = await baseWriter.finishIdle!(envelope);
 					expect(durableResult).toMatchObject({
@@ -760,11 +749,8 @@ describe("ThreadLoop", () => {
 						throw new Error("FinishIdle response-loss setup did not commit");
 					}
 					lostFinishIdleReceipt = durableResult;
-					expect(
-						session.state.enqueueAcceptedInput(
-							acceptedInput("rin_during_finish_idle_replay", session.sessionId),
-						),
-					).toBe("applied");
+					finishIdleStarted.resolve();
+					await releaseFinishIdle.promise;
 					return {
 						ok: false,
 						error: {
@@ -787,47 +773,95 @@ describe("ThreadLoop", () => {
 				return baseWriter.finishIdle!(envelope);
 			},
 		};
-		const results = await Effect.runPromise(
+		const agentLayer = runtimeThreadLoopLayer(loader, {
+			writer,
+			onStream: (request) => providerRequests.push(request),
+		});
+		const managerLayer = SessionManager.layer({
+			maxLocalSessions: 4,
+			now: () => createdAt,
+		}).pipe(Layer.provide(agentLayer));
+		const { manager, scope } = await Effect.runPromise(
 			Effect.gen(function* () {
-				const threadLoop = yield* ThreadLoop.Service;
-				const closeout = yield* threadLoop.run(session, testRunCustody());
-				const successor = yield* threadLoop.run(session, testRunCustody());
-				return { closeout, successor };
-			}).pipe(
-				Effect.provide(
-					runtimeThreadLoopLayer(loader, {
-						installLoaderState: false,
-						writer,
-						onStream: () => {
-							providerCalls += 1;
-						},
-					}),
-				),
-			),
+				const layerScope = yield* Scope.make();
+				const context = yield* Layer.buildWithScope(managerLayer, layerScope);
+				return {
+					manager: Context.get(context, SessionManager.Service),
+					scope: layerScope,
+				};
+			}),
 		);
-		expect(results.closeout).toMatchObject({
-			type: "completed",
-			modelMessageCount: 0,
-		});
-		expect(results.successor).toMatchObject({ type: "completed" });
-		expect(finishIdleWriteIds).toHaveLength(3);
-		expect(finishIdleWriteIds[0]).toBe("evt_open_idle_retry");
-		expect(finishIdleWriteIds[1]).toBe("evt_open_idle_retry");
-		expect(finishIdleWriteIds[2]).not.toBe("evt_open_idle_retry");
-		expect(finishIdleEnvelopes[1]).toEqual(finishIdleEnvelopes[0]);
-		expect(statesBeforeFinishIdleReceipts).toEqual([
-			"ready_to_finish",
-			"idle",
-			"ready_to_finish",
-		]);
-		expect(providerCalls).toBe(1);
-		expect(loader.commitCalls).toHaveLength(1);
-		expect(
-			appended.filter((event) => event.type === "span.model_request_start"),
-		).toHaveLength(1);
-		expect(session.state.threadTurnTransition().state).toEqual({
-			state: "idle",
-		});
+		try {
+			const preloadAddress = acceptedInput("rin_before_finish_idle_replay");
+			await Effect.runPromise(
+				manager.preloadThread({
+					...preloadAddress,
+					runtimeBindingToken: "runtime-binding-token",
+					contextEntries: [],
+					turnCheckpoint: {
+						executionRunId: "evt_open_idle_retry",
+						pendingInputContextSequences: [],
+					},
+					turnToolRouteView: { routes: [] },
+					thread: {
+						role: "main",
+						visibility: "public",
+						agentType: "general",
+						status: "idle",
+					},
+				}),
+			);
+			await finishIdleStarted.promise;
+
+			const successorInput = {
+				...acceptedInput("rin_during_finish_idle_replay"),
+				inputOrder: 2,
+				contentJson: JSON.stringify({
+					messages: [
+						userMessage(
+							"user-during-finish-idle-replay",
+							2,
+							"FINISH_IDLE_REPLAY_SUCCESSOR_CANARY",
+						),
+					],
+				}),
+			};
+			expect(
+				await Effect.runPromise(manager.acceptInput(successorInput)),
+			).toMatchObject({ ok: true });
+			expect(providerRequests).toHaveLength(0);
+
+			releaseFinishIdle.resolve();
+			const successorWait = await Effect.runPromise(
+				manager.waitThread(successorInput, 1000),
+			);
+			expect(successorWait).toMatchObject({ ok: true, observed: true, timedOut: false });
+			await waitForCondition(
+				() => finishIdleWriteIds.length === 3 && providerRequests.length === 1,
+				"automatic successor closeout",
+			);
+			await flushMicrotasks(20);
+			expect(finishIdleWriteIds).toHaveLength(3);
+			expect(finishIdleWriteIds[1]).toBe(finishIdleWriteIds[0]);
+			expect(finishIdleWriteIds[2]).not.toBe(finishIdleWriteIds[0]);
+			expect(finishIdleEnvelopes[1]).toEqual(finishIdleEnvelopes[0]);
+			expect(providerRequests).toHaveLength(1);
+			expect(JSON.stringify(providerRequests[0]?.context)).toContain(
+				"FINISH_IDLE_REPLAY_SUCCESSOR_CANARY",
+			);
+			expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+				"rin_during_finish_idle_replay",
+			]);
+			expect(
+				appended.filter((event) => event.type === "span.model_request_start"),
+			).toHaveLength(1);
+			expect(
+				await Effect.runPromise(manager.inspectThread(successorInput)),
+			).toMatchObject({ ok: true, observed: true, status: "idle" });
+		} finally {
+			releaseFinishIdle.resolve();
+			await Effect.runPromise(Scope.close(scope, Exit.void));
+		}
 	});
 	test("idle finalization drains the raw FinishIdle call after its local timeout", async () => {
 		const rawFinish = deferred<SessionEventWriterAppendResult>();
@@ -2183,7 +2217,7 @@ describe("ThreadLoop", () => {
 			await Effect.runPromise(Fiber.interrupt(runFiber));
 		}
 	});
-	test("a late requires-action receipt commits the remaining production action", async () => {
+	test("a late requires-action receipt uses its frozen action after confirmation changes the current route", async () => {
 		const session = new ThreadRuntime("sesn_partial_requires_action_ack");
 		const durableTurnId = "sevt_partial_requires_action_run";
 		const settledToolUseEventId = "sevt_partial_requires_action_settled";
@@ -2271,6 +2305,15 @@ describe("ThreadLoop", () => {
 			outcome: "success",
 		});
 		session.state.clearThreadToolRoute(settledToolUseEventId);
+		session.state.recordThreadToolRoute(
+			pendingToolUseEventId,
+			"resume_approval_settlement",
+		);
+		expect(session.state.threadTurnTransition().nextStep).toEqual({
+			action: "resume_tool_routes",
+			modelRequestId: "mreq_partial_requires_action",
+			toolUseEventIds: [pendingToolUseEventId],
+		});
 		releaseFinishIdle.resolve();
 		expect(await idle).toEqual({
 			ok: true,
@@ -2284,7 +2327,8 @@ describe("ThreadLoop", () => {
 				},
 			},
 			nextStep: {
-				action: "await_tool_results",
+				action: "resume_tool_routes",
+				modelRequestId: "mreq_partial_requires_action",
 				toolUseEventIds: [pendingToolUseEventId],
 			},
 		});

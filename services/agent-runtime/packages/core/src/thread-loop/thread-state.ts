@@ -223,14 +223,11 @@ export class ThreadState {
 				"Thread turn changed while FinishIdle was in flight",
 			);
 		}
-		const settlementOwner =
-			fact.stopReason.type === "requires_action"
-				? current
-				: {
-						checkpoint: current.checkpoint,
-						state: owner.state,
-						nextStep: owner.nextStep,
-					};
+		const settlementOwner = {
+			checkpoint: current.checkpoint,
+			state: owner.state,
+			nextStep: owner.nextStep,
+		};
 		return this.applyThreadTurnFactFrom(settlementOwner, fact);
 	}
 

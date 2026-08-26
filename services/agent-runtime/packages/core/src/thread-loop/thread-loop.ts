@@ -357,6 +357,7 @@ export type ThreadLoopRunResult =
 	| {
 			readonly type: "failed";
 			readonly error: ProviderError | RuntimeFailure;
+			readonly reloadHotState?: true;
 			readonly failureEventId?: string;
 			readonly closeoutDisposition?: "continuation" | "terminal";
 			readonly releaseSession?: {
@@ -953,9 +954,13 @@ async function executeRecoveredCloseInterruptedNextStep(
 	return { type: "interrupted" };
 }
 
-function failRecoveredOpenRequest(session: ThreadRuntime): ThreadLoopRunResult {
+function failRecoveredOpenRequest(
+	session: ThreadRuntime,
+	reloadHotState = false,
+): ThreadLoopRunResult {
 	return {
 		type: "failed",
+		...(reloadHotState ? { reloadHotState: true as const } : {}),
 		error: normalizeRuntimeFailure({
 			type: "runtime",
 			code: "runtime_invalid_sequence",
@@ -1052,11 +1057,11 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		return { type: "interrupted", discardHotState: true };
 	}
 	if (!applyJoinedInterruptRequestEnd(session, end)) {
-		return failRecoveredOpenRequest(session);
+		return failRecoveredOpenRequest(session, true);
 	}
 	const projectionFailure = applyFailedRequestProviderProjection(session);
 	if (projectionFailure !== undefined) {
-		return { type: "failed", error: projectionFailure };
+		return { type: "failed", error: projectionFailure, reloadHotState: true };
 	}
 	releaseInterruptedPendingTools(
 		session,
