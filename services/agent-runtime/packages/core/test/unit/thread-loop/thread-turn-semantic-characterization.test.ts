@@ -4,6 +4,11 @@ import type {
 	ThreadTurnCheckpoint,
 } from "../../../src/thread-loop/turn/checkpoint.js";
 import {
+	extractColdThreadToolRouteView,
+	extractThreadTurnCheckpoint,
+	ThreadTurnLoadFactsSchema,
+} from "../../../src/thread-loop/turn/load.js";
+import {
 	deriveThreadTurnSnapshot as deriveThreadTurnSnapshotWithActiveInput,
 	initializeThreadTurnTransition as initializeThreadTurnTransitionWithActiveInput,
 	reduceThreadTurn as reduceThreadTurnWithActiveInput,
@@ -58,6 +63,183 @@ const reduceThreadTurn = (
 	);
 
 describe("Thread-turn semantic characterization", () => {
+	test("production durable facts reconstruct legal turn families with exact retention", () => {
+		const run = turnEvent("event_run", 1, "session.status_running");
+		const start = requestStartEvent(2);
+		const toolA = toolUseEvent("event_tool_a", 3, "call_a", "Read");
+		const toolB = toolUseEvent("event_tool_b", 4, "call_b", "Grep");
+		const resultA = toolResultEvent(
+			"event_result_a",
+			5,
+			"call_a",
+			"Read",
+		);
+		const resultB = toolResultEvent(
+			"event_result_b",
+			6,
+			"call_b",
+			"Grep",
+		);
+		const repair = {
+			eventId: "event_repair",
+			eventSequence: 6,
+			type: "agent.tool_result" as const,
+			modelRequestId: "request",
+			toolResult: { repairKey: "repair_key" },
+		};
+		const repairReference = {
+			repairKey: "repair_key",
+			repairEventId: "event_repair",
+			eventSequence: 6,
+			modelRequestId: "request",
+			modelToolCallId: "call_repair",
+			toolName: "UnavailableTool",
+		};
+		const cases = [
+			{
+				name: "ordinary",
+				events: [run, start, requestEndEvent(3, "completed", [], [])],
+				internalRepairs: [],
+				expectedAction: "finish_idle",
+				expectedMembers: [],
+			},
+			{
+				name: "multi Tool",
+				events: [
+					run,
+					start,
+					toolA,
+					toolB,
+					resultA,
+					resultB,
+					requestEndEvent(
+						7,
+						"completed",
+						["event_tool_a", "event_tool_b"],
+						[],
+					),
+				],
+				internalRepairs: [],
+				expectedAction: "prepare_next_request",
+				expectedMembers: ["event_tool_a", "event_tool_b"],
+			},
+			{
+				name: "approval",
+				events: [
+					run,
+					start,
+					toolA,
+					requestEndEvent(4, "completed", ["event_tool_a"], []),
+					{
+						eventId: "event_approval_idle",
+						eventSequence: 5,
+						type: "session.status_idle" as const,
+						idle: { stopReason: "requires_action" },
+					},
+				],
+				internalRepairs: [],
+				pendingToolUses: [
+					{
+						toolUseEventId: "event_tool_a",
+						modelRequestId: "request",
+						modelToolCallId: "call_a",
+						toolName: "Read",
+						status: "pending" as const,
+					},
+				],
+				expectedAction: "await_tool_results",
+				expectedMembers: ["event_tool_a"],
+			},
+			{
+				name: "reschedule with Tool and repair",
+				events: [
+					run,
+					start,
+					toolA,
+					resultA,
+					repair,
+					requestEndEvent(
+						7,
+						"rescheduled",
+						["event_tool_a"],
+						["event_repair"],
+						true,
+					),
+				],
+				internalRepairs: [repairReference],
+				expectedAction: "apply_request_retry_or_reschedule",
+				expectedMembers: ["event_tool_a", "event_repair"],
+			},
+			{
+				name: "interrupt",
+				events: [
+					run,
+					start,
+					toolA,
+					turnEvent("event_interrupt", 4, "user.interrupt"),
+				],
+				internalRepairs: [],
+				expectedAction: "close_interrupted",
+				expectedMembers: ["event_tool_a"],
+			},
+			{
+				name: "terminal",
+				events: [
+					run,
+					{
+						eventId: "event_failure",
+						eventSequence: 2,
+						type: "session.error" as const,
+						failure: { errorType: "runtime", retryStatus: "terminal" as const },
+					},
+					turnEvent("event_terminal", 3, "session.status_terminated"),
+				],
+				internalRepairs: [],
+				expectedAction: "await_input",
+				expectedMembers: [],
+			},
+		] as const;
+
+		for (const scenario of cases) {
+			const facts = ThreadTurnLoadFactsSchema.parse({
+				events: scenario.events,
+				internalRepairs: scenario.internalRepairs,
+			});
+			const checkpoint = extractThreadTurnCheckpoint({
+				contextEntries: [
+					{
+						messageSequence: 1,
+						contextKind: "user",
+						parts: [{ type: "text", text: "request" }],
+					},
+				],
+				facts,
+			});
+			const routes = extractColdThreadToolRouteView({
+				checkpoint,
+				pendingToolUses:
+					"pendingToolUses" in scenario ? scenario.pendingToolUses : [],
+				pendingSandboxExecutions: [],
+			});
+			const snapshot = deriveThreadTurnSnapshot(
+				noPendingAttachments,
+				checkpoint,
+				routes,
+			);
+			expect(snapshot.nextStep.action, scenario.name).toBe(
+				scenario.expectedAction,
+			);
+			expect(
+				checkpoint.request?.toolMembers.map((member) =>
+					member.memberKind === "public_tool_use"
+						? member.toolUseEventId
+						: member.repairEventId,
+				) ?? [],
+				scenario.name,
+			).toEqual([...scenario.expectedMembers]);
+		}
+	});
+
 	test("a pending durable Tool Call is valid context but cannot start the next provider request", () => {
 		expect(toGatewayProviderContext([{
 			messageSequence: 1,
@@ -439,5 +621,93 @@ function pendingTool(
 		modelToolCallId,
 		toolUseEventId,
 		toolName,
+	};
+}
+
+function turnEvent(
+	eventId: string,
+	eventSequence: number,
+	type:
+		| "session.status_running"
+		| "user.interrupt"
+		| "session.status_terminated",
+) {
+	return { eventId, eventSequence, type } as const;
+}
+
+function requestStartEvent(eventSequence: number) {
+	return {
+		eventId: "event_start",
+		eventSequence,
+		type: "span.model_request_start" as const,
+		modelRequestId: "request",
+		requestStart: {
+			requestKind: "agent_provider_request" as const,
+			contextThroughMessageSequence: 1,
+		},
+	};
+}
+
+function toolUseEvent(
+	eventId: string,
+	eventSequence: number,
+	modelToolCallId: string,
+	toolName: string,
+) {
+	return {
+		eventId,
+		eventSequence,
+		type: "agent.tool_use" as const,
+		modelRequestId: "request",
+		toolUse: { modelToolCallId, toolName },
+	};
+}
+
+function toolResultEvent(
+	eventId: string,
+	eventSequence: number,
+	modelToolCallId: string,
+	toolName: string,
+) {
+	return {
+		eventId,
+		eventSequence,
+		type: "agent.tool_result" as const,
+		modelRequestId: "request",
+		toolResult: { modelToolCallId, toolName, outcome: "completed" as const },
+	};
+}
+
+function requestEndEvent(
+	eventSequence: number,
+	disposition: "completed" | "rescheduled",
+	toolUseEventIds: readonly string[],
+	repairEventIds: readonly string[],
+	isError = false,
+) {
+	return {
+		eventId: `event_end_${eventSequence}`,
+		eventSequence,
+		type: "span.model_request_end" as const,
+		modelRequestId: "request",
+		requestEnd: {
+			requestStartEventId: "event_start",
+			isError,
+			providerContextRetention: {
+				disposition,
+				toolUseEventIds: [...toolUseEventIds],
+				repairEventIds: [...repairEventIds],
+			},
+			...(disposition === "rescheduled"
+				? {
+						reschedule: {
+							attempt: 1,
+							effectiveDeadline: "2026-08-26T00:00:00.000Z",
+							providerAttempts: 1,
+							compactionAttempts: 0,
+						},
+					}
+				: {}),
+		},
 	};
 }

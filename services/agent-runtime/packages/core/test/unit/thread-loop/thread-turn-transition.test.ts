@@ -14,6 +14,7 @@ import type {
 	ThreadTurnTransition,
 } from "../../../src/thread-loop/turn/types.js";
 import { ThreadTurnContractError } from "../../../src/thread-loop/turn/types.js";
+import { ThreadState } from "../../../src/thread-loop/thread-state.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
 const noAttachments: ThreadActiveInputView = {
@@ -73,7 +74,10 @@ describe("Thread-turn reducer", () => {
 
 	test("routes two Tools once and accepts reverse-order terminal results", () => {
 		let transition = startedRequest();
-		const firstTool = apply(transition, toolUse("event_tool_1", "call_1", "Read"));
+		const firstTool = apply(
+			transition,
+			toolUse("event_tool_1", "call_1", "Read"),
+		);
 		expect(firstTool.dispatch).toEqual({
 			dispatch: "route_tool_use",
 			toolUseEventId: "event_tool_1",
@@ -100,7 +104,11 @@ describe("Thread-turn reducer", () => {
 		};
 		transition = apply(
 			secondTool,
-			requestEnded("event_end", "request_1"),
+			requestEnded("event_end", "request_1", false, {
+				disposition: "completed",
+				toolUseEventIds: ["event_tool_1", "event_tool_2"],
+				repairEventIds: [],
+			}),
 			routes,
 		);
 		expect(transition.nextStep).toEqual({
@@ -144,6 +152,42 @@ describe("Thread-turn reducer", () => {
 		]);
 	});
 
+	test("hands one Tool route off once across duplicate replay and terminal closeout", () => {
+		const committed = apply(
+			startedRequest(),
+			toolUse("event_tool_once", "call_tool_once", "Read"),
+		);
+		expect(committed.dispatch).toEqual({
+			dispatch: "route_tool_use",
+			toolUseEventId: "event_tool_once",
+		});
+
+		const duplicate = apply(
+			committed,
+			toolUse("event_tool_once", "call_tool_once", "Read"),
+		);
+		expect(duplicate.checkpoint).toEqual(committed.checkpoint);
+		expect({ state: duplicate.state, nextStep: duplicate.nextStep }).toEqual({
+			state: committed.state,
+			nextStep: committed.nextStep,
+		});
+		expect(duplicate.dispatch).toBeUndefined();
+
+		const interrupted = apply(duplicate, {
+			fact: "interrupt_committed",
+			eventId: "event_interrupt_after_handoff",
+		});
+		expect(interrupted.dispatch).toBeUndefined();
+		const terminal = apply(interrupted, {
+			fact: "terminal_closeout_committed",
+			eventId: "event_terminal_after_handoff",
+			failureEventId: "event_failure_after_handoff",
+			disposition: "terminated",
+		});
+		expect(terminal.dispatch).toBeUndefined();
+		expect(terminal.nextStep).toEqual({ action: "await_input" });
+	});
+
 	test("keeps approval and reschedule ownership behind unresolved Tools", () => {
 		const approvalTool = apply(
 			startedRequest(),
@@ -159,7 +203,11 @@ describe("Thread-turn reducer", () => {
 		};
 		let approval = apply(
 			approvalTool,
-			requestEnded("event_approval_end", "request_1"),
+			requestEnded("event_approval_end", "request_1", false, {
+				disposition: "completed",
+				toolUseEventIds: ["event_approval"],
+				repairEventIds: [],
+			}),
 			approvalRoutes,
 		);
 		expect(approval.nextStep).toEqual({
@@ -198,7 +246,11 @@ describe("Thread-turn reducer", () => {
 		let retry = apply(
 			rescheduleTool,
 			{
-				...requestEnded("event_retry_end", "request_1", true),
+				...requestEnded("event_retry_end", "request_1", true, {
+					disposition: "rescheduled",
+					toolUseEventIds: ["event_retry_tool"],
+					repairEventIds: [],
+				}),
 				reschedule: {
 					attempt: 1,
 					effectiveDeadline: "2026-08-26T00:00:00.000Z",
@@ -245,7 +297,11 @@ describe("Thread-turn reducer", () => {
 
 		transition = apply(
 			transition,
-			requestEnded("event_interrupted_end", "request_1"),
+			requestEnded("event_interrupted_end", "request_1", false, {
+				disposition: "interrupted",
+				toolUseEventIds: [],
+				repairEventIds: ["event_repair"],
+			}),
 		);
 		expect(transition.nextStep).toEqual({
 			action: "close_interrupted",
@@ -346,7 +402,11 @@ describe("Thread-turn reducer", () => {
 	test("hot transitions and cold snapshots share stable state", () => {
 		const unresolvedTool = apply(
 			apply(startedRequest(), toolUse("event_tool", "call_tool", "Read")),
-			requestEnded("event_end", "request_1"),
+			requestEnded("event_end", "request_1", false, {
+				disposition: "completed",
+				toolUseEventIds: ["event_tool"],
+				repairEventIds: [],
+			}),
 			{
 				routes: [
 					{ toolUseEventId: "event_tool", disposition: "hot_execution" },
@@ -399,17 +459,124 @@ describe("Thread-turn reducer", () => {
 		}
 	});
 
-	test("rejects conflicting durable identities", () => {
-		const started = startedRequest();
-		expect(() =>
-			apply(started, {
-				fact: "request_ended",
-				eventId: "event_end",
-				modelRequestId: "different_request",
-				isError: false,
-				providerContextRetention: retention("completed"),
+	test("keeps Request Start dispatch stack-local across ordinary admission", () => {
+		const state = new ThreadState("session_dispatch_owner");
+		state.installThreadTurn(
+			{
+				executionRunId: "event_run_dispatch_owner",
+				pendingInputContextSequences: [1],
+			},
+			noRoutes,
+		);
+		const owner = state.threadTurnTransition();
+		const started = state.applyRequestStartFact(owner, {
+			fact: "request_started",
+			eventId: "event_start_dispatch_owner",
+			modelRequestId: "request_dispatch_owner",
+			requestKind: "agent_provider_request",
+			contextThroughMessageSequence: 1,
+			consumedInputContextSequences: [1],
+		});
+		expect(
+			state.enqueueAcceptedInput({
+				workspaceId: "workspace_dispatch_owner",
+				sessionId: "session_dispatch_owner",
+				sessionThreadId: "thread_dispatch_owner",
+				bindingId: "binding_dispatch_owner",
+				bindingGeneration: 1,
+				targetPodUid: "pod_dispatch_owner",
+				runtimeInputId: "input_after_request_start",
+				inputOrder: 2,
+				kind: "messages",
+				contentJson: JSON.stringify({ messages: [{ parts: [] }] }),
 			}),
-		).toThrow(ThreadTurnContractError);
+		).toBe("applied");
+
+		const delayedDispatch = started.dispatch;
+		expect(delayedDispatch).toEqual({
+			dispatch: "start_provider_request",
+			modelRequestId: "request_dispatch_owner",
+		});
+		const resident = state.threadTurnTransition();
+		expect(resident).toEqual({
+			checkpoint: started.checkpoint,
+			state: {
+				state: "request_open",
+				modelRequestId: "request_dispatch_owner",
+			},
+			nextStep: {
+				action: "await_request_end",
+				modelRequestId: "request_dispatch_owner",
+			},
+		});
+		expect("dispatch" in resident).toBe(false);
+		if (delayedDispatch?.dispatch !== "start_provider_request") {
+			throw new ThreadTurnContractError(
+				"delayed Request Start handoff lost its stack-local dispatch",
+			);
+		}
+		expect(delayedDispatch.modelRequestId).toBe("request_dispatch_owner");
+	});
+
+	test("fails closed for representative invariant families without partial transition", () => {
+		const open = startedRequest();
+		const ended = apply(open, requestEnded("event_end", "request_1"));
+		const settled = apply(
+			apply(open, toolUse("event_tool", "call_tool", "Read")),
+			{
+				fact: "tool_result_committed",
+				toolUseEventId: "event_tool",
+				outcome: "success",
+			},
+		);
+		const cases: readonly {
+			readonly name: string;
+			readonly current: ThreadTurnTransition;
+			readonly fact: ThreadTurnFact;
+		}[] = [
+			{
+				name: "conflicting durable identity",
+				current: open,
+				fact: requestEnded("event_end_other", "different_request"),
+			},
+			{
+				name: "illegal lifecycle order",
+				current: ended,
+				fact: toolUse("event_tool_late", "call_tool_late", "Read"),
+			},
+			{
+				name: "missing owning request member",
+				current: open,
+				fact: {
+					fact: "tool_result_committed",
+					toolUseEventId: "event_tool_missing",
+					outcome: "success",
+				},
+			},
+			{
+				name: "conflicting duplicate",
+				current: settled,
+				fact: {
+					fact: "tool_result_committed",
+					toolUseEventId: "event_tool",
+					outcome: "error",
+				},
+			},
+		];
+
+		for (const scenario of cases) {
+			const before = structuredClone(scenario.current);
+			let partialTransition: ThreadTurnTransition | undefined;
+			let thrown: unknown;
+			try {
+				partialTransition = apply(before, scenario.fact);
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown, scenario.name).toBeInstanceOf(ThreadTurnContractError);
+			expect(partialTransition, scenario.name).toBeUndefined();
+			expect(before, scenario.name).toEqual(scenario.current);
+		}
 	});
 });
 
@@ -476,13 +643,14 @@ function requestEnded(
 	eventId: string,
 	modelRequestId: string,
 	isError = false,
+	providerContextRetention = retention(isError ? "failed" : "completed"),
 ): Extract<ThreadTurnFact, { readonly fact: "request_ended" }> {
 	return {
 		fact: "request_ended",
 		eventId,
 		modelRequestId,
 		isError,
-		providerContextRetention: retention(isError ? "failed" : "completed"),
+		providerContextRetention,
 	};
 }
 
