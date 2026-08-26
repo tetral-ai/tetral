@@ -668,7 +668,11 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 	if err != nil {
 		t.Fatalf("read Request Start boundaries: %v", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			t.Errorf("close Request Start boundary rows: %v", closeErr)
+		}
+	}()
 	var boundaries []int64
 	for rows.Next() {
 		var boundary int64
@@ -676,6 +680,9 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 			t.Fatalf("scan Request Start boundary: %v", err)
 		}
 		boundaries = append(boundaries, boundary)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate Request Start boundaries: %v", err)
 	}
 	var notificationSequence int64
 	var inboxStatus, queueStatus, sessionStatus, threadStatus string
