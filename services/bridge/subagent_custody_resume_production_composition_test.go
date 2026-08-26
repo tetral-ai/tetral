@@ -2099,7 +2099,40 @@ func closeChildThroughProductionInterrupt(
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), bridgeAddress, sessionID, childID, bindingID, 1, podUID,
 	)
-	runQueueUntilInterruptSettled(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
+	type captureResult struct {
+		settled bool
+		err     error
+	}
+	captureContext, cancelCapture := context.WithTimeout(context.Background(), 10*time.Second)
+	captureSettled := make(chan captureResult, 1)
+	go func() {
+		settled, settleErr := settleNextSubagentOutputCaptureForTest(captureContext, admin, sessionID)
+		captureSettled <- captureResult{settled: settled, err: settleErr}
+	}()
+	runSubagentRuntimeQueueOnce(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
+	var queueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT job.status FROM session_runtime_inbox inbox
+		JOIN queue_jobs job ON job.workspace_id=inbox.workspace_id
+		 AND job.dedupe_key='runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		WHERE inbox.workspace_id='default' AND inbox.session_id=$1 AND inbox.session_thread_id=$2
+		 AND inbox.input_kind='interrupt_control' ORDER BY inbox.created_at DESC LIMIT 1`,
+		sessionID, childID,
+	).Scan(&queueStatus); err != nil {
+		t.Fatalf("read child-close Queue custody: %v", err)
+	}
+	if queueStatus == queue.StatusPending {
+		capture := <-captureSettled
+		if capture.err != nil || !capture.settled {
+			t.Fatalf("settle child-close output capture = settled:%t err:%v", capture.settled, capture.err)
+		}
+		runQueueUntilInterruptSettled(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
+	} else {
+		cancelCapture()
+		if capture := <-captureSettled; capture.err != nil {
+			t.Fatalf("observe child-close output capture: %v", capture.err)
+		}
+	}
+	cancelCapture()
 	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release child-close Runtime composition: %v", err)
 	}
@@ -2530,6 +2563,33 @@ func runSubagentOutputCaptureOnce(t *testing.T, runtimeDB *sql.DB) {
 	t.Fatal("Subagent Runtime did not enqueue output capture")
 }
 
+func settleNextSubagentOutputCaptureForTest(ctx context.Context, db *sql.DB, sessionID string) (bool, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var writeID string
+		var generation int
+		err := db.QueryRowContext(ctx, `SELECT finish_idle_write_id,capture_generation
+			FROM sandbox_output_capture_operations
+			WHERE workspace_id='default' AND session_id=$1 AND state IN ('pending','running')
+			ORDER BY created_at DESC LIMIT 1`, sessionID).Scan(&writeID, &generation)
+		if err == nil {
+			return true, settleOutputCaptureGenerationForTest(db, sessionID, writeID, generation, "staged")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, context.Canceled) {
+				return false, nil
+			}
+			return false, err
+		}
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case <-ticker.C:
+		}
+	}
+}
+
 func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID, runtimeInputID string, diagnosticPaths ...string) {
 	t.Helper()
 	for attempt := 0; attempt < 100; attempt++ {
@@ -2564,16 +2624,43 @@ func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int,
 
 func runQueueUntilInterruptSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID string) {
 	t.Helper()
-	for attempt := 0; attempt < 6; attempt++ {
-		var pending int
-		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_inbox
-			WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'
-			 AND status IN ('queued','delivering','accepted')`, sessionID).Scan(&pending); err == nil && pending == 0 {
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var inboxStatus, queueStatus, threadID string
+		var receipt bool
+		if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status,job.status,EXISTS(
+			SELECT 1 FROM session_bridge_operations operation
+			WHERE operation.workspace_id=inbox.workspace_id AND operation.session_id=inbox.session_id
+			 AND operation.operation='commit_inputs' AND operation.source_kind='interrupt_control'
+			 AND operation.idempotency_key=inbox.runtime_input_id AND operation.receipt_json <> ''),inbox.session_thread_id
+			FROM session_runtime_inbox inbox
+			JOIN queue_jobs job ON job.workspace_id=inbox.workspace_id
+			 AND job.dedupe_key='runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+			WHERE inbox.workspace_id='default' AND inbox.session_id=$1 AND inbox.input_kind='interrupt_control'
+			ORDER BY inbox.created_at DESC LIMIT 1`, sessionID).Scan(&inboxStatus, &queueStatus, &receipt, &threadID); err != nil {
+			t.Fatalf("read child interrupt settlement: %v", err)
+		}
+		var openTurn *string
+		if err := client.WithWorkspaceTx(context.Background(), string(workspace.DefaultID), "test.child_interrupt.open_turn", func(tx *dbconnect.Tx) error {
+			var loadErr error
+			openTurn, loadErr = loadOpenDurableTurnIDTx(context.Background(), tx, &bridgev1.RuntimeScope{
+				WorkspaceId: string(workspace.DefaultID), SessionId: sessionID, SessionThreadId: threadID,
+			})
+			return loadErr
+		}); err != nil {
+			t.Fatalf("read child interrupt open Turn: %v", err)
+		}
+		if inboxStatus == "committed" && queueStatus == queue.StatusAcknowledged && receipt && openTurn == nil {
 			return
 		}
-		runSubagentRuntimeQueueOnce(t, runtimeDB, admin, port, sessionID, podUID)
+		if queueStatus == queue.StatusPending && receipt && openTurn == nil {
+			runSubagentRuntimeQueueOnce(t, runtimeDB, admin, port, sessionID, podUID)
+			continue
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("child interrupt did not settle")
+	t.Fatal("child interrupt receipt and Queue custody did not settle")
 }
 
 func readAgentMailAdmission(t *testing.T, process *attachmentRecoveryProcess) (string, int, string) {
