@@ -526,33 +526,50 @@ func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconne
 			return status.Error(codes.FailedPrecondition, "retained Assistant owner does not belong to the request")
 		}
 	}
+	declaredToolUses := make(map[string]struct{}, len(selection.GetToolUseEventIds()))
 	for _, eventID := range selection.GetToolUseEventIds() {
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (
-			SELECT 1 FROM session_events
-			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			   AND model_request_id=$4 AND event_id=$5
-			   AND type IN ('agent.tool_use','agent.mcp_tool_use')
-		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), eventID).Scan(&exists); err != nil {
-			return err
-		}
-		if !exists {
-			return status.Error(codes.FailedPrecondition, "retained Tool Use does not belong to the request")
-		}
+		declaredToolUses[eventID] = struct{}{}
 	}
+	declaredRepairs := make(map[string]struct{}, len(selection.GetRepairEventIds()))
 	for _, eventID := range selection.GetRepairEventIds() {
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (
-			SELECT 1 FROM session_events
-			 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			   AND model_request_id=$4 AND event_id=$5 AND type='agent.tool_result'
-			   AND payload_json::jsonb ->> 'repair_kind'='invalid_tool'
-		)`, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetModelRequestId(), eventID).Scan(&exists); err != nil {
+		declaredRepairs[eventID] = struct{}{}
+	}
+	rows, err := tx.Query(ctx, `SELECT event_id,
+		CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use') THEN 'tool_use' ELSE 'repair' END
+		FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4
+		  AND (type IN ('agent.tool_use','agent.mcp_tool_use') OR
+		       (type='agent.tool_result' AND payload_json::jsonb ->> 'repair_kind'='invalid_tool'))`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(), request.GetModelRequestId())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	matchedToolUses := 0
+	matchedRepairs := 0
+	for rows.Next() {
+		var eventID, memberKind string
+		if err := rows.Scan(&eventID, &memberKind); err != nil {
 			return err
 		}
-		if !exists {
-			return status.Error(codes.FailedPrecondition, "retained Tool repair does not belong to the request")
+		if memberKind == "tool_use" {
+			if _, ok := declaredToolUses[eventID]; !ok {
+				return status.Error(codes.FailedPrecondition, "provider-context retention omits a request Tool Use")
+			}
+			matchedToolUses++
+			continue
 		}
+		if _, ok := declaredRepairs[eventID]; !ok {
+			return status.Error(codes.FailedPrecondition, "provider-context retention omits a request Tool repair")
+		}
+		matchedRepairs++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if matchedToolUses != len(declaredToolUses) || matchedRepairs != len(declaredRepairs) {
+		return status.Error(codes.FailedPrecondition, "provider-context retention references a foreign request member")
 	}
 	return nil
 }

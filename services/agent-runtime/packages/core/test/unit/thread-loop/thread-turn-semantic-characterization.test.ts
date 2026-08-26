@@ -592,10 +592,7 @@ function sealedRequest(
 			readonly compactionAttempts: number;
 		};
 		readonly errorKind?: string;
-	} = {
-		isError: false,
-			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-	},
+	} = productionRetentionFor(toolMembers),
 ): ThreadTurnCheckpoint {
 	return {
 		executionRunId: "run",
@@ -607,6 +604,27 @@ function sealedRequest(
 			contextThroughMessageSequence: 1,
 			requestEnd: { eventId: "event_end", ...end },
 			toolMembers,
+		},
+	};
+}
+
+function productionRetentionFor(
+	toolMembers: NonNullable<ThreadTurnCheckpoint["request"]>["toolMembers"],
+) {
+	return {
+		isError: false,
+		providerContextRetention: {
+			disposition: "completed" as const,
+			toolUseEventIds: toolMembers.flatMap((member) =>
+				member.memberKind === "public_tool_use"
+					? [member.toolUseEventId]
+					: [],
+			),
+			repairEventIds: toolMembers.flatMap((member) =>
+				member.memberKind === "internal_tool_repair"
+					? [member.repairEventId]
+					: [],
+			),
 		},
 	};
 }
