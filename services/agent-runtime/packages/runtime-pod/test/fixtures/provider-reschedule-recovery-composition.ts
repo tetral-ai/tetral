@@ -24,6 +24,7 @@ import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import type { RuntimeCleanupController } from "../../src/runtime-service.js";
 import { RuntimeControlService } from "../../src/runtime-service.js";
+import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) {
@@ -65,8 +66,21 @@ const waitedMs: number[] = [];
 let recoveredTurnEventIds: string[] = [];
 let providerInvocations = 0;
 let executorInvocations = 0;
+let sandboxAcceptanceInvocations = 0;
+let sandboxObservationInvocations = 0;
+let markSandboxObservationStarted: (() => void) | undefined;
+const sandboxObservationStarted = new Promise<void>((resolve) => {
+	markSandboxObservationStarted = resolve;
+});
 let nextID = 0;
 const writer = new BridgeAPIEventWriter(bridgeOptions);
+const toolRunner = new RuntimePodToolRunner({
+	bridgeAddress: input.bridgeAddress,
+	webAddress: "127.0.0.1:1",
+	mcpConnectorAddress: "127.0.0.1:1",
+	tokenPath: "/unused/test-token",
+	metadataFactory: async () => new Metadata(),
+});
 const hosts = await buildRuntimeCoreHosts({
 	maxLocalSessions: 1,
 	now: () => input.now,
@@ -112,9 +126,19 @@ const hosts = await buildRuntimeCoreHosts({
 		providerCallRuntime: {
 			...DefaultProviderCallRuntimeConfig,
 			systemInstructions: "provider reschedule recovery composition",
+			timeoutMs: 5_000,
 		},
 		runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
 		runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
+		acceptSandboxExecution: async () => {
+			sandboxAcceptanceInvocations += 1;
+			return { type: "accepted" as const };
+		},
+		awaitSandboxExecution: async (request) => {
+			sandboxObservationInvocations += 1;
+			markSandboxObservationStarted?.();
+			return await toolRunner.awaitSandboxExecution(request);
+		},
 		runTool: async (request) => {
 					executorInvocations += 1;
 					if (input.serveRecovery === true) {
@@ -161,11 +185,14 @@ if (input.serveRecovery === true) {
 			...hosts.commandRunHost,
 			handleRecoverThread: async (recoveryCommand) => {
 				const result = await hosts.commandRunHost.handleRecoverThread!(recoveryCommand);
+				await sandboxObservationStarted;
 				const snapshot = await hosts.subAgentRunHost.inspectThread(recoveryCommand);
 				await writeFile(input.recoveryResultPath!, JSON.stringify({
 					resultType: "preloaded",
 					providerInvocations,
 					executorInvocations,
+					sandboxAcceptanceInvocations,
+					sandboxObservationInvocations,
 					recoveredTurnEventIds,
 					preloadResult: result,
 					lastSnapshot: snapshot,
@@ -195,6 +222,16 @@ if (input.serveRecovery === true) {
 		await server.shutdown();
 		await hosts.close();
 	}
+	process.stdout.write(JSON.stringify({
+		resultType: "completed",
+		providerInvocations,
+		executorInvocations,
+		sandboxAcceptanceInvocations,
+		sandboxObservationInvocations,
+		waitedMs,
+		providerContext: providerRequests[0]?.context ?? [],
+		recoveredTurnEventIds,
+	}));
 	process.exit(0);
 }
 let resultType = "failed";
@@ -292,7 +329,10 @@ const result = await Effect.runPromise(
 						]);
 					},
 				},
-				providerCallRuntime: { systemInstructions: "provider reschedule recovery composition" },
+				providerCallRuntime: {
+					systemInstructions: "provider reschedule recovery composition",
+					timeoutMs: 5_000,
+				},
 				runTool: () => {
 					executorInvocations += 1;
 					return { type: "completed", output: { text: "unexpected replay", truncated: false } };

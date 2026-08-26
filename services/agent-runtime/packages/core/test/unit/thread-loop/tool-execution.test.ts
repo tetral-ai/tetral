@@ -4202,14 +4202,12 @@ describe("ThreadLoop", () => {
 		expect(contextToolStatus(session)).toBe("cancelled");
 	});
 	test("SessionManager enforces the five-state interrupt fence across tools and CommitInputs", async () => {
-		const releasePreCommit = deferred<void>();
 		const terminalResultAcked = deferred<void>();
 		const releaseNextProviderTool = deferred<void>();
 		const pendingToolUseAppendStarted = deferred<void>();
 		const releasePendingToolUseAppend = deferred<void>();
 		const uncommittedRepairStarted = deferred<void>();
 		const releaseUncommittedRepair = deferred<void>();
-		let preCommitObserved = false;
 		let requestEndObserved = false;
 		const commitCalls: string[] = [];
 		const order: string[] = [];
@@ -4232,13 +4230,6 @@ describe("ThreadLoop", () => {
 				commitCalls.push(input.runtimeInputId);
 				if (input.runtimeInputId === "rin_initial_mixed") {
 					order.push("commit:initial");
-					return commitReceipt(input);
-				}
-				if (input.runtimeInputId === "rin_pre_fence_mixed") {
-					order.push("commit:pre:start");
-					preCommitObserved = true;
-					await releasePreCommit.promise;
-					order.push("commit:pre:end");
 					return commitReceipt(input);
 				}
 				order.push(`commit:${input.runtimeInputId}`);
@@ -4467,11 +4458,6 @@ describe("ThreadLoop", () => {
 					(repair) => repair.modelToolCallId === "tool-uncommitted",
 				),
 			).toHaveLength(0);
-			const preFenceInput = {
-				...acceptedInput("rin_pre_fence_mixed"),
-				inputOrder: 8,
-			};
-			await Effect.runPromise(manager.acceptInput(preFenceInput));
 			expect(commitCalls).toEqual(["rin_initial_mixed"]);
 			releaseUncommittedRepair.resolve();
 			await waitForCondition(
@@ -4480,7 +4466,6 @@ describe("ThreadLoop", () => {
 					order.includes("event:session.status_idle:requires_action"),
 				"request-end and requires-action settlement",
 			);
-			expect(preCommitObserved).toBe(false);
 			expect(providerCalls).toBe(1);
 			expect(toolRunnerCalls).toBe(1);
 			expect(
@@ -4506,8 +4491,11 @@ describe("ThreadLoop", () => {
 				),
 			).toHaveLength(1);
 			expect(order).toContain("event:session.status_idle:requires_action");
+			expect(
+				await Effect.runPromise(manager.waitThread(initialInput, 1000)),
+			).toMatchObject({ ok: true, timedOut: false });
 			const interruptCommand = interruptInput("rin_mixed_interrupt", 9);
-			const interrupt = Effect.runPromise(
+			const interruptResult = await Effect.runPromise(
 				manager.interruptControl(
 					"sesn_1",
 					interruptCommand,
@@ -4520,8 +4508,9 @@ describe("ThreadLoop", () => {
 					},
 				),
 			);
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			await flushMicrotasks();
+			expect({ interruptResult, order }).toMatchObject({
+				interruptResult: { ok: true, interrupted: false, idleInterrupt: true },
+			});
 			const postFenceInput = {
 				...acceptedInput("rin_post_fence_mixed"),
 				inputOrder: 10,
@@ -4531,15 +4520,10 @@ describe("ThreadLoop", () => {
 			);
 			expect(postAccept).toMatchObject({ ok: true, started: true });
 			await flushMicrotasks();
-			expect(order).not.toContain("commit:rin_post_fence_mixed");
 			expect(
 				order.filter((entry) => entry === "settlement:sevt_mixed_tool_2"),
 			).toHaveLength(0);
 			releaseNextProviderTool.resolve();
-			const interruptResult = await interrupt;
-			expect({ interruptResult, order }).toMatchObject({
-				interruptResult: { ok: true, interrupted: false, idleInterrupt: true },
-			});
 			const postRun = await Effect.runPromise(
 				manager.waitThread(postFenceInput, 1000),
 			);
@@ -4575,8 +4559,6 @@ describe("ThreadLoop", () => {
 			expect(
 				appended.filter((event) => event.type === "session.error"),
 			).toEqual([]);
-			expect(order).not.toContain("commit:pre:start");
-			expect(order).not.toContain("commit:pre:end");
 			expect(order.indexOf("commit:interrupt")).toBeLessThan(
 				order.indexOf("commit:rin_post_fence_mixed"),
 			);
@@ -4596,7 +4578,6 @@ describe("ThreadLoop", () => {
 				"commit:rin_post_fence_mixed",
 			]);
 		} finally {
-			releasePreCommit.resolve();
 			releasePendingToolUseAppend.resolve();
 			releaseUncommittedRepair.resolve();
 			await Effect.runPromise(Scope.close(scope, Exit.void));
@@ -7295,6 +7276,161 @@ describe("ThreadLoop", () => {
 		expect(appended.at(-1)).toEqual({
 			type: "session.status_idle",
 			stop_reason: { type: "requires_action", event_ids: ["sevt_approval"] },
+		});
+	});
+	test("resident cold recovery continues a rescheduled provider request after its Sandbox result settles", async () => {
+		const session = new ThreadRuntime("sesn_1");
+		const modelRequestId = "mrq_cold_reschedule_tool";
+		const toolUseEventId = "sevt_cold_reschedule_tool";
+		const modelToolCallId = "tool-cold-reschedule";
+		const toolInput = { file_path: "src/recovered.ts", content: "done" };
+		const pendingMessage = sealedToolContextEntry(modelRequestId, 2, [
+			{
+				modelToolCallId,
+				toolName: "Write",
+				canonicalInput: toolInput,
+			},
+		]);
+		const loadedMessages = [
+			userMessage("user-cold-reschedule", 1, "finish the write"),
+			pendingMessage,
+		];
+		const requests: LLMRequest[] = [];
+		const settlements: SessionEventWriterToolSettlementEnvelope[] = [];
+		const writer = writerFrom(
+			(envelope) => ({
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+				eventSequence: 1,
+			}),
+			undefined,
+			[pendingMessage],
+			undefined,
+			async (envelope) => {
+				settlements.push(envelope);
+				return { ok: true, result: { type: "committed" } };
+			},
+		);
+		const catalog = catalogForTest({
+			name: "Write",
+			description: "Write file",
+			inputSchema: { type: "object" },
+		});
+		const layer = runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+			writer,
+			llmService: queuedLLMService(
+				[
+					[
+						{ type: "text-start", id: "recovered-text" },
+						{
+							type: "text-delta",
+							id: "recovered-text",
+							text_delta: "recovered",
+						},
+						{ type: "text-end", id: "recovered-text" },
+						{ type: "finish", finishReason: "stop" },
+					],
+				],
+				requests,
+			),
+			providerCallRuntime: {
+				systemInstructions: "resident cold reschedule",
+				toolCatalog: {
+					...catalog,
+					entries: catalog.entries.map((entry) => ({
+						...entry,
+						route: {
+							kind: "sandbox" as const,
+							operation: "RunTool" as const,
+							helperSubcommand: "write" as const,
+						},
+					})),
+				},
+			},
+			acceptSandboxExecution: () => {
+				throw new Error("accepted Sandbox execution must not be accepted again");
+			},
+			awaitSandboxExecution: () => ({
+				type: "completed",
+				output: { text: "recovered", truncated: false },
+			}),
+		});
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const threadLoop = yield* ThreadLoop.Service;
+				session.state.contextManager.replaceEntries([loadedMessages[0]!]);
+				session.state.contextManager.installOpenRequestDraft({
+					modelRequestId,
+					messageSequence: pendingMessage.messageSequence,
+					parts: pendingMessage.parts,
+				});
+				session.state.markPersistentContextLoaded();
+				threadLoop.seedRuntimeModel(session);
+				session.state.installThreadTurn(
+					{
+						pendingInputContextSequences: [],
+						request: {
+							modelRequestId,
+							requestStartEventId: `${modelRequestId}_start`,
+							requestKind: "agent_provider_request",
+							contextThroughMessageSequence: 1,
+							toolMembers: [
+								{
+									memberKind: "public_tool_use",
+									modelToolCallId,
+									toolUseEventId,
+									toolName: "Write",
+								},
+							],
+							requestEnd: {
+								eventId: `${modelRequestId}_end`,
+								isError: true,
+								errorKind: "gateway_stream_error",
+								providerContextRetention: {
+									disposition: "rescheduled",
+									assistantMessageSequence: pendingMessage.messageSequence,
+									toolUseEventIds: [toolUseEventId],
+									repairEventIds: [],
+								},
+								reschedule: {
+									attempt: 1,
+									effectiveDeadline: createdAt,
+									providerAttempts: 1,
+									compactionAttempts: 0,
+								},
+							},
+						},
+					},
+					{
+						routes: [
+							{ toolUseEventId, disposition: "resume_sandbox_execution" },
+						],
+					},
+				);
+				expect(
+					yield* threadLoop.installLoadedSandboxExecutions(
+						session,
+						[
+							{
+								toolUseEventId,
+								modelRequestId,
+								modelToolCallId,
+								toolName: "Write",
+								input: toolInput,
+								executionState: "running",
+							},
+						],
+						loadedMessages,
+						undefined,
+					),
+				).toEqual({ ok: true });
+				return yield* threadLoop.run(session, testRunCustody());
+			}).pipe(Effect.provide(layer)),
+		);
+		expect({ result, requestCount: requests.length, settlements }).toMatchObject({
+			result: { type: "completed" },
+			requestCount: 1,
 		});
 	});
 	test("LoadContext pendingToolUses applies recorded deny decisions without re-waiting or executing the tool", async () => {

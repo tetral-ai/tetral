@@ -302,18 +302,20 @@ export function reduceThreadTurn(
 				);
 			}
 			const request = current.checkpoint.request;
-			const preserveActiveRequest =
-				current.checkpoint.interruptEventId === undefined &&
-				request?.requestEnd !== undefined &&
-				!request.requestEnd.isError &&
-				(request.toolMembers.some(
+			const hasUnsettledToolOwner =
+				request?.toolMembers.some(
 					(member) =>
 						member.memberKind === "public_tool_use" &&
 						member.terminalResult === undefined,
-				) ||
-					current.nextStep.action === "prepare_next_request" ||
-					current.nextStep.action === "continue_after_compaction" ||
-					current.nextStep.action === "complete_reviewer");
+				) ?? false;
+			const preserveActiveRequest =
+				current.checkpoint.interruptEventId === undefined &&
+				request?.requestEnd !== undefined &&
+				(hasUnsettledToolOwner ||
+					(!request.requestEnd.isError &&
+						(current.nextStep.action === "prepare_next_request" ||
+							current.nextStep.action === "continue_after_compaction" ||
+							current.nextStep.action === "complete_reviewer")));
 			const checkpoint = parseThreadTurnCheckpoint({
 				executionRunId: fact.eventId,
 				pendingInputContextSequences:

@@ -344,24 +344,47 @@ describe("Thread-turn reducer", () => {
 	});
 
 	test("hot transitions and cold snapshots share stable state", () => {
+		const unresolvedTool = apply(
+			apply(startedRequest(), toolUse("event_tool", "call_tool", "Read")),
+			requestEnded("event_end", "request_1"),
+			{
+				routes: [
+					{ toolUseEventId: "event_tool", disposition: "hot_execution" },
+				],
+			},
+		);
+		const completedTool = apply(unresolvedTool, {
+			fact: "tool_result_committed",
+			toolUseEventId: "event_tool",
+			outcome: "success",
+		});
+		const rescheduled = apply(startedRequest(), {
+			...requestEnded("event_rescheduled", "request_1", true),
+			reschedule: {
+				attempt: 1,
+				effectiveDeadline: "2026-08-26T00:00:00.000Z",
+				providerAttempts: 1,
+				compactionAttempts: 0,
+			},
+		});
+		const idle = apply(
+			apply(startedRequest(), requestEnded("event_idle_end", "request_1")),
+			{
+				fact: "finish_idle_committed",
+				eventId: "event_idle",
+				stopReason: { type: "end_turn" },
+			},
+		);
 		const hotCases = [
 			startedRequest(),
-			apply(
-				apply(
-					startedRequest(),
-					toolUse("event_tool", "call_tool", "Read"),
-				),
-				requestEnded("event_end", "request_1"),
-				{
-					routes: [
-						{ toolUseEventId: "event_tool", disposition: "hot_execution" },
-					],
-				},
-			),
+			unresolvedTool,
+			completedTool,
+			rescheduled,
 			apply(startedRequest(), {
 				fact: "interrupt_committed",
 				eventId: "event_interrupt",
 			}),
+			idle,
 		] as const;
 
 		for (const hot of hotCases) {
