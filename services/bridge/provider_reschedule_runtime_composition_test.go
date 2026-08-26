@@ -342,6 +342,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			waitForProviderFailureFacts(t, admin, sessionID, firstTurnEnds, "idle", process)
 			repairCredential()
 			if testCase.scenario == "invalid_openai_oauth" {
+				waitForProviderFailureIdleReceipt(t, process, 1)
 				prior := process.close(t)
 				priorProviderInvocations = prior.ProviderInvocations
 				priorFinishIdleInvocations = prior.FinishIdleInvocations
@@ -372,6 +373,11 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
 			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, activePodUID)
 			waitForProviderFailureFacts(t, admin, sessionID, testCase.wantRequestEnds, "idle", process)
+			processFinishIdle := testCase.wantFinishIdle
+			if testCase.scenario == "invalid_openai_oauth" {
+				processFinishIdle = 1
+			}
+			waitForProviderFailureIdleReceipt(t, process, processFinishIdle)
 			result := process.close(t)
 			if captureErr := <-capturesSettled; captureErr != nil {
 				t.Fatalf("settle %s output captures: %v", testCase.scenario, captureErr)
@@ -532,6 +538,8 @@ func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAd
 type providerFailureRuntimeState struct {
 	ProviderInvocations     int      `json:"providerInvocations"`
 	ToolInvocations         int      `json:"toolInvocations"`
+	FinishIdleInvocations   int      `json:"finishIdleInvocations"`
+	FinishIdleResult        string   `json:"finishIdleResult"`
 	ProviderRequestContexts []string `json:"providerRequestContexts"`
 }
 
@@ -543,6 +551,20 @@ func readProviderFailureRuntimeState(path string) (providerFailureRuntimeState, 
 	}
 	err = json.Unmarshal(raw, &state)
 	return state, err
+}
+
+func waitForProviderFailureIdleReceipt(t *testing.T, process *providerFailureRuntimeProcess, minimumInvocations int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := readProviderFailureRuntimeState(process.statePath)
+		if err == nil && state.FinishIdleInvocations >= minimumInvocations && state.FinishIdleResult == "committed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	state, err := readProviderFailureRuntimeState(process.statePath)
+	t.Fatalf("provider failure FinishIdle receipt = %+v/%v; want at least %d committed invocation(s)", state, err, minimumInvocations)
 }
 
 func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessionID, scenario string) func() {
