@@ -4,12 +4,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
 import {
+	normalizeRuntimeFailure,
+	type SessionEventWriter,
+} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { ProviderStreamAccumulator } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
+import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
+import {
+	acceptedInput,
+	RecordingContextLoader,
+	runtimeTerminationResultForTest,
+	runtimeThreadLoopLayer,
+	testRunCustody,
+	userMessage,
+	writerFrom,
+} from "@tetral/agent-runtime-core/test/unit/thread-loop/thread-loop-test-support.js";
+import {
 	createToolCatalog,
 	effectivePermissionPolicy,
 	lookupToolEntry,
 } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { InterruptRequest } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { InterruptOrigin } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
+import { Effect } from "effect";
 import type { RuntimePodCommandDependencies } from "../../src/command.js";
 import {
 	buildRuntimePodCommandDependencies,
@@ -26,7 +43,7 @@ import {
 } from "../../src/config.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
-import type { RuntimePodLogger } from "../../src/logger.js";
+import { createJsonLogger, type RuntimePodLogger } from "../../src/logger.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 
 describe("Runtime Pod command entrypoint", () => {
@@ -237,6 +254,218 @@ describe("Runtime Pod command entrypoint", () => {
 		} finally {
 			await throwing.coreHosts.close();
 		}
+	});
+
+	test("production terminal producers cross command assembly and JSON logging after durable settlement", async () => {
+		const runProducer = async (
+			producer: "immediate" | "recovery",
+			settlementOutcome: "committed" | "duplicate",
+			logger: RuntimePodLogger,
+		) => {
+			const terminations: Parameters<
+				NonNullable<SessionEventWriter["commitRuntimeTermination"]>
+			>[0][] = [];
+			const baseWriter = writerFrom(async (envelope) => {
+				return {
+					ok: true,
+					type: "committed",
+					eventId: `bridge-${envelope.writeId}`,
+				};
+			});
+			const writer: SessionEventWriter = {
+				...baseWriter,
+				commitRuntimeTermination: async (envelope) => {
+					terminations.push(envelope);
+					const result = runtimeTerminationResultForTest(envelope);
+					if (!result.ok || result.type === "stale") return result;
+					return {
+						...result,
+						type: settlementOutcome,
+					};
+				},
+			};
+			let productionObserver:
+				| NonNullable<
+						RuntimeCoreHostsOptions["threadLoop"]["recordRuntimeTerminalSettlement"]
+				  >
+				| undefined;
+			const dependencies = await buildRuntimePodCommandDependencies({
+				config: validConfig(),
+				logger,
+				builderOptions: {
+					coreHostsFactory: async (options) => {
+						productionObserver =
+							options.threadLoop.recordRuntimeTerminalSettlement;
+						return fakeDependencies([]).coreHosts;
+					},
+				},
+			});
+			try {
+				if (productionObserver === undefined) {
+					throw new Error("production terminal observer was not assembled");
+				}
+				const session = new ThreadRuntime(`sesn_terminal_${producer}`);
+				const layer = runtimeThreadLoopLayer(
+					new RecordingContextLoader([], {
+						type: "context",
+						entries: [userMessage(`msg_terminal_${producer}`, 1, "run")],
+					}),
+					{
+						writer,
+						recordRuntimeTerminalSettlement: productionObserver,
+						...(producer === "immediate"
+							? {
+									events: [
+										{ type: "text-start" as const, id: "terminal-text" },
+										{
+											type: "text-delta" as const,
+											id: "terminal-text",
+											text_delta: "PROMPT_CANARY",
+										},
+										{ type: "text-end" as const, id: "terminal-text" },
+										{ type: "step-start" as const, stepIndex: 1 },
+									],
+									createProcessor: (processorOptions) => {
+										const processor = new ProviderStreamAccumulator(
+											processorOptions,
+										);
+										const process = processor.process.bind(processor);
+										processor.process = async (source) =>
+											source.event.type === "step-start"
+												? {
+														ok: false,
+														events: [],
+														error: normalizeRuntimeFailure({
+															type: "runtime",
+															code: "runtime_invalid_sequence",
+															retryable: false,
+															fatal: true,
+															reason: "runtime_contract_validation",
+															retryStatus: { type: "terminal" },
+														}),
+													}
+												: await process(source);
+										return processor;
+									},
+								}
+							: {}),
+					},
+				);
+				const businessResult = await Effect.runPromise(
+					Effect.gen(function* () {
+						const threadLoop = yield* ThreadLoop.Service;
+						if (producer === "immediate") {
+							return yield* threadLoop.run(session, testRunCustody());
+						}
+						session.state.installThreadTurn(
+							{
+								executionRunId: "evt_recovery_running",
+								pendingInputContextSequences: [],
+								request: {
+									modelRequestId: "mreq_recovery",
+									requestStartEventId: "evt_recovery_start",
+									requestKind: "agent_provider_request",
+									contextThroughMessageSequence: 1,
+									toolMembers: [],
+								},
+							},
+							{ routes: [] },
+						);
+						session.state.enqueueAcceptedInput(
+							acceptedInput("rin_terminal_recovery", session.sessionId),
+						);
+						return yield* threadLoop.closeFailedRun(
+							session,
+							new Error("RAW_ERROR_CANARY"),
+							testRunCustody(),
+						);
+					}).pipe(Effect.provide(layer)),
+				);
+				return { businessResult, terminations };
+			} finally {
+				await dependencies.coreHosts.close();
+			}
+		};
+
+		const lines: string[] = [];
+		const immediate = await runProducer(
+			"immediate",
+			"committed",
+			createJsonLogger({
+				write: (line) => lines.push(line),
+				serviceName: "agent-runtime",
+				deploymentEnvironment: "test",
+				serviceVersion: "unit",
+				clock: () => new Date("2026-08-25T12:34:56.789Z"),
+			}),
+		);
+		expect(immediate.businessResult).toMatchObject({
+			type: "failed",
+			closeoutDisposition: "terminal",
+		});
+		expect(immediate.terminations).toHaveLength(1);
+		expect(lines).toHaveLength(1);
+		const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+		expect(Object.keys(record).sort()).toEqual(
+			[
+				"time",
+				"level",
+				"service.name",
+				"service.version",
+				"deployment.environment",
+				"event",
+				"event.kind",
+				"operation",
+				"component",
+				"message",
+				"workspace.id",
+				"session.id",
+				"thread.id",
+				"model_request.id",
+				"terminal",
+				"terminal.disposition",
+				"retry.status",
+				"settlement.outcome",
+				"error.class",
+				"error.code",
+				"error.message_safe",
+			].sort(),
+		);
+		expect(record).toMatchObject({
+			time: "2026-08-25T12:34:56.789Z",
+			level: "error",
+			"service.name": "agent-runtime",
+			"service.version": "unit",
+			"deployment.environment": "test",
+			event: "runtime_terminal_settlement",
+			operation: "commit_runtime_termination",
+			component: "agent-runtime",
+			message: "runtime contract validation terminated the Thread",
+			terminal: true,
+			"terminal.disposition": "terminated",
+			"retry.status": "terminal",
+			"settlement.outcome": "committed",
+			"error.class": "runtime_contract_validation",
+			"error.code": "runtime_semantic_error",
+			"error.message_safe": "runtime contract validation failed",
+		});
+		expect(JSON.stringify(record)).not.toContain("PROMPT_CANARY");
+
+		let throwingAttempts = 0;
+		const recovery = await runProducer("recovery", "duplicate", {
+			info: () => undefined,
+			error: () => {
+				throwingAttempts += 1;
+				throw new Error("terminal sink failed");
+			},
+		});
+		expect(recovery.businessResult).toEqual({
+			type: "landed",
+			disposition: "terminal",
+		});
+		expect(recovery.terminations).toHaveLength(1);
+		expect(throwingAttempts).toBe(1);
+		expect(JSON.stringify(recovery)).not.toContain("RAW_ERROR_CANARY");
 	});
 
 	test("production manifest observability reports effective eligibility for applied and stale generations", async () => {
