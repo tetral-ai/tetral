@@ -73,6 +73,7 @@ import {
 	deriveThreadTurnSnapshot,
 	initializeThreadTurnTransition,
 	reduceThreadTurn,
+	ThreadTurnContractError,
 } from "./thread-turn-reducer.js";
 
 /** Combined cap for file-backed and transient attachments on one provider request. */
@@ -414,8 +415,20 @@ export class ThreadProcessor {
 	}
 
 	apply(fact: ThreadTurnFact): ThreadTurnTransition {
+		return this.applyFrom(this.transition(), fact);
+	}
+
+	applyFrom(
+		owner: ThreadTurnTransition,
+		fact: ThreadTurnFact,
+	): ThreadTurnTransition {
+		if (owner.checkpoint !== this.#checkpoint) {
+			throw new ThreadTurnContractError(
+				"Thread turn changed while a stack-local transition owner was active",
+			);
+		}
 		const transition = reduceThreadTurn(
-			this.transition(),
+			owner,
 			fact,
 			this.#toolRoutes,
 			this.acceptedInputIds(),
@@ -650,6 +663,14 @@ export class ThreadState {
 	applyThreadTurnFact(fact: ThreadTurnFact): ThreadTurnTransition {
 		this.threadTurnReduction();
 		return this.#threadProcessor!.apply(fact);
+	}
+
+	applyRequestStartFact(
+		owner: ThreadTurnTransition,
+		fact: Extract<ThreadTurnFact, { readonly fact: "request_started" }>,
+	): ThreadTurnTransition {
+		this.threadTurnReduction();
+		return this.#threadProcessor!.applyFrom(owner, fact);
 	}
 
 	recordThreadToolRoute(

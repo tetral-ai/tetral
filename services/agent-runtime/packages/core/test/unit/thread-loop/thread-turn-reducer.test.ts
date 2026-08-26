@@ -322,6 +322,25 @@ describe("Thread-turn reducer", () => {
 		expect(duplicate.nextStep).toEqual(refreshed.nextStep);
 	});
 
+	test("Request End directly owns its stable progression and duplicate replay", () => {
+		const ended = apply(
+			startedRequest(),
+			requestEnded("event_end_direct", "request_1"),
+		);
+		expect(ended.nextStep).toEqual({
+			action: "finish_idle",
+			stopReason: { type: "end_turn" },
+		});
+		expect(ended.dispatch).toBeUndefined();
+
+		const duplicate = apply(
+			ended,
+			requestEnded("event_end_direct", "request_1"),
+		);
+		expect(duplicate.nextStep).toEqual(ended.nextStep);
+		expect(duplicate.dispatch).toBeUndefined();
+	});
+
 	test("hot transitions and cold snapshots share stable state", () => {
 		const hotCases = [
 			startedRequest(),

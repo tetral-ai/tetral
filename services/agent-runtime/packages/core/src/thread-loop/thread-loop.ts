@@ -2896,6 +2896,7 @@ function runOwnedCompactionSummaryAttemptEffect(
 					.checkpoint.pendingInputContextSequences.filter((sequence) =>
 						compactedContextSequences.has(sequence),
 					);
+				const requestStartOwner = session.state.threadTurnReduction();
 				const startAppend = yield* Effect.promise(() =>
 					appendRetriedEvent(
 						options,
@@ -2926,14 +2927,17 @@ function runOwnedCompactionSummaryAttemptEffect(
 					session.state.clearAfterCustodyHandoff();
 					return { type: "interrupted", discardHotState: true } as const;
 				}
-				const requestStartReduction = session.state.applyThreadTurnFact({
+				const requestStartReduction = session.state.applyRequestStartFact(
+					requestStartOwner,
+					{
 					fact: "request_started",
 					eventId: startAppend.eventId,
 					modelRequestId: request.modelRequestId,
 					requestKind: "compaction_summary",
 					contextThroughMessageSequence,
 					consumedInputContextSequences,
-				});
+					},
+				);
 				const requestStartDispatch = requestStartReduction.dispatch;
 				if (
 					requestStartDispatch?.dispatch !== "start_provider_request" ||
@@ -3662,6 +3666,7 @@ function coordinateProviderTurnEffect(
 				durableOperations,
 			);
 		}
+		const requestStartOwner = session.state.threadTurnReduction();
 		const spanStartAppend = yield* nonAbandonablePromise(() =>
 			appendRetriedEvent(
 				options,
@@ -3698,7 +3703,9 @@ function coordinateProviderTurnEffect(
 			session.state.clearAfterCustodyHandoff();
 			return providerTurnInterruptedWithDiscard();
 		}
-		const requestStartReduction = session.state.applyThreadTurnFact({
+		const requestStartReduction = session.state.applyRequestStartFact(
+			requestStartOwner,
+			{
 			fact: "request_started",
 			eventId: spanStartAppend.eventId,
 			modelRequestId: request.modelRequestId,
@@ -3707,7 +3714,8 @@ function coordinateProviderTurnEffect(
 			consumedInputContextSequences:
 				session.state.threadTurnReduction().checkpoint
 					.pendingInputContextSequences,
-		});
+			},
+		);
 		const requestStartDispatch = requestStartReduction.dispatch;
 		if (
 			requestStartDispatch?.dispatch !== "start_provider_request" ||

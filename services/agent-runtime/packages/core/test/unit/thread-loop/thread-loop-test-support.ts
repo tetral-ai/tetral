@@ -856,7 +856,9 @@ function requestEndResultForTest(
 }
 
 function writerFrom(
-	append: (envelope: SessionEventEnvelope) => SessionEventWriterAppendResult,
+	append: (
+		envelope: SessionEventEnvelope,
+	) => SessionEventWriterAppendResult | Promise<SessionEventWriterAppendResult>,
 	writeRequestEnd?: SessionEventWriter["writeRequestEnd"],
 	_existingContext: readonly unknown[] = [],
 	durableSequence: TestDurableSequence = {
@@ -869,7 +871,7 @@ function writerFrom(
 	const appendWithFacts = async (
 		envelope: SessionEventEnvelope,
 	): Promise<SessionEventWriterAppendResult> => {
-		const supplied = append(envelope);
+		const supplied = await append(envelope);
 		if (!supplied.ok || supplied.type === "stale") return supplied;
 		durableSequence.eventSequence += 1;
 		let result = supplied;

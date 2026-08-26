@@ -47,6 +47,7 @@ import {
 	acceptedInputCommitResult,
 	catalogForTest,
 	createdAt,
+	deferred,
 	failingEventWriter,
 	installLoaderStateForTest,
 	llmService,
@@ -420,6 +421,96 @@ describe("ThreadLoop", () => {
 		expect(requestStartWriteIds).toHaveLength(2);
 		expect(new Set(requestStartWriteIds).size).toBe(1);
 		expect(providerCalls).toBe(1);
+	});
+	test("a notification admitted behind a committed Request Start cannot replace its dispatch", async () => {
+		const session = new ThreadRuntime("sesn_notification_after_request_start");
+		session.state.enqueueAcceptedInput(
+			acceptedInput(
+				"rin_initial_notification_race",
+				session.sessionId,
+			),
+		);
+		const requestStartCommitted = deferred<void>();
+		const releaseRequestStartResponse = deferred<void>();
+		const requests: LLMRequest[] = [];
+		const events: SessionEvent[] = [];
+		const requestStartBoundaries: number[] = [];
+		let heldFirstRequestStart = false;
+		const writer = writerFrom(async (envelope) => {
+			events.push(envelope.event);
+			if (envelope.event.type === "span.model_request_start") {
+				requestStartBoundaries.push(
+					envelope.contextThroughMessageSequence ?? -1,
+				);
+				if (!heldFirstRequestStart) {
+					heldFirstRequestStart = true;
+					requestStartCommitted.resolve();
+					await releaseRequestStartResponse.promise;
+				}
+			}
+			return {
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+				eventSequence: events.length,
+			};
+		});
+		const run = Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+						runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+							writer,
+							llmService: llmService(
+								[
+									{ type: "text-start", id: "notification-race-text" },
+									{
+										type: "text-delta",
+										id: "notification-race-text",
+										text_delta: "done",
+									},
+									{ type: "text-end", id: "notification-race-text" },
+									{ type: "finish", finishReason: "stop" },
+								],
+								(request) => requests.push(request),
+							),
+					}),
+				),
+			),
+		);
+
+		await requestStartCommitted.promise;
+		expect(
+			session.state.enqueueAcceptedInput(
+				taskNotificationInput(
+					"rin_notification_after_start",
+					"task_notification_after_start",
+					"sevt_notification_source",
+					"completed",
+					'{"status":"completed","text":"notification for successor"}',
+					session.sessionId,
+				),
+			),
+		).toBe("applied");
+		releaseRequestStartResponse.resolve();
+
+		expect(await run).toMatchObject({ type: "completed" });
+		expect(requests).toHaveLength(2);
+		expect(requestStartBoundaries).toEqual([1, 3]);
+		expect(JSON.stringify(requests[0]?.context)).not.toContain(
+			"notification for successor",
+		);
+		expect(JSON.stringify(requests[1]?.context)).toContain(
+			"notification for successor",
+		);
+		expect(
+			events.filter((event) => event.type === "span.model_request_end"),
+		).toHaveLength(2);
+		expect(events.filter((event) => event.type === "session.error")).toEqual([]);
 	});
 	test("input accepted during an empty provider response prevents premature idle closeout", async () => {
 		const session = new ThreadRuntime("sesn_late_input_before_idle");

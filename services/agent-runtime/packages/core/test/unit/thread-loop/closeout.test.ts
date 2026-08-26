@@ -148,7 +148,7 @@ describe("ThreadLoop", () => {
 		expect(session.state.threadTurnReduction()).toMatchObject({
 			checkpoint: { idleCloseout: { stopReason: "end_turn" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("failed-run closeout with accepted custody uses atomic Runtime termination", async () => {
@@ -217,7 +217,7 @@ describe("ThreadLoop", () => {
 		expect(session.state.threadTurnReduction()).toMatchObject({
 			checkpoint: { terminalCloseout: { disposition: "terminated" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 		expect(session.state.acceptedInputSnapshot()).toEqual([unresolved]);
 	});
@@ -2124,7 +2124,7 @@ describe("ThreadLoop", () => {
 					stopReason: "requires_action",
 				},
 			},
-			action: {
+			nextStep: {
 				action: "await_tool_results",
 				toolUseEventIds: [pendingToolUseEventId],
 			},
@@ -2802,7 +2802,7 @@ describe("ThreadLoop", () => {
 				},
 			},
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("a fatal reviewer request failure closes durably idle without terminating its thread", async () => {
@@ -2884,7 +2884,7 @@ describe("ThreadLoop", () => {
 		expect(session.state.threadTurnReduction()).toMatchObject({
 			checkpoint: { idleCloseout: { stopReason: "end_turn" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("runtime layer seals a terminal stream failure before atomic termination", async () => {
@@ -3114,7 +3114,7 @@ describe("ThreadLoop", () => {
 		expect(failureEventId).toBeDefined();
 		expect(session.state.threadTurnReduction()).toMatchObject({
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 			checkpoint: {
 				terminalCloseout: {
 					failureEventId,

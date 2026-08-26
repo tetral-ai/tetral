@@ -557,7 +557,7 @@ describe("ThreadLoop", () => {
 				idleCloseout: { stopReason: "end_turn" },
 			},
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 
@@ -2507,7 +2507,7 @@ describe("ThreadLoop", () => {
 				state: "waiting_for_tool_results",
 				modelRequestId: "request_unresolved_tool_call",
 			},
-			action: {
+			nextStep: {
 				action: "await_tool_results",
 				modelRequestId: "request_unresolved_tool_call",
 				toolUseEventIds: [toolUseEventId],
