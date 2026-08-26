@@ -3099,9 +3099,9 @@ function runOwnedCompactionSummaryAttemptEffect(
 							}),
 						);
 					}
-					const end = yield* Effect.promise(async () => {
-						const result = await appendModelRequestEndEvent(
-							options,
+						const endResult = yield* Effect.promise(() =>
+							appendModelRequestEndEvent(
+								options,
 							session,
 							request.modelRequestId,
 							startAppend.eventId,
@@ -3118,15 +3118,15 @@ function runOwnedCompactionSummaryAttemptEffect(
 								command: interruptCommand,
 								interruptLeaseRef,
 							},
+							),
 						);
-						if (result.ok && !applyJoinedInterruptRequestEnd(session, result)) {
-							return {
-								ok: false as const,
-								error: joinedInterruptRequestEndFailure(session),
-							};
-						}
-						return result;
-					});
+						const end =
+							endResult.ok && !applyJoinedInterruptRequestEnd(session, endResult)
+								? {
+										ok: false as const,
+										error: joinedInterruptRequestEndFailure(session),
+									}
+								: endResult;
 					if (!end.ok) {
 						return yield* failRequestCloseout(end.error);
 					}
@@ -3346,8 +3346,8 @@ function closeStartedCompactionForUserInterruptEffect(
 				}),
 			);
 		}
-		const end = yield* Effect.promise(async () => {
-			const result = await appendModelRequestEndEvent(
+		const endResult = yield* Effect.promise(() =>
+			appendModelRequestEndEvent(
 				options,
 				session,
 				request.modelRequestId,
@@ -3365,15 +3365,15 @@ function closeStartedCompactionForUserInterruptEffect(
 					command,
 					interruptLeaseRef,
 				},
-			);
-			if (result.ok && !applyJoinedInterruptRequestEnd(session, result)) {
-				return {
-					ok: false as const,
-					error: joinedInterruptRequestEndFailure(session),
-				};
-			}
-			return result;
-		});
+			),
+		);
+		const end =
+			endResult.ok && !applyJoinedInterruptRequestEnd(session, endResult)
+				? {
+						ok: false as const,
+						error: joinedInterruptRequestEndFailure(session),
+					}
+				: endResult;
 		if (!end.ok) {
 			return yield* failRequestCloseout(end.error);
 		}

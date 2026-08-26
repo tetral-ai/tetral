@@ -3,10 +3,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
-import {
-	normalizeRuntimeFailure,
-	type SessionEventWriter,
-} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { SessionEventWriter } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { normalizeRuntimeFailure } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { ProviderStreamAccumulator } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
@@ -43,7 +41,8 @@ import {
 } from "../../src/config.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
-import { createJsonLogger, type RuntimePodLogger } from "../../src/logger.js";
+import type { RuntimePodLogger } from "../../src/logger.js";
+import { createJsonLogger } from "../../src/logger.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 
 describe("Runtime Pod command entrypoint", () => {
