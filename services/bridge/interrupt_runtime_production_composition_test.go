@@ -2029,7 +2029,7 @@ func assertInterruptedProviderContext(
 		}
 	}
 	if reasoningCount != 1 || toolCallCount != 1 || toolResultCount != 1 ||
-		!(reasoningIndex < toolCallIndex && toolCallIndex < toolResultIndex) {
+		reasoningIndex >= toolCallIndex || toolCallIndex >= toolResultIndex {
 		t.Fatalf("interrupted Provider ordering = reasoning:%d@%d call:%d@%d result:%d@%d: %s",
 			reasoningCount, reasoningIndex, toolCallCount, toolCallIndex, toolResultCount, toolResultIndex, raw)
 	}
@@ -2097,7 +2097,7 @@ func assertInterruptedResidentContext(
 		}
 	}
 	if reasoningCount != 1 || toolCallCount != 1 || toolResultCount != 1 ||
-		!(reasoningIndex < toolCallIndex && toolCallIndex < toolResultIndex) {
+		reasoningIndex >= toolCallIndex || toolCallIndex >= toolResultIndex {
 		t.Fatalf("interrupted resident ordering = reasoning:%d@%d call:%d@%d result:%d@%d: %s",
 			reasoningCount, reasoningIndex, toolCallCount, toolCallIndex, toolResultCount, toolResultIndex, raw)
 	}
