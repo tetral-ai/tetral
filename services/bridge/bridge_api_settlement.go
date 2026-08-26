@@ -545,7 +545,7 @@ func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconne
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	matchedToolUses := 0
 	matchedRepairs := 0
 	for rows.Next() {
